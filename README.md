@@ -13,6 +13,23 @@ It is a simple image editing tool but still satisfies most needs when trying to 
 It provides the ability to send images to Img2Img, Controlnet and Extras.![Send button](images/img2.png)  
 Images can also be sent from txt2img, img2img and extras directly to the extension via the 'Send to miniPaint' Button.![Send to miniPaint](images/img3.png)  
 
+## Compatibility
+
+Works with AUTOMATIC1111 and the Forge family, including [Forge Neo](https://github.com/Haoming02/sd-webui-forge-classic/tree/neo).
+
+Forge Neo mixes component types - img2img, Inpaint and ControlNet inputs are `ForgeCanvas`, while
+Extras is an ordinary `gr.Image`. The extension detects the type of each destination it writes to,
+so it does not need to know which WebUI or Gradio version it is running under.
+
+If a transfer does not work, open the browser console and run:
+
+```js
+a1111minipaint.debugReport()
+```
+
+It prints the Gradio version, whether ForgeCanvas is present, which destination IDs were found,
+and how many ControlNet units are mounted - please include that output in bug reports.
+
 ## Issues, Code ownership and contribution
 
 This extension is mostly code slammed together from other extensions all being free to use. If you want to grab parts of it, go ahead.  

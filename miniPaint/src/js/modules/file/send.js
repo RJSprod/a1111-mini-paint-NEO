@@ -6,11 +6,11 @@ import Tools_settings_class from "../tools/settings";
 import File_save_class from './save.js';
 import File_open_class from './open.js';
 import Helper_class from './../../libs/helpers.js';
+import * as Host from './../../libs/webui-host.js';
 
 var instance = null;
-let isForge = false
 
-/** 
+/**
  * manages sending files to other tabs
  */
 class File_send_class {
@@ -28,173 +28,102 @@ class File_send_class {
 		this.Saver = new File_save_class();
 		this.Loader = new File_open_class();
 		this.Helper = new Helper_class();
-		window.parent.a1111minipaint.recieve = this.recieveImage
-		window.parent.a1111minipaint.createSendButton = this.createSendToMiniPaintButton
-		isForge = window.parent.gradio_config.version >= "4.0.0"
+
+		this.register_bridge();
 	}
 
-
+	/**
+	 * Expose the hooks the WebUI extension calls into.
+	 * Never let a missing or changed host break module loading: this constructor
+	 * runs from Base_gui.load_modules(), so throwing here takes down all of
+	 * miniPaint, not just the send feature.
+	 */
+	register_bridge() {
+		try {
+			const parent_window = Host.host_window();
+			const bridge = parent_window && parent_window.a1111minipaint;
+			if (!bridge) {
+				return;
+			}
+			bridge.recieve = this.recieveImage.bind(this);
+			bridge.createSendButton = this.createSendToMiniPaintButton.bind(this);
+			bridge.debugReport = Host.debug_report;
+		} catch (e) {
+			Host.log_error('could not connect to the WebUI bridge', e);
+		}
+	}
 
 	dataURLtoFile(dataurl, filename) {
-		var arr = dataurl.split(','),
-			mime = arr[0].match(/:(.*?);/)[1],
-			bstr = atob(arr[1]),
-			n = bstr.length,
-			u8arr = new Uint8Array(n);
-
-		while (n--) {
-			u8arr[n] = bstr.charCodeAt(n);
-		}
-
-		return new File([u8arr], filename, { type: mime });
-	}
-	updateGradioImage(element, dt) {
-		let clearButton;
-		if (isForge) {
-			clearButton = element.querySelector('button.forge-btn[title="Remove"]');
-		} else {
-			clearButton = element.querySelector("button[aria-label='Remove Image']");
-		}
-
-		if (clearButton) {
-			clearButton.click();
-		}
-		let input;
-		if (isForge) {
-			input = element.querySelector("input.forge-file-upload[type='file']");
-		} else {
-			input = element.querySelector("input[type='file']");
-		}
-		input.value = ''
-		input.files = dt.files
-		input.dispatchEvent(
-			new Event('change', {
-				bubbles: true,
-				composed: true,
-			})
-		)
+		const { bytes, mime } = Host.data_url_to_parts(dataurl);
+		return new File([bytes], filename, { type: mime });
 	}
 
 	async sendImageCanvasEditor(type) {
-		const imageDataURL = await this.Saver.export_data_url();
+		try {
+			const image_data_url = await this.Saver.export_data_url();
 
-		var file = this.dataURLtoFile(imageDataURL, 'image.png');
+			if (type === 'img2img_img2img') {
+				Host.switch_to_img2img();
+			} else if (type === 'img2img_inpaint') {
+				Host.switch_to_inpaint();
+			}
 
-		const dt = new DataTransfer();
-		dt.items.add(file);
+			const selector = Host.DESTINATIONS[type];
+			if (!selector) {
+				throw new Error(`MiniPaint: unknown img2img destination "${type}"`);
+			}
 
-		const selector = type === "img2img_img2img" ? "#img2img_image" : "#img2maskimg";
-
-		if (type === "img2img_img2img") {
-			window.parent.switch_to_img2img();
-		} else if (type === "img2img_inpaint") {
-			window.parent.switch_to_inpaint();
+			Host.set_image_on_target(selector, image_data_url);
+		} catch (e) {
+			Host.log_error(`sending to ${type} failed`, e);
 		}
-
-		let container;
-		let imageElems;
-		if (isForge) {
-			container = window.parent.gradioApp().querySelector("#" + type + "_tab");
-			imageElems = container.querySelectorAll('div.forge-container')[0];
-			this.updateGradioImage(imageElems, dt);
-		} else {
-			container = window.parent.gradioApp().querySelector(selector);
-			imageElems = container.querySelectorAll('div[data-testid="image"]');
-			this.updateGradioImage(imageElems[0], dt);
-		};
 	}
 
 	async sendImageCanvasEditorControlNet(type, index) {
-		const imageDataURL = await this.Saver.export_data_url();
+		try {
+			const image_data_url = await this.Saver.export_data_url();
 
-		var file = this.dataURLtoFile(imageDataURL, 'image.png');
-
-		const dt = new DataTransfer();
-		dt.items.add(file);
-
-		const selector = type === "txt2img" ? "#txt2img_script_container" : "#img2img_script_container";
-
-		if (type === "txt2img") {
-			window.parent.switch_to_txt2img();
-		} else if (type === "img2img") {
-			window.parent.switch_to_img2img();
-		}
-
-		let container = window.parent.gradioApp().querySelector(selector);
-
-		let element = container.querySelector('#controlnet');
-
-		if (!element) {
-			for (const spans of container.querySelectorAll < HTMLSpanElement > (
-				'.cursor-pointer > span'
-			)) {
-				if (!spans.textContent?.includes('ControlNet')) {
-					continue
-				}
-				if (spans.textContent?.includes('M2M')) {
-					continue
-				}
-				element = spans.parentElement?.parentElement
+			if (type === 'txt2img') {
+				Host.switch_to_txt2img();
+			} else if (type === 'img2img') {
+				Host.switch_to_img2img();
 			}
-			if (!element) {
-				console.error('ControlNet element not found')
-				return
+
+			const wrapper = await Host.resolve_controlnet_target(type, index);
+
+			// Must happen before the image lands, otherwise the unit keeps
+			// using the main img2img image instead of ours.
+			if (type === 'img2img') {
+				Host.enable_controlnet_independent_image(index);
 			}
+
+			Host.set_image_file(wrapper, image_data_url);
+		} catch (e) {
+			Host.log_error(`sending to ${type} ControlNet unit ${index} failed`, e);
 		}
-		let imageElems = element.querySelectorAll('div[data-testid="image"]')
-		if (isForge) {
-			if (!imageElems[Number(index)]) {
-				let accordion = element.querySelector('.icon');
-				if (accordion) {
-					accordion.click();
-				}
-			}
-			imageElems = Array.from(window.parent.gradioApp().querySelector(selector).querySelector("#controlnet").querySelectorAll('[id]')).filter(el =>
-				el.id.match(new RegExp(String.raw`^${type}_controlnet_ControlNet-\d+_input_image$`, "g")))[index];
-			this.updateGradioImage(imageElems, dt);
+	}
+
+	async GUISendExtras() {
+		try {
+			const image_data_url = await this.Saver.export_data_url();
+			Host.switch_to_extras();
+			Host.set_image_on_target(Host.DESTINATIONS.extras, image_data_url);
+		} catch (e) {
+			Host.log_error('sending to Extras failed', e);
 		}
-		else {
-			let _this = this
-			if (!imageElems[Number(index)]) {
-				let accordion = element.querySelector('.icon');
-
-				if (accordion) {
-					accordion.click();
-
-					let controlNetAppeared = false;
-
-					let observer = new MutationObserver(function (mutations) {
-						mutations.forEach(function (mutation) {
-							if (mutation.type === "childList" && mutation.addedNodes.length > 0) {
-								for (let i = 0; i < mutation.addedNodes.length; i++) {
-									if (mutation.addedNodes[i].tagName === "INPUT") {
-
-										controlNetAppeared = true;
-
-										const imageElems2 = element.querySelectorAll('div[data-testid="image"]');
-
-										_this.updateGradioImage(imageElems2[Number(index)], dt);
-
-										observer.disconnect();
-
-										return;
-									}
-								}
-							}
-						});
-					});
-
-					observer.observe(element, { childList: true, subtree: true });
-				}
-			} else {
-				this.updateGradioImage(imageElems[Number(index * 4)], dt);
-			}
-		}
-
-	};
+	}
 
 	GUISendControlnet() {
-		let maxModelAmount = Number(window.parent.gradioApp().querySelector("#a1111minipaint_controlnet_max").querySelector("textarea").value)
+		let maxModelAmount = 3;
+		const counter = Host.query('#a1111minipaint_controlnet_max');
+		const field = counter && counter.querySelector('textarea');
+		if (field) {
+			const parsed = Number(field.value);
+			if (Number.isFinite(parsed) && parsed > 0) {
+				maxModelAmount = parsed;
+			}
+		}
+
 		let modelSelector = []
 		for (let i = 0; i < maxModelAmount; i++) {
 			modelSelector.push("Controlnet " + i)
@@ -230,60 +159,81 @@ class File_send_class {
 		this.POP.show(settings);
 	}
 
-	async GUISendExtras() {
-		const imageDataURL = await this.Saver.export_data_url();
-		var file = this.dataURLtoFile(imageDataURL, 'image.png');
-		const dt = new DataTransfer();
-		dt.items.add(file);
-		let container = window.parent.gradioApp().querySelector("#extras_image");
-		let imageElems;
-		if (isForge) {
-			imageElems = container.querySelectorAll('div.forge-container')[0];
-			window.parent.switch_to_extras()
-			this.updateGradioImage(imageElems, dt);
-		} else {
-			imageElems = container.querySelectorAll('div[data-testid="image"]')
-			window.parent.switch_to_extras()
-			this.updateGradioImage(imageElems[0], dt);
-		}
-	}
-
+	/**
+	 * Add a "send this output to Mini Paint" button to a WebUI output row.
+	 * Safe to call repeatedly - the WebUI can reload its own UI at any time.
+	 */
 	createSendToMiniPaintButton(queryId, gallery) {
-		var existingButton = window.parent.gradioApp().querySelector(`#${queryId} button`);
-		const FSC = new File_send_class();
-		const addButton = () => { FSC.recieveImage(gallery) }
-		if (window.parent.gradioApp().querySelector(`#${queryId}_open_in_minipaint`) == null) {
-			const newButton = existingButton.cloneNode(true);
-			newButton.id = `${queryId}_open_in_minipaint`;
-			newButton.textContent = "✏️";
-			newButton.title = "Send image to miniPaint tab.";
-			newButton.addEventListener("click", addButton);
-			if (isForge) {
-				window.parent.gradioApp().querySelector(`#${queryId}`).appendChild(newButton);
-			}
-			else {
-				window.parent.gradioApp().querySelector(`#${queryId} .form`).appendChild(newButton);
-			}
+		const row = Host.query(`#${queryId}`);
+		if (!row) {
+			Host.log_error(`output button row #${queryId} was not found`);
+			return;
 		}
-		else {
-			existingButton = window.parent.gradioApp().querySelector(`#${queryId}_open_in_minipaint`);
-			existingButton.addEventListener("click", addButton);
+
+		const button_id = `${queryId}_open_in_minipaint`;
+		let button = Host.query(`#${button_id}`);
+
+		if (!button) {
+			const template = row.querySelector('button');
+			if (template) {
+				// Shallow clone keeps the host's button styling (the scoped
+				// class names are build-specific) without copying its content.
+				button = template.cloneNode(false);
+				button.removeAttribute('style');
+				button.removeAttribute('disabled');
+			} else {
+				button = row.ownerDocument.createElement('button');
+				button.className = 'lg secondary gradio-button tool';
+			}
+
+			button.id = button_id;
+			button.textContent = '✏️';
+			button.title = 'Send image to miniPaint tab.';
+			button.setAttribute('aria-label', 'Send image to miniPaint tab.');
+
+			// Land in the same container as the row's other buttons.
+			const template_parent = template ? template.parentElement : row;
+			(template_parent || row).appendChild(button);
 		}
+
+		// Assigning onclick replaces any previous handler, so reloading the
+		// WebUI cannot stack duplicate listeners on the same button.
+		button.onclick = () => this.recieveImage(gallery);
 	}
 
-	recieveImage(gallery) {
-		const img = gallery.querySelectorAll("img")[0];
-		if (img) {
-			var width = img.naturalWidth
-			var height = img.naturalHeight
-			var opener = new File_open_class()
-			Array.from(window.parent.gradioApp().querySelector('#tabs').querySelectorAll('button')).find(button => button.textContent === 'Mini Paint ').click();
-			var canv = document.createElement("canvas");
-			canv.width = width;
-			canv.height = height;
-			var ctx = canv.getContext("2d");
-			ctx.drawImage(img, 0, 0);
-			opener.file_open_data_url_handler(canv.toDataURL("image/png"));
+	async recieveImage(gallery) {
+		try {
+			const target = gallery || Host.query('#txt2img_gallery');
+			const img = Host.get_selected_gallery_image(target);
+
+			if (!img) {
+				Host.log_error(
+					`no selected/visible image found in #${(target && target.id) || 'gallery'}`
+				);
+				return;
+			}
+
+			if (!img.complete || !img.naturalWidth) {
+				await img.decode();
+			}
+
+			const width = img.naturalWidth;
+			const height = img.naturalHeight;
+			if (!width || !height) {
+				Host.log_error('the selected gallery image has not finished loading');
+				return;
+			}
+
+			Host.switch_to_minipaint();
+
+			const canvas = document.createElement('canvas');
+			canvas.width = width;
+			canvas.height = height;
+			canvas.getContext('2d').drawImage(img, 0, 0);
+
+			new File_open_class().file_open_data_url_handler(canvas.toDataURL('image/png'));
+		} catch (e) {
+			Host.log_error('could not open the selected gallery image', e);
 		}
 	}
 }

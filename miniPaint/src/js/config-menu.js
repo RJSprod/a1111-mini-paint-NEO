@@ -771,6 +771,14 @@ const menuDefinition = [
 			{
 				name: 'Send to Extras',
 				target: 'file/send.GUISendExtras'
+			},
+			{
+				divider: true
+			},
+			{
+				name: 'Send log',
+				ellipsis: true,
+				target: 'file/send.GUISendLog'
 			}
 		]
 	}

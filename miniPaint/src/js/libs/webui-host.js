@@ -691,6 +691,75 @@ export async function write_send_log(record) {
 }
 
 /**
+ * The whole story as one block of text: what the host looks like, what each
+ * destination is holding, and the last transfers step by step.
+ *
+ * This is what gets shown in the editor, because a console and a log file are
+ * both out of reach on a phone.
+ */
+export async function report_text(extra) {
+	const options = extra || {};
+	const lines = [];
+	const say = (line) => lines.push(line);
+
+	say('miniPaint send report');
+	say(`generated ${new Date().toISOString()}`);
+	say(`editor: ${window.location.href}`);
+
+	let report = null;
+	try {
+		report = await debug_report();
+	} catch (e) {
+		say(`could not inspect the WebUI: ${e && e.message ? e.message : e}`);
+	}
+
+	if (report) {
+		say(`gradio: ${report.gradioVersion || 'unknown'}`);
+		say(`forge canvas present: ${report.hasForgeCanvas}, gradioApp(): ${report.hasGradioApp}`);
+		say(
+			`img2img mode the WebUI will use: ${report.img2imgMode.valueTheWebUIWillUse}` +
+			` (visible sub-tab: ${report.img2imgMode.visibleSubTab})`
+		);
+		say('');
+		say('destinations:');
+		for (const selector of Object.keys(report.targets)) {
+			const target = report.targets[selector];
+			if (typeof target === 'string') {
+				say(`  ${selector}: ${target}`);
+			} else {
+				say(
+					`  ${selector}: ${target.kind}, canvas ${target.uuid}, background ${target.background}, ` +
+					`foreground ${target.foreground}`
+				);
+				say(`      holds ${target.holds} (read from the ${target.readValueFrom})`);
+			}
+		}
+		say('');
+		say(`controlnet units: ${JSON.stringify(report.controlnetUnits)}`);
+	}
+
+	if (options.log_file) {
+		say('');
+		say(`log file: ${options.log_file}`);
+	}
+
+	say('');
+	say(`transfers (newest first, ${send_records.length}):`);
+	if (!send_records.length) {
+		say('  none yet');
+	}
+	for (const record of send_records) {
+		say('');
+		say(`[${record.startedAt}] ${record.destination} -> ${record.outcome}`);
+		for (const step of record.steps) {
+			say(`    ${step}`);
+		}
+	}
+
+	return lines.join('\n');
+}
+
+/**
  * The last few transfers, step by step, with what each one saw.
  * Exposed to the host as a1111minipaint.sendLog().
  */

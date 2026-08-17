@@ -39,7 +39,11 @@ retried, and if it still does not match you get a toast in the editor saying it 
 and why, rather than a destination that merely looks right. Successful sends say so too, and the
 console line records whether the value is byte-identical or was re-encoded by the host.
 
-Every send is written to a log file inside this extension's folder:
+When a send fails, the editor puts the whole report on screen with a **Copy all** button, so it
+can be read and copied on a phone or tablet where there is no developer console. The same report
+is available at any time from the editor's menu: **Send -> Send log ...**
+
+Every send is also written to a log file inside this extension's folder:
 
 ```
 extensions/a1111-mini-paint-NEO/logs/send-log.txt

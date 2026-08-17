@@ -21,6 +21,12 @@ Forge Neo mixes component types - img2img, Inpaint and ControlNet inputs are `Fo
 Extras is an ordinary `gr.Image`. The extension detects the type of each destination it writes to,
 so it does not need to know which WebUI or Gradio version it is running under.
 
+Sending an image waits for the destination to actually accept it before switching tabs, so on a
+remote or slow connection the target tab does not appear until the image is committed - and a
+transfer that fails says so in the console instead of leaving you on a tab that looks ready. For
+`ForgeCanvas` the image is written to the hidden textbox that Forge submits, not just to the
+canvas you can see, because those are not the same value.
+
 If a transfer does not work, open the browser console and run:
 
 ```js

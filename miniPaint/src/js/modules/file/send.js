@@ -29,6 +29,10 @@ class File_send_class {
 		this.Loader = new File_open_class();
 		this.Helper = new Helper_class();
 
+		// Outbound transfers run one at a time; see send().
+		this.pending_send = Promise.resolve();
+		this.send_token = 0;
+
 		this.register_bridge();
 	}
 
@@ -58,59 +62,111 @@ class File_send_class {
 		return new File([bytes], filename, { type: mime });
 	}
 
-	async sendImageCanvasEditor(type) {
+	/**
+	 * Run one outbound transfer at a time and navigate only afterwards.
+	 *
+	 * `transfer` resolves with the function that focuses its destination, and
+	 * that function is called only if no newer send has been started since:
+	 * a slow transfer must never drag the user to its own tab after the user
+	 * has already sent something else.
+	 *
+	 * Resolves true when the destination's backing value holds the image, and
+	 * false when the transfer failed - never before the image has landed.
+	 */
+	send(description, transfer) {
+		const token = ++this.send_token;
+
+		const task = this.pending_send
+			.catch(() => { })
+			.then(async () => {
+				try {
+					const navigate = await transfer();
+					if (typeof navigate === 'function' && token === this.send_token) {
+						navigate();
+					}
+					return true;
+				} catch (e) {
+					Host.log_error(`sending to ${description} failed`, e);
+					return false;
+				}
+			});
+
+		this.pending_send = task;
+		return task;
+	}
+
+	/**
+	 * Resolve a destination and commit the image to it.
+	 *
+	 * The tab is opened only when the destination is not mounted yet: while it
+	 * is already there, the user stays in miniPaint for the whole commit and
+	 * so cannot reach the destination's Generate button too early.
+	 */
+	async commit_to_destination(selector, switch_to, image_data_url) {
+		const { wrapper, opened } = await Host.resolve_target(selector, switch_to);
+
 		try {
-			const image_data_url = await this.Saver.export_data_url();
-
-			if (type === 'img2img_img2img') {
-				Host.switch_to_img2img();
-			} else if (type === 'img2img_inpaint') {
-				Host.switch_to_inpaint();
+			await Host.set_image_file(wrapper, image_data_url, { selector });
+		} catch (e) {
+			if (opened) {
+				Host.log_warning(
+					`${selector} had to be opened before it could be resolved, so its tab is now in ` +
+					'front without having received the image'
+				);
 			}
+			throw e;
+		}
 
+		return switch_to;
+	}
+
+	sendImageCanvasEditor(type) {
+		return this.send(type, async () => {
 			const selector = Host.DESTINATIONS[type];
 			if (!selector) {
 				throw new Error(`MiniPaint: unknown img2img destination "${type}"`);
 			}
 
-			Host.set_image_on_target(selector, image_data_url);
-		} catch (e) {
-			Host.log_error(`sending to ${type} failed`, e);
-		}
+			const switch_to =
+				type === 'img2img_inpaint' ? Host.switch_to_inpaint : Host.switch_to_img2img;
+
+			const image_data_url = await this.Saver.export_data_url();
+			return this.commit_to_destination(selector, switch_to, image_data_url);
+		});
 	}
 
-	async sendImageCanvasEditorControlNet(type, index) {
-		try {
+	sendImageCanvasEditorControlNet(type, index) {
+		return this.send(`${type} ControlNet unit ${index}`, async () => {
+			const switch_to = type === 'txt2img' ? Host.switch_to_txt2img : Host.switch_to_img2img;
+			const selector = Host.controlnet_image_selector(type, index);
+
 			const image_data_url = await this.Saver.export_data_url();
-
-			if (type === 'txt2img') {
-				Host.switch_to_txt2img();
-			} else if (type === 'img2img') {
-				Host.switch_to_img2img();
-			}
-
 			const wrapper = await Host.resolve_controlnet_target(type, index);
 
 			// Must happen before the image lands, otherwise the unit keeps
 			// using the main img2img image instead of ours.
-			if (type === 'img2img') {
-				Host.enable_controlnet_independent_image(index);
+			if (type === 'img2img' && !Host.enable_controlnet_independent_image(index)) {
+				Host.log_warning(
+					`ControlNet unit ${index} has no "Upload independent control image" checkbox; ` +
+					'the unit may use the img2img input instead of the image sent'
+				);
 			}
 
-			Host.set_image_file(wrapper, image_data_url);
-		} catch (e) {
-			Host.log_error(`sending to ${type} ControlNet unit ${index} failed`, e);
-		}
+			await Host.set_image_file(wrapper, image_data_url, { selector });
+
+			return switch_to;
+		});
 	}
 
-	async GUISendExtras() {
-		try {
+	GUISendExtras() {
+		return this.send('Extras', async () => {
 			const image_data_url = await this.Saver.export_data_url();
-			Host.switch_to_extras();
-			Host.set_image_on_target(Host.DESTINATIONS.extras, image_data_url);
-		} catch (e) {
-			Host.log_error('sending to Extras failed', e);
-		}
+			return this.commit_to_destination(
+				Host.DESTINATIONS.extras,
+				Host.switch_to_extras,
+				image_data_url
+			);
+		});
 	}
 
 	GUISendControlnet() {

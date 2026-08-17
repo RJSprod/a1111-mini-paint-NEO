@@ -852,6 +852,72 @@ async function describe_value(value) {
 }
 
 /**
+ * Keep a canvas' <img> from being reloaded with what it already shows.
+ *
+ * ForgeCanvas re-encodes the background by doing, in one synchronous block:
+ *
+ *     image.src = this.img;                  // drawImage()
+ *     tempCtx.drawImage(image, ...);         // updateBackgroundImageData()
+ *     background.set_value(tempCanvas.toDataURL());
+ *
+ * Assigning src is meant to be a no-op when the element already displays that
+ * exact URL ("completely available" aborts the update), and where it is, the
+ * re-encode is faithful. Where it is not, the element loses its decoded frame
+ * for an instant, the draw paints nothing, and the WebUI is handed a blank
+ * image of the right size while the canvas visibly shows the right picture -
+ * which is exactly what the reports show.
+ *
+ * So the redundant assignment is dropped for the length of the transfer. It
+ * has no effect other than the one that breaks this, and the count of how
+ * often it was dropped says whether this host needed it.
+ */
+function hold_image_loaded(image) {
+	if (!image) {
+		return () => 0;
+	}
+
+	const realm = (image.ownerDocument && image.ownerDocument.defaultView) || window;
+	let descriptor = null;
+	try {
+		descriptor = Object.getOwnPropertyDescriptor(realm.HTMLImageElement.prototype, 'src');
+	} catch (e) {
+		descriptor = null;
+	}
+	if (!descriptor || !descriptor.set || !descriptor.get) {
+		return () => 0;
+	}
+
+	let suppressed = 0;
+	try {
+		Object.defineProperty(image, 'src', {
+			configurable: true,
+			enumerable: false,
+			get() {
+				return descriptor.get.call(this);
+			},
+			set(value) {
+				if (value === descriptor.get.call(this) && this.complete && this.naturalWidth > 0) {
+					suppressed++;
+					return;
+				}
+				descriptor.set.call(this, value);
+			},
+		});
+	} catch (e) {
+		return () => 0;
+	}
+
+	return () => {
+		try {
+			delete image.src;
+		} catch (e) {
+			/* the element keeps the accessor; it still behaves correctly */
+		}
+		return suppressed;
+	};
+}
+
+/**
  * Commit an image to a ForgeCanvas, then confirm that what img2img will
  * submit really is the image we sent - same size, same picture - retrying the
  * write before giving up.
@@ -880,10 +946,40 @@ export async function set_forge_canvas_image(wrapper, data_url, options = {}) {
 	}
 
 	const foreground = forge_logical_textarea(uuid, 'logical_image_foreground');
-	const visible = wrapper.querySelector('img.forge-image');
+	// The element the canvas itself draws, which is what its re-encode is made
+	// of - looked up its way, so a duplicate in the page cannot go unnoticed.
+	const drawn = root().getElementById
+		? root().getElementById(`image_${uuid}`)
+		: query(`#image_${uuid}`);
+	const visible = drawn || wrapper.querySelector('img.forge-image');
 	const sent = await image_signature(data_url);
 	const budget = transfer_budget(data_url);
 	const record = options.record || start_send_record(label);
+
+	const shown = wrapper.querySelector('img.forge-image');
+	if (drawn && shown && drawn !== shown) {
+		record.step(
+			'the canvas draws a different element than the one on screen',
+			'there is more than one canvas with this uuid in the page'
+		);
+	}
+
+	// Give the canvas' element the image before the canvas asks for it, so its
+	// very first re-encode has a decoded frame to draw rather than losing the
+	// first attempt to a reload it did not need.
+	if (visible && is_png_data_url(data_url)) {
+		try {
+			visible.src = data_url;
+			if (typeof visible.decode === 'function') {
+				await visible.decode();
+			}
+			record.step('primed the canvas image', 'so its first re-encode has something to draw');
+		} catch (e) {
+			record.step('could not prime the canvas image', (e && e.message) || String(e));
+		}
+	}
+
+	const release = hold_image_loaded(visible);
 
 	record.step(
 		'exported image',
@@ -945,6 +1041,7 @@ export async function set_forge_canvas_image(wrapper, data_url, options = {}) {
 		}
 
 		if (!background.isConnected) {
+			release();
 			record.outcome = 'failed: the component was replaced mid-transfer';
 			throw new Error(`${LOG_PREFIX} ${label}: ForgeCanvas ${uuid} was replaced during the transfer`);
 		}
@@ -986,7 +1083,12 @@ export async function set_forge_canvas_image(wrapper, data_url, options = {}) {
 					const how = comparison.byte_identical
 						? 'byte-identical'
 						: `re-encoded by the host, pixel difference ${comparison.difference}/255`;
-					record.step('verified', `${how}, on attempt ${attempt}`);
+					const dropped = release();
+					record.step(
+						'verified',
+						`${how}, on attempt ${attempt}` +
+						(dropped ? `, after dropping ${dropped} redundant reload(s) of the canvas image` : '')
+					);
 					record.outcome = `sent: ${sent.width}x${sent.height}, ${how}`;
 					log_info(`${label} holds the sent image: ${held.width}x${held.height}, ${how}`);
 
@@ -1052,6 +1154,8 @@ export async function set_forge_canvas_image(wrapper, data_url, options = {}) {
 		}
 	}
 
+	const dropped = release();
+	record.step('gave up', `dropped ${dropped} redundant reload(s) of the canvas image along the way`);
 	record.outcome = `failed: ${failure}`;
 	throw new Error(
 		`${LOG_PREFIX} ${label}: sent ${sent.width}x${sent.height} (${sent.length} bytes, ` +

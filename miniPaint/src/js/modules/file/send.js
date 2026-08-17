@@ -200,7 +200,13 @@ class File_send_class {
 		let committed;
 
 		try {
-			committed = await Host.set_image_file(wrapper, image_data_url, { selector, record });
+			committed = await Host.set_image_file(wrapper, image_data_url, {
+				selector,
+				record,
+				// A canvas in a tab that was never opened has no size to draw
+				// into; this lets a retry bring the destination up first.
+				reveal: switch_to,
+			});
 		} catch (e) {
 			if (opened) {
 				Host.log_warning(
@@ -311,7 +317,11 @@ class File_send_class {
 				);
 			}
 
-			const committed = await Host.set_image_file(wrapper, image_data_url, { selector, record });
+			const committed = await Host.set_image_file(wrapper, image_data_url, {
+				selector,
+				record,
+				reveal: switch_to,
+			});
 			await this.confirm_still_held(committed, selector, record);
 			this.watch_after_send(committed, selector, record);
 

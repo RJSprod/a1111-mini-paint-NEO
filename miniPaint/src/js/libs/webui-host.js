@@ -369,12 +369,34 @@ export function image_signature(data_url) {
 			context.clearRect(0, 0, SIGNATURE_SIZE, SIGNATURE_SIZE);
 			context.drawImage(image, 0, 0, SIGNATURE_SIZE, SIGNATURE_SIZE);
 
+			const pixels = context.getImageData(0, 0, SIGNATURE_SIZE, SIGNATURE_SIZE).data;
+
+			let opaque = 0;
+			let red = 0;
+			let green = 0;
+			let blue = 0;
+			for (let i = 0; i < pixels.length; i += 4) {
+				if (pixels[i + 3] > 0) {
+					opaque++;
+					red += pixels[i];
+					green += pixels[i + 1];
+					blue += pixels[i + 2];
+				}
+			}
+
 			resolve({
 				width: image.naturalWidth,
 				height: image.naturalHeight,
 				length: data_url.length,
 				hash: string_hash(data_url),
-				pixels: context.getImageData(0, 0, SIGNATURE_SIZE, SIGNATURE_SIZE).data,
+				pixels,
+				// What the picture is actually like, so a log can say whether
+				// the other side is holding a blank, a different image, or the
+				// same one re-encoded.
+				coverage: Math.round((opaque / (SIGNATURE_SIZE * SIGNATURE_SIZE)) * 100),
+				mean: opaque
+					? `rgb(${Math.round(red / opaque)}, ${Math.round(green / opaque)}, ${Math.round(blue / opaque)})`
+					: 'nothing visible',
 			});
 		};
 		image.onerror = () => reject(new Error(`${LOG_PREFIX} the image could not be decoded`));
@@ -392,7 +414,36 @@ function string_hash(text) {
 	return (hash >>> 0).toString(16);
 }
 
-/** Is `committed` the same picture as `sent`? */
+/** A row-by-row sketch of a signature, for logs that have to be read as text. */
+export function signature_thumbnail(signature) {
+	const shades = ' .:-=+*#%@';
+	const rows = [];
+
+	for (let y = 0; y < SIGNATURE_SIZE; y += 2) {
+		let row = '';
+		for (let x = 0; x < SIGNATURE_SIZE; x++) {
+			const index = (y * SIGNATURE_SIZE + x) * 4;
+			const alpha = signature.pixels[index + 3] / 255;
+			const luminance =
+				(signature.pixels[index] * 0.299 +
+					signature.pixels[index + 1] * 0.587 +
+					signature.pixels[index + 2] * 0.114) /
+				255;
+			row += alpha === 0 ? ' ' : shades[Math.min(shades.length - 1, Math.round(luminance * alpha * 9))];
+		}
+		rows.push(`|${row}|`);
+	}
+	return rows;
+}
+
+/**
+ * Is `committed` the same picture as `sent`?
+ *
+ * Compared with the colours weighted by their alpha, because a canvas round
+ * trip discards whatever was underneath a fully transparent pixel: without
+ * that, an image with transparent areas comes back "different" despite being
+ * the same picture.
+ */
 export function compare_signatures(sent, committed) {
 	if (sent.width !== committed.width || sent.height !== committed.height) {
 		return {
@@ -402,8 +453,15 @@ export function compare_signatures(sent, committed) {
 	}
 
 	let total = 0;
-	for (let i = 0; i < sent.pixels.length; i++) {
-		total += Math.abs(sent.pixels[i] - committed.pixels[i]);
+	for (let i = 0; i < sent.pixels.length; i += 4) {
+		const sent_alpha = sent.pixels[i + 3];
+		const held_alpha = committed.pixels[i + 3];
+		for (let channel = 0; channel < 3; channel++) {
+			total += Math.abs(
+				(sent.pixels[i + channel] * sent_alpha) / 255 - (committed.pixels[i + channel] * held_alpha) / 255
+			);
+		}
+		total += Math.abs(sent_alpha - held_alpha);
 	}
 	const difference = total / sent.pixels.length;
 
@@ -784,7 +842,10 @@ async function describe_value(value) {
 	}
 	try {
 		const signature = await image_signature(value);
-		return `${signature.width}x${signature.height}, ${signature.length} bytes, hash ${signature.hash}`;
+		return (
+			`${signature.width}x${signature.height}, ${signature.length} bytes, hash ${signature.hash}, ` +
+			`${signature.coverage}% visible, average ${signature.mean}`
+		);
 	} catch (e) {
 		return `${value.length} bytes that do not decode`;
 	}
@@ -894,6 +955,19 @@ export async function set_forge_canvas_image(wrapper, data_url, options = {}) {
 			`${await describe_value(committed.value)} (from the ${committed.source}; gradio copy ${committed.mirror})`
 		);
 
+		// The canvas re-encodes by drawing its own <img> into a canvas, so
+		// when the result is wrong, its size and the state of that <img> are
+		// what tells us why.
+		const container = wrapper.querySelector('.forge-container');
+		record.step(
+			'canvas state',
+			`container ${container ? `${container.clientWidth}x${container.clientHeight}` : 'missing'}` +
+			(visible
+				? `, image natural ${visible.naturalWidth}x${visible.naturalHeight}, complete ${visible.complete}` +
+				  `, showing ${visible.src === data_url ? 'the sent image' : `${(visible.src || '').slice(0, 24)}...`}`
+				: ', no image element')
+		);
+
 		if (!committed.value) {
 			failure = 'the WebUI holds no image for it';
 		} else if (!is_png_data_url(committed.value)) {
@@ -943,11 +1017,29 @@ export async function set_forge_canvas_image(wrapper, data_url, options = {}) {
 					};
 				}
 				failure = `the WebUI holds a different image: ${comparison.reason}`;
+				record.step('sent:', '');
+				for (const row of signature_thumbnail(sent)) {
+					record.step('  ', row);
+				}
+				record.step('the WebUI holds:', '');
+				for (const row of signature_thumbnail(held)) {
+					record.step('  ', row);
+				}
 			}
 		}
 
 		if (attempt < attempts) {
 			log_warning(`${label}: ${failure} - retrying (attempt ${attempt + 1} of ${attempts})`);
+
+			// A canvas in a tab that was never opened has no size, and cannot
+			// draw itself. Bring the destination up before trying again rather
+			// than repeating the same thing and expecting a different result.
+			const container = wrapper.querySelector('.forge-container');
+			if (typeof options.reveal === 'function' && container && !container.clientWidth) {
+				options.reveal();
+				record.step('revealed the destination', 'its canvas had no size to draw into');
+				await pause(400);
+			}
 			// Only blank it when the textbox already holds exactly what we are
 			// about to write: ForgeCanvas ignores a write that changes nothing,
 			// but blanking otherwise throws away a load that is still running.

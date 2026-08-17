@@ -115,8 +115,13 @@ def on_app_started(_demo, app) -> None:
     working when what failed *is* the Gradio round trip.
     """
 
+    # The parameter has to be annotated: without the type, FastAPI reads
+    # "request" as a required query parameter and answers every POST with 422,
+    # which is what happened - the log route was there and refused everything.
+    from fastapi import Request
+
     @app.post(SEND_LOG_ROUTE)
-    async def minipaint_log(request):  # noqa: ANN001 - FastAPI supplies the type
+    async def minipaint_log(request: Request):
         try:
             record = await request.json()
         except Exception:

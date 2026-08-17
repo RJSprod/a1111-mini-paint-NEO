@@ -81,8 +81,11 @@ class File_send_class {
 		const task = this.pending_send
 			.catch(() => { })
 			.then(async () => {
+				// One record per send, written to the extension's log file
+				// whichever way the transfer ends.
+				const record = Host.start_send_record(description);
 				try {
-					const navigate = await transfer();
+					const navigate = await transfer(record);
 					if (typeof navigate === 'function' && token === this.send_token) {
 						navigate();
 					}
@@ -92,6 +95,8 @@ class File_send_class {
 					Host.log_error(`sending to ${description} failed`, e);
 					this.report_failure(description, this.failure_reason(e));
 					return false;
+				} finally {
+					await Host.write_send_log(record);
 				}
 			});
 
@@ -137,8 +142,7 @@ class File_send_class {
 	 * is already there, the user stays in miniPaint for the whole commit and
 	 * so cannot reach the destination's Generate button too early.
 	 */
-	async commit_to_destination(selector, switch_to, image_data_url, options = {}) {
-		const record = Host.start_send_record(selector);
+	async commit_to_destination(record, selector, switch_to, image_data_url, options = {}) {
 		const { wrapper, opened } = await Host.resolve_target(selector, switch_to);
 		let committed;
 
@@ -209,6 +213,7 @@ class File_send_class {
 						selector,
 						`${problem}. The image was sent but the WebUI dropped it afterwards - send it again`
 					);
+					await Host.write_send_log(record);
 				}
 			} catch (e) {
 				Host.log_warning(`could not re-check ${selector} after the send`, e);
@@ -219,7 +224,7 @@ class File_send_class {
 	sendImageCanvasEditor(type) {
 		const name = type === 'img2img_inpaint' ? 'Inpaint' : 'img2img';
 
-		return this.send(name, async () => {
+		return this.send(name, async (record) => {
 			const selector = Host.DESTINATIONS[type];
 			if (!selector) {
 				throw new Error(`MiniPaint: unknown img2img destination "${type}"`);
@@ -229,17 +234,16 @@ class File_send_class {
 				type === 'img2img_inpaint' ? Host.switch_to_inpaint : Host.switch_to_img2img;
 
 			const image_data_url = await this.Saver.export_data_url();
-			return this.commit_to_destination(selector, switch_to, image_data_url, {
+			return this.commit_to_destination(record, selector, switch_to, image_data_url, {
 				img2img_destination: type,
 			});
 		});
 	}
 
 	sendImageCanvasEditorControlNet(type, index) {
-		return this.send(`${type} ControlNet unit ${index}`, async () => {
+		return this.send(`${type} ControlNet unit ${index}`, async (record) => {
 			const switch_to = type === 'txt2img' ? Host.switch_to_txt2img : Host.switch_to_img2img;
 			const selector = Host.controlnet_image_selector(type, index);
-			const record = Host.start_send_record(selector);
 
 			const image_data_url = await this.Saver.export_data_url();
 			const wrapper = await Host.resolve_controlnet_target(type, index);
@@ -262,9 +266,10 @@ class File_send_class {
 	}
 
 	GUISendExtras() {
-		return this.send('Extras', async () => {
+		return this.send('Extras', async (record) => {
 			const image_data_url = await this.Saver.export_data_url();
 			return this.commit_to_destination(
+				record,
 				Host.DESTINATIONS.extras,
 				Host.switch_to_extras,
 				image_data_url

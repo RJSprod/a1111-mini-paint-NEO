@@ -583,6 +583,50 @@ export function start_send_record(destination) {
 	return record;
 }
 
+/** Where the extension writes transfer logs, relative to the WebUI. */
+export const SEND_LOG_ENDPOINT = '/minipaint/log';
+
+/**
+ * Hand a finished transfer to the extension, which appends it to
+ * logs/send-log.txt next to the extension itself.
+ *
+ * A plain request rather than anything Gradio, so it still reports when what
+ * failed is the Gradio round trip. Older installs have no such route; the
+ * console keeps the same information either way, so this stays quiet.
+ */
+export async function write_send_log(record) {
+	if (!record) {
+		return null;
+	}
+
+	try {
+		const response = await fetch(SEND_LOG_ENDPOINT, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				destination: record.destination,
+				startedAt: record.startedAt,
+				outcome: record.outcome,
+				steps: record.steps,
+			}),
+		});
+
+		if (!response.ok) {
+			return null;
+		}
+
+		const written = await response.json();
+		if (written && written.ok && !record.logged_path) {
+			record.logged_path = written.path;
+			log_info(`transfer log written to ${written.path}`);
+		}
+		return written;
+	} catch (e) {
+		// No endpoint (or no permission to reach it): the console still has it.
+		return null;
+	}
+}
+
 /**
  * The last few transfers, step by step, with what each one saw.
  * Exposed to the host as a1111minipaint.sendLog().

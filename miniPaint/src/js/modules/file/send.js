@@ -8,6 +8,7 @@ import File_save_class from './save.js';
 import File_open_class from './open.js';
 import Helper_class from './../../libs/helpers.js';
 import * as Host from './../../libs/webui-host.js';
+import { show_send_log } from './../../libs/send-log-view.js';
 
 var instance = null;
 
@@ -135,23 +136,50 @@ class File_send_class {
 		} catch (e) {
 			Host.log_warning('could not show the failure message', e);
 		}
+
+		// Put the details on screen. A phone has no console, and the log file
+		// needs a route the WebUI may not be serving; this always works.
+		this.GUISendLog({ log_file: this.log_file_state(logged) }).catch((error) =>
+			Host.log_warning('could not show the send log', error)
+		);
+	}
+
+	/**
+	 * Show the transfer log in the editor, ready to copy.
+	 * Reachable from the Send menu, and opened by itself when a send fails.
+	 */
+	async GUISendLog(options) {
+		// The menu calls its targets with a null parameter, so a default
+		// argument is not enough here.
+		let report;
+		try {
+			report = await Host.report_text(options || {});
+		} catch (e) {
+			report = `Could not build the report: ${(e && e.message) || e}`;
+		}
+		return show_send_log(report);
 	}
 
 	/**
 	 * Where the details of a failure ended up.
 	 *
-	 * When the log could not be written that is itself worth saying: an
-	 * instruction to read a file that was never created is how the last round
-	 * of failures stayed unexplained.
+	 * Pointing at a file that was never created is how the last round of
+	 * failures stayed unexplained, so when there is no file this says so - and
+	 * the details are on screen either way.
 	 */
 	where_to_read_more(logged) {
 		if (logged && logged.ok && logged.path) {
-			return `Details: ${logged.path}`;
+			return `Details are on screen and in ${logged.path}`;
 		}
-		if (logged && logged.reason) {
-			return `Details are in the browser console - no log file was written because ${logged.reason}.`;
+		return 'Details are on screen (Send menu -> Send log).';
+	}
+
+	/** What became of the log file, for the report header. */
+	log_file_state(logged) {
+		if (logged && logged.ok && logged.path) {
+			return logged.path;
 		}
-		return 'Details are in the browser console.';
+		return `not written - ${(logged && logged.reason) || 'unknown reason'}`;
 	}
 
 	/** The part of a transfer error that is worth putting in a toast. */

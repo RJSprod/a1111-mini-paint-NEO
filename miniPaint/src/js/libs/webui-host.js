@@ -587,6 +587,34 @@ export function start_send_record(destination) {
 export const SEND_LOG_ENDPOINT = '/minipaint/log';
 
 /**
+ * Addresses to try for that route.
+ *
+ * This iframe is served as "<prefix>/file=<path>/index.html", so the WebUI's
+ * root is whatever precedes "/file=" - which is not "/" when the WebUI is
+ * behind a reverse proxy or started with a sub-path, exactly the setups where
+ * these transfers go wrong in the first place.
+ */
+export function send_log_endpoints() {
+	const candidates = [];
+
+	try {
+		const here = new URL(window.location.href);
+		const marker = here.pathname.indexOf('/file=');
+		if (marker > 0) {
+			candidates.push(`${here.origin}${here.pathname.slice(0, marker)}${SEND_LOG_ENDPOINT}`);
+		}
+	} catch (e) {
+		/* fall back to the root-relative address */
+	}
+
+	candidates.push(SEND_LOG_ENDPOINT);
+	return candidates.filter((address, index) => candidates.indexOf(address) === index);
+}
+
+/** The address that worked last time, so later sends do not re-probe. */
+let send_log_endpoint = null;
+
+/**
  * Hand a finished transfer to the extension, which appends it to
  * logs/send-log.txt next to the extension itself.
  *
@@ -596,35 +624,70 @@ export const SEND_LOG_ENDPOINT = '/minipaint/log';
  */
 export async function write_send_log(record) {
 	if (!record) {
-		return null;
+		return { ok: false, reason: 'there was nothing to log' };
 	}
 
-	try {
-		const response = await fetch(SEND_LOG_ENDPOINT, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				destination: record.destination,
-				startedAt: record.startedAt,
-				outcome: record.outcome,
-				steps: record.steps,
-			}),
-		});
+	const body = JSON.stringify({
+		destination: record.destination,
+		startedAt: record.startedAt,
+		outcome: record.outcome,
+		steps: record.steps,
+	});
 
-		if (!response.ok) {
-			return null;
-		}
+	const addresses = send_log_endpoint ? [send_log_endpoint] : send_log_endpoints();
+	let reason = 'no address to try';
 
-		const written = await response.json();
-		if (written && written.ok && !record.logged_path) {
-			record.logged_path = written.path;
-			log_info(`transfer log written to ${written.path}`);
+	for (const address of addresses) {
+		try {
+			const response = await fetch(address, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body,
+			});
+
+			if (response.status === 404) {
+				reason =
+					'the extension has no log route (404) - the WebUI is running an older copy of ' +
+					'this extension, or has not been restarted since it was updated';
+				continue;
+			}
+			if (response.status === 401 || response.status === 403) {
+				reason = `the WebUI refused the log request (${response.status}) - it is behind authentication`;
+				continue;
+			}
+			if (!response.ok) {
+				reason = `the log route answered ${response.status}`;
+				continue;
+			}
+
+			let written = null;
+			try {
+				written = await response.json();
+			} catch (e) {
+				reason = 'the log route answered with something that is not JSON';
+				continue;
+			}
+
+			if (!written || written.ok !== true) {
+				reason = `the extension could not write the log: ${(written && written.error) || 'unknown reason'}`;
+				continue;
+			}
+
+			send_log_endpoint = address;
+			if (record.logged_path !== written.path) {
+				record.logged_path = written.path;
+				log_info(`transfer log written to ${written.path}`);
+			}
+			return written;
+		} catch (e) {
+			reason = `the log route could not be reached (${e && e.message ? e.message : e})`;
 		}
-		return written;
-	} catch (e) {
-		// No endpoint (or no permission to reach it): the console still has it.
-		return null;
 	}
+
+	// Worth saying out loud: a missing log is how the last few failures became
+	// impossible to explain.
+	log_warning(`the transfer could not be logged to a file - ${reason}`);
+	return { ok: false, reason };
 }
 
 /**

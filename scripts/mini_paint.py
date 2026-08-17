@@ -40,6 +40,7 @@ def write_config_file() -> pathlib.Path:
     return config_path
 
 
+SEND_LOG_ROUTE = "/minipaint/log"
 SEND_LOG_PATH = root_path / "logs" / "send-log.txt"
 SEND_LOG_MAX_BYTES = 1_000_000
 SEND_LOG_MAX_STEPS = 200
@@ -87,6 +88,26 @@ def append_send_log(record: typing.Any) -> pathlib.Path:
     return SEND_LOG_PATH
 
 
+def announce_send_log() -> None:
+    """Create logs/send-log.txt as soon as the extension loads.
+
+    An empty folder is a useless answer to "where is the log?": if the file is
+    missing after a restart, the extension being loaded is what to doubt, so
+    the file says when it was loaded and where transfers will appear.
+    """
+    try:
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        append_send_log(
+            {
+                "destination": "extension loaded",
+                "outcome": f"ready - transfers from miniPaint will be logged here from {stamp}",
+                "steps": [f"log route: POST {SEND_LOG_ROUTE}"],
+            }
+        )
+    except OSError as error:
+        print(f"MiniPaint: could not write {SEND_LOG_PATH}: {error}")
+
+
 def on_app_started(_demo, app) -> None:
     """Let the editor write its transfer log next to the extension.
 
@@ -94,7 +115,7 @@ def on_app_started(_demo, app) -> None:
     working when what failed *is* the Gradio round trip.
     """
 
-    @app.post("/minipaint/log")
+    @app.post(SEND_LOG_ROUTE)
     async def minipaint_log(request):  # noqa: ANN001 - FastAPI supplies the type
         try:
             record = await request.json()
@@ -105,6 +126,8 @@ def on_app_started(_demo, app) -> None:
         except OSError as error:
             return {"ok": False, "error": str(error)}
         return {"ok": True, "path": str(path)}
+
+    print(f"MiniPaint: transfer log route ready at {SEND_LOG_ROUTE}, writing to {SEND_LOG_PATH}")
 
 
 def get_controlnet_unit_count() -> int:
@@ -140,6 +163,7 @@ def get_bundle_stamp() -> str:
 
 
 def create_ui():
+    announce_send_log()
     cn_max = get_controlnet_unit_count()
     config = {
         "config": get_asset_url(write_config_file()) or "",

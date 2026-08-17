@@ -61,6 +61,12 @@ keeps working when what failed is the WebUI's own round trip, and it rotates onc
 The same information is in the browser console, and `a1111minipaint.sendLog()` typed into the
 console prints the last ten transfers if you would rather look there.
 
+The file is created when the extension loads, before any image is sent, and its first line says
+so. **If `logs/send-log.txt` does not exist after restarting the WebUI, this version of the
+extension is not the one running** - the WebUI is still on an older copy, or has not been
+restarted since it was updated. When a send fails but the log cannot be written, the message in
+the editor says why instead of pointing at a file that is not there.
+
 If a transfer does not work, open the browser console and run:
 
 ```js

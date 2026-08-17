@@ -152,6 +152,10 @@ export async function resolve_target(selector, open_target) {
 /* Awaiting host state                                                 */
 /* ------------------------------------------------------------------ */
 
+function pause(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Poll a synchronous predicate until it is truthy.
  * Everything we wait on is host state we do not own (Gradio's uploader,
@@ -273,14 +277,123 @@ export function is_png_data_url(value) {
 	return typeof value === 'string' && value.indexOf('data:image/png;base64,') === 0;
 }
 
-/** Intrinsic size of an exported data URL, used to verify what landed. */
-function decode_image_size(data_url) {
+/* ------------------------------------------------------------------ */
+/* Reading what the WebUI will actually submit                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The live value Gradio holds for a component - the one it sends when the
+ * user presses Generate.
+ *
+ * gradio_config.components[].props is the same object the running front end
+ * mutates, so this is the submitted value itself rather than the DOM node it
+ * happens to be mirrored in. Not every host/Gradio build keeps it in sync, so
+ * callers must handle `readable: false`.
+ */
+export function gradio_component_value(elem_id, class_name) {
+	const realm = host_window() || window;
+	try {
+		const components = realm.gradio_config && realm.gradio_config.components;
+		if (!Array.isArray(components)) {
+			return { readable: false, reason: 'gradio_config.components not available' };
+		}
+		for (const component of components) {
+			const props = component.props || {};
+			if (props.elem_id !== elem_id) {
+				continue;
+			}
+			if (class_name && (props.elem_classes || []).indexOf(class_name) === -1) {
+				continue;
+			}
+			return { readable: true, value: props.value, component_id: component.id };
+		}
+		return { readable: false, reason: `no component with elem_id ${elem_id}` };
+	} catch (e) {
+		return { readable: false, reason: 'gradio_config could not be read' };
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Comparing images                                                    */
+/* ------------------------------------------------------------------ */
+
+/** Side of the thumbnail images are reduced to before being compared. */
+const SIGNATURE_SIZE = 32;
+
+/**
+ * Mean per-channel difference two images may show and still count as the same
+ * picture. A faithful transfer stays near zero even when the host re-encodes
+ * the PNG; a stale, blank or truncated image is far above it.
+ */
+const SIGNATURE_TOLERANCE = 4;
+
+/**
+ * Decode an image and describe it: exact size, exact byte length, a hash of
+ * the encoded string, and a downscaled pixel signature to compare against.
+ */
+export function image_signature(data_url) {
 	return new Promise((resolve, reject) => {
+		if (typeof data_url !== 'string' || !data_url) {
+			reject(new Error(`${LOG_PREFIX} there is no image to describe`));
+			return;
+		}
+
 		const image = new Image();
-		image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
-		image.onerror = () => reject(new Error(`${LOG_PREFIX} the exported image could not be decoded`));
+		image.onload = () => {
+			const canvas = document.createElement('canvas');
+			canvas.width = SIGNATURE_SIZE;
+			canvas.height = SIGNATURE_SIZE;
+			const context = canvas.getContext('2d', { willReadFrequently: true });
+			context.clearRect(0, 0, SIGNATURE_SIZE, SIGNATURE_SIZE);
+			context.drawImage(image, 0, 0, SIGNATURE_SIZE, SIGNATURE_SIZE);
+
+			resolve({
+				width: image.naturalWidth,
+				height: image.naturalHeight,
+				length: data_url.length,
+				hash: string_hash(data_url),
+				pixels: context.getImageData(0, 0, SIGNATURE_SIZE, SIGNATURE_SIZE).data,
+			});
+		};
+		image.onerror = () => reject(new Error(`${LOG_PREFIX} the image could not be decoded`));
 		image.src = data_url;
 	});
+}
+
+/** FNV-1a, so two values can be named in a log without printing megabytes. */
+function string_hash(text) {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < text.length; i++) {
+		hash ^= text.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return (hash >>> 0).toString(16);
+}
+
+/** Is `committed` the same picture as `sent`? */
+export function compare_signatures(sent, committed) {
+	if (sent.width !== committed.width || sent.height !== committed.height) {
+		return {
+			same: false,
+			reason: `it is ${committed.width}x${committed.height}, not ${sent.width}x${sent.height}`,
+		};
+	}
+
+	let total = 0;
+	for (let i = 0; i < sent.pixels.length; i++) {
+		total += Math.abs(sent.pixels[i] - committed.pixels[i]);
+	}
+	const difference = total / sent.pixels.length;
+
+	return {
+		same: difference <= SIGNATURE_TOLERANCE,
+		difference: Math.round(difference * 100) / 100,
+		byte_identical: sent.length === committed.length && sent.hash === committed.hash,
+		reason:
+			difference <= SIGNATURE_TOLERANCE
+				? null
+				: `its pixels differ from the sent image by ${Math.round(difference)}/255 on average`,
+	};
 }
 
 /**
@@ -389,13 +502,51 @@ export function forge_logical_textarea(uuid, class_name) {
 }
 
 /**
- * Commit an image to a ForgeCanvas and wait until its backing value holds it.
+ * What img2img will submit for this canvas, and where the value was read.
  *
- * Resolves once logical_image_background is the image we sent; rejects on a
- * missing canvas, a non-PNG export, or a value that did not stick.
+ * Gradio's own value is the authority, but it trails the textarea it is bound
+ * to by a frame or two (measured at 10-25ms on Gradio 4.40), so it is only
+ * worth reading once it has caught up with the textarea. A value that never
+ * catches up means the front end did not take the write, which is exactly the
+ * failure this verification exists to catch - so it is reported as-is rather
+ * than papered over with the textarea's content.
  */
-export async function set_forge_canvas_image(wrapper, data_url) {
+export async function forge_canvas_committed_value(uuid, textarea) {
+	const probe = gradio_component_value(uuid, 'logical_image_background');
+	if (!probe.readable) {
+		return { value: (textarea && textarea.value) || '', source: 'textarea (gradio value unreadable)' };
+	}
+
+	const read = () => gradio_component_value(uuid, 'logical_image_background').value;
+	let synchronised = true;
+
+	try {
+		await wait_until(() => typeof read() === 'string' && read() === (textarea ? textarea.value : ''), {
+			timeout_ms: 2000,
+			interval_ms: 25,
+			description: "Gradio's value to catch up with the canvas textbox",
+		});
+	} catch (e) {
+		synchronised = false;
+	}
+
+	return {
+		value: typeof read() === 'string' ? read() : '',
+		source: synchronised ? 'gradio value' : 'gradio value (which never caught up with the textbox)',
+	};
+}
+
+/**
+ * Commit an image to a ForgeCanvas, then confirm that what img2img will
+ * submit really is the image we sent - same size, same picture - retrying the
+ * write before giving up.
+ *
+ * Resolves with what was verified; rejects, after `attempts` tries, with what
+ * the WebUI is holding instead.
+ */
+export async function set_forge_canvas_image(wrapper, data_url, options = {}) {
 	const label = `#${(wrapper && wrapper.id) || '(no id)'}`;
+	const attempts = options.attempts || 3;
 
 	if (!is_png_data_url(data_url)) {
 		// LogicalImage.preprocess() drops anything that is not a PNG data URL,
@@ -413,56 +564,92 @@ export async function set_forge_canvas_image(wrapper, data_url) {
 		throw new Error(`${LOG_PREFIX} ${label}: ForgeCanvas ${uuid} has no logical_image_background`);
 	}
 
-	const size = await decode_image_size(data_url);
-
-	// Foreground first: a scribble/mask from the previous image survives an
-	// image of identical dimensions, and would then be sent along with ours.
 	const foreground = forge_logical_textarea(uuid, 'logical_image_foreground');
-	if (foreground && foreground.value) {
-		set_native_value(foreground, '');
-		dispatch_host_event(foreground, 'input');
-	}
-
-	set_native_value(background, data_url);
-	dispatch_host_event(background, 'input');
-
-	if (background.value !== data_url) {
-		throw new Error(`${LOG_PREFIX} ${label}: logical_image_background rejected the image`);
-	}
-
-	// ForgeCanvas polls the textbox every 100ms, then mirrors it into the
-	// visible <img> as-is. Waiting for that is how we know the canvas agreed
-	// with us; it is not what img2img reads, so a timeout is not fatal.
 	const visible = wrapper.querySelector('img.forge-image');
-	let acknowledged = false;
+	const sent = await image_signature(data_url);
+	let failure = 'the transfer was never attempted';
 
-	if (visible) {
-		try {
-			await wait_until(() => visible.src === data_url && visible.complete && visible.naturalWidth > 0, {
-				timeout_ms: UI_ACK_TIMEOUT_MS,
-				description: `${label} to display the sent image`,
-			});
-			acknowledged = true;
-		} catch (e) {
-			log_warning(`${label}: ForgeCanvas did not display the image within ${UI_ACK_TIMEOUT_MS}ms`);
+	for (let attempt = 1; attempt <= attempts; attempt++) {
+		// Foreground first: a scribble/mask from the previous image survives an
+		// image of identical dimensions, and would then be sent along with ours.
+		if (foreground && foreground.value) {
+			set_native_value(foreground, '');
+			dispatch_host_event(foreground, 'input');
+		}
+
+		set_native_value(background, data_url);
+		dispatch_host_event(background, 'input');
+
+		// ForgeCanvas polls the textbox every 100ms, mirrors it into its
+		// visible <img>, then re-encodes that image back into the textbox.
+		// Waiting for the <img> is how we know that round trip has happened.
+		if (visible) {
+			try {
+				await wait_until(
+					() => visible.src === data_url && visible.complete && visible.naturalWidth > 0,
+					{ timeout_ms: UI_ACK_TIMEOUT_MS, description: `${label} to display the sent image` }
+				);
+			} catch (e) {
+				log_warning(`${label}: ForgeCanvas did not display the image within ${UI_ACK_TIMEOUT_MS}ms`);
+			}
+		}
+
+		if (!background.isConnected) {
+			throw new Error(`${LOG_PREFIX} ${label}: ForgeCanvas ${uuid} was replaced during the transfer`);
+		}
+
+		const committed = await forge_canvas_committed_value(uuid, background);
+
+		if (!committed.value) {
+			failure = `the WebUI holds no image for it (read from ${committed.source})`;
+		} else if (!is_png_data_url(committed.value)) {
+			failure = `the WebUI holds something that is not a PNG (read from ${committed.source})`;
+		} else {
+			let held = null;
+			try {
+				held = await image_signature(committed.value);
+			} catch (e) {
+				failure = `the WebUI holds ${committed.value.length} bytes that do not decode as an image`;
+			}
+
+			if (held) {
+				const comparison = compare_signatures(sent, held);
+				if (comparison.same) {
+					log_info(
+						`${label} holds the sent image: ${held.width}x${held.height}, ` +
+						`${comparison.byte_identical ? 'byte-identical' : `re-encoded by the host, pixel difference ${comparison.difference}/255`}` +
+						`, verified against the ${committed.source}` +
+						(attempt > 1 ? `, on attempt ${attempt}` : '')
+					);
+					return {
+						kind: 'forge-canvas',
+						uuid,
+						width: sent.width,
+						height: sent.height,
+						attempt,
+						verified_against: committed.source,
+						byte_identical: comparison.byte_identical,
+						pixel_difference: comparison.difference,
+					};
+				}
+				failure = `the WebUI holds a different image: ${comparison.reason} (read from ${committed.source})`;
+			}
+		}
+
+		if (attempt < attempts) {
+			log_warning(`${label}: ${failure} - retrying (attempt ${attempt + 1} of ${attempts})`);
+			// Blank it first: ForgeCanvas ignores a write that does not change
+			// the value, so re-sending the same image needs a change to react to.
+			set_native_value(background, '');
+			dispatch_host_event(background, 'input');
+			await pause(250);
 		}
 	}
 
-	// A component that was remounted while we were writing to it would leave
-	// us verifying a detached textarea that the WebUI no longer reads.
-	if (!background.isConnected) {
-		throw new Error(`${LOG_PREFIX} ${label}: ForgeCanvas ${uuid} was replaced during the transfer`);
-	}
-
-	// Once the canvas has loaded the image it re-encodes it from its own
-	// <img> and writes that back, so the committed string is allowed to
-	// differ from ours - but only after we saw the canvas take our image.
-	const committed = background.value;
-	if (committed !== data_url && !(acknowledged && is_png_data_url(committed))) {
-		throw new Error(`${LOG_PREFIX} ${label}: logical_image_background no longer holds the sent image`);
-	}
-
-	return { kind: 'forge-canvas', uuid, width: size.width, height: size.height };
+	throw new Error(
+		`${LOG_PREFIX} ${label}: sent ${sent.width}x${sent.height} (${sent.length} bytes, ` +
+		`hash ${sent.hash}) ${attempts} times and ${failure}`
+	);
 }
 
 /* ------------------------------------------------------------------ */
@@ -574,7 +761,26 @@ async function set_gradio_image_file(resolve, data_url, filename) {
 		{ description: `${label} to load the sent image` }
 	);
 
-	return { kind: 'gradio-image' };
+	// The preview is drawn from the component's value here, but check the
+	// value the WebUI would submit as well when this build exposes it.
+	const wrapper_id = (resolve() || {}).id;
+	const state = wrapper_id ? gradio_component_value(wrapper_id) : { readable: false };
+	if (state.readable) {
+		try {
+			await wait_until(
+				() => {
+					const value = gradio_component_value(wrapper_id).value;
+					return !!value && (typeof value !== 'object' || !!(value.path || value.url));
+				},
+				{ timeout_ms: UI_ACK_TIMEOUT_MS, description: `${label} to hold an uploaded file` }
+			);
+		} catch (e) {
+			throw new Error(`${LOG_PREFIX} ${label} shows the image but the WebUI holds no file for it`);
+		}
+	}
+
+	log_info(`${label} holds the sent image, verified against the ${state.readable ? 'gradio value' : 'preview'}`);
+	return { kind: 'gradio-image', verified_against: state.readable ? 'gradio value' : 'preview' };
 }
 
 /* ------------------------------------------------------------------ */
@@ -605,7 +811,7 @@ export async function set_image_file(target, data_url, options = {}) {
 		throw new Error(`${LOG_PREFIX} ${label} exists but no upload input was found`);
 	}
 	if (kind === 'forge-canvas') {
-		return set_forge_canvas_image(wrapper, data_url);
+		return set_forge_canvas_image(wrapper, data_url, options);
 	}
 	return set_gradio_image_file(resolve, data_url, filename);
 }
@@ -876,7 +1082,7 @@ export function get_selected_gallery_image(gallery) {
 /* Diagnostics                                                         */
 /* ------------------------------------------------------------------ */
 
-export function debug_report() {
+export async function debug_report() {
 	const parent_window = host_window();
 	const selectors = [
 		'#img2img_image',
@@ -906,14 +1112,31 @@ export function debug_report() {
 			continue;
 		}
 
-		// For ForgeCanvas the backing textbox is what a transfer writes, so
-		// report whether it can be resolved rather than just the canvas.
+		// For ForgeCanvas the backing value is what a transfer writes and what
+		// the WebUI submits, so report what it currently holds.
 		const uuid = forge_canvas_uuid(element);
+		const textarea = uuid && forge_logical_textarea(uuid, 'logical_image_background');
+		const committed = uuid
+			? await forge_canvas_committed_value(uuid, textarea)
+			: { value: '', source: 'n/a' };
+
+		let holds = 'EMPTY';
+		if (committed.value) {
+			try {
+				const signature = await image_signature(committed.value);
+				holds = `${signature.width}x${signature.height}, ${signature.length} bytes, hash ${signature.hash}`;
+			} catch (e) {
+				holds = `${committed.value.length} bytes that do not decode`;
+			}
+		}
+
 		targets[selector] = {
 			kind,
 			uuid: uuid || 'UNKNOWN',
-			background: uuid && forge_logical_textarea(uuid, 'logical_image_background') ? 'present' : 'MISSING',
+			background: textarea ? 'present' : 'MISSING',
 			foreground: uuid && forge_logical_textarea(uuid, 'logical_image_foreground') ? 'present' : 'MISSING',
+			readValueFrom: committed.source,
+			holds,
 		};
 	}
 

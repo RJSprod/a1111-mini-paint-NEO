@@ -84,20 +84,27 @@ class File_send_class {
 				// One record per send, written to the extension's log file
 				// whichever way the transfer ends.
 				const record = Host.start_send_record(description);
+				let failure = null;
 				try {
 					const navigate = await transfer(record);
 					if (typeof navigate === 'function' && token === this.send_token) {
 						navigate();
 					}
-					this.report_success(description);
-					return true;
 				} catch (e) {
 					Host.log_error(`sending to ${description} failed`, e);
-					this.report_failure(description, this.failure_reason(e));
-					return false;
-				} finally {
-					await Host.write_send_log(record);
+					failure = this.failure_reason(e);
 				}
+
+				// Report only once the log has been written, so the message can
+				// say where to read the details - or why they are not there.
+				const logged = await Host.write_send_log(record);
+
+				if (failure) {
+					this.report_failure(description, failure, logged);
+					return false;
+				}
+				this.report_success(description);
+				return true;
 			});
 
 		this.pending_send = task;
@@ -120,13 +127,31 @@ class File_send_class {
 		}
 	}
 
-	report_failure(description, reason) {
+	report_failure(description, reason, logged) {
+		const where = this.where_to_read_more(logged);
 		Host.log_error(`could not send the image to ${description}: ${reason}`);
 		try {
-			alertify.error(`Could not send the image to ${description}: ${reason}`);
+			alertify.error(`Could not send the image to ${description}: ${reason} ${where}`);
 		} catch (e) {
 			Host.log_warning('could not show the failure message', e);
 		}
+	}
+
+	/**
+	 * Where the details of a failure ended up.
+	 *
+	 * When the log could not be written that is itself worth saying: an
+	 * instruction to read a file that was never created is how the last round
+	 * of failures stayed unexplained.
+	 */
+	where_to_read_more(logged) {
+		if (logged && logged.ok && logged.path) {
+			return `Details: ${logged.path}`;
+		}
+		if (logged && logged.reason) {
+			return `Details are in the browser console - no log file was written because ${logged.reason}.`;
+		}
+		return 'Details are in the browser console.';
 	}
 
 	/** The part of a transfer error that is worth putting in a toast. */
@@ -209,11 +234,12 @@ class File_send_class {
 				if (problem) {
 					record.outcome = `sent, then lost it: ${problem}`;
 					record.step('after the send', problem);
+					const logged = await Host.write_send_log(record);
 					this.report_failure(
 						selector,
-						`${problem}. The image was sent but the WebUI dropped it afterwards - send it again`
+						`${problem}. The image was sent but the WebUI dropped it afterwards - send it again`,
+						logged
 					);
-					await Host.write_send_log(record);
 				}
 			} catch (e) {
 				Host.log_warning(`could not re-check ${selector} after the send`, e);

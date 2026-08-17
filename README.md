@@ -33,6 +33,12 @@ an image therefore also waits for that to be acknowledged, otherwise pressing Ge
 after a send can render from a different slot - the classic "my image is right there and it was
 ignored".
 
+Every send is checked against the value the WebUI will actually submit: miniPaint decodes it back
+and compares it, pixel for pixel, with the image it exported. A send that does not match is
+retried, and if it still does not match you get a toast in the editor saying it could not send
+and why, rather than a destination that merely looks right. Successful sends say so too, and the
+console line records whether the value is byte-identical or was re-encoded by the host.
+
 If a transfer does not work, open the browser console and run:
 
 ```js

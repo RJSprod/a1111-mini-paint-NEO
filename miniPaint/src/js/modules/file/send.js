@@ -1,3 +1,4 @@
+import alertify from './../../../../node_modules/alertifyjs/build/alertify.min.js';
 import app from './../../app.js';
 import config from './../../config.js';
 import Base_layers_class from './../../core/base-layers.js';
@@ -84,15 +85,27 @@ class File_send_class {
 					if (typeof navigate === 'function' && token === this.send_token) {
 						navigate();
 					}
+					alertify.success(`Image sent to ${description}.`);
 					return true;
 				} catch (e) {
 					Host.log_error(`sending to ${description} failed`, e);
+					// The console is not where the user is looking, and a
+					// transfer that silently did nothing is the whole problem.
+					alertify.error(
+						`Could not send the image to ${description}: ${this.failure_reason(e)}`
+					);
 					return false;
 				}
 			});
 
 		this.pending_send = task;
 		return task;
+	}
+
+	/** The part of a transfer error that is worth putting in a toast. */
+	failure_reason(error) {
+		const message = (error && error.message) || String(error);
+		return message.replace(/^MiniPaint:\s*/, '');
 	}
 
 	/**
@@ -107,7 +120,6 @@ class File_send_class {
 
 		try {
 			await Host.set_image_file(wrapper, image_data_url, { selector });
-			Host.log_info(`sent image to ${selector}`);
 		} catch (e) {
 			if (opened) {
 				Host.log_warning(
@@ -133,7 +145,9 @@ class File_send_class {
 	}
 
 	sendImageCanvasEditor(type) {
-		return this.send(type, async () => {
+		const name = type === 'img2img_inpaint' ? 'Inpaint' : 'img2img';
+
+		return this.send(name, async () => {
 			const selector = Host.DESTINATIONS[type];
 			if (!selector) {
 				throw new Error(`MiniPaint: unknown img2img destination "${type}"`);

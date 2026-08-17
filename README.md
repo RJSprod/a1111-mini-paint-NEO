@@ -39,15 +39,27 @@ retried, and if it still does not match you get a toast in the editor saying it 
 and why, rather than a destination that merely looks right. Successful sends say so too, and the
 console line records whether the value is byte-identical or was re-encoded by the host.
 
-If a send does fail, the browser console has a step by step account of it:
+Every send is written to a log file inside this extension's folder:
 
-```js
-a1111minipaint.sendLog()
+```
+extensions/a1111-mini-paint-NEO/logs/send-log.txt
 ```
 
-It prints the last few transfers with timings - what was exported, what the destination held
-before and after each attempt, when the canvas displayed it, what the WebUI ended up holding, and
-why an attempt was rejected. That is the output to include in a bug report.
+Each entry records the transfer step by step with timings - what was exported, what the
+destination held before and after each attempt, when the canvas displayed it, what the WebUI
+ended up holding, and why an attempt was rejected:
+
+```
+[2026-08-17 20:24:56] #img2img_image -> sent: 512x512, byte-identical
+    +    0ms  exported image - 512x512, 800000 bytes, hash abc
+    +  340ms  canvas displays the image
+    +  900ms  verified - byte-identical, on attempt 1
+```
+
+That file is the thing to attach to a bug report. It is written by the extension itself, so it
+keeps working when what failed is the WebUI's own round trip, and it rotates once it passes 1 MB.
+The same information is in the browser console, and `a1111minipaint.sendLog()` typed into the
+console prints the last ten transfers if you would rather look there.
 
 If a transfer does not work, open the browser console and run:
 

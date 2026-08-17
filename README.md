@@ -27,6 +27,12 @@ transfer that fails says so in the console instead of leaving you on a tab that 
 `ForgeCanvas` the image is written to the hidden textbox that Forge submits, not just to the
 canvas you can see, because those are not the same value.
 
+img2img generates from whichever of its sub-tabs (img2img / Inpaint / ...) the WebUI *itself*
+has recorded, and it only learns about a sub-tab change through a request to the server. Sending
+an image therefore also waits for that to be acknowledged, otherwise pressing Generate straight
+after a send can render from a different slot - the classic "my image is right there and it was
+ignored".
+
 If a transfer does not work, open the browser console and run:
 
 ```js

@@ -56,9 +56,26 @@ def on_ui_tabs():
     return [(blocks, "Mini Paint", "minipaint")]
 
 
+def get_bundle_stamp() -> str:
+    """Build stamp of the miniPaint bundle.
+
+    index.html keeps the same mtime when only dist/bundle.js is rebuilt, so
+    without this the browser can go on running a cached build of the editor
+    after the extension is updated.
+    """
+    bundle = root_path / "miniPaint" / "dist" / "bundle.js"
+    try:
+        return str(os.path.getmtime(bundle))
+    except OSError:
+        return ""
+
+
 def create_ui():
     cn_max = get_controlnet_unit_count()
-    config = {"config": get_asset_url(write_config_file()) or ""}
+    config = {
+        "config": get_asset_url(write_config_file()) or "",
+        "bundle": get_bundle_stamp(),
+    }
     html_url = get_asset_url(root_path / "miniPaint" / "index.html", config)
     with gr.Tabs(elem_id="a1111minipaint_main"):
         gr.HTML(

@@ -102,11 +102,12 @@ class File_send_class {
 	 * is already there, the user stays in miniPaint for the whole commit and
 	 * so cannot reach the destination's Generate button too early.
 	 */
-	async commit_to_destination(selector, switch_to, image_data_url) {
+	async commit_to_destination(selector, switch_to, image_data_url, options = {}) {
 		const { wrapper, opened } = await Host.resolve_target(selector, switch_to);
 
 		try {
 			await Host.set_image_file(wrapper, image_data_url, { selector });
+			Host.log_info(`sent image to ${selector}`);
 		} catch (e) {
 			if (opened) {
 				Host.log_warning(
@@ -115,6 +116,17 @@ class File_send_class {
 				);
 			}
 			throw e;
+		}
+
+		// img2img generates from whichever slot its own mode value names, not
+		// from the canvas on screen, and that value only changes on a server
+		// round trip. Settle it here, while miniPaint is still in front, so
+		// the image that just landed is the one Generate will use.
+		if (options.img2img_destination) {
+			const mode = await Host.select_img2img_mode(options.img2img_destination);
+			if (mode.applied && !mode.verified) {
+				Host.log_warning(`could not confirm the img2img sub-tab: ${mode.reason}`);
+			}
 		}
 
 		return switch_to;
@@ -131,7 +143,9 @@ class File_send_class {
 				type === 'img2img_inpaint' ? Host.switch_to_inpaint : Host.switch_to_img2img;
 
 			const image_data_url = await this.Saver.export_data_url();
-			return this.commit_to_destination(selector, switch_to, image_data_url);
+			return this.commit_to_destination(selector, switch_to, image_data_url, {
+				img2img_destination: type,
+			});
 		});
 	}
 
@@ -153,6 +167,7 @@ class File_send_class {
 			}
 
 			await Host.set_image_file(wrapper, image_data_url, { selector });
+			Host.log_info(`sent image to ${selector}`);
 
 			return switch_to;
 		});

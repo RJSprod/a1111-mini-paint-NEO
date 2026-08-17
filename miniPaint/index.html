@@ -27,7 +27,19 @@
 	<meta property="og:description" content="miniPaint is free online image editor using HTML5. Edit, adjust your images, add effects online in your browser, without installing anything..." />
 	<meta property="og:site_name" content="miniPaint" />
 	
-	<script src="dist/bundle.js"></script>
+	<script>
+		// The WebUI extension passes the built bundle's timestamp as ?bundle=,
+		// because index.html itself does not change when the bundle is rebuilt
+		// and a cached bundle.js would keep an old build alive. Standalone use
+		// (no query string) loads it unversioned, as before.
+		(function () {
+			var stamp = new URLSearchParams(window.location.search).get('bundle');
+			var script = document.createElement('script');
+			script.src = 'dist/bundle.js' + (stamp ? '?v=' + encodeURIComponent(stamp) : '');
+			script.async = false;
+			document.head.appendChild(script);
+		})();
+	</script>
 </head>
 <body>
 	<div class="wrapper">

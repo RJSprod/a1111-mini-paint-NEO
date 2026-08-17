@@ -45,6 +45,10 @@ export function log_warning(message, error) {
 	}
 }
 
+export function log_info(message) {
+	console.log(`${LOG_PREFIX} ${message}`);
+}
+
 /** The parent window, or null when miniPaint runs standalone. */
 export function host_window() {
 	try {
@@ -153,14 +157,20 @@ export async function resolve_target(selector, open_target) {
  * Everything we wait on is host state we do not own (Gradio's uploader,
  * ForgeCanvas' 100ms textarea poll), so this is bounded by a deadline rather
  * than trusting a single event.
+ *
+ * `stable_ms` additionally requires the predicate to keep holding for that
+ * long. Values that a late server reply can still overwrite are only worth
+ * trusting once they have stopped moving.
  */
 export function wait_until(predicate, options = {}) {
 	const timeout_ms = options.timeout_ms || TRANSFER_TIMEOUT_MS;
 	const interval_ms = options.interval_ms || 50;
+	const stable_ms = options.stable_ms || 0;
 	const description = options.description || 'condition';
 
 	return new Promise((resolve, reject) => {
 		const deadline = Date.now() + timeout_ms;
+		let holding_since = null;
 
 		const tick = () => {
 			let value;
@@ -170,10 +180,22 @@ export function wait_until(predicate, options = {}) {
 				reject(e);
 				return;
 			}
+
 			if (value) {
-				resolve(value);
-				return;
+				if (!stable_ms) {
+					resolve(value);
+					return;
+				}
+				if (holding_since === null) {
+					holding_since = Date.now();
+				} else if (Date.now() - holding_since >= stable_ms) {
+					resolve(value);
+					return;
+				}
+			} else {
+				holding_since = null;
 			}
+
 			if (Date.now() >= deadline) {
 				reject(new Error(`${LOG_PREFIX} timed out after ${timeout_ms}ms waiting for ${description}`));
 				return;
@@ -593,6 +615,126 @@ export async function set_image_on_target(selector, data_url, options = {}) {
 }
 
 /* ------------------------------------------------------------------ */
+/* img2img mode                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Which img2img sub-tab owns each destination.
+ *
+ * img2img does not read the canvas the user is looking at: it reads the slot
+ * named by a hidden Number inside #mode_img2img, and that Number is only
+ * updated by a *server round trip* when a sub-tab is selected (ui.py wires
+ * `tab.select(fn=lambda tabnum: tabnum, outputs=[img2img_selected_tab])`, and
+ * submit_img2img() does not overwrite it from the DOM). Clicking the tab and
+ * generating straight away therefore generates from the previous slot - the
+ * image is visibly there and still not used.
+ */
+export const IMG2IMG_MODES = {
+	img2img_img2img: { index: 0, button: '#img2img_img2img_tab-button', label: 'img2img' },
+	img2img_inpaint: { index: 2, button: '#img2img_inpaint_tab-button', label: 'inpaint' },
+};
+
+/**
+ * The hidden Number holding the selected img2img sub-tab.
+ * The tab strip itself lives inside the img2img TabItem, so "not inside a
+ * .tabitem" has to be judged relative to the strip, not to the document.
+ */
+export function img2img_mode_input() {
+	const container = query('#mode_img2img');
+	if (!container) {
+		return null;
+	}
+	for (const input of container.querySelectorAll("input[type='number']")) {
+		const item = input.closest('.tabitem');
+		if (!item || !container.contains(item)) {
+			return input;
+		}
+	}
+	return null;
+}
+
+/**
+ * Select the sub-tab that owns `destination` and wait until the WebUI agrees.
+ *
+ * Runs while miniPaint is still the visible tab, so the round trip is over
+ * before the user can reach Generate. Resolves with what happened; rejects if
+ * the WebUI never acknowledged the sub-tab, because generating in that state
+ * would silently use a different image slot.
+ */
+export async function select_img2img_mode(destination) {
+	const mode = IMG2IMG_MODES[destination];
+	if (!mode) {
+		return { applied: false, reason: 'destination has no img2img sub-tab' };
+	}
+
+	const container = query('#mode_img2img');
+	if (!container) {
+		return { applied: false, reason: '#mode_img2img not found' };
+	}
+
+	const button =
+		query(mode.button) || container.querySelectorAll('.tab-nav button')[mode.index] || null;
+	if (!button) {
+		return { applied: false, reason: `sub-tab button for ${mode.label} not found` };
+	}
+
+	const already_selected = button.classList.contains('selected');
+	if (!already_selected) {
+		button.click();
+	}
+
+	const input = img2img_mode_input();
+	if (!input) {
+		// Hosts that read the tab index in JS at submit time (upstream A1111)
+		// have nothing to synchronise; the click above is all that is needed.
+		return { applied: true, verified: false, reason: 'no mode value exposed in the DOM' };
+	}
+
+	const settled = () => Number(input.value) === mode.index;
+	const half = Math.round(TRANSFER_TIMEOUT_MS / 2);
+	const wait_for_mode = () =>
+		wait_until(settled, {
+			timeout_ms: half,
+			// Replies to earlier tab clicks can still be in flight and would
+			// overwrite a value we accepted a moment too early.
+			stable_ms: 400,
+			description: `the WebUI to switch img2img to ${mode.label}`,
+		});
+
+	try {
+		await wait_for_mode();
+	} catch (first) {
+		// Two tab clicks inside one frame are collapsed by the front end into
+		// no net change, so no select fires and the value stays stale for
+		// good. Re-select by way of a sibling tab, letting each click land
+		// before the next one, which forces the event the WebUI missed.
+		try {
+			const buttons = container.querySelectorAll('.tab-nav button');
+			const sibling = buttons[mode.index === 0 ? 1 : 0];
+			if (sibling && sibling !== button) {
+				sibling.click();
+				await wait_until(() => sibling.classList.contains('selected'), {
+					timeout_ms: 1000,
+					interval_ms: 25,
+					description: 'the img2img tab strip to settle',
+				});
+			}
+			button.click();
+			await wait_for_mode();
+		} catch (second) {
+			throw new Error(
+				`${LOG_PREFIX} the image was sent, but the WebUI still reports img2img mode ` +
+				`${input.value} instead of ${mode.index} (${mode.label}); generating now would ` +
+				`use a different image. Click the ${mode.label} tab in img2img once to sync it.`
+			);
+		}
+		return { applied: true, verified: true, index: mode.index, clicked: true, retried: true };
+	}
+
+	return { applied: true, verified: true, index: mode.index, clicked: !already_selected };
+}
+
+/* ------------------------------------------------------------------ */
 /* ControlNet                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -789,11 +931,20 @@ export function debug_report() {
 		);
 	}
 
+	// Which slot img2img will actually read, and which sub-tab is on screen.
+	// A mismatch is why a visibly-loaded image can go unused.
+	const mode_input = img2img_mode_input();
+	const selected_tab = query('#mode_img2img .tab-nav button.selected');
+
 	const report = {
 		gradioVersion: gradio_version,
 		hasForgeCanvas: !!query('.forge-container .forge-file-upload'),
 		hasGradioApp: !!(parent_window && typeof parent_window.gradioApp === 'function'),
 		iframeSrc: window.location.href,
+		img2imgMode: {
+			valueTheWebUIWillUse: mode_input ? mode_input.value : 'NOT EXPOSED',
+			visibleSubTab: selected_tab ? (selected_tab.textContent || '').trim() : 'UNKNOWN',
+		},
 		targets,
 		controlnetUnits: controlnet_units,
 	};

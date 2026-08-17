@@ -1,6 +1,8 @@
+import datetime
 import html
 import os.path
 import pathlib
+import threading
 import typing
 import urllib.parse
 
@@ -36,6 +38,73 @@ def write_config_file() -> pathlib.Path:
         # get_asset_url() stats this file, so it has to exist.
         config_path.write_text("{}", encoding="utf-8")
     return config_path
+
+
+SEND_LOG_PATH = root_path / "logs" / "send-log.txt"
+SEND_LOG_MAX_BYTES = 1_000_000
+SEND_LOG_MAX_STEPS = 200
+SEND_LOG_MAX_LINE = 500
+_send_log_lock = threading.Lock()
+
+
+def _clean(value: typing.Any, limit: int = SEND_LOG_MAX_LINE) -> str:
+    """One printable line. The browser is the only writer, but it is still input."""
+    text = value if isinstance(value, str) else repr(value)
+    text = "".join(character if character.isprintable() else " " for character in text)
+    return text[:limit]
+
+
+def format_send_entry(record: typing.Any) -> str:
+    """Render one transfer the way it will appear in the log file."""
+    if not isinstance(record, dict):
+        record = {}
+
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    destination = _clean(record.get("destination", "unknown destination"), 120)
+    outcome = _clean(record.get("outcome", "unknown outcome"), 300)
+
+    lines = [f"[{stamp}] {destination} -> {outcome}"]
+
+    steps = record.get("steps")
+    if isinstance(steps, list):
+        for step in steps[:SEND_LOG_MAX_STEPS]:
+            lines.append(f"    {_clean(step)}")
+
+    return "\n".join(lines) + "\n\n"
+
+
+def append_send_log(record: typing.Any) -> pathlib.Path:
+    """Append one transfer to logs/send-log.txt, rotating it when it grows."""
+    entry = format_send_entry(record)
+
+    with _send_log_lock:
+        SEND_LOG_PATH.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        if SEND_LOG_PATH.exists() and SEND_LOG_PATH.stat().st_size > SEND_LOG_MAX_BYTES:
+            SEND_LOG_PATH.replace(SEND_LOG_PATH.with_name("send-log.previous.txt"))
+        with SEND_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(entry)
+
+    return SEND_LOG_PATH
+
+
+def on_app_started(_demo, app) -> None:
+    """Let the editor write its transfer log next to the extension.
+
+    A plain route rather than a Gradio event on purpose: this has to keep
+    working when what failed *is* the Gradio round trip.
+    """
+
+    @app.post("/minipaint/log")
+    async def minipaint_log(request):  # noqa: ANN001 - FastAPI supplies the type
+        try:
+            record = await request.json()
+        except Exception:
+            return {"ok": False, "error": "expected a JSON body"}
+        try:
+            path = append_send_log(record)
+        except OSError as error:
+            return {"ok": False, "error": str(error)}
+        return {"ok": True, "path": str(path)}
 
 
 def get_controlnet_unit_count() -> int:
@@ -90,3 +159,4 @@ def create_ui():
 
 
 script_callbacks.on_ui_tabs(on_ui_tabs)
+script_callbacks.on_app_started(on_app_started)

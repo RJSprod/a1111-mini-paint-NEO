@@ -53,6 +53,7 @@ class File_send_class {
 			bridge.recieve = this.recieveImage.bind(this);
 			bridge.createSendButton = this.createSendToMiniPaintButton.bind(this);
 			bridge.debugReport = Host.debug_report;
+			bridge.sendLog = Host.send_log;
 		} catch (e) {
 			Host.log_error('could not connect to the WebUI bridge', e);
 		}
@@ -85,21 +86,42 @@ class File_send_class {
 					if (typeof navigate === 'function' && token === this.send_token) {
 						navigate();
 					}
-					alertify.success(`Image sent to ${description}.`);
+					this.report_success(description);
 					return true;
 				} catch (e) {
 					Host.log_error(`sending to ${description} failed`, e);
-					// The console is not where the user is looking, and a
-					// transfer that silently did nothing is the whole problem.
-					alertify.error(
-						`Could not send the image to ${description}: ${this.failure_reason(e)}`
-					);
+					this.report_failure(description, this.failure_reason(e));
 					return false;
 				}
 			});
 
 		this.pending_send = task;
 		return task;
+	}
+
+	/**
+	 * Say what happened, in the editor and in the console.
+	 *
+	 * A toast that throws must never be able to turn a reported outcome into a
+	 * silent one - that is indistinguishable from the bug this code exists to
+	 * catch - so the console line comes first and the toast is best effort.
+	 */
+	report_success(description) {
+		Host.log_info(`sent the image to ${description}`);
+		try {
+			alertify.success(`Image sent to ${description}.`);
+		} catch (e) {
+			Host.log_warning('could not show the success message', e);
+		}
+	}
+
+	report_failure(description, reason) {
+		Host.log_error(`could not send the image to ${description}: ${reason}`);
+		try {
+			alertify.error(`Could not send the image to ${description}: ${reason}`);
+		} catch (e) {
+			Host.log_warning('could not show the failure message', e);
+		}
 	}
 
 	/** The part of a transfer error that is worth putting in a toast. */
@@ -116,10 +138,12 @@ class File_send_class {
 	 * so cannot reach the destination's Generate button too early.
 	 */
 	async commit_to_destination(selector, switch_to, image_data_url, options = {}) {
+		const record = Host.start_send_record(selector);
 		const { wrapper, opened } = await Host.resolve_target(selector, switch_to);
+		let committed;
 
 		try {
-			await Host.set_image_file(wrapper, image_data_url, { selector });
+			committed = await Host.set_image_file(wrapper, image_data_url, { selector, record });
 		} catch (e) {
 			if (opened) {
 				Host.log_warning(
@@ -136,12 +160,60 @@ class File_send_class {
 		// the image that just landed is the one Generate will use.
 		if (options.img2img_destination) {
 			const mode = await Host.select_img2img_mode(options.img2img_destination);
+			record.step('img2img sub-tab', JSON.stringify(mode));
 			if (mode.applied && !mode.verified) {
 				Host.log_warning(`could not confirm the img2img sub-tab: ${mode.reason}`);
 			}
 		}
 
+		// Everything above can be undone by work the host had already started:
+		// a canvas load still running, a reply still on its way. Look once more
+		// at the last possible moment rather than trusting an older reading.
+		await this.confirm_still_held(committed, selector, record);
+		this.watch_after_send(committed, selector, record);
+
 		return switch_to;
+	}
+
+	/** Re-read the destination immediately before the user is sent to it. */
+	async confirm_still_held(committed, selector, record) {
+		if (!committed || typeof committed.still_holds !== 'function') {
+			return;
+		}
+		const problem = await committed.still_holds();
+		record.step('final check before switching tabs', problem || 'still holds the sent image');
+		if (problem) {
+			record.outcome = `failed: ${problem}`;
+			throw new Error(`${Host.LOG_PREFIX} ${selector}: ${problem}`);
+		}
+	}
+
+	/**
+	 * Look again a few seconds after the send.
+	 *
+	 * Nothing can be rolled back by then - the point is that a value quietly
+	 * replaced after a successful send gets said out loud, instead of only
+	 * showing up as a generation that ignored the image.
+	 */
+	watch_after_send(committed, selector, record) {
+		if (!committed || typeof committed.still_holds !== 'function') {
+			return;
+		}
+		setTimeout(async () => {
+			try {
+				const problem = await committed.still_holds();
+				if (problem) {
+					record.outcome = `sent, then lost it: ${problem}`;
+					record.step('after the send', problem);
+					this.report_failure(
+						selector,
+						`${problem}. The image was sent but the WebUI dropped it afterwards - send it again`
+					);
+				}
+			} catch (e) {
+				Host.log_warning(`could not re-check ${selector} after the send`, e);
+			}
+		}, 3000);
 	}
 
 	sendImageCanvasEditor(type) {
@@ -167,6 +239,7 @@ class File_send_class {
 		return this.send(`${type} ControlNet unit ${index}`, async () => {
 			const switch_to = type === 'txt2img' ? Host.switch_to_txt2img : Host.switch_to_img2img;
 			const selector = Host.controlnet_image_selector(type, index);
+			const record = Host.start_send_record(selector);
 
 			const image_data_url = await this.Saver.export_data_url();
 			const wrapper = await Host.resolve_controlnet_target(type, index);
@@ -180,8 +253,9 @@ class File_send_class {
 				);
 			}
 
-			await Host.set_image_file(wrapper, image_data_url, { selector });
-			Host.log_info(`sent image to ${selector}`);
+			const committed = await Host.set_image_file(wrapper, image_data_url, { selector, record });
+			await this.confirm_still_held(committed, selector, record);
+			this.watch_after_send(committed, selector, record);
 
 			return switch_to;
 		});

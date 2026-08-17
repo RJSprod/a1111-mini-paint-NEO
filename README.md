@@ -39,6 +39,16 @@ retried, and if it still does not match you get a toast in the editor saying it 
 and why, rather than a destination that merely looks right. Successful sends say so too, and the
 console line records whether the value is byte-identical or was re-encoded by the host.
 
+If a send does fail, the browser console has a step by step account of it:
+
+```js
+a1111minipaint.sendLog()
+```
+
+It prints the last few transfers with timings - what was exported, what the destination held
+before and after each attempt, when the canvas displayed it, what the WebUI ended up holding, and
+why an attempt was rejected. That is the output to include in a bug report.
+
 If a transfer does not work, open the browser console and run:
 
 ```js

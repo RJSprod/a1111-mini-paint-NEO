@@ -6,7 +6,9 @@ Two things cross the tab boundary, both as ordinary Gradio events:
   host's own "send to extras" button while the host is building that row;
 * the img2img / Inpaint / Extras inputs, looked up the same way the host's
   own "Send to img2img" buttons find them, so a handoff is a Gradio output
-  followed by the host's own tab-switch helper.
+  followed by the host's own tab-switch helper;
+* the reference gallery of the built-in ImageStitch script in txt2img and
+  img2img, and the box that enables it, remembered as the host builds them.
 
 Nothing here runs JavaScript at startup, watches the document, or keeps a
 second copy of which tab is selected.
@@ -14,6 +16,8 @@ second copy of which tab is selected.
 
 from __future__ import annotations
 
+import os
+import tempfile
 import typing
 
 import gradio as gr
@@ -24,8 +28,16 @@ ANCHOR_IDS = {f"{tab}_send_to_extras": tab for tab in RECEIVE_TABS}
 EXTRAS_IMAGE_ID = "extras_image"
 TAB_LABEL = "Mini Paint"
 
+# The built-in ImageStitch script (extensions-builtin/sd_forge_image_stitch):
+# one instance per tab, each an InputAccordion - a hidden checkbox with the
+# script's title as its label, then the accordion - holding the reference
+# gallery, whose id the script derives from its title and tab.
+STITCH_LABEL = "ImageStitch Integrated"
+STITCH_GALLERY_IDS = {f"script_{tab}_imagestitch_integrated_ref_latent": f"stitch_{tab}" for tab in ("txt2img", "img2img")}
+
 # Forge's helpers, in javascript/ui.js. They click the host's own tab buttons.
 SWITCH_JS = {
+    "txt2img": "switch_to_txt2img",
     "img2img": "switch_to_img2img",
     "inpaint": "switch_to_inpaint",
     "extras": "switch_to_extras",
@@ -33,12 +45,14 @@ SWITCH_JS = {
 
 _captured: typing.Dict[str, typing.Any] = {}
 _foregrounds: typing.Dict[str, typing.Any] = {}
+_pending: typing.Dict[str, typing.Any] = {}
 
 
 def reset_capture() -> None:
     """Forget the previous UI's components: a Reload UI builds new ones."""
     _captured.clear()
     _foregrounds.clear()
+    _pending.clear()
 
 
 def receive_button_id(tab: str) -> str:
@@ -100,6 +114,19 @@ def on_after_component(component, **kwargs) -> None:
 
     if elem_id in GALLERY_IDS or elem_id == EXTRAS_IMAGE_ID:
         _captured[elem_id] = component
+        return
+
+    # ImageStitch: its enabling box comes first, its gallery a few
+    # components later; the gallery's id says which tab both belong to.
+    if elem_id in STITCH_GALLERY_IDS:
+        key = STITCH_GALLERY_IDS[elem_id]
+        _captured[key] = component
+        enable = _pending.pop("stitch_enable", None)
+        if enable is not None:
+            _captured[f"{key}_enable"] = enable
+        return
+    if isinstance(component, gr.Checkbox) and getattr(component, "label", None) == STITCH_LABEL and str(elem_id).endswith("-checkbox"):
+        _pending["stitch_enable"] = component
         return
 
     tab = ANCHOR_IDS.get(elem_id)
@@ -167,7 +194,8 @@ def _inpaint_foreground(background) -> typing.Any:
 
 
 def destinations() -> typing.Dict[str, typing.Any]:
-    """Whatever this host has: img2img, inpaint (+ its mask layer), extras."""
+    """Whatever this host has: img2img, inpaint (+ its mask layer), extras,
+    and ImageStitch's galleries (+ their enabling boxes) in txt2img and img2img."""
     found: typing.Dict[str, typing.Any] = {}
 
     img2img = _init_img("img2img")
@@ -185,7 +213,46 @@ def destinations() -> typing.Dict[str, typing.Any]:
     if extras is not None:
         found["extras"] = extras
 
+    for key in ("stitch_txt2img", "stitch_img2img"):
+        gallery = _captured.get(key)
+        enable = _captured.get(f"{key}_enable")
+        if gallery is not None and enable is not None:
+            found[key] = gallery
+            found[f"{key}_enable"] = enable
+
     return found
+
+
+def temp_image_path(prefix: str) -> str:
+    """A file for a picture one of the host's galleries or Image inputs will
+    serve. Forge keeps such files in its own temporary directory (Settings
+    -> Saving, cleaned at startup) and serves a picture that says where it
+    is saved rather than copying it - into that directory, which a fresh
+    install has not created yet. So: that directory, made if need be, else
+    the system's."""
+    directory: typing.Optional[str] = None
+    try:
+        from modules.shared import opts
+
+        directory = str(getattr(opts, "temp_dir", "") or "") or None
+    except Exception:
+        directory = None
+    if directory:
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError:
+            directory = None
+    handle = tempfile.NamedTemporaryFile(prefix=prefix, suffix=".png", dir=directory, delete=False)
+    handle.close()
+    return handle.name
+
+
+def staged(image):
+    """The picture saved where the host will serve it from, and told so."""
+    path = temp_image_path("minipaint-")
+    image.save(path, format="PNG")
+    image.already_saved_as = path
+    return image
 
 
 def gallery_image(payload: typing.Any):

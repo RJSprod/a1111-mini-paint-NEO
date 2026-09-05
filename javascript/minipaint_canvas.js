@@ -15,10 +15,14 @@
  *     and for the handoff into the Inpaint tab's canvas,
  *   - telling an image the canvas echoed from one the user opened,
  *   - Undo and Redo of strokes, before the server's structural steps,
- *   - a canvas height that fits what the window has left, so nothing
- *     scrolls and nothing floats over the canvas,
- *   - in Layers mode, dragging the active layer with a live preview and
- *     handing the offset it settled on to the server,
+ *   - a canvas height that fits what the window has left, with the rail of
+ *     panels beside it kept no taller than that (it scrolls inside), so
+ *     nothing scrolls and nothing floats over the canvas; the Panels
+ *     button hides and shows the rail,
+ *   - the taps in the layer list (select, add to the selection, show or
+ *     hide, reorder), handed to the server as one action each,
+ *   - in Layers mode, dragging the selected layers with a live preview and
+ *     handing the offset they settled on to the server,
  *   - keeping the zoom and position across a reload that does not change
  *     the picture's size,
  *   - focus mode.
@@ -32,14 +36,19 @@ window.minipaintCanvas = (function () {
     "use strict";
 
     const ROOT_ID = "minipaint_canvas_root";
+    const WORK_ID = "minipaint_canvas_work";
+    const RAIL_ID = "minipaint_canvas_rail";
     const TAB_PANEL_ID = "tab_minipaint";
     const FOCUS_CLASS = "minipaint-focus";
+    const RAIL_HIDDEN_CLASS = "minipaint-rail-hidden";
     const HANDLES = ["tl", "tr", "bl", "br"];
     const MIN_FRAME = 32;
     const LOAD_TIMEOUT = 8000;
     const MIN_HEIGHT = 240;
     const BOTTOM_ROOM = 8;
     const LAYER_MOVE_ID = "minipaint_canvas_layer_move";
+    const LAYER_ACTION_ID = "minipaint_canvas_layer_action";
+    const LAYER_LIST_ID = "minipaint_canvas_layer_list";
     const LAYER_PREVIEW_ID = "minipaint_canvas_layer_preview";
     const LAYER_UNDERLAY_ID = "minipaint_canvas_layer_underlay";
 
@@ -90,6 +99,15 @@ window.minipaintCanvas = (function () {
 
     function root() {
         return document.getElementById(ROOT_ID);
+    }
+
+    /** The column that holds the action row, the canvas and the status. */
+    function work() {
+        return document.getElementById(WORK_ID) || root();
+    }
+
+    function rail() {
+        return document.getElementById(RAIL_ID);
     }
 
     function hasImage() {
@@ -151,6 +169,7 @@ window.minipaintCanvas = (function () {
         buildOverlay();
         buildFrame();
         bindGestures();
+        bindLayerList();
         watchLayout();
         onMode(S.mode);
         fitHeight();
@@ -173,18 +192,22 @@ window.minipaintCanvas = (function () {
 
     /**
      * Give the canvas the height the window has left once every other row
-     * of the tab is accounted for, so the whole tab is in view without
-     * scrolling. The rows are measured, not assumed, so an opened accordion
-     * or a wrapped status line shrinks the canvas rather than pushing the
-     * controls off screen. What the page puts after the tab (a version
-     * footer, a theme's own blocks) is left where the page put it.
+     * of its column is accounted for, so the whole tab is in view without
+     * scrolling. The rows are measured, not assumed, so a wrapped action
+     * row or status line shrinks the canvas rather than pushing the
+     * controls off screen. The rail of panels beside the canvas is then
+     * capped to the column's height and scrolls inside it; on a window too
+     * narrow for both, the rail has wrapped under the canvas and takes its
+     * share of the height instead. What the page puts after the tab (a
+     * version footer, a theme's own blocks) is left where the page put it.
      */
     function fitHeight() {
         const element = root();
-        if (!element || !S.container || !S.fit) { return; }
+        const column = work();
+        if (!element || !column || !S.container || !S.fit) { return; }
         if (S.instance && S.instance.maximized) { return; }
-        const surface = S.container.closest("#" + element.id + " > *") || S.container;
-        const rect = element.getBoundingClientRect();
+        const surface = S.container.closest("#" + column.id + " > *") || S.container;
+        const rect = column.getBoundingClientRect();
         if (!rect.width) { return; }  // the tab is hidden; measured again when it shows
 
         const scroller = scrollParent(element);
@@ -194,19 +217,67 @@ window.minipaintCanvas = (function () {
         const top = rect.top - origin + scrolled;
 
         let others = 0;
-        const style = getComputedStyle(element);
+        const style = getComputedStyle(column);
         const gap = parseFloat(style.rowGap || style.gap) || 0;
         let rows = 0;
-        for (const child of element.children) {
+        for (const child of column.children) {
             if (child === surface) { rows += 1; continue; }
             const height = child.getBoundingClientRect().height;
             if (height > 0) { others += height; rows += 1; }
         }
         const padding = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
-        let height = viewport - top - others - gap * Math.max(0, rows - 1) - padding - BOTTOM_ROOM;
+
+        const panels = rail();
+        let below = 0;
+        if (panels && railBelow(panels, column)) {
+            const rootStyle = getComputedStyle(element);
+            below = panels.getBoundingClientRect().height + (parseFloat(rootStyle.rowGap || rootStyle.gap) || 0);
+        }
+
+        let height = viewport - top - others - below - gap * Math.max(0, rows - 1) - padding - BOTTOM_ROOM;
         height = Math.round(clamp(height, MIN_HEIGHT, Math.max(MIN_HEIGHT, viewport - BOTTOM_ROOM)));
         const current = parseFloat(S.container.style.height) || 0;
         if (Math.abs(height - current) > 1) { S.container.style.height = height + "px"; }
+        sizeRail(panels, column);
+    }
+
+    /** True when the rail has wrapped under the work column (a narrow window). */
+    function railBelow(panels, column) {
+        const r = panels.getBoundingClientRect();
+        if (!r.width || !r.height) { return false; }  // hidden
+        return r.top >= column.getBoundingClientRect().bottom - 1;
+    }
+
+    /** Beside the canvas the rail is never taller than the work column; it
+     * scrolls inside that. Under the canvas it is as tall as the stylesheet
+     * lets it be. */
+    function sizeRail(panels, column) {
+        if (!panels) { return; }
+        if (railBelow(panels, column)) {
+            if (panels.style.maxHeight) { panels.style.maxHeight = ""; }
+            return;
+        }
+        const height = Math.round(column.getBoundingClientRect().height);
+        if (height > 0 && Math.abs(height - (parseFloat(panels.style.maxHeight) || 0)) > 1) {
+            panels.style.maxHeight = height + "px";
+        }
+    }
+
+    function railHidden() {
+        const element = root();
+        return !!element && element.classList.contains(RAIL_HIDDEN_CLASS);
+    }
+
+    /** Show or hide the rail of panels; the canvas takes the room. */
+    function setRail(on) {
+        const element = root();
+        if (!element) { return; }
+        element.classList.toggle(RAIL_HIDDEN_CLASS, !on);
+        scheduleFit();
+    }
+
+    function toggleRail() {
+        setRail(railHidden());
     }
 
     function scheduleFit() {
@@ -214,17 +285,19 @@ window.minipaintCanvas = (function () {
         S.fitTimer = requestAnimationFrame(function () { S.fitTimer = null; fitHeight(); });
     }
 
-    /** The other rows of the tab change height when an accordion opens, a
-     * mode changes or a line wraps; the window when it is resized or the
-     * tablet turns. The canvas follows. */
+    /** The other rows of the column change height when a line wraps; the
+     * rail when a panel or accordion opens; the window when it is resized
+     * or the tablet turns. The canvas follows. */
     function watchLayout() {
-        const element = root();
-        if (!element) { return; }
+        const column = work();
+        if (!column) { return; }
         if (typeof ResizeObserver === "function") {
             const observer = new ResizeObserver(scheduleFit);
-            for (const child of element.children) {
+            for (const child of column.children) {
                 if (!child.contains(S.container)) { observer.observe(child); }
             }
+            const panels = rail();
+            if (panels) { observer.observe(panels); }
         }
         window.addEventListener("resize", scheduleFit);
         window.addEventListener("orientationchange", scheduleFit);
@@ -408,6 +481,9 @@ window.minipaintCanvas = (function () {
     function onMode(mode) {
         if (["crop", "mask", "expand", "layers"].indexOf(mode) === -1) { return; }
         if (S.mode === "layers" && mode !== "layers") { endLayerDrag(true); }
+        // A mode's panel is a flyout beside the canvas: choosing a mode
+        // brings the rail back if it was put away.
+        if (mode !== S.mode && railHidden()) { setRail(true); }
         S.mode = mode;
         const i = S.instance;
         if (!i) { return; }
@@ -631,15 +707,42 @@ window.minipaintCanvas = (function () {
     }
 
     /* ------------------------------------------------------------------ */
+    /* The layer list                                                        */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * The list is HTML the server renders; every button in it says what it
+     * does (select, add to or take out of the selection, show or hide, up,
+     * down) and for which layer. One listener on the tab's root hands that
+     * to the server through a hidden textbox, so the list can be replaced
+     * wholesale by the next reply without rebinding anything. Shift, Ctrl
+     * or Cmd with a tap on the name adds to the selection instead.
+     */
+    function bindLayerList() {
+        const element = root();
+        if (!element || element.dataset.minipaintLayerList) { return; }
+        element.dataset.minipaintLayerList = "1";
+        element.addEventListener("click", function (event) {
+            const button = event.target && event.target.closest ? event.target.closest("#" + LAYER_LIST_ID + " [data-op]") : null;
+            if (!button || button.disabled) { return; }
+            event.preventDefault();
+            let op = button.dataset.op;
+            if (op === "pick" && (event.shiftKey || event.ctrlKey || event.metaKey)) { op = "toggle"; }
+            sendInput(LAYER_ACTION_ID, JSON.stringify({ op: op, name: button.dataset.name || "", t: Date.now() }));
+        });
+    }
+
+    /* ------------------------------------------------------------------ */
     /* Dragging a layer                                                      */
     /* ------------------------------------------------------------------ */
 
     /**
      * In Layers mode the server keeps two hidden textboxes filled: the
-     * active layer (picture, offset, size, opacity) and the other layers
-     * composited without it. A drag shows the first as an overlay over the
-     * second, moves the overlay with the finger, and hands the offset it
-     * settled on to the server, which answers with the new composite.
+     * selected layers as one picture (with offset, size, opacity) and the
+     * other layers composited without them. A drag shows the first as an
+     * overlay over the second, moves the overlay with the finger, and
+     * hands the offset it settled on to the server, which answers with the
+     * new composite.
      */
     function buildOverlay() {
         const img = document.createElement("img");
@@ -872,7 +975,16 @@ window.minipaintCanvas = (function () {
                  frameHidden: !S.frame || S.frame.hidden,
                  layerDrag: S.layerDrag ? { dx: S.layerDrag.dx, dy: S.layerDrag.dy, done: S.layerDrag.done } : null,
                  overlay: !!(S.overlay && !S.overlay.hidden), keepView: !!S.keepView, preview: !!layerPreview(),
-                 frame: S.frameRect ? Object.assign({}, S.frameRect) : null, box: cropBoxObject() };
+                 frame: S.frameRect ? Object.assign({}, S.frameRect) : null, box: cropBoxObject(), rail: railState() };
+    }
+
+    function railState() {
+        const panels = rail();
+        const column = work();
+        if (!panels || !column) { return null; }
+        const r = panels.getBoundingClientRect();
+        return { hidden: railHidden(), shown: r.width > 0 && r.height > 0, below: railBelow(panels, column),
+                 height: r.height, maxHeight: parseFloat(panels.style.maxHeight) || 0, workHeight: column.getBoundingClientRect().height };
     }
 
     /* ------------------------------------------------------------------ */
@@ -904,7 +1016,10 @@ window.minipaintCanvas = (function () {
      * the host's helpers do for theirs - found by the panel it controls.
      */
     function switchTo(target) {
-        const helpers = { img2img: "switch_to_img2img", inpaint: "switch_to_inpaint", extras: "switch_to_extras" };
+        const helpers = {
+            txt2img: "switch_to_txt2img", img2img: "switch_to_img2img", inpaint: "switch_to_inpaint", extras: "switch_to_extras",
+            stitch_txt2img: "switch_to_txt2img", stitch_img2img: "switch_to_img2img"
+        };
         const name = String(target || "").split(":")[0];
         if (name in helpers) {
             if (typeof window[helpers[name]] === "function") { window[helpers[name]](); }
@@ -959,6 +1074,8 @@ window.minipaintCanvas = (function () {
         sendInput: sendInput,
         fitHeight: fitHeight,
         fit: fit,
+        setRail: setRail,
+        toggleRail: toggleRail,
         onMode: onMode,
         setTool: setTool,
         setBrushSize: setBrushSize,

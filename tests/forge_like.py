@@ -137,6 +137,29 @@ class ToolButton(gr.Button):
         return "button"
 
 
+_accordions = 0
+
+
+def stitch_panel(tabname: str, refs: dict) -> None:
+    """The built-in ImageStitch script as Forge builds it: an InputAccordion
+    (a hidden checkbox labelled with the script's title, then the accordion
+    that follows it) holding the reference gallery, whose id the script
+    derives from its title and tab."""
+    global _accordions
+    accordion_id = f"input-accordion-{_accordions}"
+    _accordions += 1
+    enable = gr.Checkbox(value=False, label="ImageStitch Integrated", elem_id=f"{accordion_id}-checkbox", visible=False)
+    # Forge's inputAccordion.js opens the accordion when the box changes; here
+    # a class stands in for it, so a browser test can see the change fired.
+    enable.change(fn=None, js=f"(checked) => {{ const a = document.getElementById('{accordion_id}'); if (a) a.classList.toggle('probe-open', !!checked); }}", inputs=[enable])
+    with gr.Accordion(label="ImageStitch Integrated", elem_id=accordion_id, elem_classes=["input-accordion"], open=False):
+        refs[f"{tabname}_stitch_gallery"] = gr.Gallery(value=None, type="pil", interactive=True, show_label=False, container=False,
+                                                       show_download_button=False, show_share_button=False, label="Reference Image(s)",
+                                                       height=200, columns=3, rows=1, allow_preview=False, object_fit="contain",
+                                                       elem_id=f"script_{tabname}_imagestitch_integrated_ref_latent")
+    refs[f"{tabname}_stitch_enable"] = enable
+
+
 def output_panel(tabname: str, refs: dict) -> None:
     with gr.Column(elem_id=f"{tabname}_results"):
         refs[f"{tabname}_gallery"] = gr.Gallery(label="Output", show_label=False, elem_id=f"{tabname}_gallery", columns=4, preview=True, type="pil", interactive=False, object_fit="contain")
@@ -156,6 +179,7 @@ def build_host(extension_tabs_fn, extra_head: str = "", hidden_tabs=()):
     with gr.Blocks(analytics_enabled=False) as txt2img:
         refs["txt2img_prompt"] = gr.Textbox(label="Prompt", elem_id="txt2img_prompt")
         refs["txt2img_generate"] = gr.Button("Generate", elem_id="txt2img_generate")
+        stitch_panel("txt2img", refs)
         output_panel("txt2img", refs)
         infotext_utils.paste_fields["txt2img"] = {"init_img": None, "fields": []}
 
@@ -170,6 +194,7 @@ def build_host(extension_tabs_fn, extra_head: str = "", hidden_tabs=()):
                 refs["init_img_with_mask"] = ForgeCanvas(elem_id="img2maskimg", contrast_scribbles=True, scribble_color="#808080", scribble_color_fixed=True, scribble_alpha=75, scribble_alpha_fixed=True, scribble_softness_fixed=True)
             for i, tab in enumerate((tab_a, tab_b, tab_c)):
                 tab.select(fn=lambda tabnum=i: tabnum, outputs=[refs["img2img_selected_tab"]])
+        stitch_panel("img2img", refs)
         output_panel("img2img", refs)
         infotext_utils.paste_fields["img2img"] = {"init_img": refs["init_img"].background, "fields": []}
         infotext_utils.paste_fields["inpaint"] = {"init_img": refs["init_img_with_mask"].background, "fields": []}

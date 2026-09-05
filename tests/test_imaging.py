@@ -1,8 +1,8 @@
 """The image maths, with nothing but Pillow.
 
 These decide what pixels reach img2img: the mask is coverage carried as
-alpha, crops trim only padding, expansion masks exactly what is new, and the
-inpaint layer is what Forge's threshold expects.
+alpha, the crop is the frame the browser reported, expansion masks exactly
+what is new, and the scribble layer is what Forge's threshold expects.
 """
 
 from harness import Results, pixels, setup_path
@@ -12,7 +12,7 @@ setup_path()
 from PIL import Image  # noqa: E402
 
 from minipaint_neo.canvas import document, imaging, outpaint  # noqa: E402
-from minipaint_neo.canvas.ui import aspect_constraint, resolve_destination, send_label  # noqa: E402
+from minipaint_neo.canvas.ui import resolve_destination, send_label  # noqa: E402
 
 
 def photo(width=64, height=48, color=(200, 30, 30)):
@@ -31,41 +31,53 @@ def run() -> Results:
     # ---- colours
     r.check("hex colour parses", imaging.parse_color("#ff2f2f") == (255, 47, 47))
     r.check("short hex parses", imaging.parse_color("#f00") == (255, 0, 0))
+    r.check("rgba hex drops alpha", imaging.parse_color("#80808080") == (128, 128, 128))
+    r.check("tuples pass through", imaging.parse_color((1, 2, 3)) == (1, 2, 3))
     r.check("bad colour falls back", imaging.parse_color("nope") == imaging.DEFAULT_MASK_COLOR)
-    r.check("colour round-trips", imaging.color_hex((255, 47, 47)) == "#ff2f2f")
 
-    # ---- editor value: coverage travels as a layer's alpha and comes back
+    # ---- what the canvas holds: image, and coverage as the scribble layer's alpha
     image = photo()
     mask = square_mask()
-    value = imaging.editor_value(image, mask, (255, 47, 47))
-    r.check("background is RGBA", value["background"].mode == "RGBA")
-    r.check("one mask layer", len(value["layers"]) == 1)
-    r.check("layer alpha is the mask", pixels(value["layers"][0].getchannel("A")) == pixels(mask))
-    r.check("composite shows the mask colour", value["composite"].getpixel((15, 15))[:3] == (255, 47, 47))
-    r.check("composite keeps the image elsewhere", value["composite"].getpixel((50, 40))[:3] == (200, 30, 30))
-    r.check("no mask means no layers", imaging.editor_value(image, None)["layers"] == [])
-    r.check("no image means no value", imaging.editor_value(None) is None)
-
-    seen, seen_mask, notes = imaging.read_editor(value)
+    layer = imaging.foreground_layer(mask, (64, 48), (255, 47, 47))
+    r.check("layer is RGBA", layer.mode == "RGBA" and layer.size == (64, 48))
+    r.check("layer alpha is the mask", pixels(layer.getchannel("A")) == pixels(mask))
+    r.check("layer colour is the display colour", layer.getpixel((15, 15))[:3] == (255, 47, 47))
+    seen, seen_mask, notes = imaging.read_canvas(image, layer)
     r.check("read gives the image back", seen.size == (64, 48) and seen.getpixel((0, 0))[:3] == (200, 30, 30))
     r.check("read gives the mask back", pixels(seen_mask) == pixels(mask), str(notes))
-    r.check("read of nothing is nothing", imaging.read_editor(None) == (None, None, []))
-    r.check("read of a string is nothing", imaging.read_editor("text")[0] is None)
-    r.check("an empty layer is no mask",
-            imaging.read_editor({"background": image, "layers": [Image.new("RGBA", (64, 48), (0, 0, 0, 0))], "composite": image})[1] is None)
+    r.check("read of nothing is nothing", imaging.read_canvas(None, layer) == (None, None, []))
+    r.check("no layer is no mask", imaging.read_canvas(image, None)[1] is None)
+    r.check("an empty layer is no mask", imaging.read_canvas(image, Image.new("RGBA", (64, 48), (0, 0, 0, 0)))[1] is None)
+    odd_mask, odd_notes = imaging.mask_from_foreground(imaging.foreground_layer(square_mask((32, 24), (5, 5, 15, 15)), (32, 24)), (64, 48))
+    r.check("a layer of the wrong size is resampled and noted", odd_mask.size == (64, 48) and odd_notes)
 
-    # a layer of the wrong size is resampled rather than trusted
-    odd = {"background": image, "layers": [imaging.mask_layer(square_mask((32, 24), (5, 5, 15, 15)))], "composite": image}
-    _, odd_mask, odd_notes = imaging.read_editor(odd)
-    r.check("odd layer resampled to the image", odd_mask.size == (64, 48) and odd_notes)
+    # ---- the high-contrast layer: the canvas's checkerboard, alpha still the mask
+    board = imaging.foreground_layer(mask, (64, 48), contrast=True)
+    r.check("contrast layer alpha is the mask", pixels(board.getchannel("A")) == pixels(mask))
+    r.check("contrast layer is a 10px checkerboard",
+            board.getpixel((5, 5))[:3] == (255, 255, 255) and board.getpixel((15, 5))[:3] == (0, 0, 0)
+            and board.getpixel((15, 15))[:3] == (255, 255, 255) and board.getpixel((25, 5))[:3] == (255, 255, 255))
 
-    # ---- trimming a padded crop
-    padded = Image.new("RGBA", (64, 48), (0, 0, 0, 0))
-    padded.paste(Image.new("RGBA", (20, 10), (1, 2, 3, 255)), (5, 7))
-    trimmed, trimmed_mask, note = imaging.trim_transparent_frame(padded, mask)
-    r.check("padding trimmed", trimmed.size == (20, 10) and note)
-    r.check("mask trimmed with identical box", trimmed_mask.size == (20, 10))
-    r.check("opaque image untouched", imaging.trim_transparent_frame(imaging.to_rgba(image), None)[2] is None)
+    # ---- telling an echo from a new picture
+    r.check("the same image is equal", imaging.images_equal(image, image.copy()))
+    r.check("a re-encoded image is equal", imaging.images_equal(image, imaging.from_png_bytes(imaging.to_png_bytes(image))))
+    r.check("a different image is not", not imaging.images_equal(image, photo(color=(0, 0, 0))))
+    r.check("a different size is not", not imaging.images_equal(image, photo(32, 24)))
+    r.check("none is only equal to none", imaging.images_equal(None, None) and not imaging.images_equal(image, None))
+    soft = Image.new("RGBA", (8, 8), (200, 100, 50, 3))
+    browsered = Image.new("RGBA", (8, 8), (170, 85, 0, 3))  # what a canvas makes of a nearly transparent pixel
+    r.check("transparent pixels compare premultiplied", imaging.images_equal(soft, browsered))
+    r.check("opaque pixels still have to match", not imaging.images_equal(Image.new("RGBA", (8, 8), (200, 100, 50, 255)), Image.new("RGBA", (8, 8), (170, 85, 0, 255))))
+
+    # ---- the crop frame the browser reports
+    r.check("crop box parses json", imaging.crop_box('{"x0": 10, "y0": 5, "x1": 50, "y1": 40}', (64, 48)) == (10, 5, 50, 40))
+    r.check("crop box takes a dict", imaging.crop_box({"x0": 0, "y0": 0, "x1": 64, "y1": 48}, (64, 48)) == (0, 0, 64, 48))
+    r.check("crop box is clamped", imaging.crop_box({"x0": -5, "y0": -5, "x1": 100, "y1": 100}, (64, 48)) == (0, 0, 64, 48))
+    r.check("crop box rounds", imaging.crop_box({"x0": 9.6, "y0": 4.4, "x1": 50.2, "y1": 40}, (64, 48)) == (10, 4, 50, 40))
+    r.check("an empty crop box is none", imaging.crop_box("", (64, 48)) is None and imaging.crop_box(None, (64, 48)) is None)
+    r.check("a degenerate box is none", imaging.crop_box({"x0": 10, "y0": 10, "x1": 10, "y1": 30}, (64, 48)) is None)
+    r.check("a box off the image is none", imaging.crop_box({"x0": 70, "y0": 0, "x1": 90, "y1": 10}, (64, 48)) is None)
+    r.check("garbage is none", imaging.crop_box("{not json", (64, 48)) is None and imaging.crop_box({"x0": "a"}, (64, 48)) is None)
 
     # ---- smoothing rounds a jagged edge but never eats a thin stroke
     jagged = Image.new("L", (256, 256), 0)
@@ -86,6 +98,8 @@ def run() -> Results:
     r.check("invert of nothing is everything", imaging.invert_mask(None, (8, 8)).getpixel((0, 0)) == 255)
 
     # ---- fill and flatten
+    padded = Image.new("RGBA", (64, 48), (0, 0, 0, 0))
+    padded.paste(Image.new("RGBA", (20, 10), (1, 2, 3, 255)), (5, 7))
     r.check("named fills", imaging.fill_color("White", None) == (255, 255, 255))
     r.check("unknown fill is gray", imaging.fill_color("???", None) == (127, 127, 127))
     edged = Image.new("RGBA", (10, 10), (0, 0, 255, 255))
@@ -95,18 +109,18 @@ def run() -> Results:
     r.check("alpha content detected", imaging.has_alpha_content(padded) and not imaging.has_alpha_content(image))
 
     # ---- the inpaint layer Forge reads: alpha, binarised at 128
-    soft = Image.new("L", (64, 48), 0)
-    soft.paste(100, (0, 0, 10, 10))
-    soft.paste(200, (20, 20, 30, 30))
-    fg = imaging.inpaint_foreground(soft, (64, 48), (255, 47, 47))
+    soft_mask = Image.new("L", (64, 48), 0)
+    soft_mask.paste(100, (0, 0, 10, 10))
+    soft_mask.paste(200, (20, 20, 30, 30))
+    fg = imaging.foreground_layer(soft_mask, (64, 48), (255, 47, 47))
     alpha = fg.getchannel("A")
     r.check("weak coverage is dropped", alpha.getpixel((5, 5)) == 0)
     r.check("strong coverage is kept", alpha.getpixel((25, 25)) == 255)
-    r.check("foreground colour is the display colour", fg.getpixel((25, 25))[:3] == (255, 47, 47))
-    r.check("foreground is resized to the image", imaging.inpaint_foreground(square_mask((32, 24)), (64, 48)).size == (64, 48))
+    r.check("foreground is resized to the image", imaging.foreground_layer(square_mask((32, 24)), (64, 48)).size == (64, 48))
 
     # ---- png round trip
     r.check("png round trip", pixels(imaging.from_png_bytes(imaging.to_png_bytes(mask))) == pixels(mask))
+    r.check("megapixels", imaging.megapixels((1024, 1024)) == 1.05)
 
     # ---- expansion
     base = Image.new("RGBA", (100, 80), (10, 20, 30, 255))
@@ -147,26 +161,39 @@ def run() -> Results:
     r.check("preview names the size", "116 × 104" in outpaint.describe((100, 80), (16, 0, 0, 24)))
     r.check("preview with no image", outpaint.describe(None, (1, 1, 1, 1)) == "No image yet.")
 
-    # ---- document history and the stage / commit handshake
+    # ---- the document and its history of structural steps
     doc = document.Document()
-    r.check("empty document", not doc.has_image and doc.describe() == "No image")
+    r.check("empty document", not doc.has_image and doc.describe() == "No image" and doc.original_size_text() == "")
     doc.load(image, "txt2img")
     r.check("loaded document", doc.has_image and doc.origin == "txt2img" and "from txt2img" in doc.describe())
-    doc.stage("crop", "Cropped.", image=image.crop((0, 0, 32, 24)), mask=None)
-    r.check("staging changes nothing yet", doc.size == (64, 48))
-    pending = doc.commit_pending()
-    r.check("commit applies the staged image", doc.size == (32, 24) and pending["label"] == "crop")
-    r.check("commit is one-shot", doc.commit_pending() is None)
+    r.check("original size text", doc.original_size_text() == "64x48")
+    doc.checkpoint("crop")
+    doc.commit(image.crop((0, 0, 32, 24)), None)
+    r.check("commit replaces the image", doc.size == (32, 24) and doc.original.size == (64, 48))
     r.check("undo restores", doc.undo() == "crop" and doc.size == (64, 48))
     r.check("redo reapplies", doc.redo() == "crop" and doc.size == (32, 24))
-    doc.stage("undo", "", restore="undo")
-    doc.commit_pending()
-    r.check("staged undo works", doc.size == (64, 48))
-    doc.stage("expand", "", image=base, mask=grown_mask.resize((100, 80)), expansion={"to": (100, 80)})
-    doc.commit_pending()
+    r.check("nothing more to redo", doc.redo() is None)
+    doc.checkpoint("mask")
+    doc.commit(doc.image, square_mask((32, 24), (2, 2, 10, 10)))
+    r.check("a mask is kept with the image", doc.has_mask and "mask" in doc.describe())
+    doc.commit(doc.image, square_mask((64, 48)))
+    r.check("a mask of the wrong size is resampled", doc.mask.size == (32, 24))
+    doc.commit(doc.image, Image.new("L", (32, 24), 0))
+    r.check("an empty mask is no mask", not doc.has_mask)
+    r.check("undo brings the mask back", doc.undo() == "mask" and not doc.has_mask)
+    for step in range(document.HISTORY_LIMIT + 3):
+        doc.checkpoint(f"step {step}")
+    r.check("history is bounded", len(doc.history) == document.HISTORY_LIMIT)
+    doc.checkpoint("expand")
+    doc.commit(base, grown_mask.resize((100, 80)))
+    doc.has_expansion = True
     r.check("expansion is remembered", doc.has_expansion and doc.has_mask and "expanded" in doc.describe())
-    r.check("history is bounded", len(doc.history) <= document.HISTORY_LIMIT)
+    doc.load(image, "file", "cat.png")
+    r.check("load resets expansion and names the file", not doc.has_expansion and "cat.png" in doc.describe() and not doc.has_mask)
+    doc.clear()
+    r.check("clear empties the document", not doc.has_image and doc.original is None)
     r.check("ensure makes a document", isinstance(document.ensure(None), document.Document))
+    r.check("ensure keeps a document", document.ensure(doc) is doc)
 
     # ---- send decisions
     r.check("auto with nothing is img2img", resolve_destination("Auto", False, False) == "img2img")
@@ -177,11 +204,6 @@ def run() -> Results:
             and send_label(True, False, "crop") == "Send to img2img Inpaint"
             and send_label(False, False, "mask") == "Send to img2img Inpaint"
             and send_label(True, True, "mask") == "Send Outpaint to img2img")
-    r.check("aspect: free is empty", aspect_constraint("Free", (64, 48), 0, 0) == "")
-    r.check("aspect: preset passes through", aspect_constraint("16:9", None, 0, 0) == "16:9")
-    r.check("aspect: original uses the image", aspect_constraint("Original", (640, 480), 0, 0) == "640:480")
-    r.check("aspect: custom uses the numbers", aspect_constraint("Custom", None, 3, 2) == "3:2")
-    r.check("aspect: bad custom is free", aspect_constraint("Custom", None, 0, 2) == "")
 
     return r
 

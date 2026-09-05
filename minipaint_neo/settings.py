@@ -17,7 +17,6 @@ SECTION = ("minipaint_canvas", "miniPaint / Canvas")
 
 USE_OLD_UI = "minipaint_use_old_ui"
 CANVAS_HEIGHT = "minipaint_canvas_height"
-MASK_COLOR = "minipaint_mask_color"
 BRUSH_SIZE = "minipaint_brush_size"
 EXPAND_SNAP = "minipaint_expand_snap"
 SEND_FILL = "minipaint_send_fill"
@@ -28,8 +27,7 @@ FILL_CHOICES = ["Neutral gray", "Edge color", "White", "Black"]
 DEFAULTS: dict[str, typing.Any] = {
     USE_OLD_UI: False,
     CANVAS_HEIGHT: 70,
-    MASK_COLOR: "#ff2f2f",
-    BRUSH_SIZE: 0,
+    BRUSH_SIZE: 25,
     EXPAND_SNAP: "8",
     SEND_FILL: "Neutral gray",
 }
@@ -69,13 +67,13 @@ def canvas_height_percent() -> int:
         return 70
 
 
-def brush_size():
-    """Brush radius in pixels, or "auto" for the editor's own default."""
+def brush_width() -> int:
+    """The canvas's brush width setting (1-100), as the Inpaint tab counts it."""
     try:
-        size = int(get(BRUSH_SIZE, 0))
+        width = int(get(BRUSH_SIZE, 25))
     except (TypeError, ValueError):
-        size = 0
-    return size if size > 0 else "auto"
+        width = 25
+    return max(1, min(100, width))
 
 
 def _category(name: str):
@@ -89,15 +87,6 @@ def _category(name: str):
     except Exception:
         pass
     return None
-
-
-def _color_picker():
-    try:
-        from modules.ui_components import FormColorPicker
-
-        return FormColorPicker
-    except Exception:
-        return gr.ColorPicker
 
 
 def _add(key: str, info) -> None:
@@ -143,21 +132,7 @@ def on_ui_settings() -> None:
             section=SECTION,
             category_id=category,
         )
-        .info("touch Canvas only")
-        .needs_reload_ui(),
-    )
-
-    _add(
-        MASK_COLOR,
-        OptionInfo(
-            DEFAULTS[MASK_COLOR],
-            "Mask brush color",
-            _color_picker(),
-            {},
-            section=SECTION,
-            category_id=category,
-        )
-        .info("display only - the mask is sent as coverage, never as this color")
+        .info("touch Canvas only; the canvas's ⛶ button fills the window")
         .needs_reload_ui(),
     )
 
@@ -165,13 +140,13 @@ def on_ui_settings() -> None:
         BRUSH_SIZE,
         OptionInfo(
             DEFAULTS[BRUSH_SIZE],
-            "Mask brush radius in pixels",
+            "Mask brush size when the Canvas opens",
             gr.Slider,
-            {"minimum": 0, "maximum": 200, "step": 1},
+            {"minimum": 1, "maximum": 100, "step": 1},
             section=SECTION,
             category_id=category,
         )
-        .info("0 = automatic, from the image size; the editor's brush menu changes it per session")
+        .info("same scale as the Inpaint tab's brush; the mask colour and opacity follow the Inpaint settings")
         .needs_reload_ui(),
     )
 

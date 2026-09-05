@@ -1,1 +1,1 @@
-"""The touch-first Canvas: one gr.ImageEditor, ordinary Gradio controls around it."""
+"""The touch-first Canvas: the WebUI's own canvas, ordinary Gradio controls around it."""

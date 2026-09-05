@@ -19,18 +19,19 @@ from . import legacy_ui, settings
 TAB_LABEL = "Mini Paint"
 TAB_ID = "minipaint"
 
-# What the touch Canvas is built out of. A host without these is not a broken
-# install, it is an older Gradio - so it gets the legacy editor and a reason.
-REQUIRED_COMPONENTS = ("ImageEditor", "Brush", "Eraser")
-
 
 def missing_components() -> str:
-    missing = [name for name in REQUIRED_COMPONENTS if getattr(gr, name, None) is None]
-    if not missing:
-        return ""
-    version = getattr(gr, "__version__", "unknown version")
-    names = ", ".join(f"gr.{name}" for name in missing)
-    return f"this WebUI's Gradio ({version}) has no {names}"
+    """Why the touch Canvas cannot be built on this host, or an empty string.
+
+    The Canvas draws with the WebUI's own canvas component (the one img2img
+    uses). A host without it is not a broken install, it is a different
+    WebUI - so it gets the legacy editor and a reason, not a traceback.
+    """
+    try:
+        from .canvas import surface
+    except Exception as error:  # pragma: no cover - a broken install
+        return f"the Canvas package could not be imported ({error})"
+    return surface.missing()
 
 
 @contextlib.contextmanager
@@ -95,7 +96,7 @@ def on_ui_tabs():
         return [
             (
                 _legacy_tab(
-                    f"**The touch Canvas needs a newer Gradio:** {missing}. "
+                    f"**The touch Canvas cannot run here:** {missing}. "
                     "The legacy miniPaint editor was loaded instead."
                 ),
                 TAB_LABEL,

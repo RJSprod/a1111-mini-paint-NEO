@@ -27,7 +27,17 @@ class OptionInfo:
 
 class Options:
     def __init__(self):
-        self.data = {}
+        # The host options the Canvas reads, at Forge Neo's defaults.
+        self.data = {
+            "forge_canvas_height": 512,
+            "forge_canvas_toolbar_always": False,
+            "forge_canvas_consistent_brush": False,
+            "forge_canvas_plain": False,
+            "forge_canvas_plain_color": "#808080",
+            "img2img_inpaint_mask_brush_color": "#808080",
+            "img2img_inpaint_mask_high_contrast": True,
+            "img2img_inpaint_mask_scribble_alpha": 75,
+        }
         self.data_labels = {}
         self.hidden_tabs = []
 

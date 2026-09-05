@@ -22,7 +22,6 @@ RECEIVE_TABS = ("txt2img", "img2img", "extras")
 GALLERY_IDS = {f"{tab}_gallery": tab for tab in RECEIVE_TABS}
 ANCHOR_IDS = {f"{tab}_send_to_extras": tab for tab in RECEIVE_TABS}
 EXTRAS_IMAGE_ID = "extras_image"
-NEEDS_EDITOR_CLASS = "minipaint-needs-editor"
 TAB_LABEL = "Mini Paint"
 
 # Forge's helpers, in javascript/ui.js. They click the host's own tab buttons.
@@ -112,7 +111,6 @@ def on_after_component(component, **kwargs) -> None:
     _captured[receive_button_id(tab)] = _tool_button(
         "🖌️",
         elem_id=receive_button_id(tab),
-        elem_classes=[NEEDS_EDITOR_CLASS],
         tooltip="Send image to the Canvas tab (Mini Paint).",
     )
 

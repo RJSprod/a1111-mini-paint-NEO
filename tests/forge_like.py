@@ -3,9 +3,10 @@
 It installs the same two things Forge does to Gradio - the component hooks
 that fire ``after_component`` callbacks, and the ``repair`` wrapper that drops
 unknown constructor arguments and maps ``_js`` to ``js`` - then builds
-txt2img, img2img (with ForgeCanvas-style hidden textboxes), Extras and
-Settings, asks the extension for its tab, and assembles everything under one
-``gr.Tabs(elem_id="tabs")`` exactly the way the WebUI does.
+txt2img, img2img (with the stand-in ForgeCanvas from the ``modules_forge``
+stub), Extras and Settings, asks the extension for its tab, and assembles
+everything under one ``gr.Tabs(elem_id="tabs")`` exactly the way the WebUI
+does.
 
 Nothing here is copied from Forge; it reproduces the shapes the extension
 depends on so that they can be checked without a running WebUI.
@@ -13,18 +14,15 @@ depends on so that they can be checked without a running WebUI.
 
 from __future__ import annotations
 
-import base64
 import inspect
-import uuid
 import warnings
 from functools import wraps
-from io import BytesIO
 
 import gradio as gr
 import gradio.blocks
-from PIL import Image
 
 from modules import infotext_utils, script_callbacks  # the stubs
+from modules_forge.forge_canvas.canvas import ForgeCanvas, LogicalImage, base64_to_image, image_to_base64  # noqa: F401
 
 _installed = False
 
@@ -98,47 +96,6 @@ def install_patches() -> None:
         repair(getattr(gr, name, None))
 
 
-def image_to_base64(image: Image.Image) -> str:
-    buffer = BytesIO()
-    image.convert("RGBA").save(buffer, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-
-def base64_to_image(text: str) -> Image.Image:
-    data = base64.b64decode(text.replace("data:image/png;base64,", ""))
-    return Image.open(BytesIO(data)).convert("RGBA")
-
-
-class LogicalImage(gr.Textbox):
-    """ForgeCanvas's hidden textbox: a PIL image in, a data URL out."""
-
-    @wraps(gr.Textbox.__init__)
-    def __init__(self, *args, **kwargs):
-        self.infotext = {}
-        super().__init__(*args, **kwargs)
-
-    def preprocess(self, payload):
-        if not isinstance(payload, str) or not payload.startswith("data:image/png;base64,"):
-            return None
-        return base64_to_image(payload)
-
-    def postprocess(self, value):
-        if value is None:
-            return None
-        return image_to_base64(value)
-
-    def get_block_name(self):
-        return "textbox"
-
-
-class ForgeCanvasLike:
-    def __init__(self, elem_id: str):
-        self.uuid = "uuid_" + uuid.uuid4().hex
-        self.block = gr.HTML(f'<div class="forge-image-container" id="container_{self.uuid}">canvas</div>', elem_id=elem_id)
-        self.foreground = LogicalImage(visible=False, label="foreground", elem_id=self.uuid, elem_classes=["logical_image_foreground"])
-        self.background = LogicalImage(visible=False, label="background", elem_id=self.uuid, elem_classes=["logical_image_background"])
-
-
 class ToolButton(gr.Button):
     """Forge's small emoji button. @wraps matters: Gradio builds a component's
     config from its __init__ signature, so without it elem_id would vanish."""
@@ -178,11 +135,11 @@ def build_host(extension_tabs_fn, extra_head: str = "", hidden_tabs=()):
         with gr.Tabs(elem_id="mode_img2img"):
             refs["img2img_selected_tab"] = gr.Number(value=0, visible=False)
             with gr.TabItem("img2img", id="img2img", elem_id="img2img_img2img_tab") as tab_a:
-                refs["init_img"] = ForgeCanvasLike("img2img_image")
+                refs["init_img"] = ForgeCanvas(elem_id="img2img_image")
             with gr.TabItem("Sketch", id="img2img_sketch", elem_id="img2img_img2img_sketch_tab") as tab_b:
-                refs["sketch"] = ForgeCanvasLike("img2img_sketch")
+                refs["sketch"] = ForgeCanvas(elem_id="img2img_sketch")
             with gr.TabItem("Inpaint", id="inpaint", elem_id="img2img_inpaint_tab") as tab_c:
-                refs["init_img_with_mask"] = ForgeCanvasLike("img2maskimg")
+                refs["init_img_with_mask"] = ForgeCanvas(elem_id="img2maskimg", contrast_scribbles=True, scribble_color="#808080", scribble_color_fixed=True, scribble_alpha=75, scribble_alpha_fixed=True, scribble_softness_fixed=True)
             for i, tab in enumerate((tab_a, tab_b, tab_c)):
                 tab.select(fn=lambda tabnum=i: tabnum, outputs=[refs["img2img_selected_tab"]])
         output_panel("img2img", refs)

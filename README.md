@@ -3,8 +3,10 @@
 A WebUI extension that adds one **Mini Paint** tab with a choice of two frontends:
 
 * **Canvas** (default): a touch-first image preparation workspace built from ordinary
-  Gradio components around one `gr.ImageEditor`. It does three things — **Crop**,
-  **Mask**, **Expand** — and hands the result straight to img2img or Inpaint.
+  Gradio components around **the WebUI's own canvas** — the same ForgeCanvas box the
+  img2img and Inpaint tabs use, with its zoom, pan, drop, paste and stroke undo. It does
+  three things — **Crop**, **Mask**, **Expand** — and hands the result straight to img2img
+  or Inpaint. No WebGL is involved anywhere.
 * **Old UI**: the original [miniPaint](https://github.com/viliusle/miniPaint) editor in an
   iframe, exactly as before, with its send buttons, ControlNet/Extras destinations,
   verification and transfer log.
@@ -15,7 +17,8 @@ id, so tab order, hidden-tab settings and themes see one stable tab.
 
 Works with [Forge Neo](https://github.com/Haoming02/sd-webui-forge-classic/tree/neo) on
 Gradio 4.40 and follows the host theme, including Lobe in dark mode, because every control
-is a native Gradio component and the extension's own CSS only sets geometry.
+is a native Gradio component, the canvas is the host's own, and the extension's CSS only
+sets geometry.
 
 ## Installation
 
@@ -24,11 +27,10 @@ Extensions → Install from URL → this repository's URL → Install → Reload
 ## The Canvas
 
 ```
- [Open] [Undo] [Redo] [Focus]                      [ Send to img2img ]
+ [Open] [Undo] [Redo] [Fit] [Focus]                [ Send to img2img ]
  +---------------------------------------------------------------+
- |                                                               |
- |                        image editor                           |
- |                                                               |
+ | ⛶ 📂 ✠ 🔄 ↩️ ↪️      the WebUI's own canvas (ForgeCanvas)      |
+ |            pinch or wheel to zoom, drag to pan                |
  +---------------------------------------------------------------+
  status: 1024 × 1024 · from txt2img — Auto sends to img2img
  [        Crop        ] [        Mask        ] [       Expand       ]
@@ -37,19 +39,27 @@ Extensions → Install from URL → this repository's URL → Install → Reload
 ```
 
 **Getting an image in.** Press 🖌️ in the button row under a txt2img, img2img or Extras
-result, or use **Open** for a local file. The image appears large, in Crop mode.
+result, use **Open** or the canvas's own 📂 for a local file, or drop or paste a picture
+onto the canvas. The image is fitted into the box, in Crop mode. Two fingers pinch to zoom
+and pan; the mouse wheel zooms and the right button drags, exactly as in img2img; the
+canvas's ✠ refits and ⛶ fills the screen.
 
-**Crop.** Pick an aspect (Free, Original, 1:1, 4:3, 3:4, 16:9, 9:16, 3:2, 2:3 or a
-custom ratio) and drag the handles on the image — with a mouse or a finger. The editor's
-own ↶ undoes a drag. **Apply Crop** makes it permanent and shows the new size; sending
-applies it as well, so Apply is only needed before masking or expanding a cropped image.
-A crop never stretches.
+**Crop.** A frame with corner handles sits over the image; its size in image pixels is
+written on it. Move the image under the frame with one finger (or the left mouse button),
+zoom to fit more or less of it in, and drag a corner to resize the frame — with a finger
+or the mouse. The aspect chips (Free, Original, 1:1, 4:3, 3:4, 16:9, 9:16, 3:2, 2:3, or a
+custom ratio) lock the frame's shape. **Apply Crop** keeps what is inside the frame and
+shows the new size; the frame then covers the whole result again, so nothing is ever
+cropped twice by accident. A crop never stretches.
 
-**Mask.** Paint over what should change. The brush, eraser, size and colour are in the
-editor's own toolbar under the image (the brush popup has the size slider); its ↶ undoes a
-stroke. **Clear Mask** and **Invert Mask** are one tap. Edge smoothing (Off / Low / Medium /
-High) is applied to the mask when it is sent, so painting stays exactly what the editor
-does natively. The mask is coverage: the colour on screen is never part of what is sent.
+**Mask.** Paint over what should change, with the same brush the Inpaint tab has: same
+colour, same opacity, same high-contrast checkerboard if that setting is on. **Paint /
+Erase / Move** pick what one finger does; the **Brush size** slider is the one from
+Inpaint's toolbar, moved into the panel where a finger can reach it. The canvas's own ↩️
+undoes a stroke and 🔄 clears them all. **Clear Mask** and **Invert Mask** are one tap.
+Edge smoothing (Off / Low / Medium / High) is applied to the mask when it is sent, so
+painting stays exactly what the canvas does natively. The mask is coverage: the colour on
+screen is never part of what is sent.
 
 **Expand.** Tap an amount (64 / 128 / 256) and a side (Left / Right / Top / Bottom), read
 the resulting size, press **Apply Expand**. The new area is masked automatically, plus an
@@ -67,7 +77,8 @@ expansion are filled on the way out (setting: *Send: fill transparent pixels wit
 
 **Undo / Redo** in the top bar cover the structural steps — Open, Apply Crop, Apply
 Expand, Clear, Invert — and *More → Reset to original* goes back to the image as it
-arrived. Strokes and crop drags are undone inside the editor.
+arrived. Strokes are undone on the canvas itself. **Fit** puts the image and the frame
+back the way they arrived.
 
 **Focus** makes the Canvas fill the window (Exit focus or Escape brings the WebUI back).
 On tablets and phones the option panels dock to the bottom edge and every control is at
@@ -78,11 +89,14 @@ least 44 px tall.
 | option | default | |
 | --- | --- | --- |
 | Use Old UI (legacy miniPaint) | off | Reload UI to switch |
-| Canvas height (% of the browser window) | 70 | |
-| Mask brush color | `#ff2f2f` | display only; white and black are offered too |
-| Mask brush radius in pixels | 0 = automatic | the editor's brush popup changes it per session |
+| Canvas height (% of the browser window) | 70 | the canvas's ⛶ fills the window |
+| Mask brush size when the Canvas opens | 25 | same scale as the Inpaint brush |
 | Expand: snap side amounts to a multiple of | 8 | |
 | Send: fill transparent pixels with | Neutral gray | or edge colour, white, black |
+
+The mask's colour, opacity and high-contrast checkerboard are the Inpaint tab's own
+settings (Settings → img2img), because that is where the mask is going. The canvas's
+background (checkerboard or plain colour) follows Settings → Forge Canvas.
 
 `MINIPAINT_OLD_UI=1` in the environment forces the legacy editor for that run without
 touching any setting — the lever for when the UI itself is the problem.
@@ -90,7 +104,7 @@ touching any setting — the lever for when the UI itself is the problem.
 ## Why the earlier redesign broke the tab bar, and what this one does about it
 
 The first Canvas redesign left Forge Neo showing txt2img with **no top-level tab able to
-switch**, and it could not be reproduced on the machine it was built on. The cause is now
+switch**, and it could not be reproduced on the machine it was built on. The cause is
 known and covered by a test: Gradio 4.40's `ImageEditor` is built on PixiJS, which needs
 WebGL. In a browser without WebGL (hardware acceleration off, a remote desktop, a policy,
 some tablets) the editor throws while it is being mounted, inside Svelte's render pass,
@@ -98,19 +112,23 @@ and the whole page stops reacting — every tab, every button — while still lo
 rendered. Nothing about the tab bar was ever touched; a single component that fails to
 mount is enough.
 
-So the extension now checks for WebGL in the browser *before* Gradio boots (the same test
-PixiJS makes) and, only when it is missing, rewrites its own editor entry in the page
-configuration into a plain notice and disables its own editor-dependent buttons. Every
-other tab works; the notice says how to enable the legacy editor. The check runs only on
-pages that carry the Canvas, touches only components this extension created, and is a
-no-op everywhere else.
+The answer is not to guard that component but not to use it. The Canvas now draws with
+**ForgeCanvas**, the WebUI's own canvas: plain Canvas2D, no WebGL, already on every page,
+already themed, already the box users know from img2img. The extension takes the host's
+markup and its two hidden image textboxes, creates the JavaScript instance for its tab the
+way the host creates its own (one `load` event per canvas), and adds only what the tab
+needs on top, inside its own container: a crop frame, one-finger panning and two-finger
+pinch, and the mode / tool / size / aspect choices made in the Gradio panels. The smoke
+test runs the whole flow with WebGL disabled and expects nothing to differ.
 
 Beyond that, the tab-bar rules from the failed attempt are followed to the letter:
 
-* no JavaScript runs at startup except that guard — every other function is called from a
-  Gradio event on a user action, and every selector starts at the extension's own root;
-* no document-wide observers, no polling, no synthetic clicks on host tabs or on the
-  editor's toolbar while the page is coming up;
+* no JavaScript runs at startup except attaching the canvas — the same kind of `load`
+  event the host registers for each of its own canvases — and every other function is
+  called from a Gradio event on a user action, with every selector starting at the
+  extension's own elements;
+* no document-wide observers, no polling of the page, no synthetic clicks on host tabs
+  while the page is coming up;
 * the host's tab system is only touched at the one handoff point, by calling the host's
   own `switch_to_img2img` / `switch_to_inpaint` / `switch_to_extras`, and, to reach the
   Canvas, by clicking its own native tab button exactly as those helpers do;
@@ -121,31 +139,38 @@ Beyond that, the tab-bar rules from the failed attempt are followed to the lette
   host state;
 * CSS is scoped under `#minipaint_canvas_root` and uses Gradio's theme variables;
 * a Canvas that fails to build falls back to the legacy editor, restores Gradio's build
-  context, and says so on the tab; a Gradio without `ImageEditor` does the same.
+  context, and says so on the tab; a WebUI without ForgeCanvas does the same.
 
 The smoke test in `tests/browser_smoke.py` switches every top-level tab — with WebGL and
 without — before it touches a single Canvas feature.
 
-## Working with the Gradio 4.40 editor
+## Working with ForgeCanvas
 
-A few behaviours of the stock `ImageEditor` on this Gradio shaped the design; each has a
-small, contained answer rather than a replacement component:
+A few behaviours of the host's canvas shaped the wiring; each has a small answer in
+`minipaint_neo/canvas/ui.py` and `javascript/minipaint_canvas.js`:
 
-* **Crop handles answer to the mouse only.** A small adapter, bound to the editor element
-  the first time a mode is chosen, replays a finger or pen drag on a handle as the mouse
-  events the editor expects. Without it, mouse cropping still works.
-* **The crop box survives a new image.** The editor never resets its crop rectangle when
-  its contents are replaced, which would crop the next image and every export. So every
-  step that replaces the editor's contents — receive, Open, Apply Crop, Apply Expand,
-  Clear, Invert, Undo, Redo, Reset — first reads the editor, then presses the editor's own
-  Undo until its history is empty (which puts the crop box back), then pushes the new
-  image. For the same reason the editor's own upload, paste and "clear canvas" controls
-  are not used; Open and 🖌️ take their place and reset properly.
-* **Brush size is read once at mount.** The editor's brush popup changes it; the setting
-  above sets the default.
-* **There is no zoom.** The image is fitted to the block; Focus mode gives it the window.
-* **Painting never goes to the server.** No change/input events are bound to the editor;
-  its pixels are read only when Apply, Clear, Invert or Send is pressed.
+* **An image and its mask layer travel through two textboxes, and the layer can only be
+  drawn once the image has loaded** (the drawing canvas takes the image's size at that
+  moment). So every step that replaces the image — receive, Open, Apply Crop, Apply
+  Expand, Undo, Redo, Reset — is three chained events: write the image, wait in the
+  browser until the canvas has taken it, write the mask layer. The same wait guards the
+  handoff into the Inpaint tab: its image first, then its mask once its canvas has the
+  image's size. Without this a mask arriving a moment early is silently wiped.
+* **The canvas echoes every image it loads** back through its textbox, re-encoded. The
+  browser knows which of those are echoes of an image the server sent and strips them,
+  so an echo costs a tiny request rather than an upload of the whole picture; anything
+  else on that textbox is a picture the user opened, dropped or pasted, which becomes the
+  document (with the previous one an Undo away) and clears the old strokes.
+* **Stroke history is per image.** A new image or a mask layer written from the server
+  starts the canvas's own ↩️ history afresh, so an undo never restores strokes from a
+  different picture.
+* **The mask's look is the Inpaint tab's.** Colour, opacity and the high-contrast
+  checkerboard are read from the host's settings for both the on-screen brush and the
+  layers written from Python (Invert, Undo, Expand), so a restored mask looks like a
+  painted one.
+* **Painting, panning and zooming never go to the server.** No events are bound to the
+  mask layer; the canvas's pixels are read only when Apply, Clear, Invert, Save or Send
+  is pressed, and the crop frame is read only by Apply Crop, as a box in image pixels.
 
 ## Legacy editor (Old UI)
 
@@ -202,7 +227,7 @@ extensions/a1111-mini-paint-NEO/logs/send-log.txt
 ```
 
 The legacy editor writes each transfer step by step with timings; the Canvas writes one
-line per receive and per send, and the WebGL guard writes a line if it ever has to act.
+line per receive, per picture opened on the canvas, and per send.
 The file is created when the extension loads, before any image is sent, and its first line
 says which frontend loaded. **If `logs/send-log.txt` does not exist after restarting the
 WebUI, this version of the extension is not the one running.** It rotates once it passes
@@ -218,12 +243,13 @@ minipaint_neo/
     legacy_ui.py                 the original iframe tab, unchanged in behaviour
     send_log.py                  logs/send-log.txt and its route
     canvas/ui.py                 the touch Canvas: components and events
+    canvas/surface.py            the host's canvas, built from its pieces for this tab
     canvas/host.py               what the Canvas needs from the WebUI, found without touching its tabs
     canvas/imaging.py            mask, crop and fill maths (Pillow only)
     canvas/outpaint.py           expansion with automatic mask
-    canvas/document.py           the document, its history, the stage / commit handshake
+    canvas/document.py           the document and its history of structural steps
 javascript/main.js               legacy bridge, parent-frame side (unchanged)
-javascript/minipaint_canvas.js   WebGL guard, editor flush, touch crop adapter, focus mode
+javascript/minipaint_canvas.js   attaches the canvas; crop frame, touch gestures, tools, waits, focus mode
 style.css                        legacy rules, then rules scoped to the Canvas root
 miniPaint/                       the legacy editor itself
 tests/                           see tests/README.md

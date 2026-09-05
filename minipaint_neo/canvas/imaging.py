@@ -2,8 +2,8 @@
 
 One rule runs through all of it: the mask is *coverage*, kept as an ``L``
 image, and the colour it is painted in on screen is presentation only. The
-editor's layers are how coverage travels to and from the browser; they are
-never the thing that gets sent.
+canvas's scribble layer is how coverage travels to and from the browser; its
+alpha channel is what Forge's Inpaint reads, and what is read here.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ _SMOOTHING_RADIUS = {"Off": 0.0, "Low": 1.0, "Medium": 2.5, "High": 5.0}
 _GROW_AT = 32
 _SHRINK_AT = 255 - _GROW_AT
 
-DEFAULT_MASK_COLOR = (255, 47, 47)
+DEFAULT_MASK_COLOR = (128, 128, 128)
 
 FILL_COLORS = {
     "Neutral gray": (127, 127, 127),
@@ -58,10 +58,6 @@ def parse_color(value: typing.Any) -> typing.Tuple[int, int, int]:
         return DEFAULT_MASK_COLOR
 
 
-def color_hex(color: typing.Tuple[int, int, int]) -> str:
-    return "#%02x%02x%02x" % tuple(color[:3])
-
-
 def to_rgba(image: Image.Image) -> Image.Image:
     return image if image.mode == "RGBA" else image.convert("RGBA")
 
@@ -84,133 +80,82 @@ def binarize(mask: Image.Image) -> Image.Image:
     return mask.point(lambda v: MASK_ON if v >= MASK_THRESHOLD else 0)
 
 
-def mask_from_layers(
-    layers: typing.Sequence[typing.Optional[Image.Image]],
-    size: typing.Tuple[int, int],
+def _premultiplied(image: Image.Image) -> typing.Tuple[Image.Image, Image.Image]:
+    """(RGB scaled by alpha, alpha). A browser canvas stores pixels this way,
+    so it is the only form in which a picture survives a round trip through
+    one unchanged; the colour of a fully transparent pixel does not."""
+    rgba = to_rgba(image)
+    alpha = rgba.getchannel("A")
+    rgb = ImageChops.multiply(rgba.convert("RGB"), Image.merge("RGB", (alpha, alpha, alpha)))
+    return rgb, alpha
+
+
+def images_equal(a: typing.Optional[Image.Image], b: typing.Optional[Image.Image]) -> bool:
+    """Same picture, allowing for a browser's re-encoding of it."""
+    if a is None or b is None:
+        return a is b
+    if a.size != b.size:
+        return False
+    rgb_a, alpha_a = _premultiplied(a)
+    rgb_b, alpha_b = _premultiplied(b)
+    if ImageChops.difference(alpha_a, alpha_b).getextrema()[1] > 2:
+        return False
+    return all(high <= 3 for _low, high in ImageChops.difference(rgb_a, rgb_b).getextrema())
+
+
+def mask_from_foreground(
+    foreground: typing.Optional[Image.Image], size: typing.Tuple[int, int]
 ) -> typing.Tuple[typing.Optional[Image.Image], typing.List[str]]:
-    """Union of the editor layers' alpha, as coverage at ``size``."""
+    """Coverage from the canvas's scribble layer: its alpha channel."""
     notes: typing.List[str] = []
-    combined: typing.Optional[Image.Image] = None
-
-    for layer in layers or []:
-        if layer is None:
-            continue
-        alpha = to_rgba(layer).getchannel("A")
-        if alpha.size != size:
-            notes.append(
-                f"a mask layer came back {alpha.size[0]}x{alpha.size[1]} for a "
-                f"{size[0]}x{size[1]} image and was resampled to match"
-            )
-            alpha = alpha.resize(size, NEAREST)
-        combined = alpha if combined is None else ImageChops.lighter(combined, alpha)
-
-    if mask_is_empty(combined):
+    if foreground is None:
         return None, notes
-    return combined, notes
+    alpha = to_rgba(foreground).getchannel("A")
+    if alpha.size != size:
+        notes.append(
+            f"the mask layer came back {alpha.size[0]}x{alpha.size[1]} for a "
+            f"{size[0]}x{size[1]} image and was resampled to match"
+        )
+        alpha = alpha.resize(size, NEAREST)
+    if mask_is_empty(alpha):
+        return None, notes
+    return alpha, notes
 
 
-def mask_layer(
-    mask: typing.Optional[Image.Image],
-    color: typing.Tuple[int, int, int] = DEFAULT_MASK_COLOR,
-) -> typing.Optional[Image.Image]:
-    """Coverage rendered as an editor layer, so painting continues on top of it."""
-    if mask_is_empty(mask):
-        return None
-    layer = Image.new("RGBA", mask.size, tuple(color[:3]) + (0,))
-    layer.putalpha(mask)
-    return layer
-
-
-def composite_preview(
-    image: Image.Image,
-    mask: typing.Optional[Image.Image],
-    color: typing.Tuple[int, int, int] = DEFAULT_MASK_COLOR,
-) -> Image.Image:
-    layer = mask_layer(mask, color)
-    if layer is None:
-        return to_rgba(image)
-    return Image.alpha_composite(to_rgba(image), layer)
-
-
-def editor_value(
-    image: typing.Optional[Image.Image],
-    mask: typing.Optional[Image.Image] = None,
-    color: typing.Tuple[int, int, int] = DEFAULT_MASK_COLOR,
-) -> typing.Optional[dict]:
-    """The ``EditorValue`` an ImageEditor takes: background, layers, composite."""
-    if image is None:
-        return None
-    background = to_rgba(image)
-    layer = mask_layer(mask, color)
-    return {
-        "background": background,
-        "layers": [layer] if layer is not None else [],
-        "composite": composite_preview(background, mask, color),
-    }
-
-
-def read_editor(
-    value: typing.Any,
+def read_canvas(
+    background: typing.Optional[Image.Image], foreground: typing.Optional[Image.Image]
 ) -> typing.Tuple[
     typing.Optional[Image.Image], typing.Optional[Image.Image], typing.List[str]
 ]:
-    """What the editor currently holds: working image, mask coverage, notes.
-
-    The editor exports background, layers and composite all cropped to its
-    current crop box, so ``background`` is the truth about size. A layer that
-    disagrees is resampled onto it rather than trusted.
-    """
-    notes: typing.List[str] = []
-    if not isinstance(value, dict):
-        return None, None, notes
-
-    background = value.get("background")
-    composite = value.get("composite")
-    layers = value.get("layers") or []
-
-    base = background if background is not None else composite
-    if base is None:
-        return None, None, notes
+    """What the canvas currently holds: working image, mask coverage, notes."""
     if background is None:
-        notes.append("the editor had no background; its composite was used")
-
-    image = to_rgba(base)
-    if (
-        background is not None
-        and composite is not None
-        and composite.size != background.size
-    ):
-        notes.append(
-            f"the editor's composite is {composite.size[0]}x{composite.size[1]} but "
-            f"its image is {background.size[0]}x{background.size[1]}; the image wins"
-        )
-
-    mask, mask_notes = mask_from_layers(layers, image.size)
-    notes.extend(mask_notes)
+        return None, None, []
+    image = to_rgba(background)
+    mask, notes = mask_from_foreground(foreground, image.size)
     return image, mask, notes
 
 
-def trim_transparent_frame(
-    image: Image.Image, mask: typing.Optional[Image.Image]
-) -> typing.Tuple[Image.Image, typing.Optional[Image.Image], typing.Optional[str]]:
-    """Drop a transparent border the component padded a crop with.
+def crop_box(raw: typing.Any, size: typing.Tuple[int, int]) -> typing.Optional[typing.Tuple[int, int, int, int]]:
+    """The crop frame the browser reported, clamped to the image. None if unusable."""
+    import json
 
-    Only ever called when the image going *in* was fully opaque, so any
-    transparent frame coming out is padding rather than the user's pixels.
-    """
-    alpha = to_rgba(image).getchannel("A")
-    box = alpha.getbbox()
-    if box is None or box == (0, 0, image.width, image.height):
-        return image, mask, None
-
-    cropped = image.crop(box)
-    cropped_mask = None if mask is None else mask.crop(box)
-    return (
-        cropped,
-        cropped_mask,
-        f"trimmed {image.width}x{image.height} down to the "
-        f"{cropped.width}x{cropped.height} the crop actually covers",
-    )
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip() else None
+        except ValueError:
+            return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        x0, y0, x1, y1 = (int(round(float(raw[key]))) for key in ("x0", "y0", "x1", "y1"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    width, height = size
+    x0, x1 = max(0, min(width, x0)), max(0, min(width, x1))
+    y0, y1 = max(0, min(height, y0)), max(0, min(height, y1))
+    if x1 - x0 < 1 or y1 - y0 < 1:
+        return None
+    return (x0, y0, x1, y1)
 
 
 def _grow(mask: Image.Image, radius: float) -> Image.Image:
@@ -266,7 +211,7 @@ def smooth_mask(
 def invert_mask(mask: typing.Optional[Image.Image], size: typing.Tuple[int, int]) -> Image.Image:
     if mask_is_empty(mask):
         return Image.new("L", size, MASK_ON)
-    return mask.point(lambda v: MASK_ON - v)
+    return binarize(mask).point(lambda v: MASK_ON - v)
 
 
 def edge_color(image: Image.Image) -> typing.Tuple[int, int, int]:
@@ -308,22 +253,43 @@ def flatten(image: Image.Image, color: typing.Tuple[int, int, int]) -> Image.Ima
     return Image.alpha_composite(base, to_rgba(image))
 
 
-def inpaint_foreground(
+# The canvas's high-contrast brush: 10px black and white squares, anchored
+# at the drawing canvas's origin. The same tile here, so a mask written from
+# Python looks like one that was painted.
+CONTRAST_SQUARE = 10
+
+
+def _checkerboard(size: typing.Tuple[int, int]) -> Image.Image:
+    tile = Image.new("RGB", (CONTRAST_SQUARE * 2, CONTRAST_SQUARE * 2), (0, 0, 0))
+    tile.paste((255, 255, 255), (0, 0, CONTRAST_SQUARE, CONTRAST_SQUARE))
+    tile.paste((255, 255, 255), (CONTRAST_SQUARE, CONTRAST_SQUARE, CONTRAST_SQUARE * 2, CONTRAST_SQUARE * 2))
+    board = Image.new("RGB", size)
+    for y in range(0, size[1], tile.height):
+        for x in range(0, size[0], tile.width):
+            board.paste(tile, (x, y))
+    return board
+
+
+def foreground_layer(
     mask: Image.Image,
     size: typing.Tuple[int, int],
     color: typing.Tuple[int, int, int] = DEFAULT_MASK_COLOR,
+    contrast: bool = False,
 ) -> Image.Image:
-    """The scribble layer Forge's Inpaint canvas reads its mask from.
+    """Coverage as a scribble layer: the colour where the mask is, alpha 255.
 
     Forge takes the alpha channel and keeps pixels above 128, so coverage is
-    carried as alpha, binarised, and the colour underneath is only what the
-    user sees on the Inpaint canvas.
+    carried as alpha, binarised, and the colour is only what the user sees:
+    the Inpaint brush colour, or its checkerboard when high contrast is on.
     """
     if mask.size != size:
         mask = mask.resize(size, NEAREST)
-    foreground = Image.new("RGBA", size, tuple(color[:3]) + (0,))
-    foreground.putalpha(binarize(mask))
-    return foreground
+    if contrast:
+        layer = _checkerboard(size).convert("RGBA")
+    else:
+        layer = Image.new("RGBA", size, tuple(color[:3]) + (0,))
+    layer.putalpha(binarize(mask))
+    return layer
 
 
 def to_png_bytes(image: Image.Image) -> bytes:

@@ -22,18 +22,55 @@
  * Colours come from Gradio's semantic variables with fallbacks, so the
  * host theme (Lobe included) keeps deciding what things look like; this
  * file only decides where they go and how big they are to a finger.
+ *
+ * The shape: a work column (action row, canvas, status) with a rail of
+ * panels beside it on the right. The rail is capped to the work column's
+ * height by the browser side and scrolls inside it; on a narrow window it
+ * wraps under the canvas and the canvas gives it a bounded share.
  * ------------------------------------------------------------------ */
 
 #minipaint_canvas_root {
     --minipaint-target: 44px;
     --minipaint-gap: 8px;
+    --minipaint-rail: 300px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--minipaint-gap);
+    width: 100%;
+    /* The rail's width and place follow the room the tab has, not the
+       window's: a theme's sidebars can take half of a wide window. */
+    container-type: inline-size;
+    container-name: minipaint;
+}
+
+#minipaint_canvas_root > #minipaint_canvas_work {
+    flex: 1 1 0;
+    min-width: min(320px, 100%);
     display: flex;
     flex-direction: column;
     gap: var(--minipaint-gap);
-    width: 100%;
 }
 
-/* -- action bar ---------------------------------------------------- */
+#minipaint_canvas_root > #minipaint_canvas_rail {
+    flex: 0 0 var(--minipaint-rail);
+    width: var(--minipaint-rail);
+    max-width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: var(--minipaint-gap);
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    padding-right: 2px;
+}
+
+/* Panels put away: the canvas takes the whole width. */
+#minipaint_canvas_root.minipaint-rail-hidden > #minipaint_canvas_rail {
+    display: none;
+}
+
+/* -- action row ---------------------------------------------------- */
 
 #minipaint_canvas_root .minipaint-topbar {
     flex-wrap: wrap;
@@ -42,9 +79,9 @@
 }
 
 #minipaint_canvas_root .minipaint-action,
-#minipaint_canvas_root .minipaint-mode,
 #minipaint_canvas_root .minipaint-apply,
 #minipaint_canvas_root .minipaint-side,
+#minipaint_canvas_root .minipaint-quick-action,
 #minipaint_canvas_root .minipaint-panel button {
     min-height: var(--minipaint-target);
 }
@@ -131,7 +168,7 @@
     font-size: 16px;
 }
 
-/* The active layer while it is being dragged, over the other layers. */
+/* The selected layers while they are being dragged, over the other layers. */
 #minipaint_canvas_surface .minipaint-layer-preview {
     position: absolute;
     pointer-events: none;
@@ -207,56 +244,23 @@
 #minipaint_canvas_surface .minipaint-frame-handle.bl::after { right: 11px; top: 11px; border-right: none; border-top: none; }
 #minipaint_canvas_surface .minipaint-frame-handle.br::after { left: 11px; top: 11px; border-left: none; border-top: none; }
 
-/* -- mode bar ------------------------------------------------------ */
+/* -- the mode chips, in the action row ------------------------------- */
 
-#minipaint_canvas_root .minipaint-modebar {
-    gap: var(--minipaint-gap);
-}
-
-#minipaint_canvas_root .minipaint-mode {
-    flex: 1 1 0;
-    min-height: 48px;
-    font-weight: 600;
-}
-
-/* -- the mode's quick row, and the options behind the accordion ------ */
-
-#minipaint_canvas_root .minipaint-quick {
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--minipaint-gap);
-}
-
-#minipaint_canvas_root .minipaint-quick-column {
-    gap: 4px;
-}
-
-#minipaint_canvas_root .minipaint-aspect {
-    flex: 0 1 220px;
-    min-width: 160px;
-}
-
-#minipaint_canvas_root .minipaint-size {
-    flex: 1 1 200px;
-    min-width: 160px;
-}
-
-#minipaint_canvas_root .minipaint-quick-action {
-    flex: 0 1 auto;
-}
-
-#minipaint_canvas_root .minipaint-apply {
+/* Their own column, as wide as the chips and no wider, so the row wraps
+   around them instead of squeezing them over the next button. */
+#minipaint_canvas_root .minipaint-modes {
     flex: 0 0 auto;
-    min-width: 160px;
-    margin-left: auto;
+    width: auto;
+    min-width: 0 !important;
 }
 
-#minipaint_canvas_root .minipaint-panel {
-    gap: var(--minipaint-gap);
+#minipaint_canvas_root .minipaint-modes .form,
+#minipaint_canvas_root .minipaint-modes .block {
+    width: auto;
 }
 
-/* Tool, amount and smoothing pickers as finger-sized chips. A group of chips
-   stays on one line and lets the row wrap around it instead. */
+/* Tool, amount, smoothing and mode pickers as finger-sized chips. A group
+   of chips stays on one line and lets the row wrap around it instead. */
 #minipaint_canvas_root .minipaint-chips {
     flex: 0 0 auto;
     min-width: 0;
@@ -266,22 +270,155 @@
     flex-wrap: nowrap;
 }
 
-/* The visible-layers chips can be many; those wrap. */
-#minipaint_canvas_root .minipaint-chips-wrap .wrap {
-    flex-wrap: wrap;
-}
-
-#minipaint_canvas_root .minipaint-layer-pick {
-    flex: 0 1 220px;
-    min-width: 160px;
-}
-
 #minipaint_canvas_root .minipaint-chips label {
     min-height: 40px;
     display: inline-flex;
     align-items: center;
     padding: 4px 12px;
     white-space: nowrap;
+}
+
+/* -- the rail's panels --------------------------------------------- */
+
+#minipaint_canvas_root .minipaint-panel {
+    gap: var(--minipaint-gap);
+}
+
+#minipaint_canvas_root .minipaint-panel-title p {
+    margin: 0;
+    font-size: 1.05em;
+}
+
+/* Chips inside the rail may wrap: the rail is narrow. */
+#minipaint_canvas_root > #minipaint_canvas_rail .minipaint-chips .wrap {
+    flex-wrap: wrap;
+}
+
+#minipaint_canvas_root .minipaint-apply {
+    width: 100%;
+}
+
+/* Two controls sharing a line of the rail. */
+#minipaint_canvas_root .minipaint-pair {
+    gap: var(--minipaint-gap);
+    flex-wrap: nowrap;
+}
+
+#minipaint_canvas_root .minipaint-pair > * {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+/* A text box next to a button gets the larger share. */
+#minipaint_canvas_root .minipaint-pair > .form {
+    flex: 2 1 0;
+}
+
+/* Left / Right / Top / Bottom: two per line. */
+#minipaint_canvas_root .minipaint-sides {
+    gap: var(--minipaint-gap);
+    flex-wrap: wrap;
+}
+
+#minipaint_canvas_root .minipaint-sides > * {
+    flex: 1 1 40%;
+    min-width: 0;
+}
+
+/* -- the layer list -------------------------------------------------- */
+
+#minipaint_canvas_root .minipaint-layers {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px;
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    border-radius: var(--block-radius, 8px);
+    background: var(--block-background-fill, transparent);
+    max-height: 40vh;
+    overflow-y: auto;
+}
+
+#minipaint_canvas_root .minipaint-layers-empty {
+    padding: 10px;
+    color: var(--body-text-color-subdued, inherit);
+}
+
+#minipaint_canvas_root .minipaint-layer {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-height: var(--minipaint-target);
+    border-radius: 6px;
+}
+
+#minipaint_canvas_root .minipaint-layer.selected {
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.18));
+}
+
+#minipaint_canvas_root .minipaint-layer.active {
+    box-shadow: inset 3px 0 0 var(--color-accent, #ff7c00);
+}
+
+#minipaint_canvas_root .minipaint-layer.hidden-layer .minipaint-layer-name {
+    opacity: 0.55;
+    text-decoration: line-through;
+}
+
+#minipaint_canvas_root .minipaint-layer button {
+    background: transparent;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    min-height: var(--minipaint-target);
+    padding: 0 6px;
+    border-radius: 6px;
+    touch-action: manipulation;
+}
+
+#minipaint_canvas_root .minipaint-layer button:hover {
+    background: var(--background-fill-primary, rgba(127, 127, 127, 0.25));
+}
+
+#minipaint_canvas_root .minipaint-layer button:disabled {
+    opacity: 0.3;
+    cursor: default;
+    background: transparent;
+}
+
+#minipaint_canvas_root .minipaint-layer-pick {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    text-align: left;
+    min-width: 0;
+    line-height: 1.2;
+}
+
+#minipaint_canvas_root .minipaint-layer-name {
+    font-weight: 600;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#minipaint_canvas_root .minipaint-layer-meta {
+    font-size: 11px;
+    color: var(--body-text-color-subdued, inherit);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+#minipaint_canvas_root .minipaint-layer-eye,
+#minipaint_canvas_root .minipaint-layer-check,
+#minipaint_canvas_root .minipaint-layer-up,
+#minipaint_canvas_root .minipaint-layer-down {
+    flex: 0 0 auto;
+    min-width: 34px;
+    font-size: 16px;
 }
 
 /* -- focus mode ---------------------------------------------------- */
@@ -297,17 +434,27 @@
 }
 
 
-/* -- tablet and phone ---------------------------------------------- */
+/* -- less room: a tablet, a phone, a theme's sidebars ---------------- */
 
-@media (max-width: 1024px) {
+/* A narrower rail while both still fit side by side. */
+@container minipaint (max-width: 899px) {
+    #minipaint_canvas_root > #minipaint_canvas_rail {
+        --minipaint-rail: 250px;
+    }
+
     #minipaint_canvas_root .minipaint-send {
         min-width: 160px;
     }
 }
 
-@media (max-width: 720px) {
-    #minipaint_canvas_root {
-        --minipaint-target: 48px;
+/* Too narrow for both (a phone): the rail goes under the canvas with a
+   bounded share of the height (the canvas takes the rest), the chips and
+   Send get lines of their own. */
+@container minipaint (max-width: 559px) {
+    #minipaint_canvas_root > #minipaint_canvas_rail {
+        flex: 1 1 100%;
+        width: 100%;
+        max-height: 36vh;
     }
 
     #minipaint_canvas_root .minipaint-action {
@@ -315,25 +462,25 @@
         flex: 1 1 30%;
     }
 
+    #minipaint_canvas_root .minipaint-modes {
+        flex: 1 1 100%;
+        order: 8;
+    }
+
+    #minipaint_canvas_root .minipaint-modes .wrap {
+        flex-wrap: wrap;
+    }
+
     #minipaint_canvas_root .minipaint-send {
         flex: 1 1 100%;
         margin-left: 0;
         order: 9;
     }
+}
 
-    #minipaint_canvas_root .minipaint-side {
-        flex: 1 1 22%;
-        min-width: 0;
+/* Fingers on a phone. */
+@media (max-width: 720px) {
+    #minipaint_canvas_root {
+        --minipaint-target: 48px;
     }
-
-    /* Four modes: two per row. */
-    #minipaint_canvas_root .minipaint-mode {
-        flex: 1 1 45%;
-    }
-
-    #minipaint_canvas_root .minipaint-apply {
-        flex: 1 1 100%;
-        margin-left: 0;
-    }
-
 }

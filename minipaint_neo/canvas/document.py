@@ -4,6 +4,9 @@ enough history to undo the big steps.
 A layer is an RGBA picture at an offset on the document canvas; the base
 layer is the picture that arrived. ``image`` is the composite of the visible
 layers, kept current, and it is what the canvas shows and what gets sent.
+One or several layers are selected at a time, the way a layers panel works;
+the primary one (``active``) is the last picked, and moving, fading,
+duplicating, deleting and merging act on the whole selection.
 Strokes are undone by the canvas itself. What the history holds is the
 structural work - receive, open, apply crop, expand, clear, invert, reset,
 and every layer operation - because those replace the canvas's contents
@@ -82,6 +85,7 @@ class Document:
     def __init__(self) -> None:
         self.layers: typing.List[Layer] = []
         self.active: int = 0
+        self.selected: typing.List[int] = []
         self.canvas_size: typing.Optional[typing.Tuple[int, int]] = None
         self.image: typing.Optional[Image.Image] = None
         self.mask: typing.Optional[Image.Image] = None
@@ -100,6 +104,11 @@ class Document:
         # only re-sent when it is stale.
         self.layer_version: int = 0
         self.preview_sent: typing.Optional[tuple] = None
+        # The layers panel as last sent to the browser, so it is only re-sent
+        # when it changed.
+        self.layer_list_sent: typing.Optional[str] = None
+        # What the Send button does, chosen in Options: "Auto" or a destination.
+        self.destination: str = "Auto"
         self._original_png: typing.Optional[bytes] = None
         self._original_ref: typing.Optional[Image.Image] = None
 
@@ -123,6 +132,54 @@ class Document:
             return None
         self.active = max(0, min(self.active, len(self.layers) - 1))
         return self.layers[self.active]
+
+    def selected_indices(self) -> typing.List[int]:
+        """The selection, in stacking order, always including the primary."""
+        if not self.layers:
+            return []
+        active = self.active_layer  # clamps
+        chosen = {index for index in self.selected if 0 <= index < len(self.layers)}
+        chosen.add(self.active)
+        self.selected = sorted(chosen)
+        return list(self.selected)
+
+    def selected_layers(self) -> typing.List[Layer]:
+        return [self.layers[index] for index in self.selected_indices()]
+
+    def selected_names(self) -> typing.List[str]:
+        return [layer.name for layer in self.selected_layers()]
+
+    def index_of(self, name: str) -> typing.Optional[int]:
+        for index, layer in enumerate(self.layers):
+            if layer.name == name:
+                return index
+        return None
+
+    def select(self, name: str) -> bool:
+        """Only this layer, as the primary."""
+        index = self.index_of(name)
+        if index is None:
+            return False
+        self.active = index
+        self.selected = [index]
+        return True
+
+    def toggle_selected(self, name: str) -> bool:
+        """Add this layer to the selection, or take it out; the primary
+        follows the last one added, and the selection never empties."""
+        index = self.index_of(name)
+        if index is None:
+            return False
+        chosen = set(self.selected_indices())
+        if index in chosen and len(chosen) > 1:
+            chosen.discard(index)
+            if self.active == index:
+                self.active = max(chosen)
+        else:
+            chosen.add(index)
+            self.active = index
+        self.selected = sorted(chosen)
+        return True
 
     @property
     def layered(self) -> bool:
@@ -193,6 +250,19 @@ class Document:
             self._original_ref = self.original
         return self._original_png
 
+    def _reindex(self, keep: typing.Iterable[Layer], active: typing.Optional[Layer]) -> None:
+        """After the layer list changed: the selection follows the layers
+        that survived, the primary the layer given (or the nearest)."""
+        survivors = [layer for layer in keep if layer in self.layers]
+        self.selected = sorted(self.layers.index(layer) for layer in survivors)
+        if active is not None and active in self.layers:
+            self.active = self.layers.index(active)
+        elif self.selected:
+            self.active = self.selected[-1]
+        else:
+            self.active = max(0, min(self.active, len(self.layers) - 1))
+            self.selected = [self.active] if self.layers else []
+
     def _snapshot(self, label: str) -> dict:
         """A whole document, small enough to keep a handful of.
 
@@ -204,6 +274,7 @@ class Document:
             "label": label,
             "layers": [layer.snapshot() for layer in self.layers],
             "active": self.active,
+            "selected": list(self.selected_indices()),
             "canvas_size": self.canvas_size,
             "mask": imaging.to_png_bytes(self.mask) if self.has_mask else None,
             "original": self._original_bytes(),
@@ -218,6 +289,7 @@ class Document:
         original = snapshot.get("original")
         self.layers = [Layer.restore(data) for data in snapshot.get("layers", [])]
         self.active = int(snapshot.get("active", 0))
+        self.selected = [int(index) for index in snapshot.get("selected", [])]
         self.canvas_size = tuple(snapshot["canvas_size"]) if snapshot.get("canvas_size") else None
         self.mask = imaging.from_png_bytes(mask).convert("L") if mask else None
         if original is None:
@@ -270,6 +342,7 @@ class Document:
         picture = imaging.to_rgba(image)
         self.layers = [Layer(picture, 0, 0, BASE_NAME)]
         self.active = 0
+        self.selected = [0]
         self.canvas_size = picture.size
         self.mask = None
         self.original = picture
@@ -282,6 +355,7 @@ class Document:
     def clear(self) -> None:
         self.layers = []
         self.active = 0
+        self.selected = []
         self.canvas_size = None
         self.image = None
         self.mask = None
@@ -300,6 +374,7 @@ class Document:
             name = self.layers[0].name if self.layers else BASE_NAME
             self.layers = [Layer(picture, 0, 0, name)]
             self.active = 0
+            self.selected = [0]
             self.canvas_size = picture.size
             self._touch()
         if self.canvas_size is None:
@@ -314,44 +389,65 @@ class Document:
     # -- layers ------------------------------------------------------------
 
     def add_layer(self, image: Image.Image, x: int, y: int, name: typing.Optional[str] = None) -> Layer:
-        """A new layer above the active one, which becomes the active one."""
+        """A new layer above the primary one; it becomes the selection."""
         layer = Layer(image, x, y, self.unique_name(name or f"Layer {len(self.layers) + 1}"))
         index = min(self.active + 1, len(self.layers)) if self.layers else 0
         self.layers.insert(index, layer)
         self.active = index
+        self.selected = [index]
         self._touch()
         return layer
 
-    def delete_active(self) -> typing.Optional[str]:
-        if len(self.layers) < 2:
-            return None
-        removed = self.layers.pop(self.active)
-        self.active = max(0, min(self.active, len(self.layers) - 1))
+    def delete_selected(self) -> typing.List[str]:
+        """Every selected layer, as long as one layer is left."""
+        chosen = self.selected_layers()
+        if len(chosen) >= len(self.layers):
+            chosen = chosen[1:]  # the bottom-most selected one stays
+        if not chosen:
+            return []
+        below = None
+        for layer in chosen:
+            index = self.layers.index(layer)
+            below = self.layers[index - 1] if index > 0 else None
+            self.layers.remove(layer)
+        nearest = below if below in self.layers else (self.layers[0] if self.layers else None)
+        self._reindex([nearest] if nearest else [], nearest)
         self._touch()
-        return removed.name
+        return [layer.name for layer in chosen]
 
-    def move_active(self, dx: int, dy: int) -> None:
-        layer = self.active_layer
-        if layer is None:
+    def move_selected(self, dx: int, dy: int) -> None:
+        for layer in self.selected_layers():
+            layer.x += int(dx)
+            layer.y += int(dy)
+        self._touch()
+
+    def center_selected(self) -> None:
+        """Each selected layer to the middle of the canvas: the way back for
+        one that was dragged out of view."""
+        if self.canvas_size is None:
             return
-        layer.x += int(dx)
-        layer.y += int(dy)
+        width, height = self.canvas_size
+        for layer in self.selected_layers():
+            layer.x = (width - layer.image.width) // 2
+            layer.y = (height - layer.image.height) // 2
         self._touch()
 
-    def set_visibility(self, visible_names: typing.Iterable[str]) -> None:
-        wanted = set(visible_names or [])
-        for layer in self.layers:
-            layer.visible = layer.name in wanted
+    def set_visible(self, name: str, visible: typing.Optional[bool] = None) -> typing.Optional[bool]:
+        index = self.index_of(name)
+        if index is None:
+            return None
+        layer = self.layers[index]
+        layer.visible = (not layer.visible) if visible is None else bool(visible)
         self._touch()
+        return layer.visible
 
     def set_opacity(self, value: typing.Any) -> None:
-        layer = self.active_layer
-        if layer is None:
-            return
         try:
-            layer.opacity = max(0, min(100, int(round(float(value)))))
+            opacity = max(0, min(100, int(round(float(value)))))
         except (TypeError, ValueError):
             return
+        for layer in self.selected_layers():
+            layer.opacity = opacity
         self._touch()
 
     def rename_active(self, name: str) -> typing.Optional[str]:
@@ -362,39 +458,52 @@ class Document:
         self.layer_version += 1
         return layer.name
 
-    def reorder_active(self, step: int) -> bool:
-        """Swap the active layer with its neighbour: +1 is up (towards the front)."""
-        target = self.active + int(step)
-        if not self.layers or not (0 <= target < len(self.layers)) or target == self.active:
+    def reorder(self, name: str, step: int) -> bool:
+        """Swap one layer with its neighbour: +1 is up (towards the front)."""
+        index = self.index_of(name)
+        if index is None:
             return False
-        self.layers[self.active], self.layers[target] = self.layers[target], self.layers[self.active]
-        self.active = target
+        target = index + int(step)
+        if not (0 <= target < len(self.layers)) or target == index:
+            return False
+        chosen = self.selected_layers()
+        active = self.active_layer
+        self.layers[index], self.layers[target] = self.layers[target], self.layers[index]
+        self._reindex(chosen, active)
         self._touch()
         return True
 
-    def merge_down(self) -> typing.Optional[str]:
-        """The active layer onto the one below it, as the canvas shows them."""
-        if self.active < 1 or not self.layers:
-            return None
-        upper = self.layers[self.active]
-        lower = self.layers[self.active - 1]
-        merged_image, x, y = imaging.merge_layers(lower, upper)
-        merged = Layer(merged_image, x, y, lower.name, True, 100)
-        self.layers[self.active - 1] = merged
-        del self.layers[self.active]
-        self.active -= 1
+    def merge_selected(self) -> typing.Optional[str]:
+        """Two or more selected layers into one, as the canvas shows them;
+        one selected layer merges into the layer below it."""
+        chosen = self.selected_layers()
+        if len(chosen) < 2:
+            if self.active < 1:
+                return None
+            chosen = [self.layers[self.active - 1], self.layers[self.active]]
+        merged = chosen[0]
+        for upper in chosen[1:]:
+            image, x, y = imaging.merge_layers(merged, upper)
+            merged = Layer(image, x, y, chosen[0].name, True, 100)
+        position = self.layers.index(chosen[0])
+        for layer in chosen:
+            self.layers.remove(layer)
+        self.layers.insert(position, merged)
+        self.active = position
+        self.selected = [position]
         self._touch()
         return merged.name
 
-    def duplicate_active(self) -> typing.Optional[Layer]:
-        layer = self.active_layer
-        if layer is None:
-            return None
-        copy = layer.copy(self.unique_name(f"{layer.name} copy"))
-        self.layers.insert(self.active + 1, copy)
-        self.active += 1
+    def duplicate_selected(self) -> typing.List[Layer]:
+        copies = []
+        for layer in reversed(self.selected_layers()):
+            copy = layer.copy(self.unique_name(f"{layer.name} copy"))
+            self.layers.insert(self.layers.index(layer) + 1, copy)
+            copies.append(copy)
+        copies.reverse()
+        self._reindex(copies, copies[-1] if copies else None)
         self._touch()
-        return copy
+        return copies
 
     def flatten(self) -> int:
         """Every visible layer into one; hidden layers are dropped."""
@@ -404,6 +513,7 @@ class Document:
         flat = imaging.composite(self.layers, self.canvas_size)
         self.layers = [Layer(flat, 0, 0, BASE_NAME)]
         self.active = 0
+        self.selected = [0]
         self._touch()
         return count
 
@@ -418,19 +528,20 @@ class Document:
         """Keep what is inside the box, on every layer."""
         x0, y0, x1, y1 = box
         kept: typing.List[Layer] = []
-        new_active = 0
+        survivors: typing.Dict[int, Layer] = {}
         for index, layer in enumerate(self.layers):
             piece = imaging.layer_pixels_in_box(layer.image, layer.x, layer.y, box)
             if piece is None:
                 continue
             image, px, py = piece
-            if index <= self.active:
-                new_active = len(kept)
-            kept.append(Layer(image, px - x0, py - y0, layer.name, layer.visible, layer.opacity))
+            survivors[index] = Layer(image, px - x0, py - y0, layer.name, layer.visible, layer.opacity)
+            kept.append(survivors[index])
         if not kept:
             kept = [Layer(Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 0)), 0, 0, BASE_NAME)]
+        chosen = [survivors[index] for index in self.selected_indices() if index in survivors]
+        active = survivors.get(self.active)
         self.layers = kept
-        self.active = min(new_active, len(kept) - 1)
+        self._reindex(chosen, active)
         self.canvas_size = (x1 - x0, y1 - y0)
         self.mask = mask.crop(box) if not imaging.mask_is_empty(mask) else None
         self.has_expansion = False
@@ -453,31 +564,60 @@ class Document:
     # -- what the browser needs to drag a layer ------------------------------
 
     def preview_key(self) -> tuple:
-        return (self.active, self.layer_version)
+        return (tuple(self.selected_indices()), self.layer_version)
 
     def preview_payload(self) -> str:
-        """The active layer as the browser shows it while dragging."""
-        layer = self.active_layer
-        if layer is None:
+        """The selected layers, as one picture, the way the browser shows
+        them while dragging."""
+        chosen = self.selected_layers()
+        if not chosen:
             return ""
+        x0 = min(layer.x for layer in chosen)
+        y0 = min(layer.y for layer in chosen)
+        x1 = max(layer.x + layer.image.width for layer in chosen)
+        y1 = max(layer.y + layer.image.height for layer in chosen)
+        shifted = [Layer(layer.image, layer.x - x0, layer.y - y0, layer.name, layer.visible, layer.opacity) for layer in chosen]
+        picture = imaging.composite(shifted, (x1 - x0, y1 - y0))
         return json.dumps(
             {
-                "src": imaging.to_data_url(layer.image),
-                "x": layer.x,
-                "y": layer.y,
-                "w": layer.image.width,
-                "h": layer.image.height,
-                "opacity": layer.opacity if layer.visible else 0,
-                "name": layer.name,
+                "src": imaging.to_data_url(picture),
+                "x": x0,
+                "y": y0,
+                "w": x1 - x0,
+                "h": y1 - y0,
+                "opacity": 100 if any(layer.visible for layer in chosen) else 0,
+                "name": ", ".join(layer.name for layer in chosen),
             }
         )
 
     def underlay_payload(self) -> str:
-        """The other layers, for the canvas to show under a layer being dragged."""
-        if len(self.layers) < 2 or self.canvas_size is None:
+        """The other layers, for the canvas to show under the layers being dragged."""
+        chosen = set(self.selected_indices())
+        if len(self.layers) <= len(chosen) or self.canvas_size is None:
             return ""
-        others = [layer for index, layer in enumerate(self.layers) if index != self.active]
+        others = [layer for index, layer in enumerate(self.layers) if index not in chosen]
         return imaging.to_data_url(imaging.composite(others, self.canvas_size))
+
+    def layer_rows(self) -> typing.List[dict]:
+        """What a layers panel shows, top layer first."""
+        chosen = set(self.selected_indices())
+        rows = []
+        for index in range(len(self.layers) - 1, -1, -1):
+            layer = self.layers[index]
+            rows.append(
+                {
+                    "name": layer.name,
+                    "visible": layer.visible,
+                    "selected": index in chosen,
+                    "active": index == self.active,
+                    "size": f"{layer.image.width} × {layer.image.height}",
+                    "at": f"({layer.x}, {layer.y})",
+                    "opacity": layer.opacity,
+                    "top": index == len(self.layers) - 1,
+                    "bottom": index == 0,
+                }
+            )
+        return rows
 
 
 def ensure(state: typing.Any) -> Document:

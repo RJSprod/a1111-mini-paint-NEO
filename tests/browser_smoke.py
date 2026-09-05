@@ -184,9 +184,36 @@ def pick_option(page, elem_id, text):
     time.sleep(0.3)
 
 
+def pick_chip(page, elem_id, text):
+    """Choose one of a Radio's chips by its exact value."""
+    page.locator(f"{elem_id} label:has(input[value='{text}'])").first.click()
+    time.sleep(0.3)
+
+
 def tab_fits(page):
     """The Canvas tab ends above the bottom of the window (what the page puts after it is its business)."""
     return page.evaluate("() => document.querySelector('#minipaint_canvas_root').getBoundingClientRect().bottom <= window.innerHeight + 1")
+
+
+def rail_beside(page):
+    """The rail sits to the right of the work column and is no taller than it."""
+    return page.evaluate("""() => {
+        const w = document.querySelector('#minipaint_canvas_work').getBoundingClientRect();
+        const r = document.querySelector('#minipaint_canvas_rail').getBoundingClientRect();
+        return r.width > 200 && r.left >= w.right - 1 && r.top < w.bottom && r.bottom <= w.bottom + 1;
+    }""")
+
+
+def pick_mode(page, name):
+    page.locator("#minipaint_canvas_mode_pick label", has_text=name).first.click()
+
+
+def layer_row(page, name):
+    return page.locator(f"#minipaint_canvas_layer_list .minipaint-layer[data-name='{name}']").first
+
+
+def layer_rows(page):
+    return page.evaluate("() => Array.from(document.querySelectorAll('#minipaint_canvas_layer_list .minipaint-layer')).map(r => [r.dataset.name, r.classList.contains('selected'), r.classList.contains('active'), r.classList.contains('hidden-layer')])")
 
 
 def handle_center(page, corner):
@@ -209,17 +236,25 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     r.check(f"{label}: the canvas is attached, without an image", d is not None and d["attached"] and not d["hasImage"] and d["frameHidden"], str(d))
     r.check(f"{label}: the canvas took the height the window had left", d["fitting"] and 240 <= d["height"] < 900, str(d["height"]))
     r.check(f"{label}: the whole tab fits the window without scrolling", tab_fits(page), str(page.evaluate("() => [document.querySelector('#minipaint_canvas_root').getBoundingClientRect().bottom, window.innerHeight]")))
-    r.check(f"{label}: the options are behind a closed accordion", page.evaluate("() => { const p = document.querySelector('#minipaint_canvas_panel_crop'); return !!p && p.getBoundingClientRect().height === 0; }"))
+    r.check(f"{label}: the rail of panels is beside the canvas, no taller than it", rail_beside(page) and d["rail"] and not d["rail"]["below"] and d["rail"]["maxHeight"] > 0, str(d["rail"]))
+    r.check(f"{label}: the crop panel is showing in the rail, the others are not", page.evaluate("() => ['crop', 'mask', 'expand', 'layers'].map(m => document.querySelector('#minipaint_canvas_panel_' + m).getBoundingClientRect().height > 0)") == [True, False, False, False])
+    r.check(f"{label}: the options are behind a closed accordion", page.evaluate("() => { const p = document.querySelector('#minipaint_canvas_destination'); return !!p && p.getBoundingClientRect().height === 0; }"))
+    r.check(f"{label}: the mode chips share the row with Open", page.evaluate("() => { const a = document.querySelector('#minipaint_canvas_open').getBoundingClientRect(); const b = document.querySelector('#minipaint_canvas_mode_pick').getBoundingClientRect(); return Math.abs(a.top + a.height / 2 - (b.top + b.height / 2)) < a.height; }"))
     r.check(f"{label}: nothing lies over the canvas", page.evaluate("""() => {
         const box = document.querySelector('#minipaint_canvas_surface .forge-container').getBoundingClientRect();
         const probe = (x, y) => document.elementFromPoint(x, y);
         const inside = (el) => !!el && !!el.closest('#minipaint_canvas_surface');
         return inside(probe(box.left + box.width / 2, box.bottom - 6)) && inside(probe(box.left + 6, box.bottom - 6)) && inside(probe(box.right - 6, box.top + box.height / 2));
     }"""))
+    work_width = page.evaluate("() => document.querySelector('#minipaint_canvas_work').getBoundingClientRect().width")
+    page.locator("#minipaint_canvas_panels").click()
+    r.check(f"{label}: Panels puts the rail away and the canvas takes the width", wait_for(page, lambda: debug(page)["rail"]["hidden"] and page.evaluate("() => document.querySelector('#minipaint_canvas_work').getBoundingClientRect().width") > work_width + 200 and tab_fits(page), timeout=6), str(debug(page)["rail"]))
+    page.locator("#minipaint_canvas_panels").click()
+    r.check(f"{label}: and brings it back", wait_for(page, lambda: not debug(page)["rail"]["hidden"] and rail_beside(page), timeout=6), str(debug(page)["rail"]))
     page.locator("#minipaint_canvas_options").locator("button").first.click()
-    r.check(f"{label}: opening the options shrinks the canvas instead of overflowing", wait_for(page, lambda: debug(page)["height"] < d["height"] - 20 and tab_fits(page), timeout=6), str((d["height"], debug(page)["height"], tab_fits(page))))
+    r.check(f"{label}: opening the options leaves the canvas alone: the rail scrolls inside its height", wait_for(page, lambda: page.evaluate("() => document.querySelector('#minipaint_canvas_destination').getBoundingClientRect().height > 0"), timeout=6) and abs(debug(page)["height"] - d["height"]) <= 2 and tab_fits(page) and rail_beside(page), str((d["height"], debug(page)["height"], debug(page)["rail"])))
     page.locator("#minipaint_canvas_options").locator("button").first.click()
-    r.check(f"{label}: closing them gives the height back", wait_for(page, lambda: abs(debug(page)["height"] - d["height"]) <= 2, timeout=6), str((d["height"], debug(page)["height"])))
+    time.sleep(0.4)
     r.check(f"{label}: the host's toolbar is visible and finger sized", page.evaluate(f"() => {{ const b = document.querySelector('#maxButton_{uuid}'); const s = b && getComputedStyle(b); return !!s && s.display !== 'none' && parseFloat(s.minHeight) >= 36; }}"))
     r.check(f"{label}: the brush controls of the toolbar are hidden", page.evaluate("() => getComputedStyle(document.querySelector('#minipaint_canvas_surface .forge-toolbar-box-b')).display === 'none'"))
 
@@ -284,8 +319,8 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     touch(page, [(cx - 40, cy, cx - 100, cy), (cx + 40, cy, cx + 100, cy)])
     pinched = debug(page)
     r.check(f"{label}: two fingers pinch to zoom", pinched["imgScale"] > after["imgScale"] * 1.5, str((after["imgScale"], pinched["imgScale"])))
-    page.locator("#minipaint_canvas_fit").click()
-    r.check(f"{label}: fit refits the image and the frame", wait_for(page, lambda: abs(debug(page)["imgScale"] - before["imgScale"]) < 0.01 and debug(page)["box"] == {"x0": 0, "y0": 0, "x1": 640, "y1": 480}))
+    page.locator(f"#centerButton_{uuid}").click()
+    r.check(f"{label}: the canvas's own fit button refits the image and the frame", wait_for(page, lambda: abs(debug(page)["imgScale"] - before["imgScale"]) < 0.01 and debug(page)["box"] == {"x0": 0, "y0": 0, "x1": 640, "y1": 480}))
 
     # ---- touch crop: a finger on a handle ----
     tl = handle_center(page, "tl")
@@ -299,9 +334,10 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     r.check(f"{label}: the canvas has the finger crop", wait_for(page, lambda: (debug(page)["orgWidth"], debug(page)["orgHeight"]) == cropped))
 
     # ---- mask: paint a stroke, erase part of it, send ----
-    page.locator("#minipaint_canvas_mode_mask").click()
+    pick_mode(page, "Mask")
     r.check(f"{label}: mask mode relabels send", wait_for(page, lambda: "Inpaint" in page.locator("#minipaint_canvas_send").inner_text()))
     r.check(f"{label}: mask mode hides the frame and arms the brush", wait_for(page, lambda: debug(page)["frameHidden"] and not debug(page)["noScribbles"] and debug(page)["mode"] == "mask"), str(debug(page)))
+    r.check(f"{label}: the rail shows the mask panel now", wait_for(page, lambda: page.evaluate("() => ['crop', 'mask', 'expand', 'layers'].map(m => document.querySelector('#minipaint_canvas_panel_' + m).getBoundingClientRect().height > 0)") == [False, True, False, False]) and rail_beside(page))
     img = image_box(page, uuid)
     y = img["y"] + img["height"] * 0.5
     drag(page, img["x"] + img["width"] * 0.2, y, img["x"] + img["width"] * 0.7, y, steps=20)
@@ -338,13 +374,13 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
 
     # ---- expand: back to the canvas, add 128 on the right, apply, send again ----
     click_tab(page, "Mini Paint")
-    page.locator("#minipaint_canvas_mode_expand").click()
+    pick_mode(page, "Expand")
     r.check(f"{label}: expand mode disables the brush", wait_for(page, lambda: debug(page)["noScribbles"] and debug(page)["mode"] == "expand"))
     page.locator("#minipaint_canvas_expand_right").click()
     r.check(f"{label}: side button previews the size", wait_for(page, lambda: "→" in page.evaluate("() => document.querySelector('#minipaint_canvas_expand_preview').innerText")))
     page.locator("#minipaint_canvas_expand_apply").click()
     r.check(f"{label}: expand applies", wait_for(page, lambda: "Expanded to" in status_text(page)), status_text(page))
-    r.check(f"{label}: expand lands in mask mode", wait_for(page, lambda: "Outpaint" in page.locator("#minipaint_canvas_send").inner_text() and debug(page)["mode"] == "mask"))
+    r.check(f"{label}: expand lands in mask mode, chips included", wait_for(page, lambda: "Outpaint" in page.locator("#minipaint_canvas_send").inner_text() and debug(page)["mode"] == "mask" and page.evaluate("() => { const c = document.querySelector('#minipaint_canvas_mode_pick input:checked'); return c && c.value === 'Mask'; }")))
     r.check(f"{label}: the canvas shows the wider image with its mask layer",
             wait_for(page, lambda: debug(page)["orgWidth"] == cropped[0] + 128 and (lambda fg: fg is not None and fg.size[0] == cropped[0] + 128 and fg.getchannel("A").getpixel((cropped[0] + 100, 5)) == 255)(canvas_layer(page, uuid, "logical_image_foreground"))), str(debug(page)))
     page.locator("#minipaint_canvas_send").click()
@@ -361,12 +397,12 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     page.locator("#minipaint_canvas_mask_invert").click()
     r.check(f"{label}: invert of nothing masks everything", wait_for(page, lambda: "Mask inverted" in status_text(page) and (lambda fg: fg is not None and fg.getchannel("A").getextrema() == (255, 255))(canvas_layer(page, uuid, "logical_image_foreground"))), status_text(page))
 
-    # ---- layers: the frame as a selection, a drag with the mouse and with a finger, the panel ----
+    # ---- layers: the frame as a selection, a drag with the mouse and with a finger, the list ----
     page.locator("#minipaint_canvas_mask_clear").click()
     wait_for(page, lambda: "Mask cleared" in status_text(page))
-    page.locator("#minipaint_canvas_mode_layers").click()
-    r.check(f"{label}: layers mode shows the frame as a selection and the layer menu", wait_for(page, lambda: debug(page)["mode"] == "layers" and not debug(page)["frameHidden"] and debug(page)["preview"]), str(debug(page)))
-    r.check(f"{label}: the layer menu lists the one layer", wait_for(page, lambda: page.locator("#minipaint_canvas_layer_pick input").first.input_value() == "Background"))
+    pick_mode(page, "Layers")
+    r.check(f"{label}: layers mode shows the frame as a selection and the layer panel", wait_for(page, lambda: debug(page)["mode"] == "layers" and not debug(page)["frameHidden"] and debug(page)["preview"]), str(debug(page)))
+    r.check(f"{label}: the layer list has the one layer, selected", wait_for(page, lambda: layer_rows(page) == [["Background", True, True, False]]), str(layer_rows(page)))
     before = debug(page)
     tl = handle_center(page, "tl")
     if tl:
@@ -374,7 +410,7 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     box = debug(page)["box"]
     page.locator("#minipaint_canvas_layer_new").click()
     r.check(f"{label}: a selection becomes a new layer without a reload", wait_for(page, lambda: "Layer 2 holds the selection" in status_text(page)) and debug(page)["loaded"] == before["loaded"], status_text(page))
-    r.check(f"{label}: the new layer is the active one in the menu", wait_for(page, lambda: page.locator("#minipaint_canvas_layer_pick input").first.input_value() == "Layer 2"))
+    r.check(f"{label}: the list shows it on top, selected, the background not", wait_for(page, lambda: layer_rows(page) == [["Layer 2", True, True, False], ["Background", False, False, False]]), str(layer_rows(page)))
     r.check(f"{label}: the browser got the layer to drag and the underlay", wait_for(page, lambda: debug(page)["preview"] and page.evaluate("() => document.querySelector('#minipaint_canvas_layer_underlay textarea').value.startsWith('data:image/png')")))
     # drag the layer with the mouse: the view is kept, the layer lands where it was dropped
     img = image_box(page, uuid)
@@ -391,25 +427,63 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     r.check(f"{label}: a finger drags the layer too", wait_for(page, lambda: (lambda l: bool(l) and abs(l[0] - (box["x0"] + 10)) <= 2 and abs(l[1] - (box["y0"] + 10)) <= 2)(page.evaluate("() => (document.querySelector('#minipaint_canvas_status').innerText.match(/ at \\((-?\\d+), (-?\\d+)\\)/) || []).slice(1).map(Number)"))), status_text(page))
     page.locator("#minipaint_canvas_undo").click()
     r.check(f"{label}: undo takes the move back", wait_for(page, lambda: "Undid move layer" in status_text(page) and "is at (" not in status_text(page).split("Undid")[0]), status_text(page))
-    # the panel: hide the background, merge down
-    page.locator("#minipaint_canvas_options").locator("button").first.click()
-    time.sleep(0.5)
-    page.locator("#minipaint_canvas_layer_visible label", has_text="Background").first.click()
-    r.check(f"{label}: hiding a layer reloads the composite", wait_for(page, lambda: "Hidden: Background" in status_text(page)), status_text(page))
+    r.check(f"{label}: and reloads the composite", wait_for(page, lambda: debug(page)["loaded"] == before["loaded"] + 3), str(debug(page)["loaded"]))
+    # the list: tap a name to select, the eye to hide, the box to select several, the arrows to reorder
+    layer_row(page, "Background").locator(".minipaint-layer-pick").click()
+    r.check(f"{label}: tapping a layer in the list selects it", wait_for(page, lambda: "Background is the active layer" in status_text(page) and layer_rows(page) == [["Layer 2", False, False, False], ["Background", True, True, False]]), str(layer_rows(page)))
+    time.sleep(0.6)
+    r.check(f"{label}: selecting did not reload the canvas", debug(page)["loaded"] == before["loaded"] + 3, str(debug(page)["loaded"]))
+    layer_row(page, "Background").locator(".minipaint-layer-eye").click()
+    r.check(f"{label}: the eye hides a layer and reloads the composite", wait_for(page, lambda: "Background hidden" in status_text(page)), status_text(page))
     r.check(f"{label}: the hidden layer is transparent on the canvas", wait_for(page, lambda: (lambda bg: bg is not None and bg.getchannel("A").getpixel((2, 2)) == 0)(canvas_layer(page, uuid, "logical_image_background"))))
-    page.locator("#minipaint_canvas_layer_visible label", has_text="Background").first.click()
-    wait_for(page, lambda: "Every layer is visible" in status_text(page))
-    page.locator("#minipaint_canvas_options").locator("button").first.click()
+    r.check(f"{label}: the list marks it hidden", wait_for(page, lambda: layer_rows(page)[1] == ["Background", True, True, True]), str(layer_rows(page)))
+    layer_row(page, "Background").locator(".minipaint-layer-eye").click()
+    r.check(f"{label}: the eye shows it again", wait_for(page, lambda: "Background shown" in status_text(page) and layer_rows(page)[1] == ["Background", True, True, False]), status_text(page))
+    layer_row(page, "Layer 2").locator(".minipaint-layer-check").click()
+    r.check(f"{label}: the box adds a second layer to the selection", wait_for(page, lambda: "2 layers selected" in status_text(page) and layer_rows(page) == [["Layer 2", True, True, False], ["Background", True, False, False]]), str(layer_rows(page)))
+    r.check(f"{label}: the drag preview covers both, with no underlay", wait_for(page, lambda: page.evaluate("() => { const p = JSON.parse(document.querySelector('#minipaint_canvas_layer_preview textarea').value || '{}'); return p.name === 'Background, Layer 2' && document.querySelector('#minipaint_canvas_layer_underlay textarea').value === ''; }")))
+    layer_row(page, "Background").locator(".minipaint-layer-check").click()
+    r.check(f"{label}: and takes it out again", wait_for(page, lambda: layer_rows(page) == [["Layer 2", True, True, False], ["Background", False, False, False]]), str(layer_rows(page)))
+    loaded = debug(page)["loaded"]
+    layer_row(page, "Layer 2").locator(".minipaint-layer-down").click()
+    r.check(f"{label}: the arrow moves a layer down the stack", wait_for(page, lambda: "Layer 2 moved down" in status_text(page) and [row[0] for row in layer_rows(page)] == ["Background", "Layer 2"]), str(layer_rows(page)))
+    r.check(f"{label}: at the bottom the arrow is disabled", page.evaluate("() => document.querySelector(\"#minipaint_canvas_layer_list .minipaint-layer[data-name='Layer 2'] .minipaint-layer-down\").disabled"))
+    wait_for(page, lambda: debug(page)["loaded"] == loaded + 1)
+    loaded = debug(page)["loaded"]
+    layer_row(page, "Layer 2").locator(".minipaint-layer-up").click()
+    r.check(f"{label}: and up again", wait_for(page, lambda: "Layer 2 moved up" in status_text(page) and [row[0] for row in layer_rows(page)] == ["Layer 2", "Background"]), str(layer_rows(page)))
+    r.check(f"{label}: reordering reloads the composite with the view kept", wait_for(page, lambda: debug(page)["loaded"] == loaded + 1 and abs(debug(page)["imgScale"] - scale) < 0.001), str(debug(page)))
+    # center brings a layer dragged away back into view
+    drag(page, cx, cy, cx + 400, cy + 300, steps=10)
+    r.check(f"{label}: a layer can be dragged off the canvas", wait_for(page, lambda: "Moved Layer 2" in status_text(page)), status_text(page))
+    page.locator("#minipaint_canvas_layer_center").click()
+    r.check(f"{label}: Center brings it back to the middle", wait_for(page, lambda: "Centered Layer 2" in status_text(page) and (lambda l: bool(l) and abs(l[0] - (cropped[0] + 128 - (box["x1"] - box["x0"])) // 2) <= 1)(page.evaluate("() => (document.querySelector('#minipaint_canvas_status').innerText.match(/ at \\((-?\\d+), (-?\\d+)\\)/) || []).slice(1).map(Number)"))), status_text(page))
     page.locator("#minipaint_canvas_layer_merge").click()
-    r.check(f"{label}: merge down leaves one layer", wait_for(page, lambda: "merged into Background" in status_text(page) and page.locator("#minipaint_canvas_layer_pick input").first.input_value() == "Background"), status_text(page))
+    r.check(f"{label}: merge with one layer selected merges down, leaving one layer", wait_for(page, lambda: "merged into Background" in status_text(page) and layer_rows(page) == [["Background", True, True, False]]), status_text(page))
     page.locator("#minipaint_canvas_undo").click()
     r.check(f"{label}: undo restores the two layers", wait_for(page, lambda: "Undid merge down" in status_text(page) and "2 layers" in status_text(page)), status_text(page))
     page.locator("#minipaint_canvas_layer_delete").click()
-    r.check(f"{label}: delete removes the active layer", wait_for(page, lambda: "Layer 2 deleted" in status_text(page)), status_text(page))
+    r.check(f"{label}: delete removes the selected layer", wait_for(page, lambda: "Layer 2 deleted" in status_text(page)), status_text(page))
+
+    # ---- send to ImageStitch: the reference gallery gets the image, its box is ticked, the tab switches ----
+    page.locator("#minipaint_canvas_options").locator("button").first.click()
+    time.sleep(0.4)
+    pick_chip(page, "#minipaint_canvas_destination", "ImageStitch (txt2img)")
+    r.check(f"{label}: choosing a destination relabels Send", wait_for(page, lambda: page.locator("#minipaint_canvas_send").inner_text().strip() == "Send to ImageStitch (txt2img)"), page.locator("#minipaint_canvas_send").inner_text())
+    page.locator("#minipaint_canvas_send").click()
+    r.check(f"{label}: send reports ImageStitch", wait_for(page, lambda: "Sent to ImageStitch (txt2img)" in status_text(page)), status_text(page))
+    r.check(f"{label}: and switches to txt2img", wait_for(page, lambda: visible_panels(page) == ["tab_txt2img"]), str(visible_panels(page)))
+    r.check(f"{label}: the reference gallery holds the image, alone", wait_for(page, lambda: page.locator("#script_txt2img_imagestitch_integrated_ref_latent .thumbnail-item").count() == 1), str(page.locator("#script_txt2img_imagestitch_integrated_ref_latent .thumbnail-item").count()))
+    r.check(f"{label}: the ImageStitch box was ticked from the browser and its change fired", wait_for(page, lambda: page.evaluate("() => { const c = document.querySelector('#input-accordion-0-checkbox input'); const a = document.getElementById('input-accordion-0'); return !!c && c.checked && !!a && a.classList.contains('probe-open'); }")))
+    r.check(f"{label}: the img2img box was left alone", not page.evaluate("() => document.querySelector('#input-accordion-1-checkbox input').checked"))
+    click_tab(page, "Mini Paint")
+    page.locator("#minipaint_canvas_send").click()
+    r.check(f"{label}: a second send replaces the reference rather than adding one", wait_for(page, lambda: visible_panels(page) == ["tab_txt2img"]) and wait_for(page, lambda: page.locator("#script_txt2img_imagestitch_integrated_ref_latent .thumbnail-item").count() == 1, timeout=4) and page.locator("#script_txt2img_imagestitch_integrated_ref_latent .thumbnail-item").count() == 1)
+    click_tab(page, "Mini Paint")
+    pick_chip(page, "#minipaint_canvas_destination", "Auto")
+    r.check(f"{label}: back to Auto (an expanded picture goes to Inpaint as an outpaint)", wait_for(page, lambda: page.locator("#minipaint_canvas_send").inner_text().strip() == "Send Outpaint to img2img"), page.locator("#minipaint_canvas_send").inner_text())
 
     # ---- reset, then a picture opened on the canvas itself ----
-    page.locator("#minipaint_canvas_more").locator("button").first.click()
-    time.sleep(0.3)
     page.locator("#minipaint_canvas_reset").click()
     r.check(f"{label}: reset goes back to the received image", wait_for(page, lambda: "as it arrived" in status_text(page) and debug(page)["orgWidth"] == 640 and debug(page)["mode"] == "crop"), status_text(page))
     if with_upload:

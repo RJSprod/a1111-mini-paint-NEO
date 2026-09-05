@@ -84,6 +84,13 @@ def run() -> Results:
                    "minipaint_canvas_mode", "minipaint_canvas_crop_box", "minipaint_canvas_original_size",
                    "minipaint_canvas_wait", "minipaint_canvas_switch", "minipaint_canvas_event",
                    "minipaint_canvas_quick_crop", "minipaint_canvas_quick_mask", "minipaint_canvas_quick_expand",
+                   "minipaint_canvas_quick_layers", "minipaint_canvas_mode_layers", "minipaint_canvas_panel_layers",
+                   "minipaint_canvas_layer_pick", "minipaint_canvas_layer_new", "minipaint_canvas_layer_merge",
+                   "minipaint_canvas_layer_delete", "minipaint_canvas_layer_visible", "minipaint_canvas_layer_opacity",
+                   "minipaint_canvas_layer_name", "minipaint_canvas_layer_rename", "minipaint_canvas_layer_up",
+                   "minipaint_canvas_layer_down", "minipaint_canvas_layer_duplicate", "minipaint_canvas_layer_flatten",
+                   "minipaint_canvas_layer_move", "minipaint_canvas_layer_preview", "minipaint_canvas_layer_underlay",
+                   "minipaint_canvas_mask_to_layer",
                    "minipaint_canvas_options", "minipaint_canvas_panel_crop", "minipaint_canvas_panel_mask",
                    "minipaint_canvas_panel_expand", "minipaint_canvas_more",
                    "txt2img_send_to_minipaint", "img2img_send_to_minipaint", "extras_send_to_minipaint",
@@ -193,11 +200,28 @@ def run() -> Results:
 
     for elem_id in ("minipaint_canvas_undo", "minipaint_canvas_redo", "minipaint_canvas_reset", "minipaint_canvas_expand_apply"):
         d = by_elem(elem_id)
-        r.check(f"{elem_id} is the same three-step chain", len(d) == 1 and len(chain(d[0])) == 3 and "mark()" in d[0]["js"])
+        r.check(f"{elem_id} is the same three-step chain", len(d) == 1 and len(chain(d[0])) == 3 and "mark(" in d[0]["js"])
     for elem_id, helper in (("minipaint_canvas_undo", "undoStroke"), ("minipaint_canvas_redo", "redoStroke")):
         d = by_elem(elem_id)[0]
         r.check(f"{elem_id} tries the canvas's stroke history first and says which it did",
                 helper in d["js"] and component("minipaint_canvas_event")["id"] in d["inputs"])
+        r.check(f"{elem_id} asks the browser to keep the view when the size does not change", "mark(true)" in d["js"])
+
+    # -- layers: the selection, the drag's landing, and every panel action are the same chain
+    new_layer = by_elem("minipaint_canvas_layer_new")
+    r.check("new from selection reads the frame and keeps the view", len(new_layer) == 1 and "cropBox()" in new_layer[0]["js"] and "mark(true)" in new_layer[0]["js"] and len(chain(new_layer[0])) == 3)
+    move = deps_targeting(component("minipaint_canvas_layer_move")["id"], "input")
+    r.check("a dropped layer reaches the server through the hidden textbox, keeping the view", len(move) == 1 and move[0]["backend_fn"] and "mark(true)" in move[0]["js"] and len(chain(move[0])) == 3 and background["id"] in move[0]["inputs"])
+    for elem_id, trigger in (("minipaint_canvas_layer_merge", "click"), ("minipaint_canvas_layer_delete", "click"), ("minipaint_canvas_layer_up", "click"),
+                             ("minipaint_canvas_layer_down", "click"), ("minipaint_canvas_layer_duplicate", "click"), ("minipaint_canvas_layer_flatten", "click"),
+                             ("minipaint_canvas_layer_rename", "click"), ("minipaint_canvas_mask_to_layer", "click"),
+                             ("minipaint_canvas_layer_visible", "input"), ("minipaint_canvas_layer_opacity", "release")):
+        d = deps_targeting(component(elem_id)["id"], trigger)
+        r.check(f"{elem_id} is a view-keeping three-step chain", len(d) == 1 and "mark(true)" in d[0]["js"] and len(chain(d[0])) == 3)
+    pick = deps_targeting(component("minipaint_canvas_layer_pick")["id"], "input")
+    r.check("picking a layer is one backend step that does not touch the canvas", len(pick) == 1 and pick[0]["backend_fn"] and background["id"] not in pick[0]["outputs"] and status_id in pick[0]["outputs"])
+    layer_widgets = {component(f"minipaint_canvas_layer_{name}")["id"] for name in ("pick", "visible", "opacity", "name", "preview", "underlay")}
+    r.check("every mode switch also refreshes the layer widgets", all(layer_widgets <= set(by_elem(f"minipaint_canvas_mode_{mode}")[0]["outputs"]) for mode in ("crop", "mask", "expand", "layers")))
     opened = by_elem("minipaint_canvas_open", "upload")
     r.check("open is the same chain on upload", len(opened) == 1 and len(chain(opened[0])) == 3)
 

@@ -17,6 +17,10 @@
  *   - Undo and Redo of strokes, before the server's structural steps,
  *   - a canvas height that fits what the window has left, so nothing
  *     scrolls and nothing floats over the canvas,
+ *   - in Layers mode, dragging the active layer with a live preview and
+ *     handing the offset it settled on to the server,
+ *   - keeping the zoom and position across a reload that does not change
+ *     the picture's size,
  *   - focus mode.
  *
  * Every other function is called from a Gradio event on a user action, and
@@ -35,6 +39,9 @@ window.minipaintCanvas = (function () {
     const LOAD_TIMEOUT = 8000;
     const MIN_HEIGHT = 240;
     const BOTTOM_ROOM = 8;
+    const LAYER_MOVE_ID = "minipaint_canvas_layer_move";
+    const LAYER_PREVIEW_ID = "minipaint_canvas_layer_preview";
+    const LAYER_UNDERLAY_ID = "minipaint_canvas_layer_underlay";
 
     const S = {
         instance: null,
@@ -49,9 +56,16 @@ window.minipaintCanvas = (function () {
         contrast: false,
         loaded: 0,
         marker: 0,
+        keepView: null,
         serverLoad: false,
         echoValue: null,
         trimAfterDrawing: false,
+        imageEl: null,
+        overlay: null,
+        layerDrag: null,
+        underlaySrc: "",
+        underlaySwapped: false,
+        previewCache: { text: null, data: null },
         mode: "crop",
         tool: "Paint",
         aspect: 0,
@@ -126,6 +140,7 @@ window.minipaintCanvas = (function () {
         S.container = container;
         S.imageContainer = document.getElementById("imageContainer_" + uuid);
         S.drawingCanvas = document.getElementById("drawingCanvas_" + uuid);
+        S.imageEl = document.getElementById("image_" + uuid);
 
         // The canvas applies the mask opacity to its whole scribble layer on
         // the first stroke; applied now, a layer written from the server
@@ -133,6 +148,7 @@ window.minipaintCanvas = (function () {
         if (!S.contrast) { S.drawingCanvas.style.opacity = String(S.alpha / 100); }
 
         hookInstance(instance);
+        buildOverlay();
         buildFrame();
         bindGestures();
         watchLayout();
@@ -225,6 +241,10 @@ window.minipaintCanvas = (function () {
         const loadImage = i.loadImage.bind(i);
         i.loadImage = function (base64) {
             S.serverLoad = !!base64 && !!bind.target && base64 === bind.target.value;
+            // The picture about to be drawn is the answer to a dragged layer:
+            // stop putting the other layers in its place, keep the preview
+            // until it has been drawn.
+            S.underlaySwapped = false;
             return loadImage(base64);
         };
 
@@ -233,12 +253,23 @@ window.minipaintCanvas = (function () {
         const updateBackground = i.updateBackgroundImageData.bind(i);
         i.updateBackgroundImageData = function () {
             updateBackground();
+            const kept = restoreView();
+            endLayerDrag(false);
             S.echoValue = S.serverLoad && bind.target ? bind.target.value : null;
             S.loaded += 1;
             setTimeout(function () {
                 trimHistory();
-                refreshFrame(true);
+                refreshFrame(!kept);
             }, 0);
+        };
+
+        // The picture is redrawn on every pan and zoom; a layer preview and
+        // the other layers standing in for the picture follow it.
+        const drawImage = i.drawImage.bind(i);
+        i.drawImage = function () {
+            drawImage();
+            if (S.underlaySwapped && S.underlaySrc && S.imageEl) { S.imageEl.src = S.underlaySrc; }
+            positionOverlay();
         };
 
         // A mask layer written from the server starts the stroke history,
@@ -262,9 +293,39 @@ window.minipaintCanvas = (function () {
         return !!S.instance;
     }
 
-    /** Note the moment before the server replaces the image. */
-    function mark() {
+    /**
+     * Note the moment before the server replaces the image. With ``keep``,
+     * remember the zoom and position too, to put back if the picture comes
+     * back the same size (a layer moved, an undo of one).
+     */
+    function mark(keep) {
         S.marker = S.loaded;
+        const i = S.instance;
+        S.keepView = (keep && i && i.img)
+            ? { imgX: i.imgX, imgY: i.imgY, imgScale: i.imgScale, w: i.orgWidth, h: i.orgHeight }
+            : null;
+    }
+
+    function restoreView() {
+        const k = S.keepView;
+        const i = S.instance;
+        S.keepView = null;
+        if (!k || !i || !i.img || i.orgWidth !== k.w || i.orgHeight !== k.h) { return false; }
+        i.imgX = k.imgX;
+        i.imgY = k.imgY;
+        i.imgScale = k.imgScale;
+        i.drawImage();
+        return true;
+    }
+
+    /** Write a value into one of this tab's hidden textboxes the way a user
+     * would, so the Gradio event bound to it fires. */
+    function sendInput(id, text) {
+        const target = document.querySelector("#" + id + " textarea");
+        if (!target) { return false; }
+        target.value = text;
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+        return true;
     }
 
     /**
@@ -345,7 +406,8 @@ window.minipaintCanvas = (function () {
     /* ------------------------------------------------------------------ */
 
     function onMode(mode) {
-        if (["crop", "mask", "expand"].indexOf(mode) === -1) { return; }
+        if (["crop", "mask", "expand", "layers"].indexOf(mode) === -1) { return; }
+        if (S.mode === "layers" && mode !== "layers") { endLayerDrag(true); }
         S.mode = mode;
         const i = S.instance;
         if (!i) { return; }
@@ -435,7 +497,7 @@ window.minipaintCanvas = (function () {
      * image (at the chosen aspect) when asked, else keep it where it is. */
     function refreshFrame(reset) {
         if (!S.frame) { return; }
-        const show = S.mode === "crop" && hasImage();
+        const show = (S.mode === "crop" || S.mode === "layers") && hasImage();
         S.frame.hidden = !show;
         if (show) { layoutFrame(reset || !S.frameRect); }
         updateReadout();
@@ -569,6 +631,110 @@ window.minipaintCanvas = (function () {
     }
 
     /* ------------------------------------------------------------------ */
+    /* Dragging a layer                                                      */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * In Layers mode the server keeps two hidden textboxes filled: the
+     * active layer (picture, offset, size, opacity) and the other layers
+     * composited without it. A drag shows the first as an overlay over the
+     * second, moves the overlay with the finger, and hands the offset it
+     * settled on to the server, which answers with the new composite.
+     */
+    function buildOverlay() {
+        const img = document.createElement("img");
+        img.className = "minipaint-layer-preview";
+        img.hidden = true;
+        img.draggable = false;
+        S.imageContainer.appendChild(img);
+        S.overlay = img;
+    }
+
+    function layerPreview() {
+        const target = document.querySelector("#" + LAYER_PREVIEW_ID + " textarea");
+        const text = target ? target.value : "";
+        if (!text) { return null; }
+        if (S.previewCache.text !== text) {
+            let data = null;
+            try { data = JSON.parse(text); } catch (e) { data = null; }
+            S.previewCache = { text: text, data: data };
+        }
+        return S.previewCache.data;
+    }
+
+    function underlaySource() {
+        const target = document.querySelector("#" + LAYER_UNDERLAY_ID + " textarea");
+        return target ? target.value : "";
+    }
+
+    function positionOverlay() {
+        const i = S.instance;
+        const d = S.layerDrag;
+        if (!S.overlay || S.overlay.hidden || !i || !d) { return; }
+        const s = i.imgScale;
+        S.overlay.style.left = (i.imgX + (d.preview.x + d.dx) * s) + "px";
+        S.overlay.style.top = (i.imgY + (d.preview.y + d.dy) * s) + "px";
+        S.overlay.style.width = (d.preview.w * s) + "px";
+        S.overlay.style.height = (d.preview.h * s) + "px";
+    }
+
+    function startLayerDrag(event) {
+        const preview = layerPreview();
+        if (!preview || !preview.src || !S.overlay || !S.instance || !S.instance.img) { return false; }
+        S.layerDrag = { id: event.pointerId, x: event.clientX, y: event.clientY, dx: 0, dy: 0, preview: preview, done: false };
+        if (S.overlay.getAttribute("src") !== preview.src) { S.overlay.src = preview.src; }
+        S.overlay.style.opacity = String((preview.opacity == null ? 100 : preview.opacity) / 100);
+        S.overlay.hidden = false;
+        const under = underlaySource();
+        if (under && S.imageEl) {
+            S.underlaySrc = under;
+            S.underlaySwapped = true;
+            S.imageEl.src = under;
+        }
+        positionOverlay();
+        try { S.container.setPointerCapture(event.pointerId); } catch (e) { /* optional */ }
+        return true;
+    }
+
+    function moveLayerDrag(event) {
+        const d = S.layerDrag;
+        const s = S.instance.imgScale;
+        d.dx = (event.clientX - d.x) / s;
+        d.dy = (event.clientY - d.y) / s;
+        positionOverlay();
+    }
+
+    function finishLayerDrag() {
+        const d = S.layerDrag;
+        if (!d || d.done) { return; }
+        const dx = Math.round(d.dx);
+        const dy = Math.round(d.dy);
+        if (!dx && !dy) {
+            endLayerDrag(true);
+            return;
+        }
+        d.dx = dx;
+        d.dy = dy;
+        d.done = true;
+        positionOverlay();
+        // The preview stays where the finger left it until the server's
+        // composite has been drawn. The time stamp makes a repeated offset
+        // still count as a change.
+        if (!sendInput(LAYER_MOVE_ID, JSON.stringify({ dx: dx, dy: dy, t: Date.now() }))) { endLayerDrag(true); }
+    }
+
+    /** Put the canvas back the way it was (or leave it, when the server's
+     * new picture is what is being drawn). */
+    function endLayerDrag(redraw) {
+        if (!S.layerDrag && !S.underlaySwapped && (!S.overlay || S.overlay.hidden)) { return; }
+        S.layerDrag = null;
+        if (S.overlay) { S.overlay.hidden = true; }
+        const swapped = S.underlaySwapped;
+        S.underlaySwapped = false;
+        if (redraw && swapped && S.instance) { S.instance.drawImage(); }
+    }
+
+    /* ------------------------------------------------------------------ */
     /* Touch gestures                                                        */
     /* ------------------------------------------------------------------ */
 
@@ -637,8 +803,12 @@ window.minipaintCanvas = (function () {
                 // Captured, so the finger's release reaches this container
                 // even when it is lifted somewhere else on the page.
                 try { c.setPointerCapture(event.pointerId); } catch (e) { /* optional */ }
+                if (S.layerDrag && !S.layerDrag.done) { endLayerDrag(true); }
                 startPinch();
                 return;
+            }
+            if (S.pointers.size === 1 && S.mode === "layers" && !S.layerDrag) {
+                if (startLayerDrag(event)) { event.preventDefault(); return; }
             }
             if (S.pointers.size === 1 && canPan()) {
                 S.pan = { id: event.pointerId, x: event.clientX, y: event.clientY, imgX: S.instance.imgX, imgY: S.instance.imgY };
@@ -654,6 +824,11 @@ window.minipaintCanvas = (function () {
                 updatePinch();
                 return;
             }
+            if (S.layerDrag && !S.layerDrag.done && S.layerDrag.id === event.pointerId) {
+                event.preventDefault();
+                moveLayerDrag(event);
+                return;
+            }
             if (S.pan && S.pan.id === event.pointerId) {
                 event.preventDefault();
                 S.instance.imgX = S.pan.imgX + (event.clientX - S.pan.x);
@@ -666,6 +841,7 @@ window.minipaintCanvas = (function () {
         function end(event) {
             S.pointers.delete(event.pointerId);
             if (S.pinch && S.pointers.size < 2) { S.pinch = null; }
+            if (S.layerDrag && !S.layerDrag.done && S.layerDrag.id === event.pointerId) { finishLayerDrag(); }
             if (S.pan && S.pan.id === event.pointerId) { S.pan = null; }
             try {
                 if (c.hasPointerCapture(event.pointerId)) { c.releasePointerCapture(event.pointerId); }
@@ -694,6 +870,8 @@ window.minipaintCanvas = (function () {
                  history: Array.isArray(i.history) ? i.history.length : 0, historyIndex: i.historyIndex, echo: !!S.echoValue,
                  height: parseFloat(S.container.style.height) || 0, fitting: S.fit,
                  frameHidden: !S.frame || S.frame.hidden,
+                 layerDrag: S.layerDrag ? { dx: S.layerDrag.dx, dy: S.layerDrag.dy, done: S.layerDrag.done } : null,
+                 overlay: !!(S.overlay && !S.overlay.hidden), keepView: !!S.keepView, preview: !!layerPreview(),
                  frame: S.frameRect ? Object.assign({}, S.frameRect) : null, box: cropBoxObject() };
     }
 
@@ -778,6 +956,7 @@ window.minipaintCanvas = (function () {
         canvasInput: canvasInput,
         undoStroke: undoStroke,
         redoStroke: redoStroke,
+        sendInput: sendInput,
         fitHeight: fitHeight,
         fit: fit,
         onMode: onMode,

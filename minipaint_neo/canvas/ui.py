@@ -1,10 +1,10 @@
 """The touch-first Canvas: the WebUI's own canvas, with ordinary Gradio
 controls around it.
 
-Layout, top to bottom: an action bar, the canvas, a status line, the three
-modes (Crop / Mask / Expand), one compact row of controls for the chosen
-mode, an "Options" accordion with the rest of that mode's settings, and a
-"More" accordion. Nothing floats over the canvas: the canvas takes the height
+Layout, top to bottom: an action bar, the canvas, a status line, the four
+modes (Crop / Mask / Expand / Layers), one compact row of controls for the
+chosen mode, an "Options" accordion with the rest of that mode's settings,
+and a "More" accordion. Nothing floats over the canvas: the canvas takes the height
 the window has left, so the whole tab is in view without scrolling. Buttons
 are Buttons and sliders are Sliders, so the host theme decides how everything
 looks; the canvas is the same one img2img uses.
@@ -34,9 +34,9 @@ from .. import settings
 from ..send_log import announce_send_log, log_quietly
 from . import document, host, imaging, outpaint, surface
 
-MODES = ("crop", "mask", "expand")
-MODE_LABELS = {"crop": "Crop", "mask": "Mask", "expand": "Expand"}
-OPTIONS_LABELS = {"crop": "Crop options", "mask": "Mask options", "expand": "Expand options"}
+MODES = ("crop", "mask", "expand", "layers")
+MODE_LABELS = {"crop": "Crop", "mask": "Mask", "expand": "Expand", "layers": "Layers"}
+OPTIONS_LABELS = {"crop": "Crop options", "mask": "Mask options", "expand": "Expand options", "layers": "Layer options"}
 ASPECTS = ["Free", "Original", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "Custom"]
 TOOLS = ["Paint", "Erase", "Move"]
 DESTINATIONS = ["Auto", "img2img", "Inpaint", "Extras"]
@@ -73,6 +73,12 @@ CROP_JS = (
     f"(bg, fg, state, mode, box) => {{ if ({_JS}) {_JS}.mark(); "
     f"return [bg, fg, state, mode, {_JS} ? {_JS}.cropBox() : '']; }}"
 )
+# The frame as a selection: the same box, but the view is kept, because the
+# picture does not change size.
+SELECT_JS = (
+    f"(bg, fg, state, mode, box) => {{ if ({_JS}) {_JS}.mark(true); "
+    f"return [bg, fg, state, mode, {_JS} ? {_JS}.cropBox() : '']; }}"
+)
 PICK_JS = (
     f"(gallery, state, mode) => {{ if ({_JS}) {_JS}.mark(); "
     f"return [{_JS} ? {_JS}.pickGalleryImage(gallery) : null, state, mode]; }}"
@@ -89,18 +95,21 @@ CANVAS_INPUT_JS = (
 # then a structural step on the server; the third input says which happened.
 UNDO_JS = (
     f"(state, mode, kind) => {{ const done = {_JS} ? {_JS}.undoStroke() : false; "
-    f"if ({_JS}) {_JS}.mark(); return [state, mode, done ? 'stroke' : 'document']; }}"
+    f"if ({_JS}) {_JS}.mark(true); return [state, mode, done ? 'stroke' : 'document']; }}"
 )
 REDO_JS = (
     f"(state, mode, kind) => {{ const done = {_JS} ? {_JS}.redoStroke() : false; "
-    f"if ({_JS}) {_JS}.mark(); return [state, mode, done ? 'stroke' : 'document']; }}"
+    f"if ({_JS}) {_JS}.mark(true); return [state, mode, done ? 'stroke' : 'document']; }}"
 )
 
 
-def _mark_js(input_count: int) -> str:
+def _mark_js(input_count: int, keep: bool = False) -> str:
     """A pass-through that notes the moment before the image is replaced, so
-    the wait step can tell a fresh load from the last one."""
-    return f"(...args) => {{ if ({_JS}) {_JS}.mark(); return args.slice(0, {input_count}); }}"
+    the wait step can tell a fresh load from the last one. ``keep`` asks the
+    browser to keep its zoom and position when the picture comes back the
+    same size (a layer moved, an undo of one)."""
+    flag = "true" if keep else ""
+    return f"(...args) => {{ if ({_JS}) {_JS}.mark({flag}); return args.slice(0, {input_count}); }}"
 
 
 # The host's img2img and Inpaint inputs are its own hidden image textboxes.
@@ -133,9 +142,11 @@ def _noop(*_args):
 
 
 def _status(message: str, notes: typing.Sequence[str] = ()) -> str:
-    lines = [message] if message else []
-    lines.extend(f"<small>{note}</small>" for note in notes if note)
-    return "  \n".join(lines)
+    """One line, always: the status never changes height, so the canvas
+    above it never has to refit. Notes follow the message, small."""
+    parts = [message] if message else []
+    parts.extend(f"<small>{note}</small>" for note in notes if note)
+    return " ".join(parts)
 
 
 def send_label(has_mask: bool, has_expansion: bool, mode: str) -> str:
@@ -179,11 +190,12 @@ class TouchCanvas:
         """The mask as the scribble layer the canvases show."""
         return imaging.foreground_layer(mask, size, self.mask_color, self.mask_style["contrast"])
 
-    MODE_COUNT = 13
+    MODE_COUNT = 1 + 3 * len(MODES) + 3 + 6
 
     def _mode_updates(self, mode: str, doc: document.Document) -> tuple:
         """The mode textbox, the quick row and options panel of each mode,
-        the three mode buttons, the send label, the tool, the options label."""
+        the mode buttons, the send label, the tool, the options label, and
+        the layer widgets."""
         return (
             mode,
             *(gr.update(visible=mode == each) for each in MODES),
@@ -192,7 +204,28 @@ class TouchCanvas:
             gr.update(value=send_label(doc.has_mask, doc.has_expansion, mode)),
             gr.update(value="Paint") if mode == "mask" else gr.skip(),
             gr.update(label=OPTIONS_LABELS[mode]),
+            *self._layer_updates(doc, mode),
         )
+
+    def _layer_updates(self, doc: document.Document, mode: str) -> list:
+        """The layer menu, the visible-layers chips, the opacity and name of
+        the active layer, and - in Layers mode, when they changed - what the
+        browser needs to drag the active layer: the layer itself and the
+        other layers composited under it."""
+        names = doc.layer_names()
+        active = doc.active_layer
+        updates = [
+            gr.update(choices=names, value=active.name if active else None),
+            gr.update(choices=names, value=doc.visible_names()),
+            gr.update(value=active.opacity if active else 100),
+            gr.update(value=active.name if active else ""),
+        ]
+        if mode == "layers" and doc.has_image and doc.preview_key() != doc.preview_sent:
+            doc.preview_sent = doc.preview_key()
+            updates += [doc.preview_payload(), doc.underlay_payload()]
+        else:
+            updates += [gr.skip(), gr.skip()]
+        return updates
 
     def _info(
         self,
@@ -213,11 +246,10 @@ class TouchCanvas:
                 notes.append(f"{size} megapixels is a lot for a browser canvas, especially on a tablet")
 
         summary = f"**{doc.describe()}**"
+        if doc.has_image and (mode == "layers" or len(doc.layers) > 1) and doc.active_layer is not None:
+            summary += f" · {doc.active_layer.describe()}"
         if message:
             summary += f" — {message}"
-        if doc.has_image:
-            target = resolve_destination("Auto", doc.has_mask, doc.has_expansion)
-            summary += f" <small>Auto sends to {DESTINATION_LABELS[target]}.</small>"
 
         return (
             doc,
@@ -238,9 +270,14 @@ class TouchCanvas:
         *,
         sides: typing.Sequence[int] = (0, 0, 0, 0),
         reset_aspect: bool = True,
+        reload: bool = True,
     ) -> tuple:
         """Push the document into the canvas: the image now, the mask layer
-        in the step that follows the canvas having loaded it."""
+        in the step that follows the canvas having loaded it. A step that
+        changed the layers without changing what the canvas shows (a layer
+        made from a selection, a rename) leaves the canvas alone."""
+        if not reload:
+            return (gr.skip(), gr.skip(), *self._info(doc, mode, message, notes, sides=sides, reset_aspect=False))
         background = doc.image if doc.image is not None else None
         foreground = gr.skip() if doc.has_mask else None
         return (
@@ -342,7 +379,7 @@ class TouchCanvas:
             return self._unchanged(doc, mode, "The frame already covers the whole image — nothing to crop.")
 
         doc.checkpoint("crop")
-        doc.commit(image.crop(box), mask.crop(box) if mask is not None else None)
+        doc.crop(box, mask)
         return self._commit(doc, mode, f"Cropped to {doc.image.width} × {doc.image.height}.", notes)
 
     # -- callbacks: mask ----------------------------------------------------
@@ -404,14 +441,14 @@ class TouchCanvas:
 
         sides = self._sides((left, right, top, bottom), snap_choice)
         try:
-            expanded, new_mask, info = outpaint.expand(image, mask, sides, int(overlap or 0), fill)
+            expanded, new_mask, info = outpaint.expand(doc.base_full(), mask, sides, int(overlap or 0), fill)
         except ValueError as error:
             return self._unchanged(doc, mode, str(error), notes)
 
         if info["overlap"]:
             notes.append(f"the mask reaches {info['overlap']}px back into the original so the model has room to blend")
         doc.checkpoint("expand")
-        doc.commit(expanded, new_mask)
+        doc.expand(sides, expanded, new_mask)
         doc.has_expansion = True
         doc.expansion = dict(info)
         return self._commit(
@@ -460,6 +497,153 @@ class TouchCanvas:
             return self._layer(doc.mask, doc.image.size)
         return gr.skip()
 
+    # -- callbacks: layers ----------------------------------------------------
+
+    def pick_layer(self, name, state, mode):
+        doc = document.ensure(state)
+        names = doc.layer_names()
+        if name in names:
+            doc.active = names.index(name)
+        return self._info(doc, mode, f"{name} is the active layer." if name in names else "")
+
+    def new_layer_from_selection(self, background, foreground, state, mode, box_raw):
+        """The active layer's pixels inside the frame become a layer of their own."""
+        doc = document.ensure(state)
+        image, mask, notes = self._sync(doc, background, foreground)
+        if image is None:
+            return self._unchanged(doc, mode, "There is no image yet.")
+        box = imaging.crop_box(box_raw, doc.size)
+        if box is None:
+            return self._unchanged(doc, mode, "Put the frame over the part to copy first.")
+        source = doc.active_layer
+        piece = imaging.layer_pixels_in_box(source.image, source.x, source.y, box)
+        if piece is None:
+            return self._unchanged(doc, mode, f"{source.name} has nothing inside the frame.")
+        doc.checkpoint("new layer")
+        layer = doc.add_layer(piece[0], piece[1], piece[2])
+        return self._commit(
+            doc, "layers", f"{layer.name} holds the selection. Drag the image to move it; the rest stays put.", notes, reload=False
+        )
+
+    def mask_to_layer(self, background, foreground, state, mode):
+        """The active layer's pixels under the mask become a layer of their own."""
+        doc = document.ensure(state)
+        image, mask, notes = self._sync(doc, background, foreground)
+        if image is None:
+            return self._unchanged(doc, mode, "There is no image yet.")
+        if not doc.has_mask:
+            return self._unchanged(doc, mode, "Paint over the area to copy first.")
+        source = doc.active_layer
+        piece = imaging.layer_pixels_under_mask(source.image, source.x, source.y, doc.mask)
+        if piece is None:
+            return self._unchanged(doc, mode, f"{source.name} has no pixels under the mask.")
+        doc.checkpoint("new layer")
+        layer = doc.add_layer(piece[0], piece[1], piece[2])
+        return self._commit(doc, "layers", f"{layer.name} holds the masked area. Drag the image to move it.", notes, reload=False)
+
+    def move_layer(self, payload, background, foreground, state, mode):
+        """The browser dragged the active layer: the offset it settled on."""
+        import json as _json
+
+        doc = document.ensure(state)
+        try:
+            data = _json.loads(payload or "{}")
+            dx, dy = int(round(float(data.get("dx", 0)))), int(round(float(data.get("dy", 0))))
+        except (TypeError, ValueError, AttributeError):
+            dx = dy = 0
+        image, mask, notes = self._sync(doc, background, foreground)
+        if image is None or (dx == 0 and dy == 0):
+            return self._unchanged(doc, mode, "")
+        doc.checkpoint("move layer")
+        doc.move_active(dx, dy)
+        return self._commit(doc, mode, f"Moved {doc.active_layer.name}.", notes)
+
+    def layer_visibility(self, visible_names, background, foreground, state, mode):
+        doc = document.ensure(state)
+        image, mask, notes = self._sync(doc, background, foreground)
+        if image is None:
+            return self._unchanged(doc, mode, "There is no image yet.")
+        doc.checkpoint("layer visibility")
+        doc.set_visibility(visible_names or [])
+        hidden = [layer.name for layer in doc.layers if not layer.visible]
+        return self._commit(doc, mode, ("Hidden: " + ", ".join(hidden) + ".") if hidden else "Every layer is visible.", notes)
+
+    def layer_opacity(self, value, background, foreground, state, mode):
+        doc = document.ensure(state)
+        image, mask, notes = self._sync(doc, background, foreground)
+        if image is None:
+            return self._unchanged(doc, mode, "There is no image yet.")
+        doc.checkpoint("layer opacity")
+        doc.set_opacity(value)
+        layer = doc.active_layer
+        return self._commit(doc, mode, f"{layer.name} at {layer.opacity}% opacity.", notes)
+
+    def layer_rename(self, name, background, foreground, state, mode):
+        doc = document.ensure(state)
+        image, mask, notes = self._sync(doc, background, foreground)
+        if image is None:
+            return self._unchanged(doc, mode, "There is no image yet.")
+        if not str(name or "").strip():
+            return self._unchanged(doc, mode, "Type a name first.")
+        doc.checkpoint("rename layer")
+        new_name = doc.rename_active(str(name))
+        return self._commit(doc, mode, f"Renamed to {new_name}.", notes, reload=False)
+
+    def layer_order(self, step, background, foreground, state, mode):
+        doc = document.ensure(state)
+        image, mask, notes = self._sync(doc, background, foreground)
+        if image is None:
+            return self._unchanged(doc, mode, "There is no image yet.")
+        target = doc.active + step
+        if not (0 <= target < len(doc.layers)):
+            return self._unchanged(doc, mode, f"{doc.active_layer.name} is already at the {'top' if step > 0 else 'bottom'}.")
+        doc.checkpoint("layer order")
+        doc.reorder_active(step)
+        return self._commit(doc, mode, f"{doc.active_layer.name} moved {'up' if step > 0 else 'down'}.", notes)
+
+    def layer_merge(self, background, foreground, state, mode):
+        doc = document.ensure(state)
+        image, mask, notes = self._sync(doc, background, foreground)
+        if image is None:
+            return self._unchanged(doc, mode, "There is no image yet.")
+        if doc.active < 1:
+            return self._unchanged(doc, mode, f"There is nothing below {doc.active_layer.name} to merge into.")
+        upper = doc.active_layer.name
+        doc.checkpoint("merge down")
+        lower = doc.merge_down()
+        return self._commit(doc, mode, f"{upper} merged into {lower}.", notes)
+
+    def layer_delete(self, background, foreground, state, mode):
+        doc = document.ensure(state)
+        image, mask, notes = self._sync(doc, background, foreground)
+        if image is None:
+            return self._unchanged(doc, mode, "There is no image yet.")
+        if len(doc.layers) < 2:
+            return self._unchanged(doc, mode, "The last layer stays; Undo or Reset changes the picture.")
+        doc.checkpoint("delete layer")
+        removed = doc.delete_active()
+        return self._commit(doc, mode, f"{removed} deleted.", notes)
+
+    def layer_duplicate(self, background, foreground, state, mode):
+        doc = document.ensure(state)
+        image, mask, notes = self._sync(doc, background, foreground)
+        if image is None:
+            return self._unchanged(doc, mode, "There is no image yet.")
+        doc.checkpoint("duplicate layer")
+        copy = doc.duplicate_active()
+        return self._commit(doc, mode, f"{copy.name} is a copy of the layer below it.", notes)
+
+    def layer_flatten(self, background, foreground, state, mode):
+        doc = document.ensure(state)
+        image, mask, notes = self._sync(doc, background, foreground)
+        if image is None:
+            return self._unchanged(doc, mode, "There is no image yet.")
+        if len(doc.layers) < 2:
+            return self._unchanged(doc, mode, "There is only one layer.")
+        doc.checkpoint("flatten")
+        count = doc.flatten()
+        return self._commit(doc, mode, f"{count} layers flattened into one.", notes)
+
     # -- callbacks: send ----------------------------------------------------
 
     def send(self, background, foreground, state, mode, destination_choice, smoothing):
@@ -483,6 +667,8 @@ class TouchCanvas:
             return (*skips, *self._info(doc, mode, f"{label} was not found in this WebUI, so nothing was sent."), "", "")
 
         outgoing = imaging.to_rgba(doc.image)
+        if len(doc.layers) > 1:
+            notes.append(f"{len(doc.layers)} layers were flattened for {label}")
         if imaging.has_alpha_content(outgoing):
             fill_name = str(settings.get(settings.SEND_FILL, "Neutral gray"))
             color = imaging.fill_color(fill_name, outgoing)
@@ -600,12 +786,14 @@ class TouchCanvas:
             quick_crop, crop = self._crop_quick()
             quick_mask, mask = self._mask_quick()
             quick_expand, expand = self._expand_quick()
+            quick_layers, layers = self._layers_quick()
 
             # The rest of each mode's settings, behind one accordion.
             with gr.Accordion(OPTIONS_LABELS["crop"], open=False, elem_id=_id("options"), elem_classes=["minipaint-options"]) as options:
                 panel_crop = self._crop_panel(crop)
                 panel_mask = self._mask_panel(mask)
                 panel_expand = self._expand_panel(expand)
+                panel_layers = self._layers_panel(layers)
 
             destination, reset_btn, save_btn, save_file = self._more_panel()
 
@@ -617,6 +805,11 @@ class TouchCanvas:
             event_kind = gr.Textbox("", visible=False, elem_id=_id("event"))
             payload_box = gr.Textbox("", visible=False, elem_id=_id("payload"))
             mask_payload_box = gr.Textbox("", visible=False, elem_id=_id("mask_payload"))
+            # The browser drops a dragged layer here; the server answers with
+            # what it needs for the next drag.
+            layers["move"] = gr.Textbox("", visible=False, elem_id=_id("layer_move"))
+            layers["preview"] = gr.Textbox("", visible=False, elem_id=_id("layer_preview"))
+            layers["underlay"] = gr.Textbox("", visible=False, elem_id=_id("layer_underlay"))
 
         self._wire(
             state=state,
@@ -630,12 +823,13 @@ class TouchCanvas:
             focus_exit_btn=focus_exit_btn,
             send_btn=send_btn,
             mode_btns=mode_btns,
-            quick={"crop": quick_crop, "mask": quick_mask, "expand": quick_expand},
-            panels={"crop": panel_crop, "mask": panel_mask, "expand": panel_expand},
+            quick={"crop": quick_crop, "mask": quick_mask, "expand": quick_expand, "layers": quick_layers},
+            panels={"crop": panel_crop, "mask": panel_mask, "expand": panel_expand, "layers": panel_layers},
             options=options,
             crop=crop,
             mask=mask,
             expand=expand,
+            layers=layers,
             destination=destination,
             reset_btn=reset_btn,
             save_btn=save_btn,
@@ -679,6 +873,14 @@ class TouchCanvas:
             preview = gr.Markdown("No image yet.", elem_id=_id("expand_preview"), elem_classes=["minipaint-preview"])
         return column, {"amount": amount, "sides": side_buttons, "clear": clear_sides, "preview": preview, "apply": apply}
 
+    def _layers_quick(self):
+        with gr.Row(elem_id=_id("quick_layers"), elem_classes=["minipaint-quick"], visible=False) as row:
+            pick = gr.Dropdown([], value=None, label="Layer", show_label=False, elem_id=_id("layer_pick"), elem_classes=["minipaint-layer-pick"])
+            new = gr.Button("New from selection", variant="primary", elem_id=_id("layer_new"), elem_classes=["minipaint-quick-action"])
+            merge = gr.Button("Merge down", elem_id=_id("layer_merge"), elem_classes=["minipaint-quick-action"])
+            delete = gr.Button("Delete layer", elem_id=_id("layer_delete"), elem_classes=["minipaint-quick-action"])
+        return row, {"pick": pick, "new": new, "merge": merge, "delete": delete}
+
     # -- options panels ------------------------------------------------------
 
     def _crop_panel(self, crop):
@@ -695,6 +897,7 @@ class TouchCanvas:
 
     def _mask_panel(self, mask):
         with gr.Column(elem_id=_id("panel_mask"), elem_classes=["minipaint-panel"], visible=False) as panel:
+            mask["to_layer"] = gr.Button("Masked area → new layer", elem_id=_id("mask_to_layer"))
             mask["smoothing"] = gr.Radio(
                 imaging.SMOOTHING_LEVELS,
                 value="Off",
@@ -727,6 +930,29 @@ class TouchCanvas:
             )
         return panel
 
+    def _layers_panel(self, layers):
+        with gr.Column(elem_id=_id("panel_layers"), elem_classes=["minipaint-panel"], visible=False) as panel:
+            layers["visible"] = gr.CheckboxGroup(
+                [], value=[], label="Visible layers", elem_id=_id("layer_visible"), elem_classes=["minipaint-chips", "minipaint-chips-wrap"]
+            )
+            with gr.Row():
+                layers["opacity"] = gr.Slider(0, 100, value=100, step=1, label="Opacity of the active layer", elem_id=_id("layer_opacity"))
+                layers["name"] = gr.Textbox("", label="Name of the active layer", elem_id=_id("layer_name"))
+                layers["rename"] = gr.Button("Rename", elem_id=_id("layer_rename"))
+            with gr.Row():
+                layers["up"] = gr.Button("Move up", elem_id=_id("layer_up"))
+                layers["down"] = gr.Button("Move down", elem_id=_id("layer_down"))
+                layers["duplicate"] = gr.Button("Duplicate", elem_id=_id("layer_duplicate"))
+                layers["flatten"] = gr.Button("Flatten all", elem_id=_id("layer_flatten"))
+            gr.Markdown(
+                "The frame is the selection: **New from selection** copies what the active layer has inside it into a "
+                "layer of its own; *Mask options → Masked area → new layer* does the same for a painted area. "
+                "In Layers mode one finger (or the left mouse button) drags the active layer; two fingers, the wheel "
+                "and the right button still pan and zoom. Sending flattens the visible layers.",
+                elem_classes=["minipaint-hint"],
+            )
+        return panel
+
     def _more_panel(self):
         with gr.Accordion("More", open=False, elem_id=_id("more")):
             with gr.Row():
@@ -751,6 +977,7 @@ class TouchCanvas:
         crop = parts["crop"]
         mask = parts["mask"]
         expand = parts["expand"]
+        layers = parts["layers"]
         quick = parts["quick"]
         panels = parts["panels"]
         mode_btns = parts["mode_btns"]
@@ -771,6 +998,12 @@ class TouchCanvas:
             send_btn,
             mask["tool"],
             parts["options"],
+            layers["pick"],
+            layers["visible"],
+            layers["opacity"],
+            layers["name"],
+            layers["preview"],
+            layers["underlay"],
         ]
         assert len(mode_outputs) == self.MODE_COUNT
         info_outputs = [state, status, expand["preview"], crop["aspect"], parts["original_size"], wait_flag, *mode_outputs]
@@ -779,10 +1012,10 @@ class TouchCanvas:
 
         quiet = {"show_progress": "hidden"}
 
-        def structural(event, fn, inputs, js=None):
+        def structural(event, fn, inputs, js=None, keep=False):
             """image -> wait for the canvas -> mask layer. See the module docstring."""
             return (
-                event(fn, inputs=inputs, outputs=commit_outputs, js=js or _mark_js(len(inputs)), **quiet)
+                event(fn, inputs=inputs, outputs=commit_outputs, js=js or _mark_js(len(inputs), keep), **quiet)
                 .then(_noop, js=WAIT_JS, inputs=[wait_flag], outputs=None, **quiet)
                 .then(self.commit_foreground, inputs=[state], outputs=[foreground], **quiet)
             )
@@ -834,6 +1067,21 @@ class TouchCanvas:
             self.apply_expand,
             canvas_inputs + side_inputs + [expand["overlap"], expand["fill"], expand["snap"]],
         )
+
+        # -- layers: selection to layer, the drag's landing, and the panel
+        structural(layers["new"].click, self.new_layer_from_selection, canvas_inputs + [parts["crop_box"]], js=SELECT_JS)
+        structural(mask["to_layer"].click, self.mask_to_layer, canvas_inputs, keep=True)
+        structural(layers["move"].input, self.move_layer, [layers["move"]] + canvas_inputs, keep=True)
+        layers["pick"].input(self.pick_layer, inputs=[layers["pick"], state, mode_state], outputs=info_outputs, **quiet)
+        structural(layers["visible"].input, self.layer_visibility, [layers["visible"]] + canvas_inputs, keep=True)
+        structural(layers["opacity"].release, self.layer_opacity, [layers["opacity"]] + canvas_inputs, keep=True)
+        structural(layers["rename"].click, self.layer_rename, [layers["name"]] + canvas_inputs, keep=True)
+        structural(layers["up"].click, lambda *args: self.layer_order(1, *args), canvas_inputs, keep=True)
+        structural(layers["down"].click, lambda *args: self.layer_order(-1, *args), canvas_inputs, keep=True)
+        structural(layers["merge"].click, self.layer_merge, canvas_inputs, keep=True)
+        structural(layers["delete"].click, self.layer_delete, canvas_inputs, keep=True)
+        structural(layers["duplicate"].click, self.layer_duplicate, canvas_inputs, keep=True)
+        structural(layers["flatten"].click, self.layer_flatten, canvas_inputs, keep=True)
 
         # -- open, history, reset
         structural(parts["open_btn"].upload, self.open_file, [parts["open_btn"], state, mode_state])

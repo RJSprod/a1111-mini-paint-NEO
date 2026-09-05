@@ -14,7 +14,7 @@ import traceback
 
 import gradio as gr
 
-from . import settings
+from . import diagnostics, settings
 from .legacy import legacy_ui
 
 TAB_LABEL = "Mini Paint"
@@ -96,11 +96,13 @@ def on_ui_tabs():
     """Build the one Canvas tab. Its label and id never change."""
     if settings.use_old_ui():
         print("MiniPaint: mounting the legacy miniPaint editor (Old UI is on).")
+        diagnostics.write("legacy miniPaint", "Use Old UI is on")
         return [(_legacy_tab(), TAB_LABEL, TAB_ID)]
 
     missing = _missing_components()
     if missing:
         print(f"MiniPaint: {missing}; mounting the legacy miniPaint editor.")
+        diagnostics.write("legacy miniPaint", missing)
         return [
             (
                 _legacy_tab(
@@ -115,6 +117,7 @@ def on_ui_tabs():
     try:
         with _keep_build_context():
             blocks = _touch_tab()
+        diagnostics.write("touch Canvas", "Use Old UI is off")
         return [(blocks, TAB_LABEL, TAB_ID)]
     except Exception as error:
         traceback.print_exc()
@@ -123,6 +126,7 @@ def on_ui_tabs():
             "loading the legacy miniPaint editor instead."
         )
         reason = f"{type(error).__name__}: {error}".strip()
+        diagnostics.write("legacy miniPaint", "the touch Canvas failed to build", error)
         return [
             (
                 _legacy_tab(

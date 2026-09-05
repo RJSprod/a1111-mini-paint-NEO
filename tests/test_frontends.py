@@ -29,13 +29,14 @@ def run() -> Results:
 
     settings.on_ui_settings()
     results.check("old-ui option registered", settings.USE_OLD_UI in shared.opts.data_labels)
-    results.check("old-ui default is the new UI", shared.opts.data[settings.USE_OLD_UI] is False)
+    results.check("the release default is the legacy editor",
+                  shared.opts.data[settings.USE_OLD_UI] is True)
     results.check("old-ui needs a reload", shared.opts.data_labels[settings.USE_OLD_UI].reload_ui is True)
     results.check("section is miniPaint / Canvas",
           shared.opts.data_labels[settings.USE_OLD_UI].section == ("minipaint_canvas", "miniPaint / Canvas"))
     results.check("every option is in that section",
           all(i.section == settings.SECTION for i in shared.opts.data_labels.values()))
-    results.check("use_old_ui reads False", settings.use_old_ui() is False)
+    results.check("use_old_ui reads True", settings.use_old_ui() is True)
     results.check("an unknown settings category is dropped rather than claimed",
                   settings._category("no-such-category") is None)
 
@@ -67,6 +68,11 @@ def run() -> Results:
     ignored = dropped(gr.ImageEditor.__init__, wanted)
     print(f"  (this Gradio ignores {ignored or 'nothing'} on ImageEditor)")
     results.check("unsupported args are filtered, not raised", ignored == ["show_fullscreen_button"], str(ignored))
+
+    # From here on the Canvas is switched on explicitly - it no longer ships
+    # as the default, so a test that wants it has to ask for it.
+    shared.opts.data[settings.USE_OLD_UI] = False
+    results.check("unchecking the setting selects the Canvas", settings.use_old_ui() is False)
 
     # ---- the mask survives a trip through the component ----
     # This is the contract the whole editor rests on: coverage goes out as a
@@ -126,6 +132,17 @@ def run() -> Results:
     targets = {d.get("targets") and d["targets"][0][1] for d in config["dependencies"]}
     results.check("an upload event exists", "upload" in targets, str(sorted(t for t in targets if t)))
     results.check("a change event exists", "change" in targets)
+
+    # The adapter must be loaded by the Canvas and by nothing else: an editor
+    # you can turn off has to be able to leave its browser code turned off too.
+    html_values = " ".join(
+        str(component["props"].get("value") or "")
+        for component in config["components"]
+        if component.get("type") == "html"
+    )
+    results.check("the Canvas loads its adapter", "canvas.js" in html_values)
+    results.check("and does so without a script tag Gradio would not run",
+                  "<script" not in html_values)
 
     # ---- legacy UI builds, and stays the same tab ----
     shared.opts.data[settings.USE_OLD_UI] = True
@@ -207,7 +224,14 @@ def run() -> Results:
         results.check("the environment can force the old UI", settings.use_old_ui() is True)
     finally:
         del os.environ[settings.OLD_UI_ENV]
-    results.check("and stops forcing it when unset", settings.use_old_ui() is False)
+    os.environ[settings.OLD_UI_ENV] = "0"
+    try:
+        results.check("the environment can also force the new UI",
+                      settings.use_old_ui() is False)
+    finally:
+        del os.environ[settings.OLD_UI_ENV]
+    results.check("and with nothing set it is the saved setting that decides",
+                  settings.use_old_ui() is shared.opts.data[settings.USE_OLD_UI])
 
     # ---- an argument this Gradio does not have costs the argument, not the tab ----
     from forge_canvas_ext.touch.gradio_compat import build

@@ -17,23 +17,48 @@ Extensions -> Available -> `Load from` -> search for `miniPaint` -> `Install`.
 
 | | |
 | --- | --- |
-| **Canvas** (default) | A single large `gr.ImageEditor` with ordinary Gradio controls around it. Touch-sized, theme-native, three tools. |
-| **Legacy miniPaint** | The original editor in its iframe, with the bridge behaviour it has always had. |
+| **Legacy miniPaint** (default) | The original editor in its iframe, with the bridge behaviour it has always had. |
+| **Canvas** | A single large `gr.ImageEditor` with ordinary Gradio controls around it. Touch-sized, theme-native, three tools. |
 
 Pick one in **Settings -> miniPaint / Canvas -> Use Old UI (legacy
 miniPaint)**, then **Reload UI**. The choice is a saved WebUI setting, so it
 survives a restart, and exactly one editor is ever built - there is no hidden
 second canvas in the page, and no listeners from the other one.
 
-If the new Canvas fails to build for any reason, the tab falls back to the
-legacy editor by itself and puts the reason on screen; the full traceback goes
-to the WebUI console. The failure is contained: Gradio abandons its build
-context when a tab throws, so the fallback restores it before building - a
-broken Canvas must never take the rest of the WebUI's tabs with it.
+**The redesign ships switched off.** It took a WebUI down on a real install, in
+a way that could not be reproduced against Gradio 4.40 with Forge Neo's own
+component patches, script.js and ui.js - so installing this extension gives you
+the editor that was already working, and the Canvas is something you turn on.
+Uncheck the setting to try it; if anything goes wrong, `MINIPAINT_OLD_UI=1` in
+the environment overrides the setting for that run, without needing a working
+UI to reach Settings.
 
-If you ever need the old editor before the UI is usable enough to reach
-Settings, start the WebUI with `MINIPAINT_OLD_UI=1` in the environment. It
-overrides the setting for that run.
+That switch is complete, not cosmetic: with the legacy editor selected, none of
+the redesign's browser code is loaded at all. The adapter is not in the
+extension's `javascript/` folder, which the WebUI would load on every page
+whichever editor is mounted - the Canvas fetches it when it mounts, and nothing
+else ever does.
+
+If the Canvas fails to build for any reason, the tab falls back to the legacy
+editor by itself and puts the reason on screen; the full traceback goes to the
+WebUI console. The failure is contained: Gradio abandons its build context when
+a tab throws, so the fallback restores it before building - a broken Canvas
+must never take the rest of the WebUI's tabs with it.
+
+## logs/startup.txt
+
+Every launch writes one:
+
+```
+extensions/a1111-mini-paint-NEO/logs/startup.txt
+```
+
+It records which editor was mounted and why, the Gradio and Pillow versions,
+which of the components the Canvas needs this Gradio actually has, every other
+extension installed alongside it, and the traceback if the Canvas could not
+build. A browser console is out of reach on a tablet and a WebUI console
+scrolls, so **this is the file to attach to a bug report** - along with
+`logs/send-log.txt` if a transfer is what went wrong.
 
 ## The Canvas
 
@@ -173,7 +198,7 @@ The legacy editor keeps its own on-screen report with a **Copy all** button
 
 | option | |
 | --- | --- |
-| Use Old UI (legacy miniPaint) | Which editor the tab builds. Needs a Reload UI. `MINIPAINT_OLD_UI=1` in the environment overrides it. |
+| Use Old UI (legacy miniPaint) | Which editor the tab builds; on by default. Needs a Reload UI. `MINIPAINT_OLD_UI=1` (or `=0`) in the environment overrides it. |
 | Canvas height | How much of the window the image takes. |
 | Tool selected when the Canvas opens | Crop, Mask or Expand. |
 | Mask overlay colour | Display only - the mask is sent as coverage, never as a colour. |
@@ -214,9 +239,10 @@ Known limits, and why:
 python tests/run.py
 ```
 
-232 checks over the crop/mask/expand maths, the handoff staging, and both
+236 checks over the crop/mask/expand maths, the handoff staging, and both
 frontends building - including that a tab which fails to build leaves the rest
-of the WebUI wired up. See `tests/README.md`.
+of the WebUI wired up, and that the legacy editor loads none of the redesign's
+browser code. See `tests/README.md`.
 
 Layout:
 
@@ -228,9 +254,10 @@ forge_canvas_ext/
     transfer_log.py          the log route both editors write to
     legacy/legacy_ui.py      the miniPaint iframe
     touch/                   the Canvas: ui, imaging, outpaint, document, bridge
+    touch/assets/canvas.js   the Canvas adapter, loaded only by the Canvas
+    diagnostics.py           logs/startup.txt
 javascript/
     main.js                  legacy bridge, parent-frame half
-    forge_touch_canvas.js    Canvas adapter - inert unless the Canvas is mounted
 miniPaint/                   the legacy editor itself
 ```
 

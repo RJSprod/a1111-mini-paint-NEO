@@ -13,6 +13,8 @@ preparing a handoff. Painting never does.
 
 from __future__ import annotations
 
+import html
+import json
 import os.path
 import typing
 
@@ -20,12 +22,44 @@ import gradio as gr
 from PIL import Image
 
 from .. import settings
+from ..paths import get_asset_url, root_path
 from ..transfer_log import announce_send_log
 from . import bridge, document, imaging, outpaint
 from .gradio_compat import build, has
 
 TOOLS = ["Crop", "Mask", "Expand"]
 SIDES = ["Left", "Right", "Top", "Bottom"]
+
+ASSETS = root_path / "forge_canvas_ext" / "touch" / "assets"
+
+# A 1x1 transparent GIF, purely so an element with an onload attribute exists.
+_PIXEL = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+
+
+def _adapter_tag() -> str:
+    """Load the Canvas adapter, and only when the Canvas is on screen.
+
+    The WebUI loads every file under an extension's javascript/ folder on every
+    page, whichever editor is mounted. That is the wrong shape for a frontend
+    you can turn off: the legacy editor must be able to run with none of the
+    redesign's browser code present at all. A script tag written through
+    innerHTML does not execute, but an inline handler does - the same trick the
+    legacy editor already uses to know its iframe has loaded.
+    """
+    try:
+        source = get_asset_url(ASSETS / "canvas.js")
+    except OSError:
+        return ""
+    loader = (
+        "if(!window.forgeTouchCanvasLoading){window.forgeTouchCanvasLoading=1;"
+        "var s=document.createElement('script');s.src=" + json.dumps(source) + ";"
+        "s.async=false;document.head.appendChild(s);}"
+    )
+    attribute = html.escape(loader, quote=True)
+    return (
+        f'<img alt="" src="{_PIXEL}" style="display:none" '
+        f'onload="{attribute}" onerror="{attribute}">'
+    )
 
 
 def _tool_class(name: str) -> str:
@@ -400,7 +434,7 @@ class TouchCanvas:
 
         gr.HTML(
             "<style>#forge_touch_editor_root{--forge-touch-canvas-height:"
-            f"{self.canvas_height}vh;}}</style>",
+            f"{self.canvas_height}vh;}}</style>" + _adapter_tag(),
             elem_id="forge_touch_style",
         )
 

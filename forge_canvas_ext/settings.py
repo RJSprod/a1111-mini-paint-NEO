@@ -113,13 +113,19 @@ def on_ui_settings() -> None:
     _add(
         USE_OLD_UI,
         _option_info(
-            False,
+            # Ships on. The redesign has taken a WebUI down on a real install
+            # in a way that could not be reproduced, so installing this
+            # extension gives you the editor that was already working, and the
+            # touch Canvas is something you turn on. Flip this to False once
+            # the Canvas has been shown to be safe on your setup.
+            True,
             "Use Old UI (legacy miniPaint)",
             section=SECTION,
             category_id=_category("ui"),
         ),
-        "Use the original miniPaint editor instead of the touch-first Canvas "
-        "redesign. The legacy editor remains fully installed as a fallback.",
+        "On by default: the original miniPaint editor. Uncheck to try the "
+        "touch-first Canvas redesign. Requires Reload UI. Both editors stay "
+        "installed either way.",
         reload_ui=True,
     )
 

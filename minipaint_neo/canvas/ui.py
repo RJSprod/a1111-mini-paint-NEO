@@ -506,7 +506,7 @@ class TouchCanvas:
                     file_types=["image"],
                     type="filepath",
                     elem_id=_id("open"),
-                    elem_classes=["minipaint-action"],
+                    elem_classes=["minipaint-action", host.NEEDS_EDITOR_CLASS],
                 )
                 undo_btn = gr.Button("Undo", elem_id=_id("undo"), elem_classes=["minipaint-action", host.NEEDS_EDITOR_CLASS])
                 redo_btn = gr.Button("Redo", elem_id=_id("redo"), elem_classes=["minipaint-action", host.NEEDS_EDITOR_CLASS])

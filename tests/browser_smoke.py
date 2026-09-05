@@ -332,6 +332,8 @@ def run_new_ui(r: Results, port: int, chromium: str, keep: bool) -> None:
             r.check("no-webgl: editor was not mounted", not page.evaluate("() => !!document.querySelector('#minipaint_canvas_editor canvas')"))
             r.check("no-webgl: notice shown", page.evaluate("() => !!document.querySelector('.minipaint-nowebgl')"))
             r.check("no-webgl: receive button disabled", page.evaluate("() => document.querySelector('#txt2img_send_to_minipaint').disabled"))
+            r.check("no-webgl: Open is disabled too", page.evaluate("() => { const b = document.querySelector('#minipaint_canvas_open button, button#minipaint_canvas_open'); return !!b && b.disabled; }"))
+            r.check("no-webgl: the notice is still the editor's content", "WebGL" in page.evaluate("() => document.querySelector('#minipaint_canvas_editor').innerText"))
             browser.close()
     finally:
         demo.close()

@@ -12,7 +12,7 @@ setup_path()
 from PIL import Image  # noqa: E402
 
 from minipaint_neo.canvas import document, imaging, outpaint  # noqa: E402
-from minipaint_neo.canvas.ui import resolve_destination, send_label  # noqa: E402
+from minipaint_neo.canvas.ui import resolve_destination, suggested_destination, suggestion_text  # noqa: E402
 
 
 def photo(width=64, height=48, color=(200, 30, 30)):
@@ -186,11 +186,12 @@ def run() -> Results:
     r.check("empty document", not doc.has_image and doc.describe() == "No image" and doc.original_size_text() == "")
     doc.load(image, "txt2img")
     r.check("loaded document", doc.has_image and doc.origin == "txt2img" and "from txt2img" in doc.describe())
-    r.check("one layer to start with", doc.layer_names() == ["Background"] and not doc.layered and doc.image.size == (64, 48))
+    r.check("the picture is Layer 1 over a white Background of its size", doc.layer_names() == ["Background", "Layer 1"] and doc.active == 1
+            and doc.layers[0].image.size == (64, 48) and doc.layers[0].image.getpixel((0, 0)) == (255, 255, 255, 255) and doc.image.size == (64, 48) and doc.image.getpixel((0, 0)) == (200, 30, 30, 255))
     r.check("original size text", doc.original_size_text() == "64x48")
     doc.checkpoint("crop")
-    doc.commit(image.crop((0, 0, 32, 24)), None)
-    r.check("commit replaces the image", doc.size == (32, 24) and doc.original.size == (64, 48))
+    doc.crop((0, 0, 32, 24), None)
+    r.check("a crop trims the canvas and both layers", doc.size == (32, 24) and doc.original.size == (64, 48) and doc.layers[0].size == (32, 24) and doc.layers[1].size == (32, 24))
     r.check("undo restores", doc.undo() == "crop" and doc.size == (64, 48))
     r.check("redo reapplies", doc.redo() == "crop" and doc.size == (32, 24))
     r.check("nothing more to redo", doc.redo() is None)
@@ -205,37 +206,55 @@ def run() -> Results:
     for step in range(document.HISTORY_LIMIT + 3):
         doc.checkpoint(f"step {step}")
     r.check("history is bounded", len(doc.history) == document.HISTORY_LIMIT)
+    doc.load(base, "txt2img")
     doc.checkpoint("expand")
-    doc.commit(base, grown_mask.resize((100, 80)))
+    doc.commit(doc.image, grown_mask.resize((100, 80)))
     doc.has_expansion = True
     r.check("expansion is remembered", doc.has_expansion and doc.has_mask and "expanded" in doc.describe())
 
     # layers on the document: add, move, crop and expand across them, undo
     doc.checkpoint("layer")
     added = doc.add_layer(Image.new("RGBA", (20, 20), (9, 9, 9, 255)), 10, 10)
-    r.check("a layer is added above the active one and becomes active", doc.layer_names() == ["Background", "Layer 2"] and doc.active == 1 and doc.layered)
+    r.check("a layer is added above the active one, named after the count over the Background, and becomes active",
+            doc.layer_names() == ["Background", "Layer 1", "Layer 2"] and doc.active == 2 and doc.layered)
     r.check("the composite shows it", doc.image.getpixel((15, 15)) == (9, 9, 9, 255))
     doc.commit(Image.new("RGBA", (100, 80), (1, 1, 1, 255)), None)
-    r.check("with layers the canvas's picture is not taken as the document", doc.layer_names() == ["Background", "Layer 2"] and doc.image.getpixel((15, 15)) == (9, 9, 9, 255))
+    r.check("with layers the canvas's picture is not taken as the document", doc.layer_names() == ["Background", "Layer 1", "Layer 2"] and doc.image.getpixel((15, 15)) == (9, 9, 9, 255))
     doc.move_selected(50, 0)
     r.check("moving keeps the pixels and changes the offset", (added.x, added.y) == (60, 10) and doc.image.getpixel((65, 15)) == (9, 9, 9, 255) and doc.image.getpixel((15, 15)) != (9, 9, 9, 255))
-    r.check("moving the selection leaves the layer beneath alone", (doc.layers[0].x, doc.layers[0].y) == (0, 0))
+    r.check("moving the selection leaves the layers beneath alone", (doc.layers[0].x, doc.layers[0].y) == (0, 0) and (doc.layers[1].x, doc.layers[1].y) == (0, 0))
     doc.checkpoint("crop layers")
     doc.crop((55, 5, 95, 45), None)
-    r.check("a crop trims every layer and shifts offsets", doc.size == (40, 40) and doc.layers[1].size == (20, 20) and (doc.layers[1].x, doc.layers[1].y) == (5, 5))
+    r.check("a crop trims every layer and shifts offsets", doc.size == (40, 40) and doc.layers[2].size == (20, 20) and (doc.layers[2].x, doc.layers[2].y) == (5, 5) and doc.layers[1].size == (40, 40))
     doc.crop((0, 0, 4, 4), None)
-    r.check("a crop that misses a layer drops it", doc.layer_names() == ["Background"] and doc.size == (4, 4))
+    r.check("a crop that misses a layer drops it", doc.layer_names() == ["Background", "Layer 1"] and doc.size == (4, 4))
     doc.undo()
-    r.check("undo brings the layers and the canvas size back", doc.size == (100, 80) and doc.layer_names() == ["Background", "Layer 2"] and (doc.layers[1].x, doc.layers[1].y) == (60, 10))
+    r.check("undo brings the layers and the canvas size back", doc.size == (100, 80) and doc.layer_names() == ["Background", "Layer 1", "Layer 2"] and (doc.layers[2].x, doc.layers[2].y) == (60, 10))
+    added = doc.layers[2]  # undo rebuilt the layers from their snapshots
     expanded, grown_mask2, _ = outpaint.expand(doc.base_full(), None, (16, 0, 8, 0))
     doc.expand((16, 0, 8, 0), expanded, grown_mask2)
-    r.check("expanding grows the base and shifts the others", doc.size == (116, 88) and (doc.layers[1].x, doc.layers[1].y) == (76, 18) and doc.layers[0].size == (116, 88))
-    r.check("unique names", doc.unique_name("Layer 2") == "Layer 2 2" and doc.unique_name("Fresh") == "Fresh")
+    r.check("expanding grows the Background and shifts the others", doc.size == (116, 88) and (doc.layers[2].x, doc.layers[2].y) == (76, 18) and (doc.layers[1].x, doc.layers[1].y) == (16, 8) and doc.layers[0].size == (116, 88))
+    r.check("unique names", doc.unique_name("Layer 2") == "Layer 2 2" and doc.unique_name("Fresh") == "Fresh" and doc.next_layer_name() == "Layer 3")
     r.check("the drag preview describes the selected layer", '"w": 20' in doc.preview_payload() and doc.underlay_payload().startswith("data:image/png"))
+
+    # resizing: from the pixels the layer started with, keeping its centre
+    doc.checkpoint("resize")
+    r.check("a layer doubles about its centre", doc.scale_selected(200) and added.size == (40, 40) and (added.x, added.y) == (66, 8) and added.percent == 200 and added.source.size == (20, 20))
+    r.check("the list and the description say so", doc.layer_rows()[0]["percent"] == 200 and "200% size" in added.describe())
+    r.check("a second resize starts from the original pixels", doc.scale_selected(50) and added.size == (10, 10) and added.percent == 50 and added.source.size == (20, 20))
+    r.check("back to 100% is the original itself", doc.scale_selected(100) and added.size == (20, 20) and added.source is None and (added.x, added.y) == (76, 18))
+    r.check("the same size again changes nothing", not doc.scale_selected(100))
+    doc.undo()
+    r.check("undo restores the size", added.size == (20, 20) and added.percent == 100)
+    try:
+        document.Layer(Image.new("RGBA", (3000, 3000))).resize(400)
+        r.check("a size no browser canvas holds is refused", False)
+    except ValueError:
+        r.check("a size no browser canvas holds is refused", True)
 
     # the selection: one layer, several, the primary, and what acts on it
     third = doc.add_layer(Image.new("RGBA", (10, 10), (7, 7, 7, 255)), 0, 0, "Third")
-    r.check("a new layer is the selection", doc.selected_names() == ["Third"] and doc.active_layer is third)
+    r.check("a new layer is the selection", doc.selected_names() == ["Third"] and doc.active_layer is third and doc.layer_names() == ["Background", "Layer 1", "Layer 2", "Third"])
     r.check("select picks one", doc.select("Background") and doc.selected_names() == ["Background"] and doc.active == 0)
     r.check("selecting a name that is not there is refused", not doc.select("nope") and doc.selected_names() == ["Background"])
     r.check("toggle adds to the selection and makes it the primary", doc.toggle_selected("Third") and doc.selected_names() == ["Background", "Third"] and doc.active_layer is third)
@@ -245,56 +264,59 @@ def run() -> Results:
     doc.toggle_selected("Third")
     r.check("three selected, in stacking order", doc.selected_names() == ["Background", "Layer 2", "Third"])
     payload = doc.preview_payload()
-    r.check("the drag preview covers every selected layer", '"x": 0' in payload and '"y": 0' in payload and '"w": 116' in payload and doc.underlay_payload() == "")
+    r.check("the drag preview covers every selected layer", '"x": 0' in payload and '"y": 0' in payload and '"w": 116' in payload and doc.underlay_payload().startswith("data:image/png"))
     doc.select("Third")
     doc.toggle_selected("Layer 2")
     doc.move_selected(-6, 4)
-    r.check("moving moves every selected layer", (third.x, third.y) == (-6, 4) and (doc.layers[1].x, doc.layers[1].y) == (70, 22) and (doc.layers[0].x, doc.layers[0].y) == (0, 0))
+    r.check("moving moves every selected layer", (third.x, third.y) == (-6, 4) and (doc.layers[2].x, doc.layers[2].y) == (70, 22) and (doc.layers[0].x, doc.layers[0].y) == (0, 0) and (doc.layers[1].x, doc.layers[1].y) == (16, 8))
     doc.center_selected()
-    r.check("center puts each selected layer in the middle of the canvas", (third.x, third.y) == (53, 39) and (doc.layers[1].x, doc.layers[1].y) == (48, 34))
+    r.check("center puts each selected layer in the middle of the canvas", (third.x, third.y) == (53, 39) and (doc.layers[2].x, doc.layers[2].y) == (48, 34))
     r.check("the eye toggles one layer", doc.set_visible("Background") is False and not doc.layers[0].visible and doc.set_visible("Background") is True)
     r.check("the eye on a missing layer is refused", doc.set_visible("nope") is None)
     doc.set_opacity(50)
-    r.check("opacity applies to the selection", third.opacity == 50 and doc.layers[1].opacity == 50 and doc.layers[0].opacity == 100)
+    r.check("opacity applies to the selection", third.opacity == 50 and doc.layers[2].opacity == 50 and doc.layers[0].opacity == 100)
     rows = doc.layer_rows()
-    r.check("the panel lists top layer first with the selection, the primary being the last added", [row["name"] for row in rows] == ["Third", "Layer 2", "Background"]
-            and rows[1]["active"] and not rows[0]["active"] and rows[0]["selected"] and rows[1]["selected"] and not rows[2]["selected"] and rows[0]["top"] and rows[2]["bottom"] and rows[1]["opacity"] == 50)
-    r.check("reorder swaps neighbours and keeps the selection", doc.reorder("Third", -1) and doc.layer_names() == ["Background", "Third", "Layer 2"] and doc.selected_names() == ["Third", "Layer 2"] and doc.active_layer.name == "Layer 2")
+    r.check("the panel lists top layer first with the selection, the primary being the last added", [row["name"] for row in rows] == ["Third", "Layer 2", "Layer 1", "Background"]
+            and rows[1]["active"] and not rows[0]["active"] and rows[0]["selected"] and rows[1]["selected"] and not rows[3]["selected"] and rows[0]["top"] and rows[3]["bottom"] and rows[1]["opacity"] == 50)
+    r.check("reorder swaps neighbours and keeps the selection", doc.reorder("Third", -1) and doc.layer_names() == ["Background", "Layer 1", "Third", "Layer 2"] and doc.selected_names() == ["Third", "Layer 2"] and doc.active_layer.name == "Layer 2")
     r.check("reorder past the end is refused", not doc.reorder("Background", -1) and not doc.reorder("Layer 2", 1))
     copies = doc.duplicate_selected()
-    r.check("duplicate copies each selected layer above its original", [c.name for c in copies] == ["Third copy", "Layer 2 copy"] and doc.layer_names() == ["Background", "Third", "Third copy", "Layer 2", "Layer 2 copy"] and doc.selected_names() == ["Third copy", "Layer 2 copy"])
-    r.check("delete removes the selection and selects the layer below", doc.delete_selected() == ["Third copy", "Layer 2 copy"] and doc.layer_names() == ["Background", "Third", "Layer 2"] and doc.selected_names() == ["Layer 2"])
+    r.check("duplicate copies each selected layer above its original", [c.name for c in copies] == ["Third copy", "Layer 2 copy"] and doc.layer_names() == ["Background", "Layer 1", "Third", "Third copy", "Layer 2", "Layer 2 copy"] and doc.selected_names() == ["Third copy", "Layer 2 copy"])
+    r.check("delete removes the selection and selects the layer below", doc.delete_selected() == ["Third copy", "Layer 2 copy"] and doc.layer_names() == ["Background", "Layer 1", "Third", "Layer 2"] and doc.selected_names() == ["Layer 2"])
     doc.select("Third")
     doc.toggle_selected("Layer 2")
     doc.checkpoint("merge layers")
-    r.check("merging several selected layers makes one, named after the lowest", doc.merge_selected() == "Third" and doc.layer_names() == ["Background", "Third"] and doc.selected_names() == ["Third"])
+    r.check("merging several selected layers makes one, named after the lowest", doc.merge_selected() == "Third" and doc.layer_names() == ["Background", "Layer 1", "Third"] and doc.selected_names() == ["Third"])
     doc.checkpoint("merge down")
-    r.check("one selected layer merges down", doc.merge_selected() == "Background" and doc.layer_names() == ["Background"])
+    r.check("one selected layer merges down", doc.merge_selected() == "Layer 1" and doc.layer_names() == ["Background", "Layer 1"])
+    doc.select("Background")
     r.check("the bottom layer has nothing to merge into", doc.merge_selected() is None)
-    r.check("undo restores layers and selection", doc.undo() == "merge down" and doc.undo() == "merge layers" and doc.layer_names() == ["Background", "Third", "Layer 2"] and doc.selected_names() == ["Third", "Layer 2"])
+    r.check("undo restores layers and selection", doc.undo() == "merge down" and doc.undo() == "merge layers" and doc.layer_names() == ["Background", "Layer 1", "Third", "Layer 2"] and doc.selected_names() == ["Third", "Layer 2"])
     doc.checkpoint("delete")
-    r.check("delete keeps the last layer", (doc.select("Background") and doc.toggle_selected("Third") and doc.toggle_selected("Layer 2") and doc.delete_selected() == ["Third", "Layer 2"] and doc.layer_names() == ["Background"]))
+    r.check("delete keeps the last layer", (doc.select("Background") and doc.toggle_selected("Layer 1") and doc.toggle_selected("Third") and doc.toggle_selected("Layer 2")
+                                           and doc.delete_selected() == ["Layer 1", "Third", "Layer 2"] and doc.layer_names() == ["Background"]))
     doc.undo()
-    r.check("flatten leaves one layer", doc.flatten() == 3 and doc.layer_names() == ["Background"] and doc.underlay_payload() == "")
+    r.check("flatten leaves one layer", doc.flatten() == 4 and doc.layer_names() == ["Background"] and doc.underlay_payload() == "")
     doc.load(image, "file", "cat.png")
-    r.check("load resets expansion and names the file", not doc.has_expansion and "cat.png" in doc.describe() and not doc.has_mask)
+    r.check("load resets expansion and names the file", not doc.has_expansion and "cat.png" in doc.describe() and not doc.has_mask and doc.layer_names() == ["Background", "Layer 1"])
     doc.clear()
     r.check("clear empties the document", not doc.has_image and doc.original is None)
     r.check("ensure makes a document", isinstance(document.ensure(None), document.Document))
     r.check("ensure keeps a document", document.ensure(doc) is doc)
 
     # ---- send decisions
-    r.check("auto with nothing is img2img", resolve_destination("Auto", False, False) == "img2img")
-    r.check("auto with a mask is inpaint", resolve_destination("Auto", True, False) == "inpaint")
-    r.check("auto after expand is inpaint", resolve_destination("Auto", False, True) == "inpaint")
-    r.check("explicit choice wins", resolve_destination("Extras", True, True) == "extras")
-    r.check("labels follow state", send_label(False, False, "crop") == "Send to img2img"
-            and send_label(True, False, "crop") == "Send to img2img Inpaint"
-            and send_label(False, False, "mask") == "Send to img2img Inpaint"
-            and send_label(True, True, "mask") == "Send Outpaint to img2img")
-    r.check("an explicit destination names itself", send_label(True, True, "mask", "Extras") == "Send to Extras"
-            and send_label(False, False, "crop", "ImageStitch (txt2img)") == "Send to ImageStitch (txt2img)"
-            and resolve_destination("ImageStitch (img2img)", True, False) == "stitch_img2img")
+    r.check("nothing chosen and no mask is img2img", resolve_destination("", False, False) == "img2img" and suggested_destination(False, False) == "img2img")
+    r.check("nothing chosen with a mask is inpaint", resolve_destination("auto", True, False) == "inpaint" and suggested_destination(True, False) == "inpaint")
+    r.check("nothing chosen after an expansion is inpaint", suggested_destination(False, True) == "inpaint")
+    r.check("a named destination wins", resolve_destination("extras", True, True) == "extras" and resolve_destination("stitch_img2img", True, False) == "stitch_img2img")
+    r.check("an unknown name falls back to the suggestion", resolve_destination("nowhere", True, False) == "inpaint")
+    doc.load(image, "file", "cat.png")
+    r.check("the browser is told the plain suggestion", suggestion_text(doc) == "img2img")
+    doc.mask = square_mask(image.size)
+    r.check("a mask makes it inpaint, without a reason the browser does not know", suggestion_text(doc) == "inpaint")
+    doc.mask = None
+    doc.has_expansion = True
+    r.check("an expansion is named, so the browser keeps suggesting inpaint", suggestion_text(doc) == "inpaint expansion")
 
     return r
 

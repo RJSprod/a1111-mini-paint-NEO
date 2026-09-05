@@ -1,0 +1,84 @@
+Focus mode: how the Canvas tab fills the window and hides the WebUI's tab bar
+=============================================================================
+
+What it does
+------------
+"Focus" makes one extension tab take the whole browser window: the Forge Neo
+tab bar, the sidebars of a theme such as Lobe, the footer - none of it is
+visible until the user leaves focus mode (a menu item, or the Escape key).
+
+What it is not
+--------------
+It does not hide, remove or restyle the WebUI's tab bar, and it never touches
+the host's DOM. The tab bar is still there, underneath. The extension's own
+root element is simply laid over everything else. That is what keeps it safe:
+nothing about the host changes, so nothing about the host can break, and
+leaving focus mode is one class removal.
+
+The whole mechanism
+-------------------
+1. Give your tab one root element with an id, e.g. the outermost gr.Column or
+   gr.Row of your tab: gr.Column(elem_id="myext_root").
+
+2. One CSS rule, scoped to that id plus a class that only focus mode adds:
+
+       #myext_root.myext-focus {
+           position: fixed;      /* taken out of the page flow */
+           inset: 0;             /* top/right/bottom/left = 0: the whole viewport */
+           z-index: 1000;        /* above the tab bar, sidebars and footer */
+           margin: 0;
+           padding: 8px;
+           overflow: auto;       /* the tab scrolls inside itself if it must */
+           background: var(--body-background-fill, var(--background-fill-primary, #101010));
+       }
+
+   The background is one of Gradio's theme variables, so the covered page does
+   not show through and the colour matches whatever theme is active (Lobe's
+   dark mode included). Everything else about your layout stays as it is.
+
+3. A toggle that adds and removes that class. In JavaScript:
+
+       function setFocus(on) {
+           const root = document.getElementById("myext_root");
+           if (!root) return;
+           root.classList.toggle("myext-focus", !!on);
+           if (on) {
+               document.addEventListener("keydown", onEscape);
+           } else {
+               document.removeEventListener("keydown", onEscape);
+           }
+           // If your tab sizes anything to the window (a canvas height, for
+           // instance), recompute it now: the element's size just changed.
+       }
+       function onEscape(event) { if (event.key === "Escape") setFocus(false); }
+
+   Bind it to a Gradio control the ordinary way, as a browser-only event so no
+   request goes to the server:
+
+       focus_btn.click(None, js="() => { window.myExt.setFocus(true); }")
+       exit_btn.click(None, js="() => { window.myExt.setFocus(false); }")
+
+   (In Forge Neo the keyword is `js`; older WebUIs used `_js`. Forge's own
+   gradio_extensions maps `_js` to `js`, so either spelling works there.)
+
+4. Offer a way out that is visible while in focus mode: an "Exit focus" button
+   shown only when the class is on (CSS: hide it otherwise), the Escape key, or
+   a menu item. Do not rely on the tab bar - it is covered.
+
+Two details that matter
+-----------------------
+- The Escape listener is added only while focus mode is on and removed when it
+  ends, so the extension never listens to the page in its normal state. Forge's
+  own script.js also handles Escape (it looks for the current tab's Interrupt
+  button), which is harmless here.
+- Anything in the tab positioned relative to the window (a fitted canvas, a
+  panel with a max-height taken from the viewport) needs to be recomputed after
+  the class flips, because the root's box changes from "a row in the page" to
+  "the whole window". A ResizeObserver on the root, or a call to your own
+  fit function right after the toggle, covers it.
+
+Reference implementation
+------------------------
+In this repository: style.css (the rule under "focus mode"), javascript/
+minipaint_canvas.js (setFocus, and the Escape listener), and
+minipaint_neo/canvas/ui.py (the menu item that calls it).

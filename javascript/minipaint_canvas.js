@@ -19,10 +19,15 @@
  *     panels beside it kept no taller than that (it scrolls inside), so
  *     nothing scrolls and nothing floats over the canvas; the Panels
  *     button hides and shows the rail,
+ *   - the menu: one button, a flyout drawn here with Open, Edit, Tools,
+ *     Panels, Focus and Send to, each item pressing a hidden Gradio control,
  *   - the taps in the layer list (select, add to the selection, show or
  *     hide, reorder), handed to the server as one action each,
- *   - in Layers mode, dragging the selected layers with a live preview and
- *     handing the offset they settled on to the server,
+ *   - an outline of the document canvas and, in Layers mode, of the
+ *     selected layers; a drag that starts on the selection moves it, with
+ *     a live preview, and hands the offset it settled on to the server;
+ *     a drag elsewhere pans,
+ *   - a grip on the crop frame's top edge that moves the frame,
  *   - keeping the zoom and position across a reload that does not change
  *     the picture's size,
  *   - focus mode.
@@ -48,6 +53,16 @@ window.minipaintCanvas = (function () {
     const BOTTOM_ROOM = 8;
     const LAYER_MOVE_ID = "minipaint_canvas_layer_move";
     const LAYER_ACTION_ID = "minipaint_canvas_layer_action";
+    const MENU_ID = "minipaint_canvas_menu";
+    const MODE_REQUEST_ID = "minipaint_canvas_mode_request";
+    const SEND_REQUEST_ID = "minipaint_canvas_send_request";
+    const TARGETS_ID = "minipaint_canvas_targets";
+    const SUGGEST_ID = "minipaint_canvas_suggest";
+    const PRESS_IDS = {
+        open: "minipaint_canvas_open", undo: "minipaint_canvas_undo", redo: "minipaint_canvas_redo",
+        reset: "minipaint_canvas_reset", save: "minipaint_canvas_save"
+    };
+    const MODE_NAMES = { crop: "Crop", mask: "Mask", expand: "Expand", layers: "Layers" };
     const LAYER_LIST_ID = "minipaint_canvas_layer_list";
     const LAYER_PREVIEW_ID = "minipaint_canvas_layer_preview";
     const LAYER_UNDERLAY_ID = "minipaint_canvas_layer_underlay";
@@ -71,6 +86,14 @@ window.minipaintCanvas = (function () {
         trimAfterDrawing: false,
         imageEl: null,
         overlay: null,
+        bounds: null,
+        layerBounds: null,
+        menu: null,
+        menuSection: null,
+        menuOutside: null,
+        menuKey: null,
+        frameGrip: null,
+        frameDrag: null,
         layerDrag: null,
         underlaySrc: "",
         underlaySwapped: false,
@@ -167,7 +190,9 @@ window.minipaintCanvas = (function () {
 
         hookInstance(instance);
         buildOverlay();
+        buildBounds();
         buildFrame();
+        buildMenu();
         bindGestures();
         bindLayerList();
         watchLayout();
@@ -222,6 +247,7 @@ window.minipaintCanvas = (function () {
         let rows = 0;
         for (const child of column.children) {
             if (child === surface) { rows += 1; continue; }
+            if (child === S.menu) { continue; }  // flies over the canvas; takes no room
             const height = child.getBoundingClientRect().height;
             if (height > 0) { others += height; rows += 1; }
         }
@@ -294,7 +320,7 @@ window.minipaintCanvas = (function () {
         if (typeof ResizeObserver === "function") {
             const observer = new ResizeObserver(scheduleFit);
             for (const child of column.children) {
-                if (!child.contains(S.container)) { observer.observe(child); }
+                if (!child.contains(S.container) && child !== S.menu) { observer.observe(child); }
             }
             const panels = rail();
             if (panels) { observer.observe(panels); }
@@ -333,6 +359,7 @@ window.minipaintCanvas = (function () {
             setTimeout(function () {
                 trimHistory();
                 refreshFrame(!kept);
+                refreshOverlays();
             }, 0);
         };
 
@@ -343,6 +370,7 @@ window.minipaintCanvas = (function () {
             drawImage();
             if (S.underlaySwapped && S.underlaySrc && S.imageEl) { S.imageEl.src = S.underlaySrc; }
             positionOverlay();
+            positionBounds();
         };
 
         // A mask layer written from the server starts the stroke history,
@@ -375,7 +403,8 @@ window.minipaintCanvas = (function () {
         S.marker = S.loaded;
         const i = S.instance;
         S.keepView = (keep && i && i.img)
-            ? { imgX: i.imgX, imgY: i.imgY, imgScale: i.imgScale, w: i.orgWidth, h: i.orgHeight }
+            ? { imgX: i.imgX, imgY: i.imgY, imgScale: i.imgScale, w: i.orgWidth, h: i.orgHeight,
+                cw: S.container.clientWidth, ch: S.container.clientHeight }
             : null;
     }
 
@@ -384,6 +413,8 @@ window.minipaintCanvas = (function () {
         const i = S.instance;
         S.keepView = null;
         if (!k || !i || !i.img || i.orgWidth !== k.w || i.orgHeight !== k.h) { return false; }
+        // A box that changed size meanwhile (a rotated tablet) gets the fresh fit instead.
+        if (S.container.clientWidth !== k.cw || S.container.clientHeight !== k.ch) { return false; }
         i.imgX = k.imgX;
         i.imgY = k.imgY;
         i.imgScale = k.imgScale;
@@ -493,6 +524,7 @@ window.minipaintCanvas = (function () {
             i.no_scribbles = true;
         }
         refreshFrame(false);
+        refreshOverlays();
     }
 
     function setTool(tool) {
@@ -532,14 +564,31 @@ window.minipaintCanvas = (function () {
             handle.dataset.corner = corner;
             box.appendChild(handle);
         }
+        // The grip on the top edge moves the whole frame, so a frame drawn
+        // once can be put over another part of the picture.
+        const grip = document.createElement("div");
+        grip.className = "minipaint-frame-grip";
+        grip.title = "Drag to move the frame";
+        grip.appendChild(document.createElement("span"));
+        box.appendChild(grip);
         wrap.appendChild(box);
         S.imageContainer.appendChild(wrap);
         S.frame = wrap;
         S.frameBox = box;
         S.frameSize = size;
+        S.frameGrip = grip;
 
         box.addEventListener("pointerdown", function (event) {
-            const handle = event.target && event.target.closest ? event.target.closest(".minipaint-frame-handle") : null;
+            const target = event.target && event.target.closest ? event.target : null;
+            const gripHit = target ? target.closest(".minipaint-frame-grip") : null;
+            if (gripHit && S.frameRect) {
+                event.preventDefault();
+                event.stopPropagation();
+                try { gripHit.setPointerCapture(event.pointerId); } catch (e) { /* optional */ }
+                S.frameDrag = { id: event.pointerId, x: event.clientX, y: event.clientY, left: S.frameRect.left, top: S.frameRect.top };
+                return;
+            }
+            const handle = target ? target.closest(".minipaint-frame-handle") : null;
             if (!handle) { return; }
             event.preventDefault();
             event.stopPropagation();
@@ -547,12 +596,19 @@ window.minipaintCanvas = (function () {
             S.handleDrag = { corner: handle.dataset.corner, id: event.pointerId };
         });
         box.addEventListener("pointermove", function (event) {
+            if (S.frameDrag && event.pointerId === S.frameDrag.id) {
+                event.preventDefault();
+                event.stopPropagation();
+                moveFrame(event.clientX - S.frameDrag.x, event.clientY - S.frameDrag.y);
+                return;
+            }
             if (!S.handleDrag || event.pointerId !== S.handleDrag.id) { return; }
             event.preventDefault();
             event.stopPropagation();
             resizeFrame(S.handleDrag.corner, containerPoint(event));
         });
         function endHandle(event) {
+            if (S.frameDrag && event.pointerId === S.frameDrag.id) { S.frameDrag = null; }
             if (!S.handleDrag || event.pointerId !== S.handleDrag.id) { return; }
             S.handleDrag = null;
         }
@@ -633,6 +689,16 @@ window.minipaintCanvas = (function () {
         updateReadout();
     }
 
+    /** Slide the whole frame by the grip; its size is kept. */
+    function moveFrame(dx, dy) {
+        const r = S.frameRect;
+        const size = containerSize();
+        if (!r || !S.frameDrag) { return; }
+        r.left = clamp(S.frameDrag.left + dx, 0, Math.max(0, size.w - r.width));
+        r.top = clamp(S.frameDrag.top + dy, 0, Math.max(0, size.h - r.height));
+        applyFrame();
+    }
+
     /** Drag one corner; the opposite corner stays put; aspect is kept if set. */
     function resizeFrame(corner, point) {
         const r = S.frameRect;
@@ -707,6 +773,201 @@ window.minipaintCanvas = (function () {
     }
 
     /* ------------------------------------------------------------------ */
+    /* The menu                                                              */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * One button, one flyout under it, drawn here: Open, Edit (Undo, Redo,
+     * Reset, Save a copy), Tools (the four modes), Panels, Focus and Send
+     * to (every destination the server listed). An item presses the hidden
+     * Gradio control for it - a hidden button, or a hidden textbox with a
+     * nonce so the same request twice still counts - and the menu closes.
+     * A tap outside or Escape closes it too.
+     */
+    function buildMenu() {
+        const column = work();
+        if (!column || S.menu) { return; }
+        const panel = document.createElement("div");
+        panel.className = "minipaint-menu";
+        panel.hidden = true;
+        panel.setAttribute("role", "menu");
+        panel.addEventListener("click", function (event) {
+            const item = event.target && event.target.closest ? event.target.closest("[data-menu]") : null;
+            if (!item || !panel.contains(item)) { return; }
+            event.preventDefault();
+            menuAction(item.dataset.menu, item.dataset.value || "");
+        });
+        column.appendChild(panel);
+        S.menu = panel;
+    }
+
+    function readTargets() {
+        const box = document.querySelector("#" + TARGETS_ID + " textarea");
+        try {
+            const list = JSON.parse(box && box.value ? box.value : "[]");
+            return Array.isArray(list) ? list : [];
+        } catch (e) { return []; }
+    }
+
+    /**
+     * Whether anything is drawn on the mask layer: the canvas keeps the
+     * layer's pixels after every stroke, so the latest entry says. Null
+     * when it keeps none (no picture yet).
+     */
+    function hasStrokes() {
+        const i = S.instance;
+        const state = i && Array.isArray(i.history) ? i.history[i.historyIndex] : null;
+        if (!state || !state.data || !i.img) { return null; }
+        const bytes = state.data;
+        const words = new Uint32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4));
+        for (let k = 0; k < words.length; k++) {
+            if (words[k]) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * Which destination the Send to menu marks as suggested. The server
+     * writes what it knows at each step ("inpaint expansion", "inpaint",
+     * "img2img"); strokes drawn since then are known only here.
+     */
+    function suggestedTarget() {
+        const box = document.querySelector("#" + SUGGEST_ID + " textarea");
+        const words = String(box && box.value ? box.value : "").split(/\s+/).filter(Boolean);
+        if (words.indexOf("expansion") !== -1) { return "inpaint"; }
+        const strokes = hasStrokes();
+        if (strokes === null) { return words[0] || ""; }
+        return strokes ? "inpaint" : "img2img";
+    }
+
+    function focusOn() {
+        const element = root();
+        return !!element && element.classList.contains(FOCUS_CLASS);
+    }
+
+    function menuItems(section) {
+        const tick = function (on) { return on ? "✓ " : ""; };
+        if (section === "edit") {
+            return [
+                { menu: "back", label: "‹ Back" },
+                { menu: "press", value: PRESS_IDS.undo, label: "Undo" },
+                { menu: "press", value: PRESS_IDS.redo, label: "Redo" },
+                { menu: "press", value: PRESS_IDS.reset, label: "Reset to original" },
+                { menu: "press", value: PRESS_IDS.save, label: "Save a copy" }
+            ];
+        }
+        if (section === "tools") {
+            const items = [{ menu: "back", label: "‹ Back" }];
+            for (const mode of Object.keys(MODE_NAMES)) {
+                items.push({ menu: "mode", value: mode, label: tick(S.mode === mode) + MODE_NAMES[mode] });
+            }
+            return items;
+        }
+        if (section === "send") {
+            const suggest = suggestedTarget();
+            const items = [{ menu: "back", label: "‹ Back" }];
+            for (const target of readTargets()) {
+                items.push({ menu: "send", value: String(target[0]), label: String(target[1]) + (target[0] === suggest ? "  · suggested" : "") });
+            }
+            items.push({ menu: "close", label: "Cancel" });
+            return items;
+        }
+        return [
+            { menu: "press", value: PRESS_IDS.open, label: "Open…" },
+            { menu: "section", value: "edit", label: "Edit ›" },
+            { menu: "section", value: "tools", label: "Tools ›" },
+            { menu: "panels", label: tick(!railHidden()) + "Panels" },
+            { menu: "focus", label: tick(focusOn()) + "Focus" },
+            { menu: "section", value: "send", label: "Send to ›" }
+        ];
+    }
+
+    function renderMenu(section) {
+        const panel = S.menu;
+        if (!panel) { return; }
+        S.menuSection = section || null;
+        panel.innerHTML = "";
+        for (const item of menuItems(S.menuSection)) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "minipaint-menu-item" +
+                (item.menu === "section" ? " minipaint-menu-more" : "") +
+                (item.menu === "back" ? " minipaint-menu-back" : "");
+            button.dataset.menu = item.menu;
+            if (item.value) { button.dataset.value = item.value; }
+            button.setAttribute("role", "menuitem");
+            button.textContent = item.label;
+            panel.appendChild(button);
+        }
+    }
+
+    /** Press a hidden Gradio button by its id: the same click a finger would give it. */
+    function pressHidden(id) {
+        const element = document.getElementById(id);
+        if (!element) { return false; }
+        const button = element.tagName === "BUTTON" ? element : element.querySelector("button");
+        if (!button) { return false; }
+        button.click();
+        return true;
+    }
+
+    function menuAction(kind, value) {
+        switch (kind) {
+            case "section": renderMenu(value); return;
+            case "back": renderMenu(null); return;
+            case "close": closeMenu(); return;
+            case "press": closeMenu(); pressHidden(value); return;
+            case "mode": closeMenu(); sendInput(MODE_REQUEST_ID, value + ":" + Date.now()); return;
+            case "send": closeMenu(); sendInput(SEND_REQUEST_ID, value + ":" + Date.now()); return;
+            case "panels": closeMenu(); setRail(railHidden()); return;
+            case "focus": closeMenu(); setFocus(!focusOn()); return;
+            default: return;
+        }
+    }
+
+    function positionMenu() {
+        const button = document.getElementById(MENU_ID);
+        const column = work();
+        if (!button || !column || !S.menu) { return; }
+        const b = button.getBoundingClientRect();
+        const c = column.getBoundingClientRect();
+        S.menu.style.top = (b.bottom - c.top + 4) + "px";
+        S.menu.style.left = Math.max(0, b.left - c.left) + "px";
+    }
+
+    function openMenu() {
+        if (!S.menu) { return; }
+        renderMenu(null);
+        S.menu.hidden = false;
+        positionMenu();
+        // Listened for only while the menu is open, and taken down with it.
+        S.menuOutside = function (event) {
+            const target = event.target;
+            if (S.menu.contains(target)) { return; }
+            if (target && target.closest && target.closest("#" + MENU_ID)) { return; }
+            closeMenu();
+        };
+        document.addEventListener("pointerdown", S.menuOutside, true);
+        S.menuKey = function (event) {
+            if (event.key === "Escape") { event.stopPropagation(); closeMenu(); }
+        };
+        document.addEventListener("keydown", S.menuKey, true);
+    }
+
+    function closeMenu() {
+        if (!S.menu) { return; }
+        S.menu.hidden = true;
+        S.menuSection = null;
+        if (S.menuOutside) { document.removeEventListener("pointerdown", S.menuOutside, true); S.menuOutside = null; }
+        if (S.menuKey) { document.removeEventListener("keydown", S.menuKey, true); S.menuKey = null; }
+    }
+
+    function toggleMenu() {
+        if (!S.menu) { return; }
+        if (S.menu.hidden) { openMenu(); } else { closeMenu(); }
+    }
+
+    /* ------------------------------------------------------------------ */
     /* The layer list                                                        */
     /* ------------------------------------------------------------------ */
 
@@ -753,6 +1014,66 @@ window.minipaintCanvas = (function () {
         S.overlay = img;
     }
 
+    /**
+     * Two outlines over the picture: the document canvas (the thin line,
+     * always), and in Layers mode the selected layers (dashed), where a
+     * drag has to start to move them. Both are positioned from the same
+     * numbers the drag preview uses, and follow every pan and zoom.
+     */
+    function buildBounds() {
+        const bounds = document.createElement("div");
+        bounds.className = "minipaint-canvas-bounds";
+        bounds.hidden = true;
+        const selection = document.createElement("div");
+        selection.className = "minipaint-layer-bounds";
+        selection.hidden = true;
+        S.imageContainer.appendChild(bounds);
+        S.imageContainer.appendChild(selection);
+        S.bounds = bounds;
+        S.layerBounds = selection;
+    }
+
+    /** The selected layers on screen, in container pixels, or null. */
+    function selectionRect() {
+        const i = S.instance;
+        const p = S.mode === "layers" ? layerPreview() : null;
+        if (!p || !i || !i.img || !(i.imgScale > 0)) { return null; }
+        const d = S.layerDrag;
+        const s = i.imgScale;
+        return { left: i.imgX + (p.x + (d ? d.dx : 0)) * s, top: i.imgY + (p.y + (d ? d.dy : 0)) * s, width: p.w * s, height: p.h * s };
+    }
+
+    function place(element, rect) {
+        element.hidden = !rect;
+        if (!rect) { return; }
+        element.style.left = rect.left + "px";
+        element.style.top = rect.top + "px";
+        element.style.width = rect.width + "px";
+        element.style.height = rect.height + "px";
+    }
+
+    function positionBounds() {
+        if (!S.bounds) { return; }
+        place(S.bounds, imageRect());
+        place(S.layerBounds, selectionRect());
+    }
+
+    /** After the server sent a new preview, or the view changed. */
+    function refreshOverlays() {
+        positionOverlay();
+        positionBounds();
+    }
+
+    /** Whether a pointer is on the selected layers (with a little slack). */
+    function hitSelection(event) {
+        const r = selectionRect();
+        if (!r) { return false; }
+        const point = containerPoint(event);
+        const slack = 8;
+        return point.x >= r.left - slack && point.x <= r.left + r.width + slack &&
+            point.y >= r.top - slack && point.y <= r.top + r.height + slack;
+    }
+
     function layerPreview() {
         const target = document.querySelector("#" + LAYER_PREVIEW_ID + " textarea");
         const text = target ? target.value : "";
@@ -779,6 +1100,7 @@ window.minipaintCanvas = (function () {
         S.overlay.style.top = (i.imgY + (d.preview.y + d.dy) * s) + "px";
         S.overlay.style.width = (d.preview.w * s) + "px";
         S.overlay.style.height = (d.preview.h * s) + "px";
+        if (S.layerBounds) { place(S.layerBounds, selectionRect()); }
     }
 
     function startLayerDrag(event) {
@@ -897,7 +1219,7 @@ window.minipaintCanvas = (function () {
         c.addEventListener("pointerdown", function (event) {
             if (!hasImage()) { return; }
             if (event.target && event.target.closest &&
-                event.target.closest(".forge-toolbar, .forge-toolbar-static, .minipaint-frame-handle")) { return; }
+                event.target.closest(".forge-toolbar, .forge-toolbar-static, .minipaint-frame-handle, .minipaint-frame-grip")) { return; }
             if (event.pointerType === "mouse" && event.button !== 0) { return; }
             S.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
             if (S.pointers.size === 2) {
@@ -910,8 +1232,16 @@ window.minipaintCanvas = (function () {
                 startPinch();
                 return;
             }
-            if (S.pointers.size === 1 && S.mode === "layers" && !S.layerDrag) {
-                if (startLayerDrag(event)) { event.preventDefault(); return; }
+            if (S.pointers.size === 1 && S.mode === "layers") {
+                if (S.layerDrag && S.layerDrag.done) {
+                    // A drop is on its way to the server; a drag or a pan now
+                    // would be undone by the picture that comes back.
+                    event.preventDefault();
+                    S.pointers.delete(event.pointerId);
+                    return;
+                }
+                // Only what is selected moves, and only when the drag starts on it.
+                if (!S.layerDrag && hitSelection(event) && startLayerDrag(event)) { event.preventDefault(); return; }
             }
             if (S.pointers.size === 1 && canPan()) {
                 S.pan = { id: event.pointerId, x: event.clientX, y: event.clientY, imgX: S.instance.imgX, imgY: S.instance.imgY };
@@ -975,7 +1305,10 @@ window.minipaintCanvas = (function () {
                  frameHidden: !S.frame || S.frame.hidden,
                  layerDrag: S.layerDrag ? { dx: S.layerDrag.dx, dy: S.layerDrag.dy, done: S.layerDrag.done } : null,
                  overlay: !!(S.overlay && !S.overlay.hidden), keepView: !!S.keepView, preview: !!layerPreview(),
-                 frame: S.frameRect ? Object.assign({}, S.frameRect) : null, box: cropBoxObject(), rail: railState() };
+                 frame: S.frameRect ? Object.assign({}, S.frameRect) : null, box: cropBoxObject(), rail: railState(),
+                 menuOpen: !!(S.menu && !S.menu.hidden), menuSection: S.menuSection,
+                 bounds: S.bounds && !S.bounds.hidden ? imageRect() : null, selection: selectionRect(), frameDrag: !!S.frameDrag,
+                 pointers: S.pointers.size, pan: !!S.pan, pinch: !!S.pinch };
     }
 
     function railState() {
@@ -1076,6 +1409,9 @@ window.minipaintCanvas = (function () {
         fit: fit,
         setRail: setRail,
         toggleRail: toggleRail,
+        toggleMenu: toggleMenu,
+        closeMenu: closeMenu,
+        refreshOverlays: refreshOverlays,
         onMode: onMode,
         setTool: setTool,
         setBrushSize: setBrushSize,

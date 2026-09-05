@@ -1,12 +1,16 @@
 """The document the Canvas is editing: layers on a canvas, a mask, and
 enough history to undo the big steps.
 
-A layer is an RGBA picture at an offset on the document canvas; the base
-layer is the picture that arrived. ``image`` is the composite of the visible
-layers, kept current, and it is what the canvas shows and what gets sent.
-One or several layers are selected at a time, the way a layers panel works;
-the primary one (``active``) is the last picked, and moving, fading,
-duplicating, deleting and merging act on the whole selection.
+A layer is an RGBA picture at an offset on the document canvas. A picture
+that arrives becomes "Layer 1" over a white "Background" of the same size,
+so the canvas has an edge that can be seen and a layer can be dragged over
+it, hidden or deleted without the canvas losing its shape. ``image`` is the
+composite of the visible layers, kept current, and it is what the canvas
+shows and what gets sent. One or several layers are selected at a time, the
+way a layers panel works; the primary one (``active``) is the last picked,
+and moving, resizing, fading, duplicating, deleting and merging act on the
+whole selection. A resized layer keeps the pixels it had before its first
+resize, so resizing again starts from those rather than from a resample.
 Strokes are undone by the canvas itself. What the history holds is the
 structural work - receive, open, apply crop, expand, clear, invert, reset,
 and every layer operation - because those replace the canvas's contents
@@ -24,6 +28,14 @@ from . import imaging
 
 HISTORY_LIMIT = 6
 BASE_NAME = "Background"
+BACKDROP = (255, 255, 255, 255)
+# A side longer than this is past what a browser canvas holds comfortably.
+MAX_LAYER_SIDE = 8192
+
+try:  # Pillow >= 9.1
+    LANCZOS = Image.Resampling.LANCZOS
+except AttributeError:  # pragma: no cover - older Pillow
+    LANCZOS = Image.LANCZOS
 
 
 class Layer:
@@ -37,6 +49,8 @@ class Layer:
         name: str = "Layer",
         visible: bool = True,
         opacity: int = 100,
+        source: typing.Optional[Image.Image] = None,
+        scale: float = 1.0,
     ) -> None:
         self.image = imaging.to_rgba(image)
         self.x = int(x)
@@ -44,6 +58,43 @@ class Layer:
         self.name = name
         self.visible = bool(visible)
         self.opacity = max(0, min(100, int(opacity)))
+        # The pixels before the first resize, and the size relative to them.
+        self.source = imaging.to_rgba(source) if source is not None else None
+        self.scale = float(scale) if scale and scale > 0 else 1.0
+
+    @property
+    def percent(self) -> int:
+        """The size, as a percentage of the pixels the layer started with."""
+        return int(round(self.scale * 100))
+
+    def resize(self, percent: float) -> bool:
+        """This layer at a percentage of the size it had before it was first
+        resized, keeping its centre where it is. False when nothing changed."""
+        try:
+            factor = float(percent) / 100.0
+        except (TypeError, ValueError):
+            return False
+        factor = max(0.01, min(40.0, factor))
+        base = self.source if self.source is not None else self.image
+        width = max(1, int(round(base.width * factor)))
+        height = max(1, int(round(base.height * factor)))
+        if (width, height) == self.image.size:
+            return False
+        if max(width, height) > MAX_LAYER_SIDE:
+            raise ValueError(f"{width} × {height} is past what a browser canvas holds comfortably; keep a side under {MAX_LAYER_SIDE}px.")
+        centre_x = self.x + self.image.width / 2
+        centre_y = self.y + self.image.height / 2
+        if (width, height) == base.size:
+            self.image = base
+            self.source = None
+            self.scale = 1.0
+        else:
+            self.image = base.resize((width, height), LANCZOS)
+            self.source = base
+            self.scale = factor
+        self.x = int(round(centre_x - width / 2))
+        self.y = int(round(centre_y - height / 2))
+        return True
 
     @property
     def size(self) -> typing.Tuple[int, int]:
@@ -54,7 +105,7 @@ class Layer:
         return (self.x, self.y, self.x + self.image.width, self.y + self.image.height)
 
     def copy(self, name: typing.Optional[str] = None) -> "Layer":
-        return Layer(self.image.copy(), self.x, self.y, name or self.name, self.visible, self.opacity)
+        return Layer(self.image.copy(), self.x, self.y, name or self.name, self.visible, self.opacity, self.source, self.scale)
 
     def snapshot(self) -> dict:
         return {
@@ -64,14 +115,28 @@ class Layer:
             "name": self.name,
             "visible": self.visible,
             "opacity": self.opacity,
+            "source": imaging.to_png_bytes(self.source) if self.source is not None else None,
+            "scale": self.scale,
         }
 
     @classmethod
     def restore(cls, data: dict) -> "Layer":
-        return cls(imaging.from_png_bytes(data["png"]), data["x"], data["y"], data["name"], data["visible"], data["opacity"])
+        source = data.get("source")
+        return cls(
+            imaging.from_png_bytes(data["png"]),
+            data["x"],
+            data["y"],
+            data["name"],
+            data["visible"],
+            data["opacity"],
+            imaging.from_png_bytes(source) if source else None,
+            data.get("scale", 1.0),
+        )
 
     def describe(self) -> str:
         parts = [f"{self.name}: {self.image.width} × {self.image.height} at ({self.x}, {self.y})"]
+        if self.percent != 100:
+            parts.append(f"{self.percent}% size")
         if not self.visible:
             parts.append("hidden")
         if self.opacity < 100:
@@ -238,6 +303,11 @@ class Document:
             number += 1
         return f"{wanted} {number}"
 
+    def next_layer_name(self) -> str:
+        """Layer 1, Layer 2, ... counting the layers over the Background."""
+        count = sum(1 for layer in self.layers if layer.name != BASE_NAME)
+        return self.unique_name(f"Layer {count + 1}")
+
     # -- history -----------------------------------------------------------
 
     def _original_bytes(self) -> typing.Optional[bytes]:
@@ -338,11 +408,13 @@ class Document:
         origin: str,
         filename: typing.Optional[str] = None,
     ) -> None:
-        """Replace the document with one picture. Callers checkpoint first if it can be undone."""
+        """Replace the document with one picture: Layer 1, over a white
+        Background of the same size. Callers checkpoint first if it can be undone."""
         picture = imaging.to_rgba(image)
-        self.layers = [Layer(picture, 0, 0, BASE_NAME)]
-        self.active = 0
-        self.selected = [0]
+        backdrop = Image.new("RGBA", picture.size, BACKDROP)
+        self.layers = [Layer(backdrop, 0, 0, BASE_NAME), Layer(picture, 0, 0, "Layer 1")]
+        self.active = 1
+        self.selected = [1]
         self.canvas_size = picture.size
         self.mask = None
         self.original = picture
@@ -390,7 +462,7 @@ class Document:
 
     def add_layer(self, image: Image.Image, x: int, y: int, name: typing.Optional[str] = None) -> Layer:
         """A new layer above the primary one; it becomes the selection."""
-        layer = Layer(image, x, y, self.unique_name(name or f"Layer {len(self.layers) + 1}"))
+        layer = Layer(image, x, y, self.unique_name(name) if name else self.next_layer_name())
         index = min(self.active + 1, len(self.layers)) if self.layers else 0
         self.layers.insert(index, layer)
         self.active = index
@@ -440,6 +512,16 @@ class Document:
         layer.visible = (not layer.visible) if visible is None else bool(visible)
         self._touch()
         return layer.visible
+
+    def scale_selected(self, percent: typing.Any) -> bool:
+        """Every selected layer at a percentage of its original size, each
+        keeping its centre. False when nothing changed."""
+        changed = False
+        for layer in self.selected_layers():
+            changed = layer.resize(percent) or changed
+        if changed:
+            self._touch()
+        return changed
 
     def set_opacity(self, value: typing.Any) -> None:
         try:
@@ -613,6 +695,7 @@ class Document:
                     "size": f"{layer.image.width} × {layer.image.height}",
                     "at": f"({layer.x}, {layer.y})",
                     "opacity": layer.opacity,
+                    "percent": layer.percent,
                     "top": index == len(self.layers) - 1,
                     "bottom": index == 0,
                 }

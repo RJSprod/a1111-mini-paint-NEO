@@ -1,3 +1,7 @@
+/* --------------------------------------------------------------------
+ * Legacy miniPaint frontend (unchanged)
+ * ------------------------------------------------------------------ */
+
 #a1111minipaint_iframe {
     display: block;
     width: 100%;
@@ -8,4 +12,245 @@
 /* Workaround for ashen-sensored/stable-diffusion-webui-two-shot */
 #a1111minipaint_iframe .output-html {
     display: block;
+}
+
+/* --------------------------------------------------------------------
+ * Touch Canvas frontend
+ *
+ * Every rule below is scoped to the extension's own root, so it cannot
+ * reach the legacy editor, the rest of the WebUI, or a theme's layout.
+ * Colours come from Gradio's semantic variables with fallbacks, so the
+ * host theme (Lobe included) keeps deciding what things look like; this
+ * file only decides where they go and how big they are to a finger.
+ * ------------------------------------------------------------------ */
+
+#minipaint_canvas_root {
+    /* The tab's one inline style rule (an HTML block that only holds a
+       <style>) sets --minipaint-canvas-height from the Settings value. */
+    --minipaint-canvas-height: 70vh;
+    --minipaint-target: 44px;
+    --minipaint-gap: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--minipaint-gap);
+    width: 100%;
+}
+
+/* -- action bar ---------------------------------------------------- */
+
+#minipaint_canvas_root .minipaint-topbar {
+    flex-wrap: wrap;
+    gap: var(--minipaint-gap);
+    align-items: center;
+}
+
+#minipaint_canvas_root .minipaint-action,
+#minipaint_canvas_root .minipaint-mode,
+#minipaint_canvas_root .minipaint-apply,
+#minipaint_canvas_root .minipaint-side,
+#minipaint_canvas_root .minipaint-panel button {
+    min-height: var(--minipaint-target);
+}
+
+#minipaint_canvas_root .minipaint-action {
+    flex: 0 1 auto;
+    min-width: 72px;
+}
+
+/* The one action the whole tab exists for. */
+#minipaint_canvas_root .minipaint-send {
+    margin-left: auto;
+    min-width: 200px;
+    font-weight: 600;
+}
+
+/* Exit focus is only offered while focus mode is on. */
+#minipaint_canvas_root:not(.minipaint-focus) .minipaint-focus-exit,
+#minipaint_canvas_root.minipaint-focus .minipaint-focus-enter {
+    display: none;
+}
+
+/* -- empty state and status ---------------------------------------- */
+
+#minipaint_canvas_root .minipaint-empty {
+    padding: 24px 12px;
+    text-align: center;
+    border: 1px dashed var(--border-color-primary, currentColor);
+    border-radius: var(--block-radius, 8px);
+    color: var(--body-text-color-subdued, inherit);
+}
+
+#minipaint_canvas_root .minipaint-status {
+    min-height: 1.5em;
+    padding: 0 2px;
+}
+
+#minipaint_canvas_root .minipaint-status small,
+#minipaint_canvas_root .minipaint-hint,
+#minipaint_canvas_root .minipaint-preview {
+    color: var(--body-text-color-subdued, inherit);
+}
+
+#minipaint_canvas_root .minipaint-preview {
+    font-variant-numeric: tabular-nums;
+}
+
+/* -- the editor ---------------------------------------------------- */
+
+/* The drawing surface owns touch gestures; the toolbars around it keep
+   normal scrolling and tapping, and page zoom outside the editor is
+   untouched. The crop handles get the same treatment so a finger can
+   drag them without scrolling the page. */
+#minipaint_canvas_editor canvas,
+#minipaint_canvas_editor .hitbox,
+#minipaint_canvas_editor .grid {
+    touch-action: none;
+}
+
+/* The editor's "Clear canvas" control resets everything but its crop box,
+   which would corrupt the next image; Reset to original does the same job
+   safely. Its empty-state hint reads "select the draw tool", which is not
+   how images arrive here. Both are cosmetic: the editor still works
+   unchanged if these selectors ever stop matching. */
+#minipaint_canvas_editor button[aria-label="Clear canvas"],
+#minipaint_canvas_editor .empty {
+    display: none;
+}
+
+/* Keep a tall image inside the block instead of letting it be cut off: the
+   editor sizes its canvas by width only. The cap is in viewport units on the
+   canvas itself, because the editor's wrapper is content-sized (percentages
+   would not resolve) and has to keep hugging the canvas exactly - the crop
+   handles and the brush cursor are positioned from that wrapper. */
+#minipaint_canvas_editor .stage-wrap canvas {
+    width: auto !important;
+    height: auto !important;
+    max-width: 100% !important;
+    max-height: calc(var(--minipaint-canvas-height, 70vh) - 110px) !important;
+}
+
+#minipaint_canvas_style {
+    display: none;
+}
+
+.minipaint-nowebgl {
+    padding: 24px 16px;
+    line-height: 1.5;
+}
+
+/* -- mode bar ------------------------------------------------------ */
+
+#minipaint_canvas_root .minipaint-modebar {
+    gap: var(--minipaint-gap);
+}
+
+#minipaint_canvas_root .minipaint-mode {
+    flex: 1 1 0;
+    min-height: 48px;
+    font-weight: 600;
+}
+
+/* -- tool options -------------------------------------------------- */
+
+#minipaint_canvas_root .minipaint-options {
+    padding: var(--minipaint-gap);
+}
+
+#minipaint_canvas_root .minipaint-panel {
+    gap: var(--minipaint-gap);
+}
+
+#minipaint_canvas_root .minipaint-panel-actions {
+    align-items: center;
+    gap: var(--minipaint-gap);
+}
+
+#minipaint_canvas_root .minipaint-panel-actions .minipaint-hint {
+    flex: 1 1 200px;
+}
+
+#minipaint_canvas_root .minipaint-apply {
+    flex: 0 0 auto;
+    min-width: 160px;
+}
+
+/* Aspect, amount and smoothing pickers as finger-sized chips. */
+#minipaint_canvas_root .minipaint-chips label {
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 12px;
+}
+
+/* -- focus mode ---------------------------------------------------- */
+
+#minipaint_canvas_root.minipaint-focus {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    margin: 0;
+    padding: var(--minipaint-gap);
+    overflow: auto;
+    background: var(--body-background-fill, var(--background-fill-primary, #101010));
+}
+
+#minipaint_canvas_root.minipaint-focus {
+    --minipaint-canvas-height: calc(100vh - 250px);
+}
+
+#minipaint_canvas_root.minipaint-focus #minipaint_canvas_editor {
+    height: var(--minipaint-canvas-height) !important;
+    min-height: 320px;
+}
+
+/* -- tablet and phone ---------------------------------------------- */
+
+@media (max-width: 1024px) {
+    #minipaint_canvas_root .minipaint-send {
+        min-width: 160px;
+    }
+
+    /* Options become a sheet docked to the bottom edge, so the canvas keeps
+       the screen above it and the controls stay in reach. */
+    #minipaint_canvas_root .minipaint-options {
+        position: sticky;
+        bottom: 0;
+        z-index: 4;
+        background: var(--block-background-fill, var(--background-fill-primary, transparent));
+        border-top: 1px solid var(--border-color-primary, transparent);
+    }
+}
+
+@media (max-width: 720px) {
+    #minipaint_canvas_root {
+        --minipaint-target: 48px;
+    }
+
+    #minipaint_canvas_root .minipaint-action {
+        min-width: 0;
+        flex: 1 1 30%;
+    }
+
+    #minipaint_canvas_root .minipaint-send {
+        flex: 1 1 100%;
+        margin-left: 0;
+        order: 9;
+    }
+
+    #minipaint_canvas_root .minipaint-side {
+        flex: 1 1 22%;
+        min-width: 0;
+    }
+
+    #minipaint_canvas_root .minipaint-panel-actions .minipaint-hint {
+        flex-basis: 100%;
+    }
+
+    #minipaint_canvas_root .minipaint-apply {
+        flex: 1 1 100%;
+    }
+
+    #minipaint_canvas_root.minipaint-focus {
+        --minipaint-canvas-height: calc(100vh - 300px);
+    }
 }

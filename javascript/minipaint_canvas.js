@@ -14,6 +14,9 @@
  *   - the waits between writing an image and writing a mask layer, here
  *     and for the handoff into the Inpaint tab's canvas,
  *   - telling an image the canvas echoed from one the user opened,
+ *   - Undo and Redo of strokes, before the server's structural steps,
+ *   - a canvas height that fits what the window has left, so nothing
+ *     scrolls and nothing floats over the canvas,
  *   - focus mode.
  *
  * Every other function is called from a Gradio event on a user action, and
@@ -30,6 +33,8 @@ window.minipaintCanvas = (function () {
     const HANDLES = ["tl", "tr", "bl", "br"];
     const MIN_FRAME = 32;
     const LOAD_TIMEOUT = 8000;
+    const MIN_HEIGHT = 240;
+    const BOTTOM_ROOM = 8;
 
     const S = {
         instance: null,
@@ -38,6 +43,8 @@ window.minipaintCanvas = (function () {
         imageContainer: null,
         drawingCanvas: null,
         baseHeight: 0,
+        fit: true,
+        fitTimer: null,
         alpha: 75,
         contrast: false,
         loaded: 0,
@@ -99,8 +106,9 @@ window.minipaintCanvas = (function () {
         S.alpha = Number(options.alpha);
         if (!(S.alpha >= 0)) { S.alpha = 75; }
         S.contrast = !!options.contrast;
+        S.fit = options.fit !== false;
         const percent = Number(options.heightPercent) || 70;
-        S.baseHeight = Math.max(240, Math.round(window.innerHeight * percent / 100));
+        S.baseHeight = Math.max(MIN_HEIGHT, Math.round(window.innerHeight * percent / 100));
 
         // no_upload=false, no_scribbles=false (toggled per mode below), and
         // colour / opacity / softness fixed so the toolbar keeps only what a
@@ -127,7 +135,83 @@ window.minipaintCanvas = (function () {
         hookInstance(instance);
         buildFrame();
         bindGestures();
+        watchLayout();
         onMode(S.mode);
+        fitHeight();
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Height                                                                */
+    /* ------------------------------------------------------------------ */
+
+    /** The nearest ancestor that scrolls, or the document. */
+    function scrollParent(element) {
+        let node = element.parentElement;
+        while (node && node !== document.body && node !== document.documentElement) {
+            const overflow = getComputedStyle(node).overflowY;
+            if ((overflow === "auto" || overflow === "scroll") && node.scrollHeight > node.clientHeight + 1) { return node; }
+            node = node.parentElement;
+        }
+        return null;
+    }
+
+    /**
+     * Give the canvas the height the window has left once every other row
+     * of the tab is accounted for, so the whole tab is in view without
+     * scrolling. The rows are measured, not assumed, so an opened accordion
+     * or a wrapped status line shrinks the canvas rather than pushing the
+     * controls off screen. What the page puts after the tab (a version
+     * footer, a theme's own blocks) is left where the page put it.
+     */
+    function fitHeight() {
+        const element = root();
+        if (!element || !S.container || !S.fit) { return; }
+        if (S.instance && S.instance.maximized) { return; }
+        const surface = S.container.closest("#" + element.id + " > *") || S.container;
+        const rect = element.getBoundingClientRect();
+        if (!rect.width) { return; }  // the tab is hidden; measured again when it shows
+
+        const scroller = scrollParent(element);
+        const viewport = scroller ? scroller.clientHeight : window.innerHeight;
+        const scrolled = scroller ? scroller.scrollTop : (window.scrollY || 0);
+        const origin = scroller ? scroller.getBoundingClientRect().top : 0;
+        const top = rect.top - origin + scrolled;
+
+        let others = 0;
+        const style = getComputedStyle(element);
+        const gap = parseFloat(style.rowGap || style.gap) || 0;
+        let rows = 0;
+        for (const child of element.children) {
+            if (child === surface) { rows += 1; continue; }
+            const height = child.getBoundingClientRect().height;
+            if (height > 0) { others += height; rows += 1; }
+        }
+        const padding = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+        let height = viewport - top - others - gap * Math.max(0, rows - 1) - padding - BOTTOM_ROOM;
+        height = Math.round(clamp(height, MIN_HEIGHT, Math.max(MIN_HEIGHT, viewport - BOTTOM_ROOM)));
+        const current = parseFloat(S.container.style.height) || 0;
+        if (Math.abs(height - current) > 1) { S.container.style.height = height + "px"; }
+    }
+
+    function scheduleFit() {
+        if (S.fitTimer) { return; }
+        S.fitTimer = requestAnimationFrame(function () { S.fitTimer = null; fitHeight(); });
+    }
+
+    /** The other rows of the tab change height when an accordion opens, a
+     * mode changes or a line wraps; the window when it is resized or the
+     * tablet turns. The canvas follows. */
+    function watchLayout() {
+        const element = root();
+        if (!element) { return; }
+        if (typeof ResizeObserver === "function") {
+            const observer = new ResizeObserver(scheduleFit);
+            for (const child of element.children) {
+                if (!child.contains(S.container)) { observer.observe(child); }
+            }
+        }
+        window.addEventListener("resize", scheduleFit);
+        window.addEventListener("orientationchange", scheduleFit);
     }
 
     /**
@@ -222,6 +306,21 @@ window.minipaintCanvas = (function () {
     function canvasInput(bg, state, mode) {
         const echo = !!bg && bg === S.echoValue;
         return [echo ? "" : bg, state, mode, echo ? "echo" : "user"];
+    }
+
+    /** Take the last stroke back, if there is one. True when it was. */
+    function undoStroke() {
+        const i = S.instance;
+        if (!i || !i.img || !(i.historyIndex > 0)) { return false; }
+        i.undo();
+        return true;
+    }
+
+    function redoStroke() {
+        const i = S.instance;
+        if (!i || !i.img || !Array.isArray(i.history) || !(i.historyIndex < i.history.length - 1)) { return false; }
+        i.redo();
+        return true;
     }
 
     /** A new image or layer starts a fresh stroke history. */
@@ -327,7 +426,7 @@ window.minipaintCanvas = (function () {
         // frame later so the refit has happened.
         if (typeof ResizeObserver === "function") {
             new ResizeObserver(function () {
-                requestAnimationFrame(function () { refreshFrame(true); });
+                requestAnimationFrame(function () { fitHeight(); refreshFrame(true); });
             }).observe(S.imageContainer);
         }
     }
@@ -592,7 +691,8 @@ window.minipaintCanvas = (function () {
         return { attached: true, hasImage: !!i.img, imgX: i.imgX, imgY: i.imgY, imgScale: i.imgScale,
                  orgWidth: i.orgWidth, orgHeight: i.orgHeight, loaded: S.loaded, mode: S.mode, tool: S.tool,
                  noScribbles: !!i.no_scribbles, alpha: i.scribbleAlpha, width: i.scribbleWidth,
-                 history: Array.isArray(i.history) ? i.history.length : 0, echo: !!S.echoValue,
+                 history: Array.isArray(i.history) ? i.history.length : 0, historyIndex: i.historyIndex, echo: !!S.echoValue,
+                 height: parseFloat(S.container.style.height) || 0, fitting: S.fit,
                  frameHidden: !S.frame || S.frame.hidden,
                  frame: S.frameRect ? Object.assign({}, S.frameRect) : null, box: cropBoxObject() };
     }
@@ -655,7 +755,8 @@ window.minipaintCanvas = (function () {
         if (!element) { return; }
         element.classList.toggle(FOCUS_CLASS, !!on);
         if (S.container && S.instance && !S.instance.maximized) {
-            S.container.style.height = (on ? Math.max(240, window.innerHeight - 250) : S.baseHeight) + "px";
+            if (S.fit) { scheduleFit(); }
+            else { S.container.style.height = (on ? Math.max(MIN_HEIGHT, window.innerHeight - 250) : S.baseHeight) + "px"; }
         }
         if (on && !S.escapeListener) {
             S.escapeListener = function (event) {
@@ -675,6 +776,9 @@ window.minipaintCanvas = (function () {
         waitForImage: waitForImage,
         waitForHostImage: waitForHostImage,
         canvasInput: canvasInput,
+        undoStroke: undoStroke,
+        redoStroke: redoStroke,
+        fitHeight: fitHeight,
         fit: fit,
         onMode: onMode,
         setTool: setTool,

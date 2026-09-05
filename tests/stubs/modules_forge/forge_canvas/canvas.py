@@ -21,12 +21,29 @@ from functools import wraps
 from io import BytesIO
 
 import gradio as gr
+import gradio.component_meta
 from gradio.context import Context
 from PIL import Image
 
 from modules import shared
 
 DEBUG_MODE = False
+
+# Forge's canvas module wraps Gradio's .pyi generation so its own class is
+# skipped and any failure is swallowed.
+_create_or_modify_pyi = gradio.component_meta.create_or_modify_pyi
+
+
+def _create_or_modify_pyi_patched(component_class, class_name, events):
+    try:
+        if component_class.__name__ == "LogicalImage":
+            return
+        return _create_or_modify_pyi(component_class, class_name, events)
+    except Exception:
+        return
+
+
+gradio.component_meta.create_or_modify_pyi = _create_or_modify_pyi_patched
 
 _MINIMAL_HTML = """<div class="forge-container" id="container_forge_mixin">
     <input type="file" id="imageInput_forge_mixin" class="forge-file-upload">

@@ -20,11 +20,39 @@ from functools import wraps
 
 import gradio as gr
 import gradio.blocks
+import gradio.component_meta
 
 from modules import infotext_utils, script_callbacks  # the stubs
-from modules_forge.forge_canvas.canvas import ForgeCanvas, LogicalImage, base64_to_image, image_to_base64  # noqa: F401
 
 _installed = False
+
+
+def install_metaclass_patches() -> None:
+    """What Forge's ``gradio_extensions`` does to Gradio's component metaclass,
+    before any Forge component class exists: no .pyi files for classes that
+    ask not to have one, and no recording of constructor arguments for
+    classes defined from here on. The second is what makes a session rebuild
+    of Forge's ``LogicalImage`` come back with ``numpy=True``."""
+    if getattr(gradio.component_meta, "_forge_like_patched", False):
+        return
+    gradio.component_meta._forge_like_patched = True
+    original = gradio.component_meta.create_or_modify_pyi
+
+    def create_or_modify_pyi(component_class, class_name, events):
+        if hasattr(component_class, "webui_do_not_create_gradio_pyi_thank_you"):
+            return
+        try:
+            original(component_class, class_name, events)
+        except Exception:
+            return
+
+    gradio.component_meta.create_or_modify_pyi = create_or_modify_pyi
+    gradio.component_meta.updateable = lambda x: x
+
+
+install_metaclass_patches()
+
+from modules_forge.forge_canvas.canvas import ForgeCanvas, LogicalImage, base64_to_image, image_to_base64  # noqa: E402,F401
 
 
 def install_patches() -> None:

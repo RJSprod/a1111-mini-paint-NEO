@@ -29,14 +29,21 @@ Extensions → Install from URL → this repository's URL → Install → Reload
 ```
  [Open] [Undo] [Redo] [Fit] [Focus]                [ Send to img2img ]
  +---------------------------------------------------------------+
- | ⛶ 📂 ✠ 🔄 ↩️ ↪️      the WebUI's own canvas (ForgeCanvas)      |
- |            pinch or wheel to zoom, drag to pan                |
+ |             ⛶ 📂 ✠ 🔄 ↩️ ↪️                                    |
+ |           the WebUI's own canvas (ForgeCanvas),               |
+ |        as tall as the window has room for, no scrolling       |
  +---------------------------------------------------------------+
- status: 1024 × 1024 · from txt2img — Auto sends to img2img
+ 1024 × 1024 · from txt2img — Received from txt2img. Auto sends to img2img.
  [        Crop        ] [        Mask        ] [       Expand       ]
- options for the selected mode
- More ▾  (destination, reset, save a copy)
+ one row of controls for that mode      (e.g. [Aspect ▾] [Apply Crop])
+ Crop options ▸   (the rest of that mode's settings, closed by default)
+ More ▸           (destination, reset, save a copy)
 ```
+
+The canvas takes whatever height the window has left below the controls, and gives
+some back when the options accordion is opened, so the whole tab is always in view and
+nothing ever floats over the picture. On a tablet in portrait the rows wrap; on a phone
+the buttons stack.
 
 **Getting an image in.** Press 🖌️ in the button row under a txt2img, img2img or Extras
 result, use **Open** or the canvas's own 📂 for a local file, or drop or paste a picture
@@ -47,19 +54,18 @@ canvas's ✠ refits and ⛶ fills the screen.
 **Crop.** A frame with corner handles sits over the image; its size in image pixels is
 written on it. Move the image under the frame with one finger (or the left mouse button),
 zoom to fit more or less of it in, and drag a corner to resize the frame — with a finger
-or the mouse. The aspect chips (Free, Original, 1:1, 4:3, 3:4, 16:9, 9:16, 3:2, 2:3, or a
-custom ratio) lock the frame's shape. **Apply Crop** keeps what is inside the frame and
-shows the new size; the frame then covers the whole result again, so nothing is ever
-cropped twice by accident. A crop never stretches.
+or the mouse. The **Aspect** menu (Free, Original, 1:1, 4:3, 3:4, 16:9, 9:16, 3:2, 2:3, or
+a custom ratio from *Crop options*) locks the frame's shape. **Apply Crop** keeps what is
+inside the frame and shows the new size; the frame then covers the whole result again, so
+nothing is ever cropped twice by accident. A crop never stretches.
 
 **Mask.** Paint over what should change, with the same brush the Inpaint tab has: same
 colour, same opacity, same high-contrast checkerboard if that setting is on. **Paint /
 Erase / Move** pick what one finger does; the **Brush size** slider is the one from
-Inpaint's toolbar, moved into the panel where a finger can reach it. The canvas's own ↩️
-undoes a stroke and 🔄 clears them all. **Clear Mask** and **Invert Mask** are one tap.
-Edge smoothing (Off / Low / Medium / High) is applied to the mask when it is sent, so
-painting stays exactly what the canvas does natively. The mask is coverage: the colour on
-screen is never part of what is sent.
+Inpaint's toolbar, moved into the row where a finger can reach it. **Clear Mask** and
+**Invert Mask** are one tap. Edge smoothing (Off / Low / Medium / High, in *Mask options*)
+is applied to the mask when it is sent, so painting stays exactly what the canvas does
+natively. The mask is coverage: the colour on screen is never part of what is sent.
 
 **Expand.** Tap an amount (64 / 128 / 256) and a side (Left / Right / Top / Bottom), read
 the resulting size, press **Apply Expand**. The new area is masked automatically, plus an
@@ -75,10 +81,10 @@ same ones its "Send to img2img" buttons use. The button's label says which it wi
 *More → Send to* overrides this (img2img, Inpaint, Extras). Transparent pixels from an
 expansion are filled on the way out (setting: *Send: fill transparent pixels with*).
 
-**Undo / Redo** in the top bar cover the structural steps — Open, Apply Crop, Apply
-Expand, Clear, Invert — and *More → Reset to original* goes back to the image as it
-arrived. Strokes are undone on the canvas itself. **Fit** puts the image and the frame
-back the way they arrived.
+**Undo / Redo** in the top bar take strokes back first, then the bigger steps — Open,
+Apply Crop, Apply Expand, Clear, Invert — in the order they happened. *More → Reset to
+original* goes back to the image as it arrived. **Fit** puts the image and the frame back
+the way they arrived.
 
 **Focus** makes the Canvas fill the window (Exit focus or Escape brings the WebUI back).
 On tablets and phones the option panels dock to the bottom edge and every control is at
@@ -89,7 +95,8 @@ least 44 px tall.
 | option | default | |
 | --- | --- | --- |
 | Use Old UI (legacy miniPaint) | off | Reload UI to switch |
-| Canvas height (% of the browser window) | 70 | the canvas's ⛶ fills the window |
+| Canvas height: fit the window | on | the canvas takes the height the window has left |
+| Canvas height when not fitting the window (% of the browser window) | 70 | the canvas's ⛶ fills the window |
 | Mask brush size when the Canvas opens | 25 | same scale as the Inpaint brush |
 | Expand: snap side amounts to a multiple of | 8 | |
 | Send: fill transparent pixels with | Neutral gray | or edge colour, white, black |
@@ -171,6 +178,19 @@ A few behaviours of the host's canvas shaped the wiring; each has a small answer
 * **Painting, panning and zooming never go to the server.** No events are bound to the
   mask layer; the canvas's pixels are read only when Apply, Clear, Invert, Save or Send
   is pressed, and the crop frame is read only by Apply Crop, as a box in image pixels.
+* **Gradio rebuilds a component after an update output, and under Forge the rebuilt
+  copy of a ForgeCanvas textbox reads arrays instead of images.** Any event that answers
+  a component with `gr.update()` or `gr.skip()` makes Gradio keep a per-session copy of
+  it, reconstructed from the arguments it was created with. Forge switches that
+  recording off before its own `LogicalImage` class is defined, so the copy is built from
+  the plain Textbox arguments and comes back with `numpy=True`; every read of that
+  textbox from then on is a numpy array, and code expecting an image fails. That was the
+  "crop, undo, crop again" error. The Canvas's own two textboxes are therefore a subclass
+  whose default is `numpy=False`, which survives the rebuild; and the host's img2img and
+  Inpaint textboxes are never answered by the backend at all — the image and the mask
+  travel as PNG data URLs and a browser-side step writes exactly the chosen textbox,
+  leaving the others untouched. Only Extras, an ordinary `gr.Image`, is written from the
+  backend.
 
 ## Legacy editor (Old UI)
 

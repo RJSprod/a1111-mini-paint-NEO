@@ -70,6 +70,7 @@
 /* -- status ---------------------------------------------------------- */
 
 #minipaint_canvas_root .minipaint-status {
+    line-height: 1.35;
     min-height: 1.5em;
     padding: 0 2px;
 }
@@ -197,36 +198,59 @@
     font-weight: 600;
 }
 
-/* -- tool options -------------------------------------------------- */
+/* -- the mode's quick row, and the options behind the accordion ------ */
 
-#minipaint_canvas_root .minipaint-options {
-    padding: var(--minipaint-gap);
+#minipaint_canvas_root .minipaint-quick {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--minipaint-gap);
+}
+
+#minipaint_canvas_root .minipaint-quick-column {
+    gap: 4px;
+}
+
+#minipaint_canvas_root .minipaint-aspect {
+    flex: 0 1 220px;
+    min-width: 160px;
+}
+
+#minipaint_canvas_root .minipaint-size {
+    flex: 1 1 200px;
+    min-width: 160px;
+}
+
+#minipaint_canvas_root .minipaint-quick-action {
+    flex: 0 1 auto;
+}
+
+#minipaint_canvas_root .minipaint-apply {
+    flex: 0 0 auto;
+    min-width: 160px;
+    margin-left: auto;
 }
 
 #minipaint_canvas_root .minipaint-panel {
     gap: var(--minipaint-gap);
 }
 
-#minipaint_canvas_root .minipaint-panel-actions {
-    align-items: center;
-    gap: var(--minipaint-gap);
-}
-
-#minipaint_canvas_root .minipaint-panel-actions .minipaint-hint {
-    flex: 1 1 200px;
-}
-
-#minipaint_canvas_root .minipaint-apply {
+/* Tool, amount and smoothing pickers as finger-sized chips. A group of chips
+   stays on one line and lets the row wrap around it instead. */
+#minipaint_canvas_root .minipaint-chips {
     flex: 0 0 auto;
-    min-width: 160px;
+    min-width: 0;
 }
 
-/* Aspect, amount and smoothing pickers as finger-sized chips. */
+#minipaint_canvas_root .minipaint-chips .wrap {
+    flex-wrap: nowrap;
+}
+
 #minipaint_canvas_root .minipaint-chips label {
     min-height: 40px;
     display: inline-flex;
     align-items: center;
     padding: 4px 12px;
+    white-space: nowrap;
 }
 
 /* -- focus mode ---------------------------------------------------- */
@@ -247,16 +271,6 @@
 @media (max-width: 1024px) {
     #minipaint_canvas_root .minipaint-send {
         min-width: 160px;
-    }
-
-    /* Options become a sheet docked to the bottom edge, so the canvas keeps
-       the screen above it and the controls stay in reach. */
-    #minipaint_canvas_root .minipaint-options {
-        position: sticky;
-        bottom: 0;
-        z-index: 4;
-        background: var(--block-background-fill, var(--background-fill-primary, transparent));
-        border-top: 1px solid var(--border-color-primary, transparent);
     }
 }
 
@@ -281,12 +295,9 @@
         min-width: 0;
     }
 
-    #minipaint_canvas_root .minipaint-panel-actions .minipaint-hint {
-        flex-basis: 100%;
-    }
-
     #minipaint_canvas_root .minipaint-apply {
         flex: 1 1 100%;
+        margin-left: 0;
     }
 
 }

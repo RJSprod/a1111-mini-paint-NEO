@@ -2,9 +2,12 @@
 controls around it.
 
 Layout, top to bottom: an action bar, the canvas, a status line, the three
-modes (Crop / Mask / Expand), one panel of options per mode, and a "More"
-accordion. Buttons are Buttons and sliders are Sliders, so the host theme
-decides how everything looks; the canvas is the same one img2img uses.
+modes (Crop / Mask / Expand), one compact row of controls for the chosen
+mode, an "Options" accordion with the rest of that mode's settings, and a
+"More" accordion. Nothing floats over the canvas: the canvas takes the height
+the window has left, so the whole tab is in view without scrolling. Buttons
+are Buttons and sliders are Sliders, so the host theme decides how everything
+looks; the canvas is the same one img2img uses.
 
 What goes to Python is the low-frequency work: receiving or opening an
 image, committing a crop, expanding, clearing or inverting the mask, undo
@@ -33,6 +36,7 @@ from . import document, host, imaging, outpaint, surface
 
 MODES = ("crop", "mask", "expand")
 MODE_LABELS = {"crop": "Crop", "mask": "Mask", "expand": "Expand"}
+OPTIONS_LABELS = {"crop": "Crop options", "mask": "Mask options", "expand": "Expand options"}
 ASPECTS = ["Free", "Original", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "Custom"]
 TOOLS = ["Paint", "Erase", "Move"]
 DESTINATIONS = ["Auto", "img2img", "Inpaint", "Extras"]
@@ -81,10 +85,38 @@ CANVAS_INPUT_JS = (
 )
 
 
+# Undo and Redo take the last stroke back first, in the browser, and only
+# then a structural step on the server; the third input says which happened.
+UNDO_JS = (
+    f"(state, mode, kind) => {{ const done = {_JS} ? {_JS}.undoStroke() : false; "
+    f"if ({_JS}) {_JS}.mark(); return [state, mode, done ? 'stroke' : 'document']; }}"
+)
+REDO_JS = (
+    f"(state, mode, kind) => {{ const done = {_JS} ? {_JS}.redoStroke() : false; "
+    f"if ({_JS}) {_JS}.mark(); return [state, mode, done ? 'stroke' : 'document']; }}"
+)
+
+
 def _mark_js(input_count: int) -> str:
     """A pass-through that notes the moment before the image is replaced, so
     the wait step can tell a fresh load from the last one."""
     return f"(...args) => {{ if ({_JS}) {_JS}.mark(); return args.slice(0, {input_count}); }}"
+
+
+# The host's img2img and Inpaint inputs are its own hidden image textboxes.
+# They are written from the browser, as a plain value into exactly the one
+# chosen, and the others are left untouched with an empty update. A backend
+# output would have to answer every target on every send, and an answer of
+# "no change" makes Gradio rebuild a per-session copy of the host's component
+# - which under Forge comes back reading images as arrays (see surface.py).
+_KEEP = '{"__type__": "update"}'
+DELIVER_IMAGE_JS = (
+    f"(target, payload) => {{ const t = String(target || ''); "
+    f"return [t.indexOf('img2img') === 0 ? payload : {_KEEP}, t.indexOf('inpaint') === 0 ? payload : {_KEEP}]; }}"
+)
+DELIVER_MASK_JS = (
+    f"(target, payload) => [String(target || '').indexOf('inpaint') === 0 ? (payload || '') : {_KEEP}]"
+)
 
 
 def _host_wait_js(uuid: str) -> str:
@@ -147,17 +179,19 @@ class TouchCanvas:
         """The mask as the scribble layer the canvases show."""
         return imaging.foreground_layer(mask, size, self.mask_color, self.mask_style["contrast"])
 
+    MODE_COUNT = 13
+
     def _mode_updates(self, mode: str, doc: document.Document) -> tuple:
+        """The mode textbox, the quick row and options panel of each mode,
+        the three mode buttons, the send label, the tool, the options label."""
         return (
             mode,
-            gr.update(visible=mode == "crop"),
-            gr.update(visible=mode == "mask"),
-            gr.update(visible=mode == "expand"),
-            gr.update(variant="primary" if mode == "crop" else "secondary"),
-            gr.update(variant="primary" if mode == "mask" else "secondary"),
-            gr.update(variant="primary" if mode == "expand" else "secondary"),
+            *(gr.update(visible=mode == each) for each in MODES),
+            *(gr.update(visible=mode == each) for each in MODES),
+            *(gr.update(variant="primary" if mode == each else "secondary") for each in MODES),
             gr.update(value=send_label(doc.has_mask, doc.has_expansion, mode)),
             gr.update(value="Paint") if mode == "mask" else gr.skip(),
+            gr.update(label=OPTIONS_LABELS[mode]),
         )
 
     def _info(
@@ -179,13 +213,15 @@ class TouchCanvas:
                 notes.append(f"{size} megapixels is a lot for a browser canvas, especially on a tablet")
 
         summary = f"**{doc.describe()}**"
+        if message:
+            summary += f" — {message}"
         if doc.has_image:
             target = resolve_destination("Auto", doc.has_mask, doc.has_expansion)
-            summary += f" — Auto sends to {DESTINATION_LABELS[target]}"
+            summary += f" <small>Auto sends to {DESTINATION_LABELS[target]}.</small>"
 
         return (
             doc,
-            _status(f"{summary}  \n{message}" if message else summary, notes),
+            _status(summary, notes),
             outpaint.describe(doc.size, sides),
             gr.update(value="Free") if reset_aspect else gr.skip(),
             doc.original_size_text(),
@@ -217,7 +253,7 @@ class TouchCanvas:
         """The commit-shaped reply for a step that changed nothing."""
         return (gr.skip(), gr.skip(), *self._info(doc, mode, message, notes))
 
-    INFO_COUNT = 6 + 9
+    INFO_COUNT = 6 + MODE_COUNT
 
     def _skip_info(self) -> tuple:
         return tuple(gr.skip() for _ in range(self.INFO_COUNT))
@@ -389,15 +425,21 @@ class TouchCanvas:
 
     # -- callbacks: history --------------------------------------------------
 
-    def undo(self, state, mode):
+    def undo(self, state, mode, kind="document"):
+        """Undo: a stroke, if the browser took one back, else the last
+        structural step (open, crop, expand, clear, invert, reset)."""
         doc = document.ensure(state)
+        if kind == "stroke":
+            return self._unchanged(doc, mode, "Undid a stroke.")
         label = doc.undo()
         if label is None:
-            return self._unchanged(doc, mode, "Nothing to undo here. The canvas's own ↩️ undoes strokes.")
+            return self._unchanged(doc, mode, "Nothing to undo.")
         return self._commit(doc, mode, f"Undid {label}.")
 
-    def redo(self, state, mode):
+    def redo(self, state, mode, kind="document"):
         doc = document.ensure(state)
+        if kind == "stroke":
+            return self._unchanged(doc, mode, "Redid a stroke.")
         label = doc.redo()
         if label is None:
             return self._unchanged(doc, mode, "Nothing to redo.")
@@ -421,24 +463,24 @@ class TouchCanvas:
     # -- callbacks: send ----------------------------------------------------
 
     def send(self, background, foreground, state, mode, destination_choice, smoothing):
-        """The handoff: the image into the destination's own input.
-
-        For Inpaint the mask follows in a later step (``send_mask``), once
-        the Inpaint canvas has taken the image, because that canvas can only
-        hold a mask layer of the size it currently has. The last value
-        returned is the browser's instruction: which tab to switch to, and
-        for Inpaint the size the canvas must reach first.
+        """The handoff. The image goes to the destination's own input: for
+        Extras straight into its image component, for img2img and Inpaint as
+        a PNG data URL that the next (browser-side) step writes into the
+        host's hidden image textbox. For Inpaint the mask follows once that
+        canvas has taken the image (``send_mask``). The last two values are
+        the browser's instructions: the target, with the size the Inpaint
+        canvas must reach, and the image payload.
         """
         doc = document.ensure(state)
         skips = [gr.skip() for _ in self.image_targets]
         image, mask, notes = self._sync(doc, background, foreground)
         if image is None:
-            return (*skips, *self._info(doc, mode, "There is no image to send."), "")
+            return (*skips, *self._info(doc, mode, "There is no image to send."), "", "")
 
         target = resolve_destination(destination_choice, doc.has_mask, doc.has_expansion)
         label = DESTINATION_LABELS[target]
         if target not in self.targets:
-            return (*skips, *self._info(doc, mode, f"{label} was not found in this WebUI, so nothing was sent."), "")
+            return (*skips, *self._info(doc, mode, f"{label} was not found in this WebUI, so nothing was sent."), "", "")
 
         outgoing = imaging.to_rgba(doc.image)
         if imaging.has_alpha_content(outgoing):
@@ -447,14 +489,18 @@ class TouchCanvas:
             outgoing = imaging.flatten(outgoing, color)
             notes.append(f"transparent pixels were filled with rgb{color} for {label}")
 
+        payload = ""
         if target == "inpaint":
             if doc.has_mask and smoothing != "Off":
                 notes.append(f"mask edge smoothing: {smoothing}")
             doc.pending_send = {"target": target, "smoothing": smoothing, "size": outgoing.size}
             instruction = f"inpaint:{outgoing.width}x{outgoing.height}"
+            payload = imaging.to_data_url(outgoing)
         else:
             doc.pending_send = None
             instruction = target
+            if target == "img2img":
+                payload = imaging.to_data_url(outgoing)
             if doc.has_mask:
                 notes.append(f"the mask was not sent: {label} takes an image only")
 
@@ -467,20 +513,21 @@ class TouchCanvas:
             }
         )
         outputs = [outgoing if key == target else gr.skip() for key in self.image_targets]
-        return (*outputs, *self._info(doc, mode, f"Sent to {label}.", notes), instruction)
+        return (*outputs, *self._info(doc, mode, f"Sent to {label}.", notes), instruction, payload)
 
     def send_mask(self, state, instruction):
-        """The mask layer for the Inpaint canvas, or a clear when the send
-        carried no mask. Nothing for any other destination."""
+        """The mask layer for the Inpaint canvas as a data URL, or an empty
+        string to clear it when the send carried no mask. Empty for any other
+        destination, where the browser leaves the Inpaint canvas alone."""
         doc = document.ensure(state)
         pending = getattr(doc, "pending_send", None)
         if not str(instruction or "").startswith("inpaint") or not pending:
-            return gr.skip()
+            return ""
         doc.pending_send = None
         if not doc.has_mask:
-            return None
+            return ""
         mask = imaging.smooth_mask(doc.mask, pending.get("smoothing", "Off"))
-        return self._layer(mask, pending["size"])
+        return imaging.to_data_url(self._layer(mask, pending["size"]))
 
     def save_copy(self, background, foreground, state):
         doc = document.ensure(state)
@@ -499,7 +546,9 @@ class TouchCanvas:
     def build(self) -> None:
         announce_send_log("the touch Canvas")
         self.targets = host.destinations()
-        self.image_targets = [key for key in ("img2img", "inpaint", "extras") if key in self.targets]
+        # Only Extras (an ordinary gr.Image) is written from the backend; the
+        # host's hidden image textboxes are written from the browser.
+        self.image_targets = [key for key in ("extras",) if key in self.targets]
         self.target_order = list(self.image_targets)
 
         with gr.Column(elem_id=_id("root"), elem_classes=["minipaint-canvas-root"]):
@@ -525,6 +574,7 @@ class TouchCanvas:
             self.surface = surface.Surface(
                 _id("surface"),
                 height_percent=self.canvas_height,
+                fit_window=settings.canvas_fits_window(),
                 brush_width=self.brush_width,
                 attach_js=ATTACH_JS,
             )
@@ -546,10 +596,16 @@ class TouchCanvas:
                     for mode in MODES
                 }
 
-            with gr.Group(elem_id=_id("options"), elem_classes=["minipaint-options"]):
-                crop_panel, crop = self._crop_panel()
-                mask_panel, mask = self._mask_panel()
-                expand_panel, expand = self._expand_panel()
+            # One compact row per mode: what a finger needs while working.
+            quick_crop, crop = self._crop_quick()
+            quick_mask, mask = self._mask_quick()
+            quick_expand, expand = self._expand_quick()
+
+            # The rest of each mode's settings, behind one accordion.
+            with gr.Accordion(OPTIONS_LABELS["crop"], open=False, elem_id=_id("options"), elem_classes=["minipaint-options"]) as options:
+                panel_crop = self._crop_panel(crop)
+                panel_mask = self._mask_panel(mask)
+                panel_expand = self._expand_panel(expand)
 
             destination, reset_btn, save_btn, save_file = self._more_panel()
 
@@ -559,6 +615,8 @@ class TouchCanvas:
             wait_flag = gr.Textbox("", visible=False, elem_id=_id("wait"))
             switch_box = gr.Textbox("", visible=False, elem_id=_id("switch"))
             event_kind = gr.Textbox("", visible=False, elem_id=_id("event"))
+            payload_box = gr.Textbox("", visible=False, elem_id=_id("payload"))
+            mask_payload_box = gr.Textbox("", visible=False, elem_id=_id("mask_payload"))
 
         self._wire(
             state=state,
@@ -572,7 +630,9 @@ class TouchCanvas:
             focus_exit_btn=focus_exit_btn,
             send_btn=send_btn,
             mode_btns=mode_btns,
-            panels={"crop": crop_panel, "mask": mask_panel, "expand": expand_panel},
+            quick={"crop": quick_crop, "mask": quick_mask, "expand": quick_expand},
+            panels={"crop": panel_crop, "mask": panel_mask, "expand": panel_expand},
+            options=options,
             crop=crop,
             mask=mask,
             expand=expand,
@@ -585,83 +645,87 @@ class TouchCanvas:
             wait_flag=wait_flag,
             switch_box=switch_box,
             event_kind=event_kind,
+            payload_box=payload_box,
+            mask_payload_box=mask_payload_box,
         )
 
-    # -- panels --------------------------------------------------------------
+    # -- quick rows ----------------------------------------------------------
 
-    def _crop_panel(self):
-        with gr.Column(elem_id=_id("panel_crop"), elem_classes=["minipaint-panel"]) as panel:
-            aspect = gr.Radio(
-                ASPECTS, value="Free", label="Aspect", show_label=False, elem_id=_id("crop_aspect"), elem_classes=["minipaint-chips"]
+    def _crop_quick(self):
+        with gr.Row(elem_id=_id("quick_crop"), elem_classes=["minipaint-quick"]) as row:
+            aspect = gr.Dropdown(
+                ASPECTS, value="Free", label="Aspect", show_label=False, elem_id=_id("crop_aspect"), elem_classes=["minipaint-aspect"]
             )
-            with gr.Accordion("Custom ratio", open=False, elem_id=_id("crop_custom")):
-                with gr.Row():
-                    width = gr.Number(label="Width", value=1024, precision=0, minimum=1, elem_id=_id("crop_custom_w"))
-                    height = gr.Number(label="Height", value=1024, precision=0, minimum=1, elem_id=_id("crop_custom_h"))
-            with gr.Row(elem_classes=["minipaint-panel-actions"]):
-                gr.Markdown(
-                    "Drag the image under the frame, pinch or scroll to zoom, drag a corner of the frame to resize it. "
-                    "**Apply Crop** keeps what is inside the frame.",
-                    elem_classes=["minipaint-hint"],
-                )
-                apply = gr.Button("Apply Crop", variant="primary", elem_id=_id("crop_apply"), elem_classes=["minipaint-apply"])
-        return panel, {"aspect": aspect, "width": width, "height": height, "apply": apply}
+            apply = gr.Button("Apply Crop", variant="primary", elem_id=_id("crop_apply"), elem_classes=["minipaint-apply"])
+        return row, {"aspect": aspect, "apply": apply}
 
-    def _mask_panel(self):
-        with gr.Column(elem_id=_id("panel_mask"), elem_classes=["minipaint-panel"], visible=False) as panel:
-            with gr.Row():
-                tool = gr.Radio(TOOLS, value="Paint", label="Tool", show_label=False, elem_id=_id("mask_tool"), elem_classes=["minipaint-chips"])
-                size = gr.Slider(1, 100, value=self.brush_width, step=1, label="Brush size", elem_id=_id("mask_size"))
-            with gr.Row():
-                clear = gr.Button("Clear Mask", elem_id=_id("mask_clear"))
-                invert = gr.Button("Invert Mask", elem_id=_id("mask_invert"))
-                smoothing = gr.Radio(
-                    imaging.SMOOTHING_LEVELS,
-                    value="Off",
-                    label="Edge smoothing (applied when sending)",
-                    elem_id=_id("mask_smoothing"),
-                    elem_classes=["minipaint-chips"],
-                )
-            gr.Markdown(
-                "Paint over what should change. Two fingers pan and zoom; Move lets one finger pan. "
-                "The canvas's own ↩️ undoes a stroke, 🔄 clears all strokes and refits the image.",
-                elem_classes=["minipaint-hint"],
-            )
-        return panel, {"tool": tool, "size": size, "clear": clear, "invert": invert, "smoothing": smoothing}
+    def _mask_quick(self):
+        with gr.Row(elem_id=_id("quick_mask"), elem_classes=["minipaint-quick"], visible=False) as row:
+            tool = gr.Radio(TOOLS, value="Paint", label="Tool", show_label=False, elem_id=_id("mask_tool"), elem_classes=["minipaint-chips"])
+            size = gr.Slider(1, 100, value=self.brush_width, step=1, label="Brush size", elem_id=_id("mask_size"), elem_classes=["minipaint-size"])
+            clear = gr.Button("Clear Mask", elem_id=_id("mask_clear"), elem_classes=["minipaint-quick-action"])
+            invert = gr.Button("Invert Mask", elem_id=_id("mask_invert"), elem_classes=["minipaint-quick-action"])
+        return row, {"tool": tool, "size": size, "clear": clear, "invert": invert}
 
-    def _expand_panel(self):
-        with gr.Column(elem_id=_id("panel_expand"), elem_classes=["minipaint-panel"], visible=False) as panel:
+    def _expand_quick(self):
+        with gr.Column(elem_id=_id("quick_expand"), elem_classes=["minipaint-quick", "minipaint-quick-column"], visible=False) as column:
             with gr.Row():
-                amount = gr.Radio(outpaint.AMOUNTS, value="128", label="Add", elem_id=_id("expand_amount"), elem_classes=["minipaint-chips"])
+                amount = gr.Radio(outpaint.AMOUNTS, value="128", label="Add", show_label=False, elem_id=_id("expand_amount"), elem_classes=["minipaint-chips"])
                 side_buttons = {
                     side: gr.Button(side, elem_id=_id(f"expand_{side.lower()}"), elem_classes=["minipaint-side"]) for side in outpaint.SIDES
                 }
                 clear_sides = gr.Button("Clear", elem_id=_id("expand_clear"), elem_classes=["minipaint-side"])
-            preview = gr.Markdown("No image yet.", elem_id=_id("expand_preview"), elem_classes=["minipaint-preview"])
-            with gr.Accordion("Advanced expansion", open=False, elem_id=_id("expand_advanced")):
-                with gr.Row():
-                    numbers = {
-                        side: gr.Number(label=side, value=0, precision=0, minimum=0, elem_id=_id(f"expand_num_{side.lower()}"))
-                        for side in outpaint.SIDES
-                    }
-                with gr.Row():
-                    overlap = gr.Slider(0, 256, value=32, step=8, label="Overlap into the original (px)", elem_id=_id("expand_overlap"))
-                    fill = gr.Dropdown(outpaint.FILL_POLICIES, value=outpaint.DEFAULT_FILL, label="New area", elem_id=_id("expand_fill"))
-                    snap = gr.Dropdown(settings.SNAP_CHOICES, value=self.snap_default, label="Snap to", elem_id=_id("expand_snap"))
-            with gr.Row(elem_classes=["minipaint-panel-actions"]):
-                gr.Markdown("Adds room around the image and masks the new area automatically.", elem_classes=["minipaint-hint"])
                 apply = gr.Button("Apply Expand", variant="primary", elem_id=_id("expand_apply"), elem_classes=["minipaint-apply"])
-        return panel, {
-            "amount": amount,
-            "sides": side_buttons,
-            "clear": clear_sides,
-            "preview": preview,
-            "numbers": numbers,
-            "overlap": overlap,
-            "fill": fill,
-            "snap": snap,
-            "apply": apply,
-        }
+            preview = gr.Markdown("No image yet.", elem_id=_id("expand_preview"), elem_classes=["minipaint-preview"])
+        return column, {"amount": amount, "sides": side_buttons, "clear": clear_sides, "preview": preview, "apply": apply}
+
+    # -- options panels ------------------------------------------------------
+
+    def _crop_panel(self, crop):
+        with gr.Column(elem_id=_id("panel_crop"), elem_classes=["minipaint-panel"]) as panel:
+            with gr.Row():
+                crop["width"] = gr.Number(label="Custom ratio width", value=1024, precision=0, minimum=1, elem_id=_id("crop_custom_w"))
+                crop["height"] = gr.Number(label="Custom ratio height", value=1024, precision=0, minimum=1, elem_id=_id("crop_custom_h"))
+            gr.Markdown(
+                "The frame starts over the whole image. Drag the image under it with one finger, pinch or scroll to zoom, "
+                "drag a corner to resize it; the aspect locks its shape. **Apply Crop** keeps what is inside.",
+                elem_classes=["minipaint-hint"],
+            )
+        return panel
+
+    def _mask_panel(self, mask):
+        with gr.Column(elem_id=_id("panel_mask"), elem_classes=["minipaint-panel"], visible=False) as panel:
+            mask["smoothing"] = gr.Radio(
+                imaging.SMOOTHING_LEVELS,
+                value="Off",
+                label="Edge smoothing (applied when sending)",
+                elem_id=_id("mask_smoothing"),
+                elem_classes=["minipaint-chips"],
+            )
+            gr.Markdown(
+                "Paint over what should change. Two fingers pan and zoom; Move lets one finger pan. "
+                "Undo takes strokes back first, then the bigger steps.",
+                elem_classes=["minipaint-hint"],
+            )
+        return panel
+
+    def _expand_panel(self, expand):
+        with gr.Column(elem_id=_id("panel_expand"), elem_classes=["minipaint-panel"], visible=False) as panel:
+            with gr.Row():
+                expand["numbers"] = {
+                    side: gr.Number(label=side, value=0, precision=0, minimum=0, elem_id=_id(f"expand_num_{side.lower()}"))
+                    for side in outpaint.SIDES
+                }
+            with gr.Row():
+                expand["overlap"] = gr.Slider(0, 256, value=32, step=8, label="Overlap into the original (px)", elem_id=_id("expand_overlap"))
+                expand["fill"] = gr.Dropdown(outpaint.FILL_POLICIES, value=outpaint.DEFAULT_FILL, label="New area", elem_id=_id("expand_fill"))
+                expand["snap"] = gr.Dropdown(settings.SNAP_CHOICES, value=self.snap_default, label="Snap to", elem_id=_id("expand_snap"))
+            gr.Markdown(
+                "Tap an amount and a side, or type exact numbers here. **Apply Expand** adds the room and masks the new area, "
+                "plus the overlap back into the original so the model can blend.",
+                elem_classes=["minipaint-hint"],
+            )
+        return panel
 
     def _more_panel(self):
         with gr.Accordion("More", open=False, elem_id=_id("more")):
@@ -672,8 +736,7 @@ class TouchCanvas:
             save_file = gr.File(label="Saved copy", interactive=False, visible=False, elem_id=_id("save_file"))
             gr.Markdown(
                 "Auto sends a plain image to img2img, and an image with a mask to Inpaint. "
-                "Undo and Redo cover Open, Apply Crop, Apply Expand, Clear and Invert; "
-                "strokes are undone on the canvas itself.",
+                "Undo and Redo cover strokes, Open, Apply Crop, Apply Expand, Clear and Invert.",
                 elem_classes=["minipaint-hint"],
             )
         return destination, reset_btn, save_btn, save_file
@@ -688,51 +751,55 @@ class TouchCanvas:
         crop = parts["crop"]
         mask = parts["mask"]
         expand = parts["expand"]
+        quick = parts["quick"]
         panels = parts["panels"]
         mode_btns = parts["mode_btns"]
         background = self.surface.background
         foreground = self.surface.foreground
         wait_flag = parts["wait_flag"]
         switch_box = parts["switch_box"]
+        event_kind = parts["event_kind"]
 
         side_inputs = [expand["numbers"][side] for side in outpaint.SIDES]
         preview_inputs = [state] + side_inputs + [expand["snap"]]
 
         mode_outputs = [
             mode_state,
-            panels["crop"],
-            panels["mask"],
-            panels["expand"],
-            mode_btns["crop"],
-            mode_btns["mask"],
-            mode_btns["expand"],
+            *(quick[mode] for mode in MODES),
+            *(panels[mode] for mode in MODES),
+            *(mode_btns[mode] for mode in MODES),
             send_btn,
             mask["tool"],
+            parts["options"],
         ]
+        assert len(mode_outputs) == self.MODE_COUNT
         info_outputs = [state, status, expand["preview"], crop["aspect"], parts["original_size"], wait_flag, *mode_outputs]
         commit_outputs = [background, foreground, *info_outputs]
         canvas_inputs = [background, foreground, state, mode_state]
 
+        quiet = {"show_progress": "hidden"}
+
         def structural(event, fn, inputs, js=None):
             """image -> wait for the canvas -> mask layer. See the module docstring."""
             return (
-                event(fn, inputs=inputs, outputs=commit_outputs, js=js or _mark_js(len(inputs)))
-                .then(_noop, js=WAIT_JS, inputs=[wait_flag], outputs=None)
-                .then(self.commit_foreground, inputs=[state], outputs=[foreground])
+                event(fn, inputs=inputs, outputs=commit_outputs, js=js or _mark_js(len(inputs)), **quiet)
+                .then(_noop, js=WAIT_JS, inputs=[wait_flag], outputs=None, **quiet)
+                .then(self.commit_foreground, inputs=[state], outputs=[foreground], **quiet)
             )
 
         # -- modes: panels and labels from Python; the browser follows the
         # mode textbox, whichever step changed it
         for mode, button in mode_btns.items():
-            button.click(lambda state, mode=mode: self.set_mode(mode, state), inputs=[state], outputs=mode_outputs)
+            button.click(lambda state, mode=mode: self.set_mode(mode, state), inputs=[state], outputs=mode_outputs, **quiet)
         mode_state.change(None, js=MODE_JS, inputs=[mode_state])
 
         # -- what the canvas holds, when a file is opened, dropped or pasted onto it
         background.input(
             self.on_canvas_image,
-            inputs=[background, state, mode_state, parts["event_kind"]],
+            inputs=[background, state, mode_state, event_kind],
             outputs=[foreground, *info_outputs],
             js=CANVAS_INPUT_JS,
+            **quiet,
         )
 
         # -- crop: the frame lives in the browser; Apply reads it
@@ -746,8 +813,8 @@ class TouchCanvas:
         mask["tool"].change(None, js=TOOL_JS, inputs=[mask["tool"]])
         mask["size"].change(None, js=SIZE_JS, inputs=[mask["size"]])
         mask["size"].release(None, js=SIZE_JS, inputs=[mask["size"]])
-        mask["clear"].click(self.clear_mask, inputs=canvas_inputs, outputs=[foreground, *info_outputs])
-        mask["invert"].click(self.invert_mask, inputs=canvas_inputs, outputs=[foreground, *info_outputs])
+        mask["clear"].click(self.clear_mask, inputs=canvas_inputs, outputs=[foreground, *info_outputs], **quiet)
+        mask["invert"].click(self.invert_mask, inputs=canvas_inputs, outputs=[foreground, *info_outputs], **quiet)
 
         # -- expand
         for side, button in expand["sides"].items():
@@ -757,10 +824,11 @@ class TouchCanvas:
                 ),
                 inputs=[expand["amount"], state] + side_inputs + [expand["snap"]],
                 outputs=side_inputs + [expand["preview"]],
+                **quiet,
             )
-        expand["clear"].click(self.clear_sides, inputs=[state], outputs=side_inputs + [expand["preview"]])
+        expand["clear"].click(self.clear_sides, inputs=[state], outputs=side_inputs + [expand["preview"]], **quiet)
         for control in side_inputs + [expand["snap"]]:
-            control.change(self.expand_preview, inputs=preview_inputs, outputs=[expand["preview"]])
+            control.change(self.expand_preview, inputs=preview_inputs, outputs=[expand["preview"]], **quiet)
         structural(
             expand["apply"].click,
             self.apply_expand,
@@ -769,8 +837,8 @@ class TouchCanvas:
 
         # -- open, history, reset
         structural(parts["open_btn"].upload, self.open_file, [parts["open_btn"], state, mode_state])
-        structural(parts["undo_btn"].click, self.undo, [state, mode_state])
-        structural(parts["redo_btn"].click, self.redo, [state, mode_state])
+        structural(parts["undo_btn"].click, self.undo, [state, mode_state, event_kind], js=UNDO_JS)
+        structural(parts["redo_btn"].click, self.redo, [state, mode_state, event_kind], js=REDO_JS)
         structural(parts["reset_btn"].click, self.reset, [state, mode_state])
 
         # -- view: fit and focus are browser-only
@@ -779,23 +847,38 @@ class TouchCanvas:
         parts["focus_exit_btn"].click(None, js=FOCUS_OFF_JS)
 
         # -- save
-        parts["save_btn"].click(self.save_copy, inputs=[background, foreground, state], outputs=[parts["save_file"]])
+        parts["save_btn"].click(self.save_copy, inputs=[background, foreground, state], outputs=[parts["save_file"]], **quiet)
 
-        # -- send: an ordinary Gradio output into the host's own inputs, then
-        # the host's own tab switch; for Inpaint, the mask layer once that
-        # canvas has the image.
+        # -- send: the image into the host's own inputs (Extras from the
+        # backend, img2img and Inpaint from the browser), then the host's own
+        # tab switch; for Inpaint, the mask layer once that canvas has the
+        # image.
+        payload_box = parts["payload_box"]
         target_components = [self.targets[key] for key in self.image_targets]
         sent = send_btn.click(
             self.send,
             inputs=[background, foreground, state, mode_state, parts["destination"], mask["smoothing"]],
-            outputs=target_components + info_outputs + [switch_box],
+            outputs=target_components + info_outputs + [switch_box, payload_box],
+            **quiet,
         )
+        textbox_targets = [self.targets[key] for key in ("img2img", "inpaint") if key in self.targets]
+        if len(textbox_targets) == 2:
+            sent.then(None, js=DELIVER_IMAGE_JS, inputs=[switch_box, payload_box], outputs=textbox_targets)
+        elif textbox_targets:
+            only = "img2img" if "img2img" in self.targets else "inpaint"
+            sent.then(
+                None,
+                js=f"(target, payload) => [String(target || '').indexOf('{only}') === 0 ? payload : {_KEEP}]",
+                inputs=[switch_box, payload_box],
+                outputs=textbox_targets,
+            )
         sent.then(None, js=SWITCH_JS, inputs=[switch_box], outputs=None)
         if "inpaint_mask" in self.targets:
             inpaint_uuid = getattr(self.targets["inpaint"], "elem_id", "") or ""
-            sent.then(_noop, js=_host_wait_js(inpaint_uuid), inputs=[switch_box], outputs=None).then(
-                self.send_mask, inputs=[state, switch_box], outputs=[self.targets["inpaint_mask"]]
-            )
+            mask_payload_box = parts["mask_payload_box"]
+            sent.then(_noop, js=_host_wait_js(inpaint_uuid), inputs=[switch_box], outputs=None, **quiet).then(
+                self.send_mask, inputs=[state, switch_box], outputs=[mask_payload_box], **quiet
+            ).then(None, js=DELIVER_MASK_JS, inputs=[switch_box, mask_payload_box], outputs=[self.targets["inpaint_mask"]])
 
         # -- receive: the small button next to "send to extras" in each output panel
         for tab, button, gallery in host.receive_buttons():

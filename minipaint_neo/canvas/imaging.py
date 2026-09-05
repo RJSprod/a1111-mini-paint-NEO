@@ -298,6 +298,13 @@ def to_png_bytes(image: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
+def to_data_url(image: Image.Image) -> str:
+    """The PNG data URL the host's hidden image textboxes carry."""
+    import base64
+
+    return "data:image/png;base64," + base64.b64encode(to_png_bytes(to_rgba(image))).decode("ascii")
+
+
 def from_png_bytes(data: bytes) -> Image.Image:
     with Image.open(io.BytesIO(data)) as opened:
         opened.load()

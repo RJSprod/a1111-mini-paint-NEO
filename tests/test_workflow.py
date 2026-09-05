@@ -26,6 +26,13 @@ def layer(mask, size):
     return imaging.foreground_layer(mask, size, (128, 128, 128)) if mask is not None else None
 
 
+def decode_data_url(text):
+    import base64
+    import io
+
+    return Image.open(io.BytesIO(base64.b64decode(text.split(",", 1)[1])))
+
+
 def skipped(value) -> bool:
     return isinstance(value, dict) and "value" not in value and value.get("__type__") == "update"
 
@@ -52,14 +59,25 @@ def run() -> Results:
     r.check("the canvas was built", canvas is not None)
     if canvas is None:
         return r
-    r.check("image destinations were found", canvas.image_targets == ["img2img", "inpaint", "extras"], str(canvas.image_targets))
+    r.check("every destination was found", set(canvas.targets) == {"img2img", "inpaint", "inpaint_mask", "extras"}, str(sorted(canvas.targets)))
+    r.check("only Extras is written from the backend", canvas.image_targets == ["extras"], str(canvas.image_targets))
     r.check("the inpaint mask layer was found", canvas.targets["inpaint_mask"] is refs["init_img_with_mask"].foreground)
+
+    # ---- the session rebuild Gradio does after an update output, under Forge's patches ----
+    from minipaint_neo.canvas import surface as surface_module
+
+    rebuilt = type(canvas.surface.background)(**canvas.surface.background.constructor_args)
+    r.check("a rebuilt canvas textbox still reads images, not arrays", rebuilt.numpy is False and type(rebuilt) is surface_module.canvas_image_class())
+    host_rebuilt = type(refs["init_img"].background)(**refs["init_img"].background.constructor_args)
+    r.check("(the host's own textbox would not: that is why the backend never answers it)", host_rebuilt.numpy is True)
 
     # commit-shaped replies (see TouchCanvas._commit / _info / _mode_updates);
     # replies that start with the mask layer instead of the image are one shorter
     BG, FG, STATE, STATUS, PREVIEW, ASPECT, ORIGINAL, WAIT, MODE = range(9)
-    SEND_LABEL, TOOL = 15, 16
-    COMMIT_LEN = 17
+    # after the mode: 3 quick rows, 3 panels, 3 mode buttons, the send label, the tool, the options label
+    SEND_LABEL, TOOL, OPTIONS_LABEL = MODE + 10, MODE + 11, MODE + 12
+    COMMIT_LEN = 2 + canvas.INFO_COUNT
+    r.check("the commit shape is the two canvas values plus the information", COMMIT_LEN == 21 and canvas.MODE_COUNT == 13)
 
     # ---- receive from txt2img ----
     photo = Image.new("RGB", (640, 480), (20, 120, 220))
@@ -71,7 +89,7 @@ def run() -> Results:
     r.check("receive clears the mask layer", out[FG] is None and out[WAIT] == "")
     r.check("receive selects crop mode", out[MODE] == "crop")
     r.check("receive reports the original size", out[ORIGINAL] == "640x480")
-    r.check("status says where it came from", "Received from txt2img" in out[STATUS] and "640 × 480" in out[STATUS])
+    r.check("status says where it came from, on one line", "Received from txt2img" in out[STATUS] and "640 × 480" in out[STATUS] and "\n" not in out[STATUS].split("<small>")[0])
     r.check("send label is plain img2img", value_of(out[SEND_LABEL]) == "Send to img2img")
     r.check("a second receive says the first is one undo away", "one Undo away" in canvas.receive([(photo, None)], doc, "crop", "img2img")[STATUS])
     unchanged = canvas.receive(None, doc, "crop", "txt2img")
@@ -138,48 +156,59 @@ def run() -> Results:
 
     # ---- mask mode ----
     updates = canvas.set_mode("mask", doc)
-    r.check("mask mode relabels the send button and resets the tool", value_of(updates[7]) == "Send to img2img Inpaint" and value_of(updates[8]) == "Paint")
-    r.check("crop mode leaves the tool alone", skipped(canvas.set_mode("crop", doc)[8]))
+    r.check("mode updates have the mode shape", len(updates) == canvas.MODE_COUNT)
+    r.check("mask mode relabels the send button and resets the tool", value_of(updates[10]) == "Send to img2img Inpaint" and value_of(updates[11]) == "Paint")
+    r.check("mask mode shows its quick row and panel only", [u.get("visible") for u in updates[1:4]] == [False, True, False] and [u.get("visible") for u in updates[4:7]] == [False, True, False])
+    r.check("mask mode relabels the options accordion", updates[12].get("label") == "Mask options")
+    r.check("crop mode leaves the tool alone", skipped(canvas.set_mode("crop", doc)[11]))
     r.check("an unknown mode is crop", canvas.set_mode("nonsense", doc)[0] == "crop")
+
+    # ---- undo and redo take a stroke first, when the browser took one back ----
+    out = canvas.undo(doc, "mask", "stroke")
+    r.check("a stroke undo touches nothing on the server", "Undid a stroke" in out[STATUS] and skipped(out[BG]) and out[STATE] is doc)
+    r.check("a stroke redo likewise", "Redid a stroke" in canvas.redo(doc, "mask", "stroke")[STATUS])
 
     # ---- send: auto goes to Inpaint, image first, mask once the canvas has it ----
     bg = imaging.to_rgba(doc.image)
     fg = layer(doc.mask, doc.size)
-    # a send reply: the image targets, then the information (document first), then the instruction
+    # a send reply: Extras, then the information (document first), then the instruction and the image payload
     T = len(canvas.image_targets)
     SENT_DOC, SENT_STATUS = T, T + 1
     out = canvas.send(bg, fg, doc, "mask", "Auto", "Off")
-    targets = dict(zip(canvas.image_targets, out[:T]))
     doc = out[SENT_DOC]
-    r.check("auto with a mask targets inpaint", out[-1] == "inpaint:200x120")
-    r.check("img2img and extras are skipped", skipped(targets["img2img"]) and skipped(targets["extras"]))
-    r.check("inpaint receives the image", isinstance(targets["inpaint"], Image.Image) and targets["inpaint"].size == (200, 120))
+    instruction, payload = out[-2], out[-1]
+    r.check("auto with a mask targets inpaint, naming the size its canvas must reach", instruction == "inpaint:200x120")
+    r.check("extras is skipped", skipped(out[0]))
+    r.check("the image travels as a PNG data URL for the browser to write", payload.startswith("data:image/png;base64,") and decode_data_url(payload).size == (200, 120))
     r.check("status says sent", "Sent to img2img Inpaint" in out[SENT_STATUS])
-    mask_out = canvas.send_mask(doc, out[-1])
-    r.check("inpaint then receives the mask as alpha", isinstance(mask_out, Image.Image) and mask_out.size == (200, 120)
-            and mask_out.getchannel("A").getpixel((40, 40)) == 255 and mask_out.getchannel("A").getpixel((5, 5)) == 0)
-    r.check("the mask step is one-shot", skipped(canvas.send_mask(doc, out[-1])))
+    mask_out = canvas.send_mask(doc, instruction)
+    r.check("inpaint then receives the mask as a data URL, alpha where the stroke was",
+            mask_out.startswith("data:image/png;base64,") and (lambda m: m.size == (200, 120) and m.getchannel("A").getpixel((40, 40)) == 255 and m.getchannel("A").getpixel((5, 5)) == 0)(decode_data_url(mask_out)))
+    r.check("the mask step is one-shot", canvas.send_mask(doc, instruction) == "")
     r.check("the document keeps the mask", doc.has_mask)
 
     # smoothing is applied on the way out only
     out = canvas.send(bg, fg, doc, "mask", "Auto", "Medium")
     r.check("smoothing note appears", "smoothing: Medium" in out[SENT_STATUS])
-    smoothed = canvas.send_mask(doc, out[-1])
+    smoothed = decode_data_url(canvas.send_mask(doc, out[-2]))
     r.check("the smoothed mask still covers the stroke", smoothed.getchannel("A").getpixel((40, 40)) == 255 and doc.mask.getpixel((40, 40)) == 255)
 
     # explicit img2img drops the mask, and says so
     out = canvas.send(bg, fg, doc, "mask", "img2img", "Off")
-    targets = dict(zip(canvas.image_targets, out[: len(canvas.image_targets)]))
-    r.check("explicit img2img sends the image only", isinstance(targets["img2img"], Image.Image) and skipped(targets["inpaint"]))
+    r.check("explicit img2img sends the image as a payload for the browser", out[-1].startswith("data:image/png;base64,") and skipped(out[0]))
     r.check("dropping the mask is mentioned", "mask was not sent" in out[SENT_STATUS])
-    r.check("switch goes to img2img", out[-1] == "img2img")
-    r.check("no mask step for img2img", skipped(canvas.send_mask(doc, "img2img")))
+    r.check("switch goes to img2img", out[-2] == "img2img")
+    r.check("no mask for img2img", canvas.send_mask(doc, "img2img") == "")
+
+    # extras is the one destination written from the backend
+    out = canvas.send(bg, fg, doc, "mask", "Extras", "Off")
+    r.check("extras receives the image itself, with no payload", isinstance(out[0], Image.Image) and out[0].size == (200, 120) and out[-1] == "" and out[-2] == "extras")
 
     # inpaint without a mask clears the layer there
     plain = canvas.receive([(photo, None)], None, "crop", "txt2img")[STATE]
     out = canvas.send(imaging.to_rgba(plain.image), None, plain, "crop", "Inpaint", "Off")
-    r.check("inpaint without a mask still goes to inpaint", out[-1] == "inpaint:640x480")
-    r.check("and clears the layer there", canvas.send_mask(plain, out[-1]) is None)
+    r.check("inpaint without a mask still goes to inpaint", out[-2] == "inpaint:640x480")
+    r.check("and clears the layer there", canvas.send_mask(plain, out[-2]) == "")
     r.check("send without an image says so", "no image to send" in canvas.send(None, None, None, "crop", "Auto", "Off")[SENT_STATUS].lower())
 
     # ---- expand: new area auto-masked, transparent pixels filled on send ----
@@ -196,11 +225,10 @@ def run() -> Results:
 
     bg = imaging.to_rgba(doc.image)
     out = canvas.send(bg, layer(doc.mask, doc.size), doc, "mask", "Auto", "Off")
-    targets = dict(zip(canvas.image_targets, out[: len(canvas.image_targets)]))
-    sent = targets["inpaint"]
+    sent = decode_data_url(out[-1])
     r.check("sent expansion has no transparency", sent.getchannel("A").getextrema() == (255, 255))
     r.check("fill note appears", "transparent pixels were filled" in out[SENT_STATUS])
-    r.check("mask matches the image size", canvas.send_mask(doc, out[-1]).size == sent.size)
+    r.check("mask matches the image size", decode_data_url(canvas.send_mask(doc, out[-2])).size == sent.size)
     out = canvas.apply_expand(bg, layer(doc.mask, doc.size), doc, "mask", 0, 0, 0, 0, 0, "Transparent", "8")
     r.check("expanding nothing is refused without touching the canvas", skipped(out[BG]) and skipped(out[FG]) and out[STATE].has_mask)
     # the canvas is the truth: strokes that are not on it are not in the document either

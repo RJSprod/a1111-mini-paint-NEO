@@ -16,6 +16,7 @@ from modules import shared
 SECTION = ("minipaint_canvas", "miniPaint / Canvas")
 
 USE_OLD_UI = "minipaint_use_old_ui"
+CANVAS_FIT = "minipaint_canvas_fit"
 CANVAS_HEIGHT = "minipaint_canvas_height"
 BRUSH_SIZE = "minipaint_brush_size"
 EXPAND_SNAP = "minipaint_expand_snap"
@@ -26,6 +27,7 @@ FILL_CHOICES = ["Neutral gray", "Edge color", "White", "Black"]
 
 DEFAULTS: dict[str, typing.Any] = {
     USE_OLD_UI: False,
+    CANVAS_FIT: True,
     CANVAS_HEIGHT: 70,
     BRUSH_SIZE: 25,
     EXPAND_SNAP: "8",
@@ -58,6 +60,12 @@ def use_old_ui() -> bool:
     if override in _FALSE:
         return False
     return bool(get(USE_OLD_UI, False))
+
+
+def canvas_fits_window() -> bool:
+    """Size the canvas to what the window has left, so the whole tab is in
+    view without scrolling; off means the fixed percentage below."""
+    return bool(get(CANVAS_FIT, True))
 
 
 def canvas_height_percent() -> int:
@@ -123,10 +131,25 @@ def on_ui_settings() -> None:
     )
 
     _add(
+        CANVAS_FIT,
+        OptionInfo(
+            DEFAULTS[CANVAS_FIT],
+            "Canvas height: fit the window",
+            section=SECTION,
+            category_id=category,
+        )
+        .info(
+            "the canvas takes whatever height the window has left below the controls, so the "
+            "whole tab is in view without scrolling; off uses the fixed percentage below"
+        )
+        .needs_reload_ui(),
+    )
+
+    _add(
         CANVAS_HEIGHT,
         OptionInfo(
             DEFAULTS[CANVAS_HEIGHT],
-            "Canvas height (% of the browser window)",
+            "Canvas height when not fitting the window (% of the browser window)",
             gr.Slider,
             {"minimum": 30, "maximum": 95, "step": 5},
             section=SECTION,

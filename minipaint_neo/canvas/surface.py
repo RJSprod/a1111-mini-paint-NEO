@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import typing
 import uuid
+from functools import wraps
 
 import gradio as gr
 
@@ -46,6 +47,43 @@ def _host_option(name: str, default):
     return default if value is None else value
 
 
+_image_class = None
+
+
+def canvas_image_class():
+    """The host's hidden image textbox, with ``numpy=False`` as its default.
+
+    Gradio keeps a per-session copy of any component an event answered with
+    an update (``gr.skip()`` included), rebuilt from the arguments the
+    component was constructed with. Forge switches that recording off before
+    its own ``LogicalImage`` is defined, so the copy is built from the
+    Textbox-level arguments alone and comes back with ``numpy=True``: from
+    then on every read of that textbox is an array, not an image. A subclass
+    whose default is the value we want survives the rebuild.
+    """
+    global _image_class
+    canvas = host_canvas()
+    if canvas is None:
+        raise RuntimeError(missing())
+    if _image_class is None or not issubclass(_image_class, canvas.LogicalImage):
+
+        class CanvasImage(canvas.LogicalImage):
+            webui_do_not_create_gradio_pyi_thank_you = True
+
+            # @wraps matters: Gradio builds a component's config from its
+            # __init__ signature, so without it elem_id and friends vanish
+            # and the browser side cannot find the textbox.
+            @wraps(canvas.LogicalImage.__init__)
+            def __init__(self, *args, numpy=False, **kwargs):
+                super().__init__(*args, numpy=numpy, **kwargs)
+
+            def get_block_name(self):
+                return "textbox"
+
+        _image_class = CanvasImage
+    return _image_class
+
+
 def host_mask_style() -> typing.Dict[str, typing.Any]:
     """How the Inpaint tab draws its mask: colour, opacity, high-contrast
     checkerboard, brush scaling. The Canvas draws its mask the same way,
@@ -71,6 +109,7 @@ class Surface:
         elem_id: str,
         *,
         height_percent: int,
+        fit_window: bool,
         brush_width: int,
         attach_js: str,
     ) -> None:
@@ -92,17 +131,16 @@ class Surface:
         html = html.replace('class="forge-toolbar"', 'class="forge-toolbar-static"')
 
         self.block = gr.HTML(html, elem_id=elem_id, elem_classes=["minipaint-surface"])
-        self.foreground = canvas.LogicalImage(
+        image_class = canvas_image_class()
+        self.foreground = image_class(
             visible=False,
             label="foreground",
-            numpy=False,
             elem_id=self.uuid,
             elem_classes=["logical_image_foreground"],
         )
-        self.background = canvas.LogicalImage(
+        self.background = image_class(
             visible=False,
             label="background",
-            numpy=False,
             elem_id=self.uuid,
             elem_classes=["logical_image_background"],
         )
@@ -110,6 +148,7 @@ class Surface:
         self.mask_style = host_mask_style()
         self.options: typing.Dict[str, typing.Any] = {
             "heightPercent": int(height_percent),
+            "fit": bool(fit_window),
             "brushWidth": int(brush_width),
             **self.mask_style,
         }

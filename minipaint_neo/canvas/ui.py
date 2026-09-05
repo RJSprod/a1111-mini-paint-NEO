@@ -1,24 +1,27 @@
-"""The touch-first Canvas: one large ImageEditor with ordinary Gradio controls.
+"""The touch-first Canvas: the WebUI's own canvas, with ordinary Gradio
+controls around it.
 
-Layout, top to bottom: an action bar, the editor, a status line, the three
+Layout, top to bottom: an action bar, the canvas, a status line, the three
 modes (Crop / Mask / Expand), one panel of options per mode, and a "More"
 accordion. Buttons are Buttons and sliders are Sliders, so the host theme
-decides how everything looks.
+decides how everything looks; the canvas is the same one img2img uses.
 
 What goes to Python is the low-frequency work: receiving or opening an
-image, committing a crop, expanding the canvas, clearing or inverting the
-mask, undo/redo of those steps, and the handoff to img2img. Painting and crop
-dragging stay inside the editor.
+image, committing a crop, expanding, clearing or inverting the mask, undo
+and redo of those steps, and the handoff to img2img. Painting, panning and
+zooming stay in the browser.
 
-Every step that replaces the editor's contents is three chained events:
-stage (Python reads the editor and queues the next document), flush (the
-browser winds the editor's own history back, which is the only way its crop
-box resets on this Gradio), and commit (Python pushes the queued document).
-See ``document.py`` and ``javascript/minipaint_canvas.js``.
+The canvas takes its image and its scribble layer through two hidden
+textboxes, the way the host's own canvases do. The scribble layer can only
+be drawn once the image has finished loading, so every step that changes
+the image is three chained events: write the image, wait for the canvas to
+show it, write the mask layer. The same wait guards the handoff into the
+Inpaint tab's canvas. See ``surface.py`` and ``javascript/minipaint_canvas.js``.
 """
 
 from __future__ import annotations
 
+import json
 import os.path
 import typing
 
@@ -26,11 +29,12 @@ import gradio as gr
 
 from .. import settings
 from ..send_log import announce_send_log, log_quietly
-from . import document, host, imaging, outpaint
+from . import document, host, imaging, outpaint, surface
 
 MODES = ("crop", "mask", "expand")
 MODE_LABELS = {"crop": "Crop", "mask": "Mask", "expand": "Expand"}
 ASPECTS = ["Free", "Original", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "Custom"]
+TOOLS = ["Paint", "Erase", "Move"]
 DESTINATIONS = ["Auto", "img2img", "Inpaint", "Extras"]
 DESTINATION_KEYS = {"img2img": "img2img", "Inpaint": "inpaint", "Extras": "extras"}
 DESTINATION_LABELS = {"img2img": "img2img", "inpaint": "img2img Inpaint", "extras": "Extras"}
@@ -42,20 +46,54 @@ def _id(name: str) -> str:
     return f"{PREFIX}_{name}"
 
 
-# All browser-side helpers live in javascript/minipaint_canvas.js and are only
-# ever called from these events, never at startup.
+# All browser-side helpers live in javascript/minipaint_canvas.js. Apart from
+# attaching the canvas when the page loads (the host does the same for its
+# own canvases), every one is called from a Gradio event on a user action.
+# A hook that runs before a backend step must hand back the step's inputs;
+# one that runs alone (no backend step) returns nothing.
 _JS = "window.minipaintCanvas"
-FLUSH_JS = f"(flag) => (flag === 'flush' && {_JS}) ? {_JS}.flushEditor() : undefined"
-FLUSH_ALWAYS_JS = f"() => {_JS} ? {_JS}.flushEditor() : undefined"
-PICK_JS = f"(gallery, state, mode) => [{_JS} ? {_JS}.pickGalleryImage(gallery) : null, state, mode]"
-SWITCH_JS = f"(target) => {_JS} && {_JS}.switchTo(target)"
-SWITCH_CANVAS_JS = f"() => {_JS} && {_JS}.switchTo('canvas')"
-FOCUS_ON_JS = f"() => {_JS} && {_JS}.setFocus(true)"
-FOCUS_OFF_JS = f"() => {_JS} && {_JS}.setFocus(false)"
+ATTACH_JS = f"{_JS} && {_JS}.attach"
+WAIT_JS = (
+    f"async (flag) => {{ if (flag === 'wait' && {_JS}) {{ await {_JS}.waitForImage(); }} return [flag]; }}"
+)
+MODE_JS = f"(mode) => {{ if ({_JS}) {_JS}.onMode(mode); }}"
+ASPECT_JS = f"(choice, w, h, original) => {{ if ({_JS}) {_JS}.setAspect(choice, w, h, original); }}"
+TOOL_JS = f"(tool) => {{ if ({_JS}) {_JS}.setTool(tool); }}"
+SIZE_JS = f"(size) => {{ if ({_JS}) {_JS}.setBrushSize(size); }}"
+FIT_JS = f"() => {{ if ({_JS}) {_JS}.fit(); }}"
+FOCUS_ON_JS = f"() => {{ if ({_JS}) {_JS}.setFocus(true); }}"
+FOCUS_OFF_JS = f"() => {{ if ({_JS}) {_JS}.setFocus(false); }}"
+SWITCH_JS = f"(target) => {{ if ({_JS}) {_JS}.switchTo(target); }}"
+SWITCH_CANVAS_JS = f"() => {{ if ({_JS}) {_JS}.switchTo('canvas'); }}"
+CROP_JS = (
+    f"(bg, fg, state, mode, box) => {{ if ({_JS}) {_JS}.mark(); "
+    f"return [bg, fg, state, mode, {_JS} ? {_JS}.cropBox() : '']; }}"
+)
+PICK_JS = (
+    f"(gallery, state, mode) => {{ if ({_JS}) {_JS}.mark(); "
+    f"return [{_JS} ? {_JS}.pickGalleryImage(gallery) : null, state, mode]; }}"
+)
+# The canvas echoes every image it loads back through its textbox. The
+# browser knows which of those are echoes and strips them here, so an echo
+# costs one tiny request instead of an upload of the whole picture.
+CANVAS_INPUT_JS = (
+    f"(bg, state, mode, kind) => {_JS} ? {_JS}.canvasInput(bg, state, mode) : [bg, state, mode, 'user']"
+)
 
 
-def _mode_js(mode: str) -> str:
-    return f"() => {_JS} && {_JS}.onMode('{mode}')"
+def _mark_js(input_count: int) -> str:
+    """A pass-through that notes the moment before the image is replaced, so
+    the wait step can tell a fresh load from the last one."""
+    return f"(...args) => {{ if ({_JS}) {_JS}.mark(); return args.slice(0, {input_count}); }}"
+
+
+def _host_wait_js(uuid: str) -> str:
+    """Wait until the Inpaint tab's canvas has taken the image just sent to
+    it, so the mask layer written next lands on a canvas of the right size."""
+    return (
+        f"async (target) => {{ if ({_JS} && String(target).indexOf('inpaint') === 0) "
+        f"{{ await {_JS}.waitForHostImage({json.dumps(uuid)}, target); }} return [target]; }}"
+    )
 
 
 def _noop(*_args):
@@ -88,35 +126,26 @@ def resolve_destination(choice: str, has_mask: bool, has_expansion: bool) -> str
     return "inpaint" if (has_mask or has_expansion) else "img2img"
 
 
-def aspect_constraint(choice: str, original_size, custom_width, custom_height) -> str:
-    """The editor's crop_size string for an aspect choice. Empty means free."""
-    if choice == "Original" and original_size:
-        return f"{int(original_size[0])}:{int(original_size[1])}"
-    if choice == "Custom":
-        try:
-            width, height = int(custom_width or 0), int(custom_height or 0)
-        except (TypeError, ValueError):
-            return ""
-        return f"{width}:{height}" if width > 0 and height > 0 else ""
-    if choice and ":" in choice:
-        return choice
-    return ""
-
-
 class TouchCanvas:
     """Builds the tab and owns its callbacks. One instance per mounted UI."""
 
     def __init__(self) -> None:
-        self.mask_color = imaging.parse_color(settings.get(settings.MASK_COLOR))
         self.canvas_height = settings.canvas_height_percent()
-        self.brush_size = settings.brush_size()
+        self.brush_width = settings.brush_width()
         self.snap_default = str(settings.get(settings.EXPAND_SNAP, "8"))
         if self.snap_default not in settings.SNAP_CHOICES:
             self.snap_default = "8"
+        self.mask_style = surface.host_mask_style()
+        self.mask_color = imaging.parse_color(self.mask_style["color"])
         self.targets: typing.Dict[str, typing.Any] = {}
         self.target_order: typing.List[str] = []
+        self.surface: typing.Optional[surface.Surface] = None
 
     # -- replies -------------------------------------------------------------
+
+    def _layer(self, mask, size):
+        """The mask as the scribble layer the canvases show."""
+        return imaging.foreground_layer(mask, size, self.mask_color, self.mask_style["contrast"])
 
     def _mode_updates(self, mode: str, doc: document.Document) -> tuple:
         return (
@@ -128,39 +157,26 @@ class TouchCanvas:
             gr.update(variant="primary" if mode == "mask" else "secondary"),
             gr.update(variant="primary" if mode == "expand" else "secondary"),
             gr.update(value=send_label(doc.has_mask, doc.has_expansion, mode)),
+            gr.update(value="Paint") if mode == "mask" else gr.skip(),
         )
 
-    def _reply(
+    def _info(
         self,
         doc: document.Document,
         mode: str,
         message: str,
         notes: typing.Sequence[str] = (),
         *,
-        push: bool = False,
         sides: typing.Sequence[int] = (0, 0, 0, 0),
         reset_aspect: bool = False,
+        wait: bool = False,
     ) -> tuple:
-        """The outputs every commit-style callback returns, in COMMIT order."""
+        """Everything a callback reports back apart from the canvas itself."""
         notes = [note for note in notes if note]
         if doc.image is not None:
             size = imaging.megapixels(doc.image.size)
             if size > outpaint.WARN_MEGAPIXELS:
-                notes.append(
-                    f"{size} megapixels is a lot for a browser editor, especially on a tablet"
-                )
-
-        if push:
-            if doc.image is not None:
-                editor = gr.update(
-                    value=imaging.editor_value(doc.image, doc.mask, self.mask_color),
-                    visible=True,
-                    crop_size="",
-                )
-            else:
-                editor = gr.update(value=None, visible=False)
-        else:
-            editor = gr.skip()
+                notes.append(f"{size} megapixels is a lot for a browser canvas, especially on a tablet")
 
         summary = f"**{doc.describe()}**"
         if doc.has_image:
@@ -168,131 +184,154 @@ class TouchCanvas:
             summary += f" — Auto sends to {DESTINATION_LABELS[target]}"
 
         return (
-            editor,
-            gr.update(visible=not doc.has_image),
             doc,
             _status(f"{summary}  \n{message}" if message else summary, notes),
-            outpaint.describe(doc.size, sides) if push else gr.skip(),
+            outpaint.describe(doc.size, sides),
             gr.update(value="Free") if reset_aspect else gr.skip(),
+            doc.original_size_text(),
+            "wait" if wait else "",
             *self._mode_updates(mode, doc),
         )
 
-    def _staged(self, doc: document.Document, message: str, flush: bool = True) -> tuple:
-        """The outputs of a stage callback: state, a status line, and whether
-        the browser should wind the editor back before the commit."""
-        return doc, _status(message), "flush" if flush else ""
+    def _commit(
+        self,
+        doc: document.Document,
+        mode: str,
+        message: str,
+        notes: typing.Sequence[str] = (),
+        *,
+        sides: typing.Sequence[int] = (0, 0, 0, 0),
+        reset_aspect: bool = True,
+    ) -> tuple:
+        """Push the document into the canvas: the image now, the mask layer
+        in the step that follows the canvas having loaded it."""
+        background = doc.image if doc.image is not None else None
+        foreground = gr.skip() if doc.has_mask else None
+        return (
+            background,
+            foreground,
+            *self._info(doc, mode, message, notes, sides=sides, reset_aspect=reset_aspect, wait=doc.has_mask),
+        )
 
-    # -- callbacks: modes ---------------------------------------------------
+    def _unchanged(self, doc: document.Document, mode: str, message: str, notes: typing.Sequence[str] = ()) -> tuple:
+        """The commit-shaped reply for a step that changed nothing."""
+        return (gr.skip(), gr.skip(), *self._info(doc, mode, message, notes))
+
+    INFO_COUNT = 6 + 9
+
+    def _skip_info(self) -> tuple:
+        return tuple(gr.skip() for _ in range(self.INFO_COUNT))
+
+    def _sync(self, doc: document.Document, background, foreground):
+        """The canvas's current pixels become the document's."""
+        image, mask, notes = imaging.read_canvas(background, foreground)
+        if image is not None:
+            doc.commit(image, mask)
+        return image, mask, notes
+
+    # -- callbacks: modes and tools ----------------------------------------
 
     def set_mode(self, mode: str, state):
         doc = document.ensure(state)
         return self._mode_updates(mode if mode in MODES else "crop", doc)
 
-    def set_aspect(self, choice, custom_width, custom_height, state):
-        doc = document.ensure(state)
-        original = doc.original.size if doc.original is not None else doc.size
-        return gr.update(crop_size=aspect_constraint(choice, original, custom_width, custom_height))
+    # -- callbacks: what the canvas holds ----------------------------------
 
-    # -- callbacks: receive and open ---------------------------------------
+    def on_canvas_image(self, background, state, mode, kind):
+        """The canvas's image changed in the browser: a file was opened,
+        dropped or pasted onto it (``kind`` "user"), or the canvas echoed an
+        image this side sent ("echo", already stripped of its pixels).
+
+        Replies with the scribble layer first, then the usual information:
+        a picture opened in the browser starts a fresh document, so the
+        strokes left over from the previous one are cleared.
+        """
+        doc = document.ensure(state)
+        if kind == "echo":
+            return (gr.skip(), *self._skip_info())
+        if background is None:
+            if not doc.has_image:
+                return (gr.skip(), *self._skip_info())
+            doc.checkpoint("clear")
+            doc.clear()
+            return (None, *self._info(doc, mode, "The canvas was cleared. Undo brings the image back."))
+        if imaging.images_equal(background, doc.image):
+            return (gr.skip(), *self._skip_info())
+
+        notes = ["the previous image is one Undo away"] if doc.has_image else []
+        doc.checkpoint("open")
+        doc.load(background, "file")
+        log_quietly({"destination": "canvas", "outcome": f"opened {doc.image.width}x{doc.image.height} in the browser"})
+        return (None, *self._info(doc, "crop", "Opened.", notes, reset_aspect=True))
 
     def receive(self, payload, state, mode, tab: str):
         """An image arriving from a txt2img / img2img / Extras gallery."""
         doc = document.ensure(state)
         image = host.gallery_image(payload)
         if image is None:
-            return self._reply(doc, mode, "Pick an image in the gallery first.")
+            return self._unchanged(doc, mode, "Pick an image in the gallery first.")
 
-        notes = []
-        if doc.has_image:
-            doc.checkpoint("receive")
-            notes.append("the previous image is one Undo away")
+        notes = ["the previous image is one Undo away"] if doc.has_image else []
+        doc.checkpoint("receive")
         doc.load(imaging.to_rgba(image), tab)
         log_quietly({"destination": f"{tab} -> Canvas", "outcome": f"received {doc.image.width}x{doc.image.height}"})
-        return self._reply(doc, "crop", f"Received from {tab}.", notes, push=True, reset_aspect=True)
+        return self._commit(doc, "crop", f"Received from {tab}.", notes)
 
-    def stage_open(self, file, state):
+    def open_file(self, file, state, mode):
         doc = document.ensure(state)
         path = getattr(file, "name", file)
         if not path:
-            return self._staged(doc, "No file was chosen.", flush=False)
+            return self._unchanged(doc, mode, "No file was chosen.")
         try:
             image = imaging.open_file(str(path))
         except Exception as error:  # Pillow raises a family of these
-            return self._staged(doc, f"Could not open this image format. ({error})", flush=False)
+            return self._unchanged(doc, mode, f"Could not open this image format. ({error})")
 
-        doc.stage(
-            "open",
-            "Opened.",
-            ["the previous image is one Undo away"] if doc.has_image else (),
-            image=image,
-            load=True,
-            origin="file",
-            filename=os.path.basename(str(path)),
-            mode="crop",
-        )
-        return self._staged(doc, "Opening…")
+        notes = ["the previous image is one Undo away"] if doc.has_image else []
+        doc.checkpoint("open")
+        doc.load(image, "file", os.path.basename(str(path)))
+        return self._commit(doc, "crop", "Opened.", notes)
 
     # -- callbacks: crop ----------------------------------------------------
 
-    def _read(self, editor, doc: document.Document):
-        """The editor's current pixels, with a padded crop trimmed off."""
-        image, mask, notes = imaging.read_editor(editor)
-        if image is None:
-            return None, None, notes
-        # A crop that pads with transparency is a component quirk, not the
-        # user's picture - but only when the picture going in had no
-        # transparency of its own, the one case where trimming cannot eat pixels.
-        if doc.image is not None and not imaging.has_alpha_content(doc.image):
-            image, mask, note = imaging.trim_transparent_frame(image, mask)
-            if note:
-                notes.append(note)
-        return image, mask, notes
-
-    def stage_crop(self, editor, state):
+    def apply_crop(self, background, foreground, state, mode, box_raw):
         doc = document.ensure(state)
-        image, mask, notes = self._read(editor, doc)
+        image, mask, notes = self._sync(doc, background, foreground)
         if image is None:
-            return self._staged(doc, "There is no image to crop.", flush=False)
-        if doc.image is not None and image.size == doc.image.size:
-            return self._staged(
-                doc,
-                "Nothing to crop yet — drag the handles on the image, or pick an aspect, then Apply.",
-                flush=False,
-            )
-        doc.stage(
-            "crop",
-            f"Cropped to {image.width} × {image.height}.",
-            notes,
-            image=image,
-            mask=mask,
-        )
-        return self._staged(doc, "Cropping…")
+            return self._unchanged(doc, mode, "There is no image to crop.")
+        box = imaging.crop_box(box_raw, image.size)
+        if box is None:
+            return self._unchanged(doc, mode, "Put the frame over the part to keep: drag the image under it, pinch or scroll to zoom, drag a corner to resize.")
+        if box == (0, 0, image.width, image.height):
+            return self._unchanged(doc, mode, "The frame already covers the whole image — nothing to crop.")
+
+        doc.checkpoint("crop")
+        doc.commit(image.crop(box), mask.crop(box) if mask is not None else None)
+        return self._commit(doc, mode, f"Cropped to {doc.image.width} × {doc.image.height}.", notes)
 
     # -- callbacks: mask ----------------------------------------------------
 
-    def stage_clear_mask(self, editor, state):
+    def clear_mask(self, background, foreground, state, mode):
         doc = document.ensure(state)
-        image, mask, notes = self._read(editor, doc)
+        image, mask, notes = self._sync(doc, background, foreground)
         if image is None:
-            return self._staged(doc, "There is no image yet.", flush=False)
+            return (gr.skip(), *self._info(doc, mode, "There is no image yet."))
         if imaging.mask_is_empty(mask):
-            return self._staged(doc, "There is no mask to clear.", flush=False)
-        doc.stage("clear mask", "Mask cleared. The image is untouched.", notes, image=image, mask=None)
-        return self._staged(doc, "Clearing…")
+            return (gr.skip(), *self._info(doc, mode, "There is no mask to clear.", notes))
+        doc.checkpoint("clear mask")
+        doc.commit(image, None)
+        return (None, *self._info(doc, mode, "Mask cleared. The image is untouched.", notes))
 
-    def stage_invert_mask(self, editor, state):
+    def invert_mask(self, background, foreground, state, mode):
         doc = document.ensure(state)
-        image, mask, notes = self._read(editor, doc)
+        image, mask, notes = self._sync(doc, background, foreground)
         if image is None:
-            return self._staged(doc, "There is no image yet.", flush=False)
-        doc.stage(
-            "invert mask",
-            "Mask inverted.",
-            notes,
-            image=image,
-            mask=imaging.invert_mask(mask, image.size),
-        )
-        return self._staged(doc, "Inverting…")
+            return (gr.skip(), *self._info(doc, mode, "There is no image yet."))
+        doc.checkpoint("invert mask")
+        doc.commit(image, imaging.invert_mask(mask, image.size))
+        # Inverting a mask that covered everything leaves nothing: clear the layer.
+        layer = self._layer(doc.mask, doc.image.size) if doc.has_mask else None
+        return (layer, *self._info(doc, mode, "Mask inverted.", notes))
 
     # -- callbacks: expand --------------------------------------------------
 
@@ -321,108 +360,85 @@ class TouchCanvas:
         doc = document.ensure(state)
         return 0, 0, 0, 0, outpaint.describe(doc.size, (0, 0, 0, 0))
 
-    def stage_expand(self, editor, state, left, right, top, bottom, overlap, fill, snap_choice):
+    def apply_expand(self, background, foreground, state, mode, left, right, top, bottom, overlap, fill, snap_choice):
         doc = document.ensure(state)
-        image, mask, notes = self._read(editor, doc)
+        image, mask, notes = self._sync(doc, background, foreground)
         if image is None:
-            return self._staged(doc, "There is no image to expand.", flush=False)
+            return self._unchanged(doc, mode, "There is no image to expand.")
 
         sides = self._sides((left, right, top, bottom), snap_choice)
         try:
             expanded, new_mask, info = outpaint.expand(image, mask, sides, int(overlap or 0), fill)
         except ValueError as error:
-            return self._staged(doc, str(error), flush=False)
+            return self._unchanged(doc, mode, str(error), notes)
 
         if info["overlap"]:
-            notes.append(
-                f"the mask reaches {info['overlap']}px back into the original so the model has room to blend"
-            )
-        doc.stage(
-            "expand",
+            notes.append(f"the mask reaches {info['overlap']}px back into the original so the model has room to blend")
+        doc.checkpoint("expand")
+        doc.commit(expanded, new_mask)
+        doc.has_expansion = True
+        doc.expansion = dict(info)
+        return self._commit(
+            doc,
+            "mask",
             f"Expanded to {info['to'][0]} × {info['to'][1]}. The new area is masked — "
-            "refine it with the brush if you like, then send.",
+            "paint or erase to refine it, then send.",
             notes,
-            image=expanded,
-            mask=new_mask,
-            expansion=info,
-            mode="mask",
+            sides=sides,
         )
-        return self._staged(doc, "Expanding…")
 
     # -- callbacks: history --------------------------------------------------
 
-    def stage_undo(self, state):
+    def undo(self, state, mode):
         doc = document.ensure(state)
-        if not doc.history:
-            return self._staged(doc, "Nothing to undo here. The editor's own ↶ undoes strokes and crop drags.", flush=False)
-        doc.stage("undo", "", restore="undo")
-        return self._staged(doc, "Undoing…")
+        label = doc.undo()
+        if label is None:
+            return self._unchanged(doc, mode, "Nothing to undo here. The canvas's own ↩️ undoes strokes.")
+        return self._commit(doc, mode, f"Undid {label}.")
 
-    def stage_redo(self, state):
+    def redo(self, state, mode):
         doc = document.ensure(state)
-        if not doc.future:
-            return self._staged(doc, "Nothing to redo.", flush=False)
-        doc.stage("redo", "", restore="redo")
-        return self._staged(doc, "Redoing…")
+        label = doc.redo()
+        if label is None:
+            return self._unchanged(doc, mode, "Nothing to redo.")
+        return self._commit(doc, mode, f"Redid {label}.")
 
-    def stage_reset(self, state):
+    def reset(self, state, mode):
         doc = document.ensure(state)
         if doc.original is None:
-            return self._staged(doc, "There is nothing to reset to.", flush=False)
-        doc.stage(
-            "reset",
-            "Back to the image as it arrived.",
-            image=doc.original,
-            load=True,
-            origin=doc.origin,
-            filename=doc.filename,
-            mode="crop",
-        )
-        return self._staged(doc, "Resetting…")
+            return self._unchanged(doc, mode, "There is nothing to reset to.")
+        doc.checkpoint("reset")
+        doc.load(doc.original, doc.origin, doc.filename)
+        return self._commit(doc, "crop", "Back to the image as it arrived.")
 
-    # -- the commit half of every structural step --------------------------
-
-    def commit(self, state, mode, left, right, top, bottom, snap_choice):
+    def commit_foreground(self, state):
+        """The mask layer, written once the canvas has the image it belongs to."""
         doc = document.ensure(state)
-        pending = doc.commit_pending()
-        if pending is None:
-            return self._reply(doc, mode, "")
-
-        message = pending["message"]
-        if pending["restore"] == "undo":
-            message = f"Undid {pending['label']}."
-        elif pending["restore"] == "redo":
-            message = f"Redid {pending['label']}."
-
-        new_mode = pending.get("mode") or mode
-        return self._reply(
-            doc,
-            new_mode,
-            message,
-            pending["notes"],
-            push=True,
-            sides=self._sides((left, right, top, bottom), snap_choice),
-            reset_aspect=True,
-        )
+        if doc.has_mask and doc.image is not None:
+            return self._layer(doc.mask, doc.image.size)
+        return gr.skip()
 
     # -- callbacks: send ----------------------------------------------------
 
-    def send(self, editor, state, mode, destination_choice, smoothing):
-        doc = document.ensure(state)
-        skips = [gr.skip() for _ in self.target_order]
-        image, mask, notes = self._read(editor, doc)
-        if image is None:
-            return (*skips, *self._reply(doc, mode, "There is no image to send."), "")
+    def send(self, background, foreground, state, mode, destination_choice, smoothing):
+        """The handoff: the image into the destination's own input.
 
-        doc.commit(image, mask)
+        For Inpaint the mask follows in a later step (``send_mask``), once
+        the Inpaint canvas has taken the image, because that canvas can only
+        hold a mask layer of the size it currently has. The last value
+        returned is the browser's instruction: which tab to switch to, and
+        for Inpaint the size the canvas must reach first.
+        """
+        doc = document.ensure(state)
+        skips = [gr.skip() for _ in self.image_targets]
+        image, mask, notes = self._sync(doc, background, foreground)
+        if image is None:
+            return (*skips, *self._info(doc, mode, "There is no image to send."), "")
+
         target = resolve_destination(destination_choice, doc.has_mask, doc.has_expansion)
         label = DESTINATION_LABELS[target]
         if target not in self.targets:
-            return (
-                *skips,
-                *self._reply(doc, mode, f"{label} was not found in this WebUI, so nothing was sent."),
-                "",
-            )
+            return (*skips, *self._info(doc, mode, f"{label} was not found in this WebUI, so nothing was sent."), "")
 
         outgoing = imaging.to_rgba(doc.image)
         if imaging.has_alpha_content(outgoing):
@@ -431,49 +447,46 @@ class TouchCanvas:
             outgoing = imaging.flatten(outgoing, color)
             notes.append(f"transparent pixels were filled with rgb{color} for {label}")
 
-        mask_out = imaging.smooth_mask(doc.mask, smoothing) if doc.has_mask else None
-        if doc.has_mask and smoothing != "Off":
-            notes.append(f"mask edge smoothing: {smoothing}")
-
-        values = {}
-        if target == "img2img":
-            values["img2img"] = outgoing
-            if doc.has_mask:
-                notes.append("the mask was not sent: img2img takes an image only")
-        elif target == "inpaint":
-            values["inpaint"] = outgoing
-            values["inpaint_mask"] = (
-                imaging.inpaint_foreground(mask_out, outgoing.size, self.mask_color)
-                if mask_out is not None
-                else None
-            )
+        if target == "inpaint":
+            if doc.has_mask and smoothing != "Off":
+                notes.append(f"mask edge smoothing: {smoothing}")
+            doc.pending_send = {"target": target, "smoothing": smoothing, "size": outgoing.size}
+            instruction = f"inpaint:{outgoing.width}x{outgoing.height}"
         else:
-            values["extras"] = outgoing
+            doc.pending_send = None
+            instruction = target
             if doc.has_mask:
-                notes.append("the mask was not sent: Extras takes an image only")
+                notes.append(f"the mask was not sent: {label} takes an image only")
 
         doc.last_send = label
         log_quietly(
             {
                 "destination": f"Canvas -> {label}",
-                "outcome": f"sent {outgoing.width}x{outgoing.height}"
-                + (" with mask" if values.get("inpaint_mask") is not None else ""),
+                "outcome": f"sent {outgoing.width}x{outgoing.height}" + (" with mask" if target == "inpaint" and doc.has_mask else ""),
                 "steps": notes,
             }
         )
-        outputs = [values[key] if key in values else gr.skip() for key in self.target_order]
-        return (
-            *outputs,
-            *self._reply(doc, mode, f"Sent to {label}.", notes),
-            target,
-        )
+        outputs = [outgoing if key == target else gr.skip() for key in self.image_targets]
+        return (*outputs, *self._info(doc, mode, f"Sent to {label}.", notes), instruction)
 
-    def save_copy(self, editor, state):
+    def send_mask(self, state, instruction):
+        """The mask layer for the Inpaint canvas, or a clear when the send
+        carried no mask. Nothing for any other destination."""
         doc = document.ensure(state)
-        image, mask, _notes = self._read(editor, doc)
+        pending = getattr(doc, "pending_send", None)
+        if not str(instruction or "").startswith("inpaint") or not pending:
+            return gr.skip()
+        doc.pending_send = None
+        if not doc.has_mask:
+            return None
+        mask = imaging.smooth_mask(doc.mask, pending.get("smoothing", "Off"))
+        return self._layer(mask, pending["size"])
+
+    def save_copy(self, background, foreground, state):
+        doc = document.ensure(state)
+        image, _mask, _notes = self._sync(doc, background, foreground)
         if image is None:
             return gr.update()
-        doc.commit(image, mask)
         import tempfile
 
         handle = tempfile.NamedTemporaryFile(prefix="minipaint-canvas-", suffix=".png", delete=False)
@@ -485,80 +498,39 @@ class TouchCanvas:
 
     def build(self) -> None:
         announce_send_log("the touch Canvas")
-        color_hex = imaging.color_hex(self.mask_color)
         self.targets = host.destinations()
-        self.target_order = [key for key in ("img2img", "inpaint", "inpaint_mask", "extras") if key in self.targets]
+        self.image_targets = [key for key in ("img2img", "inpaint", "extras") if key in self.targets]
+        self.target_order = list(self.image_targets)
 
         with gr.Column(elem_id=_id("root"), elem_classes=["minipaint-canvas-root"]):
             state = gr.State(None)
-            mode_state = gr.State("crop")
-
-            # The one inline style: the canvas height from Settings, as a CSS
-            # variable style.css reads. The block itself is hidden by CSS.
-            gr.HTML(
-                f"<style>#{_id('root')}{{--minipaint-canvas-height:{self.canvas_height}vh;}}</style>",
-                elem_id=_id("style"),
-            )
+            # A textbox rather than a State: the browser follows its changes.
+            mode_state = gr.Textbox("crop", visible=False, elem_id=_id("mode"))
 
             with gr.Row(elem_id=_id("topbar"), elem_classes=["minipaint-topbar"]):
                 open_btn = gr.UploadButton(
-                    "Open",
-                    file_types=["image"],
-                    type="filepath",
-                    elem_id=_id("open"),
-                    elem_classes=["minipaint-action"],
+                    "Open", file_types=["image"], type="filepath", elem_id=_id("open"), elem_classes=["minipaint-action"]
                 )
-                undo_btn = gr.Button("Undo", elem_id=_id("undo"), elem_classes=["minipaint-action", host.NEEDS_EDITOR_CLASS])
-                redo_btn = gr.Button("Redo", elem_id=_id("redo"), elem_classes=["minipaint-action", host.NEEDS_EDITOR_CLASS])
+                undo_btn = gr.Button("Undo", elem_id=_id("undo"), elem_classes=["minipaint-action"])
+                redo_btn = gr.Button("Redo", elem_id=_id("redo"), elem_classes=["minipaint-action"])
+                fit_btn = gr.Button("Fit", elem_id=_id("fit"), elem_classes=["minipaint-action"])
                 focus_btn = gr.Button("Focus", elem_id=_id("focus"), elem_classes=["minipaint-action", "minipaint-focus-enter"])
                 focus_exit_btn = gr.Button(
                     "Exit focus", elem_id=_id("focus_exit"), elem_classes=["minipaint-action", "minipaint-focus-exit"]
                 )
                 send_btn = gr.Button(
-                    "Send to img2img",
-                    variant="primary",
-                    elem_id=_id("send"),
-                    elem_classes=["minipaint-action", "minipaint-send", host.NEEDS_EDITOR_CLASS],
+                    "Send to img2img", variant="primary", elem_id=_id("send"), elem_classes=["minipaint-action", "minipaint-send"]
                 )
 
-            placeholder = gr.Markdown(
-                "No image yet. **Open** a file, or press 🖌️ under a txt2img, img2img or Extras result.",
-                elem_id=_id("empty"),
-                elem_classes=["minipaint-empty"],
-            )
-
-            editor = gr.ImageEditor(
-                label="Canvas",
-                show_label=False,
-                type="pil",
-                image_mode="RGBA",
-                # No upload or paste inside the editor: on this Gradio the
-                # editor keeps its crop box across a new image, so every way
-                # in goes through Open / receive, which reset it first.
-                sources=[],
-                transforms=["crop"],
-                brush=gr.Brush(
-                    default_size=self.brush_size,
-                    colors=[color_hex, "#ffffff", "#000000"],
-                    default_color=color_hex,
-                    color_mode="fixed",
-                ),
-                eraser=gr.Eraser(default_size=self.brush_size),
-                layers=False,
-                # PNG on purpose: the default (webp) is lossy, and the mask
-                # travels as a layer's alpha.
-                format="png",
-                show_download_button=False,
-                show_share_button=False,
-                interactive=True,
-                visible=False,
-                height=f"{self.canvas_height}vh",
-                elem_id=_id("editor"),
-                elem_classes=["minipaint-editor"],
+            self.surface = surface.Surface(
+                _id("surface"),
+                height_percent=self.canvas_height,
+                brush_width=self.brush_width,
+                attach_js=ATTACH_JS,
             )
 
             status = gr.Markdown(
-                "**No image**",
+                "**No image yet.** Open a file, drop or paste one onto the canvas, or press 🖌️ under a txt2img, img2img or Extras result.",
                 elem_id=_id("status"),
                 elem_classes=["minipaint-status"],
             )
@@ -581,20 +553,21 @@ class TouchCanvas:
 
             destination, reset_btn, save_btn, save_file = self._more_panel()
 
-            # Hidden wires between chained events. Values, not DOM: nothing
-            # in the browser reads or writes these directly.
-            flush_flag = gr.Textbox("", visible=False, elem_id=_id("flush"))
+            # Hidden wires between chained events. Values, not DOM.
+            crop_box = gr.Textbox("", visible=False, elem_id=_id("crop_box"))
+            original_size = gr.Textbox("", visible=False, elem_id=_id("original_size"))
+            wait_flag = gr.Textbox("", visible=False, elem_id=_id("wait"))
             switch_box = gr.Textbox("", visible=False, elem_id=_id("switch"))
+            event_kind = gr.Textbox("", visible=False, elem_id=_id("event"))
 
         self._wire(
             state=state,
             mode_state=mode_state,
-            editor=editor,
-            placeholder=placeholder,
             status=status,
             open_btn=open_btn,
             undo_btn=undo_btn,
             redo_btn=redo_btn,
+            fit_btn=fit_btn,
             focus_btn=focus_btn,
             focus_exit_btn=focus_exit_btn,
             send_btn=send_btn,
@@ -607,8 +580,11 @@ class TouchCanvas:
             reset_btn=reset_btn,
             save_btn=save_btn,
             save_file=save_file,
-            flush_flag=flush_flag,
+            crop_box=crop_box,
+            original_size=original_size,
+            wait_flag=wait_flag,
             switch_box=switch_box,
+            event_kind=event_kind,
         )
 
     # -- panels --------------------------------------------------------------
@@ -616,12 +592,7 @@ class TouchCanvas:
     def _crop_panel(self):
         with gr.Column(elem_id=_id("panel_crop"), elem_classes=["minipaint-panel"]) as panel:
             aspect = gr.Radio(
-                ASPECTS,
-                value="Free",
-                label="Aspect",
-                show_label=False,
-                elem_id=_id("crop_aspect"),
-                elem_classes=["minipaint-chips"],
+                ASPECTS, value="Free", label="Aspect", show_label=False, elem_id=_id("crop_aspect"), elem_classes=["minipaint-chips"]
             )
             with gr.Accordion("Custom ratio", open=False, elem_id=_id("crop_custom")):
                 with gr.Row():
@@ -629,23 +600,21 @@ class TouchCanvas:
                     height = gr.Number(label="Height", value=1024, precision=0, minimum=1, elem_id=_id("crop_custom_h"))
             with gr.Row(elem_classes=["minipaint-panel-actions"]):
                 gr.Markdown(
-                    "Drag the handles on the image. The editor's ↶ undoes a drag; "
-                    "**Apply Crop** makes it permanent. Sending applies it too.",
+                    "Drag the image under the frame, pinch or scroll to zoom, drag a corner of the frame to resize it. "
+                    "**Apply Crop** keeps what is inside the frame.",
                     elem_classes=["minipaint-hint"],
                 )
-                apply = gr.Button(
-                    "Apply Crop",
-                    variant="primary",
-                    elem_id=_id("crop_apply"),
-                    elem_classes=["minipaint-apply", host.NEEDS_EDITOR_CLASS],
-                )
+                apply = gr.Button("Apply Crop", variant="primary", elem_id=_id("crop_apply"), elem_classes=["minipaint-apply"])
         return panel, {"aspect": aspect, "width": width, "height": height, "apply": apply}
 
     def _mask_panel(self):
         with gr.Column(elem_id=_id("panel_mask"), elem_classes=["minipaint-panel"], visible=False) as panel:
             with gr.Row():
-                clear = gr.Button("Clear Mask", elem_id=_id("mask_clear"), elem_classes=[host.NEEDS_EDITOR_CLASS])
-                invert = gr.Button("Invert Mask", elem_id=_id("mask_invert"), elem_classes=[host.NEEDS_EDITOR_CLASS])
+                tool = gr.Radio(TOOLS, value="Paint", label="Tool", show_label=False, elem_id=_id("mask_tool"), elem_classes=["minipaint-chips"])
+                size = gr.Slider(1, 100, value=self.brush_width, step=1, label="Brush size", elem_id=_id("mask_size"))
+            with gr.Row():
+                clear = gr.Button("Clear Mask", elem_id=_id("mask_clear"))
+                invert = gr.Button("Invert Mask", elem_id=_id("mask_invert"))
                 smoothing = gr.Radio(
                     imaging.SMOOTHING_LEVELS,
                     value="Off",
@@ -654,57 +623,34 @@ class TouchCanvas:
                     elem_classes=["minipaint-chips"],
                 )
             gr.Markdown(
-                "Paint over what should change. Brush, eraser, size and colour are in the "
-                "editor's own toolbar under the image; its ↶ undoes a stroke.",
+                "Paint over what should change. Two fingers pan and zoom; Move lets one finger pan. "
+                "The canvas's own ↩️ undoes a stroke, 🔄 clears all strokes and refits the image.",
                 elem_classes=["minipaint-hint"],
             )
-        return panel, {"clear": clear, "invert": invert, "smoothing": smoothing}
+        return panel, {"tool": tool, "size": size, "clear": clear, "invert": invert, "smoothing": smoothing}
 
     def _expand_panel(self):
         with gr.Column(elem_id=_id("panel_expand"), elem_classes=["minipaint-panel"], visible=False) as panel:
             with gr.Row():
-                amount = gr.Radio(
-                    outpaint.AMOUNTS,
-                    value="128",
-                    label="Add",
-                    elem_id=_id("expand_amount"),
-                    elem_classes=["minipaint-chips"],
-                )
+                amount = gr.Radio(outpaint.AMOUNTS, value="128", label="Add", elem_id=_id("expand_amount"), elem_classes=["minipaint-chips"])
                 side_buttons = {
-                    side: gr.Button(side, elem_id=_id(f"expand_{side.lower()}"), elem_classes=["minipaint-side"])
-                    for side in outpaint.SIDES
+                    side: gr.Button(side, elem_id=_id(f"expand_{side.lower()}"), elem_classes=["minipaint-side"]) for side in outpaint.SIDES
                 }
                 clear_sides = gr.Button("Clear", elem_id=_id("expand_clear"), elem_classes=["minipaint-side"])
             preview = gr.Markdown("No image yet.", elem_id=_id("expand_preview"), elem_classes=["minipaint-preview"])
             with gr.Accordion("Advanced expansion", open=False, elem_id=_id("expand_advanced")):
                 with gr.Row():
                     numbers = {
-                        side: gr.Number(
-                            label=side, value=0, precision=0, minimum=0, elem_id=_id(f"expand_num_{side.lower()}")
-                        )
+                        side: gr.Number(label=side, value=0, precision=0, minimum=0, elem_id=_id(f"expand_num_{side.lower()}"))
                         for side in outpaint.SIDES
                     }
                 with gr.Row():
-                    overlap = gr.Slider(
-                        0, 256, value=32, step=8, label="Overlap into the original (px)", elem_id=_id("expand_overlap")
-                    )
-                    fill = gr.Dropdown(
-                        outpaint.FILL_POLICIES, value=outpaint.DEFAULT_FILL, label="New area", elem_id=_id("expand_fill")
-                    )
-                    snap = gr.Dropdown(
-                        settings.SNAP_CHOICES, value=self.snap_default, label="Snap to", elem_id=_id("expand_snap")
-                    )
+                    overlap = gr.Slider(0, 256, value=32, step=8, label="Overlap into the original (px)", elem_id=_id("expand_overlap"))
+                    fill = gr.Dropdown(outpaint.FILL_POLICIES, value=outpaint.DEFAULT_FILL, label="New area", elem_id=_id("expand_fill"))
+                    snap = gr.Dropdown(settings.SNAP_CHOICES, value=self.snap_default, label="Snap to", elem_id=_id("expand_snap"))
             with gr.Row(elem_classes=["minipaint-panel-actions"]):
-                gr.Markdown(
-                    "Adds room around the image and masks the new area automatically.",
-                    elem_classes=["minipaint-hint"],
-                )
-                apply = gr.Button(
-                    "Apply Expand",
-                    variant="primary",
-                    elem_id=_id("expand_apply"),
-                    elem_classes=["minipaint-apply", host.NEEDS_EDITOR_CLASS],
-                )
+                gr.Markdown("Adds room around the image and masks the new area automatically.", elem_classes=["minipaint-hint"])
+                apply = gr.Button("Apply Expand", variant="primary", elem_id=_id("expand_apply"), elem_classes=["minipaint-apply"])
         return panel, {
             "amount": amount,
             "sides": side_buttons,
@@ -720,16 +666,14 @@ class TouchCanvas:
     def _more_panel(self):
         with gr.Accordion("More", open=False, elem_id=_id("more")):
             with gr.Row():
-                destination = gr.Dropdown(
-                    DESTINATIONS, value="Auto", label="Send to", elem_id=_id("destination")
-                )
-                reset_btn = gr.Button("Reset to original", elem_id=_id("reset"), elem_classes=[host.NEEDS_EDITOR_CLASS])
-                save_btn = gr.Button("Save a copy", elem_id=_id("save"), elem_classes=[host.NEEDS_EDITOR_CLASS])
+                destination = gr.Dropdown(DESTINATIONS, value="Auto", label="Send to", elem_id=_id("destination"))
+                reset_btn = gr.Button("Reset to original", elem_id=_id("reset"))
+                save_btn = gr.Button("Save a copy", elem_id=_id("save"))
             save_file = gr.File(label="Saved copy", interactive=False, visible=False, elem_id=_id("save_file"))
             gr.Markdown(
                 "Auto sends a plain image to img2img, and an image with a mask to Inpaint. "
                 "Undo and Redo cover Open, Apply Crop, Apply Expand, Clear and Invert; "
-                "strokes and crop drags are undone inside the editor.",
+                "strokes are undone on the canvas itself.",
                 elem_classes=["minipaint-hint"],
             )
         return destination, reset_btn, save_btn, save_file
@@ -739,7 +683,6 @@ class TouchCanvas:
     def _wire(self, **parts) -> None:
         state = parts["state"]
         mode_state = parts["mode_state"]
-        editor = parts["editor"]
         status = parts["status"]
         send_btn = parts["send_btn"]
         crop = parts["crop"]
@@ -747,7 +690,9 @@ class TouchCanvas:
         expand = parts["expand"]
         panels = parts["panels"]
         mode_btns = parts["mode_btns"]
-        flush_flag = parts["flush_flag"]
+        background = self.surface.background
+        foreground = self.surface.foreground
+        wait_flag = parts["wait_flag"]
         switch_box = parts["switch_box"]
 
         side_inputs = [expand["numbers"][side] for side in outpaint.SIDES]
@@ -762,46 +707,47 @@ class TouchCanvas:
             mode_btns["mask"],
             mode_btns["expand"],
             send_btn,
+            mask["tool"],
         ]
-        commit_outputs = [
-            editor,
-            parts["placeholder"],
-            state,
-            status,
-            expand["preview"],
-            crop["aspect"],
-            *mode_outputs,
-        ]
-        stage_outputs = [state, status, flush_flag]
-        commit_inputs = [state, mode_state] + side_inputs + [expand["snap"]]
+        info_outputs = [state, status, expand["preview"], crop["aspect"], parts["original_size"], wait_flag, *mode_outputs]
+        commit_outputs = [background, foreground, *info_outputs]
+        canvas_inputs = [background, foreground, state, mode_state]
 
-        def structural(event, stage_fn, inputs):
-            """stage -> flush (browser) -> commit. See the module docstring."""
+        def structural(event, fn, inputs, js=None):
+            """image -> wait for the canvas -> mask layer. See the module docstring."""
             return (
-                event(stage_fn, inputs=inputs, outputs=stage_outputs)
-                .then(_noop, js=FLUSH_JS, inputs=[flush_flag], outputs=None)
-                .then(self.commit, inputs=commit_inputs, outputs=commit_outputs)
+                event(fn, inputs=inputs, outputs=commit_outputs, js=js or _mark_js(len(inputs)))
+                .then(_noop, js=WAIT_JS, inputs=[wait_flag], outputs=None)
+                .then(self.commit_foreground, inputs=[state], outputs=[foreground])
             )
 
-        # -- modes
+        # -- modes: panels and labels from Python; the browser follows the
+        # mode textbox, whichever step changed it
         for mode, button in mode_btns.items():
-            button.click(
-                lambda state, mode=mode: self.set_mode(mode, state),
-                inputs=[state],
-                outputs=mode_outputs,
-            )
-            button.click(None, js=_mode_js(mode))
+            button.click(lambda state, mode=mode: self.set_mode(mode, state), inputs=[state], outputs=mode_outputs)
+        mode_state.change(None, js=MODE_JS, inputs=[mode_state])
 
-        # -- crop
-        aspect_inputs = [crop["aspect"], crop["width"], crop["height"], state]
-        crop["aspect"].change(self.set_aspect, inputs=aspect_inputs, outputs=[editor])
+        # -- what the canvas holds, when a file is opened, dropped or pasted onto it
+        background.input(
+            self.on_canvas_image,
+            inputs=[background, state, mode_state, parts["event_kind"]],
+            outputs=[foreground, *info_outputs],
+            js=CANVAS_INPUT_JS,
+        )
+
+        # -- crop: the frame lives in the browser; Apply reads it
+        aspect_inputs = [crop["aspect"], crop["width"], crop["height"], parts["original_size"]]
+        crop["aspect"].change(None, js=ASPECT_JS, inputs=aspect_inputs)
         for number in (crop["width"], crop["height"]):
-            number.change(self.set_aspect, inputs=aspect_inputs, outputs=[editor])
-        structural(crop["apply"].click, self.stage_crop, [editor, state])
+            number.change(None, js=ASPECT_JS, inputs=aspect_inputs)
+        structural(crop["apply"].click, self.apply_crop, canvas_inputs + [parts["crop_box"]], js=CROP_JS)
 
-        # -- mask
-        structural(mask["clear"].click, self.stage_clear_mask, [editor, state])
-        structural(mask["invert"].click, self.stage_invert_mask, [editor, state])
+        # -- mask: tool and size are browser-only; clear and invert write the layer
+        mask["tool"].change(None, js=TOOL_JS, inputs=[mask["tool"]])
+        mask["size"].change(None, js=SIZE_JS, inputs=[mask["size"]])
+        mask["size"].release(None, js=SIZE_JS, inputs=[mask["size"]])
+        mask["clear"].click(self.clear_mask, inputs=canvas_inputs, outputs=[foreground, *info_outputs])
+        mask["invert"].click(self.invert_mask, inputs=canvas_inputs, outputs=[foreground, *info_outputs])
 
         # -- expand
         for side, button in expand["sides"].items():
@@ -817,41 +763,47 @@ class TouchCanvas:
             control.change(self.expand_preview, inputs=preview_inputs, outputs=[expand["preview"]])
         structural(
             expand["apply"].click,
-            self.stage_expand,
-            [editor, state] + side_inputs + [expand["overlap"], expand["fill"], expand["snap"]],
+            self.apply_expand,
+            canvas_inputs + side_inputs + [expand["overlap"], expand["fill"], expand["snap"]],
         )
 
         # -- open, history, reset
-        structural(parts["open_btn"].upload, self.stage_open, [parts["open_btn"], state])
-        structural(parts["undo_btn"].click, self.stage_undo, [state])
-        structural(parts["redo_btn"].click, self.stage_redo, [state])
-        structural(parts["reset_btn"].click, self.stage_reset, [state])
+        structural(parts["open_btn"].upload, self.open_file, [parts["open_btn"], state, mode_state])
+        structural(parts["undo_btn"].click, self.undo, [state, mode_state])
+        structural(parts["redo_btn"].click, self.redo, [state, mode_state])
+        structural(parts["reset_btn"].click, self.reset, [state, mode_state])
 
-        # -- focus mode: purely a class on our own root
+        # -- view: fit and focus are browser-only
+        parts["fit_btn"].click(None, js=FIT_JS)
         parts["focus_btn"].click(None, js=FOCUS_ON_JS)
         parts["focus_exit_btn"].click(None, js=FOCUS_OFF_JS)
 
         # -- save
-        parts["save_btn"].click(self.save_copy, inputs=[editor, state], outputs=[parts["save_file"]])
+        parts["save_btn"].click(self.save_copy, inputs=[background, foreground, state], outputs=[parts["save_file"]])
 
-        # -- send: an ordinary Gradio output into the host's own input
-        # components, then the host's own tab switch.
-        target_components = [self.targets[key] for key in self.target_order]
-        send_btn.click(
+        # -- send: an ordinary Gradio output into the host's own inputs, then
+        # the host's own tab switch; for Inpaint, the mask layer once that
+        # canvas has the image.
+        target_components = [self.targets[key] for key in self.image_targets]
+        sent = send_btn.click(
             self.send,
-            inputs=[editor, state, mode_state, parts["destination"], mask["smoothing"]],
-            outputs=target_components + commit_outputs + [switch_box],
-        ).then(None, js=SWITCH_JS, inputs=[switch_box], outputs=None)
+            inputs=[background, foreground, state, mode_state, parts["destination"], mask["smoothing"]],
+            outputs=target_components + info_outputs + [switch_box],
+        )
+        sent.then(None, js=SWITCH_JS, inputs=[switch_box], outputs=None)
+        if "inpaint_mask" in self.targets:
+            inpaint_uuid = getattr(self.targets["inpaint"], "elem_id", "") or ""
+            sent.then(_noop, js=_host_wait_js(inpaint_uuid), inputs=[switch_box], outputs=None).then(
+                self.send_mask, inputs=[state, switch_box], outputs=[self.targets["inpaint_mask"]]
+            )
 
-        # -- receive: the small button next to "send to extras" in each
-        # output panel. Flush first (the editor is being replaced), then the
-        # transfer, then the host's tab switch.
+        # -- receive: the small button next to "send to extras" in each output panel
         for tab, button, gallery in host.receive_buttons():
-            button.click(_noop, js=FLUSH_ALWAYS_JS, inputs=None, outputs=None).then(
+            structural(
+                button.click,
                 lambda payload, state, mode, tab=tab: self.receive(payload, state, mode, tab),
+                [gallery, state, mode_state],
                 js=PICK_JS,
-                inputs=[gallery, state, mode_state],
-                outputs=commit_outputs,
             ).then(None, js=SWITCH_CANVAS_JS)
 
 

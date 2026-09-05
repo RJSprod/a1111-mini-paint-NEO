@@ -25,9 +25,6 @@
  * ------------------------------------------------------------------ */
 
 #minipaint_canvas_root {
-    /* The tab's one inline style rule (an HTML block that only holds a
-       <style>) sets --minipaint-canvas-height from the Settings value. */
-    --minipaint-canvas-height: 70vh;
     --minipaint-target: 44px;
     --minipaint-gap: 8px;
     display: flex;
@@ -70,15 +67,7 @@
     display: none;
 }
 
-/* -- empty state and status ---------------------------------------- */
-
-#minipaint_canvas_root .minipaint-empty {
-    padding: 24px 12px;
-    text-align: center;
-    border: 1px dashed var(--border-color-primary, currentColor);
-    border-radius: var(--block-radius, 8px);
-    color: var(--body-text-color-subdued, inherit);
-}
+/* -- status ---------------------------------------------------------- */
 
 #minipaint_canvas_root .minipaint-status {
     min-height: 1.5em;
@@ -95,48 +84,106 @@
     font-variant-numeric: tabular-nums;
 }
 
-/* -- the editor ---------------------------------------------------- */
+/* -- the canvas ------------------------------------------------------ */
 
-/* The drawing surface owns touch gestures; the toolbars around it keep
-   normal scrolling and tapping, and page zoom outside the editor is
-   untouched. The crop handles get the same treatment so a finger can
-   drag them without scrolling the page. */
-#minipaint_canvas_editor canvas,
-#minipaint_canvas_editor .hitbox,
-#minipaint_canvas_editor .grid {
+/* The surface is the WebUI's own canvas (the img2img box), so it already
+   looks like the rest of Forge. Only what this tab adds is styled here. */
+
+#minipaint_canvas_surface .forge-container {
+    border-radius: var(--block-radius, 8px);
+}
+
+/* Colour, opacity and softness are fixed to the Inpaint tab's, and the
+   brush width comes from the slider in the Mask panel. */
+#minipaint_canvas_surface .forge-toolbar-box-b {
+    display: none;
+}
+
+/* The remove button clears the canvas without clearing the value behind
+   it; Reset to original and Undo do that job safely. */
+#minipaint_canvas_surface [id^="removeButton_"] {
+    display: none;
+}
+
+/* The toolbar sits along the top edge, centred, instead of in the top-left
+   corner: a fitted image's top-left crop handle lives there. */
+#minipaint_canvas_surface .forge-toolbar-static {
+    left: 50%;
+    transform: translateX(-50%);
+    border-radius: 0 0 var(--block-radius, 8px) var(--block-radius, 8px);
+    white-space: nowrap;
+}
+
+/* Finger-sized toolbar buttons. */
+#minipaint_canvas_surface .forge-toolbar-static .forge-btn {
+    min-width: 36px;
+    min-height: 36px;
+    font-size: 16px;
+}
+
+/* Crop frame: a fixed-aspect window over the image, with corner handles.
+   The frame itself paints under the toolbar; the handles paint over it, so
+   a corner is always something a finger can grab. */
+#minipaint_canvas_surface .minipaint-frame {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+#minipaint_canvas_surface .minipaint-frame[hidden] {
+    display: none;
+}
+
+#minipaint_canvas_surface .minipaint-frame-box {
+    position: absolute;
+    box-sizing: border-box;
+    border: 2px solid var(--color-accent, #ff7c00);
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+}
+
+#minipaint_canvas_surface .minipaint-frame-size {
+    position: absolute;
+    left: 50%;
+    bottom: 6px;
+    transform: translateX(-50%);
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+#minipaint_canvas_surface .minipaint-frame-handle {
+    position: absolute;
+    z-index: 11;
+    width: 44px;
+    height: 44px;
+    pointer-events: auto;
     touch-action: none;
 }
 
-/* The editor's "Clear canvas" control resets everything but its crop box,
-   which would corrupt the next image; Reset to original does the same job
-   safely. Its empty-state hint reads "select the draw tool", which is not
-   how images arrive here. Both are cosmetic: the editor still works
-   unchanged if these selectors ever stop matching. */
-#minipaint_canvas_editor button[aria-label="Clear canvas"],
-#minipaint_canvas_editor .empty {
-    display: none;
+#minipaint_canvas_surface .minipaint-frame-handle::after {
+    content: "";
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    border: 3px solid var(--color-accent, #ff7c00);
+    background: rgba(0, 0, 0, 0.35);
 }
 
-/* Keep a tall image inside the block instead of letting it be cut off: the
-   editor sizes its canvas by width only. The cap is in viewport units on the
-   canvas itself, because the editor's wrapper is content-sized (percentages
-   would not resolve) and has to keep hugging the canvas exactly - the crop
-   handles and the brush cursor are positioned from that wrapper. */
-#minipaint_canvas_editor .stage-wrap canvas {
-    width: auto !important;
-    height: auto !important;
-    max-width: 100% !important;
-    max-height: calc(var(--minipaint-canvas-height, 70vh) - 110px) !important;
-}
+#minipaint_canvas_surface .minipaint-frame-handle.tl { left: -22px; top: -22px; cursor: nwse-resize; }
+#minipaint_canvas_surface .minipaint-frame-handle.tr { right: -22px; top: -22px; cursor: nesw-resize; }
+#minipaint_canvas_surface .minipaint-frame-handle.bl { left: -22px; bottom: -22px; cursor: nesw-resize; }
+#minipaint_canvas_surface .minipaint-frame-handle.br { right: -22px; bottom: -22px; cursor: nwse-resize; }
 
-#minipaint_canvas_style {
-    display: none;
-}
-
-.minipaint-nowebgl {
-    padding: 24px 16px;
-    line-height: 1.5;
-}
+#minipaint_canvas_surface .minipaint-frame-handle.tl::after { right: 11px; bottom: 11px; border-right: none; border-bottom: none; }
+#minipaint_canvas_surface .minipaint-frame-handle.tr::after { left: 11px; bottom: 11px; border-left: none; border-bottom: none; }
+#minipaint_canvas_surface .minipaint-frame-handle.bl::after { right: 11px; top: 11px; border-right: none; border-top: none; }
+#minipaint_canvas_surface .minipaint-frame-handle.br::after { left: 11px; top: 11px; border-left: none; border-top: none; }
 
 /* -- mode bar ------------------------------------------------------ */
 
@@ -194,14 +241,6 @@
     background: var(--body-background-fill, var(--background-fill-primary, #101010));
 }
 
-#minipaint_canvas_root.minipaint-focus {
-    --minipaint-canvas-height: calc(100vh - 250px);
-}
-
-#minipaint_canvas_root.minipaint-focus #minipaint_canvas_editor {
-    height: var(--minipaint-canvas-height) !important;
-    min-height: 320px;
-}
 
 /* -- tablet and phone ---------------------------------------------- */
 
@@ -250,7 +289,4 @@
         flex: 1 1 100%;
     }
 
-    #minipaint_canvas_root.minipaint-focus {
-        --minipaint-canvas-height: calc(100vh - 300px);
-    }
 }

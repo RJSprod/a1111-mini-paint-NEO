@@ -1,3 +1,7 @@
+/* --------------------------------------------------------------------
+ * Legacy miniPaint frontend
+ * ------------------------------------------------------------------ */
+
 #a1111minipaint_iframe {
     display: block;
     width: 100%;
@@ -8,4 +12,245 @@
 /* Workaround for ashen-sensored/stable-diffusion-webui-two-shot */
 #a1111minipaint_iframe .output-html {
     display: block;
+}
+
+/* --------------------------------------------------------------------
+ * Touch Canvas frontend
+ *
+ * Every rule below is scoped to the extension's own root, so it cannot
+ * reach the legacy editor, the rest of the WebUI, or a theme's layout.
+ * Colours come from the host's semantic variables with fallbacks, so
+ * Lobe (or any other theme) keeps deciding what things look like and
+ * this file only decides where they go and how big they are to a finger.
+ * ------------------------------------------------------------------ */
+
+#forge_touch_editor_root {
+    --forge-touch-canvas-height: 70vh;
+    --forge-touch-target: 44px;
+    --forge-touch-gap: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--forge-touch-gap);
+    width: 100%;
+}
+
+/* -- action bar ---------------------------------------------------- */
+
+#forge_touch_editor_root .forge-touch-topbar {
+    flex-wrap: wrap;
+    gap: var(--forge-touch-gap);
+    align-items: center;
+}
+
+#forge_touch_editor_root .forge-touch-action,
+#forge_touch_editor_root .forge-touch-mode,
+#forge_touch_editor_root .forge-touch-panel button {
+    min-height: var(--forge-touch-target);
+    min-width: 64px;
+}
+
+/* The one action the whole tab exists for. */
+#forge_touch_editor_root .forge-touch-send {
+    margin-left: auto;
+    min-width: 190px;
+    font-weight: 600;
+}
+
+/* -- canvas -------------------------------------------------------- */
+
+#forge_touch_editor_root .forge-touch-canvas-row {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+#forge_touch_canvas {
+    width: 100%;
+    min-height: var(--forge-touch-canvas-height);
+}
+
+#forge_touch_canvas > div,
+#forge_touch_canvas .image-container {
+    min-height: inherit;
+}
+
+/* Drawing surface only: the toolbars around it keep normal browser
+   gestures, and page zoom outside the editor is untouched. */
+#forge_touch_canvas canvas {
+    touch-action: none;
+}
+
+/* -- status -------------------------------------------------------- */
+
+#forge_touch_editor_root .forge-touch-status {
+    min-height: 1.5em;
+    padding: 0 2px;
+    color: var(--body-text-color, inherit);
+}
+
+#forge_touch_editor_root .forge-touch-status em,
+#forge_touch_editor_root .forge-touch-hint,
+#forge_touch_editor_root .forge-touch-preview {
+    color: var(--body-text-color-subdued, inherit);
+}
+
+#forge_touch_editor_root .forge-touch-preview {
+    font-variant-numeric: tabular-nums;
+    padding: 2px 0;
+}
+
+/* -- mode bar ------------------------------------------------------ */
+
+#forge_touch_editor_root .forge-touch-modebar {
+    gap: var(--forge-touch-gap);
+}
+
+#forge_touch_editor_root .forge-touch-mode {
+    flex: 1 1 0;
+}
+
+/* A theme that does not style Gradio's own variant classes still shows
+   which mode is active. */
+#forge_touch_editor_root .forge-touch-active {
+    outline: 2px solid var(--color-accent, var(--border-color-primary, currentColor));
+    outline-offset: -2px;
+}
+
+/* -- tool options -------------------------------------------------- */
+
+#forge_touch_editor_root .forge-touch-options {
+    padding: var(--forge-touch-gap);
+}
+
+#forge_touch_editor_root .forge-touch-panel {
+    gap: var(--forge-touch-gap);
+}
+
+/* Only one panel at a time - but only once the adapter has said it is
+   running. Without it every panel stays visible and usable, which is a
+   denser tab rather than a broken one. */
+#forge_touch_editor_root.forge-touch-js .forge-touch-panel {
+    display: none;
+}
+
+#forge_touch_editor_root.forge-touch-js.forge-touch-tool-crop .forge-touch-panel-crop,
+#forge_touch_editor_root.forge-touch-js.forge-touch-tool-mask .forge-touch-panel-mask,
+#forge_touch_editor_root.forge-touch-js.forge-touch-tool-expand .forge-touch-panel-expand {
+    display: flex;
+}
+
+#forge_touch_editor_root .forge-touch-panel-actions {
+    justify-content: flex-end;
+    gap: var(--forge-touch-gap);
+}
+
+/* Aspect and amount pickers as finger-sized chips rather than radio dots. */
+#forge_touch_editor_root .forge-touch-chips label {
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 12px;
+}
+
+/* -- focus mode ---------------------------------------------------- */
+
+#forge_touch_editor_root.forge-touch-focus {
+    position: fixed;
+    inset: 0;
+    z-index: 1001;
+    margin: 0;
+    padding: var(--forge-touch-gap);
+    overflow: auto;
+    background: var(--body-background-fill, var(--background-fill-primary, #ffffff));
+}
+
+#forge_touch_editor_root.forge-touch-focus #forge_touch_canvas {
+    min-height: min(78vh, calc(100vh - 230px));
+}
+
+body.forge-touch-focus-open {
+    overflow: hidden;
+}
+
+/* The tab's one inline style rule lives in an HTML block; it applies from
+   anywhere, so the block itself takes up no room. */
+#forge_touch_style {
+    display: none;
+}
+
+/* -- the wires the adapter talks over ------------------------------ */
+
+#forge_touch_editor_root .forge-touch-offscreen {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    min-width: 0;
+    padding: 0;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* -- receive button in the output rows ----------------------------- */
+
+button.forge-touch-receive {
+    min-height: 2em;
+}
+
+/* -- tablet and phone ---------------------------------------------- */
+
+@media (max-width: 1024px) {
+    #forge_touch_editor_root .forge-touch-send {
+        min-width: 150px;
+    }
+
+    /* Options become a sheet docked to the bottom edge, so the canvas
+       keeps the whole screen above it and the controls stay in reach. */
+    #forge_touch_editor_root .forge-touch-options {
+        position: sticky;
+        bottom: 0;
+        z-index: 4;
+        background: var(--block-background-fill, var(--background-fill-primary, transparent));
+        border-top: 1px solid var(--border-color-primary, transparent);
+    }
+
+    #forge_touch_editor_root .forge-touch-panel .forge-touch-panel-actions {
+        justify-content: stretch;
+    }
+}
+
+@media (max-width: 720px) {
+    #forge_touch_editor_root {
+        --forge-touch-target: 48px;
+        --forge-touch-canvas-height: 52vh;
+    }
+
+    #forge_touch_editor_root .forge-touch-topbar {
+        gap: 6px;
+    }
+
+    /* Undo/Redo/Fit/Focus wrap to a second row rather than shrinking to
+       something a thumb cannot hit. */
+    #forge_touch_editor_root .forge-touch-action {
+        min-width: 0;
+        flex: 1 1 22%;
+    }
+
+    #forge_touch_editor_root .forge-touch-send {
+        flex: 1 1 100%;
+        margin-left: 0;
+        order: 9;
+    }
+
+    #forge_touch_editor_root .forge-touch-panel > .form,
+    #forge_touch_editor_root .forge-touch-panel .gr-row {
+        flex-wrap: wrap;
+    }
+}
+
+/* Landscape on a tablet is the reference layout: the canvas gets the
+   height, everything else stays one row. */
+@media (max-width: 1180px) and (orientation: landscape) {
+    #forge_touch_editor_root {
+        --forge-touch-canvas-height: 60vh;
+    }
 }

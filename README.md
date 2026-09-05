@@ -5,8 +5,8 @@ A WebUI extension that adds one **Mini Paint** tab with a choice of two frontend
 * **Canvas** (default): a touch-first image preparation workspace built from ordinary
   Gradio components around **the WebUI's own canvas** — the same ForgeCanvas box the
   img2img and Inpaint tabs use, with its zoom, pan, drop, paste and stroke undo. It does
-  three things — **Crop**, **Mask**, **Expand** — and hands the result straight to img2img
-  or Inpaint. No WebGL is involved anywhere.
+  four things — **Crop**, **Mask**, **Expand**, **Layers** — and hands the result straight
+  to img2img or Inpaint. No WebGL is involved anywhere.
 * **Old UI**: the original [miniPaint](https://github.com/viliusle/miniPaint) editor in an
   iframe, exactly as before, with its send buttons, ControlNet/Extras destinations,
   verification and transfer log.
@@ -34,7 +34,7 @@ Extensions → Install from URL → this repository's URL → Install → Reload
  |        as tall as the window has room for, no scrolling       |
  +---------------------------------------------------------------+
  1024 × 1024 · from txt2img — Received from txt2img. Auto sends to img2img.
- [        Crop        ] [        Mask        ] [       Expand       ]
+ [     Crop     ] [     Mask     ] [    Expand    ] [    Layers    ]
  one row of controls for that mode      (e.g. [Aspect ▾] [Apply Crop])
  Crop options ▸   (the rest of that mode's settings, closed by default)
  More ▸           (destination, reset, save a copy)
@@ -74,6 +74,22 @@ has exact per-side numbers, the overlap width, what to fill the new area with (t
 edge-stretched, gray, white, black) and snapping to a pixel multiple. After Apply the
 Canvas switches to Mask so the automatic mask can be refined.
 
+**Layers.** The picture that arrives is the *Background* layer; more layers come from
+selections. In Layers mode the frame is a rectangle selection: **New from selection**
+copies what the active layer has inside it into a layer of its own, in place, above the
+active layer. *Mask options → Masked area → new layer* does the same for a painted area,
+trimmed to it — the mask brush is the freehand selection. One finger (or the left mouse
+button) then **drags the active layer** with a live preview; the other layers stay put,
+and the picture keeps its zoom and position when the server's new composite comes back.
+Two fingers, the wheel and the right button still pan and zoom. The row holds the layer
+menu, **New from selection**, **Merge down** and **Delete layer**; *Layer options* has the
+visible-layers chips, the active layer's opacity and name, **Move up / down**,
+**Duplicate** and **Flatten all**. Layers sit on a document canvas the size of the first
+picture; Crop trims every layer and Expand grows the Background while the others keep
+their place. Sending flattens the visible layers. Every layer step is one Undo away. What
+does not carry over from miniPaint is transforms, text and filters — the Old UI stays the
+place for those.
+
 **Send.** The big button always goes to img2img: a plain image goes to the img2img
 sub-tab, an image with a mask (drawn, or created by an expansion) goes to **Inpaint** with
 the mask in place, and the WebUI switches there — using its own tab-switch helpers, the
@@ -82,7 +98,7 @@ same ones its "Send to img2img" buttons use. The button's label says which it wi
 expansion are filled on the way out (setting: *Send: fill transparent pixels with*).
 
 **Undo / Redo** in the top bar take strokes back first, then the bigger steps — Open,
-Apply Crop, Apply Expand, Clear, Invert — in the order they happened. *More → Reset to
+Apply Crop, Apply Expand, Clear, Invert, every layer step — in the order they happened. *More → Reset to
 original* goes back to the image as it arrived. **Fit** puts the image and the frame back
 the way they arrived.
 
@@ -177,7 +193,12 @@ A few behaviours of the host's canvas shaped the wiring; each has a small answer
   painted one.
 * **Painting, panning and zooming never go to the server.** No events are bound to the
   mask layer; the canvas's pixels are read only when Apply, Clear, Invert, Save or Send
-  is pressed, and the crop frame is read only by Apply Crop, as a box in image pixels.
+  is pressed, and the crop frame is read only by Apply Crop and New from selection, as a
+  box in image pixels. Dragging a layer is browser-side too: in Layers mode the server
+  keeps two hidden textboxes filled — the active layer and the other layers composited
+  without it — and the drag shows the one over the other, hands the offset it settled on
+  to the server through a third hidden textbox, and the composite comes back with the
+  zoom and position kept.
 * **Gradio rebuilds a component after an update output, and under Forge the rebuilt
   copy of a ForgeCanvas textbox reads arrays instead of images.** Any event that answers
   a component with `gr.update()` or `gr.skip()` makes Gradio keep a per-session copy of
@@ -267,7 +288,7 @@ minipaint_neo/
     canvas/host.py               what the Canvas needs from the WebUI, found without touching its tabs
     canvas/imaging.py            mask, crop and fill maths (Pillow only)
     canvas/outpaint.py           expansion with automatic mask
-    canvas/document.py           the document and its history of structural steps
+    canvas/document.py           layers on a canvas, the composite, the mask, and the history of structural steps
 javascript/main.js               legacy bridge, parent-frame side (unchanged)
 javascript/minipaint_canvas.js   attaches the canvas; crop frame, touch gestures, tools, waits, focus mode
 style.css                        legacy rules, then rules scoped to the Canvas root

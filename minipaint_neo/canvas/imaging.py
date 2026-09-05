@@ -292,6 +292,83 @@ def foreground_layer(
     return layer
 
 
+# -- layers --------------------------------------------------------------
+
+
+def scale_alpha(image: Image.Image, opacity: int) -> Image.Image:
+    """The image with its alpha multiplied by opacity/100."""
+    rgba = to_rgba(image)
+    if opacity >= 100:
+        return rgba
+    faded = rgba.copy()
+    faded.putalpha(rgba.getchannel("A").point(lambda v: v * max(0, opacity) // 100))
+    return faded
+
+
+def _intersection(a, b):
+    box = (max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3]))
+    return box if box[2] > box[0] and box[3] > box[1] else None
+
+
+def paste_clipped(canvas: Image.Image, image: Image.Image, x: int, y: int) -> None:
+    """Alpha-composite ``image`` onto ``canvas`` at (x, y), clipped to the canvas."""
+    inter = _intersection((x, y, x + image.width, y + image.height), (0, 0, canvas.width, canvas.height))
+    if inter is None:
+        return
+    piece = to_rgba(image).crop((inter[0] - x, inter[1] - y, inter[2] - x, inter[3] - y))
+    canvas.alpha_composite(piece, dest=(inter[0], inter[1]))
+
+
+def composite(layers, size: typing.Tuple[int, int]) -> Image.Image:
+    """The visible layers, bottom to top, on a transparent canvas."""
+    canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+    for layer in layers:
+        if not layer.visible or layer.opacity <= 0:
+            continue
+        paste_clipped(canvas, scale_alpha(layer.image, layer.opacity), layer.x, layer.y)
+    return canvas
+
+
+def merge_layers(lower, upper) -> typing.Tuple[Image.Image, int, int]:
+    """``upper`` composited onto ``lower`` as the canvas shows them; the
+    result covers both. Returns (image, x, y)."""
+    x0 = min(lower.x, upper.x)
+    y0 = min(lower.y, upper.y)
+    x1 = max(lower.x + lower.image.width, upper.x + upper.image.width)
+    y1 = max(lower.y + lower.image.height, upper.y + upper.image.height)
+    merged = Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 0))
+    paste_clipped(merged, scale_alpha(lower.image, lower.opacity if lower.visible else 0), lower.x - x0, lower.y - y0)
+    if upper.visible:
+        paste_clipped(merged, scale_alpha(upper.image, upper.opacity), upper.x - x0, upper.y - y0)
+    return merged, x0, y0
+
+
+def layer_pixels_in_box(image: Image.Image, x: int, y: int, box) -> typing.Optional[typing.Tuple[Image.Image, int, int]]:
+    """The part of a layer (at x, y) inside a document box: (image, x, y), or None."""
+    inter = _intersection((x, y, x + image.width, y + image.height), tuple(box))
+    if inter is None:
+        return None
+    piece = to_rgba(image).crop((inter[0] - x, inter[1] - y, inter[2] - x, inter[3] - y))
+    return piece, inter[0], inter[1]
+
+
+def layer_pixels_under_mask(image: Image.Image, x: int, y: int, mask: Image.Image) -> typing.Optional[typing.Tuple[Image.Image, int, int]]:
+    """The layer's pixels where the document mask covers them, trimmed to
+    what is left: (image, x, y), or None when nothing is."""
+    inter = _intersection((x, y, x + image.width, y + image.height), (0, 0, mask.width, mask.height))
+    if inter is None:
+        return None
+    piece = to_rgba(image).crop((inter[0] - x, inter[1] - y, inter[2] - x, inter[3] - y))
+    coverage = binarize(mask.crop(inter))
+    alpha = ImageChops.multiply(piece.getchannel("A"), coverage)
+    bbox = alpha.getbbox()
+    if bbox is None:
+        return None
+    piece = piece.crop(bbox)
+    piece.putalpha(alpha.crop(bbox))
+    return piece, inter[0] + bbox[0], inter[1] + bbox[1]
+
+
 def to_png_bytes(image: Image.Image) -> bytes:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")

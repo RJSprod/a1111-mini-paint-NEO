@@ -74,10 +74,12 @@ def run() -> Results:
     # commit-shaped replies (see TouchCanvas._commit / _info / _mode_updates);
     # replies that start with the mask layer instead of the image are one shorter
     BG, FG, STATE, STATUS, PREVIEW, ASPECT, ORIGINAL, WAIT, MODE = range(9)
-    # after the mode: 3 quick rows, 3 panels, 3 mode buttons, the send label, the tool, the options label
-    SEND_LABEL, TOOL, OPTIONS_LABEL = MODE + 10, MODE + 11, MODE + 12
+    # after the mode: 4 quick rows, 4 panels, 4 mode buttons, the send label, the tool, the options label,
+    # then the layer menu, the visible-layers chips, the opacity, the name, the drag preview and underlay
+    SEND_LABEL, TOOL, OPTIONS_LABEL = MODE + 13, MODE + 14, MODE + 15
+    LAYER_PICK, LAYER_VISIBLE, LAYER_OPACITY, LAYER_NAME, LAYER_PREVIEW, LAYER_UNDERLAY = range(MODE + 16, MODE + 22)
     COMMIT_LEN = 2 + canvas.INFO_COUNT
-    r.check("the commit shape is the two canvas values plus the information", COMMIT_LEN == 21 and canvas.MODE_COUNT == 13)
+    r.check("the commit shape is the two canvas values plus the information", COMMIT_LEN == 30 and canvas.MODE_COUNT == 22)
 
     # ---- receive from txt2img ----
     photo = Image.new("RGB", (640, 480), (20, 120, 220))
@@ -89,7 +91,7 @@ def run() -> Results:
     r.check("receive clears the mask layer", out[FG] is None and out[WAIT] == "")
     r.check("receive selects crop mode", out[MODE] == "crop")
     r.check("receive reports the original size", out[ORIGINAL] == "640x480")
-    r.check("status says where it came from, on one line", "Received from txt2img" in out[STATUS] and "640 × 480" in out[STATUS] and "\n" not in out[STATUS].split("<small>")[0])
+    r.check("status says where it came from, on one line", "Received from txt2img" in out[STATUS] and "640 × 480" in out[STATUS] and "\n" not in out[STATUS])
     r.check("send label is plain img2img", value_of(out[SEND_LABEL]) == "Send to img2img")
     r.check("a second receive says the first is one undo away", "one Undo away" in canvas.receive([(photo, None)], doc, "crop", "img2img")[STATUS])
     unchanged = canvas.receive(None, doc, "crop", "txt2img")
@@ -157,16 +159,98 @@ def run() -> Results:
     # ---- mask mode ----
     updates = canvas.set_mode("mask", doc)
     r.check("mode updates have the mode shape", len(updates) == canvas.MODE_COUNT)
-    r.check("mask mode relabels the send button and resets the tool", value_of(updates[10]) == "Send to img2img Inpaint" and value_of(updates[11]) == "Paint")
-    r.check("mask mode shows its quick row and panel only", [u.get("visible") for u in updates[1:4]] == [False, True, False] and [u.get("visible") for u in updates[4:7]] == [False, True, False])
-    r.check("mask mode relabels the options accordion", updates[12].get("label") == "Mask options")
-    r.check("crop mode leaves the tool alone", skipped(canvas.set_mode("crop", doc)[11]))
+    r.check("mask mode relabels the send button and resets the tool", value_of(updates[13]) == "Send to img2img Inpaint" and value_of(updates[14]) == "Paint")
+    r.check("mask mode shows its quick row and panel only", [u.get("visible") for u in updates[1:5]] == [False, True, False, False] and [u.get("visible") for u in updates[5:9]] == [False, True, False, False])
+    r.check("mask mode relabels the options accordion", updates[15].get("label") == "Mask options")
+    r.check("crop mode leaves the tool alone", skipped(canvas.set_mode("crop", doc)[14]))
+    r.check("outside Layers mode the drag previews are not sent", skipped(updates[20]) and skipped(updates[21]))
     r.check("an unknown mode is crop", canvas.set_mode("nonsense", doc)[0] == "crop")
 
     # ---- undo and redo take a stroke first, when the browser took one back ----
     out = canvas.undo(doc, "mask", "stroke")
     r.check("a stroke undo touches nothing on the server", "Undid a stroke" in out[STATUS] and skipped(out[BG]) and out[STATE] is doc)
     r.check("a stroke redo likewise", "Redid a stroke" in canvas.redo(doc, "mask", "stroke")[STATUS])
+
+    # ---- layers: the frame as a selection, a drag, order, visibility, merge, flatten ----
+    bg = imaging.to_rgba(doc.image)
+    fg = layer(doc.mask, doc.size)
+    updates = canvas.set_mode("layers", doc)
+    r.check("layers mode sends the drag previews", isinstance(updates[20], str) and updates[20].startswith('{"src": "data:image/png;base64,') and updates[21] == "")
+    r.check("layers mode lists the one layer", updates[16].get("choices") == ["Background"] and updates[16].get("value") == "Background" and updates[17].get("value") == ["Background"])
+    r.check("the previews are sent once until something changes", skipped(canvas.set_mode("layers", doc)[20]))
+
+    out = canvas.new_layer_from_selection(bg, fg, doc, "layers", '{"x0": 20, "y0": 10, "x1": 120, "y1": 70}')
+    doc = out[STATE]
+    r.check("a selection becomes a layer above the active one", doc.layer_names() == ["Background", "Layer 2"] and doc.active == 1)
+    r.check("it holds the pixels where they were", doc.active_layer.size == (100, 60) and (doc.active_layer.x, doc.active_layer.y) == (20, 10))
+    r.check("the canvas is left alone: nothing changed on it", skipped(out[BG]) and skipped(out[FG]) and out[WAIT] == "")
+    r.check("the status names the new layer", "Layer 2 holds the selection" in out[STATUS] and "2 layers" in out[STATUS])
+    r.check("the layer menu and chips follow", out[LAYER_PICK].get("choices") == ["Background", "Layer 2"] and out[LAYER_PICK].get("value") == "Layer 2" and out[LAYER_VISIBLE].get("value") == ["Background", "Layer 2"])
+    r.check("a new preview and an underlay go to the browser", isinstance(out[LAYER_PREVIEW], str) and '"x": 20' in out[LAYER_PREVIEW] and out[LAYER_UNDERLAY].startswith("data:image/png"))
+    r.check("no frame is explained", "Put the frame" in canvas.new_layer_from_selection(bg, fg, doc, "layers", "")[STATUS])
+
+    out = canvas.move_layer('{"dx": 15, "dy": -5, "t": 1}', bg, fg, doc, "layers")
+    doc = out[STATE]
+    r.check("a drag moves the active layer", (doc.active_layer.x, doc.active_layer.y) == (35, 5) and "at (35, 5)" in out[STATUS] and "Moved Layer 2" in out[STATUS])
+    r.check("and reloads the composite", isinstance(out[BG], Image.Image) and out[BG].size == (200, 120))
+    r.check("a drag of nothing changes nothing", skipped(canvas.move_layer('{"dx": 0, "dy": 0}', bg, fg, doc, "layers")[BG]))
+    r.check("the composite shows the moved layer", doc.image.getpixel((5, 5))[3] == 255)
+
+    out = canvas.pick_layer("Background", doc, "layers")
+    doc = out[0]
+    r.check("picking a layer makes it active without a reload", doc.active == 0 and "Background is the active layer" in out[1] and len(out) == canvas.INFO_COUNT)
+    r.check("the preview follows the active layer", isinstance(out[LAYER_PREVIEW - 2], str) and '"name": "Background"' in out[LAYER_PREVIEW - 2])
+
+    out = canvas.layer_order(1, bg, fg, doc, "layers")
+    doc = out[STATE]
+    r.check("move up reorders", doc.layer_names() == ["Layer 2", "Background"] and doc.active == 1)
+    r.check("at the top it says so", "already at the top" in canvas.layer_order(1, bg, fg, doc, "layers")[STATUS])
+    out = canvas.layer_order(-1, bg, fg, doc, "layers")
+    doc = out[STATE]
+    r.check("move down reorders back", doc.layer_names() == ["Background", "Layer 2"] and doc.active == 0)
+
+    out = canvas.layer_visibility(["Layer 2"], bg, fg, doc, "layers")
+    doc = out[STATE]
+    r.check("hiding the background leaves the composite transparent there", not doc.layers[0].visible and doc.image.getpixel((150, 100))[3] == 0 and "Hidden: Background" in out[STATUS])
+    out = canvas.layer_visibility(["Background", "Layer 2"], bg, fg, doc, "layers")
+    doc = out[STATE]
+    r.check("showing it again", all(l.visible for l in doc.layers))
+
+    canvas.pick_layer("Layer 2", doc, "layers")
+    out = canvas.layer_opacity(40, bg, fg, doc, "layers")
+    doc = out[STATE]
+    r.check("opacity applies to the active layer", doc.active_layer.opacity == 40 and "40% opacity" in out[STATUS] and out[LAYER_OPACITY].get("value") == 40)
+    out = canvas.layer_rename("Cutout", bg, fg, doc, "layers")
+    doc = out[STATE]
+    r.check("rename without a reload", doc.active_layer.name == "Cutout" and skipped(out[BG]) and out[LAYER_PICK].get("value") == "Cutout")
+    r.check("a blank name is refused", "Type a name" in canvas.layer_rename("  ", bg, fg, doc, "layers")[STATUS])
+    out = canvas.layer_duplicate(bg, fg, doc, "layers")
+    doc = out[STATE]
+    r.check("duplicate copies the active layer above it", doc.layer_names() == ["Background", "Cutout", "Cutout copy"] and doc.active == 2)
+    out = canvas.layer_delete(bg, fg, doc, "layers")
+    doc = out[STATE]
+    r.check("delete removes the active layer", doc.layer_names() == ["Background", "Cutout"] and "Cutout copy deleted" in out[STATUS])
+    out = canvas.layer_merge(bg, fg, doc, "layers")
+    doc = out[STATE]
+    r.check("merge down leaves one layer, named after the lower", doc.layer_names() == ["Background"] and "Cutout merged into Background" in out[STATUS])
+    r.check("with one layer there is nothing to merge or delete", "nothing below" in canvas.layer_merge(bg, fg, doc, "layers")[STATUS] and "last layer stays" in canvas.layer_delete(bg, fg, doc, "layers")[STATUS])
+    out = canvas.undo(doc, "layers")
+    doc = out[STATE]
+    r.check("undo restores the two layers", "Undid merge down" in out[STATUS] and doc.layer_names() == ["Background", "Cutout"] and doc.active_layer.opacity == 40)
+    out = canvas.layer_flatten(bg, fg, doc, "layers")
+    doc = out[STATE]
+    r.check("flatten leaves one layer", doc.layer_names() == ["Background"] and "2 layers flattened" in out[STATUS])
+    canvas.undo(doc, "layers")
+
+    # the mask as a freehand selection
+    out = canvas.mask_to_layer(bg, layer(stroke.resize((200, 120)), (200, 120)), doc, "mask")
+    doc = out[STATE]
+    r.check("a masked area becomes a layer, trimmed to it, and the mode switches to Layers",
+            doc.active_layer.name == "Layer 3" and doc.active_layer.size[0] < 200 and out[MODE] == "layers" and skipped(out[BG]))
+    r.check("without a mask it says so", "Paint over the area" in canvas.mask_to_layer(bg, None, canvas.receive([(photo, None)], None, "mask", "txt2img")[STATE], "mask")[STATUS])
+    canvas.undo(doc, "layers")
+    canvas.pick_layer("Background", doc, "layers")
+    out = canvas.set_mode("mask", doc)
 
     # ---- send: auto goes to Inpaint, image first, mask once the canvas has it ----
     bg = imaging.to_rgba(doc.image)
@@ -181,6 +265,7 @@ def run() -> Results:
     r.check("extras is skipped", skipped(out[0]))
     r.check("the image travels as a PNG data URL for the browser to write", payload.startswith("data:image/png;base64,") and decode_data_url(payload).size == (200, 120))
     r.check("status says sent", "Sent to img2img Inpaint" in out[SENT_STATUS])
+    r.check("the layers are flattened for the destination", "2 layers were flattened" in out[SENT_STATUS])
     mask_out = canvas.send_mask(doc, instruction)
     r.check("inpaint then receives the mask as a data URL, alpha where the stroke was",
             mask_out.startswith("data:image/png;base64,") and (lambda m: m.size == (200, 120) and m.getchannel("A").getpixel((40, 40)) == 255 and m.getchannel("A").getpixel((5, 5)) == 0)(decode_data_url(mask_out)))

@@ -69,6 +69,15 @@
 
 /* -- status ---------------------------------------------------------- */
 
+/* One line that never wraps: a status that grew a line would shrink the
+   canvas above it and refit the picture. */
+#minipaint_canvas_root .minipaint-status p {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin: 0;
+}
+
 #minipaint_canvas_root .minipaint-status {
     line-height: 1.35;
     min-height: 1.5em;
@@ -120,6 +129,18 @@
     min-width: 36px;
     min-height: 36px;
     font-size: 16px;
+}
+
+/* The active layer while it is being dragged, over the other layers. */
+#minipaint_canvas_surface .minipaint-layer-preview {
+    position: absolute;
+    pointer-events: none;
+    max-width: unset !important;
+    max-height: unset !important;
+}
+
+#minipaint_canvas_surface .minipaint-layer-preview[hidden] {
+    display: none;
 }
 
 /* Crop frame: a fixed-aspect window over the image, with corner handles.
@@ -245,6 +266,16 @@
     flex-wrap: nowrap;
 }
 
+/* The visible-layers chips can be many; those wrap. */
+#minipaint_canvas_root .minipaint-chips-wrap .wrap {
+    flex-wrap: wrap;
+}
+
+#minipaint_canvas_root .minipaint-layer-pick {
+    flex: 0 1 220px;
+    min-width: 160px;
+}
+
 #minipaint_canvas_root .minipaint-chips label {
     min-height: 40px;
     display: inline-flex;
@@ -293,6 +324,11 @@
     #minipaint_canvas_root .minipaint-side {
         flex: 1 1 22%;
         min-width: 0;
+    }
+
+    /* Four modes: two per row. */
+    #minipaint_canvas_root .minipaint-mode {
+        flex: 1 1 45%;
     }
 
     #minipaint_canvas_root .minipaint-apply {

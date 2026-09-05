@@ -361,6 +361,52 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     page.locator("#minipaint_canvas_mask_invert").click()
     r.check(f"{label}: invert of nothing masks everything", wait_for(page, lambda: "Mask inverted" in status_text(page) and (lambda fg: fg is not None and fg.getchannel("A").getextrema() == (255, 255))(canvas_layer(page, uuid, "logical_image_foreground"))), status_text(page))
 
+    # ---- layers: the frame as a selection, a drag with the mouse and with a finger, the panel ----
+    page.locator("#minipaint_canvas_mask_clear").click()
+    wait_for(page, lambda: "Mask cleared" in status_text(page))
+    page.locator("#minipaint_canvas_mode_layers").click()
+    r.check(f"{label}: layers mode shows the frame as a selection and the layer menu", wait_for(page, lambda: debug(page)["mode"] == "layers" and not debug(page)["frameHidden"] and debug(page)["preview"]), str(debug(page)))
+    r.check(f"{label}: the layer menu lists the one layer", wait_for(page, lambda: page.locator("#minipaint_canvas_layer_pick input").first.input_value() == "Background"))
+    before = debug(page)
+    tl = handle_center(page, "tl")
+    if tl:
+        drag(page, tl[0], tl[1], tl[0] + 120, tl[1] + 90)
+    box = debug(page)["box"]
+    page.locator("#minipaint_canvas_layer_new").click()
+    r.check(f"{label}: a selection becomes a new layer without a reload", wait_for(page, lambda: "Layer 2 holds the selection" in status_text(page)) and debug(page)["loaded"] == before["loaded"], status_text(page))
+    r.check(f"{label}: the new layer is the active one in the menu", wait_for(page, lambda: page.locator("#minipaint_canvas_layer_pick input").first.input_value() == "Layer 2"))
+    r.check(f"{label}: the browser got the layer to drag and the underlay", wait_for(page, lambda: debug(page)["preview"] and page.evaluate("() => document.querySelector('#minipaint_canvas_layer_underlay textarea').value.startsWith('data:image/png')")))
+    # drag the layer with the mouse: the view is kept, the layer lands where it was dropped
+    img = image_box(page, uuid)
+    cx, cy = img["x"] + img["width"] * 0.5, img["y"] + img["height"] * 0.5
+    scale = debug(page)["imgScale"]
+    drag(page, cx, cy, cx + 40 * scale, cy + 20 * scale, steps=16)
+    r.check(f"{label}: the dropped layer is where the mouse left it", wait_for(page, lambda: "Moved Layer 2" in status_text(page)), status_text(page))
+    landed = page.evaluate("() => (document.querySelector('#minipaint_canvas_status').innerText.match(/ at \\((-?\\d+), (-?\\d+)\\)/) || []).slice(1).map(Number)")
+    r.check(f"{label}: by the distance dragged", landed and abs(landed[0] - (box["x0"] + 40)) <= 2 and abs(landed[1] - (box["y0"] + 20)) <= 2, str((landed, box)))
+    r.check(f"{label}: the composite was reloaded with the view kept", wait_for(page, lambda: debug(page)["loaded"] == before["loaded"] + 1 and abs(debug(page)["imgScale"] - scale) < 0.001 and not debug(page)["overlay"]), str(debug(page)))
+    r.check(f"{label}: the preview is gone after the drop", not debug(page)["layerDrag"])
+    # and with a finger
+    touch(page, [(cx, cy, cx - 30 * scale, cy - 10 * scale)])
+    r.check(f"{label}: a finger drags the layer too", wait_for(page, lambda: (lambda l: bool(l) and abs(l[0] - (box["x0"] + 10)) <= 2 and abs(l[1] - (box["y0"] + 10)) <= 2)(page.evaluate("() => (document.querySelector('#minipaint_canvas_status').innerText.match(/ at \\((-?\\d+), (-?\\d+)\\)/) || []).slice(1).map(Number)"))), status_text(page))
+    page.locator("#minipaint_canvas_undo").click()
+    r.check(f"{label}: undo takes the move back", wait_for(page, lambda: "Undid move layer" in status_text(page) and "is at (" not in status_text(page).split("Undid")[0]), status_text(page))
+    # the panel: hide the background, merge down
+    page.locator("#minipaint_canvas_options").locator("button").first.click()
+    time.sleep(0.5)
+    page.locator("#minipaint_canvas_layer_visible label", has_text="Background").first.click()
+    r.check(f"{label}: hiding a layer reloads the composite", wait_for(page, lambda: "Hidden: Background" in status_text(page)), status_text(page))
+    r.check(f"{label}: the hidden layer is transparent on the canvas", wait_for(page, lambda: (lambda bg: bg is not None and bg.getchannel("A").getpixel((2, 2)) == 0)(canvas_layer(page, uuid, "logical_image_background"))))
+    page.locator("#minipaint_canvas_layer_visible label", has_text="Background").first.click()
+    wait_for(page, lambda: "Every layer is visible" in status_text(page))
+    page.locator("#minipaint_canvas_options").locator("button").first.click()
+    page.locator("#minipaint_canvas_layer_merge").click()
+    r.check(f"{label}: merge down leaves one layer", wait_for(page, lambda: "merged into Background" in status_text(page) and page.locator("#minipaint_canvas_layer_pick input").first.input_value() == "Background"), status_text(page))
+    page.locator("#minipaint_canvas_undo").click()
+    r.check(f"{label}: undo restores the two layers", wait_for(page, lambda: "Undid merge down" in status_text(page) and "2 layers" in status_text(page)), status_text(page))
+    page.locator("#minipaint_canvas_layer_delete").click()
+    r.check(f"{label}: delete removes the active layer", wait_for(page, lambda: "Layer 2 deleted" in status_text(page)), status_text(page))
+
     # ---- reset, then a picture opened on the canvas itself ----
     page.locator("#minipaint_canvas_more").locator("button").first.click()
     time.sleep(0.3)

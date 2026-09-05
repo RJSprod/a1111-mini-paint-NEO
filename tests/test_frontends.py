@@ -13,12 +13,12 @@ from harness import Results, setup_path
 setup_path()
 
 import json  # noqa: E402
+import pathlib  # noqa: E402
 
+import forge_like  # noqa: E402  (first: it applies Forge's metaclass patches before the canvas stub is defined)
 from modules import script_callbacks, shared  # noqa: E402
 from modules_forge.forge_canvas import canvas as forge_canvas  # noqa: E402
 from PIL import Image  # noqa: E402
-
-import forge_like  # noqa: E402
 from minipaint_neo import router, settings  # noqa: E402
 from minipaint_neo.canvas import host, surface  # noqa: E402
 
@@ -83,6 +83,9 @@ def run() -> Results:
                    "minipaint_canvas_mask_invert", "minipaint_canvas_reset", "minipaint_canvas_destination",
                    "minipaint_canvas_mode", "minipaint_canvas_crop_box", "minipaint_canvas_original_size",
                    "minipaint_canvas_wait", "minipaint_canvas_switch", "minipaint_canvas_event",
+                   "minipaint_canvas_quick_crop", "minipaint_canvas_quick_mask", "minipaint_canvas_quick_expand",
+                   "minipaint_canvas_options", "minipaint_canvas_panel_crop", "minipaint_canvas_panel_mask",
+                   "minipaint_canvas_panel_expand", "minipaint_canvas_more",
                    "txt2img_send_to_minipaint", "img2img_send_to_minipaint", "extras_send_to_minipaint",
                    "tab_minipaint", "tab_txt2img", "tab_settings", "tab_extensions"]:
         r.check(f"component {needed}", needed in ids)
@@ -118,6 +121,13 @@ def run() -> Results:
     r.check("one load event attaches the canvas", len(loads) == 1 and not loads[0]["backend_fn"], str(len(loads)))
     r.check("attach gets the id and the Inpaint brush style",
             loads and f'"{uuid}"' in loads[0]["js"] and '"contrast": true' in loads[0]["js"] and '"alpha": 75' in loads[0]["js"] and '"heightPercent": 70' in loads[0]["js"])
+    r.check("attach is told to fit the window", loads and '"fit": true' in loads[0]["js"])
+
+    # nothing in the tab is positioned over the canvas: no sticky or fixed rule outside focus mode
+    css = (config_of(demo) and (pathlib.Path(__file__).resolve().parents[1] / "style.css").read_text(encoding="utf-8"))
+    r.check("no sticky rules in the stylesheet", "sticky" not in css)
+    fixed_blocks = [block for block in css.split("}") if "position: fixed" in block]
+    r.check("the only fixed rule is focus mode", len(fixed_blocks) == 1 and "minipaint-focus" in fixed_blocks[0].split("{")[0])
 
     # the receive buttons sit in the host's rows, next to "send to extras"
     def row_children(elem_id):
@@ -184,6 +194,10 @@ def run() -> Results:
     for elem_id in ("minipaint_canvas_undo", "minipaint_canvas_redo", "minipaint_canvas_reset", "minipaint_canvas_expand_apply"):
         d = by_elem(elem_id)
         r.check(f"{elem_id} is the same three-step chain", len(d) == 1 and len(chain(d[0])) == 3 and "mark()" in d[0]["js"])
+    for elem_id, helper in (("minipaint_canvas_undo", "undoStroke"), ("minipaint_canvas_redo", "redoStroke")):
+        d = by_elem(elem_id)[0]
+        r.check(f"{elem_id} tries the canvas's stroke history first and says which it did",
+                helper in d["js"] and component("minipaint_canvas_event")["id"] in d["inputs"])
     opened = by_elem("minipaint_canvas_open", "upload")
     r.check("open is the same chain on upload", len(opened) == 1 and len(chain(opened[0])) == 3)
 
@@ -203,9 +217,14 @@ def run() -> Results:
     r.check("nothing is bound to the mask layer", not deps_targeting(foreground["id"], "input") and not deps_targeting(foreground["id"], "change"))
 
     # -- modes: a backend switch on the buttons, the browser following the mode textbox
+    options_id = component("minipaint_canvas_options")["id"]
     for mode in ("crop", "mask", "expand"):
         d = by_elem(f"minipaint_canvas_mode_{mode}")
         r.check(f"{mode} mode button has one backend event that writes the mode", len(d) == 1 and d[0]["backend_fn"] and mode_id in d[0]["outputs"])
+        r.check(f"{mode} mode switch shows its quick row, its panel and relabels the options",
+                d and {component(f"minipaint_canvas_quick_{mode}")["id"], component(f"minipaint_canvas_panel_{mode}")["id"], options_id} <= set(d[0]["outputs"]))
+    r.check("the options accordion starts closed", component("minipaint_canvas_options")["props"].get("open") is False)
+    r.check("the aspect is a dropdown in the crop quick row", component("minipaint_canvas_crop_aspect")["type"] == "dropdown")
     mode_change = deps_targeting(mode_id, "change")
     r.check("the browser follows the mode textbox", len(mode_change) == 1 and "onMode" in mode_change[0]["js"] and not mode_change[0]["backend_fn"])
 
@@ -225,17 +244,25 @@ def run() -> Results:
     r.check("send has one backend event", len(send) == 1 and send[0]["backend_fn"])
     outputs = set(send[0]["outputs"]) if send else set()
     switch_id = component("minipaint_canvas_switch")["id"]
+    payload_id = component("minipaint_canvas_payload")["id"]
     inpaint = refs["init_img_with_mask"]
-    r.check("send writes img2img's hidden image", refs["init_img"].background._id in outputs)
-    r.check("send writes inpaint's image but not its mask", inpaint.background._id in outputs and inpaint.foreground._id not in outputs)
-    r.check("send writes extras", refs["extras_image"]._id in outputs)
-    r.check("send writes the switch instruction", switch_id in outputs)
+    host_boxes = {refs["init_img"].background._id, inpaint.background._id, inpaint.foreground._id}
+    r.check("the backend never writes the host's hidden image textboxes", not (host_boxes & outputs))
+    r.check("send writes extras from the backend", refs["extras_image"]._id in outputs)
+    r.check("send writes the instruction and the image payload", {switch_id, payload_id} <= outputs)
     follow = followers(send[0]) if send else []
+    deliver = [f for f in follow if set(f["outputs"]) == {refs["init_img"].background._id, inpaint.background._id}]
+    r.check("a browser-only step writes the chosen host textbox and leaves the other untouched",
+            len(deliver) == 1 and not deliver[0]["backend_fn"] and '"__type__": "update"' in deliver[0]["js"] and deliver[0]["inputs"] == [switch_id, payload_id])
     r.check("send is followed by the tab switch", any("switchTo" in (f.get("js") or "") and not f["backend_fn"] for f in follow))
     waits = [f for f in follow if "waitForHostImage" in (f.get("js") or "")]
     r.check("and by a wait on the Inpaint canvas", len(waits) == 1 and waits[0]["backend_fn"] and f'"{inpaint.uuid}"' in waits[0]["js"])
     after_wait = followers(waits[0]) if waits else []
-    r.check("then the mask layer goes into Inpaint", len(after_wait) == 1 and after_wait[0]["outputs"] == [inpaint.foreground._id] and after_wait[0]["backend_fn"])
+    mask_payload_id = component("minipaint_canvas_mask_payload")["id"]
+    r.check("then the mask layer is prepared as a payload", len(after_wait) == 1 and after_wait[0]["outputs"] == [mask_payload_id] and after_wait[0]["backend_fn"])
+    after_mask = followers(after_wait[0]) if after_wait else []
+    r.check("and written into Inpaint from the browser", len(after_mask) == 1 and not after_mask[0]["backend_fn"] and after_mask[0]["outputs"] == [inpaint.foreground._id])
+    r.check("no backend event anywhere writes a host image textbox", not any(d["backend_fn"] and (host_boxes & set(d["outputs"])) for d in deps))
 
     r.check("no javascript runs at startup apart from attaching the canvases",
             all("ForgeCanvas" in (d.get("js") or "") or "attach" in (d.get("js") or "") for d in deps if any(t[1] == "load" for t in d["targets"])))

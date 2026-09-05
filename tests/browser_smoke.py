@@ -177,6 +177,18 @@ def touch(page, gesture, steps=12):
     cdp.detach()
 
 
+def pick_option(page, elem_id, text):
+    """Choose an entry of a Gradio dropdown the way a finger would."""
+    page.locator(f"{elem_id} input").first.click()
+    page.locator(f"{elem_id} ul li, {elem_id} [role=option], .options li, [role=listbox] [role=option]", has_text=text).first.click()
+    time.sleep(0.3)
+
+
+def tab_fits(page):
+    """The Canvas tab ends above the bottom of the window (what the page puts after it is its business)."""
+    return page.evaluate("() => document.querySelector('#minipaint_canvas_root').getBoundingClientRect().bottom <= window.innerHeight + 1")
+
+
 def handle_center(page, corner):
     box = page.locator(f"#minipaint_canvas_surface .minipaint-frame-handle.{corner}").first.bounding_box()
     return (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2) if box else None
@@ -191,8 +203,23 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     inpaint = refs["init_img_with_mask"]
     check_tabs(r, page, label)
 
+    click_tab(page, "Mini Paint")
+    time.sleep(0.6)
     d = debug(page)
-    r.check(f"{label}: the canvas is attached, without an image", d is not None and not d["hasImage"] and d["frameHidden"], str(d))
+    r.check(f"{label}: the canvas is attached, without an image", d is not None and d["attached"] and not d["hasImage"] and d["frameHidden"], str(d))
+    r.check(f"{label}: the canvas took the height the window had left", d["fitting"] and 240 <= d["height"] < 900, str(d["height"]))
+    r.check(f"{label}: the whole tab fits the window without scrolling", tab_fits(page), str(page.evaluate("() => [document.querySelector('#minipaint_canvas_root').getBoundingClientRect().bottom, window.innerHeight]")))
+    r.check(f"{label}: the options are behind a closed accordion", page.evaluate("() => { const p = document.querySelector('#minipaint_canvas_panel_crop'); return !!p && p.getBoundingClientRect().height === 0; }"))
+    r.check(f"{label}: nothing lies over the canvas", page.evaluate("""() => {
+        const box = document.querySelector('#minipaint_canvas_surface .forge-container').getBoundingClientRect();
+        const probe = (x, y) => document.elementFromPoint(x, y);
+        const inside = (el) => !!el && !!el.closest('#minipaint_canvas_surface');
+        return inside(probe(box.left + box.width / 2, box.bottom - 6)) && inside(probe(box.left + 6, box.bottom - 6)) && inside(probe(box.right - 6, box.top + box.height / 2));
+    }"""))
+    page.locator("#minipaint_canvas_options").locator("button").first.click()
+    r.check(f"{label}: opening the options shrinks the canvas instead of overflowing", wait_for(page, lambda: debug(page)["height"] < d["height"] - 20 and tab_fits(page), timeout=6), str((d["height"], debug(page)["height"], tab_fits(page))))
+    page.locator("#minipaint_canvas_options").locator("button").first.click()
+    r.check(f"{label}: closing them gives the height back", wait_for(page, lambda: abs(debug(page)["height"] - d["height"]) <= 2, timeout=6), str((d["height"], debug(page)["height"])))
     r.check(f"{label}: the host's toolbar is visible and finger sized", page.evaluate(f"() => {{ const b = document.querySelector('#maxButton_{uuid}'); const s = b && getComputedStyle(b); return !!s && s.display !== 'none' && parseFloat(s.minHeight) >= 36; }}"))
     r.check(f"{label}: the brush controls of the toolbar are hidden", page.evaluate("() => getComputedStyle(document.querySelector('#minipaint_canvas_surface .forge-toolbar-box-b')).display === 'none'"))
 
@@ -228,14 +255,22 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     r.check(f"{label}: the canvas shows the cropped image and the frame resets to it",
             wait_for(page, lambda: debug(page)["orgWidth"] == box["x1"] and debug(page)["box"] == {"x0": 0, "y0": 0, "x1": box["x1"], "y1": box["y1"]}), str(debug(page)))
 
-    # ---- undo the crop structurally ----
+    # ---- undo the crop structurally, then crop again: the sequence that failed in the field ----
     page.locator("#minipaint_canvas_undo").click()
     r.check(f"{label}: undo restores 640x480", wait_for(page, lambda: "Undid crop" in status_text(page) and debug(page)["orgWidth"] == 640), status_text(page))
+    br = handle_center(page, "br")
+    if br:
+        drag(page, br[0], br[1], br[0] - 60, br[1] - 40)
+    again = debug(page)["box"]
+    page.locator("#minipaint_canvas_crop_apply").click()
+    r.check(f"{label}: a crop after an undo works", again and wait_for(page, lambda: f"Cropped to {again['x1'] - again['x0']} × {again['y1'] - again['y0']}" in status_text(page)), status_text(page))
+    page.locator("#minipaint_canvas_undo").click()
+    r.check(f"{label}: and can be undone again", wait_for(page, lambda: "Undid crop" in status_text(page) and debug(page)["orgWidth"] == 640), status_text(page))
 
-    # ---- aspect: the frame follows the chips ----
-    page.locator("#minipaint_canvas_crop_aspect label", has_text="1:1").first.click()
+    # ---- aspect: the frame follows the dropdown ----
+    pick_option(page, "#minipaint_canvas_crop_aspect", "1:1")
     r.check(f"{label}: a 1:1 aspect squares the frame", wait_for(page, lambda: (lambda b: b and b["x1"] - b["x0"] == b["y1"] - b["y0"] == 480)(debug(page)["box"])), str(debug(page)["box"]))
-    page.locator("#minipaint_canvas_crop_aspect label", has_text="Free").first.click()
+    pick_option(page, "#minipaint_canvas_crop_aspect", "Free")
     r.check(f"{label}: free aspect covers the image again", wait_for(page, lambda: debug(page)["box"] == {"x0": 0, "y0": 0, "x1": 640, "y1": 480}))
 
     # ---- touch: one finger pans the image under the frame, two fingers pinch ----
@@ -275,6 +310,11 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     painted = fg.getchannel("A").getbbox()
     r.check(f"{label}: the stroke is where the finger went", painted and painted[0] < cropped[0] * 0.25 and painted[2] > cropped[0] * 0.65, str(painted))
     r.check(f"{label}: the stroke is opaque in the layer (opacity is display only)", fg.getchannel("A").getextrema()[1] == 255)
+    before_undo = fg.getchannel("A").getbbox()
+    page.locator("#minipaint_canvas_undo").click()
+    r.check(f"{label}: undo takes the stroke back, not the crop", wait_for(page, lambda: "Undid a stroke" in status_text(page) and (lambda fg: fg is None or fg.getchannel("A").getbbox() is None)(canvas_layer(page, uuid, "logical_image_foreground"))) and (debug(page)["orgWidth"], debug(page)["orgHeight"]) == cropped, status_text(page))
+    page.locator("#minipaint_canvas_redo").click()
+    r.check(f"{label}: redo brings the stroke back", wait_for(page, lambda: "Redid a stroke" in status_text(page) and (lambda fg: fg is not None and fg.getchannel("A").getbbox() == before_undo)(canvas_layer(page, uuid, "logical_image_foreground"))), status_text(page))
     page.locator("#minipaint_canvas_mask_tool label", has_text="Erase").first.click()
     r.check(f"{label}: erase sets the brush to zero opacity", wait_for(page, lambda: float(debug(page)["alpha"]) == 0))
     drag(page, img["x"] + img["width"] * 0.55, y - 5, img["x"] + img["width"] * 0.75, y + 5, steps=12)
@@ -294,7 +334,7 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     r.check(f"{label}: inpaint got the mask, same size, once its canvas had the image",
             wait_for(page, lambda: (lambda fg: fg is not None and fg.size == cropped and fg.getchannel("A").getbbox() is not None)(canvas_layer(page, inpaint.uuid, "logical_image_foreground"))), str(canvas_layer(page, inpaint.uuid, "logical_image_foreground")))
     r.check(f"{label}: the inpaint canvas is showing the image", page.evaluate(f"() => {{ const c = document.querySelector('#drawingCanvas_{inpaint.uuid}'); return c && c.width === {cropped[0]} && c.height === {cropped[1]}; }}"))
-    r.check(f"{label}: and the mask is drawn on it", page.evaluate(f"() => {{ const c = document.querySelector('#drawingCanvas_{inpaint.uuid}'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 128) n++; return n > 100; }}"))
+    r.check(f"{label}: and the mask is drawn on it", wait_for(page, lambda: page.evaluate(f"() => {{ const c = document.querySelector('#drawingCanvas_{inpaint.uuid}'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 128) n++; return n > 100; }}"), timeout=6))
 
     # ---- expand: back to the canvas, add 128 on the right, apply, send again ----
     click_tab(page, "Mini Paint")

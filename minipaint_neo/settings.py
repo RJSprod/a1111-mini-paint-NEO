@@ -23,7 +23,8 @@ EXPAND_SNAP = "minipaint_expand_snap"
 SEND_FILL = "minipaint_send_fill"
 
 SNAP_CHOICES = ["Off", "8", "16", "32", "64"]
-FILL_CHOICES = ["Neutral gray", "Edge color", "White", "Black"]
+KEEP_TRANSPARENT = "Keep transparent"
+FILL_CHOICES = [KEEP_TRANSPARENT, "White", "Neutral gray", "Edge color", "Black"]
 
 DEFAULTS: dict[str, typing.Any] = {
     USE_OLD_UI: False,
@@ -31,7 +32,7 @@ DEFAULTS: dict[str, typing.Any] = {
     CANVAS_HEIGHT: 70,
     BRUSH_SIZE: 25,
     EXPAND_SNAP: "8",
-    SEND_FILL: "Neutral gray",
+    SEND_FILL: KEEP_TRANSPARENT,
 }
 
 # The setting is the way to switch editors - but it lives in a UI, and the one
@@ -195,7 +196,8 @@ def on_ui_settings() -> None:
             section=SECTION,
             category_id=category,
         ).info(
-            "img2img needs real pixels everywhere; expanded area is transparent in the "
-            "editor and filled with this on the way out"
+            "what a hidden layer or an expansion leaves see-through: kept as transparency "
+            "(img2img, Inpaint and ImageStitch then fill it with the colour in Settings → img2img; "
+            "Extras gets white), or filled with a colour on the way out"
         ),
     )

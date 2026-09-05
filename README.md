@@ -28,41 +28,49 @@ Extensions → Install from URL → this repository's URL → Install → Reload
 ## The Canvas
 
 ```
- [Open] [Undo] [Redo] (Crop|Mask|Expand|Layers) [Panels] [Focus] [ Send to img2img ]
+ [☰ Layers]  1024 × 1024 · 3 layers · from txt2img — Layer 2 holds the selection.
  +------------------------------------------------------+  +-------------------+
- |             ⛶ 📂 ✠ 🔄 ↩️ ↪️                           |  | Layers            |
+ |                                    ⛶ 📂 ✠ 🔄 ↩️ ↪️     |  | Layers            |
  |                                                      |  | [New from selection]
  |           the WebUI's own canvas (ForgeCanvas),      |  | 👁 Layer 2   ☑ ▲ ▼ |
- |        as tall as the window has room for,           |  | 👁 Background ☐ ▲ ▼ |
- |        no scrolling, nothing floating over it        |  | [Merge] [Delete]  |
- |                                                      |  | [Duplicate][Center]|
- +------------------------------------------------------+  | Opacity ────────  |
- 1024 × 1024 · 2 layers · from txt2img — Layer 2 holds ...  | Options ▸         |
-                                                           +-------------------+
+ |        as tall as the window has room for,           |  | 👁 Layer 1   ☐ ▲ ▼ |
+ |        no scrolling, nothing floating over it        |  | 👁 Background ☐ ▲ ▼ |
+ |                                                      |  | [Merge] [Delete]  |
+ +------------------------------------------------------+  | [Re-center layer] |
+                                                           | Size ─── ½ 100% ×2 |
+   ☰ Menu:  Open… · Edit › (Undo, Redo, Reset, Save a copy)  | Opacity ────────  |
+            Tools › (Crop, Mask, Expand, Layers) · Panels     +-------------------+
+            Focus · Send to › (img2img, Inpaint, Extras, ImageStitch…, Cancel)
 ```
 
-The four modes are chips in the action row, next to Open. Each mode's controls live in
-the **rail** on the right — the panel for the chosen mode is the one showing — and the
-rail's last item is an **Options** accordion (where to send, reset, save a copy). The
-canvas takes whatever height the window has left below the action row; the rail is
-never taller than that and scrolls inside it, so the whole tab is always in view and
-nothing ever floats over the picture. **Panels** puts the rail away for a canvas the
-full width of the window and brings it back (choosing a mode brings it back too). On a
-phone the rail moves under the canvas with a bounded share of the height.
+One **Menu** button holds everything that is not a tool's own control: *Open…*, *Edit*
+(Undo, Redo, Reset to original, Save a copy), *Tools* (Crop, Mask, Expand, Layers — the
+current one ticked), *Panels* and *Focus* (toggles), and *Send to* with every destination
+this WebUI has and a Cancel. Each list closes on the choice; a tap outside or Escape
+closes it too. The button's label names the current tool. The rest of the action row is
+the status line. Each tool's controls live in the **rail** on the right — the panel for
+the chosen tool is the one showing. The canvas takes whatever height the window has left
+below the action row; the rail is never taller than that and scrolls inside it, so the
+whole tab is always in view and nothing ever floats over the picture. *Panels* puts the
+rail away for a canvas the full width of the window and brings it back (choosing a tool
+brings it back too). On a phone the rail moves under the canvas with a bounded share of
+the height.
 
 **Getting an image in.** Press 🖌️ in the button row under a txt2img, img2img or Extras
-result, use **Open** or the canvas's own 📂 for a local file, or drop or paste a picture
-onto the canvas. The image is fitted into the box, in Crop mode. Two fingers pinch to zoom
-and pan; the mouse wheel zooms and the right button drags, exactly as in img2img; the
-canvas's ✠ refits and ⛶ fills the screen.
+result, use *Menu → Open…* or the canvas's own 📂 for a local file, or drop or paste a
+picture onto the canvas. The image is fitted into the box, in Crop, as **Layer 1 over a
+white Background of the same size**; a thin line on the canvas marks that size. Two
+fingers pinch to zoom and pan; the mouse wheel zooms and the right button drags, exactly
+as in img2img; the canvas's ✠ refits and ⛶ fills the screen.
 
 **Crop.** A frame with corner handles sits over the image; its size in image pixels is
 written on it. Move the image under the frame with one finger (or the left mouse button),
-zoom to fit more or less of it in, and drag a corner to resize the frame — with a finger
-or the mouse. The **Aspect** menu (Free, Original, 1:1, 4:3, 3:4, 16:9, 9:16, 3:2, 2:3, or
-a custom ratio) locks the frame's shape. **Apply Crop** keeps what is inside the frame and
-shows the new size; the frame then covers the whole result again, so nothing is ever
-cropped twice by accident. A crop never stretches.
+zoom to fit more or less of it in, drag a corner to resize the frame, and drag the
+**grip on its top edge** to slide the frame somewhere else without redrawing it — with a
+finger or the mouse. The **Aspect** menu (Free, Original, 1:1, 4:3, 3:4, 16:9, 9:16,
+3:2, 2:3, or a custom ratio) locks the frame's shape. **Apply Crop** keeps what is inside
+the frame and shows the new size; the frame then covers the whole result again, so
+nothing is ever cropped twice by accident. A crop never stretches.
 
 **Mask.** Paint over what should change, with the same brush the Inpaint tab has: same
 colour, same opacity, same high-contrast checkerboard if that setting is on. **Paint /
@@ -74,48 +82,57 @@ is coverage: the colour on screen is never part of what is sent.
 
 **Expand.** Tap an amount (64 / 128 / 256) and a side (Left / Right / Top / Bottom), read
 the resulting size, press **Apply Expand**. The new area is masked automatically, plus an
-overlap band back into the original so the model has room to blend. *Exact amounts and
-fill* has per-side numbers, the overlap width, what to fill the new area with (transparent,
+overlap band back into the original so the model has room to blend. *Exact amounts* has
+per-side numbers, the overlap width, what to fill the new area with (transparent,
 edge-stretched, gray, white, black) and snapping to a pixel multiple. After Apply the
 Canvas switches to Mask so the automatic mask can be refined.
 
-**Layers.** The picture that arrives is the *Background* layer; more layers come from
-selections. In Layers mode the frame is a rectangle selection: **New from selection**
-copies what the active layer has inside it into a layer of its own, in place, above the
-active layer. **Masked area → new layer** does the same for a painted area, trimmed to it
-— the mask brush is the freehand selection. The panel's **layer list** is the one from
-miniPaint and Photoshop, top layer first: tap a name to select that layer alone, tap the
-box (or shift/ctrl-tap the name) to select several, the eye shows or hides a layer, the
-arrows move it up or down the stack; the selected rows are highlighted and the primary
-one carries a bar. One finger (or the left mouse button) then **drags the selected
-layers** with a live preview; the layers that are not selected stay put, and the picture
-keeps its zoom and position when the server's new composite comes back. Two fingers, the
-wheel and the right button still pan and zoom. **Center** brings a layer that was dragged
-out of view back to the middle of the canvas. **Merge** joins the selected layers into one
-(or one selected layer into the one below it), **Delete**, **Duplicate**, the opacity
-slider and **Flatten all** act on the selection; the name box renames the primary layer.
-Layers sit on a document canvas the size of the first picture; Crop trims every layer and
-Expand grows the Background while the others keep their place. Sending flattens the
-visible layers. Every layer step is one Undo away. What does not carry over from miniPaint
-is transforms, text and filters — the Old UI stays the place for those.
+**Layers.** The picture is *Layer 1*; under it is a white *Background* the size of the
+canvas, so a layer can be hidden, moved or deleted and the canvas keeps its edge. More
+layers come from selections: in Layers the frame is a rectangle selection, and **New from
+selection** copies what the active layer has inside it into a layer of its own, in place,
+above the active layer. **Masked area → new layer** does the same for a painted area,
+trimmed to it — the mask brush is the freehand selection. The panel's **layer list** is
+the one from miniPaint and Photoshop, top layer first: tap a name to select that layer
+alone, tap the box (or shift/ctrl-tap the name) to select several, the eye shows or hides
+a layer, the arrows move it up or down the stack; the selected rows are highlighted and
+the primary one carries a bar. The selected layers are outlined on the canvas with a
+dashed line: **a drag that starts inside that outline moves them**, with a live preview,
+and nothing else moves; a drag that starts outside pans the picture, as in Crop. The
+picture keeps its zoom and position when the server's new composite comes back; two
+fingers, the wheel and the right button still pan and zoom. **Re-center layer** brings a
+layer that was dragged out of view back to the middle of the canvas. **Size** resizes the
+selected layers — the slider, or ½, 100% and ×2 — about their centre, always from the
+pixels the layer started with, so resizing again does not blur it twice. **Merge** joins
+the selected layers into one (or one selected layer into the one below it); **Delete**,
+**Duplicate**, the opacity slider and **Flatten all** act on the selection; the name box
+renames the primary layer. Crop trims every layer and Expand grows the Background while
+the others keep their place. Sending flattens the visible layers. Every layer step is one
+Undo away. What does not carry over from miniPaint is rotation, text and filters — the
+Old UI stays the place for those.
 
-**Send.** The big button goes to img2img by default: a plain image goes to the img2img
-sub-tab, an image with a mask (drawn, or created by an expansion) goes to **Inpaint** with
-the mask in place, and the WebUI switches there — using its own tab-switch helpers, the
-same ones its "Send to img2img" buttons use. The button's label says which it will be.
-*Options → Send to* picks a destination instead: img2img, Inpaint, Extras, or
-**ImageStitch** in txt2img or img2img — the image replaces whatever reference images the
-ImageStitch panel of that tab held, becomes its only one, the panel is switched on, and
-the WebUI goes to that tab. Transparent pixels from an expansion are filled on the way out
-(setting: *Send: fill transparent pixels with*).
+**Send.** *Menu → Send to* lists every destination: **img2img**, **img2img Inpaint**
+(the mask goes with the image), **Extras**, and **ImageStitch** in txt2img or img2img —
+the image replaces whatever reference images the ImageStitch panel of that tab held,
+becomes its only one, the panel is switched on, and the WebUI goes to that tab. The one a
+plain send would pick is marked *suggested*: Inpaint when there is a mask or an
+expansion, img2img otherwise. The WebUI switches to the destination's tab using its own
+tab-switch helpers, the same ones its "Send to img2img" buttons use. Pixels that are
+see-through — a hidden layer, a smaller layer over a hidden Background, an expansion —
+are **sent as they are**: img2img, Inpaint and ImageStitch fill them with the colour in
+*Settings → img2img → For img2img, fill the transparent parts of the input image with
+this color*, and Extras gets white. The setting *Send: fill transparent pixels with* can
+fill them with a colour on the way out instead.
 
-**Undo / Redo** in the action row take strokes back first, then the bigger steps — Open,
+**Undo / Redo** (*Menu → Edit*) take strokes back first, then the bigger steps — Open,
 Apply Crop, Apply Expand, Clear, Invert, every layer step — in the order they happened.
-*Options → Reset to original* goes back to the image as it arrived. The canvas's own ✠
-puts the image and the frame back the way they arrived.
+*Menu → Edit → Reset to original* goes back to the image as it arrived. The canvas's own
+✠ puts the image and the frame back the way they arrived.
 
-**Focus** makes the Canvas fill the window (Exit focus or Escape brings the WebUI back).
-Every control is at least 44 px tall; on a phone the rail sits under the canvas.
+**Focus** (*Menu → Focus*) makes the Canvas fill the window; choosing it again, or
+Escape, brings the WebUI back. How it is done, for another extension, is in
+`docs/focus-mode.txt`. Every control is at least 44 px tall; on a phone the rail sits
+under the canvas.
 
 ### Settings (Settings → miniPaint / Canvas)
 
@@ -126,7 +143,7 @@ Every control is at least 44 px tall; on a phone the rail sits under the canvas.
 | Canvas height when not fitting the window (% of the browser window) | 70 | the canvas's ⛶ fills the window |
 | Mask brush size when the Canvas opens | 25 | same scale as the Inpaint brush |
 | Expand: snap side amounts to a multiple of | 8 | |
-| Send: fill transparent pixels with | Neutral gray | or edge colour, white, black |
+| Send: fill transparent pixels with | Keep transparent | or white, neutral gray, edge colour, black; the WebUI fills kept transparency with its img2img background colour |
 
 The mask's colour, opacity and high-contrast checkerboard are the Inpaint tab's own
 settings (Settings → img2img), because that is where the mask is going. The canvas's
@@ -306,7 +323,7 @@ minipaint_neo/
     canvas/host.py               what the Canvas needs from the WebUI (galleries, inputs, ImageStitch), found without touching its tabs
     canvas/imaging.py            mask, crop and fill maths (Pillow only)
     canvas/outpaint.py           expansion with automatic mask
-    canvas/document.py           layers on a canvas, the composite, the mask, and the history of structural steps
+    canvas/document.py           layers on a canvas (the picture over a white Background), the composite, the mask, and the history of structural steps
 javascript/main.js               legacy bridge, parent-frame side (unchanged)
 javascript/minipaint_canvas.js   attaches the canvas; crop frame, touch gestures, tools, the rail's height, the layer list, waits, focus mode
 style.css                        legacy rules, then rules scoped to the Canvas root

@@ -105,9 +105,11 @@ def build_with_generator(old_ui: bool):
 
 
 def decode_data_url(text):
-    if not text or not text.startswith("data:image/png;base64,"):
+    """A data URL as an image: PNG, or the JPEG / WebP display copies the canvas is shown."""
+    if not text or not text.startswith("data:image/") or "," not in text:
         return None
-    return Image.open(io.BytesIO(base64.b64decode(text.split(",", 1)[1])))
+    image = Image.open(io.BytesIO(base64.b64decode(text.split(",", 1)[1])))
+    return image.convert("RGBA") if image.mode != "RGBA" else image
 
 
 def visible_panels(page):
@@ -218,8 +220,36 @@ def menu_click(page, text):
     page.locator(".minipaint-menu .minipaint-menu-item", has_text=re.compile(r"^(\u2713 |\u2039 )?" + re.escape(text) + r"( \u203a|  \u00b7 suggested)?$")).first.click()
 
 
+def snapped(page, x, y, w, h):
+    """Where a layer of this size dropped at (x, y) lands: the browser snaps
+    an edge that comes within 14 screen pixels of the canvas's or another
+    visible layer's edge onto it (the same rule the canvas applies)."""
+    p = page.evaluate("() => JSON.parse(document.querySelector('#minipaint_canvas_layer_preview textarea').value || '{}')")
+    tolerance = 14 / max(debug(page)["imgScale"], 1e-6)
+    xs, ys = [0, p["canvas"][0]], [0, p["canvas"][1]]
+    for b in p.get("others", []):
+        xs += [b[0], b[0] + b[2]]
+        ys += [b[1], b[1] + b[3]]
+
+    def delta(edges, targets):
+        best, best_abs = 0, tolerance + 1
+        for edge in edges:
+            for target in targets:
+                if abs(target - edge) <= tolerance and abs(target - edge) < best_abs:
+                    best, best_abs = target - edge, abs(target - edge)
+        return best
+
+    return x + delta([x, x + w], xs), y + delta([y, y + h], ys)
+
+
+def tool(page, mode):
+    """A tool button on the bar."""
+    page.locator(f"#minipaint_canvas_tool_{mode}").click()
+    wait_for(page, lambda: debug(page)["mode"] == mode, timeout=10)
+
+
 def menu_pick(page, *path):
-    """Open the menu and follow a path of items, e.g. ("Tools", "Mask")."""
+    """Open the menu and follow a path of items, e.g. ("Edit", "Undo")."""
     menu_open(page)
     for step in path:
         menu_click(page, step)
@@ -262,7 +292,7 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
         const gone = ['#minipaint_canvas_send', '#minipaint_canvas_mode_pick', '#minipaint_canvas_panels', '#minipaint_canvas_focus', '#minipaint_canvas_options'].every(id => !document.querySelector(id));
         return m.width > 0 && s.left > m.right && Math.abs(m.top + m.height / 2 - (s.top + s.height / 2)) < m.height && gone;
     }"""))
-    r.check(f"{label}: the menu button names the tool", page.locator("#minipaint_canvas_menu").inner_text().strip() == "☰ Crop", page.locator("#minipaint_canvas_menu").inner_text())
+    r.check(f"{label}: the menu button is just the menu", page.locator("#minipaint_canvas_menu").inner_text().strip() == "☰ Menu", page.locator("#minipaint_canvas_menu").inner_text())
     r.check(f"{label}: what the menu presses is not shown", page.evaluate("() => ['open', 'undo', 'redo', 'reset', 'save'].every(n => document.getElementById('minipaint_canvas_' + n).getBoundingClientRect().height === 0)"))
     r.check(f"{label}: nothing lies over the canvas", page.evaluate("""() => {
         const box = document.querySelector('#minipaint_canvas_surface .forge-container').getBoundingClientRect();
@@ -273,14 +303,24 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
 
     # ---- the menu: its lists, and the three ways out ----
     r.check(f"{label}: the menu opens under its button", menu_open(page) and page.evaluate("() => { const b = document.querySelector('#minipaint_canvas_menu').getBoundingClientRect(); const m = document.querySelector('.minipaint-menu').getBoundingClientRect(); return m.top >= b.bottom && m.left >= b.left - 1 && m.width >= 200; }"))
-    r.check(f"{label}: the menu lists Open, Edit, Tools, Panels, Focus and Send to", menu_items(page) == ["Open…", "Edit ›", "Tools ›", "✓ Panels", "Focus", "Send to ›"], str(menu_items(page)))
+    r.check(f"{label}: the menu lists Open, Edit, Panels, Focus and Send to", menu_items(page) == ["Open…", "Edit ›", "✓ Panels", "Focus", "Send to ›"], str(menu_items(page)))
     menu_click(page, "Send to")
     r.check(f"{label}: Send to lists every destination, the suggested one marked, and Cancel", menu_items(page) == ["‹ Back", "img2img  · suggested", "img2img Inpaint", "Extras", "ImageStitch (txt2img)", "ImageStitch (img2img)", "Cancel"], str(menu_items(page)))
     menu_click(page, "Cancel")
     r.check(f"{label}: Cancel closes the menu", wait_for(page, lambda: not debug(page)["menuOpen"], timeout=4))
+    r.check(f"{label}: the four tools sit on the bar as finger-sized icon buttons, Crop current", page.evaluate("""() => {
+        const names = ['crop', 'mask', 'expand', 'layers'];
+        const buttons = names.map(n => document.getElementById('minipaint_canvas_tool_' + n));
+        if (buttons.some(b => !b)) return 'missing';
+        const boxes = buttons.map(b => b.getBoundingClientRect());
+        const menu = document.getElementById('minipaint_canvas_menu').getBoundingClientRect();
+        const icons = buttons.map(b => getComputedStyle(b, '::before').maskImage || getComputedStyle(b, '::before').webkitMaskImage || '');
+        return {sized: boxes.every(b => b.width >= 43 && b.width <= 46 && b.height >= 43), row: boxes.every(b => Math.abs(b.top - menu.top) < 2), icons: icons.every(i => i.indexOf('svg') !== -1),
+                current: buttons.map(b => b.classList.contains('minipaint-current')), titles: buttons.map(b => b.title)};
+    }""") == {"sized": True, "row": True, "icons": True, "current": [True, False, False, False], "titles": ["Crop", "Mask", "Expand", "Layers"]}, str(page.evaluate("() => Array.from(document.querySelectorAll('#minipaint_canvas_topbar button')).map(b => [b.id, b.getBoundingClientRect().width])")))
     menu_open(page)
-    menu_click(page, "Tools")
-    r.check(f"{label}: Tools lists the four tools with the current one ticked", menu_items(page) == ["‹ Back", "✓ Crop", "Mask", "Expand", "Layers"], str(menu_items(page)))
+    menu_click(page, "Edit")
+    r.check(f"{label}: Edit lists Undo, Redo, Reset and Save", menu_items(page) == ["‹ Back", "Undo", "Redo", "Reset to original", "Save a copy"], str(menu_items(page)))
     menu_click(page, "Back")
     r.check(f"{label}: Back returns to the top of the menu", menu_items(page)[0] == "Open…")
     page.keyboard.press("Escape")
@@ -397,8 +437,8 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     r.check(f"{label}: the canvas has the finger crop", wait_for(page, lambda: (debug(page)["orgWidth"], debug(page)["orgHeight"]) == cropped))
 
     # ---- mask: paint a stroke, erase part of it, send ----
-    menu_pick(page, "Tools", "Mask")
-    r.check(f"{label}: Menu -> Tools -> Mask switches the tool and the button says so", wait_for(page, lambda: page.locator("#minipaint_canvas_menu").inner_text().strip() == "☰ Mask"), page.locator("#minipaint_canvas_menu").inner_text())
+    tool(page, "mask")
+    r.check(f"{label}: the Mask tool button switches the tool and is marked current", wait_for(page, lambda: page.evaluate("() => ['crop', 'mask', 'expand', 'layers'].map(n => document.getElementById('minipaint_canvas_tool_' + n).classList.contains('minipaint-current'))") == [False, True, False, False]), str(debug(page)["mode"]))
     r.check(f"{label}: mask mode hides the frame and arms the brush", wait_for(page, lambda: debug(page)["frameHidden"] and not debug(page)["noScribbles"] and debug(page)["mode"] == "mask"), str(debug(page)))
     r.check(f"{label}: the rail shows the mask panel now", wait_for(page, lambda: page.evaluate("() => ['crop', 'mask', 'expand', 'layers'].map(m => document.querySelector('#minipaint_canvas_panel_' + m).getBoundingClientRect().height > 0)") == [False, True, False, False]) and rail_beside(page))
     img = image_box(page, uuid)
@@ -440,14 +480,14 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
 
     # ---- expand: back to the canvas, add 128 on the right, apply, send again ----
     click_tab(page, "Mini Paint")
-    menu_pick(page, "Tools", "Expand")
+    tool(page, "expand")
     r.check(f"{label}: expand mode disables the brush", wait_for(page, lambda: debug(page)["noScribbles"] and debug(page)["mode"] == "expand"))
     page.locator("#minipaint_canvas_expand_right").click()
     r.check(f"{label}: side button previews the size", wait_for(page, lambda: "→" in page.evaluate("() => document.querySelector('#minipaint_canvas_expand_preview').innerText")))
     r.check(f"{label}: the exact amounts sit two per line in the rail", page.evaluate("() => { const l = document.querySelector('#minipaint_canvas_expand_num_left').getBoundingClientRect(); const r = document.querySelector('#minipaint_canvas_expand_num_right').getBoundingClientRect(); const t = document.querySelector('#minipaint_canvas_expand_num_top').getBoundingClientRect(); return l.width > 60 && Math.abs(l.top - r.top) < 4 && r.left > l.right && t.top > l.bottom; }"))
     page.locator("#minipaint_canvas_expand_apply").click()
     r.check(f"{label}: expand applies", wait_for(page, lambda: "Expanded to" in status_text(page)), status_text(page))
-    r.check(f"{label}: expand lands in mask mode, the button says so", wait_for(page, lambda: debug(page)["mode"] == "mask" and page.locator("#minipaint_canvas_menu").inner_text().strip() == "☰ Mask"))
+    r.check(f"{label}: expand lands in mask mode, the bar says so", wait_for(page, lambda: debug(page)["mode"] == "mask" and page.evaluate("() => document.getElementById('minipaint_canvas_tool_mask').classList.contains('minipaint-current') && !document.getElementById('minipaint_canvas_tool_expand').classList.contains('minipaint-current')")))
     r.check(f"{label}: the canvas shows the wider image with its mask layer",
             wait_for(page, lambda: debug(page)["orgWidth"] == cropped[0] + 128 and (lambda fg: fg is not None and fg.size[0] == cropped[0] + 128 and fg.getchannel("A").getpixel((cropped[0] + 100, 5)) == 255)(canvas_layer(page, uuid, "logical_image_foreground"))), str(debug(page)))
     menu_pick(page, "Send to", "img2img Inpaint")
@@ -467,7 +507,7 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     # ---- layers: the frame as a selection, a drag on the selection with the mouse and with a finger, the list ----
     page.locator("#minipaint_canvas_mask_clear").click()
     wait_for(page, lambda: "Mask cleared" in status_text(page))
-    menu_pick(page, "Tools", "Layers")
+    tool(page, "layers")
     r.check(f"{label}: layers mode shows the frame as a selection and the layer panel", wait_for(page, lambda: debug(page)["mode"] == "layers" and not debug(page)["frameHidden"] and debug(page)["preview"]), str(debug(page)))
     r.check(f"{label}: the layer list has the picture over the Background, the picture selected", wait_for(page, lambda: layer_rows(page) == [["Layer 1", True, True, False], ["Background", False, False, False]]), str(layer_rows(page)))
     # (the picture is narrower than the canvas since the expansion: the outline is inside the canvas's, most of its width)
@@ -480,7 +520,7 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     page.locator("#minipaint_canvas_layer_new").click()
     r.check(f"{label}: a selection becomes a new layer without a reload", wait_for(page, lambda: "Layer 2 holds the selection" in status_text(page)) and debug(page)["loaded"] == before["loaded"], status_text(page))
     r.check(f"{label}: the list shows it on top, selected, the others not", wait_for(page, lambda: layer_rows(page) == [["Layer 2", True, True, False], ["Layer 1", False, False, False], ["Background", False, False, False]]), str(layer_rows(page)))
-    r.check(f"{label}: the browser got the layer to drag and the underlay", wait_for(page, lambda: debug(page)["preview"] and page.evaluate("() => document.querySelector('#minipaint_canvas_layer_underlay textarea').value.startsWith('data:image/png')")))
+    r.check(f"{label}: the browser got the layer to drag and the underlay, at display size", wait_for(page, lambda: debug(page)["preview"] and page.evaluate("() => { const p = JSON.parse(document.querySelector('#minipaint_canvas_layer_preview textarea').value || '{}'); const u = document.querySelector('#minipaint_canvas_layer_underlay textarea').value; return typeof p.src === 'string' && p.src.startsWith('data:image/') && Array.isArray(p.canvas) && Array.isArray(p.others) && u.startsWith('data:image/') && u.length < 400000; }")))
     r.check(f"{label}: the outline moved to the new layer", wait_for(page, lambda: (lambda s, b: bool(s) and bool(b) and s["width"] < b["width"] - 20 and s["left"] > b["left"] + 20)(debug(page)["selection"], debug(page)["bounds"])), str(debug(page)["selection"]))
     # drag the layer with the mouse, starting on it: the view is kept, the layer lands where it was dropped
     img = image_box(page, uuid)
@@ -489,12 +529,14 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     drag(page, cx, cy, cx + 40 * scale, cy + 20 * scale, steps=16)
     r.check(f"{label}: the dropped layer is where the mouse left it", wait_for(page, lambda: "Moved Layer 2" in status_text(page)), status_text(page))
     landed = page.evaluate("() => (document.querySelector('#minipaint_canvas_status').innerText.match(/ at \\((-?\\d+), (-?\\d+)\\)/) || []).slice(1).map(Number)")
-    r.check(f"{label}: by the distance dragged", landed and abs(landed[0] - (box["x0"] + 40)) <= 2 and abs(landed[1] - (box["y0"] + 20)) <= 2, str((landed, box)))
+    expected = snapped(page, box["x0"] + 40, box["y0"] + 20, box["x1"] - box["x0"], box["y1"] - box["y0"])
+    r.check(f"{label}: by the distance dragged (snapping to an edge it comes close to)", landed and abs(landed[0] - expected[0]) <= 2 and abs(landed[1] - expected[1]) <= 2, str((landed, expected, box)))
     r.check(f"{label}: the composite was reloaded with the view kept", wait_for(page, lambda: debug(page)["loaded"] == before["loaded"] + 1 and abs(debug(page)["imgScale"] - scale) < 0.001 and not debug(page)["overlay"]), str(debug(page)))
     r.check(f"{label}: the preview is gone after the drop", not debug(page)["layerDrag"])
     # and with a finger
     touch(page, [(cx, cy, cx - 30 * scale, cy - 10 * scale)])
-    r.check(f"{label}: a finger drags the layer too", wait_for(page, lambda: (lambda l: bool(l) and abs(l[0] - (box["x0"] + 10)) <= 2 and abs(l[1] - (box["y0"] + 10)) <= 2)(page.evaluate("() => (document.querySelector('#minipaint_canvas_status').innerText.match(/ at \\((-?\\d+), (-?\\d+)\\)/) || []).slice(1).map(Number)"))), status_text(page))
+    expected = snapped(page, box["x0"] + 10, box["y0"] + 10, box["x1"] - box["x0"], box["y1"] - box["y0"])
+    r.check(f"{label}: a finger drags the layer too (snapping to an edge it comes close to)", wait_for(page, lambda: (lambda l: bool(l) and abs(l[0] - expected[0]) <= 2 and abs(l[1] - expected[1]) <= 2)(page.evaluate("() => (document.querySelector('#minipaint_canvas_status').innerText.match(/ at \\((-?\\d+), (-?\\d+)\\)/) || []).slice(1).map(Number)"))), str((status_text(page), expected)))
     menu_pick(page, "Edit", "Undo")
     r.check(f"{label}: undo takes the move back", wait_for(page, lambda: "Undid move layer" in status_text(page) and "is at (" not in status_text(page).split("Undid")[0]), status_text(page))
     r.check(f"{label}: and reloads the composite", wait_for(page, lambda: debug(page)["loaded"] == before["loaded"] + 3), str(debug(page)["loaded"]))
@@ -528,7 +570,7 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     r.check(f"{label}: the eye shows them again", wait_for(page, lambda: "Background shown" in status_text(page) and layer_rows(page)[2] == ["Background", True, True, False]), status_text(page))
     layer_row(page, "Layer 2").locator(".minipaint-layer-check").click()
     r.check(f"{label}: the box adds a second layer to the selection", wait_for(page, lambda: "2 layers selected" in status_text(page) and layer_rows(page) == [["Layer 2", True, True, False], ["Layer 1", False, False, False], ["Background", True, False, False]]), str(layer_rows(page)))
-    r.check(f"{label}: the drag preview covers both, over the layer between", wait_for(page, lambda: page.evaluate("() => { const p = JSON.parse(document.querySelector('#minipaint_canvas_layer_preview textarea').value || '{}'); return p.name === 'Background, Layer 2' && document.querySelector('#minipaint_canvas_layer_underlay textarea').value.startsWith('data:image/png'); }")))
+    r.check(f"{label}: the drag preview covers both, over the layer between", wait_for(page, lambda: page.evaluate("() => { const p = JSON.parse(document.querySelector('#minipaint_canvas_layer_preview textarea').value || '{}'); return p.name === 'Background, Layer 2' && document.querySelector('#minipaint_canvas_layer_underlay textarea').value.startsWith('data:image/'); }")))
     layer_row(page, "Background").locator(".minipaint-layer-check").click()
     r.check(f"{label}: and takes it out again", wait_for(page, lambda: layer_rows(page) == [["Layer 2", True, True, False], ["Layer 1", False, False, False], ["Background", False, False, False]]), str(layer_rows(page)))
     loaded = debug(page)["loaded"]
@@ -573,6 +615,47 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
         w, h, x, y = (int(layer.group(k)) for k in range(1, 5))
         return abs(x - (cw - w) // 2) <= 1 and abs(y - (ch - h) // 2) <= 1
     r.check(f"{label}: Re-center brings it back to the middle", wait_for(page, lambda: "Centered Layer 2" in status_text(page) and centered(status_text(page))), status_text(page))
+    # ---- transform mode: a box with corner knobs; drag inside to move, a corner to resize; edges snap; Done applies ----
+    wait_for(page, lambda: not debug(page)["layerDrag"] and debug(page)["preview"])
+    page.locator("#minipaint_canvas_layer_transform_start").click()
+    r.check(f"{label}: Resize / move by hand puts the box on the layer and hides the frame", wait_for(page, lambda: (lambda d: bool(d["transform"]) and not d["transform"]["done"] and d["frameHidden"] and d["overlay"])(debug(page))), str(debug(page)))
+    r.check(f"{label}: while transforming the panel shows Done and nothing else", page.evaluate("() => { const v = (id) => { const e = document.getElementById(id); return !!e && getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().height > 0; }; return [v('minipaint_canvas_layer_transform_done'), v('minipaint_canvas_layer_new'), v('minipaint_canvas_layer_scale'), v('minipaint_canvas_layer_center')]; }") == [True, False, False, False])
+    t0 = debug(page)["transform"]
+    scale = debug(page)["imgScale"]
+    origin = page.locator("#minipaint_canvas_surface .forge-container").bounding_box()
+    box = page.locator("#minipaint_canvas_surface .minipaint-transform-box").bounding_box()
+    cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+    drag(page, cx, cy, cx + 60, cy + 40, steps=10)
+    t1 = debug(page)["transform"]
+    r.check(f"{label}: dragging inside the box moves it by the distance dragged", abs((t1["x"] - t0["x"]) * scale - 60) <= 2 and abs((t1["y"] - t0["y"]) * scale - 40) <= 2 and abs(t1["w"] - t0["w"]) < 0.01, str((t0, t1)))
+    handle = page.locator("#minipaint_canvas_surface .minipaint-transform-handle.br").bounding_box()
+    hx, hy = handle["x"] + handle["width"] / 2, handle["y"] + handle["height"] / 2
+    drag(page, hx, hy, hx + 80, hy + 80 * t1["h"] / t1["w"], steps=10)
+    t2 = debug(page)["transform"]
+    r.check(f"{label}: dragging a corner resizes it, keeping its shape and the opposite corner", t2["w"] > t1["w"] + 40 / scale and abs(t2["w"] / t2["h"] - t1["w"] / t1["h"]) < 0.02 and abs(t2["x"] - t1["x"]) < 0.01 and abs(t2["y"] - t1["y"]) < 0.01, str((t1, t2)))
+    # snap: bring the left edge to within a few pixels of the canvas's left edge
+    box = page.locator("#minipaint_canvas_surface .minipaint-transform-box").bounding_box()
+    cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+    target_left = origin["x"] + debug(page)["imgX"] + 9  # 9 screen px short of the canvas edge
+    drag(page, cx, cy, cx + (target_left - box["x"]), cy, steps=10)
+    t3 = debug(page)["transform"]
+    r.check(f"{label}: near the canvas edge the box snaps onto it", t3["x"] == 0, str(t3))
+    page.locator("#minipaint_canvas_layer_transform_done").click()
+    r.check(f"{label}: Done applies the transform: the layer is resized and lands on the edge", wait_for(page, lambda: re.search(r"Layer 2: (\d+) × (\d+) at \(0, (-?\d+)\)\.", status_text(page)) is not None and debug(page)["transform"] is None and not debug(page)["frameHidden"]), status_text(page))
+    r.check(f"{label}: by the width the box had", (lambda m: bool(m) and abs(int(m.group(1)) - round(t3["w"])) <= 1)(re.search(r"Layer 2: (\d+) × (\d+) at", status_text(page))), status_text(page))
+    r.check(f"{label}: the panel is back to its controls", page.evaluate("() => { const e = document.getElementById('minipaint_canvas_layer_new'); return !!e && getComputedStyle(e).display !== 'none'; }"))
+    before_undo = debug(page)["loaded"]
+    menu_pick(page, "Edit", "Undo")
+    r.check(f"{label}: undo takes the transform back", wait_for(page, lambda: "Undid transform layer" in status_text(page)), status_text(page))
+    # a plain drag snaps too: drop the layer a few pixels from the top edge and it lands on it
+    # (after the undo's picture has arrived: a drag started before it would be dropped with it)
+    r.check(f"{label}: and reloads the composite", wait_for(page, lambda: debug(page)["loaded"] == before_undo + 1 and not debug(page)["layerDrag"] and not debug(page)["transform"]), str(debug(page)["loaded"]))
+    sel = debug(page)["selection"]
+    sx, sy = origin["x"] + sel["left"] + sel["width"] / 2, origin["y"] + sel["top"] + sel["height"] / 2
+    top_now = sel["top"] - debug(page)["imgY"]  # screen px from the canvas's top edge
+    drag(page, sx, sy, sx, sy - top_now + 8, steps=10)
+    r.check(f"{label}: a plain drag near the top edge snaps the layer onto it", wait_for(page, lambda: re.search(r"Layer 2: \d+ × \d+ at \(-?\d+, 0\)", status_text(page)) is not None and "Moved Layer 2" in status_text(page)), status_text(page))
+    wait_for(page, lambda: not debug(page)["layerDrag"])
     page.locator("#minipaint_canvas_layer_merge").click()
     r.check(f"{label}: merge with one layer selected merges it into the picture", wait_for(page, lambda: "Layer 2 merged into Layer 1" in status_text(page) and layer_rows(page) == [["Layer 1", True, True, False], ["Background", False, False, False]]), status_text(page))
     menu_pick(page, "Edit", "Undo")

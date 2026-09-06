@@ -108,28 +108,31 @@ class Layer:
         return Layer(self.image.copy(), self.x, self.y, name or self.name, self.visible, self.opacity, self.source, self.scale)
 
     def snapshot(self) -> dict:
+        """The layer as history keeps it. The picture itself, not a PNG of
+        it: no edit ever changes a layer's pixels in place (each makes a new
+        image), so a snapshot can share them, and taking one costs nothing
+        - which matters, because every step takes one first."""
         return {
-            "png": imaging.to_png_bytes(self.image),
+            "image": self.image,
             "x": self.x,
             "y": self.y,
             "name": self.name,
             "visible": self.visible,
             "opacity": self.opacity,
-            "source": imaging.to_png_bytes(self.source) if self.source is not None else None,
+            "source": self.source,
             "scale": self.scale,
         }
 
     @classmethod
     def restore(cls, data: dict) -> "Layer":
-        source = data.get("source")
         return cls(
-            imaging.from_png_bytes(data["png"]),
+            data["image"],
             data["x"],
             data["y"],
             data["name"],
             data["visible"],
             data["opacity"],
-            imaging.from_png_bytes(source) if source else None,
+            data.get("source"),
             data.get("scale", 1.0),
         )
 
@@ -166,16 +169,19 @@ class Document:
         # that step needs to know, and it is consumed by it.
         self.pending_send: typing.Optional[dict] = None
         # Bumped whenever a layer changes, so the browser's drag preview is
-        # only re-sent when it is stale.
+        # only re-sent when it is stale; pixel_version stays put when layers
+        # only moved, so the picture in that preview is not remade for a move.
         self.layer_version: int = 0
+        self.pixel_version: int = 0
         self.preview_sent: typing.Optional[tuple] = None
+        self._preview_src_key: typing.Optional[tuple] = None
+        self._underlay_key: typing.Optional[tuple] = None
+        self._underlay_src: str = ""
         # The layers panel as last sent to the browser, so it is only re-sent
         # when it changed.
         self.layer_list_sent: typing.Optional[str] = None
         # What the Send button does, chosen in Options: "Auto" or a destination.
         self.destination: str = "Auto"
-        self._original_png: typing.Optional[bytes] = None
-        self._original_ref: typing.Optional[Image.Image] = None
 
     # -- state -------------------------------------------------------------
 
@@ -289,8 +295,10 @@ class Document:
             return
         self.image = imaging.composite(self.layers, self.canvas_size)
 
-    def _touch(self) -> None:
+    def _touch(self, moved: bool = False) -> None:
         self.layer_version += 1
+        if not moved:
+            self.pixel_version += 1
         self.recomposite()
 
     def unique_name(self, wanted: str, ignore: typing.Optional[Layer] = None) -> str:
@@ -310,16 +318,6 @@ class Document:
 
     # -- history -----------------------------------------------------------
 
-    def _original_bytes(self) -> typing.Optional[bytes]:
-        """The original as PNG, encoded once and shared by every snapshot
-        taken while it is the original."""
-        if self.original is None:
-            return None
-        if self._original_png is None or self._original_ref is not self.original:
-            self._original_png = imaging.to_png_bytes(self.original)
-            self._original_ref = self.original
-        return self._original_png
-
     def _reindex(self, keep: typing.Iterable[Layer], active: typing.Optional[Layer]) -> None:
         """After the layer list changed: the selection follows the layers
         that survived, the primary the layer given (or the nearest)."""
@@ -334,11 +332,10 @@ class Document:
             self.selected = [self.active] if self.layers else []
 
     def _snapshot(self, label: str) -> dict:
-        """A whole document, small enough to keep a handful of.
-
-        PNG rather than the images themselves: a structural step is rare and
-        slow anyway, and six uncompressed 4K RGBA frames is a lot of server
-        memory per open tab. The composite is not stored; it is rebuilt.
+        """A whole document, as references: the layers, the mask and the
+        original are never changed in place, so the snapshots share them
+        and a step's checkpoint is instant. Memory grows only with the
+        pictures an edit actually made. The composite is rebuilt, not kept.
         """
         return {
             "label": label,
@@ -346,8 +343,8 @@ class Document:
             "active": self.active,
             "selected": list(self.selected_indices()),
             "canvas_size": self.canvas_size,
-            "mask": imaging.to_png_bytes(self.mask) if self.has_mask else None,
-            "original": self._original_bytes(),
+            "mask": self.mask if self.has_mask else None,
+            "original": self.original,
             "origin": self.origin,
             "filename": self.filename,
             "has_expansion": self.has_expansion,
@@ -355,19 +352,12 @@ class Document:
         }
 
     def _restore(self, snapshot: dict) -> None:
-        mask = snapshot.get("mask")
-        original = snapshot.get("original")
         self.layers = [Layer.restore(data) for data in snapshot.get("layers", [])]
         self.active = int(snapshot.get("active", 0))
         self.selected = [int(index) for index in snapshot.get("selected", [])]
         self.canvas_size = tuple(snapshot["canvas_size"]) if snapshot.get("canvas_size") else None
-        self.mask = imaging.from_png_bytes(mask).convert("L") if mask else None
-        if original is None:
-            self.original = None
-        elif original is not self._original_png:
-            self.original = imaging.from_png_bytes(original)
-            self._original_png = original
-            self._original_ref = self.original
+        self.mask = snapshot.get("mask")
+        self.original = snapshot.get("original")
         self.origin = snapshot.get("origin", "none")
         self.filename = snapshot.get("filename")
         self.has_expansion = bool(snapshot.get("has_expansion"))
@@ -378,9 +368,22 @@ class Document:
         """Remember the document as it is now, before changing it."""
         if not self.has_image:
             return
-        self.history.append(self._snapshot(label))
+        self.keep(self.take(label))
+
+    def take(self, label: str) -> dict:
+        """The document as it is now, for ``keep`` once the step turned out
+        to change something - a step that changes nothing must not cost an
+        undo step, nor push an old one off a full history."""
+        return self._snapshot(label)
+
+    def keep(self, snapshot: dict) -> None:
+        self.history.append(snapshot)
         del self.history[:-HISTORY_LIMIT]
         self.future.clear()
+
+    def restore(self, snapshot: dict) -> None:
+        """Back to a taken snapshot, as if the step never happened."""
+        self._restore(snapshot)
 
     def undo(self) -> typing.Optional[str]:
         if not self.history:
@@ -437,6 +440,7 @@ class Document:
         self.has_expansion = False
         self.expansion = {}
         self.layer_version += 1
+        self.pixel_version += 1
 
     def commit(self, image: typing.Optional[Image.Image], mask: typing.Optional[Image.Image]) -> None:
         """Take the canvas's word for the mask, and for the picture too while
@@ -491,7 +495,7 @@ class Document:
         for layer in self.selected_layers():
             layer.x += int(dx)
             layer.y += int(dy)
-        self._touch()
+        self._touch(moved=True)
 
     def center_selected(self) -> None:
         """Each selected layer to the middle of the canvas: the way back for
@@ -502,7 +506,7 @@ class Document:
         for layer in self.selected_layers():
             layer.x = (width - layer.image.width) // 2
             layer.y = (height - layer.image.height) // 2
-        self._touch()
+        self._touch(moved=True)
 
     def set_visible(self, name: str, visible: typing.Optional[bool] = None) -> typing.Optional[bool]:
         index = self.index_of(name)
@@ -512,6 +516,48 @@ class Document:
         layer.visible = (not layer.visible) if visible is None else bool(visible)
         self._touch()
         return layer.visible
+
+    def selection_box(self) -> typing.Optional[typing.Tuple[int, int, int, int]]:
+        """The box around the selected layers: x, y, width, height."""
+        chosen = self.selected_layers()
+        if not chosen:
+            return None
+        x0 = min(layer.x for layer in chosen)
+        y0 = min(layer.y for layer in chosen)
+        x1 = max(layer.x + layer.image.width for layer in chosen)
+        y1 = max(layer.y + layer.image.height for layer in chosen)
+        return x0, y0, x1 - x0, y1 - y0
+
+    def transform_selected(self, x: typing.Any, y: typing.Any, width: typing.Any) -> bool:
+        """The selection's box put at (x, y) and made ``width`` wide, its
+        height following: what the browser's transform mode hands back.
+        Each selected layer is scaled about the box the way the box was,
+        from the pixels it started with, and lands where it sat in the
+        box. False when nothing changed; ValueError when a layer would be
+        larger than a browser canvas holds."""
+        box = self.selection_box()
+        if box is None:
+            return False
+        x0, y0, box_w, _box_h = box
+        try:
+            x, y, width = int(round(float(x))), int(round(float(y))), int(round(float(width)))
+        except (TypeError, ValueError):
+            return False
+        if box_w <= 0 or width <= 0:
+            return False
+        factor = width / box_w
+        changed = False
+        for layer in self.selected_layers():
+            rel_x = (layer.x - x0) * factor
+            rel_y = (layer.y - y0) * factor
+            resized = layer.resize(layer.scale * factor * 100)
+            new_x, new_y = int(round(x + rel_x)), int(round(y + rel_y))
+            if resized or (new_x, new_y) != (layer.x, layer.y):
+                changed = True
+            layer.x, layer.y = new_x, new_y
+        if changed:
+            self._touch()
+        return changed
 
     def scale_selected(self, percent: typing.Any) -> bool:
         """Every selected layer at a percentage of its original size, each
@@ -648,37 +694,58 @@ class Document:
     def preview_key(self) -> tuple:
         return (tuple(self.selected_indices()), self.layer_version)
 
-    def preview_payload(self) -> str:
-        """The selected layers, as one picture, the way the browser shows
-        them while dragging."""
-        chosen = self.selected_layers()
-        if not chosen:
-            return ""
-        x0 = min(layer.x for layer in chosen)
-        y0 = min(layer.y for layer in chosen)
-        x1 = max(layer.x + layer.image.width for layer in chosen)
-        y1 = max(layer.y + layer.image.height for layer in chosen)
-        shifted = [Layer(layer.image, layer.x - x0, layer.y - y0, layer.name, layer.visible, layer.opacity) for layer in chosen]
-        picture = imaging.composite(shifted, (x1 - x0, y1 - y0))
-        return json.dumps(
-            {
-                "src": imaging.to_data_url(picture),
-                "x": x0,
-                "y": y0,
-                "w": x1 - x0,
-                "h": y1 - y0,
-                "opacity": 100 if any(layer.visible for layer in chosen) else 0,
-                "name": ", ".join(layer.name for layer in chosen),
-            }
-        )
+    def other_boxes(self) -> typing.List[typing.List[int]]:
+        """The boxes of the visible layers that are not selected, for the
+        browser to snap a dragged layer's edges to."""
+        chosen = set(self.selected_indices())
+        return [
+            [layer.x, layer.y, layer.image.width, layer.image.height]
+            for index, layer in enumerate(self.layers)
+            if index not in chosen and layer.visible
+        ]
 
-    def underlay_payload(self) -> str:
-        """The other layers, for the canvas to show under the layers being dragged."""
+    def preview_payload(self) -> str:
+        """What the browser needs to outline and drag the selected layers:
+        their box, the canvas size and the other visible layers' boxes (to
+        snap to), and the selected layers as one picture - included only
+        when the browser cannot already have it, since a move changes the
+        box but not the picture."""
+        chosen = self.selected_layers()
+        if not chosen or self.canvas_size is None:
+            self._preview_src_key = None
+            return ""
+        x0, y0, box_w, box_h = self.selection_box()
+        x1, y1 = x0 + box_w, y0 + box_h
+        payload = {
+            "x": x0,
+            "y": y0,
+            "w": x1 - x0,
+            "h": y1 - y0,
+            "opacity": 100 if any(layer.visible for layer in chosen) else 0,
+            "name": ", ".join(layer.name for layer in chosen),
+            "canvas": list(self.canvas_size),
+            "others": self.other_boxes(),
+        }
+        key = (tuple(self.selected_indices()), self.pixel_version, tuple((layer.x - x0, layer.y - y0) for layer in chosen))
+        if key != self._preview_src_key:
+            shifted = [Layer(layer.image, layer.x - x0, layer.y - y0, layer.name, layer.visible, layer.opacity) for layer in chosen]
+            payload["src"] = imaging.preview_data_url(imaging.composite(shifted, (x1 - x0, y1 - y0)))
+            self._preview_src_key = key
+        return json.dumps(payload)
+
+    def underlay_payload(self) -> typing.Optional[str]:
+        """The other layers, for the canvas to show under the layers being
+        dragged: "" when there are none, None when the browser has it already."""
         chosen = set(self.selected_indices())
         if len(self.layers) <= len(chosen) or self.canvas_size is None:
+            self._underlay_key = None
             return ""
         others = [layer for index, layer in enumerate(self.layers) if index not in chosen]
-        return imaging.to_data_url(imaging.composite(others, self.canvas_size))
+        key = (tuple(sorted(chosen)), self.pixel_version, tuple((layer.x, layer.y) for layer in others), self.canvas_size)
+        if key == self._underlay_key:
+            return None
+        self._underlay_key = key
+        return imaging.preview_data_url(imaging.composite(others, self.canvas_size))
 
     def layer_rows(self) -> typing.List[dict]:
         """What a layers panel shows, top layer first."""

@@ -86,9 +86,45 @@
 
 #minipaint_canvas_root .minipaint-menu-button {
     flex: 0 0 auto;
-    min-width: 128px;
+    min-width: 96px;
     font-weight: 600;
 }
+
+
+/* The four tools, as icons: the label is kept (for the tooltip and screen
+   readers) but drawn at no size; the icon is an SVG mask filled with the
+   button's own text colour, so it follows the theme. */
+#minipaint_canvas_root .minipaint-action.minipaint-tool {
+    flex: 0 0 var(--minipaint-target);
+    width: var(--minipaint-target);
+    min-width: var(--minipaint-target);
+    padding: 0;
+    font-size: 0;
+    line-height: 0;
+    position: relative;
+}
+
+#minipaint_canvas_root .minipaint-tool::before {
+    content: "";
+    display: block;
+    width: 26px;
+    height: 26px;
+    margin: 0 auto;
+    background-color: currentColor;
+    -webkit-mask: var(--minipaint-icon) center / contain no-repeat;
+    mask: var(--minipaint-icon) center / contain no-repeat;
+}
+
+#minipaint_canvas_root .minipaint-tool.minipaint-current {
+    background: var(--color-accent, #ff7c00);
+    border-color: var(--color-accent, #ff7c00);
+    color: #fff;
+}
+
+#minipaint_canvas_root .minipaint-tool-crop { --minipaint-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 2v14a2 2 0 0 0 2 2h14'/%3E%3Cpath d='M18 22V8a2 2 0 0 0-2-2H2'/%3E%3C/svg%3E"); }
+#minipaint_canvas_root .minipaint-tool-mask { --minipaint-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath fill-rule='evenodd' d='M2 8c0-2 2-3 4-3h12c2 0 4 1 4 3v3c0 4-3 7-6 7-2 0-3-1-4-2-1 1-2 2-4 2-3 0-6-3-6-7zM5.5 10.5a2.5 1.8 0 1 0 5 0 2.5 1.8 0 1 0-5 0zM13.5 10.5a2.5 1.8 0 1 0 5 0 2.5 1.8 0 1 0-5 0z'/%3E%3C/svg%3E"); }
+#minipaint_canvas_root .minipaint-tool-expand { --minipaint-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='15 3 21 3 21 9'/%3E%3Cpolyline points='9 21 3 21 3 15'/%3E%3Cline x1='21' y1='3' x2='14' y2='10'/%3E%3Cline x1='3' y1='21' x2='10' y2='14'/%3E%3C/svg%3E"); }
+#minipaint_canvas_root .minipaint-tool-layers { --minipaint-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='12 2 2 7 12 12 22 7 12 2'/%3E%3Cpolyline points='2 17 12 22 22 17'/%3E%3Cpolyline points='2 12 12 17 22 12'/%3E%3C/svg%3E"); }
 
 /* The flyout, under the button, over the canvas only while it is open. */
 #minipaint_canvas_root .minipaint-menu {
@@ -347,6 +383,81 @@
 #minipaint_canvas_surface .minipaint-frame-handle.bl::after { right: 11px; top: 11px; border-right: none; border-top: none; }
 #minipaint_canvas_surface .minipaint-frame-handle.br::after { left: 11px; top: 11px; border-left: none; border-top: none; }
 
+/* -- transform mode: a box around the selection ----------------------- */
+
+#minipaint_canvas_surface .minipaint-transform {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+#minipaint_canvas_surface .minipaint-transform[hidden] {
+    display: none;
+}
+
+#minipaint_canvas_surface .minipaint-transform-box {
+    position: absolute;
+    box-sizing: border-box;
+    border: 2px solid var(--color-accent, #ff7c00);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+    pointer-events: auto;
+    touch-action: none;
+    cursor: move;
+}
+
+#minipaint_canvas_surface .minipaint-transform-size {
+    position: absolute;
+    left: 50%;
+    bottom: 6px;
+    transform: translateX(-50%);
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+/* Round corner knobs, finger sized, unlike the crop frame's brackets. */
+#minipaint_canvas_surface .minipaint-transform-handle {
+    position: absolute;
+    z-index: 11;
+    width: 44px;
+    height: 44px;
+    pointer-events: auto;
+    touch-action: none;
+}
+
+#minipaint_canvas_surface .minipaint-transform-handle::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 18px;
+    height: 18px;
+    margin: -9px 0 0 -9px;
+    border-radius: 50%;
+    background: var(--color-accent, #ff7c00);
+    box-shadow: 0 0 0 2px #fff, 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+
+#minipaint_canvas_surface .minipaint-transform-handle.tl { left: -22px; top: -22px; cursor: nwse-resize; }
+#minipaint_canvas_surface .minipaint-transform-handle.tr { right: -22px; top: -22px; cursor: nesw-resize; }
+#minipaint_canvas_surface .minipaint-transform-handle.bl { left: -22px; bottom: -22px; cursor: nesw-resize; }
+#minipaint_canvas_surface .minipaint-transform-handle.br { right: -22px; bottom: -22px; cursor: nwse-resize; }
+
+/* While transforming, the Layers panel shows only Done and its hint. */
+#minipaint_canvas_root.minipaint-transforming #minipaint_canvas_panel_layers > *:not(.minipaint-transform-only) {
+    display: none !important;
+}
+
+#minipaint_canvas_root:not(.minipaint-transforming) #minipaint_canvas_panel_layers > .minipaint-transform-only {
+    display: none !important;
+}
+
 /* -- chips ---------------------------------------------------------- */
 
 /* Tool, amount, smoothing and mode pickers as finger-sized chips. A group
@@ -574,7 +685,7 @@
     }
 
     #minipaint_canvas_root .minipaint-menu-button {
-        min-width: 110px;
+        min-width: 84px;
     }
 }
 

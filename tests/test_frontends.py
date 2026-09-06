@@ -77,7 +77,8 @@ def run() -> Results:
     for needed in ["minipaint_canvas_root", "minipaint_canvas_work", "minipaint_canvas_rail", "minipaint_canvas_surface",
                    "minipaint_canvas_menu", "minipaint_canvas_status", "minipaint_canvas_open", "minipaint_canvas_undo",
                    "minipaint_canvas_redo", "minipaint_canvas_reset", "minipaint_canvas_save", "minipaint_canvas_save_file",
-                   "minipaint_canvas_mode_request", "minipaint_canvas_send_request", "minipaint_canvas_targets", "minipaint_canvas_suggest",
+                   "minipaint_canvas_send_request", "minipaint_canvas_targets", "minipaint_canvas_suggest",
+                   "minipaint_canvas_tool_crop", "minipaint_canvas_tool_mask", "minipaint_canvas_tool_expand", "minipaint_canvas_tool_layers",
                    "minipaint_canvas_crop_apply", "minipaint_canvas_crop_aspect", "minipaint_canvas_expand_apply",
                    "minipaint_canvas_mask_tool", "minipaint_canvas_mask_size", "minipaint_canvas_mask_clear",
                    "minipaint_canvas_mask_invert",
@@ -91,6 +92,7 @@ def run() -> Results:
                    "minipaint_canvas_layer_opacity", "minipaint_canvas_layer_name", "minipaint_canvas_layer_rename",
                    "minipaint_canvas_layer_duplicate", "minipaint_canvas_layer_flatten",
                    "minipaint_canvas_layer_move", "minipaint_canvas_layer_preview", "minipaint_canvas_layer_underlay",
+                   "minipaint_canvas_layer_transform", "minipaint_canvas_layer_transform_start", "minipaint_canvas_layer_transform_done",
                    "minipaint_canvas_mask_to_layer",
                    "txt2img_send_to_minipaint", "img2img_send_to_minipaint", "extras_send_to_minipaint",
                    "tab_minipaint", "tab_txt2img", "tab_settings", "tab_extensions"]:
@@ -98,7 +100,7 @@ def run() -> Results:
     for gone in ("minipaint_canvas_fit", "minipaint_canvas_more", "minipaint_canvas_modebar", "minipaint_canvas_quick_crop",
                  "minipaint_canvas_mode_crop", "minipaint_canvas_mode_pick", "minipaint_canvas_modes", "minipaint_canvas_layer_pick",
                  "minipaint_canvas_layer_visible", "minipaint_canvas_send", "minipaint_canvas_panels", "minipaint_canvas_focus",
-                 "minipaint_canvas_destination", "minipaint_canvas_options", "minipaint_canvas_expand_advanced"):
+                 "minipaint_canvas_destination", "minipaint_canvas_options", "minipaint_canvas_expand_advanced", "minipaint_canvas_mode_request"):
         r.check(f"no {gone} any more", gone not in ids)
     r.check("the legacy iframe is not mounted", "a1111minipaint_main" not in ids)
     r.check("no ImageEditor anywhere in the page", "imageeditor" not in {c["type"] for c in config["components"]})
@@ -168,15 +170,16 @@ def run() -> Results:
     work_children = row_children("minipaint_canvas_work")
     r.check("the work column is the action row and the canvas, then what the menu presses and the hidden wires",
             [c for c in work_children if c in ("minipaint_canvas_topbar", "minipaint_canvas_surface", "minipaint_canvas_open")] == ["minipaint_canvas_topbar", "minipaint_canvas_surface", "minipaint_canvas_open"], str(work_children))
-    r.check("the action row is the menu button and the status line, nothing else", row_children("minipaint_canvas_topbar") == ["minipaint_canvas_menu", "minipaint_canvas_status"], str(row_children("minipaint_canvas_topbar")))
-    r.check("the menu button names the tool", component("minipaint_canvas_menu")["props"]["value"] == "☰ Crop")
+    r.check("the action row is the menu button, the four tools and the status line, nothing else", row_children("minipaint_canvas_topbar") == ["minipaint_canvas_menu", "minipaint_canvas_tool_crop", "minipaint_canvas_tool_mask", "minipaint_canvas_tool_expand", "minipaint_canvas_tool_layers", "minipaint_canvas_status"], str(row_children("minipaint_canvas_topbar")))
+    r.check("the menu button is just the menu", component("minipaint_canvas_menu")["props"]["value"] == "☰ Menu")
+    r.check("the tools are labelled buttons drawn as icons", all(component(f"minipaint_canvas_tool_{m}")["props"]["value"] == label and "minipaint-tool" in component(f"minipaint_canvas_tool_{m}")["props"]["elem_classes"] for m, label in (("crop", "Crop"), ("mask", "Mask"), ("expand", "Expand"), ("layers", "Layers"))))
     rail_children = row_children("minipaint_canvas_rail")
     r.check("the rail holds one panel per tool and the saved file",
             rail_children == ["minipaint_canvas_panel_crop", "minipaint_canvas_panel_mask", "minipaint_canvas_panel_expand", "minipaint_canvas_panel_layers", "minipaint_canvas_save_file"], str(rail_children))
     r.check("the rail's panels start with only crop showing", component("minipaint_canvas_panel_crop")["props"].get("visible", True) is True
             and all(component(f"minipaint_canvas_panel_{m}")["props"].get("visible") is False for m in ("mask", "expand", "layers")))
     r.check("the layer list is server-rendered html with no image yet", component("minipaint_canvas_layer_list")["type"] == "html" and "No image yet" in component("minipaint_canvas_layer_list")["props"]["value"])
-    r.check("what the menu presses is hidden", all(component(f"minipaint_canvas_{name}")["props"].get("visible") is False for name in ("open", "undo", "redo", "reset", "save", "mode_request", "send_request", "targets", "suggest")))
+    r.check("what the menu presses is hidden", all(component(f"minipaint_canvas_{name}")["props"].get("visible") is False for name in ("open", "undo", "redo", "reset", "save", "send_request", "targets", "suggest")))
     r.check("the menu reads the destinations this WebUI has, ImageStitch for both tabs", json.loads(component("minipaint_canvas_targets")["props"]["value"]) == [["img2img", "img2img"], ["inpaint", "img2img Inpaint"], ["extras", "Extras"], ["stitch_txt2img", "ImageStitch (txt2img)"], ["stitch_img2img", "ImageStitch (img2img)"]])
     r.check("no menu opens inside the rail: every picker there is chips, but the aspect at its top", all(component(f"minipaint_canvas_{name}")["type"] == "radio" for name in ("expand_fill", "expand_snap", "mask_smoothing", "expand_amount", "mask_tool"))
             and component("minipaint_canvas_crop_aspect")["type"] == "dropdown")
@@ -222,8 +225,8 @@ def run() -> Results:
     apply_crop = by_elem("minipaint_canvas_crop_apply")
     steps = chain(apply_crop[0]) if apply_crop else []
     r.check("apply crop is one chain of three backend steps", len(apply_crop) == 1 and len(steps) == 3 and all(s["backend_fn"] for s in steps), str(len(steps)))
-    r.check("apply crop reads the canvas and the frame",
-            steps and background["id"] in steps[0]["inputs"] and foreground["id"] in steps[0]["inputs"]
+    r.check("apply crop reads the strokes and the frame, never the picture (the document has it)",
+            steps and background["id"] not in steps[0]["inputs"] and foreground["id"] in steps[0]["inputs"]
             and component("minipaint_canvas_crop_box")["id"] in steps[0]["inputs"] and "cropBox()" in steps[0]["js"] and "mark()" in steps[0]["js"])
     r.check("apply crop writes the image, the status and the wait flag",
             steps and {background["id"], foreground["id"], status_id, wait_id, mode_id} <= set(steps[0]["outputs"]))
@@ -243,10 +246,10 @@ def run() -> Results:
     new_layer = by_elem("minipaint_canvas_layer_new")
     r.check("new from selection reads the frame and keeps the view", len(new_layer) == 1 and "cropBox()" in new_layer[0]["js"] and "mark(true)" in new_layer[0]["js"] and len(chain(new_layer[0])) == 3)
     move = deps_targeting(component("minipaint_canvas_layer_move")["id"], "input")
-    r.check("a dropped layer reaches the server through the hidden textbox, keeping the view", len(move) == 1 and move[0]["backend_fn"] and "mark(true)" in move[0]["js"] and len(chain(move[0])) == 3 and background["id"] in move[0]["inputs"])
+    r.check("a dropped layer reaches the server through the hidden textbox, keeping the view", len(move) == 1 and move[0]["backend_fn"] and "mark(true)" in move[0]["js"] and len(chain(move[0])) == 3 and background["id"] not in move[0]["inputs"] and foreground["id"] in move[0]["inputs"])
     action = deps_targeting(component("minipaint_canvas_layer_action")["id"], "input")
     r.check("a tap in the layer list reaches the server the same way", len(action) == 1 and action[0]["backend_fn"] and "mark(true)" in action[0]["js"] and len(chain(action[0])) == 3
-            and background["id"] in action[0]["inputs"] and component("minipaint_canvas_layer_list")["id"] in action[0]["outputs"])
+            and background["id"] not in action[0]["inputs"] and component("minipaint_canvas_layer_list")["id"] in action[0]["outputs"])
     r.check("nothing is bound to the list itself: the browser delegates its taps", not any(component("minipaint_canvas_layer_list")["id"] in [t[0] for t in d["targets"]] for d in deps))
     for elem_id, trigger in (("minipaint_canvas_layer_merge", "click"), ("minipaint_canvas_layer_delete", "click"), ("minipaint_canvas_layer_center", "click"),
                              ("minipaint_canvas_layer_duplicate", "click"), ("minipaint_canvas_layer_flatten", "click"),
@@ -254,6 +257,12 @@ def run() -> Results:
                              ("minipaint_canvas_layer_opacity", "release")):
         d = deps_targeting(component(elem_id)["id"], trigger)
         r.check(f"{elem_id} is a view-keeping three-step chain", len(d) == 1 and "mark(true)" in d[0]["js"] and len(chain(d[0])) == 3)
+    transform = deps_targeting(component("minipaint_canvas_layer_transform")["id"], "input")
+    r.check("Done in transform mode reaches the server through its hidden textbox, keeping the view", len(transform) == 1 and transform[0]["backend_fn"] and "mark(true)" in transform[0]["js"] and len(chain(transform[0])) == 3)
+    start = by_elem("minipaint_canvas_layer_transform_start", "click")
+    done = by_elem("minipaint_canvas_layer_transform_done", "click")
+    r.check("entering and leaving transform mode are browser-only", len(start) == 1 and not start[0]["backend_fn"] and "startTransform" in start[0]["js"] and len(done) == 1 and not done[0]["backend_fn"] and "finishTransform" in done[0]["js"])
+    r.check("Done is shown only while transforming", "minipaint-transform-only" in component("minipaint_canvas_layer_transform_done")["props"]["elem_classes"] and component("minipaint_canvas_layer_transform_done")["props"]["visible"] is not False)
     for elem_id in ("minipaint_canvas_layer_half", "minipaint_canvas_layer_full", "minipaint_canvas_layer_double"):
         d = by_elem(elem_id)
         r.check(f"{elem_id} is a view-keeping three-step chain", len(d) == 1 and "mark(true)" in d[0]["js"] and len(chain(d[0])) == 3)
@@ -262,11 +271,11 @@ def run() -> Results:
     outline = deps_targeting(component("minipaint_canvas_layer_preview")["id"], "change")
     r.check("the selection outline follows the preview, browser-only", len(outline) == 1 and "refreshOverlays" in outline[0]["js"] and not outline[0]["backend_fn"])
     layer_widgets = {component(f"minipaint_canvas_layer_{name}")["id"] for name in ("list", "scale", "opacity", "name", "preview", "underlay")}
-    mode_request = by_elem("minipaint_canvas_mode_request", "input")
-    r.check("Menu -> Tools is one backend event that writes the mode, the menu button, the rail panels and the layer widgets",
-            len(mode_request) == 1 and mode_request[0]["backend_fn"] and mode_id in mode_request[0]["outputs"] and layer_widgets <= set(mode_request[0]["outputs"])
-            and component("minipaint_canvas_menu")["id"] in mode_request[0]["outputs"]
-            and {component(f"minipaint_canvas_panel_{m}")["id"] for m in ("crop", "mask", "expand", "layers")} <= set(mode_request[0]["outputs"]))
+    tool_clicks = [by_elem(f"minipaint_canvas_tool_{m}", "click") for m in ("crop", "mask", "expand", "layers")]
+    r.check("each tool button is one backend event that writes the mode, the rail panels and the layer widgets",
+            all(len(d) == 1 and d[0]["backend_fn"] and mode_id in d[0]["outputs"] and layer_widgets <= set(d[0]["outputs"])
+                and {component(f"minipaint_canvas_panel_{m}")["id"] for m in ("crop", "mask", "expand", "layers")} <= set(d[0]["outputs"])
+                and component("minipaint_canvas_menu")["id"] not in d[0]["outputs"] for d in tool_clicks))
     menu = by_elem("minipaint_canvas_menu")
     r.check("the menu button is browser-only", len(menu) == 1 and "toggleMenu" in menu[0]["js"] and not menu[0]["backend_fn"])
     opened = by_elem("minipaint_canvas_open", "upload")

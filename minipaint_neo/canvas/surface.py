@@ -18,6 +18,8 @@ from functools import wraps
 
 import gradio as gr
 
+from . import imaging
+
 
 def host_canvas():
     """The host's canvas module, or None when this WebUI does not have it."""
@@ -76,6 +78,24 @@ def canvas_image_class():
             @wraps(canvas.LogicalImage.__init__)
             def __init__(self, *args, numpy=False, **kwargs):
                 super().__init__(*args, numpy=numpy, **kwargs)
+
+            def postprocess(self, value):
+                # A data URL made on our side (a display copy of the
+                # composite) goes through as it is; a picture is encoded
+                # the host's way.
+                if isinstance(value, str):
+                    return value
+                return super().postprocess(value)
+
+            def preprocess(self, payload):
+                # The host reads PNG only; the canvas may hold one of our
+                # display copies (JPEG or WebP) when a step reads it back.
+                if isinstance(payload, str) and payload.startswith("data:image/") and not payload.startswith("data:image/png;"):
+                    try:
+                        return imaging.from_data_url(payload)
+                    except Exception:
+                        return None
+                return super().preprocess(payload)
 
             def get_block_name(self):
                 return "textbox"

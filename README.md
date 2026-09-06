@@ -28,7 +28,7 @@ Extensions → Install from URL → this repository's URL → Install → Reload
 ## The Canvas
 
 ```
- [☰ Layers]  1024 × 1024 · 3 layers · from txt2img — Layer 2 holds the selection.
+ [☰ Menu] [⌗] [◒] [⤢] [◈]  1024 × 1024 · 3 layers — Layer 2 holds the selection.
  +------------------------------------------------------+  +-------------------+
  |                                    ⛶ 📂 ✠ 🔄 ↩️ ↪️     |  | Layers            |
  |                                                      |  | [New from selection]
@@ -36,20 +36,20 @@ Extensions → Install from URL → this repository's URL → Install → Reload
  |        as tall as the window has room for,           |  | 👁 Layer 1   ☐ ▲ ▼ |
  |        no scrolling, nothing floating over it        |  | 👁 Background ☐ ▲ ▼ |
  |                                                      |  | [Merge] [Delete]  |
- +------------------------------------------------------+  | [Re-center layer] |
-                                                           | Size ─── ½ 100% ×2 |
-   ☰ Menu:  Open… · Edit › (Undo, Redo, Reset, Save a copy)  | Opacity ────────  |
-            Tools › (Crop, Mask, Expand, Layers) · Panels     +-------------------+
-            Focus · Send to › (img2img, Inpaint, Extras, ImageStitch…, Cancel)
+ +------------------------------------------------------+  | [Resize / move by hand]
+                                                           | [Re-center layer] |
+   ☰ Menu:  Open… · Edit › (Undo, Redo, Reset, Save a copy)  | Size ─── ½ 100% ×2 |
+            Panels · Focus                                    | Opacity ────────  |
+            Send to › (img2img, Inpaint, Extras, ImageStitch…, Cancel)
 ```
 
-One **Menu** button holds everything that is not a tool's own control: *Open…*, *Edit*
-(Undo, Redo, Reset to original, Save a copy), *Tools* (Crop, Mask, Expand, Layers — the
-current one ticked), *Panels* and *Focus* (toggles), and *Send to* with every destination
-this WebUI has and a Cancel. Each list closes on the choice; a tap outside or Escape
-closes it too. The button's label names the current tool. The rest of the action row is
-the status line. Each tool's controls live in the **rail** on the right — the panel for
-the chosen tool is the one showing. The canvas takes whatever height the window has left
+The action row is one **Menu** button, the four tools as icon buttons — **Crop**, **Mask**,
+**Expand**, **Layers**, the current one filled — and the status line, truncated to what
+is left. The menu holds everything that is not a tool's own control: *Open…*, *Edit*
+(Undo, Redo, Reset to original, Save a copy), *Panels* and *Focus* (toggles), and *Send
+to* with every destination this WebUI has and a Cancel. Each list closes on the choice; a
+tap outside or Escape closes it too. Each tool's controls live in the **rail** on the
+right — the panel for the chosen tool is the one showing. The canvas takes whatever height the window has left
 below the action row; the rail is never taller than that and scrolls inside it, so the
 whole tab is always in view and nothing ever floats over the picture. *Panels* puts the
 rail away for a canvas the full width of the window and brings it back (choosing a tool
@@ -100,10 +100,18 @@ the primary one carries a bar. The selected layers are outlined on the canvas wi
 dashed line: **a drag that starts inside that outline moves them**, with a live preview,
 and nothing else moves; a drag that starts outside pans the picture, as in Crop. The
 picture keeps its zoom and position when the server's new composite comes back; two
-fingers, the wheel and the right button still pan and zoom. **Re-center layer** brings a
-layer that was dragged out of view back to the middle of the canvas. **Size** resizes the
-selected layers — the slider, or ½, 100% and ×2 — about their centre, always from the
-pixels the layer started with, so resizing again does not blur it twice. **Merge** joins
+fingers, the wheel and the right button still pan and zoom. **Resize / move by hand**
+puts a box with round corner knobs on the selected layer and hides everything else in the
+panel but **Done**: drag a corner to resize it (the shape is kept; the opposite corner
+stays put), drag inside the box to move it, as many times as you like, then *Done* applies
+it in one step (one Undo away). **Edges snap**: while a layer is dragged or resized, an
+edge that comes within about 14 screen pixels of the canvas's edge — whether or not the
+Background is shown — or of another visible layer's edge lands exactly on it, so a layer
+meant to sit flush against a border or a neighbour does, without pixel-hunting.
+**Re-center layer** brings a layer that was dragged out of view back to the middle of the
+canvas. **Size** resizes the selected layers — the slider, or ½, 100% and ×2 — about
+their centre, always from the pixels the layer started with, so resizing again does not
+blur it twice. **Merge** joins
 the selected layers into one (or one selected layer into the one below it); **Delete**,
 **Duplicate**, the opacity slider and **Flatten all** act on the selection; the name box
 renames the primary layer. Crop trims every layer and Expand grows the Background while
@@ -119,15 +127,24 @@ plain send would pick is marked *suggested*: Inpaint when there is a mask or an
 expansion, img2img otherwise. The WebUI switches to the destination's tab using its own
 tab-switch helpers, the same ones its "Send to img2img" buttons use. Pixels that are
 see-through — a hidden layer, a smaller layer over a hidden Background, an expansion —
-are **sent as they are**: img2img, Inpaint and ImageStitch fill them with the colour in
-*Settings → img2img → For img2img, fill the transparent parts of the input image with
-this color*, and Extras gets white. The setting *Send: fill transparent pixels with* can
-fill them with a colour on the way out instead.
+are **sent as they are**: the picture arrives with real transparency, and at generation
+time the WebUI fills it with the colour in *Settings → img2img → For img2img, fill the
+transparent parts of the input image with this color* (gray unless you change it; white is
+a common choice). Extras gets white. The setting *Send: see-through pixels* can fill them
+with white, the edge colour or black on the way out instead; gray is not offered.
 
 **Undo / Redo** (*Menu → Edit*) take strokes back first, then the bigger steps — Open,
 Apply Crop, Apply Expand, Clear, Invert, every layer step — in the order they happened.
 *Menu → Edit → Reset to original* goes back to the image as it arrived. The canvas's own
 ✠ puts the image and the frame back the way they arrived.
+
+**What keeps it quick.** The canvas is only ever shown a *display copy* of the composite
+— a JPEG, or a WebP when the picture is see-through — while the document on the server
+keeps the real pixels; so a step uploads the strokes, never the picture, the history keeps
+references rather than encodings, and the drag preview is made at screen size and sent
+again only when the pixels changed, not for every move. On a 1664 × 1152 photo a dropped
+layer is redrawn in well under half a second where it took several before. Sends and
+saves still go out as PNG.
 
 **Focus** (*Menu → Focus*) makes the Canvas fill the window; choosing it again, or
 Escape, brings the WebUI back. How it is done, for another extension, is in
@@ -143,7 +160,7 @@ under the canvas.
 | Canvas height when not fitting the window (% of the browser window) | 70 | the canvas's ⛶ fills the window |
 | Mask brush size when the Canvas opens | 25 | same scale as the Inpaint brush |
 | Expand: snap side amounts to a multiple of | 8 | |
-| Send: fill transparent pixels with | Keep transparent | or white, neutral gray, edge colour, black; the WebUI fills kept transparency with its img2img background colour |
+| Send: see-through pixels | Keep transparent | or white, edge colour, black; the WebUI fills kept transparency at generation time with its own img2img background colour (gray unless changed) |
 
 The mask's colour, opacity and high-contrast checkerboard are the Inpaint tab's own
 settings (Settings → img2img), because that is where the mask is going. The canvas's

@@ -395,6 +395,29 @@
     color: var(--error-text-color, #d9534f);
 }
 
+/* The same notice over the canvas, readable when the status line is squeezed. */
+#minipaint_canvas_surface .minipaint-toast {
+    position: absolute;
+    left: 50%;
+    top: 12px;
+    transform: translateX(-50%);
+    z-index: 12;
+    max-width: calc(100% - 24px);
+    padding: 8px 14px;
+    border-radius: 8px;
+    background: rgba(30, 30, 30, 0.92);
+    color: #fff;
+    border-left: 4px solid var(--error-text-color, #d9534f);
+    font-size: 13px;
+    line-height: 1.35;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    pointer-events: none;
+}
+
+#minipaint_canvas_surface .minipaint-toast[hidden] {
+    display: none;
+}
+
 /* -- transform mode: a box around the selection ----------------------- */
 
 #minipaint_canvas_surface .minipaint-transform {

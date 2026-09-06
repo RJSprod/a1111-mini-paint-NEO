@@ -385,8 +385,9 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     # ---- crop: a selection too small is dismissed with a notice; a proper one becomes the frame ----
     tiny = draw_selection(page, uuid, 0.4, 0.4, 0.45, 0.45)
     r.check(f"{label}: a selection under 128 x 128 is dismissed: 'Tiny Debounce' in the status, still nothing selected", tiny is None and debug(page)["frameHidden"] and debug(page)["armed"] and debug(page)["notice"] and "Tiny Debounce" in status_text(page) and "dismissed" in status_text(page), str((tiny, status_text(page))))
+    r.check(f"{label}: and as a toast over the canvas, for when the status line is squeezed", page.evaluate("() => { const t = document.querySelector('#minipaint_canvas_surface .minipaint-toast'); return !!t && !t.hidden && t.textContent.indexOf('Tiny Debounce') === 0 && t.getBoundingClientRect().height > 20; }"))
     drawn = draw_selection(page, uuid, 0.1, 0.1, 0.9, 0.9)
-    r.check(f"{label}: a drag draws the selection, over what was dragged", drawn is not None and not debug(page)["frameHidden"] and debug(page)["frameByUser"] and not debug(page)["notice"]
+    r.check(f"{label}: a drag draws the selection, over what was dragged, and the notice goes", drawn is not None and not debug(page)["frameHidden"] and debug(page)["frameByUser"] and not debug(page)["notice"] and page.evaluate("() => { const t = document.querySelector('#minipaint_canvas_surface .minipaint-toast'); return !t || t.hidden; }")
             and abs(drawn["x0"] - 64) <= 3 and abs(drawn["y0"] - 48) <= 3 and abs(drawn["x1"] - 576) <= 3 and abs(drawn["y1"] - 432) <= 3, str((drawn, status_text(page))))
     r.check(f"{label}: Reselect clears it, and a new drag draws again", page.locator("#minipaint_canvas_crop_reselect").click() is None and wait_for(page, lambda: debug(page)["armed"] and debug(page)["frameHidden"] and debug(page)["armedBy"] == "reselect", timeout=4)
             and (lambda b: b is not None and abs(b["x0"] - 128) <= 3 and abs(b["y0"] - 96) <= 3)(draw_selection(page, uuid, 0.2, 0.2, 0.95, 0.95)), str(debug(page)["box"]))

@@ -125,6 +125,7 @@ window.minipaintCanvas = (function () {
         // a tool switch, the automatic default never enters Crop); the frame
         // in image pixels, so a refit keeps it over the same pixels.
         selecting: null,
+        toastTimer: null,
         armedBy: null,
         frameByUser: false,
         frameImageBox: null,
@@ -797,6 +798,7 @@ window.minipaintCanvas = (function () {
     /* ------------------------------------------------------------------ */
 
     function notice(title, detail) {
+        toast(title + " — " + detail);
         const status = document.getElementById(STATUS_ID);
         if (!status) { return; }
         const line = status.querySelector("p") || status;
@@ -812,6 +814,26 @@ window.minipaintCanvas = (function () {
     function clearNotice() {
         const status = document.getElementById(STATUS_ID);
         if (status) { status.classList.remove("minipaint-status-error"); }
+        toast(null);
+    }
+
+    /** The notice over the canvas as well, since the status line may be
+     * squeezed to a few characters beside a theme's sidebars; it goes by
+     * itself after a moment. */
+    function toast(text) {
+        if (!S.imageContainer) { return; }
+        let element = S.imageContainer.querySelector(".minipaint-toast");
+        if (!element) {
+            element = document.createElement("div");
+            element.className = "minipaint-toast";
+            element.setAttribute("role", "alert");
+            S.imageContainer.appendChild(element);
+        }
+        if (S.toastTimer) { clearTimeout(S.toastTimer); S.toastTimer = null; }
+        if (!text) { element.hidden = true; return; }
+        element.textContent = text;
+        element.hidden = false;
+        S.toastTimer = setTimeout(function () { element.hidden = true; S.toastTimer = null; }, 3500);
     }
 
     /** The server rewrites the status line with every reply; a notice's

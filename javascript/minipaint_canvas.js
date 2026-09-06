@@ -53,6 +53,10 @@ window.minipaintCanvas = (function () {
     const BOTTOM_ROOM = 8;
     const LAYER_MOVE_ID = "minipaint_canvas_layer_move";
     const LAYER_TRANSFORM_ID = "minipaint_canvas_layer_transform";
+    const STATUS_ID = "minipaint_canvas_status";
+    // A crop selection smaller than this (image pixels, either side) is dismissed.
+    const MIN_CROP = 128;
+    const MIN_SELECTION = 4;
     const TRANSFORM_CLASS = "minipaint-transforming";
     // Edges snap to the canvas's edges and to other layers' when this close (screen pixels).
     const SNAP_PX = 14;
@@ -115,6 +119,15 @@ window.minipaintCanvas = (function () {
         pinch: null,
         pan: null,
         transform: null,
+        transformNext: false,
+        // A drag drawing a new selection; why there is none (a fresh Crop, or
+        // Reselect); whether the user made the frame (a user's frame survives
+        // a tool switch, the automatic default never enters Crop); the frame
+        // in image pixels, so a refit keeps it over the same pixels.
+        selecting: null,
+        armedBy: null,
+        frameByUser: false,
+        frameImageBox: null,
         transformEl: null,
         transformBox: null,
         transformSize: null,
@@ -203,6 +216,7 @@ window.minipaintCanvas = (function () {
         buildBounds();
         buildFrame();
         buildTransform();
+        watchStatus();
         buildMenu();
         bindGestures();
         bindLayerList();
@@ -381,6 +395,7 @@ window.minipaintCanvas = (function () {
                 trimHistory();
                 refreshFrame(!kept);
                 refreshOverlays();
+                maybeStartTransform();
             }, 0);
         };
 
@@ -523,7 +538,7 @@ window.minipaintCanvas = (function () {
         if (!i || !i.img) { return; }
         i.adjustInitialPositionAndScale();
         i.drawImage();
-        refreshFrame(true);
+        refreshFrame("refit");
     }
 
     /* ------------------------------------------------------------------ */
@@ -536,6 +551,7 @@ window.minipaintCanvas = (function () {
         // A mode's panel is a flyout beside the canvas: choosing a mode
         // brings the rail back if it was put away.
         if (mode !== S.mode && railHidden()) { setRail(true); }
+        const entering = mode !== S.mode;
         S.mode = mode;
         markTool(mode);
         const i = S.instance;
@@ -545,8 +561,12 @@ window.minipaintCanvas = (function () {
         } else {
             i.no_scribbles = true;
         }
+        // Crop opens with nothing selected unless the user drew the frame:
+        // the first drag draws one. A default frame is never a crop.
+        if (mode === "crop" && entering && !S.frameByUser) { arm("crop"); }
         refreshFrame(false);
         refreshOverlays();
+        maybeStartTransform();
     }
 
     /** The bar's tool buttons: the current one is marked, each says its name. */
@@ -653,19 +673,155 @@ window.minipaintCanvas = (function () {
         // frame later so the refit has happened.
         if (typeof ResizeObserver === "function") {
             new ResizeObserver(function () {
-                requestAnimationFrame(function () { fitHeight(); refreshFrame(true); });
+                requestAnimationFrame(function () { fitHeight(); refreshFrame("refit"); });
             }).observe(S.imageContainer);
         }
     }
 
     /** Show the frame in Crop mode over an image; reset it to the whole
      * image (at the chosen aspect) when asked, else keep it where it is. */
+    /**
+     * The frame, for the mode: shown in Crop and Layers over a picture (not
+     * while transforming). ``reset`` true is a new picture - Crop starts
+     * with nothing selected and the first drag draws the frame, Layers with
+     * the whole picture; "refit" keeps the selection over the same pixels
+     * after the picture was refitted; false keeps the frame as it is.
+     */
     function refreshFrame(reset) {
         if (!S.frame) { return; }
+        if (reset === true) {
+            // A new picture: whatever frame there was belonged to the old one.
+            S.selecting = null;
+            S.frameRect = null;
+            S.frameImageBox = null;
+            S.frameByUser = false;
+            S.armedBy = null;
+            if (S.frameBox) { S.frameBox.classList.remove("minipaint-frame-drawing"); }
+        }
         const show = (S.mode === "crop" || S.mode === "layers") && hasImage() && !S.transform;
-        S.frame.hidden = !show;
-        if (show) { layoutFrame(reset || !S.frameRect); }
+        if (!show) { S.frame.hidden = true; updateReadout(); return; }
+        if (reset === "refit") {
+            if (!S.frameImageBox) { S.frame.hidden = true; updateReadout(); return; }
+            S.frameRect = rectOfBox(S.frameImageBox);
+            layoutFrame(false);
+        } else if (reset) {
+            if (S.mode === "crop") { arm("crop"); return; }
+            layoutFrame(true);
+        } else if (S.frameRect) {
+            layoutFrame(false);
+        } else if (S.mode === "layers" && S.armedBy !== "reselect") {
+            layoutFrame(true);
+        } else {
+            S.frame.hidden = true;
+            updateReadout();
+            return;
+        }
+        S.frame.hidden = false;
         updateReadout();
+    }
+
+    /** No selection: the frame is gone and the next drag on the canvas draws one. */
+    function arm(by) {
+        S.selecting = null;
+        S.frameRect = null;
+        S.frameImageBox = null;
+        S.frameByUser = false;
+        S.armedBy = by;
+        if (S.frame) { S.frame.hidden = true; }
+        if (S.frameBox) { S.frameBox.classList.remove("minipaint-frame-drawing"); }
+        updateReadout();
+    }
+
+    /** Reselect: the frame goes away; the next drag draws a new one. */
+    function reselect() {
+        if (!hasImage()) { return false; }
+        if (S.transform) { endTransform(true); }
+        if (S.layerDrag) { endLayerDrag(true); }
+        arm("reselect");
+        clearNotice();
+        return true;
+    }
+
+    /** A box in image pixels as a frame rectangle in container pixels. */
+    function rectOfBox(box) {
+        const i = S.instance;
+        const s = i.imgScale;
+        return { left: i.imgX + box.x0 * s, top: i.imgY + box.y0 * s, width: (box.x1 - box.x0) * s, height: (box.y1 - box.y0) * s };
+    }
+
+    /** The drag drawing a selection follows the pointer from where it went
+     * down; the aspect, if set, shapes it. */
+    function drawSelection(point) {
+        const sel = S.selecting;
+        const size = containerSize();
+        const x = clamp(point.x, 0, size.w);
+        const y = clamp(point.y, 0, size.h);
+        let w = Math.abs(x - sel.x0);
+        let h = Math.abs(y - sel.y0);
+        if (S.aspect > 0) {
+            if (w / Math.max(1, h) > S.aspect) { h = w / S.aspect; } else { w = h * S.aspect; }
+        }
+        S.frameRect = { left: x >= sel.x0 ? sel.x0 : sel.x0 - w, top: y >= sel.y0 ? sel.y0 : sel.y0 - h, width: w, height: h };
+        S.frame.hidden = false;
+        S.frameBox.classList.add("minipaint-frame-drawing");
+        applyFrame();
+    }
+
+    /** The finger came up: the rectangle becomes the frame, unless it is too
+     * small - a crop under 128 × 128 is dismissed with a notice. */
+    function finishSelection() {
+        S.selecting = null;
+        S.frameBox.classList.remove("minipaint-frame-drawing");
+        const i = S.instance;
+        const box = cropBoxObject();
+        const minW = S.mode === "crop" ? Math.min(MIN_CROP, i.orgWidth) : MIN_SELECTION;
+        const minH = S.mode === "crop" ? Math.min(MIN_CROP, i.orgHeight) : MIN_SELECTION;
+        if (!box || box.x1 - box.x0 < minW || box.y1 - box.y0 < minH) {
+            const by = S.armedBy || (S.mode === "crop" ? "crop" : "reselect");
+            arm(by);
+            if (S.mode === "crop") {
+                notice("Tiny Debounce", "the selection covered less than " + MIN_CROP + " × " + MIN_CROP + " pixels of the picture and was dismissed; draw a bigger one.");
+            }
+            return;
+        }
+        S.armedBy = null;
+        S.frameByUser = true;
+        layoutFrame(false);
+        S.frame.hidden = false;
+        clearNotice();
+        updateReadout();
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* A notice in the status line, written here, gone with the next reply  */
+    /* ------------------------------------------------------------------ */
+
+    function notice(title, detail) {
+        const status = document.getElementById(STATUS_ID);
+        if (!status) { return; }
+        const line = status.querySelector("p") || status;
+        line.textContent = "";
+        const strong = document.createElement("strong");
+        strong.textContent = title;
+        line.appendChild(strong);
+        line.appendChild(document.createTextNode(" — " + detail));
+        line.dataset.minipaintNotice = "1";
+        status.classList.add("minipaint-status-error");
+    }
+
+    function clearNotice() {
+        const status = document.getElementById(STATUS_ID);
+        if (status) { status.classList.remove("minipaint-status-error"); }
+    }
+
+    /** The server rewrites the status line with every reply; a notice's
+     * colouring goes with the text it coloured. */
+    function watchStatus() {
+        const status = document.getElementById(STATUS_ID);
+        if (!status || typeof MutationObserver !== "function") { return; }
+        new MutationObserver(function () {
+            if (!status.querySelector("[data-minipaint-notice]")) { clearNotice(); }
+        }).observe(status, { childList: true, subtree: true, characterData: true });
     }
 
     function containerSize() {
@@ -709,6 +865,8 @@ window.minipaintCanvas = (function () {
         rect.left = clamp(rect.left, 0, size.w - rect.width);
         rect.top = clamp(rect.top, 0, size.h - rect.height);
         S.frameRect = rect;
+        S.armedBy = null;
+        if (reset) { S.frameByUser = false; }
         applyFrame();
     }
 
@@ -729,12 +887,14 @@ window.minipaintCanvas = (function () {
         if (!r || !S.frameDrag) { return; }
         r.left = clamp(S.frameDrag.left + dx, 0, Math.max(0, size.w - r.width));
         r.top = clamp(S.frameDrag.top + dy, 0, Math.max(0, size.h - r.height));
+        S.frameByUser = true;
         applyFrame();
     }
 
     /** Drag one corner; the opposite corner stays put; aspect is kept if set. */
     function resizeFrame(corner, point) {
         const r = S.frameRect;
+        S.frameByUser = true;
         const size = containerSize();
         if (!r) { return; }
         const anchorX = corner.indexOf("l") !== -1 ? r.left + r.width : r.left;
@@ -773,7 +933,18 @@ window.minipaintCanvas = (function () {
             if (parts[0] > 0 && parts[1] > 0) { aspect = parts[0] / parts[1]; }
         }
         S.aspect = aspect;
-        refreshFrame(true);
+        // A frame that exists keeps its place and takes the shape: the
+        // largest box of that shape inside it, centred. None: the next
+        // drawn one takes it.
+        const r = S.frameRect;
+        if (r && aspect > 0) {
+            let w = r.width;
+            let h = r.height;
+            if (w / h > aspect) { w = h * aspect; } else { h = w / aspect; }
+            S.frameRect = { left: r.left + (r.width - w) / 2, top: r.top + (r.height - h) / 2, width: w, height: h };
+            layoutFrame(false);
+            updateReadout();
+        }
     }
 
     /** The frame in image pixels, clamped to the image. Null when it misses. */
@@ -802,6 +973,7 @@ window.minipaintCanvas = (function () {
     function updateReadout() {
         if (!S.frameSize) { return; }
         const box = cropBoxObject();
+        S.frameImageBox = S.frameRect ? box : null;
         S.frameSize.textContent = box ? (box.x1 - box.x0) + " × " + (box.y1 - box.y0) : "";
     }
 
@@ -1091,6 +1263,20 @@ window.minipaintCanvas = (function () {
     function refreshOverlays() {
         positionOverlay();
         positionBounds();
+        maybeStartTransform();
+    }
+
+    /**
+     * A preview that asks for it (a picture just added as a layer wants
+     * placing) opens transform mode - once the new picture has been drawn,
+     * since a load ends any transform in progress.
+     */
+    function maybeStartTransform() {
+        const p = layerPreview();
+        if (p && p.transform) { p.transform = false; S.transformNext = true; }
+        if (!S.transformNext || S.transform) { return; }
+        if (S.loaded <= S.marker) { return; }
+        if (startTransform()) { S.transformNext = false; }
     }
 
     /** Whether a pointer is on the selected layers (with a little slack). */
@@ -1496,7 +1682,18 @@ window.minipaintCanvas = (function () {
                 // even when it is lifted somewhere else on the page.
                 try { c.setPointerCapture(event.pointerId); } catch (e) { /* optional */ }
                 if (S.layerDrag && !S.layerDrag.done) { endLayerDrag(true); }
+                if (S.selecting) { arm(S.armedBy || "reselect"); }
                 startPinch();
+                return;
+            }
+            // Nothing selected: the drag draws the selection.
+            if (S.pointers.size === 1 && S.frameRect === null && (S.mode === "crop" || S.mode === "layers") &&
+                !S.transform && !(S.layerDrag && S.layerDrag.done)) {
+                event.preventDefault();
+                event.stopPropagation();
+                const point = containerPoint(event);
+                S.selecting = { id: event.pointerId, x0: point.x, y0: point.y };
+                try { c.setPointerCapture(event.pointerId); } catch (e) { /* optional */ }
                 return;
             }
             if (S.pointers.size === 1 && S.mode === "layers") {
@@ -1520,6 +1717,11 @@ window.minipaintCanvas = (function () {
         c.addEventListener("pointermove", function (event) {
             if (!S.pointers.has(event.pointerId)) { return; }
             S.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+            if (S.selecting && S.selecting.id === event.pointerId) {
+                event.preventDefault();
+                drawSelection(containerPoint(event));
+                return;
+            }
             if (S.pinch) {
                 event.preventDefault();
                 updatePinch();
@@ -1541,6 +1743,7 @@ window.minipaintCanvas = (function () {
 
         function end(event) {
             S.pointers.delete(event.pointerId);
+            if (S.selecting && S.selecting.id === event.pointerId) { finishSelection(); }
             if (S.pinch && S.pointers.size < 2) { S.pinch = null; }
             if (S.layerDrag && !S.layerDrag.done && S.layerDrag.id === event.pointerId) { finishLayerDrag(); }
             if (S.pan && S.pan.id === event.pointerId) { S.pan = null; }
@@ -1557,7 +1760,7 @@ window.minipaintCanvas = (function () {
         c.addEventListener("click", function (event) {
             const refit = event.target && event.target.closest &&
                 event.target.closest('[id^="centerButton_"], [id^="resetButton_"]');
-            requestAnimationFrame(function () { if (refit) { refreshFrame(true); } else { updateReadout(); } });
+            requestAnimationFrame(function () { if (refit) { refreshFrame("refit"); } else { updateReadout(); } });
         });
     }
 
@@ -1570,7 +1773,9 @@ window.minipaintCanvas = (function () {
                  noScribbles: !!i.no_scribbles, alpha: i.scribbleAlpha, width: i.scribbleWidth,
                  history: Array.isArray(i.history) ? i.history.length : 0, historyIndex: i.historyIndex, echo: !!S.echoValue,
                  height: parseFloat(S.container.style.height) || 0, fitting: S.fit,
-                 frameHidden: !S.frame || S.frame.hidden,
+                 frameHidden: !S.frame || S.frame.hidden, armed: S.frameRect === null, armedBy: S.armedBy, frameByUser: S.frameByUser,
+                 selecting: !!S.selecting, transformNext: S.transformNext,
+                 notice: !!(document.getElementById(STATUS_ID) && document.getElementById(STATUS_ID).classList.contains("minipaint-status-error")),
                  layerDrag: S.layerDrag ? { dx: S.layerDrag.dx, dy: S.layerDrag.dy, done: S.layerDrag.done } : null,
                  transform: S.transform ? { x: S.transform.x, y: S.transform.y, w: S.transform.w, h: S.transform.h, done: S.transform.done, dragging: !!S.transform.drag } : null,
                  overlay: !!(S.overlay && !S.overlay.hidden), keepView: !!S.keepView, preview: !!layerPreview(),
@@ -1680,6 +1885,9 @@ window.minipaintCanvas = (function () {
         toggleRail: toggleRail,
         toggleMenu: toggleMenu,
         startTransform: startTransform,
+        reselect: reselect,
+        pressHidden: pressHidden,
+        notice: notice,
         finishTransform: finishTransform,
         endTransform: endTransform,
         closeMenu: closeMenu,

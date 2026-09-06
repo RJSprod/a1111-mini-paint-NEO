@@ -87,6 +87,8 @@ def run() -> Results:
                    "minipaint_canvas_panel_crop", "minipaint_canvas_panel_mask", "minipaint_canvas_panel_expand",
                    "minipaint_canvas_panel_layers", "minipaint_canvas_expand_fill", "minipaint_canvas_expand_snap", "minipaint_canvas_expand_num_left",
                    "minipaint_canvas_layer_list", "minipaint_canvas_layer_action", "minipaint_canvas_layer_new",
+                   "minipaint_canvas_layer_add", "minipaint_canvas_layer_add_btn", "minipaint_canvas_layer_reselect", "minipaint_canvas_crop_reselect",
+                   "minipaint_canvas_layer_transform", "minipaint_canvas_layer_transform_start", "minipaint_canvas_layer_transform_done",
                    "minipaint_canvas_layer_merge", "minipaint_canvas_layer_delete", "minipaint_canvas_layer_center",
                    "minipaint_canvas_layer_scale", "minipaint_canvas_layer_half", "minipaint_canvas_layer_full", "minipaint_canvas_layer_double",
                    "minipaint_canvas_layer_opacity", "minipaint_canvas_layer_name", "minipaint_canvas_layer_rename",
@@ -345,6 +347,13 @@ def run() -> Results:
     hidden_presses = [by_elem(f"minipaint_canvas_{name}") for name in ("undo", "redo", "reset", "save")]
     r.check("the hidden Undo, Redo, Reset and Save buttons each have one event for the menu to press", all(len(d) == 1 and d[0]["backend_fn"] for d in hidden_presses))
     r.check("the hidden Open button is an upload button the menu can press", component("minipaint_canvas_open")["type"] == "uploadbutton" and len(by_elem("minipaint_canvas_open", "upload")) == 1)
+    add_upload = by_elem("minipaint_canvas_layer_add", "upload")
+    r.check("Add image as layer is a hidden upload button whose file is a view-keeping layer step", component("minipaint_canvas_layer_add")["type"] == "uploadbutton" and component("minipaint_canvas_layer_add")["props"].get("visible") is False
+            and len(add_upload) == 1 and add_upload[0]["backend_fn"] and "mark(true)" in add_upload[0]["js"] and len(chain(add_upload[0])) == 3 and background["id"] not in add_upload[0]["inputs"])
+    add_press = by_elem("minipaint_canvas_layer_add_btn", "click")
+    r.check("the panel's Add image button only presses it, in the browser", len(add_press) == 1 and not add_press[0]["backend_fn"] and "pressHidden('minipaint_canvas_layer_add')" in add_press[0]["js"])
+    r.check("Reselect in Crop and in Layers is browser-only", all(len(d) == 1 and not d[0]["backend_fn"] and "reselect()" in d[0]["js"] for d in (by_elem("minipaint_canvas_crop_reselect", "click"), by_elem("minipaint_canvas_layer_reselect", "click"))))
+    r.check("entering and leaving transform mode are browser-only", all(len(d) == 1 and not d[0]["backend_fn"] and word in d[0]["js"] for d, word in ((by_elem("minipaint_canvas_layer_transform_start", "click"), "startTransform"), (by_elem("minipaint_canvas_layer_transform_done", "click"), "finishTransform"))))
     r.check("no javascript runs at startup apart from attaching the canvases",
             all("ForgeCanvas" in (d.get("js") or "") or "attach" in (d.get("js") or "") for d in deps if any(t[1] == "load" for t in d["targets"])))
 

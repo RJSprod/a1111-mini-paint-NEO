@@ -383,6 +383,18 @@
 #minipaint_canvas_surface .minipaint-frame-handle.bl::after { right: 11px; top: 11px; border-right: none; border-top: none; }
 #minipaint_canvas_surface .minipaint-frame-handle.br::after { left: 11px; top: 11px; border-left: none; border-top: none; }
 
+/* -- drawing a selection: the frame while the finger is still down --- */
+
+#minipaint_canvas_surface .minipaint-frame-box.minipaint-frame-drawing .minipaint-frame-handle,
+#minipaint_canvas_surface .minipaint-frame-box.minipaint-frame-drawing .minipaint-frame-grip {
+    display: none;
+}
+
+/* A notice the browser writes into the status line (a dismissed tiny selection). */
+#minipaint_canvas_root .minipaint-status.minipaint-status-error p {
+    color: var(--error-text-color, #d9534f);
+}
+
 /* -- transform mode: a box around the selection ----------------------- */
 
 #minipaint_canvas_surface .minipaint-transform {

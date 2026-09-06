@@ -176,7 +176,9 @@ class Document:
         self.preview_sent: typing.Optional[tuple] = None
         self._preview_src_key: typing.Optional[tuple] = None
         self._underlay_key: typing.Optional[tuple] = None
-        self._underlay_src: str = ""
+        # Set when the next preview should open the browser's transform mode
+        # (a picture just added as a layer wants placing); consumed by it.
+        self.transform_next: bool = False
         # The layers panel as last sent to the browser, so it is only re-sent
         # when it changed.
         self.layer_list_sent: typing.Optional[str] = None
@@ -474,6 +476,34 @@ class Document:
         self._touch()
         return layer
 
+    def add_picture(self, image: Image.Image, name: typing.Optional[str] = None) -> Layer:
+        """A picture dropped in as a layer of its own: fitted to the canvas
+        - scaled, up or down, until it touches it on one side - and
+        centred, from its own pixels, so a resize by hand later starts from
+        them. The canvas keeps its size."""
+        picture = imaging.to_rgba(image)
+        width, height = self.canvas_size
+        factor = min(width / picture.width, height / picture.height)
+        size = (max(1, int(round(picture.width * factor))), max(1, int(round(picture.height * factor))))
+        if size == picture.size:
+            fitted, source, scale = picture, None, 1.0
+        else:
+            fitted, source, scale = picture.resize(size, LANCZOS), picture, factor
+        layer = Layer(
+            fitted,
+            (width - fitted.width) // 2,
+            (height - fitted.height) // 2,
+            self.unique_name(name) if name else self.next_layer_name(),
+            source=source,
+            scale=scale,
+        )
+        index = min(self.active + 1, len(self.layers)) if self.layers else 0
+        self.layers.insert(index, layer)
+        self.active = index
+        self.selected = [index]
+        self._touch()
+        return layer
+
     def delete_selected(self) -> typing.List[str]:
         """Every selected layer, as long as one layer is left."""
         chosen = self.selected_layers()
@@ -726,6 +756,9 @@ class Document:
             "canvas": list(self.canvas_size),
             "others": self.other_boxes(),
         }
+        if self.transform_next:
+            payload["transform"] = True
+            self.transform_next = False
         key = (tuple(self.selected_indices()), self.pixel_version, tuple((layer.x - x0, layer.y - y0) for layer in chosen))
         if key != self._preview_src_key:
             shifted = [Layer(layer.image, layer.x - x0, layer.y - y0, layer.name, layer.visible, layer.opacity) for layer in chosen]

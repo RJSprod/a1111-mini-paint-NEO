@@ -220,6 +220,20 @@ def menu_click(page, text):
     page.locator(".minipaint-menu .minipaint-menu-item", has_text=re.compile(r"^(\u2713 |\u2039 )?" + re.escape(text) + r"( \u203a|  \u00b7 suggested)?$")).first.click()
 
 
+def draw_selection(page, uuid, x0=0.1, y0=0.1, x1=0.9, y1=0.9, steps=10):
+    """Drag over the picture from one fraction of it to another: draws the frame when nothing is selected."""
+    img = image_box(page, uuid)
+    drag(page, img["x"] + img["width"] * x0, img["y"] + img["height"] * y0, img["x"] + img["width"] * x1, img["y"] + img["height"] * y1, steps=steps)
+    time.sleep(0.2)
+    return debug(page)["box"]
+
+
+def layer_geometry(page, name):
+    """(x, y, w, h) of a layer as the status line describes it."""
+    m = re.search(re.escape(name) + r": (\d+) × (\d+) at \((-?\d+), (-?\d+)\)", status_text(page))
+    return (int(m.group(3)), int(m.group(4)), int(m.group(1)), int(m.group(2))) if m else None
+
+
 def snapped(page, x, y, w, h):
     """Where a layer of this size dropped at (x, y) lands: the browser snaps
     an edge that comes within 14 screen pixels of the canvas's or another
@@ -361,20 +375,29 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     r.check(f"{label}: status reports the receive", wait_for(page, lambda: "Received from txt2img" in status_text(page)), status_text(page))
     r.check(f"{label}: the canvas shows the 640x480 image", wait_for(page, lambda: debug(page)["orgWidth"] == 640 and debug(page)["orgHeight"] == 480), str(debug(page)))
     r.check(f"{label}: the image is fitted into the box", wait_for(page, lambda: (image_box(page, uuid) or {}).get("width", 0) > 300), str(image_box(page, uuid)))
-    r.check(f"{label}: the crop frame covers the whole image", wait_for(page, lambda: debug(page)["box"] == {"x0": 0, "y0": 0, "x1": 640, "y1": 480} and not debug(page)["frameHidden"]), str(debug(page)))
+    r.check(f"{label}: Crop opens with nothing selected: no frame, no box, the next drag draws one", wait_for(page, lambda: debug(page)["frameHidden"] and debug(page)["box"] is None and debug(page)["armed"] and debug(page)["armedBy"] == "crop"), str(debug(page)))
     r.check(f"{label}: the canvas outline marks the picture's edge", wait_for(page, lambda: (lambda b, i: bool(b) and bool(i) and abs(b["width"] - i["width"]) < 2 and abs(b["height"] - i["height"]) < 2)(debug(page)["bounds"], image_box(page, uuid))), str(debug(page)["bounds"]))
     r.check(f"{label}: the picture is Layer 1 over a Background", wait_for(page, lambda: layer_rows(page) == [["Layer 1", True, True, False], ["Background", False, False, False]]), str(layer_rows(page)))
     time.sleep(1.2)
     r.check(f"{label}: the echo of the sent image did not count as an opened one", "Received from txt2img" in status_text(page) and "Opened" not in status_text(page), status_text(page))
     r.check(f"{label}: stroke history starts fresh", debug(page)["history"] == 1, str(debug(page)["history"]))
 
-    # ---- crop with the mouse: drag the bottom-right handle inwards, then move the frame by its grip ----
+    # ---- crop: a selection too small is dismissed with a notice; a proper one becomes the frame ----
+    tiny = draw_selection(page, uuid, 0.4, 0.4, 0.45, 0.45)
+    r.check(f"{label}: a selection under 128 x 128 is dismissed: 'Tiny Debounce' in the status, still nothing selected", tiny is None and debug(page)["frameHidden"] and debug(page)["armed"] and debug(page)["notice"] and "Tiny Debounce" in status_text(page) and "dismissed" in status_text(page), str((tiny, status_text(page))))
+    drawn = draw_selection(page, uuid, 0.1, 0.1, 0.9, 0.9)
+    r.check(f"{label}: a drag draws the selection, over what was dragged", drawn is not None and not debug(page)["frameHidden"] and debug(page)["frameByUser"] and not debug(page)["notice"]
+            and abs(drawn["x0"] - 64) <= 3 and abs(drawn["y0"] - 48) <= 3 and abs(drawn["x1"] - 576) <= 3 and abs(drawn["y1"] - 432) <= 3, str((drawn, status_text(page))))
+    r.check(f"{label}: Reselect clears it, and a new drag draws again", page.locator("#minipaint_canvas_crop_reselect").click() is None and wait_for(page, lambda: debug(page)["armed"] and debug(page)["frameHidden"] and debug(page)["armedBy"] == "reselect", timeout=4)
+            and (lambda b: b is not None and abs(b["x0"] - 128) <= 3 and abs(b["y0"] - 96) <= 3)(draw_selection(page, uuid, 0.2, 0.2, 0.95, 0.95)), str(debug(page)["box"]))
+    first = debug(page)["box"]
+    # then: drag the bottom-right handle inwards, and move the frame by its grip
     br = handle_center(page, "br")
     r.check(f"{label}: the frame has handles", br is not None)
     if br:
         drag(page, br[0], br[1], br[0] - 120, br[1] - 90)
     box = debug(page)["box"]
-    r.check(f"{label}: dragging a handle shrinks the frame", box and box["x1"] < 640 and box["y1"] < 480 and box["x0"] == 0, str(box))
+    r.check(f"{label}: dragging a handle shrinks the frame", box and box["x1"] < first["x1"] and box["y1"] < first["y1"] and box["x0"] == first["x0"], str((first, box)))
     readout = page.locator("#minipaint_canvas_surface .minipaint-frame-size").inner_text()
     r.check(f"{label}: the readout shows the crop size", readout == f"{box['x1'] - box['x0']} × {box['y1'] - box['y0']}", readout)
     grip = page.locator("#minipaint_canvas_surface .minipaint-frame-grip").first.bounding_box()
@@ -389,12 +412,14 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     r.check(f"{label}: apply crop reports a smaller image", wait_for(page, lambda: "Cropped to" in status_text(page)), status_text(page))
     expected = f"Cropped to {box['x1'] - box['x0']} × {box['y1'] - box['y0']}"
     r.check(f"{label}: the crop is exactly the frame", expected in status_text(page), status_text(page))
-    r.check(f"{label}: the canvas shows the cropped image and the frame resets to it",
-            wait_for(page, lambda: debug(page)["orgWidth"] == box["x1"] - box["x0"] and debug(page)["box"] == {"x0": 0, "y0": 0, "x1": box["x1"] - box["x0"], "y1": box["y1"] - box["y0"]}), str(debug(page)))
+    r.check(f"{label}: the canvas shows the cropped image and nothing is selected again",
+            wait_for(page, lambda: debug(page)["orgWidth"] == box["x1"] - box["x0"] and debug(page)["box"] is None and debug(page)["frameHidden"] and debug(page)["armed"]), str(debug(page)))
 
     # ---- undo the crop structurally, then crop again: the sequence that failed in the field ----
     menu_pick(page, "Edit", "Undo")
     r.check(f"{label}: undo restores 640x480", wait_for(page, lambda: "Undid crop" in status_text(page) and debug(page)["orgWidth"] == 640), status_text(page))
+    time.sleep(0.4)
+    draw_selection(page, uuid, 0.15, 0.15, 0.8, 0.8)
     br = handle_center(page, "br")
     if br:
         drag(page, br[0], br[1], br[0] - 60, br[1] - 40)
@@ -404,11 +429,19 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     menu_pick(page, "Edit", "Undo")
     r.check(f"{label}: and can be undone again", wait_for(page, lambda: "Undid crop" in status_text(page) and debug(page)["orgWidth"] == 640), status_text(page))
 
-    # ---- aspect: the frame follows the dropdown ----
+    # ---- aspect: a drawn frame takes the shape in place; the next drawn one has it ----
+    time.sleep(0.4)
+    wide = draw_selection(page, uuid, 0.05, 0.2, 0.95, 0.8)
     pick_option(page, "#minipaint_canvas_crop_aspect", "1:1")
-    r.check(f"{label}: a 1:1 aspect squares the frame", wait_for(page, lambda: (lambda b: b and b["x1"] - b["x0"] == b["y1"] - b["y0"] == 480)(debug(page)["box"])), str(debug(page)["box"]))
+    r.check(f"{label}: a 1:1 aspect squares the drawn frame in place, no bigger than it was", wait_for(page, lambda: (lambda b: bool(b) and abs((b["x1"] - b["x0"]) - (b["y1"] - b["y0"])) <= 1 and b["y1"] - b["y0"] <= wide["y1"] - wide["y0"] + 1 and b["x0"] > wide["x0"])(debug(page)["box"])), str((wide, debug(page)["box"])))
+    square = debug(page)["box"]
     pick_option(page, "#minipaint_canvas_crop_aspect", "Free")
-    r.check(f"{label}: free aspect covers the image again", wait_for(page, lambda: debug(page)["box"] == {"x0": 0, "y0": 0, "x1": 640, "y1": 480}))
+    r.check(f"{label}: free aspect leaves the frame where it is", wait_for(page, lambda: debug(page)["box"] == square, timeout=3), str(debug(page)["box"]))
+    pick_option(page, "#minipaint_canvas_crop_aspect", "1:1")
+    page.locator("#minipaint_canvas_crop_reselect").click()
+    r.check(f"{label}: with an aspect set, a drawn selection has that shape", wait_for(page, lambda: debug(page)["armed"], timeout=3) and (lambda b: bool(b) and abs((b["x1"] - b["x0"]) - (b["y1"] - b["y0"])) <= 1)(draw_selection(page, uuid, 0.1, 0.1, 0.7, 0.9)), str(debug(page)["box"]))
+    pick_option(page, "#minipaint_canvas_crop_aspect", "Free")
+    r.check(f"{label}: a user's frame survives a trip through another tool, the automatic one never enters Crop", (lambda kept: tool(page, "mask") is None and tool(page, "crop") is None and wait_for(page, lambda: debug(page)["box"] == kept, timeout=3))(debug(page)["box"]), str(debug(page)["box"]))
 
     # ---- touch: one finger pans the image under the frame, two fingers pinch ----
     before = debug(page)
@@ -423,14 +456,17 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     pinched = debug(page)
     r.check(f"{label}: two fingers pinch to zoom", pinched["imgScale"] > after["imgScale"] * 1.5, str((after["imgScale"], pinched["imgScale"])))
     page.locator(f"#centerButton_{uuid}").click()
-    r.check(f"{label}: the canvas's own fit button refits the image and the frame", wait_for(page, lambda: abs(debug(page)["imgScale"] - before["imgScale"]) < 0.01 and debug(page)["box"] == {"x0": 0, "y0": 0, "x1": 640, "y1": 480}))
+    r.check(f"{label}: the canvas's own fit button refits the image and keeps the selection over the same pixels", wait_for(page, lambda: abs(debug(page)["imgScale"] - before["imgScale"]) < 0.01 and debug(page)["box"] == pinched["box"]), str((pinched["box"], debug(page)["box"])))
 
-    # ---- touch crop: a finger on a handle ----
+    # ---- touch crop: a finger on a handle of a freshly drawn selection ----
+    page.locator("#minipaint_canvas_crop_reselect").click()
+    wait_for(page, lambda: debug(page)["armed"], timeout=3)
+    full = draw_selection(page, uuid, 0.0, 0.0, 1.0, 1.0)
     tl = handle_center(page, "tl")
     if tl:
         touch(page, [(tl[0], tl[1], tl[0] + 80, tl[1] + 60)])
     box = debug(page)["box"]
-    r.check(f"{label}: a finger drags a handle", box and box["x0"] > 0 and box["y0"] > 0 and box["x1"] == 640, str(box))
+    r.check(f"{label}: a finger drags a handle", full and box and box["x0"] > full["x0"] and box["y0"] > full["y0"] and box["x1"] == full["x1"] and full["x1"] >= 638, str((full, box)))
     page.locator("#minipaint_canvas_crop_apply").click()
     r.check(f"{label}: a finger can crop", wait_for(page, lambda: f"Cropped to {box['x1'] - box['x0']} × {box['y1'] - box['y0']}" in status_text(page)), status_text(page))
     cropped = (box["x1"] - box["x0"], box["y1"] - box["y0"])
@@ -512,6 +548,10 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     r.check(f"{label}: the layer list has the picture over the Background, the picture selected", wait_for(page, lambda: layer_rows(page) == [["Layer 1", True, True, False], ["Background", False, False, False]]), str(layer_rows(page)))
     # (the picture is narrower than the canvas since the expansion: the outline is inside the canvas's, most of its width)
     r.check(f"{label}: the selected layer is outlined on the canvas", wait_for(page, lambda: (lambda s, b: bool(s) and bool(b) and s["left"] >= b["left"] - 1 and s["left"] + s["width"] <= b["left"] + b["width"] + 1 and s["width"] > b["width"] * 0.5)(debug(page)["selection"], debug(page)["bounds"])), str((debug(page)["selection"], debug(page)["bounds"])))
+    page.locator("#minipaint_canvas_layer_reselect").click()
+    r.check(f"{label}: Reselect in Layers clears the selection frame", wait_for(page, lambda: debug(page)["armed"] and debug(page)["frameHidden"] and debug(page)["armedBy"] == "reselect", timeout=4), str(debug(page)))
+    redrawn = draw_selection(page, uuid, 0.05, 0.05, 0.95, 0.95)
+    r.check(f"{label}: and the next drag draws a new one instead of moving the layer", redrawn is not None and debug(page)["frameByUser"] and not debug(page)["frameHidden"] and "Moved" not in status_text(page).split("—")[-1], str((redrawn, status_text(page))))
     before = debug(page)
     tl = handle_center(page, "tl")
     if tl:
@@ -521,6 +561,7 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     r.check(f"{label}: a selection becomes a new layer without a reload", wait_for(page, lambda: "Layer 2 holds the selection" in status_text(page)) and debug(page)["loaded"] == before["loaded"], status_text(page))
     r.check(f"{label}: the list shows it on top, selected, the others not", wait_for(page, lambda: layer_rows(page) == [["Layer 2", True, True, False], ["Layer 1", False, False, False], ["Background", False, False, False]]), str(layer_rows(page)))
     r.check(f"{label}: the browser got the layer to drag and the underlay, at display size", wait_for(page, lambda: debug(page)["preview"] and page.evaluate("() => { const p = JSON.parse(document.querySelector('#minipaint_canvas_layer_preview textarea').value || '{}'); const u = document.querySelector('#minipaint_canvas_layer_underlay textarea').value; return typeof p.src === 'string' && p.src.startsWith('data:image/') && Array.isArray(p.canvas) && Array.isArray(p.others) && u.startsWith('data:image/') && u.length < 400000; }")))
+    placed = layer_geometry(page, "Layer 2")
     r.check(f"{label}: the outline moved to the new layer", wait_for(page, lambda: (lambda s, b: bool(s) and bool(b) and s["width"] < b["width"] - 20 and s["left"] > b["left"] + 20)(debug(page)["selection"], debug(page)["bounds"])), str(debug(page)["selection"]))
     # drag the layer with the mouse, starting on it: the view is kept, the layer lands where it was dropped
     img = image_box(page, uuid)
@@ -529,13 +570,16 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     drag(page, cx, cy, cx + 40 * scale, cy + 20 * scale, steps=16)
     r.check(f"{label}: the dropped layer is where the mouse left it", wait_for(page, lambda: "Moved Layer 2" in status_text(page)), status_text(page))
     landed = page.evaluate("() => (document.querySelector('#minipaint_canvas_status').innerText.match(/ at \\((-?\\d+), (-?\\d+)\\)/) || []).slice(1).map(Number)")
-    expected = snapped(page, box["x0"] + 40, box["y0"] + 20, box["x1"] - box["x0"], box["y1"] - box["y0"])
-    r.check(f"{label}: by the distance dragged (snapping to an edge it comes close to)", landed and abs(landed[0] - expected[0]) <= 2 and abs(landed[1] - expected[1]) <= 2, str((landed, expected, box)))
+    # the layer is the frame clipped to the picture's pixels, so its own place and size are the base, not the frame's
+    expected = snapped(page, placed[0] + 40, placed[1] + 20, placed[2], placed[3])
+    r.check(f"{label}: by the distance dragged (snapping to an edge it comes close to)", landed and abs(landed[0] - expected[0]) <= 2 and abs(landed[1] - expected[1]) <= 2, str((landed, expected, placed)))
     r.check(f"{label}: the composite was reloaded with the view kept", wait_for(page, lambda: debug(page)["loaded"] == before["loaded"] + 1 and abs(debug(page)["imgScale"] - scale) < 0.001 and not debug(page)["overlay"]), str(debug(page)))
     r.check(f"{label}: the preview is gone after the drop", not debug(page)["layerDrag"])
     # and with a finger
     touch(page, [(cx, cy, cx - 30 * scale, cy - 10 * scale)])
-    expected = snapped(page, box["x0"] + 10, box["y0"] + 10, box["x1"] - box["x0"], box["y1"] - box["y0"])
+    # the finger starts from where the mouse drop landed (snapped), not from the original place
+    current = layer_geometry(page, "Layer 2") or placed
+    expected = snapped(page, current[0] - 30, current[1] - 10, placed[2], placed[3])
     r.check(f"{label}: a finger drags the layer too (snapping to an edge it comes close to)", wait_for(page, lambda: (lambda l: bool(l) and abs(l[0] - expected[0]) <= 2 and abs(l[1] - expected[1]) <= 2)(page.evaluate("() => (document.querySelector('#minipaint_canvas_status').innerText.match(/ at \\((-?\\d+), (-?\\d+)\\)/) || []).slice(1).map(Number)"))), str((status_text(page), expected)))
     menu_pick(page, "Edit", "Undo")
     r.check(f"{label}: undo takes the move back", wait_for(page, lambda: "Undid move layer" in status_text(page) and "is at (" not in status_text(page).split("Undid")[0]), status_text(page))
@@ -662,6 +706,25 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     r.check(f"{label}: undo restores the three layers", wait_for(page, lambda: "Undid merge down" in status_text(page) and "3 layers" in status_text(page)), status_text(page))
     page.locator("#minipaint_canvas_layer_delete").click()
     r.check(f"{label}: delete removes the selected layer", wait_for(page, lambda: "Layer 2 deleted" in status_text(page)), status_text(page))
+
+    # ---- add a picture file as a layer: fitted to the canvas, and transform mode opens on it ----
+    if with_upload:
+        with tempfile.NamedTemporaryFile(prefix="sticker-", suffix=".png", delete=False) as handle:
+            sample_image(300, 200).save(handle.name)
+        canvas_w, canvas_h = debug(page)["orgWidth"], debug(page)["orgHeight"]
+        with page.expect_file_chooser(timeout=8000) as chooser:
+            page.locator("#minipaint_canvas_layer_add_btn").click()
+        chooser.value.set_files(handle.name)
+        fit = min(canvas_w / 300, canvas_h / 200)
+        fitted = (round(300 * fit), round(200 * fit))
+        r.check(f"{label}: Add image as layer drops the file in as a layer fitted to the canvas, which keeps its size", wait_for(page, lambda: "added as a layer, fitted to the canvas" in status_text(page) and debug(page)["orgWidth"] == canvas_w), status_text(page))
+        r.check(f"{label}: it is on top and selected, at the fitted size", wait_for(page, lambda: layer_rows(page) and layer_rows(page)[0][0].startswith("sticker-") and layer_rows(page)[0][1]) and f"{fitted[0]} × {fitted[1]}" in page.locator("#minipaint_canvas_layer_list").inner_text(), str((layer_rows(page), fitted)))
+        r.check(f"{label}: transform mode opens on it by itself, once the picture is drawn", wait_for(page, lambda: (lambda t: bool(t) and not t["done"] and abs(t["w"] - fitted[0]) <= 1)(debug(page)["transform"])), str(debug(page)["transform"]))
+        tool(page, "crop")
+        r.check(f"{label}: leaving without placing it keeps it fitted", debug(page)["transform"] is None and f"{fitted[0]} × {fitted[1]}" in page.locator("#minipaint_canvas_layer_list").inner_text())
+        tool(page, "layers")
+        menu_pick(page, "Edit", "Undo")
+        r.check(f"{label}: undo takes the added layer away", wait_for(page, lambda: "Undid add layer" in status_text(page)), status_text(page))
 
     # ---- send to ImageStitch from the menu: the reference gallery gets the image, its box is ticked, the tab switches ----
     menu_pick(page, "Send to", "ImageStitch (txt2img)")

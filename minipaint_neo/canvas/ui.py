@@ -78,6 +78,7 @@ MODE_JS = f"(mode) => {{ if ({_JS}) {_JS}.onMode(mode); }}"
 MENU_JS = f"() => {{ if ({_JS}) {_JS}.toggleMenu(); }}"
 OVERLAYS_JS = f"() => {{ if ({_JS}) {_JS}.refreshOverlays(); }}"
 TRANSFORM_START_JS = f"() => {{ if ({_JS}) {_JS}.startTransform(); }}"
+RESELECT_JS = f"() => {{ if ({_JS}) {_JS}.reselect(); }}"
 TRANSFORM_DONE_JS = f"() => {{ if ({_JS}) {_JS}.finishTransform(); }}"
 ASPECT_JS = f"(choice, w, h, original) => {{ if ({_JS}) {_JS}.setAspect(choice, w, h, original); }}"
 TOOL_JS = f"(tool) => {{ if ({_JS}) {_JS}.setTool(tool); }}"
@@ -460,6 +461,33 @@ class TouchCanvas:
         doc.load(image, "file", os.path.basename(str(path)))
         return self._commit(doc, "crop", "Opened.", notes)
 
+    def add_image_layer(self, file, foreground, state, mode):
+        """A picture file dropped in as a layer of its own, fitted to the
+        canvas, which keeps its size; the browser then opens transform mode
+        on it, since placing it is what comes next."""
+        doc = document.ensure(state)
+        notes, failed = self._ready(doc, foreground, mode)
+        if failed:
+            return failed
+        path = getattr(file, "name", file)
+        if not path:
+            return self._unchanged(doc, mode, "No file was chosen.")
+        try:
+            image = imaging.open_file(str(path))
+        except Exception as error:  # Pillow raises a family of these
+            return self._unchanged(doc, mode, f"Could not open this image format. ({error})")
+        doc.checkpoint("add layer")
+        layer = doc.add_picture(image, os.path.splitext(os.path.basename(str(path)))[0])
+        doc.transform_next = True
+        return self._commit(
+            doc,
+            "layers",
+            f"{layer.name} added as a layer, fitted to the canvas ({layer.image.width} × {layer.image.height}). "
+            "Drag its corners or move it, then Done.",
+            notes,
+            reset_aspect=False,
+        )
+
     # -- callbacks: crop ----------------------------------------------------
 
     def apply_crop(self, foreground, state, mode, box_raw):
@@ -469,7 +497,7 @@ class TouchCanvas:
             return self._unchanged(doc, mode, "There is no image to crop.")
         box = imaging.crop_box(box_raw, image.size)
         if box is None:
-            return self._unchanged(doc, mode, "Put the frame over the part to keep: drag the image under it, pinch or scroll to zoom, drag a corner to resize.")
+            return self._unchanged(doc, mode, "Draw a rectangle over the part to keep first, then Apply Crop.")
         if box == (0, 0, image.width, image.height):
             return self._unchanged(doc, mode, "The frame already covers the whole image — nothing to crop.")
 
@@ -650,7 +678,7 @@ class TouchCanvas:
             return failed
         box = imaging.crop_box(box_raw, doc.size)
         if box is None:
-            return self._unchanged(doc, mode, "Put the frame over the part to copy first.")
+            return self._unchanged(doc, mode, "Draw a selection over the part to copy first.")
         source = doc.active_layer
         piece = imaging.layer_pixels_in_box(source.image, source.x, source.y, box)
         if piece is None:
@@ -980,6 +1008,7 @@ class TouchCanvas:
 
                 # What the menu presses. Hidden: the menu is their face.
                 open_btn = gr.UploadButton("Open", file_types=["image"], type="filepath", visible=False, elem_id=_id("open"))
+                layer_add = gr.UploadButton("Add image as layer", file_types=["image"], type="filepath", visible=False, elem_id=_id("layer_add"))
                 undo_btn = gr.Button("Undo", visible=False, elem_id=_id("undo"))
                 redo_btn = gr.Button("Redo", visible=False, elem_id=_id("redo"))
                 reset_btn = gr.Button("Reset to original", visible=False, elem_id=_id("reset"))
@@ -1030,6 +1059,7 @@ class TouchCanvas:
             status=status,
             menu_btn=menu_btn,
             open_btn=open_btn,
+            layer_add=layer_add,
             undo_btn=undo_btn,
             redo_btn=redo_btn,
             reset_btn=reset_btn,
@@ -1063,13 +1093,15 @@ class TouchCanvas:
                 width = gr.Number(label="Custom ratio width", value=1024, precision=0, minimum=1, min_width=0, elem_id=_id("crop_custom_w"))
                 height = gr.Number(label="Custom ratio height", value=1024, precision=0, minimum=1, min_width=0, elem_id=_id("crop_custom_h"))
             apply = gr.Button("Apply Crop", variant="primary", elem_id=_id("crop_apply"), elem_classes=["minipaint-apply"])
+            reselect = gr.Button("Reselect", elem_id=_id("crop_reselect"), elem_classes=["minipaint-quick-action"])
             gr.Markdown(
-                "The frame starts over the whole image. Drag the image under it with one finger, pinch or scroll to zoom, "
-                "drag a corner to resize it, drag the grip on its top edge to move it; the aspect locks its shape. "
+                "Nothing is selected until you **draw a rectangle** over the part to keep (one under 128 × 128 is "
+                "dismissed). Then drag a corner to resize it, the grip on its top edge to move it, and the image under "
+                "it with one finger; pinch or scroll to zoom; the aspect locks its shape. **Reselect** starts over. "
                 "**Apply Crop** keeps what is inside.",
                 elem_classes=["minipaint-hint"],
             )
-        return panel, {"aspect": aspect, "width": width, "height": height, "apply": apply}
+        return panel, {"aspect": aspect, "width": width, "height": height, "apply": apply, "reselect": reselect}
 
     def _mask_panel(self):
         with gr.Column(elem_id=_id("panel_mask"), elem_classes=["minipaint-panel"], visible=False) as panel:
@@ -1141,6 +1173,9 @@ class TouchCanvas:
                 elem_classes=["minipaint-hint", "minipaint-transform-only"],
             )
             new = gr.Button("New from selection", variant="primary", elem_id=_id("layer_new"), elem_classes=["minipaint-apply"])
+            with gr.Row(elem_classes=["minipaint-pair"]):
+                reselect = gr.Button("Reselect", elem_id=_id("layer_reselect"), elem_classes=["minipaint-quick-action"])
+                add_btn = gr.Button("Add image as layer…", elem_id=_id("layer_add_btn"), elem_classes=["minipaint-quick-action"])
             to_layer = gr.Button("Masked area → new layer", elem_id=_id("mask_to_layer"), elem_classes=["minipaint-quick-action"])
             listing = gr.HTML(layer_list_html(document.Document()), elem_id=_id("layer_list"), elem_classes=["minipaint-layer-list"])
             with gr.Row(elem_classes=["minipaint-pair"]):
@@ -1164,14 +1199,18 @@ class TouchCanvas:
                 "The picture sits as Layer 1 over a white Background of the same size; the thin line on the canvas is that size. "
                 "Tap a layer to select it; the box selects several; the eye shows or hides; the arrows reorder. "
                 "The frame is the selection: **New from selection** copies what the active layer has inside it into a "
-                "layer of its own. The dashed outline is the selected layer: dragging inside it moves it, dragging "
-                "elsewhere pans; two fingers, the wheel and the right button pan and zoom. **Resize / move by hand** "
-                "puts corner handles on it. **Re-center layer** brings it back to the middle. Edges snap to the canvas "
-                "and to other layers. Sending flattens the visible layers.",
+                "layer of its own; **Reselect** clears it so the next drag draws a new one. **Add image as layer…** "
+                "drops a picture file in as a layer fitted to the canvas and opens it for placing. The dashed outline "
+                "is the selected layer: dragging inside it moves it, dragging elsewhere pans; two fingers, the wheel "
+                "and the right button pan and zoom. **Resize / move by hand** puts corner handles on it. **Re-center "
+                "layer** brings it back to the middle. Edges snap to the canvas and to other layers. Sending flattens "
+                "the visible layers.",
                 elem_classes=["minipaint-hint"],
             )
         return panel, {
             "new": new,
+            "reselect": reselect,
+            "add_btn": add_btn,
             "to_layer": to_layer,
             "list": listing,
             "merge": merge,
@@ -1312,6 +1351,14 @@ class TouchCanvas:
 
         # -- open, history, reset: hidden buttons the menu presses
         structural(parts["open_btn"].upload, self.open_file, [parts["open_btn"], state, mode_state])
+        # A picture added as a layer: the panel's button presses the hidden
+        # upload button (a file chooser opens from a user's click), and the
+        # file comes in as a view-keeping layer step.
+        layers["add_btn"].click(None, js=f"() => {{ if ({_JS}) {_JS}.pressHidden('{_id('layer_add')}'); }}")
+        structural(parts["layer_add"].upload, self.add_image_layer, [parts["layer_add"]] + canvas_inputs, keep=True)
+        # Reselect: the frame goes away and the next drag on the canvas draws a new one (browser-only).
+        crop["reselect"].click(None, js=RESELECT_JS)
+        layers["reselect"].click(None, js=RESELECT_JS)
         structural(parts["undo_btn"].click, self.undo, [state, mode_state, event_kind], js=UNDO_JS)
         structural(parts["redo_btn"].click, self.redo, [state, mode_state, event_kind], js=REDO_JS)
         structural(parts["reset_btn"].click, self.reset, [state, mode_state])

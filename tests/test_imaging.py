@@ -258,6 +258,22 @@ def run() -> Results:
     doc.undo()
     doc.future.clear()
     r.check("undo puts the layers back as they were", doc.selection_box() == box_before and doc.layers[1].percent == 100 and doc.layers[2].source is None)
+
+    # a picture dropped in as a layer: fitted to the canvas (116 x 88 here), centred, from its own pixels
+    doc.checkpoint("before add_picture")
+    names_before_add = doc.layer_names()
+    big = doc.add_picture(Image.new("RGBA", (232, 88), (1, 2, 3, 255)), "big")
+    r.check("a picture wider than the canvas is fitted to it and centred, from its own pixels", big.size == (116, 44) and (big.x, big.y) == (0, 22) and big.source is not None and big.source.size == (232, 88) and abs(big.scale - 0.5) < 1e-9 and big.name == "big" and doc.active_layer is big and doc.size == (116, 88))
+    small = doc.add_picture(Image.new("RGBA", (58, 22)), "small")
+    r.check("a smaller one is scaled up to fit", small.size == (116, 44) and small.percent == 200 and (small.x, small.y) == (0, 22))
+    same = doc.add_picture(Image.new("RGBA", (116, 88)))
+    r.check("an exact fit keeps its pixels and gets the next layer name", same.size == (116, 88) and same.source is None and same.name.startswith("Layer "))
+    r.check("a resize by hand of a fitted picture starts from its own pixels", big.resize(100) and big.size == (232, 88) and big.source is None)
+    doc.transform_next = True
+    r.check("the preview asks for transform mode once", '"transform": true' in doc.preview_payload() and '"transform"' not in doc.preview_payload())
+    doc.undo()
+    doc.future.clear()
+    r.check("undo takes the added pictures away", doc.layer_names() == names_before_add)
     added = doc.layers[2]  # rebuilt again by that undo
 
     # resizing: from the pixels the layer started with, keeping its centre

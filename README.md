@@ -63,14 +63,18 @@ white Background of the same size**; a thin line on the canvas marks that size. 
 fingers pinch to zoom and pan; the mouse wheel zooms and the right button drags, exactly
 as in img2img; the canvas's ✠ refits and ⛶ fills the screen.
 
-**Crop.** A frame with corner handles sits over the image; its size in image pixels is
-written on it. Move the image under the frame with one finger (or the left mouse button),
-zoom to fit more or less of it in, drag a corner to resize the frame, and drag the
-**grip on its top edge** to slide the frame somewhere else without redrawing it — with a
-finger or the mouse. The **Aspect** menu (Free, Original, 1:1, 4:3, 3:4, 16:9, 9:16,
-3:2, 2:3, or a custom ratio) locks the frame's shape. **Apply Crop** keeps what is inside
-the frame and shows the new size; the frame then covers the whole result again, so
-nothing is ever cropped twice by accident. A crop never stretches.
+**Crop.** Crop opens with **nothing selected** — a frame over the whole picture is never
+a crop. Drag over the part to keep and a frame with corner handles appears over what you
+dragged, its size in image pixels written on it; one smaller than 128 × 128 is dismissed
+with a *Tiny Debounce* notice in the status line, and the next drag draws again. Then
+drag a corner to resize the frame, drag the **grip on its top edge** to slide it, and
+move the picture under it with one finger (or the left mouse button); pinch or scroll to
+zoom. **Reselect** clears the frame so the next drag draws a new one. The **Aspect** menu
+(Free, Original, 1:1, 4:3, 3:4, 16:9, 9:16, 3:2, 2:3, or a custom ratio) reshapes the
+frame you have in place and shapes the ones you draw next. **Apply Crop** keeps what is
+inside and shows the new size; nothing is selected afterwards, so nothing is ever cropped
+twice by accident. A frame you drew survives a trip through another tool; the automatic
+one Layers starts with never enters Crop. A crop never stretches.
 
 **Mask.** Paint over what should change, with the same brush the Inpaint tab has: same
 colour, same opacity, same high-contrast checkerboard if that setting is on. **Paint /
@@ -100,7 +104,12 @@ the primary one carries a bar. The selected layers are outlined on the canvas wi
 dashed line: **a drag that starts inside that outline moves them**, with a live preview,
 and nothing else moves; a drag that starts outside pans the picture, as in Crop. The
 picture keeps its zoom and position when the server's new composite comes back; two
-fingers, the wheel and the right button still pan and zoom. **Resize / move by hand**
+fingers, the wheel and the right button still pan and zoom. **Reselect** clears the selection frame so the next drag on the canvas draws a new one
+(Layers otherwise starts with the whole picture selected). **Add image as layer…** opens
+the file chooser and drops the picture in as a layer of its own, fitted to the canvas —
+scaled until it touches it on one side and centred, from its own pixels — without
+changing the canvas's size, and opens it for placing at once (below); leave it and it
+stays fitted. **Resize / move by hand**
 puts a box with round corner knobs on the selected layer and hides everything else in the
 panel but **Done**: drag a corner to resize it (the shape is kept; the opposite corner
 stays put), drag inside the box to move it, as many times as you like, then *Done* applies

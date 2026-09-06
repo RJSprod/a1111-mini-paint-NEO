@@ -12,6 +12,8 @@ from harness import Results, setup_path, value_of
 setup_path()
 
 import json  # noqa: E402
+import os  # noqa: E402
+import tempfile  # noqa: E402
 
 from modules import script_callbacks  # noqa: E402
 from PIL import Image  # noqa: E402
@@ -137,7 +139,7 @@ def run() -> Results:
     out = canvas.apply_crop(None, doc, "crop", '{"x0": 0, "y0": 0, "x1": 320, "y1": 240}')
     r.check("a frame over the whole image is not a crop", "nothing to crop" in out[STATUS] and skipped(out[BG]))
     out = canvas.apply_crop(None, doc, "crop", "")
-    r.check("no frame is explained", "Put the frame" in out[STATUS] and skipped(out[BG]))
+    r.check("no frame is explained", "Draw a rectangle" in out[STATUS] and skipped(out[BG]))
     r.check("a crop without an image is refused", "no image" in canvas.apply_crop(None, None, "crop", '{"x0":0,"y0":0,"x1":1,"y1":1}')[STATUS])
 
     # a crop with strokes on the canvas keeps the covered part of the mask
@@ -202,7 +204,7 @@ def run() -> Results:
             and 'minipaint-layer selected active" role="listitem" data-name="Layer 2"' in listing and 'minipaint-layer" role="listitem" data-name="Background"' in listing)
     r.check("the list carries every action", all(f'data-op="{op}"' in listing for op in ("pick", "toggle", "eye", "up", "down")) and 'data-op="up" data-name="Layer 2" title="Move Layer 2 up" disabled' in listing)
     r.check("a new preview and an underlay go to the browser", isinstance(out[LAYER_PREVIEW], str) and '"x": 20' in out[LAYER_PREVIEW] and '"src": "data:image/' in out[LAYER_PREVIEW] and out[LAYER_UNDERLAY].startswith("data:image/"))
-    r.check("no frame is explained", "Put the frame" in canvas.new_layer_from_selection(fg, doc, "layers", "")[STATUS])
+    r.check("no frame is explained", "Draw a selection" in canvas.new_layer_from_selection(fg, doc, "layers", "")[STATUS])
 
     out = canvas.move_layer('{"dx": 15, "dy": -5, "t": 1}', fg, doc, "layers")
     doc = out[STATE]
@@ -266,6 +268,22 @@ def run() -> Results:
     big = canvas.receive([(Image.new("RGB", (3000, 3000)), None)], None, "layers", "txt2img")[STATE]
     out = canvas.transform_layer('{"x": 0, "y": 0, "w": 9000}', fg, big, "layers")
     r.check("a transform past what a canvas holds is refused and undone", "keep a side under" in out[STATUS] and big.active_layer.percent == 100 and not big.history and isinstance(out[BG], str))
+
+    # a picture file added as a layer: fitted to the 200 x 120 canvas, which keeps its size; the browser is asked to open transform mode
+    with tempfile.NamedTemporaryFile(prefix="wide-cat-", suffix=".png", delete=False) as handle:
+        Image.new("RGB", (400, 100), (10, 200, 10)).save(handle.name)
+        added_path = handle.name
+    names_before = doc.layer_names()
+    out = canvas.add_image_layer(added_path, fg, doc, "crop")
+    doc = out[STATE]
+    r.check("the file becomes a layer fitted to the canvas, selected, in Layers mode", out[MODE] == "layers" and "added as a layer, fitted to the canvas (200 × 50)" in out[STATUS] and doc.size == (200, 120) and len(doc.layer_names()) == len(names_before) + 1 and doc.active_layer.name.startswith("wide-cat-") and doc.active_layer.size == (200, 50) and (doc.active_layer.x, doc.active_layer.y) == (0, 35))
+    r.check("from its own pixels", doc.active_layer.source is not None and doc.active_layer.source.size == (400, 100) and doc.active_layer.percent == 50)
+    r.check("the reply reloads the picture and its preview asks for transform mode", isinstance(out[BG], str) and '"transform": true' in out[LAYER_PREVIEW] and '"src": "data:image/' in out[LAYER_PREVIEW])
+    r.check("only once", '"transform"' not in doc.preview_payload())
+    r.check("and it is one undo away", doc.history[-1]["label"] == "add layer" and "Undid add layer" in canvas.undo(doc, "layers")[STATUS] and doc.layer_names() == names_before)
+    r.check("a file that is not an image says so", "Could not open" in canvas.add_image_layer(__file__, fg, doc, "layers")[STATUS] and "No file was chosen" in canvas.add_image_layer(None, fg, doc, "layers")[STATUS])
+    r.check("without a picture there is nothing to add to", "no image" in canvas.add_image_layer(added_path, None, None, "layers")[STATUS].lower())
+    os.unlink(added_path)
     out = canvas.undo(doc, "layers")
     doc = out[STATE]
     r.check("undo takes the transform back", "Undid transform layer" in out[STATUS] and doc.active_layer.percent == 100)
@@ -389,7 +407,6 @@ def run() -> Results:
     r.check("extras receives the image itself, with no payload", isinstance(out[EXTRAS], Image.Image) and out[EXTRAS].size == (200, 120) and out[-1] == "" and out[-2] == "extras")
     out = canvas.send(fg, doc, "mask", "stitch_txt2img:1700000003", "Off")
     r.check("ImageStitch receives the image as the gallery's only entry", isinstance(out[STITCH_T2I], list) and len(out[STITCH_T2I]) == 1 and out[STITCH_T2I][0].size == (200, 120) and skipped(out[STITCH_I2I]) and skipped(out[EXTRAS]))
-    import os
     staged = getattr(out[STITCH_T2I][0], "already_saved_as", None)
     r.check("the picture is saved where the host serves it from, and says so", staged and os.path.isfile(staged) and Image.open(staged).size == (200, 120), str(staged))
     r.check("Extras got one too", os.path.isfile(getattr(canvas.send(fg, doc, "mask", "extras", "Off")[EXTRAS], "already_saved_as", "")))
@@ -495,7 +512,6 @@ def run() -> Results:
     r.check("preview follows the numbers", "768 × 480" in canvas.expand_preview(doc, 64, 64, 0, 0, "Off"))
 
     # ---- open from a file ----
-    import tempfile
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
         Image.new("RGB", (90, 60), (1, 2, 3)).save(handle.name)

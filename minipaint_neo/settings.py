@@ -20,11 +20,15 @@ CANVAS_FIT = "minipaint_canvas_fit"
 CANVAS_HEIGHT = "minipaint_canvas_height"
 BRUSH_SIZE = "minipaint_brush_size"
 EXPAND_SNAP = "minipaint_expand_snap"
-SEND_FILL = "minipaint_send_fill"
+# A new key on purpose: the earlier one ("minipaint_send_fill") defaulted to
+# a gray fill and got saved along with everything else when settings were
+# applied, so a saved gray kept overriding the transparency later rounds
+# meant to send. A value saved under the old key is simply not read.
+SEND_FILL = "minipaint_send_transparency"
 
 SNAP_CHOICES = ["Off", "8", "16", "32", "64"]
 KEEP_TRANSPARENT = "Keep transparent"
-FILL_CHOICES = [KEEP_TRANSPARENT, "White", "Neutral gray", "Edge color", "Black"]
+FILL_CHOICES = [KEEP_TRANSPARENT, "White", "Edge color", "Black"]
 
 DEFAULTS: dict[str, typing.Any] = {
     USE_OLD_UI: False,
@@ -190,14 +194,15 @@ def on_ui_settings() -> None:
         SEND_FILL,
         OptionInfo(
             DEFAULTS[SEND_FILL],
-            "Send: fill transparent pixels with",
+            "Send: see-through pixels",
             gr.Dropdown,
             {"choices": FILL_CHOICES},
             section=SECTION,
             category_id=category,
         ).info(
             "what a hidden layer or an expansion leaves see-through: kept as transparency "
-            "(img2img, Inpaint and ImageStitch then fill it with the colour in Settings → img2img; "
-            "Extras gets white), or filled with a colour on the way out"
+            "(the WebUI then fills it at generation time with the colour in Settings → img2img → "
+            "'For img2img, fill the transparent parts of the input image with this color', gray unless "
+            "changed; Extras gets white), or filled with a colour on the way out"
         ),
     )

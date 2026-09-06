@@ -15,8 +15,10 @@ from PIL import Image, ImageChops, ImageFilter
 
 try:  # Pillow >= 9.1
     NEAREST = Image.Resampling.NEAREST
+    BILINEAR = Image.Resampling.BILINEAR
 except AttributeError:  # pragma: no cover - older Pillow
     NEAREST = Image.NEAREST
+    BILINEAR = Image.BILINEAR
 
 # Forge's inpaint reads the foreground's alpha and keeps pixels above 128, so
 # that is the value anything we produce ourselves has to clear.
@@ -244,7 +246,7 @@ def edge_color(image: Image.Image) -> typing.Tuple[int, int, int]:
 def fill_color(name: str, image: typing.Optional[Image.Image]) -> typing.Tuple[int, int, int]:
     if name == "Edge color" and image is not None:
         return edge_color(image)
-    return FILL_COLORS.get(name, FILL_COLORS["Neutral gray"])
+    return FILL_COLORS.get(name, FILL_COLORS["White"])
 
 
 def flatten(image: Image.Image, color: typing.Tuple[int, int, int]) -> Image.Image:
@@ -380,6 +382,61 @@ def to_data_url(image: Image.Image) -> str:
     import base64
 
     return "data:image/png;base64," + base64.b64encode(to_png_bytes(to_rgba(image))).decode("ascii")
+
+
+def _data_url(image: Image.Image, fmt: str, mime: str, **options) -> str:
+    import base64
+
+    buffer = io.BytesIO()
+    image.save(buffer, format=fmt, **options)
+    return f"data:{mime};base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+DISPLAY_QUALITY = 90
+PREVIEW_SIDE = 1024
+
+
+def display_data_url(image: Image.Image, quality: int = DISPLAY_QUALITY) -> str:
+    """A copy for the browser to show, not to keep.
+
+    The document keeps the pixels; the canvas only draws them, so what it is
+    given can be lossy: JPEG when the picture is opaque, WebP (lossy, the
+    alpha kept) when it is see-through. Either is a fraction of the PNG's
+    size and of its encoding time, and that time is what every step waits
+    on. Sends and saves still go out as PNG (``to_data_url``).
+    """
+    rgba = to_rgba(image)
+    if has_alpha_content(rgba):
+        try:
+            return _data_url(rgba, "WEBP", "image/webp", quality=quality, method=0)
+        except Exception:  # a Pillow built without WebP
+            return to_data_url(rgba)
+    return _data_url(rgba.convert("RGB"), "JPEG", "image/jpeg", quality=quality)
+
+
+def preview_data_url(image: Image.Image, max_side: int = PREVIEW_SIDE) -> str:
+    """The display copy of a picture the browser only shows while a layer is
+    being dragged: no bigger than a screen needs, so it is cheap to make,
+    to carry and to decode."""
+    width, height = image.size
+    longest = max(width, height)
+    if longest > max_side:
+        factor = max_side / longest
+        image = image.resize((max(1, round(width * factor)), max(1, round(height * factor))), BILINEAR)
+    return display_data_url(image, quality=85)
+
+
+def from_data_url(text: typing.Any) -> typing.Optional[Image.Image]:
+    """A picture from a data URL in any image format, as RGBA; None when
+    the text is not one."""
+    import base64
+
+    if not isinstance(text, str) or not text.startswith("data:image/") or "," not in text:
+        return None
+    try:
+        return to_rgba(from_png_bytes(base64.b64decode(text.split(",", 1)[1])))
+    except Exception:
+        return None
 
 
 def from_png_bytes(data: bytes) -> Image.Image:

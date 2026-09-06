@@ -52,9 +52,13 @@ window.minipaintCanvas = (function () {
     const MIN_HEIGHT = 240;
     const BOTTOM_ROOM = 8;
     const LAYER_MOVE_ID = "minipaint_canvas_layer_move";
+    const LAYER_TRANSFORM_ID = "minipaint_canvas_layer_transform";
+    const TRANSFORM_CLASS = "minipaint-transforming";
+    // Edges snap to the canvas's edges and to other layers' when this close (screen pixels).
+    const SNAP_PX = 14;
+    const MIN_LAYER_SIDE = 8;
     const LAYER_ACTION_ID = "minipaint_canvas_layer_action";
     const MENU_ID = "minipaint_canvas_menu";
-    const MODE_REQUEST_ID = "minipaint_canvas_mode_request";
     const SEND_REQUEST_ID = "minipaint_canvas_send_request";
     const TARGETS_ID = "minipaint_canvas_targets";
     const SUGGEST_ID = "minipaint_canvas_suggest";
@@ -63,6 +67,8 @@ window.minipaintCanvas = (function () {
         reset: "minipaint_canvas_reset", save: "minipaint_canvas_save"
     };
     const MODE_NAMES = { crop: "Crop", mask: "Mask", expand: "Expand", layers: "Layers" };
+    const TOOL_ID_PREFIX = "minipaint_canvas_tool_";
+    const CURRENT_CLASS = "minipaint-current";
     const LAYER_LIST_ID = "minipaint_canvas_layer_list";
     const LAYER_PREVIEW_ID = "minipaint_canvas_layer_preview";
     const LAYER_UNDERLAY_ID = "minipaint_canvas_layer_underlay";
@@ -108,6 +114,10 @@ window.minipaintCanvas = (function () {
         pointers: new Map(),
         pinch: null,
         pan: null,
+        transform: null,
+        transformEl: null,
+        transformBox: null,
+        transformSize: null,
         handleDrag: null,
         escapeListener: null
     };
@@ -192,6 +202,7 @@ window.minipaintCanvas = (function () {
         buildOverlay();
         buildBounds();
         buildFrame();
+        buildTransform();
         buildMenu();
         bindGestures();
         bindLayerList();
@@ -348,13 +359,23 @@ window.minipaintCanvas = (function () {
         };
 
         // Called at the end of every successful image load, just before the
-        // canvas records the first stroke state of the new image.
+        // canvas records the first stroke state of the new image. The
+        // canvas's own version draws the picture into a scratch canvas and
+        // PNG-encodes it into the textbox (hundreds of milliseconds at a
+        // few megapixels) so the server can read it; for a picture the
+        // server itself just wrote there, that would replace its value with
+        // a bigger copy of the same pixels and echo it back - skipped.
         const updateBackground = i.updateBackgroundImageData.bind(i);
         i.updateBackgroundImageData = function () {
-            updateBackground();
+            if (S.serverLoad) {
+                S.echoValue = bind.target ? bind.target.value : null;
+            } else {
+                updateBackground();
+                S.echoValue = null;
+            }
             const kept = restoreView();
+            endTransform(false);
             endLayerDrag(false);
-            S.echoValue = S.serverLoad && bind.target ? bind.target.value : null;
             S.loaded += 1;
             setTimeout(function () {
                 trimHistory();
@@ -511,11 +532,12 @@ window.minipaintCanvas = (function () {
 
     function onMode(mode) {
         if (["crop", "mask", "expand", "layers"].indexOf(mode) === -1) { return; }
-        if (S.mode === "layers" && mode !== "layers") { endLayerDrag(true); }
+        if (S.mode === "layers" && mode !== "layers") { endTransform(true); endLayerDrag(true); }
         // A mode's panel is a flyout beside the canvas: choosing a mode
         // brings the rail back if it was put away.
         if (mode !== S.mode && railHidden()) { setRail(true); }
         S.mode = mode;
+        markTool(mode);
         const i = S.instance;
         if (!i) { return; }
         if (mode === "mask") {
@@ -525,6 +547,17 @@ window.minipaintCanvas = (function () {
         }
         refreshFrame(false);
         refreshOverlays();
+    }
+
+    /** The bar's tool buttons: the current one is marked, each says its name. */
+    function markTool(mode) {
+        for (const each of Object.keys(MODE_NAMES)) {
+            const button = document.getElementById(TOOL_ID_PREFIX + each);
+            if (!button) { continue; }
+            button.classList.toggle(CURRENT_CLASS, each === mode);
+            button.setAttribute("aria-pressed", each === mode ? "true" : "false");
+            if (!button.title) { button.title = MODE_NAMES[each]; }
+        }
     }
 
     function setTool(tool) {
@@ -629,7 +662,7 @@ window.minipaintCanvas = (function () {
      * image (at the chosen aspect) when asked, else keep it where it is. */
     function refreshFrame(reset) {
         if (!S.frame) { return; }
-        const show = (S.mode === "crop" || S.mode === "layers") && hasImage();
+        const show = (S.mode === "crop" || S.mode === "layers") && hasImage() && !S.transform;
         S.frame.hidden = !show;
         if (show) { layoutFrame(reset || !S.frameRect); }
         updateReadout();
@@ -856,13 +889,6 @@ window.minipaintCanvas = (function () {
                 { menu: "press", value: PRESS_IDS.save, label: "Save a copy" }
             ];
         }
-        if (section === "tools") {
-            const items = [{ menu: "back", label: "‹ Back" }];
-            for (const mode of Object.keys(MODE_NAMES)) {
-                items.push({ menu: "mode", value: mode, label: tick(S.mode === mode) + MODE_NAMES[mode] });
-            }
-            return items;
-        }
         if (section === "send") {
             const suggest = suggestedTarget();
             const items = [{ menu: "back", label: "‹ Back" }];
@@ -875,7 +901,6 @@ window.minipaintCanvas = (function () {
         return [
             { menu: "press", value: PRESS_IDS.open, label: "Open…" },
             { menu: "section", value: "edit", label: "Edit ›" },
-            { menu: "section", value: "tools", label: "Tools ›" },
             { menu: "panels", label: tick(!railHidden()) + "Panels" },
             { menu: "focus", label: tick(focusOn()) + "Focus" },
             { menu: "section", value: "send", label: "Send to ›" }
@@ -917,7 +942,6 @@ window.minipaintCanvas = (function () {
             case "back": renderMenu(null); return;
             case "close": closeMenu(); return;
             case "press": closeMenu(); pressHidden(value); return;
-            case "mode": closeMenu(); sendInput(MODE_REQUEST_ID, value + ":" + Date.now()); return;
             case "send": closeMenu(); sendInput(SEND_REQUEST_ID, value + ":" + Date.now()); return;
             case "panels": closeMenu(); setRail(railHidden()); return;
             case "focus": closeMenu(); setFocus(!focusOn()); return;
@@ -1036,10 +1060,13 @@ window.minipaintCanvas = (function () {
     /** The selected layers on screen, in container pixels, or null. */
     function selectionRect() {
         const i = S.instance;
-        const p = S.mode === "layers" ? layerPreview() : null;
-        if (!p || !i || !i.img || !(i.imgScale > 0)) { return null; }
-        const d = S.layerDrag;
+        if (!i || !i.img || !(i.imgScale > 0)) { return null; }
         const s = i.imgScale;
+        const t = S.transform;
+        if (t) { return { left: i.imgX + t.x * s, top: i.imgY + t.y * s, width: t.w * s, height: t.h * s }; }
+        const p = S.mode === "layers" ? layerPreview() : null;
+        if (!p) { return null; }
+        const d = S.layerDrag;
         return { left: i.imgX + (p.x + (d ? d.dx : 0)) * s, top: i.imgY + (p.y + (d ? d.dy : 0)) * s, width: p.w * s, height: p.h * s };
     }
 
@@ -1055,7 +1082,9 @@ window.minipaintCanvas = (function () {
     function positionBounds() {
         if (!S.bounds) { return; }
         place(S.bounds, imageRect());
-        place(S.layerBounds, selectionRect());
+        // The transform box draws its own edge.
+        place(S.layerBounds, S.transform ? null : selectionRect());
+        positionTransform();
     }
 
     /** After the server sent a new preview, or the view changed. */
@@ -1074,6 +1103,12 @@ window.minipaintCanvas = (function () {
             point.y >= r.top - slack && point.y <= r.top + r.height + slack;
     }
 
+    /**
+     * The selected layers as the server last described them. A payload
+     * without a picture ("src") means the picture has not changed since
+     * the last one that had it - a move changes the box, not the pixels -
+     * so that picture is kept.
+     */
     function layerPreview() {
         const target = document.querySelector("#" + LAYER_PREVIEW_ID + " textarea");
         const text = target ? target.value : "";
@@ -1081,6 +1116,8 @@ window.minipaintCanvas = (function () {
         if (S.previewCache.text !== text) {
             let data = null;
             try { data = JSON.parse(text); } catch (e) { data = null; }
+            const last = S.previewCache.data;
+            if (data && !data.src && last && last.src) { data.src = last.src; }
             S.previewCache = { text: text, data: data };
         }
         return S.previewCache.data;
@@ -1094,13 +1131,18 @@ window.minipaintCanvas = (function () {
     function positionOverlay() {
         const i = S.instance;
         const d = S.layerDrag;
-        if (!S.overlay || S.overlay.hidden || !i || !d) { return; }
+        const t = S.transform;
+        if (!S.overlay || S.overlay.hidden || !i || (!d && !t)) { return; }
         const s = i.imgScale;
-        S.overlay.style.left = (i.imgX + (d.preview.x + d.dx) * s) + "px";
-        S.overlay.style.top = (i.imgY + (d.preview.y + d.dy) * s) + "px";
-        S.overlay.style.width = (d.preview.w * s) + "px";
-        S.overlay.style.height = (d.preview.h * s) + "px";
-        if (S.layerBounds) { place(S.layerBounds, selectionRect()); }
+        const rect = t
+            ? { left: i.imgX + t.x * s, top: i.imgY + t.y * s, width: t.w * s, height: t.h * s }
+            : { left: i.imgX + (d.preview.x + d.dx) * s, top: i.imgY + (d.preview.y + d.dy) * s, width: d.preview.w * s, height: d.preview.h * s };
+        S.overlay.style.left = rect.left + "px";
+        S.overlay.style.top = rect.top + "px";
+        S.overlay.style.width = rect.width + "px";
+        S.overlay.style.height = rect.height + "px";
+        if (S.layerBounds) { place(S.layerBounds, t ? null : selectionRect()); }
+        positionTransform();
     }
 
     function startLayerDrag(event) {
@@ -1124,8 +1166,15 @@ window.minipaintCanvas = (function () {
     function moveLayerDrag(event) {
         const d = S.layerDrag;
         const s = S.instance.imgScale;
-        d.dx = (event.clientX - d.x) / s;
-        d.dy = (event.clientY - d.y) / s;
+        const p = d.preview;
+        let dx = (event.clientX - d.x) / s;
+        let dy = (event.clientY - d.y) / s;
+        const targets = snapTargets(p);
+        const tolerance = snapTolerance();
+        dx += snapDelta([p.x + dx, p.x + p.w + dx], targets.xs, tolerance);
+        dy += snapDelta([p.y + dy, p.y + p.h + dy], targets.ys, tolerance);
+        d.dx = dx;
+        d.dy = dy;
         positionOverlay();
     }
 
@@ -1157,6 +1206,224 @@ window.minipaintCanvas = (function () {
         const swapped = S.underlaySwapped;
         S.underlaySwapped = false;
         if (redraw && swapped && S.instance) { S.instance.drawImage(); }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Snapping                                                              */
+    /* ------------------------------------------------------------------ */
+
+    function snapTolerance() {
+        const s = S.instance ? S.instance.imgScale : 1;
+        return SNAP_PX / (s > 0 ? s : 1);
+    }
+
+    /** The edges a dragged layer can land on: the canvas's (whether or not
+     * the Background is shown) and those of the other visible layers, as
+     * the server listed them with the preview. Image pixels. */
+    function snapTargets(preview) {
+        const p = preview || layerPreview();
+        const xs = [];
+        const ys = [];
+        if (p && p.canvas) { xs.push(0, p.canvas[0]); ys.push(0, p.canvas[1]); }
+        for (const b of (p && p.others) || []) {
+            xs.push(b[0], b[0] + b[2]);
+            ys.push(b[1], b[1] + b[3]);
+        }
+        return { xs: xs, ys: ys };
+    }
+
+    /** The smallest shift that puts one of the edges on a target, or 0. */
+    function snapDelta(edges, targets, tolerance) {
+        let best = 0;
+        let bestAbs = tolerance + 1;
+        for (const edge of edges) {
+            for (const target of targets) {
+                const d = target - edge;
+                const a = Math.abs(d);
+                if (a <= tolerance && a < bestAbs) { best = d; bestAbs = a; }
+            }
+        }
+        return best;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Transform mode: one box around the selection, corners to resize,     */
+    /* the inside to move; Done hands the result to the server             */
+    /* ------------------------------------------------------------------ */
+
+    function buildTransform() {
+        const wrap = document.createElement("div");
+        wrap.className = "minipaint-transform";
+        wrap.hidden = true;
+        const box = document.createElement("div");
+        box.className = "minipaint-transform-box";
+        const size = document.createElement("div");
+        size.className = "minipaint-transform-size";
+        box.appendChild(size);
+        for (const corner of HANDLES) {
+            const handle = document.createElement("div");
+            handle.className = "minipaint-transform-handle " + corner;
+            handle.dataset.corner = corner;
+            box.appendChild(handle);
+        }
+        wrap.appendChild(box);
+        S.imageContainer.appendChild(wrap);
+        S.transformEl = wrap;
+        S.transformBox = box;
+        S.transformSize = size;
+
+        box.addEventListener("pointerdown", function (event) {
+            const t = S.transform;
+            if (!t || t.done || t.drag) { return; }
+            if (event.pointerType === "mouse" && event.button !== 0) { return; }
+            event.preventDefault();
+            event.stopPropagation();
+            const handle = event.target && event.target.closest ? event.target.closest(".minipaint-transform-handle") : null;
+            t.drag = { id: event.pointerId, kind: handle ? handle.dataset.corner : "move", start: imagePoint(event), box0: { x: t.x, y: t.y, w: t.w, h: t.h } };
+            try { box.setPointerCapture(event.pointerId); } catch (e) { /* optional */ }
+        });
+        box.addEventListener("pointermove", function (event) {
+            const t = S.transform;
+            if (!t || !t.drag || t.drag.id !== event.pointerId) { return; }
+            event.preventDefault();
+            event.stopPropagation();
+            const point = imagePoint(event);
+            if (t.drag.kind === "move") { moveTransform(t, point); } else { scaleTransform(t, point); }
+            positionOverlay();
+        });
+        function end(event) {
+            const t = S.transform;
+            if (!t || !t.drag || t.drag.id !== event.pointerId) { return; }
+            t.drag = null;
+            try { box.releasePointerCapture(event.pointerId); } catch (e) { /* optional */ }
+        }
+        box.addEventListener("pointerup", end);
+        box.addEventListener("pointercancel", end);
+    }
+
+    /** A pointer's place in image pixels. */
+    function imagePoint(event) {
+        const i = S.instance;
+        const point = containerPoint(event);
+        const s = i && i.imgScale > 0 ? i.imgScale : 1;
+        return { x: (point.x - (i ? i.imgX : 0)) / s, y: (point.y - (i ? i.imgY : 0)) / s };
+    }
+
+    function moveTransform(t, point) {
+        const b = t.drag.box0;
+        let x = b.x + (point.x - t.drag.start.x);
+        let y = b.y + (point.y - t.drag.start.y);
+        const targets = snapTargets(t.preview);
+        const tolerance = snapTolerance();
+        x += snapDelta([x, x + t.w], targets.xs, tolerance);
+        y += snapDelta([y, y + t.h], targets.ys, tolerance);
+        t.x = x;
+        t.y = y;
+    }
+
+    /** A corner drag scales about the opposite corner, keeping the shape;
+     * the pointer's travel along the diagonal sets the size, and the two
+     * edges that move snap. */
+    function scaleTransform(t, point) {
+        const b = t.drag.box0;
+        const kind = t.drag.kind;
+        const leftSide = kind === "tl" || kind === "bl";
+        const topSide = kind === "tl" || kind === "tr";
+        const ax = leftSide ? b.x + b.w : b.x;
+        const ay = topSide ? b.y + b.h : b.y;
+        const dx0 = (leftSide ? b.x : b.x + b.w) - ax;
+        const dy0 = (topSide ? b.y : b.y + b.h) - ay;
+        const len2 = dx0 * dx0 + dy0 * dy0;
+        if (!len2) { return; }
+        const minF = Math.max(MIN_LAYER_SIDE / Math.max(1, b.w), MIN_LAYER_SIDE / Math.max(1, b.h));
+        let f = Math.max(minF, ((point.x - ax) * dx0 + (point.y - ay) * dy0) / len2);
+        const targets = snapTargets(t.preview);
+        const tolerance = snapTolerance();
+        const sx = snapDelta([ax + dx0 * f], targets.xs, tolerance);
+        const sy = snapDelta([ay + dy0 * f], targets.ys, tolerance);
+        let snapped = null;
+        if (sx && (!sy || Math.abs(sx) <= Math.abs(sy))) { snapped = (dx0 * f + sx) / dx0; }
+        else if (sy) { snapped = (dy0 * f + sy) / dy0; }
+        if (snapped !== null && snapped >= minF) { f = snapped; }
+        t.w = b.w * f;
+        t.h = b.h * f;
+        t.x = leftSide ? ax - t.w : ax;
+        t.y = topSide ? ay - t.h : ay;
+    }
+
+    function positionTransform() {
+        const t = S.transform;
+        if (!S.transformEl) { return; }
+        S.transformEl.hidden = !t || t.done;
+        if (!t || t.done) { return; }
+        const rect = selectionRect();
+        if (!rect) { return; }
+        S.transformBox.style.left = rect.left + "px";
+        S.transformBox.style.top = rect.top + "px";
+        S.transformBox.style.width = rect.width + "px";
+        S.transformBox.style.height = rect.height + "px";
+        S.transformSize.textContent = Math.round(t.w) + " × " + Math.round(t.h);
+    }
+
+    /** Enter transform mode around the selection. False when there is
+     * nothing to transform (no picture, no layer, not in Layers mode). */
+    function startTransform() {
+        const preview = layerPreview();
+        const i = S.instance;
+        const element = root();
+        if (S.mode !== "layers" || !preview || !preview.src || !i || !i.img || !S.overlay || !element) { return false; }
+        if (S.transform) { return true; }
+        if (S.layerDrag) { endLayerDrag(true); }
+        S.transform = { x: preview.x, y: preview.y, w: preview.w, h: preview.h, preview: preview, drag: null, done: false };
+        if (S.overlay.getAttribute("src") !== preview.src) { S.overlay.src = preview.src; }
+        S.overlay.style.opacity = String((preview.opacity == null ? 100 : preview.opacity) / 100);
+        S.overlay.hidden = false;
+        const under = underlaySource();
+        if (under && S.imageEl) {
+            S.underlaySrc = under;
+            S.underlaySwapped = true;
+            S.imageEl.src = under;
+        }
+        element.classList.add(TRANSFORM_CLASS);
+        refreshFrame(false);
+        positionOverlay();
+        positionBounds();
+        return true;
+    }
+
+    /** Done: the box as it was left goes to the server; the preview stays
+     * until the new picture has been drawn. Nothing changed: just leave. */
+    function finishTransform() {
+        const t = S.transform;
+        if (!t || t.done) { return false; }
+        t.drag = null;
+        const x = Math.round(t.x);
+        const y = Math.round(t.y);
+        const w = Math.round(t.w);
+        const changed = x !== t.preview.x || y !== t.preview.y || w !== t.preview.w;
+        if (!changed) { endTransform(true); return false; }
+        t.done = true;
+        const element = root();
+        if (element) { element.classList.remove(TRANSFORM_CLASS); }
+        positionTransform();
+        if (!sendInput(LAYER_TRANSFORM_ID, JSON.stringify({ x: x, y: y, w: w, t: Date.now() }))) { endTransform(true); return false; }
+        return true;
+    }
+
+    /** Leave transform mode; redraw the picture unless the server's new one
+     * is what is being drawn. */
+    function endTransform(redraw) {
+        if (!S.transform) { return; }
+        S.transform = null;
+        const element = root();
+        if (element) { element.classList.remove(TRANSFORM_CLASS); }
+        if (S.transformEl) { S.transformEl.hidden = true; }
+        if (S.overlay) { S.overlay.hidden = true; }
+        const swapped = S.underlaySwapped;
+        S.underlaySwapped = false;
+        if (redraw && swapped && S.instance) { S.instance.drawImage(); }
+        refreshFrame(false);
+        positionBounds();
     }
 
     /* ------------------------------------------------------------------ */
@@ -1219,7 +1486,7 @@ window.minipaintCanvas = (function () {
         c.addEventListener("pointerdown", function (event) {
             if (!hasImage()) { return; }
             if (event.target && event.target.closest &&
-                event.target.closest(".forge-toolbar, .forge-toolbar-static, .minipaint-frame-handle, .minipaint-frame-grip")) { return; }
+                event.target.closest(".forge-toolbar, .forge-toolbar-static, .minipaint-frame-handle, .minipaint-frame-grip, .minipaint-transform")) { return; }
             if (event.pointerType === "mouse" && event.button !== 0) { return; }
             S.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
             if (S.pointers.size === 2) {
@@ -1233,15 +1500,16 @@ window.minipaintCanvas = (function () {
                 return;
             }
             if (S.pointers.size === 1 && S.mode === "layers") {
-                if (S.layerDrag && S.layerDrag.done) {
+                if ((S.layerDrag && S.layerDrag.done) || (S.transform && S.transform.done)) {
                     // A drop is on its way to the server; a drag or a pan now
                     // would be undone by the picture that comes back.
                     event.preventDefault();
                     S.pointers.delete(event.pointerId);
                     return;
                 }
-                // Only what is selected moves, and only when the drag starts on it.
-                if (!S.layerDrag && hitSelection(event) && startLayerDrag(event)) { event.preventDefault(); return; }
+                // Only what is selected moves, and only when the drag starts
+                // on it. In transform mode the box takes the drags itself.
+                if (!S.layerDrag && !S.transform && hitSelection(event) && startLayerDrag(event)) { event.preventDefault(); return; }
             }
             if (S.pointers.size === 1 && canPan()) {
                 S.pan = { id: event.pointerId, x: event.clientX, y: event.clientY, imgX: S.instance.imgX, imgY: S.instance.imgY };
@@ -1304,6 +1572,7 @@ window.minipaintCanvas = (function () {
                  height: parseFloat(S.container.style.height) || 0, fitting: S.fit,
                  frameHidden: !S.frame || S.frame.hidden,
                  layerDrag: S.layerDrag ? { dx: S.layerDrag.dx, dy: S.layerDrag.dy, done: S.layerDrag.done } : null,
+                 transform: S.transform ? { x: S.transform.x, y: S.transform.y, w: S.transform.w, h: S.transform.h, done: S.transform.done, dragging: !!S.transform.drag } : null,
                  overlay: !!(S.overlay && !S.overlay.hidden), keepView: !!S.keepView, preview: !!layerPreview(),
                  frame: S.frameRect ? Object.assign({}, S.frameRect) : null, box: cropBoxObject(), rail: railState(),
                  menuOpen: !!(S.menu && !S.menu.hidden), menuSection: S.menuSection,
@@ -1410,6 +1679,9 @@ window.minipaintCanvas = (function () {
         setRail: setRail,
         toggleRail: toggleRail,
         toggleMenu: toggleMenu,
+        startTransform: startTransform,
+        finishTransform: finishTransform,
+        endTransform: endTransform,
         closeMenu: closeMenu,
         refreshOverlays: refreshOverlays,
         onMode: onMode,

@@ -1113,6 +1113,57 @@ def guidance_checks(r: Results) -> None:
             "<script" not in wangp_ui._help_html("auth").lower())
 
 
+def console_checks(r: Results) -> None:
+    """The page's own log: what it keeps, and what it must never keep.
+
+    It exists to be pasted into a bug report, so the two things a bug report
+    must not carry - the runtime secret and the backend port - are taken out
+    on the way in rather than trusted not to be passed.
+    """
+    import json as _json
+
+    from minipaint_neo.wangp import journal
+    from minipaint_neo.wangp import ui as wangp_ui
+
+    journal.clear()
+    r.check("an empty journal still reads as something", journal.text().strip() != "")
+
+    journal.note("runtime", "launching http://127.0.0.1:41234/ with secret=s3cr3t-value")
+    written = journal.text()
+    r.check("the backend port never reaches the log", "41234" not in written, written)
+    r.check("nor does a secret", "s3cr3t-value" not in written, written)
+    r.check("but the line is still there", "launching" in written)
+
+    journal.note("bridge", "MINIPAINT_WANGP_BRIDGE_SECRET=abcdef")
+    r.check("a secret named any of the usual ways is taken out",
+            "abcdef" not in journal.text(), journal.text())
+
+    # The browser is a writer like any other, and an untrusted one.
+    wangp_ui.record_client_log(_json.dumps({"n": 1, "line": "handshake: offer 1/7 sent into the iframe"}))
+    r.check("the browser's own lines reach the log", "offer 1/7" in journal.text())
+    for bad in ("{not json", "[]", "", None, _json.dumps({"n": 2})):
+        try:
+            wangp_ui.record_client_log(bad)
+            survived = True
+        except Exception:
+            survived = False
+        r.check(f"a malformed client line is dropped, not raised ({bad!r:.20})", survived)
+
+    long_line = "x" * 5000
+    wangp_ui.record_client_log(_json.dumps({"line": long_line}))
+    r.check("a very long client line is cut down",
+            max(len(line) for line in journal.lines()) <= journal.MAX_LINE + 40)
+
+    # Bounded, so a long run cannot grow without limit.
+    for index in range(journal.MAX_LINES + 50):
+        journal.note("test", f"line {index}")
+    r.check("the log is a ring buffer", len(journal.lines()) == journal.MAX_LINES)
+    r.check("and keeps the newest", f"line {journal.MAX_LINES + 49}" in journal.text())
+
+    journal.clear()
+    r.check("clearing empties it", journal.lines() == [])
+
+
 def run() -> Results:
     r = Results("wangp receiver contract")
     try:
@@ -1128,6 +1179,7 @@ def run() -> Results:
         session_record_checks(r)
         wizard_checks(r)
         guidance_checks(r)
+        console_checks(r)
     finally:
         bridge.reset_for_tests()
     return r

@@ -49,7 +49,7 @@ import threading
 import time
 import typing
 
-from . import discovery, errors
+from . import discovery, errors, journal
 from .config import DEFAULT_PROXY_PATH, runtime_dir
 from .errors import IntegrationError
 
@@ -510,7 +510,13 @@ def _drain(child: _Child) -> None:
             if not raw:
                 break
             line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
-            child.stderr_tail.append(line.rstrip("\r\n"))
+            stripped = line.rstrip("\r\n")
+            child.stderr_tail.append(stripped)
+            # The child's own words, in the one place a user can read them.
+            # This is where WanGP says which plugins it loaded, and it is the
+            # only place it says so.
+            if stripped.strip():
+                journal.note("wangp", stripped)
             if ECHO_CHILD_STDERR:
                 try:
                     sys.stderr.write(line)
@@ -650,6 +656,7 @@ class Runtime:
         self.error_code = code
         self.error_detail = _text(detail)
         self.state = _state_for_code(code)
+        journal.note("runtime", f"{code}: {_text(detail)} (state {self.state})")
         return IntegrationError(code, detail)
 
     def mark(self, code: str, detail: str = "") -> None:
@@ -750,9 +757,11 @@ class Runtime:
                     config, port, instance_id, secret, handoff_root=handoff
                 )
 
+                journal.note("runtime", f"launch attempt {attempt + 1}: {' '.join(command)}")
                 try:
                     process = spawn(command, root_text, environment)
                 except Exception as error:
+                    journal.note("runtime", f"spawn failed: {type(error).__name__}: {error}")
                     raise self._fail(errors.PROCESS_START_FAILED, f"{command[0]}: {error}")
 
                 child = _Child(process, instance_id, root_text, port)

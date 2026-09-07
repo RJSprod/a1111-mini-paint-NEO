@@ -1107,8 +1107,11 @@ def guidance_checks(r: Results) -> None:
             or "You do not start WanGP yourself" in wangp_ui.HELP["port"])
 
     r.check("every check has guidance", all(key in wangp_ui.HELP for key, _ in wangp_ui.CHECKS))
-    r.check("the sign-in guidance says where to look",
-            "private window" in wangp_ui.HELP["auth"] and "tick" in wangp_ui.HELP["auth"])
+    r.check("the sign-in guidance says the row answers itself",
+            "Run the checks" in wangp_ui.HELP["auth"] and "no credentials" in wangp_ui.HELP["auth"],
+            wangp_ui.HELP["auth"])
+    r.check("and says what an answered probe would mean",
+            "does not protect" in wangp_ui.HELP["auth"], wangp_ui.HELP["auth"])
     # The help is escaped before its own emphasis is put back, so a stray
     # angle bracket in a future edit cannot open a tag.
     r.check("the fold-out escapes its content",

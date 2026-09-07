@@ -41,9 +41,19 @@ def _on_app_started(_demo, app) -> None:
     is started here - startup is lazy, and a Forge that boots is a Forge with
     no WanGP process in it.
     """
-    from . import handoff, proxy, ui
+    from . import config, handoff, proxy, ui
 
     ui.remember_app(app)
+
+    # What the saved setup says about the one question this code cannot answer
+    # for itself. Told to the proxy before its routes exist, so there is no
+    # moment where /wan2gp/ is mounted and does not yet know.
+    try:
+        saved = config.load()
+        proxy.set_auth_acknowledged(bool((saved.integration or {}).get("auth_checked")) if saved else False)
+    except Exception:
+        proxy.set_auth_acknowledged(False)
+
     proxy.install(app)
 
     # Prepared images from a previous run are files nobody will ever ask for

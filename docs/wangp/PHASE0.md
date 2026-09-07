@@ -141,6 +141,8 @@ authentication runs as ASGI middleware, and reports *unknown* — which fails th
   unauthenticated one above. **Proves:** the signed-in request now returns the WanGP page and
   the unauthenticated one still returns Forge's own `401` — which is the whole point of the
   override, and the reason it must never be set before that second result has been seen.
+  The checkbox in the wizard's step 5 does the same thing and is saved with the setup; the
+  environment variable exists for a deployment that would rather not store the answer.
   **Proves:** the code's verdict matches what curl just showed. If curl says protected but
   the row says `unknown`, the mechanism is per-route and the report is being honest about
   not being able to see it — record which mechanism, and treat the curl result as the

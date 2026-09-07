@@ -125,15 +125,22 @@ whole of it to anyone who could reach Forge's port. Refusing at the point of ser
 not at startup, is what also covers the two awkward cases: a child the setup wizard's own
 checks started, and an installation that was set up before authentication was switched on.
 
-If your Forge's sign-in *does* cover the route — run the `curl` in `PHASE0.md` spike B and
-see a `401` — record that answer in the environment and the proxy will serve:
+So on a Forge that has a sign-in, that row is the one thing you have to answer yourself,
+and step 5 has a checkbox for it: **"I signed out and checked that /wan2gp/ asks me to
+sign in"**. Check it first, honestly — sign out, open `/wan2gp/` in a private window, and
+confirm it refuses you the way the rest of Forge does. The answer is saved with the rest
+of the setup, so it survives a restart, and it is what both the checklist row and the
+proxy read.
+
+There is an environment variable that says the same thing, for a deployment that would
+rather not carry the answer in its config file:
 
 ```
 MINIPAINT_WANGP_ALLOW_UNPROVEN_AUTH=1
 ```
 
-Deliberately an environment variable rather than a setting: it is a statement about a
-deployment that somebody checked, not a box a browser can tick.
+Neither is a claim this code can make for you. Ticking the box without looking gets you
+exactly the exposure the row exists to prevent, and nothing later will catch it.
 
 Anything not observed is a failure, not an omission: the checklist starts entirely red and
 a row goes green only when something proved it. Rows can need two presses — the first

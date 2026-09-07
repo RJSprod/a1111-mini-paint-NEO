@@ -247,7 +247,15 @@ def check_schema(r: Results) -> None:
     r.check("v1 does not inherit a launch strategy", migrated.as_dict()["runtime"]["launch_strategy"] == "")
     r.check("v1 gains the integration defaults",
             migrated.as_dict()["integration"] == {"proxy_path": config.DEFAULT_PROXY_PATH,
-                                                  "auto_start": config.AUTO_START_LAZY})
+                                                  "auto_start": config.AUTO_START_LAZY,
+                                                  "auth_checked": False})
+    # An older setup cannot have answered a question that was not asked, and
+    # the answer it does not have has to be the closed one: a migrated config
+    # must not arrive claiming somebody checked the sign-in boundary.
+    r.check("v1 does not inherit an answer about the sign-in boundary",
+            migrated.as_dict()["integration"]["auth_checked"] is False)
+    r.check("nor does a v2 file that never carried one",
+            config.Config.from_dict(config.Config().as_dict()).as_dict()["integration"]["auth_checked"] is False)
     r.check("a v1 file with no runtime at all still parses", config.Config.from_dict({"schema_version": 1}).runtime == {})
 
     too_new = failure(config.Config.from_dict, {"schema_version": config.SCHEMA_VERSION + 1, "initialized": True})

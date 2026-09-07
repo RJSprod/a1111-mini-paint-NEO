@@ -958,6 +958,94 @@ def session_record_checks(r: Results) -> None:
     bridge.reset_for_tests()
 
 
+def wizard_checks(r: Results) -> None:
+    """The two ways the setup wizard could leave someone stuck on its own page.
+
+    Both are about a step that cannot be finished and does not say so. Neither
+    is reachable from a unit test through the browser, so the wizard's two pure
+    halves are driven directly: ``observe`` collects, ``checklist`` judges.
+    """
+    from minipaint_neo.wangp import errors as wangp_errors
+    from minipaint_neo.wangp import proxy as wangp_proxy
+    from minipaint_neo.wangp import ui as wangp_ui
+
+    FLAGS = ("loopback", "no_listen", "no_share", "no_wildcard")
+
+    # Step 2 answered as far as the dropdown, which is where a user stops: the
+    # environments were listed and one is selected, but nothing has probed it.
+    unprobed = {"root": "/opt/Wan2GP", "gpu_uuid": "GPU-11112222-3333-4444-5555-666677778888"}
+    rows = {row["key"]: row for row in wangp_ui.checklist(wangp_ui.observe(unprobed))}
+    said = rows["loopback"]["detail"]
+    r.check("an unprobed environment does not claim the setup broke",
+            wangp_errors.MESSAGES[wangp_errors.RUNTIME_MISSING] not in said, said)
+    r.check("it names the button that was missed", "Try it against this WanGP" in said, said)
+    for key in FLAGS:
+        r.check(f"the {key} row says the same thing", rows[key]["detail"] == said)
+
+    # An environment that was chosen and has since gone really is the other
+    # sentence, and must not have been flattened into the first.
+    gone = dict(unprobed, runtime={"type": "conda", "prefix": "/nowhere/at/all", "display_name": "x",
+                                   "launch_strategy": "direct_python"})
+    missing = wangp_ui.checklist(wangp_ui.observe(gone))
+    detail = {row["key"]: row["detail"] for row in missing}["loopback"]
+    r.check("an environment that vanished still says so",
+            wangp_errors.MESSAGES[wangp_errors.RUNTIME_MISSING] in detail, detail)
+
+    # Step 5's one row this code cannot settle. Without an answer it is red and
+    # mandatory, so Finish stays shut; with the operator's answer it passes -
+    # and nothing else about the checklist moves.
+    remembered = wangp_ui._app.get("app")
+    acknowledged = wangp_proxy._acknowledged
+    had_opts = None
+    try:
+        class HasSignIn:
+            """An app whose sign-in is per route, which is what cannot be seen."""
+
+            auth = ("user", "pass")
+            router = type("R", (), {"routes": [type("Q", (), {"path": "/wan2gp/{path:path}"})()], "dependencies": []})()
+            user_middleware = []
+
+        wangp_ui._app["app"] = HasSignIn()
+        wangp_proxy.set_auth_acknowledged(False)
+        # host_auth comes from this Forge's own command line, which is what
+        # makes the row mandatory rather than advisory.
+        from modules import shared as host_shared
+
+        had_opts = getattr(host_shared, "cmd_opts", None)
+        host_shared.cmd_opts = type("Opts", (), {"gradio_auth": "user:pass"})()
+
+        unanswered = {row["key"]: row for row in wangp_ui.checklist(wangp_ui.observe(unprobed))}["auth"]
+        r.check("an unproven sign-in boundary is a red row", unanswered["ok"] is False)
+        r.check("and a mandatory one, so Finish stays shut", unanswered["mandatory"] is True)
+
+        ticked = dict(unprobed, auth_checked=True)
+        answered = {row["key"]: row for row in wangp_ui.checklist(wangp_ui.observe(ticked))}["auth"]
+        r.check("the operator's answer turns that row green", answered["ok"] is True)
+
+        # The answer is a stored one, and the proxy is the thing it unlocks.
+        boundary = wangp_proxy._boundary
+        wangp_proxy._boundary = {"ok": False, "coverage": "unknown", "mechanisms": ["gradio_auth"]}
+        try:
+            r.check("the proxy refuses while it is unanswered", wangp_proxy.serving_allowed() is False)
+            wangp_proxy.set_auth_acknowledged(True)
+            r.check("and serves once it is answered", wangp_proxy.serving_allowed() is True)
+        finally:
+            wangp_proxy._boundary = boundary
+
+        document = wangp_ui.config_from_wizard(ticked, initialized=True)
+        r.check("the answer survives being written down",
+                document.as_dict()["integration"]["auth_checked"] is True)
+        r.check("and an untouched checkbox writes down a no",
+                wangp_ui.config_from_wizard(unprobed, initialized=True).as_dict()["integration"]["auth_checked"] is False)
+    finally:
+        wangp_ui._app["app"] = remembered
+        wangp_proxy.set_auth_acknowledged(acknowledged)
+        if had_opts is None:
+            delattr(host_shared, "cmd_opts")
+        else:
+            host_shared.cmd_opts = had_opts
+
+
 def run() -> Results:
     r = Results("wangp receiver contract")
     try:
@@ -971,6 +1059,7 @@ def run() -> Results:
         tab_checks(r)
         handoff_release_checks(r)
         session_record_checks(r)
+        wizard_checks(r)
     finally:
         bridge.reset_for_tests()
     return r

@@ -79,7 +79,13 @@ AUTO_START_CHOICES = (AUTO_START_LAZY,)
 TOP_LEVEL_KEYS = ("schema_version", "initialized", "wangp_root", "runtime", "gpu", "integration")
 RUNTIME_KEYS = ("type", "prefix", "display_name", "launch_strategy")
 GPU_KEYS = ("uuid",)
-INTEGRATION_KEYS = ("proxy_path", "auto_start")
+#: ``auth_checked`` is an answer the operator gave, not a fact this code
+#: observed: this Forge's sign-in could not be seen to cover /wan2gp/ (it is
+#: enforced per route, which is invisible from here), and somebody checked it
+#: with an unauthenticated request themselves. It is persisted for the same
+#: reason the GPU is - it is a property of this deployment, and asking again
+#: after every restart would only teach people to tick it without looking.
+INTEGRATION_KEYS = ("proxy_path", "auto_start", "auth_checked")
 
 #: Named so a reader of this file, and of a review of it, can see the rule
 #: rather than infer it from a whitelist. These are the per-run facts from
@@ -341,6 +347,7 @@ class Config:
             "integration": {
                 "proxy_path": DEFAULT_PROXY_PATH,
                 "auto_start": auto_start if auto_start in AUTO_START_CHOICES else AUTO_START_LAZY,
+                "auth_checked": bool(integration.get("auth_checked")),
             },
         }
 

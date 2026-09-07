@@ -578,7 +578,11 @@ def config_from_wizard(candidate: typing.Optional[dict], initialized: bool = Fal
             "launch_strategy": str(runtime_entry.get("launch_strategy") or ""),
         },
         gpu={"uuid": str(answers.get("gpu_uuid") or "")},
-        integration={"proxy_path": config.DEFAULT_PROXY_PATH, "auto_start": config.AUTO_START_LAZY},
+        integration={
+            "proxy_path": config.DEFAULT_PROXY_PATH,
+            "auto_start": config.AUTO_START_LAZY,
+            "auth_checked": bool(answers.get("auth_checked")),
+        },
     )
 
 
@@ -668,7 +672,7 @@ def remember_app(app: typing.Any) -> None:
     _app["app"] = app
 
 
-def _auth_report() -> dict:
+def _auth_report(acknowledged: bool = False) -> dict:
     app = _app.get("app")
     if app is None:
         return {}
@@ -676,6 +680,9 @@ def _auth_report() -> dict:
         from . import proxy
 
         report = proxy.auth_boundary_report(app)
+        if not report.get("ok") and acknowledged:
+            return dict(report, ok=True, coverage="declared_by_operator",
+                        detail="the checkbox in step 5 says this was checked with an unauthenticated request.")
         if not report.get("ok") and proxy.auth_override():
             # The gate honours this, so the checklist has to as well: an
             # operator who ran the unauthenticated request themselves and set
@@ -704,8 +711,19 @@ def observe(candidate: typing.Optional[dict], browser_text: typing.Any = "") -> 
         command = runtime.command_line(document, 1)
     except errors.IntegrationError as error:
         command = []
+        # "No longer there" is the right sentence for a setup that used to work
+        # and now does not. During the wizard it is simply wrong: nothing has
+        # been chosen yet, and telling someone to set the integration up again
+        # while they are setting it up is how they end up stuck on this page.
+        unanswered = not str((answers.get("runtime") or {}).get("prefix") or "")
+        sentence = (
+            "no environment has been tried yet - choose one in step 2 and press "
+            "\u201cTry it against this WanGP\u201d"
+            if unanswered and error.code == errors.RUNTIME_MISSING
+            else errors.message(error.code)
+        )
         for key in ("loopback", "no_listen", "no_share", "no_wildcard"):
-            details[key] = errors.message(error.code)
+            details[key] = sentence
     except Exception as error:
         command = []
         details["loopback"] = str(error)
@@ -751,7 +769,7 @@ def observe(candidate: typing.Optional[dict], browser_text: typing.Any = "") -> 
     if not reported.get("round_trip") and snapshot.get("state") == runtime.READY:
         details["bridge_round"] = reported.get("detail") or "the WanGP page below has not answered yet"
 
-    auth = _auth_report()
+    auth = _auth_report(bool(answers.get("auth_checked")))
     if auth and not auth.get("ok"):
         details["auth"] = str(auth.get("detail") or "")
 
@@ -1054,6 +1072,21 @@ def _build_wizard() -> dict:
             "Run the checks", variant="primary", elem_id="wangp_setup_validate"
         )
         parts["checklist"] = gr.HTML(checklist_html(checklist({})), elem_id="wangp_setup_checklist")
+        # The one row this code cannot settle for itself. Gradio's sign-in is a
+        # per-route dependency, so a route added after the app was built is not
+        # visibly covered by it either way - which is exactly the case section
+        # 12.6 refuses to guess at. Somebody has to look, and this is where
+        # they say they did. Until then /wan2gp/ serves nothing at all.
+        parts["auth_checked"] = gr.Checkbox(
+            False,
+            label="I signed out and checked that /wan2gp/ asks me to sign in",
+            info=(
+                "Only tick this after checking. With Forge signed out, open /wan2gp/ in a private "
+                "window: it must refuse you the way the rest of Forge does. WanGP has no sign-in "
+                "of its own, so if that page opens, anyone who can reach this Forge can drive it."
+            ),
+            elem_id="wangp_setup_auth_checked",
+        )
         parts["finish"] = gr.Button(
             "Finish setup", variant="primary", interactive=False, elem_id="wangp_setup_finish"
         )
@@ -1071,6 +1104,17 @@ def _good(text: str) -> str:
 
 def _bad(text: str) -> str:
     return f"**Not yet.** {text}"
+
+
+def _next(text: str) -> str:
+    """A step that has moved but is not done. Neither of the other two will do.
+
+    Finding the environments is not choosing one, and saying "OK" there reads
+    as a finished step: the wizard then sails on to the GPU, the checks come
+    back saying the environment is "no longer there", and nothing on the page
+    ever said which button was missed.
+    """
+    return f"**Next.** {text}"
 
 
 def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
@@ -1112,7 +1156,10 @@ def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
                 "no Conda environment was found. Type the environment folder below instead."
             )
         choices = [(f"{entry['display_name']} ({entry['type']}) - {entry['prefix']}", entry["prefix"]) for entry in found]
-        return gr.update(choices=choices, value=choices[0][1]), _good(f"{len(choices)} environment(s) found.")
+        return gr.update(choices=choices, value=choices[0][1]), _next(
+            f"{len(choices)} environment(s) found. Choose the one that runs WanGP, then press "
+            "**Try it against this WanGP** - until that has passed, no environment has been chosen."
+        )
 
     parts["runtime_scan"].click(
         fn=scan_runtimes,
@@ -1147,6 +1194,27 @@ def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
         fn=probe,
         inputs=[parts["runtime_choice"], parts["runtime_prefix"], parts["candidate"]],
         outputs=[parts["runtime_status"], parts["candidate"]],
+    )
+
+    def forget_runtime(candidate):
+        """A different environment is a different answer, so drop the old one.
+
+        Otherwise a probe that passed for one environment would still be in the
+        candidate after the user picked another, and setup would finish against
+        an interpreter nothing had tried.
+        """
+        candidate = dict(candidate or {})
+        had = candidate.pop("runtime", None)
+        return _next(
+            "press **Try it against this WanGP** to check this one."
+            if had else "then press **Try it against this WanGP**."
+        ), candidate
+
+    parts["runtime_choice"].change(
+        fn=forget_runtime, inputs=[parts["candidate"]], outputs=[parts["runtime_status"], parts["candidate"]]
+    )
+    parts["runtime_prefix"].change(
+        fn=forget_runtime, inputs=[parts["candidate"]], outputs=[parts["runtime_status"], parts["candidate"]]
     )
 
     def scan_gpus():
@@ -1194,6 +1262,17 @@ def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
     )
     parts["gpu_choice"].change(
         fn=pick_gpu, inputs=[parts["gpu_choice"], parts["candidate"]], outputs=[parts["candidate"]]
+    )
+
+    def record_auth_check(ticked, candidate):
+        candidate = dict(candidate or {})
+        candidate["auth_checked"] = bool(ticked)
+        return candidate
+
+    parts["auth_checked"].change(
+        fn=record_auth_check,
+        inputs=[parts["auth_checked"], parts["candidate"]],
+        outputs=[parts["candidate"]],
     )
 
     def check_bridge(candidate):
@@ -1305,6 +1384,13 @@ def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
             return (_bad(f"{error.user_message} ({error.detail})"),) + show()
         except OSError as error:
             return (_bad(f"the setup could not be saved ({error})."),) + show()
+
+        # The proxy refuses to serve on an unproven boundary, so a setup that
+        # answers that question has to reach it now rather than at the next
+        # restart - otherwise the tab this setup just finished shows an error.
+        from . import proxy
+
+        proxy.set_auth_acknowledged(bool(document.integration.get("auth_checked")))
 
         print(f"{_LOG_PREFIX} setup complete; the integration is initialized.")
         return (_good("Setup saved. The previous setup, if there was one, is kept as a backup."),) + show()

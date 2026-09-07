@@ -1023,8 +1023,20 @@ AUTH_OVERRIDE_ENV = "MINIPAINT_WANGP_ALLOW_UNPROVEN_AUTH"
 _TRUE = {"1", "true", "yes", "on"}
 
 
+#: Set from the saved setup when an operator has recorded that they checked
+#: the boundary themselves. Same meaning as the environment variable, kept
+#: apart from it so a diagnostics line can say which of the two is speaking.
+_acknowledged = False
+
+
+def set_auth_acknowledged(value: typing.Any) -> None:
+    """Record the operator's answer from the saved setup. See ``serving_allowed``."""
+    global _acknowledged
+    _acknowledged = bool(value)
+
+
 def auth_override() -> bool:
-    return os.environ.get(AUTH_OVERRIDE_ENV, "").strip().lower() in _TRUE
+    return os.environ.get(AUTH_OVERRIDE_ENV, "").strip().lower() in _TRUE or _acknowledged
 
 
 def boundary_report() -> typing.Optional[dict]:

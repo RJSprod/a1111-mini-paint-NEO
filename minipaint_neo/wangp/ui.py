@@ -192,7 +192,10 @@ HELP: typing.Dict[str, str] = {
         "are green and this one is not, the usual cause is that WanGP is running without the "
         "plugin: it is only loaded when `wgp_config.json` lists it in `enabled_plugins` **and** "
         "WanGP has started since. Press **Install or update it** in step 4 - that adds it to the "
-        "list and stops WanGP - then press **Run the checks** to start it again."
+        "list and stops WanGP - then press **Run the checks** to start it again. If the row says "
+        "the bridge *answered but refused* and names a code, the plugin is loaded and running and "
+        "the code is the reason: press **Install or update it** to put the plugin this build "
+        "ships in place, then **Run the checks** again, and paste the Console if it persists."
     ),
     "origin": (
         "The page below is loaded from a path on this Forge, never from WanGP's own address. If "

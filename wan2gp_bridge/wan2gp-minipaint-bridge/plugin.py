@@ -324,6 +324,9 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         self.bridge = MiniPaintBridge(host=compatibility.Host(self))
         self.controls: typing.Optional[bridge_ui.BridgeControls] = None
         self.wired = False
+        #: Whether the browser half has been handed to WanGP. Once only: the
+        #: UI is built more than once on some pages.
+        self.injected = False
 
     # -- hooks ----------------------------------------------------------------
 
@@ -335,6 +338,13 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
             return result
         self.bridge.declare()
         self.controls = bridge_ui.build()
+        # Here, not in post_ui_setup. Everything a plugin declares - the
+        # components it wants, the JavaScript it adds - is declared before the
+        # main UI is built; by the time post_ui_setup runs, the Blocks exist
+        # and the page's scripts are settled, so a script added then is
+        # accepted without complaint and never reaches the document. That is
+        # what "the bridge is loaded and silent" was.
+        self._inject_script()
         return result
 
     def post_ui_setup(self, *args: typing.Any, **kwargs: typing.Any) -> typing.Any:
@@ -393,7 +403,6 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
             self.bridge.compat.output_components(),
             bridge_js.DELIVER_JS,
         )
-        self._inject_script()
 
     def on_model_change(self, *args: typing.Any, **kwargs: typing.Any) -> typing.Any:
         # Section 14.6: useful for dropping model-derived caches, never
@@ -423,15 +432,25 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         return handler
 
     def _inject_script(self) -> None:
-        script = bridge_js.document_script(_theme_css())
-        injector = getattr(self, "add_custom_js", None)
-        if not callable(injector):
-            _note("this WanGP has no add_custom_js; the bridge cannot reach the browser")
+        if self.injected:
             return
-        try:
-            injector(script)
-        except Exception as error:
-            _note(f"add_custom_js refused the bridge script: {error!r}")
+        script = bridge_js.document_script(_theme_css())
+        for name in ("add_custom_js", "add_js", "custom_js"):
+            injector = getattr(self, name, None)
+            if not callable(injector):
+                continue
+            try:
+                injector(script)
+            except Exception as error:
+                _note(f"{name} refused the bridge script: {type(error).__name__}: {error}")
+                continue
+            self.injected = True
+            _note(f"browser script handed to {name} ({len(script)} characters)")
+            return
+        _note(
+            "this WanGP exposes no way to add JavaScript (tried add_custom_js, add_js, "
+            "custom_js); the bridge cannot reach the browser and intelligent send stays off"
+        )
 
 
 # ----------------------------------------------------------------- helpers --

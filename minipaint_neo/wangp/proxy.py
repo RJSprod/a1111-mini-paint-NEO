@@ -53,6 +53,18 @@ from .errors import (
 PROXY_PATH = "/wan2gp"
 PROXY_PREFIX = PROXY_PATH + "/"
 
+#: A route under our own prefix that answers nothing and proves everything.
+#: Section 12.6 says route registration is not authentication coverage and
+#: 49.4 makes proving it a release blocker - but the check it asks for, an
+#: unauthenticated request to /wan2gp/, is one the page itself can make. So
+#: this exists to be asked for without credentials: if this Forge's sign-in
+#: covers dynamically added routes, Forge answers 401 before we are reached
+#: and the boundary is proven; if we answer, it does not, and that is proven
+#: too. It carries no content of any kind, which is what makes it safe to
+#: leave outside the serving gate - the gate's whole purpose is the thing it
+#: is being used to decide.
+AUTH_PROBE_PATH = PROXY_PREFIX + "__minipaint_auth_probe"
+
 #: Everything Gradio has been observed to use, plus the ones a future release
 #: may. A method that is not here never reaches the backend.
 METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
@@ -561,6 +573,19 @@ async def _stream_response(response: httpx.Response) -> typing.AsyncIterator[byt
         # The status line left long ago; there is no error page to send now.
         # Ending the body is the only honest move, and the log carries the why.
         _log(f"{PROXY_STREAM_FAILED}: the WanGP response ended early ({redact(error)}).")
+
+
+async def _auth_probe(request: typing.Any) -> typing.Any:
+    """204, and not one byte more. See ``AUTH_PROBE_PATH``.
+
+    Deliberately outside ``serving_allowed``: reaching this is the answer to
+    the question the gate exists to ask. A caller who gets 204 has learnt only
+    that this extension is installed, which the tab in front of them already
+    said.
+    """
+    from starlette.responses import Response
+
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 
 async def forward(request: typing.Any) -> typing.Any:
@@ -1078,6 +1103,8 @@ def install(app: typing.Any) -> None:
         from starlette.routing import Route, WebSocketRoute
 
         routes = [
+            # First, so the catch-all below never swallows it.
+            Route(AUTH_PROBE_PATH, endpoint=_auth_probe, methods=["GET", "HEAD"]),
             Route(PROXY_PATH, endpoint=_redirect_to_prefix, methods=["GET", "HEAD"]),
             Route(PROXY_PREFIX + "{path:path}", endpoint=forward, methods=list(METHODS)),
             WebSocketRoute(PROXY_PREFIX + "{path:path}", endpoint=_websocket_endpoint),

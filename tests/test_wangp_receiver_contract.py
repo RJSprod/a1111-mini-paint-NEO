@@ -1087,10 +1087,12 @@ def guidance_checks(r: Results) -> None:
     for key in ("port", "root_path", "proxy_base", "proxy_asset", "bridge_round"):
         said = waiting.get(key) or ""
         r.check(f"the {key} row explains itself", bool(said), repr(said))
-        # Specifically: it says what the runtime is doing, not the old blanket
-        # line that was true of every failure and useful for none of them.
+        # Specifically: it names a cause - what the runtime is doing, or the
+        # proxy refusing - rather than the old blanket line that was true of
+        # every failure and useful for none of them.
         r.check(f"the {key} row is not the old catch-all",
-                said == wangp_ui._why_not_serving(wangp_runtime.snapshot()), repr(said))
+                said in (wangp_ui._why_not_serving(wangp_runtime.snapshot()),) or "refusing" in said,
+                repr(said))
 
     # And the fold-out saying what to do, on failed rows only.
     rows = [
@@ -1164,6 +1166,71 @@ def console_checks(r: Results) -> None:
     r.check("clearing empties it", journal.lines() == [])
 
 
+def auth_probe_checks(r: Results) -> None:
+    """The sign-in row answers itself, and the deadlock it used to create.
+
+    Gradio checks its login per route, so a route added by an extension is
+    invisible to that check and the row could only ever read "unknown". The
+    row is mandatory, the proxy refuses while it is unproven, and the iframe
+    loads through the proxy - so the bridge row could never pass either, and
+    the only way out was a checkbox. The page can simply make the
+    unauthenticated request itself, which is what the row was asking a human
+    to go and do.
+    """
+    import json as _json
+
+    from minipaint_neo.wangp import proxy as wangp_proxy
+    from minipaint_neo.wangp import ui as wangp_ui
+
+    class HasSignIn:
+        auth = ("user", "pass")
+        router = type("R", (), {"routes": [type("Q", (), {"path": "/wan2gp/{path:path}"})()], "dependencies": []})()
+        user_middleware = []
+
+    remembered_app = wangp_ui._app.get("app")
+    boundary = wangp_proxy._boundary
+    acknowledged = wangp_proxy._acknowledged
+    try:
+        wangp_ui._app["app"] = HasSignIn()
+
+        def after(probe):
+            wangp_proxy._boundary = {"ok": False, "coverage": "unknown", "mechanisms": ["gradio_auth"]}
+            wangp_proxy.set_auth_acknowledged(False)
+            reported = wangp_ui.parse_browser_check(_json.dumps({"round_trip": False, "auth_probe": probe}))
+            return wangp_ui._auth_report(False, reported), reported
+
+        # Forge got there first: proven covered, and the proxy may serve.
+        for status in (401, 403):
+            got, _ = after({"ran": True, "status": status})
+            r.check(f"a {status} proves the sign-in covers the route", got["ok"] is True, repr(got))
+            r.check(f"and says how it knows ({status})", "unauthenticated request" in got["detail"])
+            r.check(f"and the proxy starts serving ({status})", wangp_proxy.serving_allowed() is True)
+
+        # We answered it: proven open. Not "unknown" any more - and still shut.
+        got, _ = after({"ran": True, "status": 204})
+        r.check("our own answer proves it is NOT covered", got["ok"] is False)
+        r.check("and says so rather than saying unknown", got["coverage"] == "proven_open", repr(got))
+        r.check("and the proxy keeps refusing", wangp_proxy.serving_allowed() is False)
+
+        # No answer at all leaves it exactly where it was.
+        got, _ = after({"ran": False, "reason": "no fetch"})
+        r.check("a probe that never ran proves nothing", got["ok"] is False and got["coverage"] == "unknown")
+
+        # The rows that load through the proxy must not claim to work while
+        # the browser would be refused - which is what they used to do,
+        # because the transport probe talks to the backend directly.
+        wangp_proxy._boundary = {"ok": False, "coverage": "unknown", "mechanisms": ["gradio_auth"]}
+        wangp_proxy.set_auth_acknowledged(False)
+        seen = wangp_ui.observe({"root": "/opt/Wan2GP"}, _json.dumps({"round_trip": False}))
+        rows = {row["key"]: row for row in wangp_ui.checklist(seen)}
+        for key in ("proxy_base", "proxy_asset", "bridge_round"):
+            r.check(f"the {key} row says the proxy is refusing", "refusing" in rows[key]["detail"], rows[key]["detail"])
+    finally:
+        wangp_ui._app["app"] = remembered_app
+        wangp_proxy._boundary = boundary
+        wangp_proxy.set_auth_acknowledged(acknowledged)
+
+
 def run() -> Results:
     r = Results("wangp receiver contract")
     try:
@@ -1180,6 +1247,7 @@ def run() -> Results:
         wizard_checks(r)
         guidance_checks(r)
         console_checks(r)
+        auth_probe_checks(r)
     finally:
         bridge.reset_for_tests()
     return r

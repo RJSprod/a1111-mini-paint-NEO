@@ -199,12 +199,15 @@ HELP: typing.Dict[str, str] = {
         "this row is red the tab has not drawn the WanGP frame yet; finish the rows above."
     ),
     "auth": (
-        "This Forge has a sign-in, and this code cannot see whether it covers `/wan2gp/`: Gradio "
-        "checks a login per route, and a route added by an extension is invisible to that check "
-        "either way. So somebody has to look. Sign out of Forge, open `/wan2gp/` in a private "
-        "window, and confirm it refuses you the way the rest of Forge does. Then tick the box "
-        "under this list. Until it is ticked `/wan2gp/` serves nothing at all - WanGP has no "
-        "sign-in of its own, so if that page opened for a stranger they could drive it."
+        "This Forge has a sign-in, and Gradio checks a login per route, so a route added by an "
+        "extension is invisible to that check from the inside. The page therefore asks from the "
+        "outside: it makes one request to `/wan2gp/__minipaint_auth_probe` with no credentials, "
+        "which is the same check you would make in a private window. **Press Run the checks and "
+        "this row answers itself.** If Forge refuses that request the row passes. If it is "
+        "answered, this Forge genuinely does not protect `/wan2gp/` - the row then says so, and "
+        "the proxy keeps refusing, because WanGP has no sign-in of its own and would otherwise "
+        "be open to anyone who can reach this Forge. The checkbox below is only for a deployment "
+        "where that request cannot be made at all."
     ),
 }
 
@@ -752,11 +755,20 @@ def parse_browser_check(text: typing.Any) -> dict:
         return {}
     if not isinstance(payload, dict):
         return {}
+    probe = payload.get("auth_probe")
+    probe = probe if isinstance(probe, dict) else {}
+    status = probe.get("status")
     return {
         "round_trip": bool(payload.get("round_trip")),
         "channel": str(payload.get("channel") or ""),
         "origin": str(payload.get("origin") or ""),
         "detail": str(payload.get("detail") or "")[:200],
+        # What an unauthenticated request to our own prefix was answered with,
+        # asked by the page because only the page knows the address a visitor
+        # really uses. 0 means it was never asked or could not be.
+        "auth_probe_ran": bool(probe.get("ran")),
+        "auth_probe_status": int(status) if isinstance(status, (int, float)) and not isinstance(status, bool) else 0,
+        "auth_probe_reason": str(probe.get("reason") or "")[:120],
     }
 
 
@@ -790,14 +802,43 @@ def remember_app(app: typing.Any) -> None:
     _app["app"] = app
 
 
-def _auth_report(acknowledged: bool = False) -> dict:
+def _serving_allowed(auth: typing.Optional[dict]) -> bool:
+    """Whether the proxy would answer a browser right now."""
+    try:
+        from . import proxy
+
+        return bool(proxy.serving_allowed() or (auth or {}).get("ok"))
+    except Exception:
+        return False
+
+
+def _auth_report(acknowledged: bool = False, reported: typing.Optional[dict] = None) -> dict:
     app = _app.get("app")
     if app is None:
         return {}
+    reported = reported if isinstance(reported, dict) else {}
     try:
         from . import proxy
 
         report = proxy.auth_boundary_report(app)
+
+        # The page asked for our prefix without credentials. Forge answering
+        # first is the proof this code cannot get for itself; us answering is
+        # the disproof, and just as useful - it turns "unknown" into a fact.
+        status = reported.get("auth_probe_status") or 0
+        if not report.get("ok") and reported.get("auth_probe_ran") and status:
+            if status in (401, 403):
+                proxy.set_auth_acknowledged(True)
+                return dict(
+                    report, ok=True, coverage="proven_by_probe",
+                    detail=f"an unauthenticated request to {proxy.AUTH_PROBE_PATH} was refused with {status}, "
+                           "so this Forge's sign-in does cover the route.",
+                )
+            return dict(
+                report, ok=False, coverage="proven_open",
+                detail=f"an unauthenticated request to {proxy.AUTH_PROBE_PATH} was answered with {status}: "
+                       "this Forge's sign-in does NOT cover the route, so /wan2gp/ stays refused.",
+            )
         if not report.get("ok") and acknowledged:
             return dict(report, ok=True, coverage="declared_by_operator",
                         detail="the checkbox in step 5 says this was checked with an unauthenticated request.")
@@ -922,9 +963,21 @@ def observe(candidate: typing.Optional[dict], browser_text: typing.Any = "") -> 
     if not reported.get("round_trip") and snapshot.get("state") == runtime.READY:
         details["bridge_round"] = reported.get("detail") or "the WanGP page below has not answered yet"
 
-    auth = _auth_report(bool(answers.get("auth_checked")))
+    auth = _auth_report(bool(answers.get("auth_checked")), reported)
     if auth and not auth.get("ok"):
         details["auth"] = str(auth.get("detail") or "")
+
+    # The browser reaching /wan2gp/ is what the iframe will do, and the gate
+    # applies to it. The transport probe above talks to the backend directly,
+    # so on its own it would report a proxy that works while the page in front
+    # of the user shows a refusal - which is exactly what it did.
+    if not _serving_allowed(auth):
+        refusal = (
+            "the proxy is refusing every request until the sign-in row below passes, "
+            "so the page cannot load through it yet"
+        )
+        for key in ("proxy_base", "proxy_asset", "bridge_round"):
+            details[key] = refusal
 
     return {
         "command": command,
@@ -1246,11 +1299,13 @@ def _build_wizard() -> dict:
         # they say they did. Until then /wan2gp/ serves nothing at all.
         parts["auth_checked"] = gr.Checkbox(
             False,
-            label="I signed out and checked that /wan2gp/ asks me to sign in",
+            label="I checked this myself: /wan2gp/ asks an unauthenticated visitor to sign in",
             info=(
-                "Only tick this after checking. With Forge signed out, open /wan2gp/ in a private "
-                "window: it must refuse you the way the rest of Forge does. WanGP has no sign-in "
-                "of its own, so if that page opens, anyone who can reach this Forge can drive it."
+                "Not normally needed - Run the checks makes that request for you and answers the "
+                "row above. Tick this only where the page cannot make it (an old browser, an "
+                "extension blocking it) and you have checked by hand instead, by opening /wan2gp/ "
+                "in a private window and being refused. WanGP has no sign-in of its own, so if "
+                "that page opens, anyone who can reach this Forge can drive it."
             ),
             elem_id="wangp_setup_auth_checked",
         )

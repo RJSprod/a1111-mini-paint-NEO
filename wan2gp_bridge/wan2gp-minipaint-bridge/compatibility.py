@@ -175,7 +175,10 @@ COMPONENTS: typing.Tuple[ComponentSpec, ...] = (
     ),
     ComponentSpec(
         key=MODEL_SELECTOR,
-        candidates=("model_type", "model_list", "model_choice", "model_selector"),
+        # Never "model_type": that is the name of a *global* this plugin also
+        # asks for, and a host that answers both from one mapping would hand
+        # back the model's name where a component belongs.
+        candidates=("model_list", "model_choice", "model_selector", "model_type_selector"),
         kind="selection",
         mandatory=False,
         known_for="the model dropdown itself; read so the model is a fact about this page",
@@ -456,6 +459,20 @@ class Host:
     def request_component(self, elem_id: str) -> typing.Any:
         return self._call(self._REQUEST_COMPONENT, elem_id)
 
+    @staticmethod
+    def is_component(value: typing.Any) -> bool:
+        """Whether this is really a Gradio component and not something named
+        like one.
+
+        Gradio identifies a block by ``_id`` and builds an event's config from
+        exactly that attribute, so anything without it cannot be an input or
+        an output - it raises inside Gradio, during WanGP's own UI build,
+        where the blame lands on WanGP. One value that is not a component
+        reached an event this way and took the whole application into safe
+        mode, so the shape is checked here rather than assumed anywhere.
+        """
+        return value is not None and hasattr(value, "_id") and hasattr(value, "get_config")
+
     def accept_components(self, handed: typing.Any) -> int:
         """Take the mapping ``post_ui_setup`` was called with. Returns its size.
 
@@ -467,7 +484,11 @@ class Host:
         """
         if not isinstance(handed, dict):
             return 0
-        self.handed.update({str(key): value for key, value in handed.items()})
+        # A host may hand back globals and components in one mapping - the
+        # names overlap - so only what is really a component is kept.
+        self.handed.update(
+            {str(key): value for key, value in handed.items() if self.is_component(value)}
+        )
         return len(self.handed)
 
     def read_component(self, elem_id: str) -> typing.Any:
@@ -476,12 +497,12 @@ class Host:
         if elem_id in self.handed:
             return self.handed[elem_id]
         found = self._call(self._READ_COMPONENT, elem_id)
-        if found is not None:
+        if self.is_component(found):
             return found
         # A host that keeps them on the plugin instead is still understood.
         for name in ("components", "requested_components", "resolved_components"):
             mapping = getattr(self.owner, name, None)
-            if isinstance(mapping, dict) and elem_id in mapping:
+            if isinstance(mapping, dict) and self.is_component(mapping.get(elem_id)):
                 return mapping[elem_id]
         return None
 

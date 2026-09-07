@@ -666,8 +666,17 @@ def component_handoff_checks(r: Results) -> None:
     r.check("with nothing handed over, the mandatory ones are missing",
             bool(empty.missing_mandatory), repr(empty.missing_mandatory))
 
-    # Now the documented handoff.
-    handed = {name: f"component-{name}" for name in
+    # Now the documented handoff. Real component shapes, because a value that
+    # is not one is rejected on the way in - see the crash below.
+    class Handed:
+        def __init__(self, name):
+            self._id = name
+            self.name = name
+
+        def get_config(self):
+            return {}
+
+    handed = {name: Handed(name) for name in
               ("image_start", "image_end", "image_refs", "image_prompt_type", "video_prompt_type")}
     taken = host.accept_components(handed)
     r.check("the mapping post_ui_setup was called with is taken", taken == len(handed), str(taken))
@@ -680,11 +689,53 @@ def component_handoff_checks(r: Results) -> None:
             and resolved.elem_ids.get(compatibility.END_IMAGE) == "image_end",
             repr(resolved.elem_ids))
     r.check("and the component itself is the object handed over, not a copy",
-            resolved.components.get(compatibility.START_IMAGE) == "component-image_start")
+            resolved.components.get(compatibility.START_IMAGE) is handed["image_start"])
 
     # A host that hands over nothing usable must not pretend otherwise.
     r.check("a non-mapping is ignored rather than trusted",
             compatibility.Host(None).accept_components(["not", "a", "dict"]) == 0)
+
+    # The crash this cost a real install: WanGP answers components and globals
+    # out of one mapping, and their names overlap. A value that is not a
+    # component reached a Gradio event, create_ui() raised, and WanGP restarted
+    # into safe mode with every user plugin disabled - other people's too.
+    class Block:
+        _id = 1
+
+        def get_config(self):
+            return {}
+
+    r.check("a string is not mistaken for a component", not compatibility.Host.is_component("t2v_A"))
+    r.check("nor a dict, nor None",
+            not compatibility.Host.is_component({"a": 1}) and not compatibility.Host.is_component(None))
+    r.check("a gradio-shaped block is one", compatibility.Host.is_component(Block()))
+
+    mixed = compatibility.Host(None)
+    kept = mixed.accept_components({
+        "image_start": Block(), "model_type": "t2v_A", "state": {"queue": []},
+    })
+    r.check("only the real component is kept from a mixed mapping", kept == 1, str(kept))
+    r.check("and the global's value is not readable as a component",
+            mixed.read_component("model_type") is None)
+
+    # And the name that collided is no longer asked for as a widget.
+    selector = compatibility.COMPONENTS_BY_KEY[compatibility.MODEL_SELECTOR]
+    r.check("the model selector never asks for the global's name",
+            "model_type" not in selector.candidates, str(selector.candidates))
+
+    # Whatever WanGP hands over, nothing that is not a component reaches an event.
+    host2 = compatibility.Host(None)
+    compat2 = compatibility.Compatibility(host=host2)
+    compat2.declare()
+    handed2 = {name: Block() for name in
+               ("image_start", "image_end", "image_refs", "image_prompt_type", "video_prompt_type")}
+    handed2.update({"model_type": "t2v_A", "state": {}})
+    host2.accept_components(handed2)
+    compat2.resolve()
+    passed = [component for _key, component in compat2.state_components()]
+    r.check("every input handed to Gradio is a real component",
+            passed and all(compatibility.Host.is_component(item) for item in passed),
+            repr([type(item).__name__ for item in passed]))
 
 
 def run() -> Results:

@@ -362,6 +362,30 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
                 f"Resolved: {', '.join(sorted(resolution.elem_ids.values())) or 'nothing'}."
             )
 
+        # Nothing this plugin does may take WanGP down with it. It already
+        # has, once: a value that was not a component reached a Gradio event,
+        # create_ui() raised, and WanGP restarted into safe mode with every
+        # user plugin disabled - other people's plugins included. A bridge
+        # that fails to wire itself is a Send menu without WanGP in it, and
+        # that is all it is ever allowed to be.
+        try:
+            self._wire(resolution)
+        except Exception as error:
+            self.wired = None
+            _note(
+                f"could not wire the bridge ({type(error).__name__}: {error}). "
+                "WanGP is unaffected; intelligent send stays off for this run."
+            )
+            try:
+                import traceback
+
+                traceback.print_exc()
+            except Exception:
+                pass
+        return result
+
+    def _wire(self, resolution: typing.Any) -> None:
+        """Attach the hidden bridge event. See ``post_ui_setup``."""
         self.wired = bridge_ui.wire(
             self.controls,
             self._make_handler(),
@@ -370,7 +394,6 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
             bridge_js.DELIVER_JS,
         )
         self._inject_script()
-        return result
 
     def on_model_change(self, *args: typing.Any, **kwargs: typing.Any) -> typing.Any:
         # Section 14.6: useful for dropping model-derived caches, never

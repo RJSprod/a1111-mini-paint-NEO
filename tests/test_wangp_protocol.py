@@ -738,6 +738,87 @@ def component_handoff_checks(r: Results) -> None:
             repr([type(item).__name__ for item in passed]))
 
 
+def injection_timing_checks(r: Results) -> None:
+    """The browser half is declared, not added afterwards.
+
+    Everything a WanGP plugin declares - the components it wants, the script
+    it adds - is declared in ``setup_ui``, before the main UI is built. Doing
+    it in ``post_ui_setup`` instead is accepted without complaint and never
+    reaches the document, which is a bridge that loads, resolves every
+    component, and is silent.
+    """
+    import sys as _sys
+
+    folder = str(BRIDGE_COPY.parent)
+    added = folder not in _sys.path
+    if added:
+        _sys.path.insert(0, folder)
+    try:
+        import plugin as bridge_plugin
+    finally:
+        if added and folder in _sys.path:
+            _sys.path.remove(folder)
+
+    class Recorder:
+        def __init__(self):
+            self.order = []
+        def request_component(self, elem_id):
+            self.order.append("request_component")
+        def request_global(self, name):
+            self.order.append("request_global")
+        def add_custom_js(self, script):
+            self.order.append("add_custom_js")
+            self.script = script
+
+    host = Recorder()
+    instance = bridge_plugin.MiniPaintBridgePlugin.__new__(bridge_plugin.MiniPaintBridgePlugin)
+    instance.bridge = bridge_plugin.MiniPaintBridge(
+        host=bridge_plugin.compatibility.Host(host),
+        environ={"MINIPAINT_WANGP_INSTANCE_ID": "i", "MINIPAINT_WANGP_HANDOFF_ROOT": "/tmp"},
+    )
+    instance.controls = None
+    instance.wired = False
+    instance.injected = False
+    instance.add_custom_js = host.add_custom_js
+
+    instance.setup_ui()
+    r.check("the script is handed over during setup_ui", "add_custom_js" in host.order, str(host.order[:3]))
+    r.check("and it is a real script, not an empty string",
+            len(getattr(host, "script", "")) > 500, str(len(getattr(host, "script", ""))))
+    r.check("the components are asked for in the same phase", "request_component" in host.order)
+
+    handed = host.order.count("add_custom_js")
+    instance._inject_script()
+    r.check("a second pass does not hand it over twice",
+            host.order.count("add_custom_js") == handed, str(host.order.count("add_custom_js")))
+
+    # A build that offers no way to add JavaScript must say so rather than go
+    # quiet - a silent bridge is what cost several rounds of this.
+    quiet = bridge_plugin.MiniPaintBridgePlugin.__new__(bridge_plugin.MiniPaintBridgePlugin)
+    quiet.bridge = instance.bridge
+    quiet.controls = None
+    quiet.wired = False
+    quiet.injected = False
+    for name in ("add_custom_js", "add_js", "custom_js"):
+        setattr(quiet, name, None)
+    quiet._inject_script()
+    r.check("a WanGP with no JavaScript hook leaves the flag down", quiet.injected is False)
+
+    # And one that refuses the script is not mistaken for one that took it.
+    def refuse(_script):
+        raise RuntimeError("not accepted")
+
+    refused = bridge_plugin.MiniPaintBridgePlugin.__new__(bridge_plugin.MiniPaintBridgePlugin)
+    refused.bridge = instance.bridge
+    refused.controls = None
+    refused.wired = False
+    refused.injected = False
+    for name in ("add_custom_js", "add_js", "custom_js"):
+        setattr(refused, name, refuse)
+    refused._inject_script()
+    r.check("a refused script leaves the flag down too", refused.injected is False)
+
+
 def run() -> Results:
     r = Results("wangp protocol")
     copy_checks(r)
@@ -749,6 +830,7 @@ def run() -> Results:
     session_isolation_checks(r)
     loader_checks(r)
     component_handoff_checks(r)
+    injection_timing_checks(r)
     handoff_checks(r)
     return r
 

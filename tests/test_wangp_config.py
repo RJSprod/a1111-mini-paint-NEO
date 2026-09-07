@@ -532,6 +532,81 @@ def check_root(r: Results, base: pathlib.Path) -> None:
     r.check("no bridge installed reads as no info", discovery.read_bridge_info(good) is None)
     r.check("no bridge installed is BRIDGE_MISSING", discovery.bridge_status(good)[0] == errors.BRIDGE_MISSING)
 
+    check_plugin_registration(r, base)
+
+
+def check_plugin_registration(r: Results, base) -> None:
+    """Copying the folder is half the job; WanGP has to be told to load it.
+
+    Upstream discovers plugins by scanning ``plugins/`` but only loads
+    ``SYSTEM_PLUGINS`` plus the folder names in ``enabled_plugins`` in
+    ``wgp_config.json``. A plugin that is only copied is found and skipped -
+    which looks exactly like one that is installed and broken. Nothing inside
+    our own ``plugin_info.json`` has any say in it.
+    """
+    import json as _json
+
+    root = make_root(base / "roots" / "registered")
+
+    # A WanGP that already has settings and other people's plugins switched on.
+    settings = {
+        "enabled_plugins": ["video_mask_creator", "somebody_elses_plugin"],
+        "transformer_quantization": "int8",
+        "profile": 4,
+    }
+    (root / discovery.WGP_CONFIG_NAME).write_text(_json.dumps(settings, indent=4), encoding="utf-8")
+
+    r.check("the enabled list is read as WanGP stores it",
+            discovery.enabled_plugins(root) == ["video_mask_creator", "somebody_elses_plugin"])
+    r.check("ours is not enabled to begin with", discovery.bridge_is_enabled(root) is False)
+
+    changed = discovery.enable_bridge_plugin(root)
+    written = _json.loads((root / discovery.WGP_CONFIG_NAME).read_text(encoding="utf-8"))
+    r.check("enabling reports that it changed something", changed is True)
+    r.check("ours is now listed", discovery.bridge_is_enabled(root))
+
+    # The whole point: this is somebody else's configuration file.
+    r.check("every other plugin is still enabled",
+            all(name in written["enabled_plugins"] for name in settings["enabled_plugins"]))
+    r.check("their order is kept, ours is appended",
+            written["enabled_plugins"] == settings["enabled_plugins"] + [discovery.BRIDGE_FOLDER_NAME])
+    r.check("nothing else in their settings moved",
+            {key: value for key, value in written.items() if key != "enabled_plugins"}
+            == {key: value for key, value in settings.items() if key != "enabled_plugins"})
+    r.check("enabling twice changes nothing", discovery.enable_bridge_plugin(root) is False)
+    r.check("and does not list it twice",
+            _json.loads((root / discovery.WGP_CONFIG_NAME).read_text(encoding="utf-8"))["enabled_plugins"].count(
+                discovery.BRIDGE_FOLDER_NAME) == 1)
+
+    # A WanGP that has never written its settings, and one that wrote rubbish.
+    fresh = make_root(base / "roots" / "fresh-config")
+    r.check("no config file reads as nothing enabled", discovery.enabled_plugins(fresh) == [])
+    discovery.enable_bridge_plugin(fresh)
+    r.check("and enabling creates it with only ours in it",
+            _json.loads((fresh / discovery.WGP_CONFIG_NAME).read_text(encoding="utf-8"))["enabled_plugins"]
+            == [discovery.BRIDGE_FOLDER_NAME])
+
+    broken = make_root(base / "roots" / "broken-config")
+    (broken / discovery.WGP_CONFIG_NAME).write_text("{not json", encoding="utf-8")
+    r.check("unreadable settings read as nothing enabled, not a crash",
+            discovery.enabled_plugins(broken) == [])
+    listy = make_root(base / "roots" / "listy-config")
+    (listy / discovery.WGP_CONFIG_NAME).write_text('{"enabled_plugins": "not a list"}', encoding="utf-8")
+    r.check("a malformed enabled list reads as empty", discovery.enabled_plugins(listy) == [])
+
+    # And the status a copied-but-unregistered plugin gets. This is the exact
+    # state that used to report itself as installed and switched on.
+    copied = make_root(base / "roots" / "copied-only")
+    folder = copied / discovery.PLUGINS_DIR_NAME / discovery.BRIDGE_FOLDER_NAME
+    folder.mkdir(parents=True)
+    (folder / discovery.BRIDGE_INFO_NAME).write_text('{"name": "x", "version": "1.0.0"}', encoding="utf-8")
+    code, detail = discovery.bridge_status(copied, "1.0.0")
+    r.check("a copied but unregistered plugin is BRIDGE_DISABLED", code == errors.BRIDGE_DISABLED, f"{code} {detail}")
+    r.check("and the reason names the file that decides it",
+            discovery.WGP_CONFIG_NAME in detail and "enabled_plugins" in detail, detail)
+    discovery.enable_bridge_plugin(copied)
+    r.check("registering it makes the status pass", discovery.bridge_status(copied, "1.0.0")[0] == "")
+
 
 def check_gpus(r: Results) -> None:
     """nvidia-smi parsing, and the refusal to substitute one card for another."""

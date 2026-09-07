@@ -137,6 +137,11 @@ CHECKS: typing.Tuple[typing.Tuple[str, str], ...] = (
 #: cover a route, and demanding coverage there would block every setup.
 CONDITIONAL_CHECKS = frozenset({"auth"})
 
+#: How often the wizard asks again while WanGP is starting. Long enough not to
+#: be a spinner made of round trips, short enough that a model finishing its
+#: load is noticed rather than waited out.
+POLL_SECONDS = 3.0
+
 #: What to do about a row that has not passed. A red row states a fact; this
 #: says what to go and do about it, which is the part somebody staring at the
 #: wizard actually needs. Shown folded, only on rows that failed, because a
@@ -169,9 +174,12 @@ HELP: typing.Dict[str, str] = {
     ),
     "bridge": (
         "Press **Check the bridge plugin** in step 4, and **Install or update it** if it is "
-        "missing or the wrong version. It is copied into `plugins/wan2gp-minipaint-bridge` "
-        "inside your WanGP folder and nothing else there is touched. If WanGP was already "
-        "running when you installed it, it has to be restarted to load it."
+        "missing or not listed. Two things have to be true, and copying the folder is only the "
+        "first: WanGP finds plugins by scanning `plugins/`, but it only *loads* the ones named "
+        "in `enabled_plugins` in `wgp_config.json`. **Install or update it** does both, adding "
+        "our folder to that list and leaving every other plugin and setting alone. WanGP builds "
+        "its plugin list at startup, so it is stopped for you and starts again with the plugin "
+        "loaded on the next **Run the checks**."
     ),
     "proxy_base": (
         "This fetches the WanGP page through this Forge, so WanGP has to be up first. Wait for "
@@ -179,9 +187,11 @@ HELP: typing.Dict[str, str] = {
     ),
     "proxy_asset": "Same as the row above: it needs WanGP serving, then another press of **Run the checks**.",
     "bridge_round": (
-        "The WanGP page below has to load and its bridge plugin has to answer. That needs the "
-        "proxy rows green first, and it needs the bridge plugin installed and switched on. Give "
-        "the page below time to appear, then press **Run the checks** again."
+        "The WanGP page below has to load and its bridge plugin has to answer. If the rows above "
+        "are green and this one is not, the usual cause is that WanGP is running without the "
+        "plugin: it is only loaded when `wgp_config.json` lists it in `enabled_plugins` **and** "
+        "WanGP has started since. Press **Install or update it** in step 4 - that adds it to the "
+        "list and stops WanGP - then press **Run the checks** to start it again."
     ),
     "origin": (
         "The page below is loaded from a path on this Forge, never from WanGP's own address. If "
@@ -1198,6 +1208,13 @@ def _build_wizard() -> dict:
         parts["validate"] = gr.Button(
             "Run the checks", variant="primary", elem_id="wangp_setup_validate"
         )
+        # While WanGP is coming up the answer changes without anybody pressing
+        # anything, so the page asks again on its own. It runs only between
+        # "a launch is in flight" and "the runtime has settled", and turns
+        # itself off at that point - the standing rule against polling is
+        # about a page that watches forever, not about waiting for a process
+        # this very page started.
+        parts["poll"] = gr.Timer(POLL_SECONDS, active=False)
         parts["checklist"] = gr.HTML(checklist_html(checklist({})), elem_id="wangp_setup_checklist")
         # The one row this code cannot settle for itself. Gradio's sign-in is a
         # per-route dependency, so a route added after the app was built is not
@@ -1425,10 +1442,30 @@ def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
             return _bad(f"{error.user_message} ({error.detail})")
         except Exception as error:
             return _bad(f"the bridge could not be installed ({error}).")
-        note = " WanGP loads plugins at startup, so it has to be restarted for this to take effect."
+        listed = (
+            f" It was added to `enabled_plugins` in `{discovery.WGP_CONFIG_NAME}`, which is what "
+            "makes WanGP load it; nothing else in that file was changed."
+            if result.get("enabled")
+            else f" `{discovery.WGP_CONFIG_NAME}` already listed it."
+        )
+
+        # WanGP builds its plugin list once, at startup, so a copy over a
+        # running instance changes nothing until it comes back. We own that
+        # process, so the restart is ours to do rather than ours to ask for.
+        restarted = ""
+        if result.get("restart_required"):
+            try:
+                if runtime.snapshot().get("state") != runtime.STOPPED:
+                    runtime.stop()
+                    restarted = " WanGP was stopped; the next Run the checks starts it with the plugin loaded."
+                else:
+                    restarted = " It loads the next time WanGP starts."
+            except Exception as error:  # pragma: no cover - a stop that fails is still an install
+                restarted = f" WanGP could not be stopped automatically ({error}); restart it to load the plugin."
+
         return _good(
             f"version {result['version']} written to `{result['path']}` "
-            f"({result['files']} files).{note if result['restart_required'] else ''}"
+            f"({result['files']} files).{listed}{restarted}"
         )
 
     parts["bridge_install"].click(
@@ -1456,12 +1493,23 @@ def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
         ready = mandatory_pass(rows)
         channel = _new_channel(runtime.snapshot()) if runtime.snapshot().get("state") == runtime.READY else ""
 
-        message = (
-            "Every mandatory check passed. Finish setup writes it down."
-            if ready
-            else "Some checks have not passed yet. WanGP may still be loading below; press "
-            "**Run the checks** again once it is."
-        )
+        # Whether anything is still going to change on its own. Only a launch
+        # in flight counts: once WanGP is up or has failed, the remaining red
+        # rows are waiting on the person, not on the machine.
+        working = _start_pending() or runtime.snapshot().get("state") == runtime.STARTING
+
+        if ready:
+            message = "Every mandatory check passed. Finish setup writes it down."
+        elif working:
+            message = (
+                "WanGP is starting - loading a model can take a few minutes. This list is "
+                "refreshing itself; nothing needs pressing until it stops."
+            )
+        else:
+            message = (
+                "Some checks have not passed yet. Open **What to do** under a red row for the "
+                "next step."
+            )
         return (
             checklist_html(rows),
             rows,
@@ -1471,6 +1519,7 @@ def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
             iframe_html(channel) if channel else "",
             channel,
             message,
+            gr.Timer(active=bool(working)),
         )
 
     parts["validate"].click(
@@ -1489,6 +1538,25 @@ def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
             shell["iframe"],
             shell["channel"],
             parts["finish_status"],
+            parts["poll"],
+        ],
+    )
+
+    # The same answer, asked again by the clock rather than by a person, for
+    # as long as the launch it started is still running.
+    parts["poll"].tick(
+        fn=validate,
+        inputs=[parts["candidate"], shell["browser_check"]],
+        outputs=[
+            parts["checklist"],
+            parts["rows"],
+            parts["candidate"],
+            parts["finish"],
+            shell["iframe_root"],
+            shell["iframe"],
+            shell["channel"],
+            parts["finish_status"],
+            parts["poll"],
         ],
     )
 

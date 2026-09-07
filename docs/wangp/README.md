@@ -8,6 +8,33 @@ for yourself. It is written against the code in `minipaint_neo/wangp/`,
 `docs/WAN2GP_TAB_DESIGN_INTENT_REVISED_2026-09-06.txt`; where the two differ, this file
 follows the code and says so.
 
+
+## How the bridge plugin is installed
+
+Two things have to be true before WanGP will run our plugin, and only the first
+is what "installing a plugin" usually means:
+
+1. **The folder is there.** `plugins/wan2gp-minipaint-bridge/` inside your WanGP
+   installation. WanGP finds plugins by scanning that directory for folders
+   containing a `plugin.py` or an `__init__.py`, so nothing has to be registered
+   for it to be *found*.
+2. **It is listed in `enabled_plugins`.** WanGP loads its built-in
+   `SYSTEM_PLUGINS` plus exactly the folder names listed under `enabled_plugins`
+   in `wgp_config.json`, in the WanGP root. The key defaults to an empty list.
+   **A plugin that is only copied is discovered and then skipped** — which looks
+   from the outside like a plugin that is installed and broken. Nothing inside
+   our own `plugin_info.json` has any say in this.
+
+**Install or update it** in step 4 does both, so there is nothing to edit by
+hand. It appends our folder name to that list and writes the file back
+atomically; every other plugin stays enabled and every other setting is
+preserved. It is the same switch WanGP's own Plugins tab writes.
+
+WanGP builds its plugin list once, at startup, so enabling it changes nothing
+until the process restarts. Because this extension owns that process, the
+installer stops it for you and the next **Run the checks** starts it again with
+the plugin loaded.
+
 ## What it is
 
 A second top-level tab, **WanGP**, that shows the real WanGP application, plus WanGP

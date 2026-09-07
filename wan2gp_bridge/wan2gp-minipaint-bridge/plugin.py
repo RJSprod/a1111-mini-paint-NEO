@@ -493,17 +493,23 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
     def _make_handler(self) -> typing.Callable[..., typing.Any]:
         bridge = self.bridge
 
-        def handler(*values: typing.Any, request: typing.Any = None) -> typing.List[typing.Any]:
+        # ``request`` first, and positional. Gradio decides which arguments
+        # to fill in itself by walking the signature's *positional* parameters
+        # and stopping at the first that is not one - so a request parameter
+        # placed after ``*values``, keyword-only, is never even looked at,
+        # the handler runs with no request, and without a session hash every
+        # hello is refused with BRIDGE_SESSION_MISMATCH. That was the answer
+        # a real install gave, over and over, once its controls were finally
+        # on the page.
+        def handler(request: typing.Any, *values: typing.Any) -> typing.List[typing.Any]:
             raw = values[0] if values else ""
             session_hash = getattr(request, "session_hash", None)
             ack, applied = bridge.handle(raw, values[1:], session_hash)
             return bridge.outputs(ack, applied)
 
-        # Gradio decides to inject its request object by looking at the
-        # annotation, and this module postpones annotations, so the real class
-        # is attached here instead of written in the signature. Without it the
-        # handler has no session hash and every request is refused - which is
-        # the safe direction, but not the working one.
+        # Gradio recognises the parameter by its annotation, and this module
+        # postpones annotations, so the real class is attached here instead of
+        # written in the signature.
         if gr is not None:
             handler.__annotations__["request"] = gr.Request
         return handler

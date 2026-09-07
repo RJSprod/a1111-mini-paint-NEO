@@ -1111,6 +1111,116 @@ def placement_checks(r: Results) -> None:
             and config["columnClass"] == bridge_ui.COLUMN_CLASS)
 
 
+def session_hash_checks(r: Results) -> None:
+    """The bridge's event is handed Gradio's request, and so a session hash.
+
+    Gradio fills in its request object only for a *positional* parameter
+    annotated as one, and stops reading the signature at the first parameter
+    that is not positional. A handler written ``(*values, request=None)``
+    therefore never receives it, derives no session, and refuses every hello
+    with BRIDGE_SESSION_MISMATCH - which is exactly what a real install did
+    once its controls were finally on the page. This drives the wired event
+    through Gradio's own predict endpoint with a session hash and reads the
+    session it derives.
+    """
+    import json as _json
+    import sys as _sys
+
+    import gradio as gr
+    from gradio import helpers
+    from gradio.routes import App
+    from starlette.testclient import TestClient
+
+    folder = str(BRIDGE_COPY.parent)
+    added = folder not in _sys.path
+    if added:
+        _sys.path.insert(0, folder)
+    try:
+        import plugin as bridge_plugin
+    finally:
+        if added and folder in _sys.path:
+            _sys.path.remove(folder)
+
+    class Host:
+        def __init__(self):
+            self.inserts = []
+
+        def request_component(self, elem_id):
+            pass
+
+        def request_global(self, name):
+            pass
+
+        def add_custom_js(self, script):
+            pass
+
+        def insert_after(self, target, builder):
+            self.inserts.append((target, builder))
+
+    host = Host()
+    plugin = _bare_plugin(bridge_plugin, host, insert_after=host.insert_after, add_custom_js=host.add_custom_js)
+
+    # First the rule itself, on the handler alone.
+    handler = plugin._make_handler()
+    inputs = ["the request json"]
+    helpers.special_args(handler, inputs=inputs, request="THE REQUEST")
+    r.check("Gradio fills the handler's request in, ahead of the request json",
+            inputs and inputs[0] == "THE REQUEST" and inputs[1] == "the request json", repr(inputs))
+
+    # Then the whole path: a wired event, Gradio's own endpoint, a session hash.
+    with gr.Blocks() as demo:
+        with gr.Row():
+            image_start = gr.Image(label="start")
+            image_end = gr.Image(label="end")
+            image_refs = gr.Gallery(label="refs")
+            image_prompt_type = gr.Text(value="S", visible=False)
+            video_prompt_type = gr.Text(value="", visible=False)
+        handed = {
+            "image_start": image_start, "image_end": image_end, "image_refs": image_refs,
+            "image_prompt_type": image_prompt_type, "video_prompt_type": video_prompt_type,
+        }
+        plugin.setup_ui()
+        plugin.post_ui_setup(handed)
+        _wangp_insertions(handed, host.inserts)
+        trigger_id = plugin.controls.trigger._id
+
+    app = App.create_app(demo)
+    client = TestClient(app)
+    config = client.get("/config").json()
+    index = next(i for i, d in enumerate(config["dependencies"])
+                 if any(t[0] == trigger_id and t[1] == "click" for t in d["targets"]))
+    width = len(config["dependencies"][index]["inputs"])
+
+    def hello(session_hash):
+        body = {
+            "data": [_json.dumps({"op": "hello", "request_id": "r1", "channel_id": "a" * 32})] + [None] * (width - 1),
+            "fn_index": index,
+            "session_hash": session_hash,
+        }
+        response = client.post("/gradio_api/run/predict", json=body)
+        r.check("Gradio ran the bridge's event", response.status_code == 200, str(response.status_code))
+        return _json.loads(response.json()["data"][0])
+
+    hex32 = re.compile(r"^[0-9a-f]{32}$")
+    first = hello("page-one")
+    r.check("a hello through Gradio is answered with a session for that page",
+            bool(hex32.match(str(first.get("bridge_session", "")))), repr(first.get("bridge_session")))
+    r.check("and is not the refusal a real install kept getting",
+            first.get("code") != "BRIDGE_SESSION_MISMATCH", repr(first.get("code")))
+    r.check("the acknowledgement still names the instance and the request",
+            first.get("instance_id") == "i" and first.get("request_id") == "r1")
+    again = hello("page-one")
+    r.check("the same page gets the same session", again.get("bridge_session") == first.get("bridge_session"))
+    other = hello("page-two")
+    r.check("another page gets another", other.get("bridge_session") != first.get("bridge_session"))
+
+    # And the parent, should it ever meet that refusal again, says so where
+    # the checklist reads it instead of counting the answer as silence.
+    parent = BROWSER_COPY.read_text(encoding="utf-8")
+    r.check("the parent reports a refused hello as a refusal, with its code",
+            "answered but refused" in parent and "stopHandshake();" in parent)
+
+
 def run() -> Results:
     r = Results("wangp protocol")
     copy_checks(r)
@@ -1124,6 +1234,7 @@ def run() -> Results:
     component_handoff_checks(r)
     injection_timing_checks(r)
     placement_checks(r)
+    session_hash_checks(r)
     handoff_checks(r)
     return r
 

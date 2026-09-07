@@ -635,7 +635,21 @@ window.minipaintWanGP = (function () {
      */
     function onReady(payload) {
         const session = text(payload.bridge_session, 128);
-        if (!OPAQUE_RE.test(session)) { return; }
+        if (!OPAQUE_RE.test(session)) {
+            // The bridge answered and could not even name a session for this
+            // page: the request reached its Gradio event, and that event had
+            // nothing to derive one from. That is an answer - a refusal with
+            // a code - not silence, and it is reported as one so the checklist
+            // row says why rather than "did not answer". Offering again would
+            // get the same refusal, so the handshake stops here.
+            const refused = text(payload.code || payload.reason_code, 60) || BRIDGE_SESSION_MISMATCH;
+            stopHandshake();
+            S.ready = false;
+            S.lastCode = refused;
+            say("handshake: the bridge answered but refused - " + refused + " (it named no session for this page)");
+            report(false, "the bridge answered but refused: " + refused);
+            return;
+        }
         const instance = text(payload.instance_id, 128);
         const restarted = !!S.instanceId && !!instance && instance !== S.instanceId;
         if (S.bridgeSession && S.bridgeSession !== session) {

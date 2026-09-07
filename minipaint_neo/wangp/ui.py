@@ -692,6 +692,26 @@ def config_from_wizard(candidate: typing.Optional[dict], initialized: bool = Fal
     )
 
 
+def acknowledge_auth(ticked: typing.Any, candidate: typing.Any) -> dict:
+    """Take the operator's word about the sign-in boundary, and act on it now.
+
+    Immediately, not when the setup is saved. The rows below that one need the
+    iframe, the iframe needs the proxy, and the proxy needs this answer - so
+    holding it until Finish left the checkbox unable to unblock the very rows
+    that were keeping Finish disabled.
+    """
+    answers = dict(candidate or {}) if isinstance(candidate, dict) else {}
+    answers["auth_checked"] = bool(ticked)
+    try:
+        from . import proxy
+
+        proxy.set_auth_acknowledged(bool(ticked))
+        journal.note("checks", f"the sign-in box was {'ticked' if ticked else 'cleared'} by hand")
+    except Exception:  # pragma: no cover - a checkbox is never worth an exception
+        pass
+    return answers
+
+
 def record_client_log(text: typing.Any) -> None:
     """One line the browser wants in the page's log. Never raises.
 
@@ -1486,10 +1506,7 @@ def _wire_wizard(parts: dict, shell: dict, painted, show, console) -> None:
         fn=pick_gpu, inputs=[parts["gpu_choice"], parts["candidate"]], outputs=[parts["candidate"]]
     )
 
-    def record_auth_check(ticked, candidate):
-        candidate = dict(candidate or {})
-        candidate["auth_checked"] = bool(ticked)
-        return candidate
+    record_auth_check = acknowledge_auth
 
     parts["auth_checked"].change(
         fn=record_auth_check,

@@ -329,6 +329,22 @@ def version_supported(version: typing.Any, minimum: str = WAN2GP_MIN_VERSION, ma
 # --------------------------------------------------------- the plugin base --
 
 
+#: Where WanGP's plugin base class lives. The first entry is the real one -
+#: ``shared/utils/plugins.py`` is the module whose loader imports us - and the
+#: rest are kept for a build that moves it. Getting this wrong is silent by
+#: construction on WanGP's side, so it is worth being explicit about.
+PLUGIN_BASE_CANDIDATES: typing.Tuple[typing.Tuple[str, str], ...] = (
+    ("shared.utils.plugins", "WAN2GPPlugin"),
+    ("shared.utils.plugin", "WAN2GPPlugin"),
+    ("shared.plugins", "WAN2GPPlugin"),
+    ("wan2gp_plugin", "WAN2GPPlugin"),
+    ("plugins.plugin_base", "WAN2GPPlugin"),
+    ("plugins.base", "WAN2GPPlugin"),
+    ("shared.plugin", "WAN2GPPlugin"),
+    ("wgp_plugin", "WAN2GPPlugin"),
+)
+
+
 def plugin_base() -> type:
     """WanGP's plugin class, or a stand-in with the same shape.
 
@@ -339,13 +355,7 @@ def plugin_base() -> type:
     deliberately inert: it defines the hook names and does nothing, so a
     plugin built on it never pretends to have wired anything up.
     """
-    for module_name, attribute in (
-        ("wan2gp_plugin", "WAN2GPPlugin"),
-        ("plugins.plugin_base", "WAN2GPPlugin"),
-        ("plugins.base", "WAN2GPPlugin"),
-        ("shared.plugin", "WAN2GPPlugin"),
-        ("wgp_plugin", "WAN2GPPlugin"),
-    ):
+    for module_name, attribute in PLUGIN_BASE_CANDIDATES:
         try:
             module = __import__(module_name, fromlist=[attribute])
             candidate = getattr(module, attribute, None)
@@ -353,6 +363,19 @@ def plugin_base() -> type:
             continue
         if isinstance(candidate, type):
             return candidate
+
+    # Landing here means every subclass hook below is attached to a class
+    # WanGP has never heard of. Its loader finds plugins with
+    # ``issubclass(obj, WAN2GPPlugin)`` and skips anything else without a
+    # word, so this would otherwise be a plugin that installs, enables,
+    # appears in the Plugins tab and simply never runs. Say so where the log
+    # will pick it up - WanGP's stdout is read by the tab that installed us.
+    print(
+        "[MiniPaint bridge] WanGP's plugin base class was not found in any of "
+        + ", ".join(name for name, _ in PLUGIN_BASE_CANDIDATES)
+        + ". The bridge cannot be loaded by this WanGP build: its loader only "
+        "accepts a subclass of WAN2GPPlugin. Nothing else about WanGP is affected."
+    )
     return FallbackPlugin
 
 

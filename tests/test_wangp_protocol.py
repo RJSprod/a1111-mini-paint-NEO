@@ -553,6 +553,86 @@ def session_isolation_checks(r: Results) -> None:
         r.check(f"{label} is recognised as the current model", compat.selection_is_current(shape), repr(shape))
 
 
+def loader_checks(r: Results) -> None:
+    """WanGP's own loader must be able to find our plugin class.
+
+    It imports ``<folder>.plugin`` and takes any class where
+    ``issubclass(obj, WAN2GPPlugin)`` holds. A plugin whose class is built on
+    anything else is skipped with no message at all - it still appears in the
+    Plugins tab, still sits in ``enabled_plugins``, and simply never runs.
+    That is exactly what happened: the base class was searched for under five
+    module names, none of which was the real one.
+
+    So this builds a WanGP-shaped tree with the base class where WanGP really
+    keeps it, and runs the loader's own two lines against the real folder.
+    """
+    import importlib
+    import inspect
+    import pathlib as _pathlib
+    import shutil
+    import sys
+    import tempfile
+
+    source = BRIDGE_COPY.parent
+    r.check("the real module path is the first place we look",
+            _first_candidate() == ("shared.utils.plugins", "WAN2GPPlugin"), repr(_first_candidate()))
+
+    with tempfile.TemporaryDirectory(prefix="minipaint-wangp-loader-") as scratch:
+        root = _pathlib.Path(scratch)
+        (root / "shared" / "utils").mkdir(parents=True)
+        (root / "shared" / "__init__.py").write_text("", encoding="utf-8")
+        (root / "shared" / "utils" / "__init__.py").write_text("", encoding="utf-8")
+        (root / "shared" / "utils" / "plugins.py").write_text(
+            "class WAN2GPPlugin:\n    name = 'unnamed'\n", encoding="utf-8"
+        )
+        plugins = root / "plugins"
+        plugins.mkdir()
+        shutil.copytree(str(source), str(plugins / source.name))
+
+        added = [str(root), str(plugins)]
+        for entry in added:
+            sys.path.insert(0, entry)
+        buried = {name: module for name, module in sys.modules.items()
+                  if name.split(".")[0] in ("shared", source.name)}
+        for name in buried:
+            sys.modules.pop(name, None)
+        try:
+            base = importlib.import_module("shared.utils.plugins").WAN2GPPlugin
+            module = importlib.import_module(f"{source.name}.plugin")
+            accepted = [obj for _name, obj in inspect.getmembers(module, inspect.isclass)
+                        if issubclass(obj, base) and obj is not base]
+            r.check("WanGP's loader would accept our plugin class", bool(accepted),
+                    "no subclass of WAN2GPPlugin - WanGP skips this silently")
+            r.check("and it is the bridge plugin",
+                    any(obj.__name__ == "MiniPaintBridgePlugin" for obj in accepted),
+                    str([obj.__name__ for obj in accepted]))
+        finally:
+            for name in list(sys.modules):
+                if name.split(".")[0] in ("shared", source.name):
+                    sys.modules.pop(name, None)
+            sys.modules.update(buried)
+            for entry in added:
+                if entry in sys.path:
+                    sys.path.remove(entry)
+
+
+def _first_candidate():
+    """The first place ``compatibility`` looks for WanGP's base class."""
+    import sys
+
+    folder = str(BRIDGE_COPY.parent)
+    added = folder not in sys.path
+    if added:
+        sys.path.insert(0, folder)
+    try:
+        import compatibility
+
+        return tuple(compatibility.PLUGIN_BASE_CANDIDATES[0])
+    finally:
+        if added and folder in sys.path:
+            sys.path.remove(folder)
+
+
 def run() -> Results:
     r = Results("wangp protocol")
     copy_checks(r)
@@ -562,6 +642,7 @@ def run() -> Results:
     receiver_checks(r)
     fullness_checks(r)
     session_isolation_checks(r)
+    loader_checks(r)
     handoff_checks(r)
     return r
 

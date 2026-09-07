@@ -1215,6 +1215,22 @@ def auth_probe_checks(r: Results) -> None:
         r.check("and says so rather than saying unknown", got["coverage"] == "proven_open", repr(got))
         r.check("and the proxy keeps refusing", wangp_proxy.serving_allowed() is False)
 
+        # Ticking the box by hand has to take effect at once. Holding it until
+        # Finish was the second half of the deadlock: the rows that keep Finish
+        # disabled are the ones the answer unblocks.
+        wangp_proxy._boundary = {"ok": False, "coverage": "unknown", "mechanisms": ["gradio_auth"]}
+        wangp_proxy.set_auth_acknowledged(False)
+        r.check("the proxy refuses before the box is ticked", wangp_proxy.serving_allowed() is False)
+        answers = wangp_ui.acknowledge_auth(True, {"root": "/opt/Wan2GP"})
+        r.check("ticking it is remembered in the setup", answers["auth_checked"] is True)
+        r.check("and opens the proxy there and then, not at Finish",
+                wangp_proxy.serving_allowed() is True)
+        r.check("and it survives into the saved document",
+                wangp_ui.config_from_wizard(answers, initialized=True).as_dict()["integration"]["auth_checked"] is True)
+        cleared = wangp_ui.acknowledge_auth(False, answers)
+        r.check("clearing it shuts the proxy again", wangp_proxy.serving_allowed() is False)
+        r.check("and is remembered too", cleared["auth_checked"] is False)
+
         # No answer at all leaves it exactly where it was.
         got, _ = after({"ran": False, "reason": "no fetch"})
         r.check("a probe that never ran proves nothing", got["ok"] is False and got["coverage"] == "unknown")

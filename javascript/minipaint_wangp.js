@@ -420,10 +420,6 @@ window.minipaintWanGP = (function () {
             S.instanceId = text(attribute(S.frame, INSTANCE_ATTRIBUTE), 128);
         }
         say("handshake: starting, channel=" + S.channelId.slice(0, 8) + " origin=" + origin());
-        // The one row nobody could answer. Asked here because this is the
-        // moment the page is certainly loaded and certainly on the right
-        // origin, and re-asked on every reload for the same reason.
-        probeAuth().then(function () { report(S.ready, S.ready ? "" : "auth probe finished"); });
         S.helloStep = 0;
         step();
     }
@@ -994,10 +990,22 @@ window.minipaintWanGP = (function () {
         S.watcher.observe(root, { childList: true, subtree: true });
     }
 
+    /**
+     * The sign-in probe needs nothing but this page. It must not wait for the
+     * iframe, because the iframe is precisely what cannot load until the probe
+     * has answered - the proxy refuses every request while the boundary is
+     * unproven, and the frame's own request is one of those. Hanging it off
+     * the handshake made the deadlock it was written to break.
+     */
+    function startAuthProbe() {
+        probeAuth().then(function () { report(S.ready, ""); });
+    }
+
     try {
         if (document.readyState === "loading") {
-            document.addEventListener("DOMContentLoaded", function () { watchRoot(0); }, { once: true });
+            document.addEventListener("DOMContentLoaded", function () { startAuthProbe(); watchRoot(0); }, { once: true });
         } else {
+            startAuthProbe();
             watchRoot(0);
         }
     } catch (e) {
@@ -1007,6 +1015,7 @@ window.minipaintWanGP = (function () {
 
     return {
         attach: attach,
+        probeAuth: probeAuth,
         receivers: receivers,
         send: send,
         focus: focus,

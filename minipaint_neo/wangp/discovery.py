@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import csv
 import io
+import contextlib
 import json
 import os
+import tempfile
 import pathlib
 import shutil
 import subprocess
@@ -36,6 +38,9 @@ from . import errors
 PLUGINS_DIR_NAME = "plugins"
 BRIDGE_FOLDER_NAME = "wan2gp-minipaint-bridge"
 BRIDGE_INFO_NAME = "plugin_info.json"
+#: WanGP's own settings file, in its root. Its ``enabled_plugins`` list is
+#: what decides whether a plugin in ``plugins/`` is loaded at all.
+WGP_CONFIG_NAME = "wgp_config.json"
 
 #: The file that makes a directory recognisably WanGP rather than a folder
 #: that happens to share its name.
@@ -360,23 +365,76 @@ def bridge_version(info: typing.Optional[dict]) -> str:
     return ""
 
 
-def _bridge_is_disabled(root: typing.Any, info: dict) -> bool:
-    """Whether WanGP would skip this plugin.
+def wgp_config_path(root: typing.Any) -> pathlib.Path:
+    """WanGP's own settings file, which is where enabling actually happens."""
+    return pathlib.Path(str(root or "")).expanduser() / WGP_CONFIG_NAME
 
-    Two conventions are honoured because plugin loaders differ: a falsy
-    ``enabled`` in the manifest, and a ``.disabled`` marker file next to it.
-    Neither is authoritative for every WanGP build, so the handshake remains
-    the real proof - this only lets setup explain a silent plugin.
-    """
-    for key in ("enabled", "active"):
-        if key in info and not bool(info.get(key)):
-            return True
-    if bool(info.get("disabled")):
-        return True
+
+def read_wgp_config(root: typing.Any) -> dict:
+    """WanGP's settings, or an empty dict. Never raises."""
     try:
-        return (bridge_dir(root) / ".disabled").exists()
-    except OSError:
+        loaded = json.loads(wgp_config_path(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def enabled_plugins(root: typing.Any) -> typing.List[str]:
+    """The plugin folder names WanGP will actually load, as it stores them.
+
+    Upstream reads ``server_config.get("enabled_plugins", [])`` and loads
+    ``SYSTEM_PLUGINS`` plus those. A folder that is not in this list is
+    discovered and then skipped - which looks exactly like a plugin that is
+    installed and broken, and is why this has to be read rather than guessed
+    at from the plugin's own manifest.
+    """
+    listed = read_wgp_config(root).get("enabled_plugins")
+    return [str(name) for name in listed if isinstance(name, str)] if isinstance(listed, list) else []
+
+
+def bridge_is_enabled(root: typing.Any) -> bool:
+    return BRIDGE_FOLDER_NAME in enabled_plugins(root)
+
+
+def enable_bridge_plugin(root: typing.Any) -> bool:
+    """Add our folder to WanGP's ``enabled_plugins``. True if that changed it.
+
+    This is the step that has no equivalent in dropping a folder into
+    ``plugins/``: discovery is automatic, loading is not. Upstream's own
+    Plugins tab writes the same list, so this is the same switch a user would
+    have flicked there - not a private convention of ours.
+
+    Everything else in WanGP's settings is read, kept and written back
+    untouched, and the write is atomic, because this file is theirs and holds
+    their whole configuration.
+    """
+    if not BRIDGE_FOLDER_NAME:  # pragma: no cover - a constant, guarded for clarity
         return False
+
+    settings = read_wgp_config(root)
+    listed = settings.get("enabled_plugins")
+    names = [str(name) for name in listed if isinstance(name, str)] if isinstance(listed, list) else []
+    if BRIDGE_FOLDER_NAME in names:
+        return False
+
+    names.append(BRIDGE_FOLDER_NAME)
+    settings["enabled_plugins"] = names
+
+    path = wgp_config_path(root)
+    handle = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=str(path.parent), prefix=".wgp_config-", suffix=".tmp", delete=False
+    )
+    try:
+        with handle:
+            json.dump(settings, handle, indent=4)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(handle.name, str(path))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(handle.name)
+        raise
+    return True
 
 
 def bridge_status(root: typing.Any, expected_version: str = "") -> typing.Tuple[str, str]:
@@ -391,8 +449,11 @@ def bridge_status(root: typing.Any, expected_version: str = "") -> typing.Tuple[
     if info is None:
         return errors.BRIDGE_MISSING, _detail(f"no {BRIDGE_INFO_NAME} under {BRIDGE_FOLDER_NAME}")
 
-    if _bridge_is_disabled(root, info):
-        return errors.BRIDGE_DISABLED, "the plugin manifest says it is switched off"
+    if not bridge_is_enabled(root):
+        return errors.BRIDGE_DISABLED, _detail(
+            f"the folder is there but {WGP_CONFIG_NAME} does not list it in enabled_plugins, "
+            "so WanGP finds it and skips it"
+        )
 
     installed = bridge_version(info)
     wanted = str(expected_version or "").strip()
@@ -482,12 +543,26 @@ def install_bridge(root: typing.Any, source_dir: typing.Any) -> dict:
     except OSError as error:
         raise errors.IntegrationError(errors.BRIDGE_MISSING, _detail(error))
 
+    # Copying the folder only gets it discovered. WanGP loads
+    # ``SYSTEM_PLUGINS`` plus whatever ``enabled_plugins`` names, so without
+    # this the plugin sits in the folder being skipped - which is what a user
+    # would otherwise have had to fix by hand in WanGP's Plugins tab.
+    try:
+        enabled = enable_bridge_plugin(root_path)
+    except OSError as error:
+        raise errors.IntegrationError(
+            errors.BRIDGE_DISABLED,
+            _detail(f"the files were written but {WGP_CONFIG_NAME} could not be updated: {error}"),
+        )
+
     return {
         "ok": True,
         "path": str(destination),
         "files": files,
         "bytes": total,
         "replaced": replaced,
+        "enabled": enabled,
+        "config": str(wgp_config_path(root_path)),
         "version": bridge_version(read_bridge_info(root_path)),
         # WanGP loads plugins once, at startup. Copying files over a running
         # instance does not activate them, so the caller coordinates a

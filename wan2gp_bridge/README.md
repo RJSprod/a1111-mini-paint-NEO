@@ -76,12 +76,25 @@ The installed layout:
     receiver_state.py      normalised live state, and its fingerprint
     receiver_adapters.py   how each input is read, filled and verified
     handoff.py             validating the PNG that Forge left behind an id
-    bridge_ui.py           three invisible Gradio components
+    bridge_ui.py           three invisible Gradio components, placed by WanGP's insert_after
     bridge_js.py           the script that runs in the WanGP document
     protocol.py            the shared vocabulary, copied verbatim
     theme.css              the dark theme
     plugin_info.json       name, version, protocol, compatibility range
 ```
+
+The three controls - a request box, an acknowledgement box and a trigger
+button - are not built by the plugin itself. `setup_ui` runs before WanGP's
+Blocks exist, and a Gradio component created outside a Blocks context is on
+no page: it has an id, an event can name it, and the page config still does
+not contain it, so the browser never finds it and the bridge never answers.
+Instead `post_ui_setup` asks WanGP to place them with
+`insert_after("image_prompt_type", builder)`; WanGP calls the builder inside
+the generator form, and the builder creates the controls and wires their
+event there. WanGP builds the form twice (the Media Generator tab and the
+hidden Edit tab), so there are two sets on a page, each with its own element
+ids and each wired to its own form; the browser script finds them by class
+and uses the set whose surroundings are displayed.
 
 `protocol.py` is a byte-for-byte copy of the shared block of
 `minipaint_neo/wangp/protocol.py`. It is duplicated rather than imported

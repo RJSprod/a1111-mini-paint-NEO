@@ -776,8 +776,10 @@ def injection_timing_checks(r: Results) -> None:
         host=bridge_plugin.compatibility.Host(host),
         environ={"MINIPAINT_WANGP_INSTANCE_ID": "i", "MINIPAINT_WANGP_HANDOFF_ROOT": "/tmp"},
     )
+    instance.declared = False
     instance.controls = None
     instance.wired = False
+    instance.instances = 0
     instance.injected = False
     instance.add_custom_js = host.add_custom_js
 
@@ -796,8 +798,10 @@ def injection_timing_checks(r: Results) -> None:
     # quiet - a silent bridge is what cost several rounds of this.
     quiet = bridge_plugin.MiniPaintBridgePlugin.__new__(bridge_plugin.MiniPaintBridgePlugin)
     quiet.bridge = instance.bridge
+    quiet.declared = False
     quiet.controls = None
     quiet.wired = False
+    quiet.instances = 0
     quiet.injected = False
     for name in ("add_custom_js", "add_js", "custom_js"):
         setattr(quiet, name, None)
@@ -810,13 +814,301 @@ def injection_timing_checks(r: Results) -> None:
 
     refused = bridge_plugin.MiniPaintBridgePlugin.__new__(bridge_plugin.MiniPaintBridgePlugin)
     refused.bridge = instance.bridge
+    refused.declared = False
     refused.controls = None
     refused.wired = False
+    refused.instances = 0
     refused.injected = False
     for name in ("add_custom_js", "add_js", "custom_js"):
         setattr(refused, name, refuse)
     refused._inject_script()
     r.check("a refused script leaves the flag down too", refused.injected is False)
+
+def _bare_plugin(bridge_plugin, host, **hooks):
+    """A plugin instance without WanGP's base class, with the hooks given."""
+    instance = bridge_plugin.MiniPaintBridgePlugin.__new__(bridge_plugin.MiniPaintBridgePlugin)
+    instance.bridge = bridge_plugin.MiniPaintBridge(
+        host=bridge_plugin.compatibility.Host(host),
+        environ={"MINIPAINT_WANGP_INSTANCE_ID": "i", "MINIPAINT_WANGP_HANDOFF_ROOT": "/tmp"},
+    )
+    instance.declared = False
+    instance.controls = None
+    instance.wired = False
+    instance.instances = 0
+    instance.injected = False
+    for name, hook in hooks.items():
+        setattr(instance, name, hook)
+    return instance
+
+
+def _wangp_insertions(all_components, requests):
+    """WanGP's own ``insert_after`` processing, in the shape it really has.
+
+    After every plugin's ``post_ui_setup``, WanGP takes each request, enters
+    the target's container, calls the builder, and moves the container's last
+    child to sit behind the target. What a builder creates is on the page
+    because of the ``with parent:`` - and only because of it.
+    """
+    placed = []
+    for target_name, builder in requests:
+        target = all_components.get(target_name)
+        parent = getattr(target, "parent", None)
+        if not target or not parent or not hasattr(parent, "children"):
+            placed.append(None)
+            continue
+        target_index = parent.children.index(target)
+        with parent:
+            builder()
+        newly_added = parent.children.pop(-1)
+        parent.children.insert(target_index + 1, newly_added)
+        placed.append(newly_added)
+    return placed
+
+
+def placement_checks(r: Results) -> None:
+    """The controls are on the page, or the bridge says why not.
+
+    A component created outside a Blocks context belongs to no page: it has
+    an id, an event can name it, and the page config still does not contain
+    it. ``setup_ui`` runs before WanGP's Blocks exist, so a bridge that built
+    its controls there had a trigger the browser could never find - the
+    handshake's ``pump`` retried its twenty times and gave up, every load.
+    The only way onto the page is WanGP's ``insert_after``, and this drives
+    the bridge through it exactly as WanGP does, against real Gradio.
+    """
+    import contextlib
+    import io
+    import json as _json
+    import sys as _sys
+
+    import gradio as gr
+
+    folder = str(BRIDGE_COPY.parent)
+    added = folder not in _sys.path
+    if added:
+        _sys.path.insert(0, folder)
+    try:
+        import bridge_js
+        import bridge_ui
+        import plugin as bridge_plugin
+    finally:
+        if added and folder in _sys.path:
+            _sys.path.remove(folder)
+
+    class Host:
+        """What WanGP's base class offers a plugin, and nothing more."""
+
+        def __init__(self):
+            self.inserts = []
+            self.script = ""
+
+        def request_component(self, elem_id):
+            pass
+
+        def request_global(self, name):
+            pass
+
+        def add_custom_js(self, script):
+            self.script = script
+
+        def insert_after(self, target, builder):
+            self.inserts.append((target, builder))
+
+    def page_of(blocks):
+        return _json.loads(_json.dumps(blocks.get_config_file(), default=str))
+
+    def by_elem_id(page, elem_id):
+        for component in page["components"]:
+            if component.get("props", {}).get("elem_id") == elem_id:
+                return component
+        return None
+
+    def dangling(page):
+        known = {component["id"] for component in page["components"]}
+        return [d for d in page["dependencies"] if any(i not in known for i in d["inputs"] + d["outputs"])]
+
+    host = Host()
+    plugin = _bare_plugin(bridge_plugin, host, insert_after=host.insert_after, add_custom_js=host.add_custom_js)
+
+    with gr.Blocks() as demo:
+        # The Media Generator form, as far as the bridge can tell it apart.
+        with gr.Row() as form:
+            image_start = gr.Image(label="start")
+            image_end = gr.Image(label="end")
+            image_refs = gr.Gallery(label="refs")
+            image_prompt_type = gr.Text(value="S", visible=False)
+            video_prompt_type = gr.Text(value="", visible=False)
+            neighbour = gr.Textbox(label="what WanGP keeps after the target")
+        handed = {
+            "image_start": image_start, "image_end": image_end, "image_refs": image_refs,
+            "image_prompt_type": image_prompt_type, "video_prompt_type": video_prompt_type,
+            "model_type": "t2v_A",
+        }
+        fns_before = len(demo.fns)
+
+        plugin.setup_ui()
+        r.check("setup_ui builds nothing: there is no page to build into yet",
+                plugin.controls is None and len(demo.fns) == fns_before)
+
+        plugin.post_ui_setup(handed)
+        r.check("post_ui_setup asks WanGP to place the controls after the image prompt type",
+                len(host.inserts) == 1 and host.inserts[0][0] == "image_prompt_type", repr([i[0] for i in host.inserts]))
+        r.check("and still builds nothing itself - the builder has not been called",
+                plugin.controls is None and len(demo.fns) == fns_before)
+
+        placed = _wangp_insertions(dict(handed, neighbour=neighbour), host.inserts)
+        column = placed[0]
+        # Gradio wraps text fields in a Form of their own when their row
+        # closes, so the target's container is that Form, not the Row - which
+        # is also where WanGP's inserter puts the column, because it goes by
+        # the target's own parent.
+        container = image_prompt_type.parent
+        r.check("the target sits in a container of Gradio's making, as it does in WanGP",
+                container is not form and container in form.children, type(container).__name__)
+        r.check("WanGP's inserter put one column right behind the target",
+                column is not None and container.children.index(column) == container.children.index(image_prompt_type) + 1)
+        r.check("and it is the bridge's own column", plugin.controls is not None and column is plugin.controls.column)
+        r.check("WanGP's neighbour is where it was", container.children[-1] is neighbour)
+        r.check("the event was wired inside the builder: a click and a then",
+                plugin.wired is True and len(demo.fns) == fns_before + 2, f"{plugin.wired} {len(demo.fns) - fns_before}")
+
+        first = page_of(demo)
+        ids = {c["props"].get("elem_id") for c in first["components"] if c.get("props")}
+        for prefix in (bridge_ui.COLUMN_ELEM_ID, bridge_ui.REQUEST_ELEM_ID,
+                       bridge_ui.ACK_ELEM_ID, bridge_ui.TRIGGER_ELEM_ID):
+            r.check(f"{prefix}_1 is in the page config", f"{prefix}_1" in ids)
+        trigger = by_elem_id(first, f"{bridge_ui.TRIGGER_ELEM_ID}_1")
+        request = by_elem_id(first, f"{bridge_ui.REQUEST_ELEM_ID}_1")
+        r.check("the trigger carries the class the script looks for",
+                trigger is not None and bridge_ui.TRIGGER_CLASS in trigger["props"].get("elem_classes", []))
+        r.check("so does the request box",
+                request is not None and bridge_ui.REQUEST_CLASS in request["props"].get("elem_classes", []))
+        r.check("and the column", bridge_ui.COLUMN_CLASS in by_elem_id(first, f"{bridge_ui.COLUMN_ELEM_ID}_1")["props"].get("elem_classes", []))
+        r.check("none of it is visible", all(
+            by_elem_id(first, f"{prefix}_1")["props"].get("visible") is False
+            for prefix in (bridge_ui.COLUMN_ELEM_ID, bridge_ui.REQUEST_ELEM_ID, bridge_ui.TRIGGER_ELEM_ID)))
+
+        click = [d for d in first["dependencies"] if any(t[0] == trigger["id"] and t[1] == "click" for t in d["targets"])]
+        r.check("the trigger's click is a registered event", len(click) == 1, str(len(click)))
+        if click:
+            r.check("its first input is the request box, then this form's state",
+                    click[0]["inputs"][0] == request["id"] and image_prompt_type._id in click[0]["inputs"]
+                    and image_start._id in click[0]["inputs"], repr(click[0]["inputs"]))
+            r.check("its outputs are the acknowledgement and then this form's receivers",
+                    click[0]["outputs"][0] == plugin.controls.ack._id and image_start._id in click[0]["outputs"]
+                    and image_refs._id in click[0]["outputs"], repr(click[0]["outputs"]))
+        r.check("nothing on the page dangles", not dangling(first), str(dangling(first)[:1]))
+
+        # WanGP builds the form again for its hidden Edit tab and calls
+        # post_ui_setup again with that form's components. Each set must be
+        # bound to its own form: the first form's trigger must not read the
+        # second form's values, and the ids must not collide.
+        with gr.Row() as edit_form:
+            image_start2 = gr.Image(label="start (edit)")
+            image_end2 = gr.Image(label="end (edit)")
+            image_refs2 = gr.Gallery(label="refs (edit)")
+            image_prompt_type2 = gr.Text(value="S", visible=False)
+            video_prompt_type2 = gr.Text(value="", visible=False)
+        handed2 = {
+            "image_start": image_start2, "image_end": image_end2, "image_refs": image_refs2,
+            "image_prompt_type": image_prompt_type2, "video_prompt_type": video_prompt_type2,
+        }
+        host.inserts.clear()
+        plugin.post_ui_setup(handed2)
+        placed2 = _wangp_insertions(handed2, host.inserts)
+        r.check("the second form gets its own set of controls",
+                placed2 and placed2[0] is not None and placed2[0] is not column and plugin.instances == 2)
+        second = page_of(demo)
+        ids2 = {c["props"].get("elem_id") for c in second["components"] if c.get("props")}
+        r.check("with element ids of its own", f"{bridge_ui.TRIGGER_ELEM_ID}_2" in ids2 and f"{bridge_ui.REQUEST_ELEM_ID}_2" in ids2)
+        r.check("and the first set's ids are still there", f"{bridge_ui.TRIGGER_ELEM_ID}_1" in ids2)
+        trigger2 = by_elem_id(second, f"{bridge_ui.TRIGGER_ELEM_ID}_2")
+        click2 = [d for d in second["dependencies"] if any(t[0] == trigger2["id"] and t[1] == "click" for t in d["targets"])]
+        r.check("the second set's event reads the second form",
+                click2 and image_prompt_type2._id in click2[0]["inputs"] and image_start2._id in click2[0]["outputs"])
+        r.check("and not the first", click2 and image_prompt_type._id not in click2[0]["inputs"]
+                and image_start._id not in click2[0]["outputs"])
+        click1 = [d for d in second["dependencies"] if any(t[0] == trigger["id"] and t[1] == "click" for t in d["targets"])]
+        r.check("the first set's event still reads the first form, not the second",
+                click1 and image_prompt_type._id in click1[0]["inputs"] and image_prompt_type2._id not in click1[0]["inputs"])
+        r.check("nothing dangles with two sets either", not dangling(second))
+
+    # A WanGP without insert_after cannot be given the controls. That is a
+    # sentence on its console, not a crash in its startup, and not silence.
+    class OldHost(Host):
+        insert_after = None
+
+    old_host = OldHost()
+    old = _bare_plugin(bridge_plugin, old_host, add_custom_js=old_host.add_custom_js)
+    old.insert_after = None
+    said = io.StringIO()
+    with gr.Blocks():
+        with gr.Row():
+            handed_old = {"image_prompt_type": gr.Text(visible=False), "image_start": gr.Image()}
+        old.setup_ui()
+        with contextlib.redirect_stdout(said):
+            old.post_ui_setup(handed_old)
+    r.check("a WanGP without insert_after is told so", "insert_after" in said.getvalue(), said.getvalue())
+    r.check("and nothing was wired or built", old.wired is False and old.controls is None)
+
+    # Handed nothing, there is nowhere to go, and that is said too.
+    nowhere = _bare_plugin(bridge_plugin, host, insert_after=host.insert_after, add_custom_js=host.add_custom_js)
+    host.inserts.clear()
+    said = io.StringIO()
+    nowhere.setup_ui()
+    with contextlib.redirect_stdout(said):
+        nowhere.post_ui_setup({})
+    r.check("handed no component, the bridge says it has nowhere to go",
+            "no component" in said.getvalue() and not host.inserts, said.getvalue())
+
+    # Handed only globals - WanGP mixes them into the same mapping - there is
+    # still nowhere to go: a global's name is a target WanGP cannot find.
+    host.inserts.clear()
+    said = io.StringIO()
+    with contextlib.redirect_stdout(said):
+        nowhere.post_ui_setup({"model_type": "t2v_A", "state": {"queue": []}})
+    r.check("a global's name is never asked for as the place to sit",
+            not host.inserts and "no component" in said.getvalue(), repr([i[0] for i in host.inserts]))
+
+    # A builder that cannot wire still hands WanGP exactly one column, so
+    # WanGP's "move the last child" moves ours and not its own.
+    broken_host = Host()
+    broken = _bare_plugin(bridge_plugin, broken_host, insert_after=broken_host.insert_after,
+                          add_custom_js=broken_host.add_custom_js)
+    broken._make_handler = lambda: (lambda *a, **k: None)
+    real_wire = bridge_ui.wire
+
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError("no event for you")
+
+    with gr.Blocks() as demo3:
+        with gr.Row() as form3:
+            target3 = gr.Text(visible=False)
+            keeper = gr.Textbox(label="WanGP's own last child")
+        broken.setup_ui()
+        broken.post_ui_setup({"image_prompt_type": target3})
+        bridge_ui.wire = refuse
+        said = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(said):
+                placed3 = _wangp_insertions({"image_prompt_type": target3}, broken_host.inserts)
+        finally:
+            bridge_ui.wire = real_wire
+    r.check("a wiring failure is a note", "could not be wired" in said.getvalue(), said.getvalue())
+    r.check("and WanGP still received the bridge's column, not its own last child",
+            placed3 and placed3[0] is broken.controls.column and target3.parent.children[-1] is keeper)
+    r.check("with the failure recorded on the plugin", broken.wired is None)
+
+    # The browser half looks for the set that is on screen, by class.
+    script = bridge_js.document_script("")
+    r.check("the script finds the controls by class", "columnClass" in script and "getElementsByClassName" in script)
+    r.check("and never one of them by id",
+            "getElementById(CONFIG" not in script and "requestElemId" not in script and "triggerElemId" not in script)
+    r.check("and prefers the set whose surroundings are displayed", "surroundingsDisplayed" in script)
+    config = bridge_js.configuration()
+    r.check("the classes in the script are the ones the components carry",
+            config["requestClass"] == bridge_ui.REQUEST_CLASS and config["triggerClass"] == bridge_ui.TRIGGER_CLASS
+            and config["columnClass"] == bridge_ui.COLUMN_CLASS)
 
 
 def run() -> Results:
@@ -831,6 +1123,7 @@ def run() -> Results:
     loader_checks(r)
     component_handoff_checks(r)
     injection_timing_checks(r)
+    placement_checks(r)
     handoff_checks(r)
     return r
 

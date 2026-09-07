@@ -8,6 +8,23 @@ and it builds them inside WanGP's own Blocks so that the callback they fire is
 an ordinary event on the page the user is looking at, with that page's live
 values as its inputs.
 
+"Inside WanGP's own Blocks" is literal, and it is the part that was wrong for
+several rounds. A Gradio component created outside a ``with gr.Blocks()``
+context is never part of any page: it gets an id, it can be named as an event's
+input, and the page config still does not contain it, so the browser never
+finds it and the bridge never answers. ``setup_ui`` runs before WanGP's Blocks
+exist. The one sanctioned way to add a component to the page from a plugin is
+``insert_after(target, builder)``, asked for during ``post_ui_setup``: WanGP
+then calls the builder inside the target's own container, and everything the
+builder creates is on the page. ``build`` below is written to be that builder's
+body, and it is only correct when called from one.
+
+WanGP builds its generator form twice - the Media Generator tab and the hidden
+Edit tab - and asks every plugin's ``post_ui_setup`` once per form, so there
+are two sets of these controls on a page. Each set gets element ids of its own
+and the classes the browser script looks them up by; the script picks the set
+whose surroundings are displayed.
+
 Which is the point. Section 21.2 rules out setting a value in the DOM and
 declaring victory, because what WanGP generates from is server-side session
 state. Going through a real event means the values the callback reads belong
@@ -34,8 +51,9 @@ except Exception:  # pragma: no cover - Gradio is WanGP's own dependency
     gr = None  # type: ignore[assignment]
 
 
-#: The ids the bridge's own JavaScript looks up. They are ours, they are
-#: prefixed, and they are the only element ids the browser side ever names.
+#: The element-id prefixes of the bridge's own components. They are ours, they
+#: are prefixed, and each set on a page gets its own suffix - see ``elem_id``.
+COLUMN_ELEM_ID = "minipaint_bridge"
 TRIGGER_ELEM_ID = "minipaint_bridge_trigger"
 REQUEST_ELEM_ID = "minipaint_bridge_request"
 ACK_ELEM_ID = "minipaint_bridge_ack"
@@ -43,6 +61,22 @@ ACK_ELEM_ID = "minipaint_bridge_ack"
 #: One class on all three, so theme.css can keep them out of the layout
 #: without selecting anything of WanGP's.
 BRIDGE_CLASS = "minipaint-bridge-io"
+
+#: The classes the browser script looks the controls up by. Classes rather
+#: than ids because there is one set per form and WanGP builds two forms;
+#: the script wants "the request box of the set that is on screen", and an id
+#: can only ever name one of them.
+COLUMN_CLASS = "minipaint-bridge-column"
+REQUEST_CLASS = "minipaint-bridge-request"
+ACK_CLASS = "minipaint-bridge-ack"
+TRIGGER_CLASS = "minipaint-bridge-trigger"
+
+#: Where the controls are asked to go, in order of preference. These are the
+#: names WanGP hands ``post_ui_setup`` - its own local variable names for the
+#: components - and ``insert_after`` takes the same names. Both are hidden
+#: text fields inside the generator form, so the controls land inside the
+#: form whose values the event reads.
+PREFERRED_TARGETS = ("image_prompt_type", "video_prompt_type")
 
 
 @dataclasses.dataclass
@@ -52,45 +86,82 @@ class BridgeControls:
     request: typing.Any
     ack: typing.Any
     trigger: typing.Any
+    column: typing.Any = None
+    instance: int = 1
 
 
-def build() -> typing.Optional[BridgeControls]:
-    """Create the hidden request/ack pair and the trigger, or None.
+def elem_id(prefix: str, instance: int) -> str:
+    """``prefix_N``: unique per set, recognisable to a person reading the DOM."""
+    return f"{prefix}_{max(1, int(instance))}"
+
+
+def target_for(handed: typing.Mapping[str, typing.Any]) -> str:
+    """The component to sit after, chosen from what WanGP actually handed over.
+
+    Preference first, then anything at all that was handed: the controls have
+    to be *somewhere* on the page, and any component WanGP resolved for us is
+    a component with a container to be inserted into.
+    """
+    names = [str(name) for name in handed] if isinstance(handed, typing.Mapping) else []
+    for wanted in PREFERRED_TARGETS:
+        if wanted in names:
+            return wanted
+    return names[0] if names else ""
+
+
+def build(instance: int = 1) -> typing.Optional[BridgeControls]:
+    """Create the hidden column holding the request/ack pair and the trigger.
+
+    Call this only where Gradio is collecting components into a page - in
+    practice, from the builder handed to WanGP's ``insert_after``. Called
+    anywhere else it returns components that belong to no page, which is
+    precisely the silent failure this module's docstring describes.
+
+    One hidden column rather than three loose components, because WanGP's
+    inserter takes exactly one new child from the container it ran the
+    builder in and moves it behind the target. Three loose ones would leave
+    two of them at the end of the container, out of order but present; a
+    column keeps the set together and is what the browser script picks by.
 
     ``visible=False`` rather than a zero-size style: Gradio still renders the
-    elements, so the ids resolve, and WanGP's layout never has to make room
-    for a control the user is not meant to see.
+    elements, so the classes resolve, and WanGP's layout never has to make
+    room for a control the user is not meant to see.
     """
     if gr is None:
         return None
     try:
-        request = gr.Textbox(
-            value="",
+        with gr.Column(
             visible=False,
-            interactive=True,
-            elem_id=REQUEST_ELEM_ID,
-            elem_classes=[BRIDGE_CLASS],
-            label="Mini Paint bridge request",
-            show_label=False,
-        )
-        ack = gr.Textbox(
-            value="",
-            visible=False,
-            interactive=False,
-            elem_id=ACK_ELEM_ID,
-            elem_classes=[BRIDGE_CLASS],
-            label="Mini Paint bridge acknowledgement",
-            show_label=False,
-        )
-        trigger = gr.Button(
-            "Mini Paint bridge",
-            visible=False,
-            elem_id=TRIGGER_ELEM_ID,
-            elem_classes=[BRIDGE_CLASS],
-        )
+            elem_id=elem_id(COLUMN_ELEM_ID, instance),
+            elem_classes=[COLUMN_CLASS],
+        ) as column:
+            request = gr.Textbox(
+                value="",
+                visible=False,
+                interactive=True,
+                elem_id=elem_id(REQUEST_ELEM_ID, instance),
+                elem_classes=[BRIDGE_CLASS, REQUEST_CLASS],
+                label="Mini Paint bridge request",
+                show_label=False,
+            )
+            ack = gr.Textbox(
+                value="",
+                visible=False,
+                interactive=False,
+                elem_id=elem_id(ACK_ELEM_ID, instance),
+                elem_classes=[BRIDGE_CLASS, ACK_CLASS],
+                label="Mini Paint bridge acknowledgement",
+                show_label=False,
+            )
+            trigger = gr.Button(
+                "Mini Paint bridge",
+                visible=False,
+                elem_id=elem_id(TRIGGER_ELEM_ID, instance),
+                elem_classes=[BRIDGE_CLASS, TRIGGER_CLASS],
+            )
     except Exception:
         return None
-    return BridgeControls(request=request, ack=ack, trigger=trigger)
+    return BridgeControls(request=request, ack=ack, trigger=trigger, column=column, instance=instance)
 
 
 def wire(

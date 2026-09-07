@@ -513,12 +513,22 @@ window.minipaintWanGP = (function () {
         S.bridgeSession = session;
         if (instance) { S.instanceId = instance; }
         S.bridgeVersion = text(payload.version, 40);
+
+        // The handshake says whether the bridge can actually work here, and it
+        // is allowed to say no: a plugin of the wrong version, or one that
+        // could not resolve a component this WanGP build was meant to have,
+        // reports ready false and the reason. Taking the word "READY" as the
+        // answer instead would leave the menu saying a model takes no image
+        // when what is really wrong is the plugin - so believe the flag, keep
+        // the code, and let the ordinary failure path explain it.
+        const declared = payload.ready !== false;
+        const failure = text(payload.code || payload.reason_code, 60);
         S.model = normaliseModel(payload.model);
-        S.receivers = normaliseReceivers(payload.receivers);
-        S.revision = REVISION_RE.test(text(payload.state_revision, 64)) ? payload.state_revision : "";
-        S.ready = true;
-        S.lastCode = "";
-        report(true, "");
+        S.receivers = declared ? normaliseReceivers(payload.receivers) : [];
+        S.revision = declared && REVISION_RE.test(text(payload.state_revision, 64)) ? payload.state_revision : "";
+        S.ready = declared;
+        S.lastCode = declared ? "" : (failure || "BRIDGE_COMPONENT_INCOMPATIBLE");
+        report(declared, S.lastCode);
         // Presentation only, and never a reason a picture cannot be sent.
         try { theme(S.theme || detectTheme()); } catch (e) { /* section 27.1 */ }
     }

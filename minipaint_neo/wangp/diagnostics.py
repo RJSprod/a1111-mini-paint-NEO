@@ -37,6 +37,7 @@ import typing
 from .. import paths
 from ..send_log import SEND_LOG_PATH
 from . import bridge, config, discovery, errors, protocol, runtime
+from .errors import AUTH_BOUNDARY_FAILED
 
 #: How much of the transfer log to carry. Enough for one failed send and the
 #: successful one before it, short enough to stay pasteable.
@@ -233,6 +234,22 @@ def fields(
             collected.append((f"proxy {name}", f"{'ok' if step.get('ok') else 'failed'} - {step.get('detail', '')}".strip(" -")))
     else:
         collected.append(("proxy health", NOT_RUN))
+
+    # Whether the proxy is willing to serve at all, and why. A bug report that
+    # says "the tab is blank" is answered by this line more often than by any
+    # other: an unproven sign-in boundary refuses every request on purpose.
+    try:
+        from . import proxy
+
+        boundary = proxy.boundary_report()
+        if boundary is None:
+            collected.append(("proxy auth boundary", "not installed"))
+        else:
+            serving = "serving" if proxy.serving_allowed() else f"refusing ({AUTH_BOUNDARY_FAILED})"
+            override = ", operator override set" if proxy.auth_override() else ""
+            collected.append(("proxy auth boundary", f"{boundary.get('coverage', 'unknown')} - {serving}{override}"))
+    except Exception:
+        collected.append(("proxy auth boundary", NOT_RUN))
 
     try:
         sessions = bridge.registry().snapshot()

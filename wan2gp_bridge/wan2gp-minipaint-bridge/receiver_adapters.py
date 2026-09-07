@@ -187,8 +187,15 @@ class ReceiverAdapter:
     # -- description ---------------------------------------------------------
 
     def capacity(self, state: "receiver_state.SessionState") -> typing.Tuple[int, typing.Optional[int]]:
-        """``(count, max_count)`` for right now. ``None`` means unbounded."""
-        return (1 if receiver_state.value_present(state.value(self.component_key)) else 0, 1)
+        """``(count, max_count)`` for right now. ``None`` means unbounded.
+
+        The count says whether this slot already holds a picture; the limit is
+        deliberately ``None``. A one-image slot that replaces what it holds has
+        no maximum in the sense section 16.5 means - reporting ``1 of 1`` would
+        say "full", and a start frame that already has an image is exactly the
+        one a user most wants to send a new picture to.
+        """
+        return (1 if receiver_state.value_present(state.value(self.component_key)) else 0, None)
 
     def can_describe(self, state: "receiver_state.SessionState") -> typing.Optional[dict]:
         """The descriptor for this receiver, or None if it is not on offer.

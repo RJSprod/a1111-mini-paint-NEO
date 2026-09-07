@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import re
 import typing
 import urllib.parse
@@ -565,6 +566,9 @@ async def forward(request: typing.Any) -> typing.Any:
     from starlette.background import BackgroundTask
     from starlette.responses import StreamingResponse
 
+    if not serving_allowed():
+        return error_response(request, AUTH_BOUNDARY_FAILED, 503)
+
     target = upstream()
     if not target:
         return error_response(request, PROXY_NOT_READY, 503)
@@ -732,6 +736,13 @@ async def _pump_to_browser(websocket: typing.Any, socket: _UpstreamSocket) -> No
 
 async def _websocket_endpoint(websocket: typing.Any) -> None:
     """Bridge frames both ways for as long as either side keeps talking."""
+    # The same gate the HTTP side has. A socket is the one route a browser can
+    # open without ever fetching the page, so refusing only in ``forward``
+    # would leave the door it was meant to close.
+    if not serving_allowed():
+        await websocket.close(code=1011)
+        return
+
     target = upstream()
     if not target:
         await websocket.close(code=1011)
@@ -995,6 +1006,48 @@ def auth_boundary_report(app: typing.Any) -> dict:
 
 _INSTALLED_FLAG = "_minipaint_wangp_proxy_installed"
 
+#: The verdict ``install`` reached about who can reach ``/wan2gp/``. None until
+#: the routes exist, which is itself a refusal: nothing is served before the
+#: question has been asked.
+_boundary: typing.Optional[dict] = None
+
+#: The one way past an unproven boundary. Section 12.6 makes an unauthenticated
+#: ``/wan2gp/`` a release blocker and the check here cannot see per-route
+#: authentication, so a Forge whose sign-in genuinely does cover the route
+#: still reports "unknown". Rather than leave those installs with a feature
+#: that can never run, the answer they get from the PHASE0 curl check can be
+#: recorded here - deliberately as an environment variable and not a setting,
+#: so it is a decision someone made about a deployment rather than a checkbox
+#: a browser can tick.
+AUTH_OVERRIDE_ENV = "MINIPAINT_WANGP_ALLOW_UNPROVEN_AUTH"
+_TRUE = {"1", "true", "yes", "on"}
+
+
+def auth_override() -> bool:
+    return os.environ.get(AUTH_OVERRIDE_ENV, "").strip().lower() in _TRUE
+
+
+def boundary_report() -> typing.Optional[dict]:
+    """What ``install`` concluded, for the tab and the diagnostics report."""
+    return dict(_boundary) if _boundary is not None else None
+
+
+def serving_allowed() -> bool:
+    """Whether this proxy may answer at all.
+
+    The gate rather than the log entry. ``auth_boundary_report`` says ``ok``
+    false for "not proven", and a proxy that forwards anyway would hand an
+    unauthenticated caller the whole of WanGP - which has no sign-in of its
+    own, because it was only ever meant to be reachable on loopback. So an
+    unproven boundary refuses, here, at the point of service: that covers a
+    child started by the wizard's own checks and a config initialised before
+    authentication was switched on, neither of which any startup-time decision
+    would have caught.
+    """
+    if _boundary is None:
+        return False
+    return bool(_boundary.get("ok")) or auth_override()
+
 
 def install(app: typing.Any) -> None:
     """Put the routes on Forge's FastAPI app. Called from ``on_app_started``.
@@ -1024,7 +1077,15 @@ def install(app: typing.Any) -> None:
     with contextlib.suppress(Exception):
         app.add_event_handler("shutdown", _aclose_client)
 
-    boundary = auth_boundary_report(app)
+    global _boundary
+    _boundary = auth_boundary_report(app)
     _log(f"reverse proxy ready at {PROXY_PREFIX} (one loopback upstream, chosen by the runtime only).")
-    if not boundary["ok"]:
-        _log(f"authentication coverage for {PROXY_PREFIX} is {boundary['coverage']}: {boundary['detail']}")
+    if not _boundary["ok"]:
+        _log(f"authentication coverage for {PROXY_PREFIX} is {_boundary['coverage']}: {_boundary['detail']}")
+        if auth_override():
+            _log(f"{AUTH_OVERRIDE_ENV} is set, so {PROXY_PREFIX} will be served anyway.")
+        else:
+            _log(
+                f"{PROXY_PREFIX} will answer {AUTH_BOUNDARY_FAILED} until that is proven. Check it with an "
+                f"unauthenticated request (docs/wangp/PHASE0.md); if it is protected, set {AUTH_OVERRIDE_ENV}=1."
+            )

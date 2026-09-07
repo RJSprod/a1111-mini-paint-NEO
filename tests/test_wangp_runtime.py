@@ -222,6 +222,40 @@ def failed(call):
     return ""
 
 
+def health_is_never_a_wait(r: Results) -> None:
+    """The tab has to be able to draw STARTING while a start is happening.
+
+    ``start`` holds the runtime lock for the whole launch, and loading a video
+    model is measured in minutes. ``health`` is what every repaint of the tab
+    reads, so if it waited for that lock the one state a user most needs to
+    see would be the one state the tab could never show.
+    """
+    current = runtime.current()
+    launched = threading.Event()
+    release = threading.Event()
+
+    def hold_it_like_start():
+        with current._lock:
+            launched.set()
+            release.wait(5.0)
+
+    holder = threading.Thread(target=hold_it_like_start, daemon=True)
+    holder.start()
+    try:
+        r.check("the stand-in launch took the lock", launched.wait(2.0))
+        began = time.monotonic()
+        report = current.health()
+        waited = time.monotonic() - began
+        r.check("health answers while a launch holds the lock", waited < 0.5, f"{waited:.3f}s")
+        r.check("it still reports a state", bool(report.get("state")))
+        r.check("and says it could not reconcile", report.get("reconciled") is False)
+    finally:
+        release.set()
+        holder.join(5.0)
+
+    r.check("once the launch is over it reconciles again", current.health().get("reconciled") is True)
+
+
 def run() -> Results:
     r = Results("wangp runtime")
 
@@ -466,6 +500,8 @@ def run() -> Results:
         runtime.reset_for_tests()
         r.check("resetting gives a fresh one", runtime.current().state == runtime.STOPPED)
         runtime.reset_for_tests()
+
+        health_is_never_a_wait(r)
     finally:
         base.cleanup()
 

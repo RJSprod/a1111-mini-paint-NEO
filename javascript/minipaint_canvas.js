@@ -1200,6 +1200,10 @@ window.minipaintCanvas = (function () {
         // The server owns the send log; this is the only thing that knows how
         // the transfer actually ended.
         sendInput(WANGP_RESULT_ID, JSON.stringify({
+            // The prepared file is the server's to delete, and this is the
+            // only moment anything knows it is finished with - on a failure
+            // just as much as on a success.
+            handoff_id: String(handoffId || ""),
             receiver_id: (armed && armed.receiver) || "",
             ok: !!result.ok,
             code: result.code || "",

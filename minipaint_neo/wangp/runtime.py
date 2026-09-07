@@ -620,16 +620,29 @@ class Runtime:
         would have asked the watcher thread about it yet; a health panel that
         reports READY for a process that is gone is exactly the "pretend the
         iframe is usable" that section 11.8 forbids.
+
+        The lock is taken without waiting, though, because ``start`` holds it
+        for the whole launch - a model-loading WanGP can take minutes - and
+        this is what the tab repaints from. Blocking here would mean the one
+        state a user most needs to see, STARTING, is the one state the tab
+        cannot draw. When the lock is busy there is also nothing to reconcile:
+        a start in progress is not a READY child that quietly died, so the
+        plain snapshot is both what we can get and what is true.
         """
-        with self._lock:
+        held = self._lock.acquire(blocking=False)
+        try:
             child = self._child
-            if self.state == READY and child is not None and not child.alive():
+            if held and self.state == READY and child is not None and not child.alive():
                 self._note_exit(child)
             report = self.snapshot()
             report["pid_tracked"] = bool(child is not None and child.pid)
             report["stderr_tail"] = child.tail() if child is not None else []
             report["job_object"] = bool(child is not None and child.job)
+            report["reconciled"] = held
             return report
+        finally:
+            if held:
+                self._lock.release()
 
     # -- transitions --------------------------------------------------------
 
@@ -709,6 +722,21 @@ class Runtime:
             self.error_code = ""
             self.error_detail = ""
 
+            # Everything from here to the end of the launch reports through
+            # _fail. Without this, an unexpected error - the kernel refusing a
+            # port, a thread that cannot be created - would escape with the
+            # state left at STARTING and no code to explain it, and the tab
+            # would sit on "starting WanGP" until somebody pressed again.
+            try:
+                return self._launch(config, spawn, probe, root, handoff_root, deadline_span)
+            except IntegrationError:
+                raise
+            except Exception as error:
+                raise self._fail(errors.PROCESS_START_FAILED, f"{type(error).__name__}: {error}")
+
+    def _launch(self, config, spawn, probe, root, handoff_root, deadline_span) -> "Runtime":
+        """The launch itself, with the lock already held. See ``start``."""
+        if True:
             instance_id = secrets.token_hex(16)
             secret = secrets.token_urlsafe(32)
             root_text = str(root)
@@ -875,6 +903,18 @@ class Runtime:
         process = child.process
         deadline = time.time() + max(0.5, float(timeout))
 
+        # Whether this child is still ours to signal. Once the watcher thread
+        # has waited on it the pid is free, and a process-group id is only the
+        # leader's pid - so a remembered pgid can by then name a group that
+        # belongs to somebody else's work. Popen.terminate() checks the same
+        # thing for itself and does nothing to a reaped child, but os.killpg
+        # does not, and signalling a group on the strength of a stale number is
+        # the mistake section 11.7 rules out alongside killing by name.
+        try:
+            reaped = process.poll() is not None
+        except Exception:
+            reaped = True
+
         try:
             if os.name == "nt":
                 if child.job:
@@ -882,7 +922,7 @@ class Runtime:
                     child.job = None
                 else:
                     process.terminate()
-            elif child.pgid:
+            elif child.pgid and not reaped:
                 os.killpg(child.pgid, signal.SIGTERM)
             else:
                 process.terminate()

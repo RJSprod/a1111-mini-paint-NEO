@@ -110,6 +110,23 @@ authentication — a FastAPI dependency, Gradio's own login check — is reporte
 `unknown` rather than as covered, and the row stays red; that is deliberate, and the
 manual test for it is in `docs/wangp/PHASE0.md`.
 
+That verdict is not advice, it is the gate. `/wan2gp/` answers `AUTH_BOUNDARY_FAILED` —
+HTTP and WebSocket alike — until coverage is proven, whatever else is running: WanGP has
+no sign-in of its own, so a proxy that forwarded on an unproven boundary would hand the
+whole of it to anyone who could reach Forge's port. Refusing at the point of service, and
+not at startup, is what also covers the two awkward cases: a child the setup wizard's own
+checks started, and an installation that was set up before authentication was switched on.
+
+If your Forge's sign-in *does* cover the route — run the `curl` in `PHASE0.md` spike B and
+see a `401` — record that answer in the environment and the proxy will serve:
+
+```
+MINIPAINT_WANGP_ALLOW_UNPROVEN_AUTH=1
+```
+
+Deliberately an environment variable rather than a setting: it is a statement about a
+deployment that somebody checked, not a box a browser can tick.
+
 Anything not observed is a failure, not an omission: the checklist starts entirely red and
 a row goes green only when something proved it. Rows can need two presses — the first
 asks for WanGP, the second reads the result once it is serving. Nothing polls in between.
@@ -294,8 +311,9 @@ What the tab offers you depends only on the code:
   `BRIDGE_VERSION_MISMATCH`, `BRIDGE_COMPONENT_INCOMPATIBLE` → **Reinitialize**. These all
   mean "the setup on disk no longer describes reality", and restarting the process would
   only reproduce them.
-* `AUTH_BOUNDARY_FAILED` → **nothing**. The integration deliberately stayed off, and
-  restarting changes nothing about who can reach the route.
+* `AUTH_BOUNDARY_FAILED` → **nothing**. The proxy is refusing on purpose, and restarting
+  changes nothing about who can reach the route. Prove the boundary and set
+  `MINIPAINT_WANGP_ALLOW_UNPROVEN_AUTH=1`, or run this Forge without a sign-in of its own.
 * Everything else → **Restart WanGP**.
 
 Two of them do not take the tab away from you. `BRIDGE_VERSION_MISMATCH` and

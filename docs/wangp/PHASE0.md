@@ -133,6 +133,14 @@ authentication runs as ASGI middleware, and reports *unknown* — which fails th
   **Proves:** the boundary covers the whole subtree, not only the page.
 * [ ] **What the tab decided.** Look at the step-5 row *"/wan2gp/ is covered by this
   Forge's sign-in"* and at `auth_boundary_report`'s `coverage` in the diagnostic report.
+
+* [ ] **The refusal is real.** While that row is red, `curl -i $FORGE/wan2gp/` *as a signed-in
+  user*. **Proves:** `503` naming `AUTH_BOUNDARY_FAILED` — the proxy fails closed rather than
+  merely logging the doubt, so an unproven boundary cannot serve WanGP to anyone. Then set
+  `MINIPAINT_WANGP_ALLOW_UNPROVEN_AUTH=1`, restart Forge, and repeat both this request and the
+  unauthenticated one above. **Proves:** the signed-in request now returns the WanGP page and
+  the unauthenticated one still returns Forge's own `401` — which is the whole point of the
+  override, and the reason it must never be set before that second result has been seen.
   **Proves:** the code's verdict matches what curl just showed. If curl says protected but
   the row says `unknown`, the mechanism is per-route and the report is being honest about
   not being able to see it — record which mechanism, and treat the curl result as the

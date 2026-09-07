@@ -153,8 +153,12 @@ def parse_nvidia_smi(text: str) -> typing.List[Gpu]:
         return devices
 
     # csv, because a product name may legitimately contain a comma and
-    # nvidia-smi quotes it when it does.
-    for row in csv.reader(io.StringIO(text)):
+    # nvidia-smi quotes it when it does. ``skipinitialspace`` is what makes
+    # that quoting work: nvidia-smi separates with ", ", and a quote that does
+    # not start the field is just a character, so without this a name like
+    # "RTX A6000, Ada" splits in two and every field after it shifts along -
+    # putting half a name where the UUID should be.
+    for row in csv.reader(io.StringIO(text), skipinitialspace=True):
         fields = [str(cell).strip() for cell in row]
         if len(fields) < 3:
             continue

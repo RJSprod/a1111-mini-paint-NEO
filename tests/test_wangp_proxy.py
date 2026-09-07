@@ -25,6 +25,7 @@ import asyncio  # noqa: E402
 import contextlib  # noqa: E402
 import http.server  # noqa: E402
 import json  # noqa: E402
+import os  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 
@@ -573,11 +574,99 @@ async def async_checks(r: Results) -> None:
         as_stopped()
 
 
+async def auth_gate_checks(r: Results) -> None:
+    """An unproven authentication boundary refuses to serve anything.
+
+    Section 12.6 will not let route registration stand in for protection and
+    49.4 makes an unauthenticated ``/wan2gp/`` a release blocker. The verdict
+    therefore has to be load-bearing rather than logged: WanGP has no sign-in
+    of its own, so a proxy that forwarded while coverage was merely "unknown"
+    would hand the whole of it to anyone who could reach Forge's port.
+    """
+    from minipaint_neo.wangp.errors import AUTH_BOUNDARY_FAILED
+
+    spy = SpyClient()
+    proxy.use_client(spy)
+    remembered = proxy._boundary
+    override = os.environ.pop(proxy.AUTH_OVERRIDE_ENV, None)
+    try:
+        as_ready(PRETEND_PORT)
+
+        proxy._boundary = None
+        r.check("nothing is served before install has asked the question", proxy.serving_allowed() is False)
+        before = len(spy.urls)
+        answer = await proxy.forward(request_for("GET", "/wan2gp/"))
+        r.check("a request before install never reaches a client", len(spy.urls) == before)
+        r.check("and is refused rather than answered", answer.status_code == 503)
+
+        # Gradio's own login is a per-route dependency, so a route added to the
+        # router afterwards cannot be seen to be covered by it.
+        proxy._boundary = {
+            "ok": False, "coverage": "unknown", "mechanisms": ["gradio_auth"],
+            "host_auth_configured": True, "detail": "per-route", "failure_code": AUTH_BOUNDARY_FAILED,
+        }
+        r.check("an unproven boundary refuses to serve", proxy.serving_allowed() is False)
+        before = len(spy.urls)
+        refused = await proxy.forward(request_for("GET", "/wan2gp/"))
+        r.check("an unproven boundary never reaches the backend", len(spy.urls) == before)
+        r.check("it answers 503", refused.status_code == 503)
+        body = bytes(getattr(refused, "body", b"") or b"").decode("utf-8", "ignore")
+        r.check("it names the failure code", AUTH_BOUNDARY_FAILED in body)
+        r.check("and still does not leak the backend port", str(PRETEND_PORT) not in body)
+
+        socket = _Socket("/wan2gp/queue/join")
+        await proxy._websocket_endpoint(socket)
+        r.check("a socket is refused on the same verdict", socket.closed is not None and not socket.accepted)
+        r.check("a refused socket reaches no backend", len(spy.urls) == before)
+
+        # A deployment that checked for itself can say so, deliberately, in the
+        # environment - never from a browser and never from a saved setting.
+        os.environ[proxy.AUTH_OVERRIDE_ENV] = "1"
+        r.check("an explicit override serves again", proxy.serving_allowed() is True)
+        allowed = await proxy.forward(request_for("GET", "/wan2gp/"))
+        r.check("and the request goes through", allowed.status_code == 200)
+        os.environ.pop(proxy.AUTH_OVERRIDE_ENV, None)
+
+        # A Forge with no sign-in at all is not a Forge we should block: the
+        # tab is exactly as reachable as the rest of it, which is the point.
+        proxy._boundary = {"ok": True, "coverage": "no_auth_configured", "mechanisms": []}
+        r.check("a Forge with no authentication is served", proxy.serving_allowed() is True)
+        proxy._boundary = {"ok": True, "coverage": "covered", "mechanisms": ["asgi_middleware"]}
+        r.check("authentication that wraps every route is served", proxy.serving_allowed() is True)
+    finally:
+        if override is None:
+            os.environ.pop(proxy.AUTH_OVERRIDE_ENV, None)
+        else:
+            os.environ[proxy.AUTH_OVERRIDE_ENV] = override
+        proxy._boundary = remembered
+        proxy.use_client(None)
+        runtime.reset_for_tests()
+
+
+class _Socket:
+    """Just enough WebSocket for the endpoint to refuse one."""
+
+    def __init__(self, path: str) -> None:
+        self.url = FakeUrl(path=path)
+        self.headers = {"host": "forge.example.test"}
+        self.client = None
+        self.scope = {"query_string": b"", "subprotocols": []}
+        self.accepted = False
+        self.closed = None
+
+    async def accept(self, *args, **keywords) -> None:
+        self.accepted = True
+
+    async def close(self, code: int = 1000) -> None:
+        self.closed = code
+
+
 def run() -> Results:
     r = Results("wangp proxy")
     try:
         sync_checks(r)
         asyncio.run(async_checks(r))
+        asyncio.run(auth_gate_checks(r))
     finally:
         proxy.use_client(None)
         runtime.reset_for_tests()

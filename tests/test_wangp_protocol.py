@@ -450,6 +450,45 @@ def handoff_checks(r: Results) -> None:
             protocol.MAX_HANDOFF_BYTES > 0 and protocol.MAX_HANDOFF_PIXELS > 0 and protocol.MAX_HANDOFF_SIDE > 0)
 
 
+def fullness_checks(r: Results) -> None:
+    """A replace receiver is never full, however much it already holds.
+
+    The regression this guards: a start frame reported ``1 of 1`` the moment
+    it held a picture, the normaliser read that as full, and the menu stopped
+    offering the one receiver a user most wants to send a second image to -
+    which is the whole of "Start send replaces start" in section 45.
+    """
+    for receiver_id, role in (("start_frame", "start"), ("end_frame", "end"), ("control_image", "control")):
+        held = protocol.normalize_receiver(
+            {"id": receiver_id, "role": role, "operation": protocol.REPLACE, "count": 1, "max_count": 1}
+        )
+        r.check(f"a {receiver_id} holding an image is not full", held["full"] is False)
+        r.check(f"a {receiver_id} holding an image can still be sent to", held["enabled"] is True)
+        r.check(f"a {receiver_id} still reports what it holds", held["count"] == 1)
+
+    # The append side keeps its limit, because there it means something.
+    full = protocol.normalize_receiver(
+        {"id": "reference", "role": "reference", "operation": protocol.APPEND, "count": 9, "max_count": 9}
+    )
+    r.check("a reference list at its maximum is full", full["full"] is True)
+    r.check("a full reference list is not offered", full["enabled"] is False)
+    room = protocol.normalize_receiver(
+        {"id": "reference", "role": "reference", "operation": protocol.APPEND, "count": 2, "max_count": 9}
+    )
+    r.check("a reference list with room is offered", room["enabled"] is True and room["full"] is False)
+    over = protocol.normalize_receiver(
+        {"id": "reference", "role": "reference", "operation": protocol.APPEND, "count": 12, "max_count": 9}
+    )
+    r.check("a reference list past its maximum is still full", over["full"] is True)
+
+    # An explicitly disabled receiver stays disabled either way: fullness is
+    # one reason to withhold an action, never the only one.
+    off = protocol.normalize_receiver(
+        {"id": "start_frame", "role": "start", "operation": protocol.REPLACE, "enabled": False, "count": 1, "max_count": 1}
+    )
+    r.check("a switched-off start frame stays switched off", off["enabled"] is False)
+
+
 def run() -> Results:
     r = Results("wangp protocol")
     copy_checks(r)
@@ -457,6 +496,7 @@ def run() -> Results:
     envelope_checks(r)
     revision_checks(r)
     receiver_checks(r)
+    fullness_checks(r)
     handoff_checks(r)
     return r
 

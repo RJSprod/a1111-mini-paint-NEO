@@ -175,7 +175,11 @@ def normalize_receiver(raw: typing.Any) -> typing.Optional[dict]:
     else:
         max_count = None
 
-    full = max_count is not None and count >= max_count
+    # Fullness is an append-only idea. A receiver that replaces what it holds
+    # can always take another picture - that is what replacing means - so a
+    # start frame with an image in it must not come back disabled, which is
+    # what a naive "count >= max_count" does to a single-image slot.
+    full = operation == APPEND and max_count is not None and count >= max_count
     enabled = bool(raw.get("enabled", True)) and bool(raw.get("visible", True)) and not full
 
     label = str(raw.get("label") or receiver_id.replace("_", " ").title())

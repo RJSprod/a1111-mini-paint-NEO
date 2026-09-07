@@ -771,6 +771,73 @@ def tab_checks(r: Results) -> None:
             config.use_config_dir(None)
 
 
+def handoff_release_checks(r: Results) -> None:
+    """A finished send lets go of the file it prepared.
+
+    The prepared PNG is the one thing a send leaves behind on disk, and the
+    browser's report is the only moment anything knows the transfer is over -
+    the bridge has already decoded the picture into WanGP's own component
+    value, so nothing points at the file any more. Section 20.7 asks for it to
+    go on success and on failure alike; the regression this guards is a report
+    that carried no id at all, which left every send's file on disk for the
+    life of the process.
+    """
+    import json as _json
+    import tempfile as _tempfile
+
+    from minipaint_neo.canvas import ui as canvas_ui
+    from minipaint_neo.wangp import config as wangp_config
+    from minipaint_neo.wangp import handoff as wangp_handoff
+    from PIL import Image
+
+    canvas = object.__new__(canvas_ui.TouchCanvas)
+    # Never ask for the real one, not even to put it back: resolving it makes
+    # it, and a suite that runs in a checkout would leave a folder behind.
+    with _tempfile.TemporaryDirectory(prefix="minipaint-wangp-release-") as temporary:
+        wangp_config.use_config_dir(pathlib.Path(temporary) / "data")
+        try:
+            # What the browser says, and what of it is believed.
+            prepared = wangp_handoff.write(Image.new("RGBA", (12, 8), (9, 9, 9, 255)))
+            read = canvas_ui.wangp_report(_json.dumps({"handoff_id": prepared.id, "receiver_id": "start_frame", "ok": True}))
+            r.check("a real handoff id is carried back", read["handoff_id"] == prepared.id)
+            for label, bad in (("a path", "../" + "a" * 29), ("a short id", "a" * 31), ("upper case", "A" * 32), ("nothing", "")):
+                spoiled = canvas_ui.wangp_report(_json.dumps({"handoff_id": bad, "receiver_id": "start_frame"}))
+                r.check(f"{label} is not accepted as a handoff id", spoiled["handoff_id"] == "")
+
+            # A send that worked: the file goes.
+            r.check("the prepared file exists to begin with", prepared.path.exists())
+            canvas.wangp_result(None, _json.dumps({
+                "handoff_id": prepared.id, "receiver_id": "start_frame", "ok": True,
+                "role": "start", "operation": "replace", "verification": "pixel-equivalent",
+                "width": 12, "height": 8, "state_revision": "r",
+            }))
+            r.check("a verified send removes its file", not prepared.path.exists())
+            r.check("and forgets its manifest", wangp_handoff.manifest_of(prepared.id) is None)
+
+            # A send that failed: the file goes too, and so does one whose
+            # report names no receiver at all - the early return used to skip
+            # the cleanup entirely.
+            failed = wangp_handoff.write(Image.new("RGBA", (4, 4)))
+            canvas.wangp_result(None, _json.dumps({
+                "handoff_id": failed.id, "receiver_id": "start_frame", "ok": False, "code": "RECEIVER_VERIFY_FAILED",
+            }))
+            r.check("a failed send removes its file too", not failed.path.exists())
+
+            nameless = wangp_handoff.write(Image.new("RGBA", (4, 4)))
+            canvas.wangp_result(None, _json.dumps({
+                "handoff_id": nameless.id, "receiver_id": "", "ok": False, "code": "IFRAME_NOT_READY",
+            }))
+            r.check("a send that never named a receiver still releases its file", not nameless.path.exists())
+
+            # Nothing is deleted on the strength of an id we did not mint.
+            survivor = wangp_handoff.write(Image.new("RGBA", (4, 4)))
+            canvas.wangp_result(None, _json.dumps({"handoff_id": "../../etc/passwd", "receiver_id": "start_frame", "ok": True}))
+            r.check("a bad id in a report removes nothing", survivor.path.exists())
+            wangp_handoff.discard(survivor.id)
+        finally:
+            wangp_config.use_config_dir(None)
+
+
 def run() -> Results:
     r = Results("wangp receiver contract")
     try:
@@ -782,6 +849,7 @@ def run() -> Results:
         verification_checks(r)
         log_checks(r)
         tab_checks(r)
+        handoff_release_checks(r)
     finally:
         bridge.reset_for_tests()
     return r

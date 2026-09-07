@@ -641,7 +641,14 @@ def _auth_report() -> dict:
     try:
         from . import proxy
 
-        return proxy.auth_boundary_report(app)
+        report = proxy.auth_boundary_report(app)
+        if not report.get("ok") and proxy.auth_override():
+            # The gate honours this, so the checklist has to as well: an
+            # operator who ran the unauthenticated request themselves and set
+            # the variable has answered the one question this code cannot.
+            report = dict(report, ok=True, coverage="declared_by_operator",
+                          detail=f"{proxy.AUTH_OVERRIDE_ENV} is set: coverage was checked outside this process.")
+        return report
     except Exception:
         return {}
 

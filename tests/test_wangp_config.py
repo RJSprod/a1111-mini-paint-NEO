@@ -571,11 +571,15 @@ def check_gpus(r: Results) -> None:
     r.check("no cards at all is None, not an error", discovery.find_gpu(GOOD_UUID, []) is None)
     r.check("a single remaining card is still not a substitute", discovery.find_gpu(GOOD_UUID, [devices[1]]) is None)
 
-    # A malformed row that slipped through parsing is still unselectable: the
-    # UUID is what the launch trusts, and it has to match exactly.
+    # nvidia-smi separates with ", " and quotes any name that contains a comma
+    # of its own. Reading that quoting correctly is what keeps the UUID in the
+    # UUID column: parsed naively the name splits in two, every later field
+    # shifts along, and the card becomes unselectable - safe, but for no reason.
     quoted = discovery.parse_nvidia_smi('3, "NVIDIA RTX A6000, 48GB", GPU-99998888-7777-6666-5555-444433332222, 49140\n')
-    r.check("a comma inside a name cannot produce a selectable uuid",
-            discovery.find_gpu("GPU-99998888-7777-6666-5555-444433332222", quoted) is None)
+    r.check("a quoted name containing a comma stays one name", [card.name for card in quoted] == ["NVIDIA RTX A6000, 48GB"])
+    r.check("and its uuid is still the uuid",
+            discovery.find_gpu("GPU-99998888-7777-6666-5555-444433332222", quoted) is not None)
+    r.check("with the memory that followed it", [card.total_mb for card in quoted] == [49140])
 
     r.check("nvml is skippable and the smi path still answers",
             discovery.list_gpus(runner=Runner(Completed(0, sample_output)), use_nvml=False) is not None)

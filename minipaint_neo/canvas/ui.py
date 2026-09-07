@@ -300,7 +300,11 @@ def wangp_report(value: typing.Any, known: typing.Optional[typing.Sequence[str]]
     names = wangp_receiver_ids() if known is None else known
     receiver = str(raw.get("receiver_id") or "")
     failure = str(raw.get("code") or "")
+    module = _wangp("protocol")
+    told = raw.get("handoff_id")
+    valid = getattr(module, "valid_handoff_id", None) if module is not None else None
     return {
+        "handoff_id": str(told) if callable(valid) and valid(told) else "",
         "receiver_id": receiver if receiver in names else "",
         "ok": raw.get("ok") is True,
         "code": failure if failure.replace("_", "").isalpha() and failure.isupper() else "",
@@ -1094,6 +1098,16 @@ class TouchCanvas:
         """
         doc = document.ensure(state)
         outcome = wangp_report(report)
+
+        # The prepared PNG has done its job either way: the bridge decoded it
+        # into WanGP's own component value, so nothing points at the file any
+        # more. This is the only moment that knows a send is over, and it runs
+        # before the report is judged - a send that failed, or one that came
+        # back naming no receiver at all, still leaves a file to let go of.
+        handoff = _wangp("handoff")
+        if handoff is not None and outcome["handoff_id"]:
+            handoff.discard(outcome["handoff_id"])
+
         if not outcome["receiver_id"]:
             return gr.skip()
         label = wangp_label(outcome["receiver_id"])

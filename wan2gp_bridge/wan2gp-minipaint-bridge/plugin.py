@@ -342,12 +342,25 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         if self.controls is None:
             return result
 
+        # The components arrive here and nowhere else: WanGP resolves what was
+        # asked for in setup_ui and hands the mapping to this call. Looking for
+        # them on the plugin object instead found nothing, and every receiver
+        # then reported itself missing however right its elem_id was.
+        handed = kwargs.get("components")
+        if not isinstance(handed, dict):
+            handed = next((item for item in args if isinstance(item, dict)), None)
+        taken = self.bridge.compat.host.accept_components(handed)
+        _note(f"post_ui_setup handed {taken} component(s)")
+
         resolution = self.bridge.resolve()
         if not resolution.ok:
             # Fail closed and say why. The event is not wired at all, so there
             # is no path by which an unproven component could be written to,
             # and the handshake the parent gets says BRIDGE_COMPONENT_INCOMPATIBLE.
-            _note(f"not ready: missing {', '.join(resolution.missing_mandatory)}")
+            _note(
+                f"not ready: missing {', '.join(resolution.missing_mandatory)}. "
+                f"Resolved: {', '.join(sorted(resolution.elem_ids.values())) or 'nothing'}."
+            )
 
         self.wired = bridge_ui.wire(
             self.controls,

@@ -1046,6 +1046,73 @@ def wizard_checks(r: Results) -> None:
             host_shared.cmd_opts = had_opts
 
 
+def guidance_checks(r: Results) -> None:
+    """A red row has to say why, and what to do about it.
+
+    Both halves were missing. Every row that needed a running WanGP said "not
+    serving yet" whatever had happened - still loading, failed to launch,
+    crashed with a traceback - so the one press that would have explained it
+    never did, and nothing on the page said the extension starts WanGP itself.
+    """
+    from minipaint_neo.wangp import errors as wangp_errors
+    from minipaint_neo.wangp import runtime as wangp_runtime
+    from minipaint_neo.wangp import ui as wangp_ui
+
+    # Why it is not serving, from the runtime's own state.
+    starting = wangp_ui._why_not_serving({"state": wangp_runtime.STARTING})
+    r.check("a starting WanGP says it is starting", "starting" in starting.lower(), starting)
+    r.check("and says pressing again is the next move", "again" in starting.lower(), starting)
+
+    stopped = wangp_ui._why_not_serving({"state": wangp_runtime.STOPPED})
+    r.check("a stopped WanGP says it is started for you", "started for you" in stopped, stopped)
+
+    crashed = wangp_ui._why_not_serving({
+        "state": wangp_runtime.CRASHED,
+        "error_code": wangp_errors.PROCESS_EXITED,
+        "stderr_tail": ["Traceback (most recent call last):", "ModuleNotFoundError: No module named 'torch'"],
+    })
+    r.check("a crash reports the failure", wangp_errors.MESSAGES[wangp_errors.PROCESS_EXITED] in crashed, crashed)
+    r.check("and carries what WanGP actually said", "No module named 'torch'" in crashed, crashed)
+    r.check("a crash never claims it is merely not serving yet",
+            "not serving yet" not in crashed.lower(), crashed)
+
+    failed = wangp_ui._why_not_serving({"state": wangp_runtime.STOPPED, "error_code": wangp_errors.PROCESS_START_FAILED})
+    r.check("a launch that failed says so",
+            wangp_errors.MESSAGES[wangp_errors.PROCESS_START_FAILED] in failed, failed)
+
+    # The reason reaches every row that was waiting on it, the port row too -
+    # that one used to carry no explanation at all.
+    seen = dict(wangp_ui.observe({"root": "/opt/Wan2GP"}), )
+    waiting = {row["key"]: row["detail"] for row in wangp_ui.checklist(seen)}
+    for key in ("port", "root_path", "proxy_base", "proxy_asset", "bridge_round"):
+        said = waiting.get(key) or ""
+        r.check(f"the {key} row explains itself", bool(said), repr(said))
+        # Specifically: it says what the runtime is doing, not the old blanket
+        # line that was true of every failure and useful for none of them.
+        r.check(f"the {key} row is not the old catch-all",
+                said == wangp_ui._why_not_serving(wangp_runtime.snapshot()), repr(said))
+
+    # And the fold-out saying what to do, on failed rows only.
+    rows = [
+        {"key": "port", "label": "a loopback port", "ok": False, "mandatory": True, "detail": "x"},
+        {"key": "gpu", "label": "the GPU", "ok": True, "mandatory": True, "detail": ""},
+    ]
+    rendered = wangp_ui.checklist_html(rows)
+    r.check("a failed row carries a fold-out", rendered.count("<details") == 1, rendered[:200])
+    r.check("a passing row does not", "the GPU</b>" not in rendered or rendered.count("<details") == 1)
+    r.check("the fold-out is shut to begin with", "<details class" in rendered and " open" not in rendered)
+    r.check("it says the extension launches WanGP", "do not start WanGP yourself" in rendered.lower()
+            or "You do not start WanGP yourself" in wangp_ui.HELP["port"])
+
+    r.check("every check has guidance", all(key in wangp_ui.HELP for key, _ in wangp_ui.CHECKS))
+    r.check("the sign-in guidance says where to look",
+            "private window" in wangp_ui.HELP["auth"] and "tick" in wangp_ui.HELP["auth"])
+    # The help is escaped before its own emphasis is put back, so a stray
+    # angle bracket in a future edit cannot open a tag.
+    r.check("the fold-out escapes its content",
+            "<script" not in wangp_ui._help_html("auth").lower())
+
+
 def run() -> Results:
     r = Results("wangp receiver contract")
     try:
@@ -1060,6 +1127,7 @@ def run() -> Results:
         handoff_release_checks(r)
         session_record_checks(r)
         wizard_checks(r)
+        guidance_checks(r)
     finally:
         bridge.reset_for_tests()
     return r

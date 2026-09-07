@@ -730,3 +730,70 @@
         --minipaint-target: 48px;
     }
 }
+
+/* The WanGP setup checklist. Scoped to its own list: the rows are the only
+   place these classes are used, and nothing here reaches outside them. */
+.minipaint-wangp-checklist {
+    list-style: none;
+    margin: 0.5em 0;
+    padding: 0;
+}
+
+.minipaint-wangp-checklist > li {
+    padding: 0.35em 0;
+    line-height: 1.5;
+}
+
+.minipaint-wangp-checklist > li + li {
+    border-top: 1px solid rgba(128, 128, 128, 0.18);
+}
+
+.minipaint-wangp-pass > b {
+    color: #3fb950;
+}
+
+.minipaint-wangp-fail > b {
+    color: #f85149;
+}
+
+.minipaint-wangp-detail {
+    opacity: 0.75;
+}
+
+/* The fold-out on a failed row: shut by default, and obviously pressable. */
+.minipaint-wangp-help {
+    margin: 0.35em 0 0.1em 2.1em;
+}
+
+.minipaint-wangp-help > summary {
+    cursor: pointer;
+    display: inline-block;
+    padding: 0.1em 0.6em;
+    border: 1px solid rgba(128, 128, 128, 0.35);
+    border-radius: 999px;
+    font-size: 0.85em;
+    opacity: 0.85;
+    user-select: none;
+}
+
+.minipaint-wangp-help > summary:hover {
+    opacity: 1;
+    border-color: rgba(128, 128, 128, 0.6);
+}
+
+.minipaint-wangp-help[open] > summary {
+    margin-bottom: 0.4em;
+}
+
+.minipaint-wangp-help > div {
+    border-left: 2px solid rgba(128, 128, 128, 0.35);
+    padding: 0.1em 0 0.1em 0.8em;
+    max-width: 70ch;
+    opacity: 0.92;
+}
+
+.minipaint-wangp-help code {
+    padding: 0.05em 0.35em;
+    border-radius: 4px;
+    background: rgba(128, 128, 128, 0.18);
+}

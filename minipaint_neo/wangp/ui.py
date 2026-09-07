@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import html
+import re
 import json
 import threading
 import traceback
@@ -135,6 +136,66 @@ CHECKS: typing.Tuple[typing.Tuple[str, str], ...] = (
 #: mandatory about: a Forge with no authentication of its own cannot fail to
 #: cover a route, and demanding coverage there would block every setup.
 CONDITIONAL_CHECKS = frozenset({"auth"})
+
+#: What to do about a row that has not passed. A red row states a fact; this
+#: says what to go and do about it, which is the part somebody staring at the
+#: wizard actually needs. Shown folded, only on rows that failed, because a
+#: checklist that explains thirteen passing things is a wall of text.
+HELP: typing.Dict[str, str] = {
+    "loopback": (
+        "This reads the command line WanGP would be launched with, so it needs steps 1 and 2 "
+        "answered first. If step 2 is not green, press **Try it against this WanGP** there - "
+        "choosing an environment in the dropdown is not the same as proving it can run WanGP."
+    ),
+    "no_listen": "Same as the row above: it reads the launch command, which needs steps 1 and 2 green.",
+    "no_share": "Same as the row above: it reads the launch command, which needs steps 1 and 2 green.",
+    "no_wildcard": "Same as the row above: it reads the launch command, which needs steps 1 and 2 green.",
+    "gpu": (
+        "Press **List the GPUs** in step 3 and choose one. If the card you want is not listed, "
+        "this extension cannot see it: check `nvidia-smi` runs in a terminal. A GPU that was "
+        "chosen before and has since gone is never quietly swapped for another one."
+    ),
+    "port": (
+        "This turns green once WanGP is actually running, because the port is assigned to a real "
+        "process. **You do not start WanGP yourself - this extension starts it for you**, on the "
+        "first press of *Run the checks*. A cold start loads a model and can take minutes, so "
+        "press *Run the checks* again after a while. If it never goes green, the row will say "
+        "what went wrong instead of this."
+    ),
+    "root_path": (
+        "WanGP has to be running for this. It is started for you; give it time and press "
+        "**Run the checks** again. If WanGP has crashed, the reason appears on this row and the "
+        "full output is in the diagnostic report at the bottom of this tab."
+    ),
+    "bridge": (
+        "Press **Check the bridge plugin** in step 4, and **Install or update it** if it is "
+        "missing or the wrong version. It is copied into `plugins/wan2gp-minipaint-bridge` "
+        "inside your WanGP folder and nothing else there is touched. If WanGP was already "
+        "running when you installed it, it has to be restarted to load it."
+    ),
+    "proxy_base": (
+        "This fetches the WanGP page through this Forge, so WanGP has to be up first. Wait for "
+        "the rows above to go green and press **Run the checks** again."
+    ),
+    "proxy_asset": "Same as the row above: it needs WanGP serving, then another press of **Run the checks**.",
+    "bridge_round": (
+        "The WanGP page below has to load and its bridge plugin has to answer. That needs the "
+        "proxy rows green first, and it needs the bridge plugin installed and switched on. Give "
+        "the page below time to appear, then press **Run the checks** again."
+    ),
+    "origin": (
+        "The page below is loaded from a path on this Forge, never from WanGP's own address. If "
+        "this row is red the tab has not drawn the WanGP frame yet; finish the rows above."
+    ),
+    "auth": (
+        "This Forge has a sign-in, and this code cannot see whether it covers `/wan2gp/`: Gradio "
+        "checks a login per route, and a route added by an extension is invisible to that check "
+        "either way. So somebody has to look. Sign out of Forge, open `/wan2gp/` in a private "
+        "window, and confirm it refuses you the way the rest of Forge does. Then tick the box "
+        "under this list. Until it is ticked `/wan2gp/` serves nothing at all - WanGP has no "
+        "sign-in of its own, so if that page opened for a stranger they could drive it."
+    ),
+}
 
 
 # ------------------------------------------------------------------ views --
@@ -538,8 +599,38 @@ def mandatory_pass(rows: typing.Optional[typing.Sequence[dict]]) -> bool:
     return all(row.get("ok") for row in rows if row.get("mandatory"))
 
 
+def _help_html(key: str) -> str:
+    """The fold-out "what do I do about this" for one failed row.
+
+    A ``<details>`` rather than anything scripted: it is one element, it works
+    inside a Gradio HTML block with no JavaScript of ours in the page, and it
+    stays folded so a list of thirteen rows does not become an essay.
+    """
+    guidance = HELP.get(key)
+    if not guidance:
+        return ""
+    # Markdown-ish emphasis, kept to the one form the help text uses.
+    body = html.escape(guidance).replace("**", "\u0000")
+    pieces = body.split("\u0000")
+    rebuilt = "".join(
+        piece if index % 2 == 0 else f"<b>{piece}</b>" for index, piece in enumerate(pieces)
+    )
+    rebuilt = re.sub(r"`([^`]+)`", r"<code>\1</code>", rebuilt)
+    return (
+        '<details class="minipaint-wangp-help">'
+        "<summary>What to do</summary>"
+        f"<div>{rebuilt}</div>"
+        "</details>"
+    )
+
+
 def checklist_html(rows: typing.Optional[typing.Sequence[dict]]) -> str:
-    """The checklist as the list of pass/fail rows section 8.5 asks for."""
+    """The checklist as the list of pass/fail rows section 8.5 asks for.
+
+    A failed row also carries its own folded note saying what to do about it.
+    Only a failed one: a green row needs no advice, and the wizard is already
+    a long page.
+    """
     items = []
     for row in rows or []:
         ok = bool(row.get("ok"))
@@ -547,8 +638,9 @@ def checklist_html(rows: typing.Optional[typing.Sequence[dict]]) -> str:
         tone = "minipaint-wangp-pass" if ok else "minipaint-wangp-fail"
         optional = "" if row.get("mandatory") else " <em>(only required when this Forge has a sign-in)</em>"
         detail = f" <span class=\"minipaint-wangp-detail\">- {html.escape(str(row['detail']))}</span>" if row.get("detail") else ""
+        guidance = "" if ok else _help_html(str(row.get("key", "")))
         items.append(
-            f'<li class="{tone}"><b>[{mark}]</b> {html.escape(str(row.get("label", "")))}{optional}{detail}</li>'
+            f'<li class="{tone}"><b>[{mark}]</b> {html.escape(str(row.get("label", "")))}{optional}{detail}{guidance}</li>'
         )
     body = "".join(items) or "<li>nothing has been checked yet</li>"
     return f'<ul class="minipaint-wangp-checklist">{body}</ul>'
@@ -694,6 +786,35 @@ def _auth_report(acknowledged: bool = False) -> dict:
         return {}
 
 
+def _why_not_serving(snapshot: typing.Optional[dict]) -> str:
+    """One sentence saying why WanGP is not answering, from the runtime itself.
+
+    The wizard starts WanGP on the user's behalf, so "it is not running" is
+    never advice - the useful thing is whether it is still coming up, whether
+    it fell over, and what it said on the way down.
+    """
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    state = str(snapshot.get("state") or runtime.STOPPED)
+    code = str(snapshot.get("error_code") or "")
+
+    if code:
+        sentence = errors.message(code)
+        tail = [str(line) for line in (snapshot.get("stderr_tail") or []) if str(line).strip()]
+        if tail:
+            # The last thing the child said is nearly always the reason, and a
+            # tail nobody can see is a tail nobody can act on.
+            sentence = f"{sentence} WanGP's last output: {tail[-1][:200]}"
+        return sentence
+
+    if state == runtime.STARTING:
+        return "WanGP is still starting - loading a model can take minutes. Press Run the checks again."
+    if state == runtime.STOPPING:
+        return "WanGP is shutting down; wait for it to stop, then press Run the checks again."
+    if state == runtime.READY:
+        return "WanGP is running but has not answered this yet."
+    return "WanGP has not started yet. Press Run the checks - it is started for you, not by hand."
+
+
 def observe(candidate: typing.Optional[dict], browser_text: typing.Any = "") -> dict:
     """Everything the checklist needs, collected once, from the real thing.
 
@@ -757,8 +878,14 @@ def observe(candidate: typing.Optional[dict], browser_text: typing.Any = "") -> 
         except Exception as error:
             details["proxy_base"] = str(error)
     else:
-        for key in ("root_path", "proxy_base", "proxy_asset", "bridge_round"):
-            details[key] = "WanGP is not serving yet"
+        # "Not serving yet" is true of a WanGP that is still loading a model
+        # and of one that died on the way up, and the difference is the only
+        # thing worth knowing. The runtime already has the answer - a state, a
+        # code, and the tail of what the child printed - and dropping it here
+        # was leaving people to press this button forever.
+        because = _why_not_serving(snapshot)
+        for key in ("port", "root_path", "proxy_base", "proxy_asset", "bridge_round"):
+            details[key] = because
 
     steps = probe.get("steps") or {}
     for name, key in (("base_page", "proxy_base"), ("asset", "proxy_asset"), ("root_path", "root_path")):

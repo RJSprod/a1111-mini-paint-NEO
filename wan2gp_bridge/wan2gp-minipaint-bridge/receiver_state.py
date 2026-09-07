@@ -206,14 +206,16 @@ def read(
     """The state of the page whose event supplied ``live``.
 
     ``live`` is the component-key-to-value mapping assembled from the bridge
-    event's own inputs, so it is session-scoped by construction. The model
-    descriptor and the static schema come from the plugin API and are process
-    facts; they are the parts of the picture that are the same for every page.
+    event's own inputs, so it is session-scoped by construction - and the model
+    selector is one of those inputs, which is what keeps two browser tabs on
+    two models from reading each other's schema. The plugin API's globals are
+    still consulted, but only once this page's own selection agrees with them.
     """
+    selected = live.get(compatibility.MODEL_SELECTOR)
     return build(
         values=live,
-        model=compat.model_descriptor(),
-        capabilities=compat.model_capabilities(schema),
+        model=compat.model_descriptor(selected),
+        capabilities=compat.model_capabilities(schema, selected),
         view=str(compat.host.read_global("active_view") or ""),
     )
 

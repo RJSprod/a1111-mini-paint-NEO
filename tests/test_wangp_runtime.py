@@ -28,6 +28,7 @@ import tempfile  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 
+from minipaint_neo.wangp import config as wangp_config  # noqa: E402
 from minipaint_neo.wangp import discovery, errors, runtime  # noqa: E402
 from minipaint_neo.wangp.errors import IntegrationError  # noqa: E402
 
@@ -254,6 +255,73 @@ def health_is_never_a_wait(r: Results) -> None:
         holder.join(5.0)
 
     r.check("once the launch is over it reconciles again", current.health().get("reconciled") is True)
+
+
+def ownership_and_failure_checks(r: Results) -> None:
+    """Two ways a launch or a stop can go wrong without anyone noticing.
+
+    A group is only ever signalled while its leader is still ours, and an
+    unexpected error on the way up reports itself instead of leaving the tab
+    saying "starting" for the rest of the session.
+    """
+    current = runtime.current()
+
+    # A child the watcher already reaped: its pid is free, and a process-group
+    # id is only the leader's pid, so the number may by now name somebody
+    # else's work. Section 11.7 rules that out alongside killing by name.
+    reaped = FakeProcess(pid=424242)
+    reaped.end(0)
+    child = runtime._Child(reaped, "instance", "/nowhere", 7999)
+    child.pgid = 424242
+    signalled = []
+    original_killpg = getattr(runtime.os, "killpg", None)
+    if original_killpg is not None:
+        runtime.os.killpg = lambda pgid, sig: signalled.append((pgid, sig))
+    try:
+        current._terminate(child, 0.5)
+    finally:
+        if original_killpg is not None:
+            runtime.os.killpg = original_killpg
+    r.check("a reaped child's process group is never signalled", signalled == [], repr(signalled))
+    r.check("the reaped child is still tidied up through its own handle", "terminate" in reaped.calls)
+
+    # A live one is signalled exactly as before.
+    alive = FakeProcess(pid=424243)
+    living = runtime._Child(alive, "instance", "/nowhere", 7999)
+    living.pgid = 424243
+    signalled = []
+    if original_killpg is not None:
+        runtime.os.killpg = lambda pgid, sig: (signalled.append((pgid, sig)), alive.end(-15))[0]
+        try:
+            current._terminate(living, 0.5)
+        finally:
+            runtime.os.killpg = original_killpg
+        r.check("a living child's own group still is", [pgid for pgid, _ in signalled] == [424243], repr(signalled))
+
+    # An unexpected error mid-launch must not strand the state machine.
+    runtime.reset_for_tests()
+    stranded = runtime.current()
+
+    def explode(*args, **keywords):
+        raise MemoryError("no room to make a thread")
+
+    failed = None
+    # The launch resolves a handoff root, and resolving the real one would make
+    # a folder in whatever checkout this suite runs in.
+    with tempfile.TemporaryDirectory(prefix="minipaint-wangp-launch-") as scratch:
+        wangp_config.use_config_dir(pathlib.Path(scratch) / "data")
+        try:
+            stranded.start(CONFIG_FOR_FAILURE, spawn=explode, probe=lambda *a, **k: (True, ""), gpus=GPUS_FOR_FAILURE)
+        except Exception as error:
+            failed = error
+        finally:
+            wangp_config.use_config_dir(None)
+    r.check("an unexpected launch error is reported, not raised raw",
+            isinstance(failed, IntegrationError) and failed.code == errors.PROCESS_START_FAILED, repr(failed))
+    r.check("and the runtime does not sit in STARTING",
+            stranded.state != runtime.STARTING, stranded.state)
+    r.check("the failure has a code the tab can act on", bool(stranded.error_code))
+    runtime.reset_for_tests()
 
 
 def run() -> Results:
@@ -502,6 +570,10 @@ def run() -> Results:
         runtime.reset_for_tests()
 
         health_is_never_a_wait(r)
+
+        global CONFIG_FOR_FAILURE, GPUS_FOR_FAILURE
+        CONFIG_FOR_FAILURE, GPUS_FOR_FAILURE = config, [gpu(uuid=GPU_UUID)]
+        ownership_and_failure_checks(r)
     finally:
         base.cleanup()
 

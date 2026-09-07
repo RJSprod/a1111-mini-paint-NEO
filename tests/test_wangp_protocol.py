@@ -489,6 +489,70 @@ def fullness_checks(r: Results) -> None:
     r.check("a switched-off start frame stays switched off", off["enabled"] is False)
 
 
+def session_isolation_checks(r: Results) -> None:
+    """Two browser tabs on two models must not read each other's schema.
+
+    The receiver-affecting values already come from the bridge event's own
+    inputs, which are session-scoped by construction. The model did not: it was
+    read through ``request_global``, which is one value for the whole process,
+    so whichever model the server saw last decided what every page was offered.
+    Section 13.2 says receiver state is per browser session, and section 44
+    tests it by changing the model in tab A and expecting tab B not to move.
+    """
+    import sys as _sys
+
+    folder = str(BRIDGE_COPY.parent)
+    added = folder not in _sys.path
+    if added:
+        _sys.path.insert(0, folder)
+    try:
+        import compatibility
+    except ImportError as error:  # pragma: no cover - a broken bridge copy
+        r.check("the bridge compatibility module imports", False, str(error))
+        return
+    finally:
+        if added and folder in _sys.path:
+            _sys.path.remove(folder)
+
+    class OneProcess:
+        """The plugin globals: one model for the whole server, as they are."""
+
+        def read_global(self, name):
+            return {
+                "model_type": "t2v_A",
+                "model_def": {"media_inputs": {"image": {"reference": True, "start": True}}},
+            }.get(name)
+
+    compat = compatibility.Compatibility.__new__(compatibility.Compatibility)
+    compat.host = OneProcess()
+
+    r.check("the model selector is a component the bridge reads",
+            compatibility.MODEL_SELECTOR in compatibility.COMPONENTS_BY_KEY)
+    r.check("and it is not mandatory, so a build without it still works",
+            compatibility.COMPONENTS_BY_KEY[compatibility.MODEL_SELECTOR].mandatory is False)
+
+    # Tab A is on the model the process globals describe.
+    r.check("the page on the current model agrees with the globals", compat.selection_is_current("t2v_A"))
+    r.check("and reads the schema", compat.model_capabilities(selected="t2v_A")["reference"] is True)
+    r.check("and is named by it", compat.model_descriptor("t2v_A")["type"] == "t2v_A")
+
+    # Tab B is on another one. It must not inherit tab A's answers.
+    r.check("a page on another model does not claim to agree", not compat.selection_is_current("i2v_B"))
+    borrowed = compat.model_capabilities(selected="i2v_B")
+    r.check("and borrows no capability from it", set(borrowed.values()) == {None}, repr(borrowed))
+    r.check("and reports its own model, not the other page's",
+            compat.model_descriptor("i2v_B")["type"] == "i2v_B")
+
+    # A build where the dropdown never resolved behaves exactly as before.
+    r.check("an unresolved selector falls back to the globals",
+            compat.selection_is_current("") and compat.selection_is_current(None))
+    r.check("and still reads the schema", compat.model_capabilities(selected=None)["start_frame"] is True)
+
+    # Whatever shape the dropdown hands back.
+    for label, shape in (("a bare string", "t2v_A"), ("a pair", ("Label", "t2v_A")), ("a list of one", ["t2v_A"])):
+        r.check(f"{label} is recognised as the current model", compat.selection_is_current(shape), repr(shape))
+
+
 def run() -> Results:
     r = Results("wangp protocol")
     copy_checks(r)
@@ -497,6 +561,7 @@ def run() -> Results:
     revision_checks(r)
     receiver_checks(r)
     fullness_checks(r)
+    session_isolation_checks(r)
     handoff_checks(r)
     return r
 

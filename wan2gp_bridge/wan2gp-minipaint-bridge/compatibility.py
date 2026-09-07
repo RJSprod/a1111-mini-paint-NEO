@@ -111,6 +111,7 @@ IMAGE_PROMPT_TYPE = "image_prompt_type"
 VIDEO_PROMPT_TYPE = "video_prompt_type"
 AUDIO_PROMPT_TYPE = "audio_prompt_type"
 MODEL_MODE = "model_mode"
+MODEL_SELECTOR = "model_selector"
 
 # VERIFY ON A REAL INSTALL (section 49.1): every elem_id below was taken from
 # WanGP's documented media-input naming and from the receiver example in
@@ -171,6 +172,13 @@ COMPONENTS: typing.Tuple[ComponentSpec, ...] = (
         kind="selection",
         mandatory=False,
         known_for="model-specific mode selector; absent on many models",
+    ),
+    ComponentSpec(
+        key=MODEL_SELECTOR,
+        candidates=("model_type", "model_list", "model_choice", "model_selector"),
+        kind="selection",
+        mandatory=False,
+        known_for="the model dropdown itself; read so the model is a fact about this page",
     ),
 )
 
@@ -601,12 +609,24 @@ class Compatibility:
         Gradio hands a callback the values belonging to the page that fired
         it, and there is no other source that is true of one browser tab.
         """
-        keys = (IMAGE_PROMPT_TYPE, VIDEO_PROMPT_TYPE, AUDIO_PROMPT_TYPE, MODEL_MODE, REFERENCE_GALLERY, START_IMAGE, END_IMAGE)
+        keys = (
+            IMAGE_PROMPT_TYPE, VIDEO_PROMPT_TYPE, AUDIO_PROMPT_TYPE, MODEL_MODE,
+            REFERENCE_GALLERY, START_IMAGE, END_IMAGE,
+            # The model belongs here for the same reason as the rest of them.
+            # Read through ``request_global`` it is one value for the whole
+            # process, so two browser tabs on two models would share whichever
+            # the server saw last - section 13.2's warning exactly, and what
+            # section 44 tests when it changes the model in tab A and expects
+            # tab B's menu not to move.
+            MODEL_SELECTOR,
+        )
         return [(key, self.resolution.component(key)) for key in keys if self.resolution.component(key) is not None]
 
     # -- layer A -------------------------------------------------------------
 
-    def model_capabilities(self, schema: typing.Any = None) -> typing.Dict[str, typing.Optional[bool]]:
+    def model_capabilities(
+        self, schema: typing.Any = None, selected: typing.Any = None
+    ) -> typing.Dict[str, typing.Optional[bool]]:
         """Which image roles the current model's schema allows.
 
         Three answers, not two: True (the schema says yes), False (the schema
@@ -615,6 +635,13 @@ class Compatibility:
         metadata key would break the integration on an upgrade that changed
         nothing that matters.
         """
+        if schema is None and not self.selection_is_current(selected):
+            # This page is on a different model from the one the process-wide
+            # schema describes, and the plugin API offers no way to ask for
+            # another model's definition. Answering from the other page's
+            # schema would be worse than answering nothing: None leaves the
+            # decision to the live selectors, and those really are this page's.
+            return {receiver_id: None for receiver_id in CAPABILITY_PATHS}
         source = schema if schema is not None else self.host.read_global("model_def")
         answers: typing.Dict[str, typing.Optional[bool]] = {}
         for receiver_id, path in CAPABILITY_PATHS.items():
@@ -634,15 +661,35 @@ class Compatibility:
                 return int(value)
         return None
 
-    def model_descriptor(self) -> typing.Dict[str, str]:
+    def selection_is_current(self, selected: typing.Any) -> bool:
+        """Whether this page's model is the one the process globals describe.
+
+        Deliberately loose about shape, and deliberately biased towards True.
+        A dropdown may hand back the model type, a (label, value) pair or a
+        list of one, and which half of a pair is the model is not something
+        this can know - so any scalar in the selection matching counts as
+        agreement, and only a selection that matches nothing is treated as
+        another model. Erring this way costs a page on another model the
+        schema layer, which is recoverable; erring the other way would let one
+        page read another page's schema, which is what section 13.2 forbids.
+        An unresolved selector answers True: there is nothing to disagree with,
+        and behaviour is then exactly what it was before it was read at all.
+        """
+        chosen = [_short(item) for item in _scalars(selected) if _short(item)]
+        if not chosen:
+            return True
+        return _short(self.host.read_global("model_type")) in chosen
+
+    def model_descriptor(self, selected: typing.Any = None) -> typing.Dict[str, str]:
         """The model block of the receiver answer: type, label, family.
 
         Strings only, and only the three the protocol names. The bridge does
         not publish a model database and MiniPaint does not keep one; this is
         for the diagnostics line and the send log.
         """
-        model_type = self.host.read_global("model_type")
-        definition = self.host.read_global("model_def")
+        current = self.selection_is_current(selected)
+        model_type = self.host.read_global("model_type") if current else _first_scalar(selected)
+        definition = self.host.read_global("model_def") if current else None
         label = _walk(definition, ("name",)) or _walk(definition, ("label",))
         family = _walk(definition, ("family",)) or _walk(definition, ("architecture",))
         return {
@@ -724,6 +771,31 @@ def _walk_flag(source: typing.Any, path: typing.Sequence[str]) -> typing.Optiona
     if isinstance(value, (list, tuple, dict, set)):
         return bool(value)
     return True
+
+
+def _scalars(value: typing.Any) -> typing.List[typing.Any]:
+    """Every scalar a selection component might have meant, outermost first.
+
+    Gradio dropdowns hand back a string, a (label, value) pair, or a list of
+    one of those depending on the build and on ``multiselect``. Which half of
+    a pair is the model is not knowable from here, so both are kept and the
+    caller decides what a match means.
+    """
+    found: typing.List[typing.Any] = []
+    queue = [value]
+    while queue and len(found) < 8:
+        item = queue.pop(0)
+        if isinstance(item, (list, tuple)):
+            queue.extend(list(item)[:4])
+        elif isinstance(item, (str, int, float)) and not isinstance(item, bool):
+            found.append(item)
+    return found
+
+
+def _first_scalar(value: typing.Any) -> typing.Any:
+    """The one scalar to report a selection by. See ``_scalars``."""
+    found = _scalars(value)
+    return found[0] if found else ""
 
 
 def _short(value: typing.Any, limit: int = 80) -> str:

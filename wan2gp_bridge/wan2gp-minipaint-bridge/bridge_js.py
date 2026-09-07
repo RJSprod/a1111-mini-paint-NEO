@@ -77,6 +77,9 @@ def configuration(theme_css: str = "") -> dict:
         "triggerElemId": bridge_ui.TRIGGER_ELEM_ID,
         "triggerAttempts": TRIGGER_ATTEMPTS,
         "triggerRetryMs": TRIGGER_RETRY_MS,
+        # Longer than the parent will wait, so in the ordinary case the parent
+        # reports the timeout and this only ever unwedges the queue behind it.
+        "roundTripMs": protocol.RECEIVE_TIMEOUT_MS + 5000,
         "themeCss": str(theme_css or ""),
     }
 
@@ -108,6 +111,8 @@ _SCRIPT = r"""
   var focusable = Object.create(null);
   var pending = [];
   var busy = false;
+  var inFlight = null;
+  var watchdog = 0;
   var attempts = 0;
   var timer = 0;
   var encoder = (typeof TextEncoder !== "undefined") ? new TextEncoder() : null;
@@ -170,6 +175,23 @@ _SCRIPT = r"""
 
     var next = pending.shift();
     busy = true;
+    inFlight = next;
+    // Nothing else clears ``busy``. If the Gradio round trip never lands - the
+    // server errored, the queue dropped it, WanGP restarted underneath us -
+    // then without this every later request would find the queue busy and
+    // return without doing anything, and the bridge in this page would be
+    // wedged until somebody reloaded it. The parent has its own, shorter,
+    // timeout, so in the ordinary case this only tidies up behind it.
+    if (watchdog) { window.clearTimeout(watchdog); }
+    watchdog = window.setTimeout(function () {
+      watchdog = 0;
+      if (!busy) { return; }
+      busy = false;
+      var stranded = inFlight;
+      inFlight = null;
+      if (stranded) { answer(stranded, { ok: false, code: "RECEIVER_QUERY_TIMEOUT" }); }
+      pump();
+    }, CONFIG.roundTripMs);
     try {
       box.value = JSON.stringify(next);
       // Gradio binds to the input event; assigning .value alone leaves the
@@ -180,6 +202,8 @@ _SCRIPT = r"""
       button.click();
     } catch (error) {
       busy = false;
+      inFlight = null;
+      if (watchdog) { window.clearTimeout(watchdog); watchdog = 0; }
       answer(next, { ok: false, code: "INTERNAL_ERROR" });
     }
   }
@@ -215,6 +239,8 @@ _SCRIPT = r"""
 
   function deliver(raw) {
     busy = false;
+    inFlight = null;
+    if (watchdog) { window.clearTimeout(watchdog); watchdog = 0; }
     var payload = null;
     try { payload = JSON.parse(String(raw || "")); } catch (error) { payload = null; }
 

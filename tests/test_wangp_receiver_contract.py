@@ -838,6 +838,85 @@ def handoff_release_checks(r: Results) -> None:
             wangp_config.use_config_dir(None)
 
 
+def session_record_checks(r: Results) -> None:
+    """The Forge side is told a session exists, and the report can say so.
+
+    The browser is the only half that ever hears the bridge, so until it writes
+    what it heard, the registry stays empty: ``get`` finds nothing, a channel is
+    minted afresh on every repaint, and the diagnostics report cannot answer any
+    of section 48's questions about the model, the receivers or the revision.
+    """
+    import json as _json
+
+    from minipaint_neo.wangp import diagnostics
+    from minipaint_neo.wangp import ui as wangp_ui
+
+    bridge.reset_for_tests()
+    channel = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+    said = {
+        "protocol": bridge.PROTOCOL,
+        "introducing": True,
+        "bridge_session": "sess-000000000001",
+        "instance_id": "inst-01",
+        "version": "1.0.0",
+        "state_revision": "0" * 32,
+        "model": {"type": "t2v_A", "label": "Model A", "family": "wan"},
+        "receivers": [{"id": "start_frame", "role": "start", "operation": "replace", "enabled": True}],
+        "ready": True,
+    }
+
+    r.check("nothing is known before the browser speaks", bridge.registry().get(channel) is None)
+    wangp_ui.record_session(channel, _json.dumps(said))
+    session = bridge.registry().get(channel)
+    r.check("the session is recorded", session is not None)
+    r.check("with the model this page is on", session is not None and session.model.get("type") == "t2v_A")
+    r.check("and the revision it was read at", session is not None and session.state_revision == "0" * 32)
+    r.check("and the receiver it offered",
+            session is not None and [item["id"] for item in session.receivers] == ["start_frame"])
+
+    # A later answer updates the same session rather than starting a new one.
+    later = dict(said, introducing=False, state_revision="1" * 32,
+                 receivers=[{"id": "reference", "role": "reference", "operation": "append", "enabled": True}])
+    wangp_ui.record_session(channel, _json.dumps(later))
+    session = bridge.registry().get(channel)
+    r.check("a later answer moves the revision", session is not None and session.state_revision == "1" * 32)
+    r.check("and replaces the receiver list, not appends to it",
+            session is not None and [item["id"] for item in session.receivers] == ["reference"])
+
+    # The report resolves the config directory, and resolving the real one
+    # would leave a folder in whatever checkout this suite runs in.
+    import tempfile as _tempfile
+
+    from minipaint_neo.wangp import config as wangp_config
+
+    with _tempfile.TemporaryDirectory(prefix="minipaint-wangp-report-") as scratch:
+        wangp_config.use_config_dir(pathlib.Path(scratch) / "data")
+        try:
+            written = diagnostics.report()
+        finally:
+            wangp_config.use_config_dir(None)
+    r.check("the report can now name the live session",
+            "t2v_A" in written or "sess-00" in written, written[-400:])
+
+    # None of it may be able to fail: a malformed record is dropped, and a
+    # channel that is not ours is refused, without an exception either way.
+    for label, bad in (("nonsense", "{{"), ("a list", "[1,2]"), ("nothing", ""), ("None", None)):
+        try:
+            wangp_ui.record_session(channel, bad)
+            survived = True
+        except Exception:
+            survived = False
+        r.check(f"{label} is dropped rather than raised", survived)
+    try:
+        wangp_ui.record_session("not-a-channel", _json.dumps(said))
+        survived = True
+    except Exception:
+        survived = False
+    r.check("a bad channel id is refused quietly", survived)
+    r.check("and did not create a session", bridge.registry().get("not-a-channel") is None)
+    bridge.reset_for_tests()
+
+
 def run() -> Results:
     r = Results("wangp receiver contract")
     try:
@@ -850,6 +929,7 @@ def run() -> Results:
         log_checks(r)
         tab_checks(r)
         handoff_release_checks(r)
+        session_record_checks(r)
     finally:
         bridge.reset_for_tests()
     return r

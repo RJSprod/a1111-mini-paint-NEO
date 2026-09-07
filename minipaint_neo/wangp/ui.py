@@ -67,6 +67,7 @@ STATE_ELEM_ID = "wangp_state"
 OPEN_ELEM_ID = "wangp_open_request"
 REFRESH_ELEM_ID = "wangp_refresh_request"
 BROWSER_CHECK_ELEM_ID = "wangp_browser_check"
+SESSION_ELEM_ID = "wangp_session"
 
 #: The only URL the browser is ever given for WanGP. A path, so it resolves
 #: against the Forge origin the page is already on; it must stay equal to
@@ -581,6 +582,39 @@ def config_from_wizard(candidate: typing.Optional[dict], initialized: bool = Fal
     )
 
 
+def record_session(channel: typing.Any, text: typing.Any) -> None:
+    """Take down what the iframe last said about itself.
+
+    The browser is the only half that ever hears the bridge, so this is the
+    only way the Forge side learns that a page has a live WanGP session, which
+    model it is on and what it will accept. Nothing here decides anything: the
+    receiver list is answered by the live iframe at the moment the menu opens,
+    and the gate that refuses a stale or unknown receiver runs inside WanGP
+    next to the components. This is the record, for the diagnostics report and
+    for keeping a channel across a repaint - so it is also written to be unable
+    to fail, because a bookkeeping error must never cost a send.
+    """
+    try:
+        payload = json.loads(text) if isinstance(text, str) and text.strip() else None
+        if not isinstance(payload, dict):
+            return
+        registry = bridge.registry()
+        if payload.get("introducing"):
+            registry.hello(channel, payload.get("instance_id"))
+            registry.ready(channel, payload)
+        else:
+            registry.receivers(channel, payload)
+    except errors.IntegrationError as error:
+        # A named refusal is worth knowing about - a plugin of the wrong
+        # protocol is exactly the case section 31 wants reported as itself
+        # rather than as an empty menu - but it is still only bookkeeping, so
+        # it is recorded and never raised at the browser.
+        if error.code == errors.BRIDGE_VERSION_MISMATCH:
+            runtime.current().mark(error.code, error.detail)
+    except Exception:
+        return
+
+
 def parse_browser_check(text: typing.Any) -> dict:
     """What the browser reported about the round trip through the iframe.
 
@@ -834,6 +868,12 @@ def create_ui() -> None:
         shell["channel"] = gr.Textbox("", visible=False, elem_id=CHANNEL_ELEM_ID)
         shell["state"] = gr.Textbox(json.dumps(view), visible=False, elem_id=STATE_ELEM_ID)
         shell["browser_check"] = gr.Textbox("", visible=False, elem_id=BROWSER_CHECK_ELEM_ID)
+        # What the live iframe says about itself, so that this side knows any
+        # of it. Without this the registry is never told a session exists, and
+        # the diagnostics report cannot answer section 48's questions about the
+        # model, the receivers or the revision - the browser is the only thing
+        # that ever hears the bridge's answers.
+        shell["session"] = gr.Textbox("", visible=False, elem_id=SESSION_ELEM_ID)
         open_request = gr.Button("Open", visible=False, elem_id=OPEN_ELEM_ID)
         refresh_request = gr.Button("Refresh", visible=False, elem_id=REFRESH_ELEM_ID)
 
@@ -932,6 +972,7 @@ def create_ui() -> None:
         request_start()
         return show()
 
+    shell["session"].change(fn=record_session, inputs=[shell["channel"], shell["session"]], outputs=[])
     open_request.click(fn=open_tab, inputs=[shell["channel"]], outputs=painted)
     refresh_request.click(fn=show, inputs=[shell["channel"]], outputs=painted)
     start_btn.click(fn=open_tab, inputs=[shell["channel"]], outputs=painted)

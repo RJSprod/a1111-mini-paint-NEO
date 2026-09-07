@@ -127,6 +127,7 @@ window.minipaintWanGP = (function () {
     // the fallback for a page that hands it over some other way.
     const CHANNEL_ELEM_ID = "wangp_channel";
     const BROWSER_CHECK_ELEM_ID = "wangp_browser_check";
+    const SESSION_ELEM_ID = "wangp_session";
     const CHANNEL_ATTRIBUTE = "data-minipaint-channel";
     const INSTANCE_ATTRIBUTE = "data-minipaint-instance";
 
@@ -450,6 +451,32 @@ window.minipaintWanGP = (function () {
      * round trip happens entirely in the browser - and it is a report, not a
      * gate: nothing here decides whether an image may be handed over.
      */
+    /**
+     * Hand this page's session to the Forge side. Bookkeeping only: the
+     * receiver list a send is judged against is the one the live iframe
+     * answers with at the moment the menu opens, and the gate that refuses a
+     * stale or unknown receiver runs inside WanGP. This is what lets the
+     * diagnostics report say which model a page is on, and what lets a channel
+     * survive a repaint - so it is written to be unable to throw.
+     */
+    function recordSession(introducing) {
+        try {
+            if (!S.channelId || !S.bridgeSession) { return; }
+            writeBox(SESSION_ELEM_ID, JSON.stringify({
+                protocol: PROTOCOL,
+                introducing: !!introducing,
+                bridge_session: S.bridgeSession,
+                instance_id: S.instanceId || "",
+                bridge_version: S.bridgeVersion || "",
+                state_revision: S.revision || "",
+                model: S.model || {},
+                receivers: S.receivers || [],
+                ready: !!S.ready,
+                code: S.lastCode || ""
+            }));
+        } catch (e) { /* a record is never worth an exception */ }
+    }
+
     function report(roundTrip, detail) {
         try {
             writeBox(BROWSER_CHECK_ELEM_ID, JSON.stringify({
@@ -529,6 +556,7 @@ window.minipaintWanGP = (function () {
         S.ready = declared;
         S.lastCode = declared ? "" : (failure || "BRIDGE_COMPONENT_INCOMPATIBLE");
         report(declared, S.lastCode);
+        recordSession(true);
         // Presentation only, and never a reason a picture cannot be sent.
         try { theme(S.theme || detectTheme()); } catch (e) { /* section 27.1 */ }
     }
@@ -570,6 +598,7 @@ window.minipaintWanGP = (function () {
         S.revision = revision;
         S.bridgeSession = session;
         S.model = normaliseModel(payload.model) || S.model;
+        recordSession(false);
         settle(requestId, {
             ok: true,
             code: "",

@@ -72,9 +72,13 @@ def configuration(theme_css: str = "") -> dict:
         "inbound": sorted(protocol.TO_BRIDGE),
         "receiverIds": list(protocol.RECEIVER_IDS),
         "maxEnvelopeBytes": protocol.MAX_ENVELOPE_BYTES,
-        "requestElemId": bridge_ui.REQUEST_ELEM_ID,
-        "ackElemId": bridge_ui.ACK_ELEM_ID,
-        "triggerElemId": bridge_ui.TRIGGER_ELEM_ID,
+        # Classes, not ids: WanGP builds its form twice and the bridge places
+        # one set of controls in each, so the script looks for "the set that
+        # is on screen" rather than for one element.
+        "columnClass": bridge_ui.COLUMN_CLASS,
+        "requestClass": bridge_ui.REQUEST_CLASS,
+        "ackClass": bridge_ui.ACK_CLASS,
+        "triggerClass": bridge_ui.TRIGGER_CLASS,
         "triggerAttempts": TRIGGER_ATTEMPTS,
         "triggerRetryMs": TRIGGER_RETRY_MS,
         # Longer than the parent will wait, so in the ordinary case the parent
@@ -129,11 +133,58 @@ _SCRIPT = r"""
     try { return document.getElementById(id); } catch (error) { return null; }
   }
 
-  function field(id) {
-    var host = element(id);
+  // -- finding our own controls -------------------------------------------------
+  //
+  // WanGP builds its generator form twice - once for the Media Generator tab
+  // and once for the hidden Edit tab - and the bridge places one set of
+  // controls in each, so nothing here is looked up by id. The live set is the
+  // one whose surroundings are displayed: the Edit tab's copy is wired to the
+  // Edit form's values, which are not the ones on screen. The set's own column
+  // is hidden by design, so the walk starts above it.
+
+  function columns() {
+    try { return Array.prototype.slice.call(document.getElementsByClassName(CONFIG.columnClass)); }
+    catch (error) { return []; }
+  }
+
+  function surroundingsDisplayed(column) {
+    var node = column.parentElement;
+    while (node && node !== document.body) {
+      try { if (window.getComputedStyle(node).display === "none") { return false; } }
+      catch (error) { return true; }
+      node = node.parentElement;
+    }
+    return true;
+  }
+
+  function liveColumn() {
+    var found = columns();
+    for (var index = 0; index < found.length; index += 1) {
+      if (surroundingsDisplayed(found[index])) { return found[index]; }
+    }
+    // Every set is inside something hidden - a form whose image row is folded
+    // away for the current model, say. The first one built is the Media
+    // Generator's, and that is the form the user is looking at.
+    return found.length ? found[0] : null;
+  }
+
+  function controlIn(column, className) {
+    if (!column) { return null; }
+    try { return column.querySelector("." + className); } catch (error) { return null; }
+  }
+
+  function fieldIn(column, className) {
+    var host = controlIn(column, className);
     if (!host) { return null; }
     if (host.tagName === "TEXTAREA" || host.tagName === "INPUT") { return host; }
     return host.querySelector("textarea, input");
+  }
+
+  function buttonIn(column, className) {
+    var host = controlIn(column, className);
+    if (!host) { return null; }
+    if (host.tagName === "BUTTON") { return host; }
+    return host.querySelector("button");
   }
 
   // -- outbound ---------------------------------------------------------------
@@ -161,8 +212,9 @@ _SCRIPT = r"""
   function pump() {
     if (busy || !pending.length) { return; }
 
-    var box = field(CONFIG.requestElemId);
-    var button = element(CONFIG.triggerElemId);
+    var column = liveColumn();
+    var box = fieldIn(column, CONFIG.requestClass);
+    var button = buttonIn(column, CONFIG.triggerClass);
     if (!box || !button) {
       // The bridge components have not rendered yet. Bounded retries, then the
       // waiting requests are failed rather than kept forever: a Send that

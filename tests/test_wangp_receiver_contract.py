@@ -716,6 +716,19 @@ def tab_checks(r: Results) -> None:
             r.check("the channel textbox starts empty",
                     component_of(page, wangp_ui.CHANNEL_ELEM_ID)["props"]["value"] == "")
 
+            # The setup checks run every few seconds while WanGP starts. Each
+            # run used to mint a channel and rewrite the iframe, and WanGP
+            # reloaded inside it on every run - the "flash" - so the handshake
+            # never got to finish. Every event that can repaint the iframe
+            # from the checks must first read the channel the page has.
+            channel_id = component_of(page, wangp_ui.CHANNEL_ELEM_ID)["id"]
+            probe_id = component_of(page, wangp_ui.BROWSER_CHECK_ELEM_ID)["id"]
+            checks = [d for d in page["dependencies"] if probe_id in d["inputs"]]
+            r.check("the setup checks are wired twice: the button and the clock", len(checks) == 2, str(len(checks)))
+            r.check("and both read the page's channel before deciding anything about the iframe",
+                    checks and all(channel_id in d["inputs"] for d in checks))
+            r.check("and both can write it back", checks and all(channel_id in d["outputs"] for d in checks))
+
             # The whole page, not just the tab: the second integration must not
             # cost the first one anything.
             r.check("the Mini Paint tab is still there", "tab_minipaint" in ids)
@@ -1046,6 +1059,55 @@ def wizard_checks(r: Results) -> None:
             host_shared.cmd_opts = had_opts
 
 
+def channel_reuse_checks(r: Results) -> None:
+    """A repaint is not a page load.
+
+    ``page_channel`` is the one decision the setup checks make about the
+    iframe. Asked again and again while nothing has changed, it must answer
+    the same channel and "nothing changed", so the iframe is left alone and
+    the WanGP inside it gets to finish its handshake.
+    """
+    import re
+
+    from minipaint_neo.wangp import runtime as wangp_runtime
+    from minipaint_neo.wangp import ui as wangp_ui
+
+    hex32 = re.compile(r"^[0-9a-f]{32}$")
+    first_run = "a" * 32
+    second_run = "b" * 32
+    original = wangp_runtime.snapshot
+    try:
+        wangp_runtime.snapshot = lambda: {"state": wangp_runtime.STARTING, "instance_id": ""}
+        r.check("while WanGP is starting there is no channel and nothing to change",
+                wangp_ui.page_channel("") == ("", False))
+        r.check("and a page still holding one from before is told to let it go",
+                wangp_ui.page_channel("c" * 32) == ("", True))
+
+        wangp_runtime.snapshot = lambda: {"state": wangp_runtime.READY, "instance_id": first_run}
+        first, changed = wangp_ui.page_channel("")
+        r.check("once WanGP serves, a page without a channel is given one",
+                bool(hex32.match(first)) and changed, repr((first, changed)))
+        r.check("asked again - before any handshake - the same page keeps the same channel",
+                wangp_ui.page_channel(first) == (first, False), repr(wangp_ui.page_channel(first)))
+        r.check("twenty polls later it is still that one channel, and nothing to change",
+                all(wangp_ui.page_channel(first) == (first, False) for _ in range(20)))
+        r.check("a page whose channel is not one of ours is given a real one",
+                wangp_ui.page_channel("not-a-channel")[1] and hex32.match(wangp_ui.page_channel("not-a-channel")[0]))
+
+        # A restart ends every session of the old run. The next answer is a
+        # new channel - one reload, which is the honest one - and then that
+        # channel is kept in turn.
+        bridge.registry().invalidate_instance(first_run)
+        wangp_runtime.snapshot = lambda: {"state": wangp_runtime.READY, "instance_id": second_run}
+        fresh, changed = wangp_ui.page_channel(first)
+        r.check("a WanGP that restarted means a new channel, once",
+                bool(hex32.match(fresh)) and fresh != first and changed)
+        r.check("which is then kept like the first", wangp_ui.page_channel(fresh) == (fresh, False))
+    finally:
+        wangp_runtime.snapshot = original
+        bridge.reset_for_tests()
+
+
 def guidance_checks(r: Results) -> None:
     """A red row has to say why, and what to do about it.
 
@@ -1264,6 +1326,7 @@ def run() -> Results:
         handoff_release_checks(r)
         session_record_checks(r)
         wizard_checks(r)
+        channel_reuse_checks(r)
         guidance_checks(r)
         console_checks(r)
         auth_probe_checks(r)

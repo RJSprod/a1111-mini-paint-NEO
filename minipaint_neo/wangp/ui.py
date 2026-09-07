@@ -374,6 +374,28 @@ def _keep_or_mint(channel: typing.Any) -> str:
     return _new_channel(snapshot)
 
 
+def page_channel(existing: typing.Any) -> typing.Tuple[str, bool]:
+    """The channel this page should carry now, and whether that is news.
+
+    Returns ``(channel, changed)``. The channel is the page's own while WanGP
+    is serving and it still names the run that is serving; a new one only
+    when there is none, or the run it named has ended; and "" while WanGP is
+    not ready to be framed. ``changed`` is what a handler uses to decide
+    whether to touch the iframe at all.
+
+    This exists because the setup checks used to mint a channel on every
+    pass, and every pass rewrote the iframe. Each rewrite reloaded WanGP
+    inside it - the "flash" a user sees - and a WanGP that reloads every
+    three seconds never finishes the handshake the same checks were waiting
+    for. A repaint is not a new page load, and must not be turned into one.
+    """
+    before = str(existing or "")
+    if runtime.snapshot().get("state") != runtime.READY:
+        return "", before != ""
+    channel = _keep_or_mint(before)
+    return channel, channel != before
+
+
 # ----------------------------------------------------------- lazy startup --
 
 _launch_lock = threading.Lock()
@@ -1567,7 +1589,7 @@ def _wire_wizard(parts: dict, shell: dict, painted, show, console) -> None:
         fn=install_bridge, inputs=[parts["candidate"]], outputs=[parts["bridge_status"]]
     )
 
-    def validate(candidate, reported):
+    def validate(candidate, reported, channel=""):
         """Run every check that can be run right now, and start WanGP if the
         remaining ones need it running.
 
@@ -1575,6 +1597,12 @@ def _wire_wizard(parts: dict, shell: dict, painted, show, console) -> None:
         that is serving and an iframe that has answered, so the first press
         asks for the process and the next one reads the result. Nothing polls
         in between.
+
+        ``channel`` is the one this page already carries. It is kept, and the
+        iframe left untouched, for as long as it names the WanGP that is
+        serving: the checks are asked again every few seconds while WanGP
+        starts, and an iframe rewritten on every answer is a WanGP reloaded
+        on every answer - which is a handshake that never completes.
         """
         candidate = dict(candidate or {})
         document = config_from_wizard(candidate)
@@ -1599,7 +1627,9 @@ def _wire_wizard(parts: dict, shell: dict, painted, show, console) -> None:
 
         rows = checklist(observe(candidate, reported))
         ready = mandatory_pass(rows)
-        channel = _new_channel(runtime.snapshot()) if runtime.snapshot().get("state") == runtime.READY else ""
+        channel, frame_changed = page_channel(channel)
+        if frame_changed:
+            journal.note("checks", "the iframe is being (re)loaded" if channel else "the iframe is being taken down")
 
         # Whether anything is still going to change on its own. Only a launch
         # in flight counts: once WanGP is up or has failed, the remaining red
@@ -1623,14 +1653,17 @@ def _wire_wizard(parts: dict, shell: dict, painted, show, console) -> None:
                 journal.note("checks", f"[X] {row['label']}" + (f" - {row['detail']}" if row.get("detail") else ""))
         journal.note("checks", f"{sum(1 for row in rows if row.get('ok'))}/{len(rows)} rows pass")
 
+        # The three iframe outputs are skipped, not re-sent, when nothing
+        # about the frame changed: Gradio re-renders an HTML component it is
+        # handed, even the same string, and a re-rendered iframe is a reload.
         return (
             checklist_html(rows),
             rows,
             candidate,
             gr.update(interactive=ready),
-            gr.update(visible=bool(channel)),
-            iframe_html(channel) if channel else "",
-            channel,
+            gr.update(visible=bool(channel)) if frame_changed else gr.skip(),
+            (iframe_html(channel) if channel else "") if frame_changed else gr.skip(),
+            channel if frame_changed else gr.skip(),
             message,
             gr.Timer(active=bool(working)),
             journal.text(),
@@ -1638,7 +1671,7 @@ def _wire_wizard(parts: dict, shell: dict, painted, show, console) -> None:
 
     parts["validate"].click(
         fn=validate,
-        inputs=[parts["candidate"], shell["browser_check"]],
+        inputs=[parts["candidate"], shell["browser_check"], shell["channel"]],
         outputs=[
             parts["checklist"],
             parts["rows"],
@@ -1661,7 +1694,7 @@ def _wire_wizard(parts: dict, shell: dict, painted, show, console) -> None:
     # as long as the launch it started is still running.
     parts["poll"].tick(
         fn=validate,
-        inputs=[parts["candidate"], shell["browser_check"]],
+        inputs=[parts["candidate"], shell["browser_check"], shell["channel"]],
         outputs=[
             parts["checklist"],
             parts["rows"],

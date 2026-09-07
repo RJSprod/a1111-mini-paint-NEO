@@ -281,9 +281,13 @@ chosen so that each step's failure is diagnosable without the ones after it.
 * [ ] **4. The plugin loads.** Spike C's first three boxes.
 * [ ] **5. One known receiver resolves — Start Frame.** Spike C's component table, at
   least `start_image`, `image_prompt_type`.
-* [ ] **6. The hidden bridge event exists.** The bridge builds three invisible controls in
-  WanGP's own Blocks and wires one event. Its absence shows as a `Send to` menu that never
-  gets an answer: `WanGP: unavailable — open WanGP tab`.
+* [ ] **6. The hidden bridge event exists.** The bridge asks WanGP, through
+  `insert_after` during `post_ui_setup`, to place three invisible controls inside the
+  generator form, and wires one event on them in that builder. Nothing built anywhere
+  else is on the page: a component created before WanGP's Blocks exist has an id and is
+  still absent from the page config. Its absence shows as a `Send to` menu that never
+  gets an answer: `WanGP: unavailable — open WanGP tab`. WanGP's console says
+  `controls placed after 'image_prompt_type' (set 1); event wired` when it worked.
 * [ ] **7. A parent message populates one image.** Spike D.
 * [ ] **8. Generate uses it.** Spike F, start frame only, at this point.
 * [ ] **9. Reference append works.** Spike E.

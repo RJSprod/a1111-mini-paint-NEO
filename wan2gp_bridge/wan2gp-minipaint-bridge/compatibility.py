@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.0.0"
+BRIDGE_VERSION = "1.0.1"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build

@@ -1,12 +1,19 @@
 """The plugin WanGP loads, and the one event everything happens on.
 
 The shape is deliberately small. During ``setup_ui`` the bridge asks for the
-components and globals it needs and builds three invisible controls of its
-own. During ``post_ui_setup`` it records what it actually got, builds one
-adapter per receiver it can serve, wires a single Gradio event whose outputs
-are the acknowledgement plus every v1 receiver component, and injects the
-document script. After that it does nothing at all until a browser asks it
-something.
+components and globals it needs and hands WanGP the document script. During
+``post_ui_setup`` it records what it actually got, builds one adapter per
+receiver it can serve, and asks WanGP - through ``insert_after`` - to place
+its three invisible controls inside the form it was handed, wiring a single
+Gradio event whose outputs are the acknowledgement plus every v1 receiver
+component as it does so. After that it does nothing at all until a browser
+asks it something.
+
+The controls are placed by WanGP rather than built by the plugin because a
+component built anywhere else is on no page. ``setup_ui`` runs before WanGP's
+Blocks exist, and a Gradio component created outside a Blocks context has an
+id, can be named in an event, and is still absent from the page config: the
+browser never finds it, and the bridge never answers. That was the silence.
 
 One event rather than one per receiver, because every request needs the same
 thing first: the live values of this page, read as that event's inputs. That
@@ -322,8 +329,15 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         except TypeError:
             super().__init__()
         self.bridge = MiniPaintBridge(host=compatibility.Host(self))
+        #: Whether setup_ui declared anything - False when WanGP was started
+        #: by hand, and the bridge is staying out of the way.
+        self.declared = False
+        #: The most recently placed set of controls, and whether its event is
+        #: wired. WanGP asks for one set per form it builds; ``instances``
+        #: counts them so that each gets element ids of its own.
         self.controls: typing.Optional[bridge_ui.BridgeControls] = None
         self.wired = False
+        self.instances = 0
         #: Whether the browser half has been handed to WanGP. Once only: the
         #: UI is built more than once on some pages.
         self.injected = False
@@ -337,19 +351,23 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
             # rather than adding controls nobody will ever message.
             return result
         self.bridge.declare()
-        self.controls = bridge_ui.build()
+        self.declared = True
         # Here, not in post_ui_setup. Everything a plugin declares - the
         # components it wants, the JavaScript it adds - is declared before the
         # main UI is built; by the time post_ui_setup runs, the Blocks exist
         # and the page's scripts are settled, so a script added then is
         # accepted without complaint and never reaches the document. That is
         # what "the bridge is loaded and silent" was.
+        #
+        # The controls are the other way round: they cannot be built here,
+        # because nothing built before the Blocks exist is on the page. They
+        # are asked for in post_ui_setup, from the page itself.
         self._inject_script()
         return result
 
     def post_ui_setup(self, *args: typing.Any, **kwargs: typing.Any) -> typing.Any:
         result = _super_call(self, "post_ui_setup", *args, **kwargs)
-        if self.controls is None:
+        if not getattr(self, "declared", False):
             return result
 
         # The components arrive here and nowhere else: WanGP resolves what was
@@ -364,9 +382,11 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
 
         resolution = self.bridge.resolve()
         if not resolution.ok:
-            # Fail closed and say why. The event is not wired at all, so there
-            # is no path by which an unproven component could be written to,
-            # and the handshake the parent gets says BRIDGE_COMPONENT_INCOMPATIBLE.
+            # Fail closed and say why. The controls are still placed, so that
+            # the handshake the parent gets is an answer naming
+            # BRIDGE_COMPONENT_INCOMPATIBLE rather than a timeout; only the
+            # receivers that resolved are ever outputs of the event, so there
+            # is no path by which an unproven component could be written to.
             _note(
                 f"not ready: missing {', '.join(resolution.missing_mandatory)}. "
                 f"Resolved: {', '.join(sorted(resolution.elem_ids.values())) or 'nothing'}."
@@ -376,14 +396,14 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         # has, once: a value that was not a component reached a Gradio event,
         # create_ui() raised, and WanGP restarted into safe mode with every
         # user plugin disabled - other people's plugins included. A bridge
-        # that fails to wire itself is a Send menu without WanGP in it, and
+        # that fails to place itself is a Send menu without WanGP in it, and
         # that is all it is ever allowed to be.
         try:
-            self._wire(resolution)
+            self._place(handed if isinstance(handed, dict) else {})
         except Exception as error:
             self.wired = None
             _note(
-                f"could not wire the bridge ({type(error).__name__}: {error}). "
+                f"could not place the bridge controls ({type(error).__name__}: {error}). "
                 "WanGP is unaffected; intelligent send stays off for this run."
             )
             try:
@@ -394,15 +414,72 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
                 pass
         return result
 
-    def _wire(self, resolution: typing.Any) -> None:
-        """Attach the hidden bridge event. See ``post_ui_setup``."""
-        self.wired = bridge_ui.wire(
-            self.controls,
-            self._make_handler(),
-            [component for _, component in self.bridge.compat.state_components()],
-            self.bridge.compat.output_components(),
-            bridge_js.DELIVER_JS,
-        )
+    def _place(self, handed: typing.Mapping[str, typing.Any]) -> None:
+        """Ask WanGP to put the controls on the page, wired. See ``post_ui_setup``.
+
+        ``insert_after(target, builder)`` is WanGP's contract: after every
+        plugin's ``post_ui_setup`` has run, WanGP calls the builder inside the
+        container that holds ``target`` and moves the one component it built
+        to sit right behind it. That is the only moment a plugin's own
+        component is created inside the page, so the controls are built and
+        their event attached there, in the builder, and nowhere else.
+
+        The event's inputs and outputs are read *now*, not in the builder:
+        WanGP hands each form's components to a fresh ``post_ui_setup`` and
+        runs every builder afterwards, so a builder that asked the bridge
+        for its components at run time would wire the first form's controls
+        to the second form's values.
+        """
+        # WanGP answers components and globals out of one mapping. A global's
+        # name handed to insert_after is a target WanGP cannot find, so only
+        # real components are candidates for "the thing to sit behind".
+        placeable = {name: value for name, value in handed.items() if compatibility.Host.is_component(value)}
+        target = bridge_ui.target_for(placeable)
+        inserter = getattr(self, "insert_after", None)
+        if not target:
+            _note(
+                "WanGP handed over no component to place the bridge controls after; "
+                "intelligent send stays off for this run"
+            )
+            return
+        if not callable(inserter):
+            _note(
+                "this WanGP has no insert_after, so the bridge cannot put its controls "
+                "on the page; intelligent send stays off for this run"
+            )
+            return
+
+        self.instances += 1
+        instance = self.instances
+        handler = self._make_handler()
+        inputs = [component for _, component in self.bridge.compat.state_components()]
+        outputs = list(self.bridge.compat.output_components())
+
+        def build_controls() -> typing.Any:
+            # Runs inside WanGP's Blocks, inside the target's own container.
+            # It must add exactly one component to that container and return
+            # it - WanGP moves the container's last child behind the target -
+            # so the column is created first and returned whatever else
+            # happens, and a wiring failure is a note, never an exception
+            # that would leave WanGP's own last child where the column went.
+            controls = bridge_ui.build(instance)
+            if controls is None:
+                raise RuntimeError("gradio is not importable inside the builder")
+            self.controls = controls
+            try:
+                self.wired = bridge_ui.wire(controls, handler, inputs, outputs, bridge_js.DELIVER_JS)
+            except Exception as error:
+                self.wired = None
+                _note(f"controls placed after '{target}' but their event could not be wired: {type(error).__name__}: {error}")
+            else:
+                _note(
+                    f"controls placed after '{target}' (set {instance}); event wired with "
+                    f"{len(inputs)} input(s) and {len(outputs)} receiver output(s)"
+                )
+            return controls.column
+
+        inserter(target, build_controls)
+        _note(f"asked WanGP to place the bridge controls after '{target}' (set {instance})")
 
     def on_model_change(self, *args: typing.Any, **kwargs: typing.Any) -> typing.Any:
         # Section 14.6: useful for dropping model-derived caches, never

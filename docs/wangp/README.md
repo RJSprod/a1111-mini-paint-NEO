@@ -1,0 +1,370 @@
+# The WanGP integration — an operator's guide
+
+This describes what the extension actually does when the **WanGP** tab is set up and
+used: what it starts, what it writes, what it refuses to write, and what you can check
+for yourself. It is written against the code in `minipaint_neo/wangp/`,
+`wan2gp_bridge/`, `javascript/minipaint_wangp.js` and the registration in
+`scripts/mini_paint.py`. The design document it implements is
+`docs/WAN2GP_TAB_DESIGN_INTENT_REVISED_2026-09-06.txt`; where the two differ, this file
+follows the code and says so.
+
+## What it is
+
+A second top-level tab, **WanGP**, that shows the real WanGP application, plus WanGP
+destinations in the Canvas's *Send to* menu.
+
+* **WanGP runs in its own process.** The extension starts it from your existing WanGP
+  folder using your existing Python environment, with `cwd` set to the WanGP root, so
+  WanGP keeps its own models, presets, LoRAs and outputs exactly where they are. Forge's
+  interpreter never imports WanGP.
+* **That process binds `127.0.0.1` and a port the kernel picks.** The browser never
+  learns the port and never contacts it. The tab's iframe is `src="/wan2gp/"` — a path on
+  the Forge origin — and a reverse proxy inside Forge streams that to the child.
+* **One GPU, by UUID.** The child is launched with `CUDA_VISIBLE_DEVICES` set to the
+  physical UUID you chose. If that card is not in the machine, nothing starts; no other
+  GPU is used instead.
+* **Startup is lazy.** Nothing is launched when Forge boots. Opening the tab (or opening
+  *Send to*) asks for WanGP and returns immediately; the tab shows a "starting" card with
+  a *Check again* button rather than blocking a Gradio event for a cold model load.
+* **The Send destinations are WanGP's own answer.** When *Send to* opens, one bounded
+  question goes to the live WanGP page in your browser: *what image inputs can you accept
+  right now?* The answer becomes exact menu lines ("Send Image to WanGP Start Frame").
+  There is no cached list, no model-name table, and no DOM scraping. When there is no live
+  WanGP page in this Forge tab, the menu says so instead of guessing.
+* **A send is verified before the tab switches.** The picture is flattened to a PNG on the
+  server, handed to the browser as an opaque id, applied by a WanGP-side plugin through a
+  real Gradio event, and acknowledged. Only a verified acknowledgement switches you to the
+  WanGP tab. A send is never followed by an automatic Generate.
+* **None of it can break Mini Paint.** `scripts/mini_paint.py` wraps the whole
+  registration; if any part of the WanGP package fails to import, one line is printed and
+  the Mini Paint tab loads exactly as before.
+
+## Before you set it up
+
+* A WanGP installation you already use — a folder containing `wgp.py` and at least one of
+  its project packages (`shared/`, `wan/`, `ltx_video/`, `hyvideo/`, `preprocessing/`,
+  `models/`).
+* The Python environment that runs it: a Conda environment prefix, or any folder with
+  `python.exe` / `bin/python` in it.
+* An NVIDIA GPU. Cards are enumerated through NVML when `pynvml` happens to be importable
+  and through `nvidia-smi` otherwise; if neither answers, the list is empty and setup
+  cannot finish.
+* Nothing to install. Gradio, FastAPI, Pillow and httpx already come with Forge.
+
+## The five setup steps
+
+Open the **WanGP** tab and press **Start Setup**. The wizard is five numbered steps and a
+checklist; nothing is written until every mandatory row of that checklist is green.
+
+**1. The WanGP installation.** Type the folder that contains `wgp.py` and press *Check
+this folder*. It must exist, be readable, contain `wgp.py`, contain one of the project
+directories above, and have a resolvable `plugins/` destination. Your install is not
+moved, copied or modified by this step.
+
+**2. The Python environment that runs it.** *Find environments* looks for Conda
+installations and environments (`CONDA_PREFIX`, `CONDA_EXE`, the usual roots,
+`environments.txt`, and `conda env list --json` when a `conda` binary is on the path) and
+lists what it found; you can also type an environment prefix by hand. *Try it against this
+WanGP* actually runs a probe in that environment — a short script that reads `wgp.py` and
+*parses* it, never imports it, so nothing pulls torch or a CUDA context into anything —
+and records which of two launch strategies worked:
+`direct_python` (`<prefix>/python -u wgp.py …`) or `conda_run`
+(`conda run --no-capture-output -p <prefix> python -u wgp.py …`). The strategy is
+persisted, so a Conda environment that genuinely needs its activation scripts is not
+launched the way that never worked.
+
+**3. The GPU WanGP may use.** *List the GPUs* shows each card as
+`NVIDIA GeForce RTX 5090 - 32 GB`. What is stored is the UUID, not the index, so a driver
+reshuffle or a reboot cannot repoint it at a different card.
+
+**4. The MiniPaint bridge plugin.** *Check the bridge plugin* reads
+`plugin_info.json` from `<WanGP root>/plugins/wan2gp-minipaint-bridge/` and compares its
+version to the one this copy of the extension ships. *Install or update it* copies the
+extension's own `wan2gp_bridge/wan2gp-minipaint-bridge/` folder there and nothing else
+— see *Updating the bridge plugin* below for the rules it follows and the restart it
+needs.
+
+**5. Security and launch checks.** *Run the checks* starts WanGP if it is not running,
+loads the proxied page beside the wizard, and renders thirteen pass/fail rows:
+
+| row | what proves it |
+| --- | --- |
+| WanGP is launched bound to 127.0.0.1 only | `--server-name 127.0.0.1` is in the argv that would actually be run |
+| `--listen` is absent from the command line | read off that same argv |
+| `--share` is absent from the command line | read off that same argv |
+| nothing binds 0.0.0.0 | no argument anywhere in the argv contains it |
+| the selected GPU is present and is the only one WanGP will see | the UUID matched a card on this machine |
+| a loopback port was assigned to this run | the runtime reports a bound listener |
+| WanGP serves itself under /wan2gp | the proxy's root-path probe |
+| the MiniPaint bridge plugin is installed and switched on | step 4's answer, with no failure code |
+| the WanGP page loads through the proxy | a base-page fetch through `/wan2gp/` |
+| a WanGP asset loads through the proxy | one asset URL found in that page, fetched |
+| the bridge answered through the proxied iframe | a round trip reported by the iframe below the wizard |
+| the browser only ever talks to this Forge origin | the iframe `src` is a path, not a URL |
+| `/wan2gp/` is covered by this Forge's sign-in | see below |
+
+The last row is **only mandatory when this Forge has authentication of its own**. When it
+does, coverage is only accepted as proven if the authentication runs as ASGI middleware,
+which by construction wraps every route including a dynamically added one. Per-route
+authentication — a FastAPI dependency, Gradio's own login check — is reported as
+`unknown` rather than as covered, and the row stays red; that is deliberate, and the
+manual test for it is in `docs/wangp/PHASE0.md`.
+
+Anything not observed is a failure, not an omission: the checklist starts entirely red and
+a row goes green only when something proved it. Rows can need two presses — the first
+asks for WanGP, the second reads the result once it is serving. Nothing polls in between.
+
+**Finish setup** is the only path in the whole extension that writes `initialized: true`,
+and it re-judges the rows itself rather than trusting the button's enabled state. It writes
+a pending file first and promotes it atomically, so a setup that half-succeeds leaves the
+previous one intact. **Restore the previous working integration** puts the last known-good
+setup back and then revalidates the root, the environment and the GPU before calling it
+ready.
+
+## Where things live
+
+| what | where |
+| --- | --- |
+| the setup | `<Forge data_path>/a1111-mini-paint-NEO/wan2gp.json` |
+| the previous setup | `…/wan2gp.backup.json` |
+| a setup being validated | `…/wan2gp.pending.json` (short-lived) |
+| prepared images on their way to WanGP | `…/runtime/handoff/<32 hex>.png`, mode `0700` where the platform has it |
+| the bridge plugin, as installed | `<WanGP root>/plugins/wan2gp-minipaint-bridge/` |
+| the bridge plugin, as shipped | `wan2gp_bridge/wan2gp-minipaint-bridge/` in this repository |
+| transfer log lines | `extensions/a1111-mini-paint-NEO/logs/send-log.txt`, shared with Mini Paint |
+
+The data root is asked for in the order `modules.paths_internal.data_path`,
+`modules.paths.data_path`, `modules.shared.cmd_opts.data_dir`. If none answers, the
+settings fall back to `<extension folder>/data/` and a line is printed at startup saying
+so and warning that a reinstall takes them away — the fallback is never silent.
+
+Handoff files are swept at Forge startup: anything under the handoff root older than six
+hours goes, except files this process still holds a manifest for (an in-flight send owns
+its file, however slow the generation). Nothing outside that root is ever touched, and
+symlinks are not followed out of it.
+
+## What is deliberately not stored
+
+None of the following is ever written to `wan2gp.json`, to the backup, to the send log, or
+to any other file:
+
+* the child's **pid** and its **backend port**
+* the **runtime instance id** minted per launch
+* the **server integration secret** passed to the child in its environment
+* the **browser channel id** and the **bridge session id**
+* the Gradio **session hash**
+* **handoff ids** and handoff **paths**
+* the last **receiver revision** and any **receiver cache**
+
+`config.py` enforces this twice — a named `NEVER_PERSISTED` set is stripped from every
+section, and then only the keys the schema declares survive — so widening a whitelist by
+accident cannot quietly start writing one. `bridge.py` does the same for the send log:
+`LOGGED_FIELDS` is a whitelist and `FORBIDDEN_FIELDS` is checked as well. The diagnostics
+report reports the pid as `tracked`/`none` and the port as `bound to loopback`/`not
+bound`, never as numbers, because that report is rendered inside the tab and the browser
+must not learn the port.
+
+## Security invariants you can check yourself
+
+**The backend is loopback-only.** While WanGP is running, look at the listeners:
+
+```
+# Linux / macOS
+ss -ltnp | grep python          # or: lsof -nP -iTCP -sTCP:LISTEN
+# Windows
+netstat -ano | findstr LISTENING
+```
+
+The child's port must appear as `127.0.0.1:<port>`, never `0.0.0.0:<port>` and never
+`[::]:<port>`. From a second machine on the same network, nothing on that port answers.
+
+**No `--listen`, no `--share`, no `0.0.0.0`.** Look at the child's command line
+(`ps -ef | grep wgp.py`, or Task Manager's *Command line* column). It is either
+
+```
+<prefix>/python -u wgp.py --server-name 127.0.0.1 --server-port <n>
+conda run --no-capture-output -p <prefix> python -u wgp.py --server-name 127.0.0.1 --server-port <n>
+```
+
+and nothing else. `runtime.command_line` refuses to return a command containing
+`--listen`, `--share`, `--open-browser` or `--server-name` without `127.0.0.1`; it raises
+`PROCESS_START_FAILED` rather than launching. The environment is pinned the same way:
+`GRADIO_SERVER_NAME=127.0.0.1`, `GRADIO_SERVER_PORT=<n>`, and any inherited
+`GRADIO_SHARE` or `GRADIO_ROOT_PATH` is dropped before the child sees it.
+
+**The iframe is same-origin.** In the WanGP tab, inspect the iframe: its `src` is
+`/wan2gp/` — a path, with no scheme, host or port in it — so it resolves against the Forge
+origin the page is already on. In the browser's network panel, filter for `127.0.0.1`
+while WanGP is loading and generating: every request goes to the Forge origin under
+`/wan2gp/`, and the backend port appears nowhere. There is no mixed content and no second
+certificate.
+
+**The proxy has exactly one upstream.** `proxy.upstream()` composes
+`http://127.0.0.1:<port>` from `runtime.current()` and from nothing else. There is no
+query parameter, header, cookie or path segment anywhere in `proxy.py` that can influence
+the destination. Try it: `GET /wan2gp/?url=http://example.com` is forwarded to WanGP with
+that query string attached, exactly like any other, and reaches nowhere else.
+
+**The GPU is the one you chose.** `CUDA_VISIBLE_DEVICES` is *set* to the configured UUID,
+never inherited from Forge and never appended to. If the UUID is not present the tab shows
+`GPU_UUID_MISSING` and offers Reinitialize — there is deliberately no "start anyway",
+because the only thing "anyway" could mean is a different card.
+
+**The handoff carries an id, not a path.** What crosses to the browser and back into
+WanGP is 32 lowercase hex characters. Anything else — a name with a dot in it, a relative
+path, an id of the wrong length — is rejected outright by `protocol.HANDOFF_ID_RE` on
+both sides; it is never sanitised and retried. The path is built only as
+`<handoff root>/<id>.png`, and the file is then checked for being a regular file, inside
+the root after resolution, under the size and dimension ceilings, a real decodable PNG,
+and matching the digest Forge recorded.
+
+**Only our own child is ever killed.** The extension holds the `Popen` handle, the pid, the
+process group (POSIX, via `start_new_session` and `killpg` on that pgid) or a Windows Job
+Object with kill-on-close, and terminates that and only that. There is no name-based kill
+anywhere in `runtime.py`, so a standalone WanGP or any other Python you are running is
+never touched. The corollary is that a standalone WanGP started by hand is *not* managed:
+it has no instance id in its environment, the bridge plugin loads and stays silent, and
+this integration ignores it.
+
+**No document-wide watching.** `javascript/minipaint_wangp.js` keeps exactly two things
+alive between calls: the window's `message` listener, and one observer on the tab's own
+iframe container. The document is never observed, nothing polls, no host tab is clicked at
+startup, and the postMessage target origin is always this origin — `"*"` appears nowhere.
+Every inbound message is checked for exact origin, exact source window, protocol version,
+a type legal for that direction, the current channel id, a request id being waited on, and
+a size under the shared ceiling; anything else is dropped without a reply.
+
+## Updating the bridge plugin
+
+The bridge is a small plugin this extension owns. It is the only piece of the integration
+that knows a WanGP element id, and it is the piece to update when WanGP moves an input.
+
+* **From the tab:** setup step 4, *Install or update it*. It copies
+  `wan2gp_bridge/wan2gp-minipaint-bridge/` into `<WanGP root>/plugins/`, skipping
+  `__pycache__`, VCS folders and build droppings, and reports how many files it wrote.
+* **By hand:** `cp -r wan2gp_bridge/wan2gp-minipaint-bridge <your WanGP>/plugins/`.
+
+The install refuses rather than works around: the destination is recomputed from the WanGP
+root, must resolve to `<root>/plugins/wan2gp-minipaint-bridge`, and an existing folder is
+replaced **only** when it already carries our `plugin_info.json`. A symlink in the way, a
+name collision with somebody else's plugin, or a destination that escapes the root all stop
+the install. Nothing outside that one folder is ever written.
+
+**WanGP must be restarted afterwards.** Plugins are loaded once at startup, so copying
+files over a running WanGP does not activate them, and the wizard says so after every
+install. The tab's **Restart WanGP** button is on the error surface, so it is offered when
+something has actually gone wrong; if WanGP is running happily and you have just replaced
+its bridge, use **Reinitialize** and set up again, or reload the WebUI. (A restart button
+that is always visible is worth having and is not in this version.)
+
+Version comparison is exact equality, not a range: the two halves of the protocol are
+released together, so an installed bridge that is *newer* than the extension is as wrong as
+one that is older. Either way the code is `BRIDGE_VERSION_MISMATCH`, the tab stays usable,
+and intelligent Send is switched off until it matches.
+
+`plugin_info.json` also declares a WanGP version range, but that range is only an early
+filter. Real compatibility is decided functionally at WanGP startup: the bridge resolves
+each component it needs through WanGP's plugin API and reports what it actually got in its
+handshake. A build that is missing a mandatory one answers `ready=false` with
+`BRIDGE_COMPONENT_INCOMPATIBLE`, and the Send menu offers nothing rather than sending into
+something that looked about right.
+
+## Reading a failure code
+
+Every failure this integration can report has a stable code and one sentence. The codes and
+their sentences are in `minipaint_neo/wangp/errors.py`; nothing builds a message out of an
+exception's text, so the tab, the Send menu and the log always say the same thing about the
+same failure.
+
+You will see a code in four places:
+
+* **the tab's error surface** — the sentence, with the buttons that code allows;
+* **a Send to line** — a short version, such as
+  `WanGP: open WanGP tab to choose model/input`;
+* **`logs/send-log.txt`** — `failed: CODE - the sentence`, followed by the receiver, the
+  operation, the state revision, the per-step timings, and a detail line;
+* **the diagnostic report** — as `failure code`, with `failure message` under it.
+
+What the tab offers you depends only on the code:
+
+* `SETUP_REQUIRED` → the wizard.
+* Anything in `errors.REINIT_CODES` — `WANGP_ROOT_MISSING`, `RUNTIME_MISSING`,
+  `RUNTIME_PROBE_FAILED`, `GPU_UUID_MISSING`, `CONFIG_UNREADABLE`,
+  `CONFIG_SCHEMA_TOO_NEW`, `BRIDGE_MISSING`, `BRIDGE_DISABLED`,
+  `BRIDGE_VERSION_MISMATCH`, `BRIDGE_COMPONENT_INCOMPATIBLE` → **Reinitialize**. These all
+  mean "the setup on disk no longer describes reality", and restarting the process would
+  only reproduce them.
+* `AUTH_BOUNDARY_FAILED` → **nothing**. The integration deliberately stayed off, and
+  restarting changes nothing about who can reach the route.
+* Everything else → **Restart WanGP**.
+
+Two of them do not take the tab away from you. `BRIDGE_VERSION_MISMATCH` and
+`BRIDGE_COMPONENT_INCOMPATIBLE`, while WanGP is still serving pages, leave the iframe
+visible and usable and only switch off intelligent Send — the tab calls this state
+*degraded*.
+
+The ones worth knowing by sight:
+
+| code | what it actually means |
+| --- | --- |
+| `GPU_UUID_MISSING` | the card you chose is not in the machine. Nothing was started, and no other GPU was used. |
+| `PORT_IN_USE` / `LOOPBACK_BIND_FAILED` | a port was chosen but the child never opened it. Usually WanGP died during startup — its stderr tail is in the WebUI console. |
+| `PROXY_ROOT_PATH_FAILED` | WanGP answers, but not under `/wan2gp/`. `GRADIO_ROOT_PATH` did not take effect in that build. |
+| `AUTH_BOUNDARY_FAILED` | this Forge has a sign-in that could not be *proven* to cover `/wan2gp/`. Fail-closed, not a claim that it is exposed. |
+| `IFRAME_NOT_READY` | there is no live WanGP page in this Forge tab yet. Open the WanGP tab and pick a model. |
+| `NO_ACTIVE_RECEIVER` | this model and mode take no image right now. Nothing is offered rather than something plausible. |
+| `STALE_RECEIVER_STATE` | the WanGP page moved between the menu opening and the click. Reopen *Send to*. |
+| `BRIDGE_SESSION_MISMATCH` / `WANGP_RESTARTED` | the WanGP page or process is not the one this send was prepared for. The image was not applied. |
+| `RECEIVER_VERIFY_FAILED` | WanGP took an image, but it could not be confirmed as the one that was sent. The tab does not switch, and the log keeps the detail. |
+
+## Diagnostics
+
+*Integration management → Diagnostics → Copy diagnostic report* in the WanGP tab builds one
+block of text for a bug report. It is a whitelist, not a dump: Forge and Gradio versions,
+the extension's commit, the protocol number, the shipped and installed bridge versions, the
+setup fields with paths reduced to their last component, the GPU UUID and whether that card
+is present, the runtime state and uptime, whether a child and a job object are tracked,
+whether the port is bound, the failure code, the proxy probe steps if one has run, the live
+bridge sessions with truncated channel ids, and the last forty transfer-log lines.
+
+No secret, cookie or authorization header has a line in it — not even a redacted one. The
+pid and the port are reported as facts rather than numbers. The GPU UUID *is* included in
+full, because it is the one field that makes `GPU_UUID_MISSING` diagnosable and it
+identifies a piece of hardware rather than a person.
+
+The report never raises: every field is collected inside its own guard, and one that could
+not be collected says `unavailable`.
+
+## Reinitialize
+
+There is exactly one entry on the Settings page — *Settings → miniPaint / Canvas → WanGP
+integration* — and it is a paragraph with a link, not a switch. Forge's settings system
+stores values, and a checkbox meaning "reinitialize" would be a checkbox that gets saved.
+The real button lives in the WanGP tab, under *Integration management*, so there is one
+place that knows what the running process was started from.
+
+Reinitialize stops the child this extension started, invalidates every browser session and
+receiver list, copies the active setup into the backup, marks the active setup incomplete,
+and brings the tab back to the wizard. It does not uninstall WanGP, and it deletes no
+models, no LoRAs, no presets, no outputs, no settings of yours and no plugin — the only
+plugin folder it can ever write to is its own, and only when a new setup explicitly asks it
+to install one.
+
+## Known limits
+
+* **One managed WanGP.** The extension runs a single child. A standalone WanGP you start
+  yourself against the same install is not detected, not attached to and not killed;
+  running both against one WanGP root is not something this version has proven safe.
+* **The Canvas frontend only.** WanGP destinations appear in the Canvas's *Send to* menu.
+  The legacy miniPaint (Old UI) frontend has its own send path and does not offer them.
+* **No always-visible Restart.** *Restart WanGP* is offered on the error surface, which is
+  where it is usually wanted, but not while WanGP is running normally.
+* **Three receivers.** Start frame, end frame and reference are the v1 set. The protocol
+  already names control image, positioned reference and style reference, and the bridge
+  publishes none of them, so Mini Paint never offers them. Adding one is three declarations
+  in `compatibility.py` and a small adapter — no change on the Forge side.
+* **The element ids in `compatibility.py` are unverified against a running WanGP.** They
+  were written from WanGP's documented media-input naming, each carries a
+  `VERIFY ON A REAL INSTALL` comment, and a build that does not resolve them fails closed.
+  See `docs/wangp/PHASE0.md` for the checks that settle this, and for everything else that
+  could not be executed without a real Forge and a real WanGP.

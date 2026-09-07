@@ -21,6 +21,11 @@ Gradio 4.40 and follows the host theme, including Lobe in dark mode, because eve
 is a native Gradio component, the canvas is the host's own, and the extension's CSS only
 sets geometry.
 
+There is also an optional second tab, **WanGP**, which runs a WanGP install you already
+have in its own process, shows its real UI inside Forge, and gives the Canvas exact WanGP
+destinations to send to. It stays out of the way until it is set up, and nothing about it
+can stop the Mini Paint tab loading — see [The WanGP tab](#the-wangp-tab).
+
 ## Installation
 
 Extensions → Install from URL → this repository's URL → Install → Reload UI.
@@ -274,6 +279,83 @@ A few behaviours of the host's canvas shaped the wiring; each has a small answer
   leaving the others untouched. Only Extras, an ordinary `gr.Image`, is written from the
   backend.
 
+## The WanGP tab
+
+A second top-level tab, **WanGP**, that runs the [WanGP](https://github.com/deepbeepmeep/Wan2GP)
+you already have in its own process and shows **its real UI** inside Forge — not a
+Forge-side copy of its controls — and puts WanGP destinations in the Canvas's *Send to*
+menu. It is entirely separate from Mini Paint: its own tab, its own settings entry, its own
+routes, registered alongside the ones above rather than in place of them. If any part of it
+fails to load, one line says so in the console and the Mini Paint tab is exactly as it was.
+
+**Setting it up.** Open the tab and press *Start Setup*. Five steps: the folder that
+contains `wgp.py`, the Python environment that runs it (Conda environments are found for
+you, and either way the wizard *probes* the one you pick — it runs a harmless command in it
+and records whether `<prefix>/python` or `conda run -p <prefix>` is the one that actually
+works), the GPU it may use, the bridge plugin, and a checklist of thirteen security and
+launch checks. Nothing is written until every mandatory row is green, and the last four
+rows need WanGP up and the page loaded, so *Run the checks* is usually pressed twice.
+Nothing is moved, copied or downloaded: your WanGP keeps its models, presets, LoRAs and
+outputs where they are, and Forge's own Python never imports it. The setup is remembered in
+`<Forge data_path>/a1111-mini-paint-NEO/wan2gp.json`, and the setup it replaces is kept as
+a backup you can restore.
+
+**What actually runs.** Nothing starts when Forge boots; opening the tab asks for WanGP and
+the tab shows a *starting* card with a *Check again* button rather than holding a Gradio
+event open for a cold model load. The child binds `127.0.0.1` on a port the kernel picks,
+with `CUDA_VISIBLE_DEVICES` set to the **UUID** of the card you chose — not its index, so a
+reboot cannot repoint it, and a card that is missing means nothing starts rather than
+something starting on the wrong one. `--listen`, `--share`, `--open-browser` and `0.0.0.0`
+are *refused* by the code that builds the command line, not merely left out of it. The
+browser never learns that port: the tab's iframe is `src="/wan2gp/"` — a path on the Forge
+origin — and a reverse proxy inside Forge streams both directions with nothing buffered, so
+a long generation's queue events are not cut short and a large upload is not held in
+memory. Its destination comes from the runtime object and from nowhere a request can reach.
+Stopping only ever touches the child this extension started, by its own process group or
+Windows job object; nothing is ever killed by name, so a WanGP you started yourself is left
+alone.
+
+**Sending a picture.** *Menu → Send to* asks the WanGP page in your browser what image
+inputs it can accept *right now* — one bounded question, when the menu opens, and never
+again while it stays open — and turns the answer into exact lines: *Send Image to WanGP
+Start Frame*, *… End Frame*, *… Reference*. There is no remembered list and no table of
+model names, so an input that is switched off or full is a line that says so and does
+nothing, and when there is no live WanGP page in that Forge tab the menu says to open it
+and choose a model. Choosing a line flattens the canvas to a PNG on the server and hands
+the browser nothing but that file's 32-character id — never a path — and a small plugin
+inside WanGP reads it, puts the picture in the input you named through an ordinary Gradio
+event, and proves that is where it went. Only that acknowledgement switches you to the
+WanGP tab; a send that cannot be proved leaves you in the Canvas with one line saying why,
+and the detail in `logs/send-log.txt`. References **append**: two already there become
+three, in their original order, never one. Nothing is generated for you — you set the rest
+up in WanGP and press Generate yourself.
+
+**The bridge plugin.** The piece inside WanGP is `wan2gp-minipaint-bridge`, shipped in
+`wan2gp_bridge/` and installed by setup step 4 into `<WanGP root>/plugins/`. It writes
+inside its own folder and nowhere else, refuses to replace a folder that is not ours, and
+needs WanGP restarted afterwards because plugins load once at startup. It is the only part
+of the whole integration that knows a WanGP element id — one file, `compatibility.py` — so
+when WanGP moves an input that is the file to correct and nothing in Forge or the browser
+changes. A build that does not expose an input the bridge needs fails closed: the tab keeps
+working, and *Send to* offers nothing rather than something that looked about right.
+
+**Reinitialize.** Settings → *miniPaint / Canvas* has one WanGP entry, and it is a
+paragraph with a link rather than a switch — the wizard's fields are not duplicated there,
+and there is no checkbox that would mean "reinitialize" forever. The button itself is in
+the tab, under *Integration management*, next to *Copy diagnostic report*. It stops the
+WanGP this extension started, forgets which install, environment and GPU it was pointed at,
+and brings the tab back to the wizard. It uninstalls nothing and deletes no models, LoRAs,
+presets, outputs or other plugins.
+
+**Not yet proven on real hardware.** The integration was written without a WanGP, a Forge
+or an NVIDIA driver to hand, so every claim about a WanGP element id, a proxied WebSocket,
+Forge's authentication boundary or Windows process ownership is unverified.
+`docs/wangp/PHASE0.md` is the checklist for settling them on a real install — what to run
+and what result proves it — and it is honest about which boxes nobody has ticked.
+`docs/wangp/README.md` is the operator's guide: what is stored where, what is deliberately
+never stored, the invariants you can check yourself, and how to read a failure code. The
+specification both follow is `docs/WAN2GP_TAB_DESIGN_INTENT_REVISED_2026-09-06.txt`.
+
 ## Legacy editor (Old UI)
 
 Everything below is unchanged from the original extension and applies when *Use Old UI* is
@@ -329,7 +411,10 @@ extensions/a1111-mini-paint-NEO/logs/send-log.txt
 ```
 
 The legacy editor writes each transfer step by step with timings; the Canvas writes one
-line per receive, per picture opened on the canvas, and per send.
+line per receive, per picture opened on the canvas, and per send. A send to WanGP writes
+one line too, naming the input it went to, whether it replaced or appended, how the
+transfer was verified and the per-step timings — and never a handoff id, a channel or a
+port.
 The file is created when the extension loads, before any image is sent, and its first line
 says which frontend loaded. **If `logs/send-log.txt` does not exist after restarting the
 WebUI, this version of the extension is not the one running.** It rotates once it passes
@@ -350,10 +435,23 @@ minipaint_neo/
     canvas/imaging.py            mask, crop and fill maths (Pillow only)
     canvas/outpaint.py           expansion with automatic mask
     canvas/document.py           layers on a canvas (the picture over a white Background), the composite, the mask, and the history of structural steps
+    wangp/                       the WanGP tab, all of it (see docs/wangp/README.md)
+        config.py                what survives a restart, and only that
+        discovery.py             WanGP root, Conda/venv runtimes, GPUs, the bridge plugin
+        runtime.py               the child process: one, ours, loopback, one GPU by UUID
+        proxy.py                 /wan2gp/* on the Forge origin, streamed to that one port
+        handoff.py               PNGs on their way out, as opaque ids under a fixed root
+        bridge.py                which browser page is talking to which live WanGP session
+        protocol.py              the vocabulary all three sides share
+        errors.py                the failure codes and their sentences
+        ui.py / settings.py / diagnostics.py    the tab, the one Settings entry, the report
 javascript/main.js               legacy bridge, parent-frame side (unchanged)
 javascript/minipaint_canvas.js   attaches the canvas; crop frame, touch gestures, tools, the rail's height, the layer list, waits, focus mode
+javascript/minipaint_wangp.js    the WanGP iframe: handshake, receiver query, verified send
+wan2gp_bridge/                   the companion plugin, installed into your WanGP
 style.css                        legacy rules, then rules scoped to the Canvas root
 miniPaint/                       the legacy editor itself
+docs/wangp/                      the WanGP operator's guide, the Phase 0 checklist, the module contracts
 tests/                           see tests/README.md
 ```
 

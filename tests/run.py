@@ -19,7 +19,21 @@ from harness import setup_path
 
 setup_path()
 
-SUITES = ["test_imaging", "test_frontends", "test_workflow"]
+SUITES = [
+    "test_imaging",
+    "test_frontends",
+    "test_workflow",
+    # The WanGP integration, in the order it is built: what survives a restart,
+    # the files on their way out, the vocabulary all three sides share, the
+    # child process, the route in front of it, and finally the gate that
+    # decides whether an image may be sent at all.
+    "test_wangp_config",
+    "test_wangp_handoff",
+    "test_wangp_protocol",
+    "test_wangp_runtime",
+    "test_wangp_proxy",
+    "test_wangp_receiver_contract",
+]
 
 
 def main() -> int:

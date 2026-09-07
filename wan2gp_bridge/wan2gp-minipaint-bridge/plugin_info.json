@@ -1,0 +1,29 @@
+{
+  "name": "wan2gp-minipaint-bridge",
+  "display_name": "Mini Paint Bridge",
+  "version": "1.0.0",
+  "bridge_version": "1.0.0",
+  "type": "extension",
+  "enabled": true,
+  "entry": "plugin.py",
+  "class": "MiniPaintBridgePlugin",
+  "description": "Lets the a1111-mini-paint-NEO extension ask this WanGP what image inputs it can accept right now, and hand it one PNG at a time. Adds no generation UI and changes no generation behaviour.",
+  "author": "a1111-mini-paint-NEO",
+  "homepage": "https://github.com/prodigital-prod/a1111-mini-paint-NEO",
+  "license": "MIT",
+  "bridge_protocol": 2,
+  "compatibility": {
+    "wan2gp_min_version": "8.0",
+    "wan2gp_max_version": "",
+    "note": "The version range is an early filter only. Real compatibility is functional: the bridge resolves its components through the plugin API and reports ready=false with BRIDGE_COMPONENT_INCOMPATIBLE when a mandatory one is missing."
+  },
+  "requires": {
+    "wan2gp": ">=8.0"
+  },
+  "capabilities": [
+    "receiver_query",
+    "image_handoff",
+    "verified_ack",
+    "theme"
+  ]
+}

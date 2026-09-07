@@ -32,7 +32,7 @@ import shutil
 import subprocess
 import typing
 
-from . import errors
+from . import errors, journal
 
 #: Where the companion plugin lives inside someone else's WanGP.
 PLUGINS_DIR_NAME = "plugins"
@@ -547,8 +547,14 @@ def install_bridge(root: typing.Any, source_dir: typing.Any) -> dict:
     # ``SYSTEM_PLUGINS`` plus whatever ``enabled_plugins`` names, so without
     # this the plugin sits in the folder being skipped - which is what a user
     # would otherwise have had to fix by hand in WanGP's Plugins tab.
+    journal.note("bridge", f"copied {files} file(s) to {destination}")
     try:
         enabled = enable_bridge_plugin(root_path)
+        journal.note(
+            "bridge",
+            f"{WGP_CONFIG_NAME} enabled_plugins now {enabled_plugins(root_path)}"
+            + ("" if enabled else " (it was already listed)"),
+        )
     except OSError as error:
         raise errors.IntegrationError(
             errors.BRIDGE_DISABLED,

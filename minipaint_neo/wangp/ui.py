@@ -50,7 +50,7 @@ import typing
 import gradio as gr
 
 from .. import paths
-from . import bridge, config, diagnostics, discovery, errors, runtime
+from . import bridge, config, diagnostics, discovery, errors, journal, runtime
 
 TAB_LABEL = "WanGP"
 TAB_ID = "wangp"
@@ -69,6 +69,7 @@ OPEN_ELEM_ID = "wangp_open_request"
 REFRESH_ELEM_ID = "wangp_refresh_request"
 BROWSER_CHECK_ELEM_ID = "wangp_browser_check"
 SESSION_ELEM_ID = "wangp_session"
+CLIENT_LOG_ELEM_ID = "wangp_client_log"
 
 #: The only URL the browser is ever given for WanGP. A path, so it resolves
 #: against the Forge origin the page is already on; it must stay equal to
@@ -688,6 +689,21 @@ def config_from_wizard(candidate: typing.Optional[dict], initialized: bool = Fal
     )
 
 
+def record_client_log(text: typing.Any) -> None:
+    """One line the browser wants in the page's log. Never raises.
+
+    The browser is a writer here like any other, so what it says is trimmed
+    and scrubbed on the way in rather than trusted - it reaches a box a user
+    is invited to copy into a bug report.
+    """
+    try:
+        payload = json.loads(text) if isinstance(text, str) and text.strip() else None
+        if isinstance(payload, dict) and payload.get("line"):
+            journal.note("browser", payload["line"])
+    except Exception:
+        return
+
+
 def record_session(channel: typing.Any, text: typing.Any) -> None:
     """Take down what the iframe last said about itself.
 
@@ -1029,6 +1045,10 @@ def create_ui() -> None:
         # model, the receivers or the revision - the browser is the only thing
         # that ever hears the bridge's answers.
         shell["session"] = gr.Textbox("", visible=False, elem_id=SESSION_ELEM_ID)
+        # The browser's half of the log. The handshake happens entirely between
+        # this page and the iframe, so without this the one thing that goes
+        # wrong most often leaves no trace anywhere a user can reach.
+        shell["client_log"] = gr.Textbox("", visible=False, elem_id=CLIENT_LOG_ELEM_ID)
         open_request = gr.Button("Open", visible=False, elem_id=OPEN_ELEM_ID)
         refresh_request = gr.Button("Refresh", visible=False, elem_id=REFRESH_ELEM_ID)
 
@@ -1128,13 +1148,16 @@ def create_ui() -> None:
         return show()
 
     shell["session"].change(fn=record_session, inputs=[shell["channel"], shell["session"]], outputs=[])
+    shell["client_log"].change(fn=record_client_log, inputs=[shell["client_log"]], outputs=[])
     open_request.click(fn=open_tab, inputs=[shell["channel"]], outputs=painted)
     refresh_request.click(fn=show, inputs=[shell["channel"]], outputs=painted)
     start_btn.click(fn=open_tab, inputs=[shell["channel"]], outputs=painted)
     recheck_btn.click(fn=show, inputs=[shell["channel"]], outputs=painted)
     shell["restart"].click(fn=restart, inputs=[], outputs=painted)
 
-    _wire_wizard(wizard, shell, painted, show)
+    # The console lives with the diagnostics, but it is the wizard that
+    # fills it, so the wizard is handed the box to write into.
+    _wire_wizard(wizard, shell, painted, show, manage["console"])
     _wire_management(manage, shell["error_reinit"], painted, show)
 
 
@@ -1261,7 +1284,7 @@ def _next(text: str) -> str:
     return f"**Next.** {text}"
 
 
-def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
+def _wire_wizard(parts: dict, shell: dict, painted, show, console) -> None:
     """The wizard's events. Each one answers one question and says so.
 
     Every handler carries the candidate dictionary through: it is the only
@@ -1485,7 +1508,20 @@ def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
         document = config_from_wizard(candidate)
         started = runtime.snapshot()
 
+        journal.note("checks", f"run: runtime is {started.get('state')}")
+        # The two facts that decide whether the bridge can ever answer, read
+        # from WanGP's own files rather than from anything we remember.
+        root = str(candidate.get("root") or "")
+        if root:
+            try:
+                code, detail = discovery.bridge_status(root, diagnostics.shipped_bridge_version())
+                journal.note("checks", f"plugin folder: {discovery.bridge_dir(root)}")
+                journal.note("checks", f"{discovery.WGP_CONFIG_NAME} enabled_plugins = {discovery.enabled_plugins(root)}")
+                journal.note("checks", f"bridge status: {code or 'ok'} - {detail}")
+            except Exception as error:
+                journal.note("checks", f"could not read the plugin state: {type(error).__name__}: {error}")
         if started.get("state") != runtime.READY and not _start_pending():
+            journal.note("checks", "asking for WanGP")
             request_start(document)
             started = runtime.snapshot()
 
@@ -1510,6 +1546,11 @@ def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
                 "Some checks have not passed yet. Open **What to do** under a red row for the "
                 "next step."
             )
+        for row in rows:
+            if not row.get("ok"):
+                journal.note("checks", f"[X] {row['label']}" + (f" - {row['detail']}" if row.get("detail") else ""))
+        journal.note("checks", f"{sum(1 for row in rows if row.get('ok'))}/{len(rows)} rows pass")
+
         return (
             checklist_html(rows),
             rows,
@@ -1520,6 +1561,7 @@ def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
             channel,
             message,
             gr.Timer(active=bool(working)),
+            journal.text(),
         )
 
     parts["validate"].click(
@@ -1539,6 +1581,7 @@ def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
             shell["channel"],
             parts["finish_status"],
             parts["poll"],
+            console,
         ],
     )
 
@@ -1557,6 +1600,7 @@ def _wire_wizard(parts: dict, shell: dict, painted, show) -> None:
             shell["channel"],
             parts["finish_status"],
             parts["poll"],
+            console,
         ],
     )
 
@@ -1635,10 +1679,22 @@ def _build_management() -> dict:
         gr.Markdown("#### Diagnostics")
         parts["diagnostics"] = _copyable_textbox()
         parts["collect"] = gr.Button("Copy diagnostic report", elem_id="wangp_diagnostics_collect")
+
+        # The console. Everything the integration just did, from whichever
+        # side did it - this process, the WanGP child, and the browser. It is
+        # the only place the handshake is visible at all: that conversation
+        # happens between two windows and touches no server.
+        gr.Markdown("#### Console")
+        parts["console"] = _copyable_textbox(
+            label="Console", lines=18, placeholder="Press Refresh, or run the checks above."
+        )
+        with gr.Row():
+            parts["console_refresh"] = gr.Button("Refresh the console", elem_id="wangp_console_refresh")
+            parts["console_clear"] = gr.Button("Clear it", elem_id="wangp_console_clear")
     return parts
 
 
-def _copyable_textbox():
+def _copyable_textbox(label: str = "Diagnostic report", lines: int = 12, placeholder: str = ""):
     """A textbox with the host's own copy button where the host has one.
 
     ``show_copy_button`` is the affordance section 48 asks for and it needs no
@@ -1646,11 +1702,12 @@ def _copyable_textbox():
     which is the same text one keystroke further away.
     """
     common = dict(
-        label="Diagnostic report",
-        lines=18,
-        max_lines=40,
+        label=label,
+        lines=lines,
+        max_lines=max(lines, 40),
         interactive=False,
-        elem_id="wangp_diagnostics",
+        placeholder=placeholder,
+        elem_id="wangp_" + label.split()[0].lower(),
     )
     try:
         return gr.Textbox("", show_copy_button=True, **common)
@@ -1690,6 +1747,17 @@ def _wire_management(parts: dict, error_reinit_btn, painted, show) -> None:
         return diagnostics.report(probe_result=probe_result)
 
     parts["collect"].click(fn=collect, inputs=[], outputs=[parts["diagnostics"]])
+
+    def read_console():
+        return journal.text()
+
+    def clear_console():
+        journal.clear()
+        journal.note("console", "cleared by hand")
+        return journal.text()
+
+    parts["console_refresh"].click(fn=read_console, inputs=[], outputs=[parts["console"]])
+    parts["console_clear"].click(fn=clear_console, inputs=[], outputs=[parts["console"]])
 
 
 # ------------------------------------------------------------------ tab ----

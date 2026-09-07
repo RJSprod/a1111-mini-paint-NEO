@@ -418,6 +418,7 @@ window.minipaintWanGP = (function () {
             S.channelId = HEX32.test(String(declared || "")) ? String(declared) : hex32();
             S.instanceId = text(attribute(S.frame, INSTANCE_ATTRIBUTE), 128);
         }
+        say("handshake: starting, channel=" + S.channelId.slice(0, 8) + " origin=" + origin());
         S.helloStep = 0;
         step();
     }
@@ -428,11 +429,17 @@ window.minipaintWanGP = (function () {
         if (S.helloStep >= HELLO_DELAYS.length) {
             // The offers are over. Say so where the tab's setup checklist
             // reads it, rather than leaving a row that never resolves.
+            say(
+                "handshake: gave up after " + HELLO_DELAYS.length + " offers with no reply. " +
+                "Either the WanGP page has no MiniPaint bridge plugin loaded, or its script " +
+                "did not run."
+            );
             report(false, "the WanGP page in this browser did not answer the handshake");
             return;
         }
         const wait = HELLO_DELAYS[S.helloStep];
         S.helloStep += 1;
+        say("handshake: offer " + S.helloStep + "/" + HELLO_DELAYS.length + " sent into the iframe");
         post(HELLO, hex32(), { instance_id: S.instanceId, protocol: PROTOCOL });
         S.helloTimer = setTimeout(step, wait);
     }
@@ -477,6 +484,26 @@ window.minipaintWanGP = (function () {
         } catch (e) { /* a record is never worth an exception */ }
     }
 
+    const CLIENT_LOG_ELEM_ID = "wangp_client_log";
+    let logSeq = 0;
+
+    /**
+     * Say what just happened, where somebody can read it. The handshake lives
+     * entirely in this window and the iframe's, so when it does not happen
+     * there is otherwise nothing at all to look at - no request, no console
+     * anybody thought to open, and one red row that only says "did not
+     * answer". Each line goes to the page's own log through a hidden textbox.
+     */
+    function say(message) {
+        try {
+            logSeq += 1;
+            if (typeof console !== "undefined" && console.debug) {
+                console.debug("MiniPaint WanGP:", message);
+            }
+            writeBox(CLIENT_LOG_ELEM_ID, JSON.stringify({ n: logSeq, line: String(message).slice(0, 300) }));
+        } catch (e) { /* a log line is never worth an exception */ }
+    }
+
     function report(roundTrip, detail) {
         try {
             writeBox(BROWSER_CHECK_ELEM_ID, JSON.stringify({
@@ -499,27 +526,69 @@ window.minipaintWanGP = (function () {
      * reading once those hold.
      */
     function acceptable(event) {
-        if (event.origin !== origin()) { return null; }
-        if (!S.frame || event.source !== S.frame.contentWindow) { return null; }
+        // Every rejection below is deliberate and stays silent to the sender.
+        // Only a message that looks like it was meant for us is worth a line
+        // in the log - one that failed a check we care about while claiming
+        // our protocol. Anything else on the page's message bus is not ours
+        // and is not news.
+        const claims = event && event.data && typeof event.data === "object" && event.data.protocol !== undefined;
+        if (event.origin !== origin()) {
+            if (claims) { dropped("wrong origin, expected " + origin(), event); }
+            return null;
+        }
+        if (!S.frame || event.source !== S.frame.contentWindow) {
+            if (claims) { dropped(S.frame ? "not from the WanGP iframe" : "no iframe is attached", event); }
+            return null;
+        }
         const message = event.data;
         if (!message || typeof message !== "object" || Array.isArray(message)) { return null; }
-        if (message.protocol !== PROTOCOL) { return null; }
-        if (TO_PARENT.indexOf(message.type) === -1) { return null; }
-        if (typeof message.channel_id !== "string" || message.channel_id !== S.channelId) { return null; }
-        if (typeof message.request_id !== "string" || !message.request_id) { return null; }
+        if (message.protocol !== PROTOCOL) {
+            dropped("protocol " + message.protocol + ", this build speaks " + PROTOCOL, event);
+            return null;
+        }
+        if (TO_PARENT.indexOf(message.type) === -1) {
+            dropped("type is not one the iframe may send", event);
+            return null;
+        }
+        if (typeof message.channel_id !== "string" || message.channel_id !== S.channelId) {
+            dropped("channel " + String(message.channel_id).slice(0, 8) + ", expected " + S.channelId.slice(0, 8), event);
+            return null;
+        }
+        if (typeof message.request_id !== "string" || !message.request_id) {
+            dropped("no request id", event);
+            return null;
+        }
         const payload = message.payload === undefined ? {} : message.payload;
-        if (!payload || typeof payload !== "object" || Array.isArray(payload)) { return null; }
-        if (envelopeBytes(message) >= MAX_ENVELOPE_BYTES) { return null; }
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+            dropped("payload is not an object", event);
+            return null;
+        }
+        if (envelopeBytes(message) >= MAX_ENVELOPE_BYTES) {
+            dropped("envelope is too large", event);
+            return null;
+        }
         return { type: message.type, requestId: message.request_id, payload: payload };
     }
 
     function onMessage(event) {
         const message = acceptable(event);
         if (!message) { return; }
+        say("received " + message.type + " from the iframe");
         if (message.type === READY) { onReady(message.payload); return; }
         if (message.type === RUNTIME_STATE) { onRuntimeState(message.payload); return; }
         if (message.type === RECEIVERS) { onReceivers(message.requestId, message.payload); return; }
         if (message.type === RECEIVE_RESULT) { onResult(message.requestId, message.payload); }
+    }
+
+    /** Why an inbound message was dropped. Every rejection is silent by
+     * design - answering an unknown sender is how a bridge gets abused - but
+     * silent to the sender is not the same as invisible to the operator. */
+    function dropped(why, event) {
+        try {
+            const from = event && event.origin ? String(event.origin) : "(no origin)";
+            const kind = event && event.data && event.data.type ? String(event.data.type) : "(no type)";
+            say("dropped a message: " + why + " (from " + from + ", type " + kind + ")");
+        } catch (e) { /* nothing */ }
     }
 
     /**
@@ -673,7 +742,11 @@ window.minipaintWanGP = (function () {
      */
     function attach(options) {
         const frame = frameElement();
-        if (!frame) { return false; }
+        if (!frame) {
+            say("attach: no iframe found under #" + IFRAME_ROOT_ID + " yet");
+            return false;
+        }
+        say("attach: bound to the iframe, src=" + (frame.getAttribute("src") || "(none)"));
         if (!S.listening) {
             window.addEventListener("message", onMessage);
             S.listening = true;
@@ -865,8 +938,10 @@ window.minipaintWanGP = (function () {
         if (!root) {
             const next = ROOT_LOOKUPS[step_ + 1];
             if (next !== undefined) { setTimeout(function () { watchRoot(step_ + 1); }, next); }
+            else { say("watchRoot: gave up looking for #" + IFRAME_ROOT_ID + "; the WanGP tab never drew it"); }
             return;
         }
+        say("watchRoot: found #" + IFRAME_ROOT_ID + " after " + step_ + " attempt(s)");
         attach(null);
         if (typeof MutationObserver !== "function") { return; }
         // Kept rather than disconnected after the first iframe: the tab

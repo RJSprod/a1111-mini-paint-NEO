@@ -470,8 +470,25 @@ async def async_checks(r: Results) -> None:
     app = Starlette()
     proxy.install(app)
     installed = len(app.router.routes)
-    r.check("the routes go in front of the host's own", str(app.router.routes[0].path) == proxy.PROXY_PATH)
-    r.check("the prefix, the tree and a websocket are all mounted", installed == 3, str(installed))
+    r.check("the routes go in front of the host's own",
+            str(app.router.routes[0].path) == proxy.AUTH_PROBE_PATH)
+    r.check("the auth probe is in front of the catch-all that would swallow it",
+            [str(route.path) for route in app.router.routes[:4]].index(proxy.AUTH_PROBE_PATH)
+            < [str(route.path) for route in app.router.routes[:4]].index(proxy.PROXY_PREFIX + "{path:path}"))
+    r.check("the probe, the prefix, the tree and a websocket are all mounted", installed == 4, str(installed))
+
+    # The probe answers whatever the gate says, because reaching it is the
+    # question the gate exists to decide. It carries nothing.
+    remembered = proxy._boundary
+    proxy._boundary = {"ok": False, "coverage": "unknown", "mechanisms": ["gradio_auth"]}
+    try:
+        answered = await proxy._auth_probe(request_for("GET", proxy.AUTH_PROBE_PATH))
+        r.check("the auth probe answers even while the proxy refuses", answered.status_code == 204)
+        r.check("and carries no body", not bytes(getattr(answered, "body", b"") or b""))
+        refused = await proxy.forward(request_for("GET", "/wan2gp/"))
+        r.check("while a real request is still refused", refused.status_code == 503)
+    finally:
+        proxy._boundary = remembered
     proxy.install(app)
     r.check("installing twice adds nothing", len(app.router.routes) == installed)
 

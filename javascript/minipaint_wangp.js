@@ -155,6 +155,7 @@ window.minipaintWanGP = (function () {
         receivers: [],
         revision: "",
         pending: new Map(),
+        authProbe: null,
         query: null,
         helloTimer: null,
         helloStep: 0,
@@ -419,6 +420,10 @@ window.minipaintWanGP = (function () {
             S.instanceId = text(attribute(S.frame, INSTANCE_ATTRIBUTE), 128);
         }
         say("handshake: starting, channel=" + S.channelId.slice(0, 8) + " origin=" + origin());
+        // The one row nobody could answer. Asked here because this is the
+        // moment the page is certainly loaded and certainly on the right
+        // origin, and re-asked on every reload for the same reason.
+        probeAuth().then(function () { report(S.ready, S.ready ? "" : "auth probe finished"); });
         S.helloStep = 0;
         step();
     }
@@ -485,6 +490,7 @@ window.minipaintWanGP = (function () {
     }
 
     const CLIENT_LOG_ELEM_ID = "wangp_client_log";
+    const AUTH_PROBE_PATH = "/wan2gp/__minipaint_auth_probe";
     let logSeq = 0;
 
     /**
@@ -510,9 +516,43 @@ window.minipaintWanGP = (function () {
                 round_trip: !!roundTrip,
                 channel: S.channelId,
                 origin: origin(),
-                detail: text(detail, 200)
+                detail: text(detail, 200),
+                auth_probe: S.authProbe
             }));
         } catch (e) { /* a checklist row is not worth an exception */ }
+    }
+
+    /**
+     * Ask this Forge, without credentials, for a route under our own prefix
+     * that answers nothing. The server cannot do this for itself: it would
+     * have to guess its own address, and behind TLS or a reverse proxy the
+     * guess is wrong in ways that matter. The page already knows the exact
+     * origin a real visitor uses, so it asks from there.
+     *
+     * 401 or 403 means Forge's sign-in got there first, and /wan2gp/ is
+     * behind it. 204 means it did not, and the route is open to anyone who
+     * can reach this Forge. Either way it is an answer, which is what the
+     * checklist could not get before.
+     */
+    function probeAuth() {
+        if (typeof fetch !== "function") {
+            S.authProbe = { ran: false, reason: "this browser has no fetch()" };
+            return Promise.resolve(S.authProbe);
+        }
+        return fetch(AUTH_PROBE_PATH, {
+            method: "GET",
+            credentials: "omit",
+            cache: "no-store",
+            redirect: "manual"
+        }).then(function (response) {
+            S.authProbe = { ran: true, status: response.status, type: response.type };
+            say("auth probe: unauthenticated GET " + AUTH_PROBE_PATH + " answered " + response.status);
+            return S.authProbe;
+        }).catch(function (error) {
+            S.authProbe = { ran: false, reason: String(error && error.message ? error.message : error).slice(0, 120) };
+            say("auth probe: could not be made (" + S.authProbe.reason + ")");
+            return S.authProbe;
+        });
     }
 
     /* ------------------------------------------------------------------ */

@@ -35,6 +35,14 @@ destinations in the Canvas's *Send to* menu.
   server, handed to the browser as an opaque id, applied by a WanGP-side plugin through a
   real Gradio event, and acknowledged. Only a verified acknowledgement switches you to the
   WanGP tab. A send is never followed by an automatic Generate.
+
+  Both halves check, and they check different things. Inside WanGP the plugin decodes the
+  value it just applied and compares it, pixel for pixel, with the file it read - that is
+  the half that can see what Generate will actually use. Back in Forge the answer is then
+  held to the manifest of the file that was written and to the input that was asked for:
+  an acknowledgement claiming another size, another input, or a file digest that never
+  left here is refused even though it says `ok`. An answer carrying no evidence at all is
+  refused too - `ok` on its own only proves that a message came back.
 * **None of it can break Mini Paint.** `scripts/mini_paint.py` wraps the whole
   registration; if any part of the WanGP package fails to import, one line is printed and
   the Mini Paint tab loads exactly as before.

@@ -278,6 +278,12 @@ def wangp_label(receiver_id: str) -> str:
     return "WanGP " + str(receiver_id or "").replace("_", " ").title()
 
 
+def _digest(value: typing.Any) -> str:
+    """A hex digest as reported, or an empty string."""
+    text = str(value or "").strip().lower()
+    return text if 32 <= len(text) <= 128 and all(character in "0123456789abcdef" for character in text) else ""
+
+
 def _whole(value: typing.Any) -> int:
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else 0
 
@@ -316,6 +322,13 @@ def wangp_report(value: typing.Any, known: typing.Optional[typing.Sequence[str]]
         "width": _whole(raw.get("width")),
         "height": _whole(raw.get("height")),
         "new_count": _whole(raw.get("new_count")),
+        # Evidence, kept in the shape the verifier expects. A digest is hex or
+        # it is nothing; anything else is dropped rather than passed along to
+        # be compared against something it could never match.
+        "source_digest": _digest(raw.get("source_digest")),
+        "receiver_digest": _digest(raw.get("receiver_digest")),
+        "source_pixel_digest": _digest(raw.get("source_pixel_digest")),
+        "receiver_pixel_digest": _digest(raw.get("receiver_pixel_digest")),
     }
 
 
@@ -1078,7 +1091,12 @@ class TouchCanvas:
             log_quietly({"destination": f"Canvas -> {label}", "outcome": f"failed: {code}", "steps": list(notes)})
             return (*skips, *self._info(doc, mode, sentence, notes), "", "")
 
-        doc.pending_send = None
+        # What was asked for, kept so the answer can be held to it. Without
+        # this the only record of the chosen input is the browser's own, and an
+        # acknowledgement naming a different one would be checked against
+        # itself. ``send_mask`` looks at the instruction before this, so a
+        # WanGP send in here cannot be mistaken for a pending inpaint.
+        doc.pending_send = {"wangp": receiver_id, "handoff": prepared.id}
         doc.last_send = label
         notes.append(f"a {outgoing.width}x{outgoing.height} PNG was prepared for {label}")
         return (
@@ -1105,14 +1123,38 @@ class TouchCanvas:
         # before the report is judged - a send that failed, or one that came
         # back naming no receiver at all, still leaves a file to let go of.
         handoff = _wangp("handoff")
+        errors = _wangp("errors")
+        bridge = _wangp("bridge")
+
+        # The manifest of the file this send actually wrote, read before the
+        # file is let go. It is the only thing on this side that knows what was
+        # sent, and section 23 is explicit that an acknowledgement is a claim:
+        # the picture WanGP says it took has to be the one that left here.
+        expected = handoff.manifest_of(outcome["handoff_id"]) if handoff is not None else None
         if handoff is not None and outcome["handoff_id"]:
             handoff.discard(outcome["handoff_id"])
+
+        # The receiver this send was prepared for, from this side's own record
+        # rather than from the answer being judged.
+        pending = getattr(doc, "pending_send", None)
+        asked_for = pending.get("wangp") if isinstance(pending, dict) else ""
+        if isinstance(pending, dict) and pending.get("handoff") == outcome["handoff_id"]:
+            doc.pending_send = None
+
+        if outcome["ok"] and bridge is not None and isinstance(expected, dict):
+            proven, level, code = bridge.verify_result(
+                dict(expected, receiver_id=asked_for or outcome["receiver_id"], operation=outcome["operation"]),
+                dict(outcome, ok=True),
+            )
+            if not proven:
+                outcome["ok"] = False
+                outcome["code"] = code or "RECEIVER_VERIFY_FAILED"
+            elif level:
+                outcome["verification"] = level
 
         if not outcome["receiver_id"]:
             return gr.skip()
         label = wangp_label(outcome["receiver_id"])
-        errors = _wangp("errors")
-        bridge = _wangp("bridge")
         if outcome["ok"]:
             doc.last_send = label
             message = f"Sent to {label}."

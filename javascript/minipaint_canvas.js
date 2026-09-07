@@ -1215,6 +1215,13 @@ window.minipaintCanvas = (function () {
             height: result.height || 0,
             new_count: result.new_count || 0,
             state_revision: (armed && armed.revision) || "",
+            // The evidence, passed straight through. This side cannot judge it
+            // - only the half that still holds the manifest of the file it
+            // wrote can say whether what came back describes that file.
+            source_digest: result.source_digest || "",
+            receiver_digest: result.receiver_digest || "",
+            source_pixel_digest: result.source_pixel_digest || "",
+            receiver_pixel_digest: result.receiver_pixel_digest || "",
             t: Date.now()
         }));
     }

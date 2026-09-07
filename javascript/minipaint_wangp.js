@@ -615,6 +615,12 @@ window.minipaintWanGP = (function () {
      * level this side recognises, has not proved anything, and an unproved
      * send is a failed send.
      */
+    /** A hex digest, or "". Never anything else, whatever the bridge said. */
+    function digest(value) {
+        const seen = text(value, 128);
+        return /^[0-9a-f]{32,128}$/.test(seen) ? seen : "";
+    }
+
     function onResult(requestId, payload) {
         const entry = S.pending.get(requestId);
         if (!entry || entry.type !== RECEIVE_RESULT) { return; }
@@ -645,6 +651,12 @@ window.minipaintWanGP = (function () {
             height: Number.isFinite(payload.height) ? Math.trunc(payload.height) : 0,
             new_count: Number.isFinite(payload.new_count) ? Math.trunc(payload.new_count) : 0,
             state_revision_after: REVISION_RE.test(after) ? after : "",
+            // Carried, not read: the digests mean nothing here, and everything
+            // to the side that still holds the manifest of the file it wrote.
+            source_digest: digest(payload.source_digest),
+            receiver_digest: digest(payload.receiver_digest),
+            source_pixel_digest: digest(payload.source_pixel_digest),
+            receiver_pixel_digest: digest(payload.receiver_pixel_digest),
             message: ""
         });
     }

@@ -791,6 +791,7 @@ def handoff_release_checks(r: Results) -> None:
     from PIL import Image
 
     canvas = object.__new__(canvas_ui.TouchCanvas)
+    document = canvas_ui.document.Document()
     # Never ask for the real one, not even to put it back: resolving it makes
     # it, and a suite that runs in a checkout would leave a folder behind.
     with _tempfile.TemporaryDirectory(prefix="minipaint-wangp-release-") as temporary:
@@ -828,6 +829,46 @@ def handoff_release_checks(r: Results) -> None:
                 "handoff_id": nameless.id, "receiver_id": "", "ok": False, "code": "IFRAME_NOT_READY",
             }))
             r.check("a send that never named a receiver still releases its file", not nameless.path.exists())
+
+            # Section 23: an acknowledgement is a claim, and this side still
+            # holds the manifest of the file it wrote, so the claim is checked
+            # against it rather than taken. "ok: true" is where that starts.
+            from minipaint_neo.wangp import errors as wangp_errors
+
+            def sent(asked="start_frame", **ack):
+                prepared = wangp_handoff.write(Image.new("RGBA", (24, 16), (7, 7, 7, 255)))
+                manifest = wangp_handoff.manifest_of(prepared.id) or {}
+                # What _send_to_wangp records when it prepares the file.
+                document.pending_send = {"wangp": asked, "handoff": prepared.id}
+                base = {
+                    "handoff_id": prepared.id, "receiver_id": "start_frame", "ok": True,
+                    "role": "start", "operation": "replace", "verification": "pixel-equivalent",
+                    "width": 24, "height": 16, "state_revision": "r",
+                    "source_digest": manifest.get("sha256", ""),
+                    "receiver_digest": manifest.get("sha256", ""),
+                }
+                base.update(ack)
+                return canvas.wangp_result(document, _json.dumps(base)) or ""
+
+            honest = sent()
+            r.check("an acknowledgement that matches the file is a success",
+                    "Sent to" in honest, honest[:160])
+
+            lying = sent(width=512, height=512, receiver_digest="", source_digest="")
+            r.check("one that claims another size is refused, however cheerful",
+                    wangp_errors.MESSAGES[wangp_errors.RECEIVER_VERIFY_FAILED] in lying, lying[:200])
+
+            hollow = sent(width=0, height=0, verification="", receiver_digest="", source_digest="")
+            r.check("one that proves nothing is not a success either",
+                    "Sent to" not in hollow, hollow[:200])
+
+            wrong_slot = sent(asked="start_frame", receiver_id="end_frame")
+            r.check("one that names another input is refused",
+                    "Sent to" not in wrong_slot, wrong_slot[:200])
+
+            corrupted = sent(source_digest="b" * 64)
+            r.check("one whose file digest does not match is refused",
+                    "Sent to" not in corrupted, corrupted[:200])
 
             # Nothing is deleted on the strength of an id we did not mint.
             survivor = wangp_handoff.write(Image.new("RGBA", (4, 4)))

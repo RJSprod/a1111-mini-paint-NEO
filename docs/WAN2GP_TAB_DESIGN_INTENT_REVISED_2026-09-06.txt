@@ -1,0 +1,3520 @@
+WAN2GP TAB + INTELLIGENT MINIPAINT SEND
+REVISED DESIGN INTENT / IMPLEMENTATION SPECIFICATION
+Repository target: RJSprod/a1111-mini-paint-NEO
+Revision date: 2026-09-06
+Status: Implementation-grade design intent
+Supersedes: WAN2GP_TAB_DESIGN_INTENT dated 2026-09-06
+
+================================================================================
+0. DOCUMENT PURPOSE, STATUS, AND RESEARCH NOTE
+================================================================================
+
+This document is a revised implementation specification for adding a WanGP
+integration to:
+
+    https://github.com/RJSprod/a1111-mini-paint-NEO
+
+It is based on the original design intent supplied for this work, plus a fresh
+review of the current public upstream repositories and documentation on
+2026-09-06.
+
+This revision preserves the original product intent:
+
+    Forge Neo generation
+        -> MiniPaint edit/preparation
+        -> intelligent send into the currently meaningful WanGP image role
+        -> user continues in the real WanGP UI
+        -> user generates video normally
+
+The principal changes are not a change of product direction. They strengthen
+the architecture where current upstream behavior makes a more reliable
+implementation possible.
+
+The most important revision is this:
+
+    DO NOT hardcode MiniMax H3 FL2VA as "start/end only" and Ref2VA as
+    "references only."
+
+Current WanGP main, as reviewed on 2026-09-06, documents and implements optional
+start/end image conditioning in MiniMax H3 Ref2VA as well as reference media.
+
+Therefore the bridge must answer the actual question:
+
+    "Which logical image receivers are valid and active in THIS live WanGP
+     browser session, for THIS selected model/mode/state, right now?"
+
+It must not answer:
+
+    "Which inputs did this model family support when this MiniPaint extension
+     was written?"
+
+This difference is foundational.
+
+Research conclusions are classified in this document as:
+
+    CONFIRMED
+        Directly supported by current upstream source/documentation reviewed on
+        2026-09-06.
+
+    IMPLEMENTATION RECOMMENDATION
+        A design choice recommended here because it reduces brittleness,
+        security risk, or maintenance cost.
+
+    SPECIAL ATTENTION
+        Feasible, but the exact behavior depends on the installed Forge/WanGP/
+        Gradio version, operating system, or UI component implementation and
+        therefore must be validated by a targeted prototype or acceptance test.
+
+No "SPECIAL ATTENTION" item should be silently converted into a hardcoded
+assumption.
+
+================================================================================
+1. PRODUCT PURPOSE
+================================================================================
+
+Add a new top-level WanGP tab to Forge Neo through the
+RJSprod/a1111-mini-paint-NEO extension.
+
+MiniPaint is already the image preparation/handoff surface. The integration
+should make WanGP feel like a native destination from MiniPaint while keeping
+WanGP itself independent.
+
+The finished workflow is:
+
+    Forge Neo generation
+            -> MiniPaint
+            -> crop/mask/layers/prepare
+            -> user opens WanGP and selects desired model/mode
+            -> user returns to MiniPaint
+            -> Menu -> Send to
+            -> MiniPaint asks WanGP what image roles are active NOW
+            -> exact WanGP destination(s) appear
+            -> current flattened MiniPaint image is transferred
+            -> WanGP verifies the correct receiver was populated
+            -> MiniPaint logs the result
+            -> Forge switches back to WanGP
+            -> user edits WanGP settings and presses Generate
+
+The WanGP tab must display the real WanGP application. Do not recreate a
+Forge-side clone of WanGP's model-dependent controls.
+
+================================================================================
+2. REQUIRED PRODUCT CHARACTERISTICS
+================================================================================
+
+The integration must be:
+
+    - real-UI based
+    - separate-process based
+    - explicit-GPU based
+    - persistent after initialization
+    - loopback-only for the WanGP backend
+    - same-origin in the browser through Forge
+    - capability/state driven
+    - session aware
+    - transfer verified
+    - no arbitrary filesystem bridge
+    - no whole-document DOM scraping
+    - no permanent polling
+    - no automatic video generation on ordinary Send
+    - maintainable when WanGP adds or changes models
+
+The design must remain useful for models not known when this extension is
+written.
+
+================================================================================
+3. CURRENT UPSTREAM FINDINGS THAT CHANGE OR STRENGTHEN THE ORIGINAL SPEC
+================================================================================
+
+3.1 Target MiniPaint repository
+-------------------------------
+
+CONFIRMED from the current target repository README/source:
+
+    - The extension creates one stable Mini Paint tab.
+    - The default Canvas is ForgeCanvas-based.
+    - Sending flattens visible layers.
+    - Sends and saves are PNG.
+    - Existing Send to destinations include img2img, Inpaint, Extras, and
+      ImageStitch.
+    - The target tab is switched only at the actual handoff point using host
+      behavior.
+    - Existing sends are verified rather than assumed.
+    - A rotating send-log exists.
+    - The extension intentionally avoids document-wide observers and permanent
+      polling.
+    - Code is already organized under minipaint_neo/ with a small
+      scripts/mini_paint.py entry point.
+    - on_app_started is already used to register a FastAPI route for the
+      transfer log.
+
+These are architectural precedents for the WanGP work. Do not bypass them.
+
+3.2 WanGP plugin system
+-----------------------
+
+CONFIRMED from current WanGP plugin documentation/source:
+
+WanGP plugins can use a WAN2GPPlugin class and provide facilities including:
+
+    setup_ui
+    post_ui_setup
+    request_component
+    request_global
+    insert_after
+    on_model_change
+    add_tab
+    add_custom_js
+
+Current plugin metadata also supports compatibility metadata such as a
+Wan2GP-version requirement.
+
+Therefore a companion WanGP extension plugin is a supported upstream-shaped
+solution and is strongly preferred over MiniPaint scraping WanGP's DOM.
+
+3.3 WanGP model metadata
+------------------------
+
+CONFIRMED from current WanGP API documentation:
+
+WanGP now exposes generic model metadata/schema information including concepts
+such as:
+
+    media_inputs.image.start
+    media_inputs.image.end
+    media_inputs.image.reference
+    media_inputs.image.background
+    media_inputs.image.injected_frames
+
+and normalized setting/capability information including allowed
+image_prompt_type and video_prompt_type choices.
+
+This is useful for STATIC CAPABILITY discovery.
+
+It is NOT sufficient for deciding what MiniPaint should show right now.
+
+The bridge must combine:
+
+    static model capability
+        +
+    current live UI/mode values
+        +
+    current receiver capacity/state
+        =
+    active receiver list
+
+3.4 Current MiniMax H3 behavior
+-------------------------------
+
+IMPORTANT CURRENT FACT, confirmed in current WanGP main on 2026-09-06:
+
+MiniMax H3 FL2VA supports start/end image conditioning.
+
+Current WanGP also documents MiniMax H3 Ref2VA as supporting:
+
+    - reference images
+    - reference video
+    - reference audio
+    - optional start image
+    - optional end image
+
+Current H3 pipeline code accepts image_start and image_end and separately
+enforces that reference media require the reference checkpoint.
+
+Therefore the ORIGINAL statement that "current Ref2VA rejects first/last-frame
+conditioning" must NOT remain as an implementation rule.
+
+Correct implementation rule:
+
+    WanGP bridge publishes active logical receivers from current upstream
+    capability + current live state.
+
+Do not hardcode a permanent matrix such as:
+
+    FL2VA => start/end only
+    Ref2VA => reference only
+
+Current example behavior may instead include:
+
+    H3 FL2VA:
+        Start Frame
+        End Frame
+        other frame/control roles depending on selected UI state
+
+    H3 Ref2VA:
+        Reference Image
+        optional Start Frame
+        optional End Frame
+        plus other active media roles where supported
+
+The Send to menu must reflect what the actual current WanGP UI/session accepts.
+
+3.5 Gradio reverse-proxy behavior
+---------------------------------
+
+CONFIRMED from current Gradio documentation:
+
+Gradio supports deployment under a non-root path through root_path and the
+GRADIO_ROOT_PATH environment variable.
+
+Gradio documentation also notes the importance of forwarded host/protocol
+headers when behind a reverse proxy.
+
+A current WanGP issue documents successful use of:
+
+    GRADIO_ROOT_PATH=/wan2gp
+
+behind a reverse proxy and specifically calls out forwarded headers and HTTP
+upgrade handling.
+
+This makes the same-origin proxy design feasible.
+
+SPECIAL ATTENTION:
+
+The exact HTTP transport used by the installed Gradio version can evolve.
+The proxy must be treated as a real application reverse proxy, not a GET-only
+forwarder.
+
+3.6 GPU UUID selection
+----------------------
+
+CONFIRMED from NVIDIA documentation:
+
+CUDA_VISIBLE_DEVICES accepts GPU UUIDs, and NVIDIA recommends UUIDs instead of
+indices to avoid ambiguity.
+
+A child launched with one physical GPU UUID visible may see that physical GPU
+as cuda:0 internally.
+
+The original UUID-based GPU design is therefore correct.
+
+================================================================================
+4. STABLE ARCHITECTURAL DECISIONS
+================================================================================
+
+The following are deliberate product/architecture decisions and should not be
+changed casually during implementation.
+
+1. The real WanGP UI is embedded. No Forge-side clone of WanGP controls.
+
+2. WanGP runs in its own process.
+
+3. WanGP uses its existing Python/Conda environment.
+
+4. Forge must not import WanGP's ML stack into Forge's Python process.
+
+5. Physical GPU identity is persisted by NVIDIA UUID, not ordinal index.
+
+6. WanGP backend is loopback-only.
+
+7. Browser-facing WanGP traffic goes through the Forge origin.
+
+8. Initial setup occurs in the WanGP tab.
+
+9. Setup persists.
+
+10. Normal Forge Settings does not duplicate setup fields.
+
+11. MiniPaint does not determine receiver roles by DOM scraping.
+
+12. MiniPaint does not own a permanent model-name-to-input mapping.
+
+13. A WanGP-side bridge translates current WanGP state into stable logical
+    receiver descriptors.
+
+14. Send destinations are queried on demand.
+
+15. The send request is revalidated at execution time.
+
+16. Sending populates WanGP's visible state but does not automatically generate.
+
+17. Transfer completion is verified and logged.
+
+18. Current WanGP capability wins over historical assumptions in this document.
+
+19. The bridge is the compatibility boundary for WanGP UI internals.
+
+20. A failure to prove that a target is correct must fail closed rather than
+    send to a guessed slot.
+
+================================================================================
+5. HIGH-LEVEL ARCHITECTURE
+================================================================================
+
+                         BROWSER
+                            |
+                            | Forge public HTTPS origin
+                            v
+          +---------------------------------------------+
+          | Forge Neo                                   |
+          | a1111-mini-paint-NEO                        |
+          |                                             |
+          | MiniPaint tab                               |
+          | WanGP tab                                   |
+          | integration control                         |
+          | /wan2gp/* reverse proxy                     |
+          +---------------------+-----------------------+
+                                |
+                                | loopback-only HTTP
+                                v
+                    127.0.0.1:<dynamic-port>
+                                |
+          +---------------------+-----------------------+
+          | managed WanGP process                       |
+          | existing environment                        |
+          | selected CUDA GPU UUID only                 |
+          | real WanGP Gradio UI                        |
+          | wan2gp-minipaint-bridge plugin              |
+          +---------------------------------------------+
+
+Browser URL:
+
+    https://<forge-origin>/wan2gp/
+
+Internal upstream:
+
+    http://127.0.0.1:<dynamic-port>/
+
+The browser must not be instructed to use the internal URL.
+
+The dynamic port and launch secret are runtime state only.
+
+================================================================================
+6. COMPONENT RESPONSIBILITY BOUNDARIES
+================================================================================
+
+6.1 Forge-side integration owns
+-------------------------------
+
+    - persistent integration configuration
+    - setup wizard
+    - install/runtime/GPU discovery
+    - WanGP child lifecycle
+    - runtime environment construction
+    - loopback port selection/retry
+    - reverse proxy
+    - bridge startup/health expectation
+    - handoff storage
+    - top-level WanGP tab shell
+    - current MiniPaint send menu integration
+    - send logging
+    - reinitialize action
+
+6.2 WanGP-side bridge owns
+--------------------------
+
+    - bridge compatibility/version handshake
+    - adapting current WanGP component internals
+    - reading live receiver-affecting state
+    - reading static model capability when useful
+    - building logical receiver descriptors
+    - accepting one logical receiver operation
+    - inserting image into the intended WanGP component/session
+    - append/replace semantics
+    - receiver capacity/limit decisions
+    - verified acknowledgement
+    - theme injection within the WanGP document
+    - bridge JS required inside the iframe
+
+6.3 WanGP upstream remains source of truth for
+----------------------------------------------
+
+    - models
+    - presets
+    - model handlers
+    - model schemas
+    - generation controls
+    - LoRAs
+    - plugins
+    - queue/generation behavior
+    - galleries
+    - model-specific media rules
+    - future UI additions
+
+6.4 MiniPaint must not own
+--------------------------
+
+    - a copy of WanGP settings
+    - a copy of WanGP selected model
+    - a hardcoded model capability database
+    - DOM selectors for WanGP upload widgets
+    - a model-switch policy
+    - automatic generation behavior
+
+================================================================================
+7. TOP-LEVEL TAB
+================================================================================
+
+Add one stable Forge top-level tab:
+
+    WanGP
+
+Preferred stable id:
+
+    wangp
+
+If project naming requires Wan2GP, label may be "Wan2GP", but keep one stable id
+after release.
+
+The tab is created once during Forge UI construction.
+
+Its internal state is one of:
+
+    SETUP_REQUIRED
+    STARTING
+    READY
+    DEGRADED
+    ERROR
+
+Do not dynamically destroy/recreate the top-level tab.
+
+Suggested internal containers:
+
+    #wangp_setup_root
+    #wangp_starting_root
+    #wangp_error_root
+    #wangp_iframe_root
+
+Only visibility/content changes.
+
+Reason:
+
+The target MiniPaint repository deliberately keeps stable tab identities and
+has prior experience with a failed component destabilizing the entire tab UI.
+Follow that philosophy.
+
+================================================================================
+8. SETUP / INITIALIZATION UX
+================================================================================
+
+Before initialization, opening WanGP shows setup rather than a broken iframe.
+
+Suggested initial card:
+
+    +----------------------------------------------------+
+    | Set up WanGP                                       |
+    |                                                    |
+    | Connect Forge MiniPaint to an existing WanGP       |
+    | installation, runtime, and dedicated GPU.          |
+    |                                                    |
+    |                  [ Start Setup ]                   |
+    +----------------------------------------------------+
+
+The wizard must not mark setup complete until all mandatory validations pass.
+
+8.1 Step 1 - WanGP installation root
+------------------------------------
+
+User supplies the existing WanGP root.
+
+Example:
+
+    D:\AI\Wan2GP
+
+Validation SHOULD include at minimum:
+
+    - directory exists
+    - wgp.py exists
+    - expected shared/ or equivalent project structure exists
+    - plugins directory is resolvable/creatable as appropriate
+    - root is readable
+    - bridge installation destination can be determined
+    - startup probe can identify the application as compatible WanGP
+
+Do not move or duplicate the WanGP installation.
+
+Do not silently initialize a random similarly named directory.
+
+8.2 Step 2 - Python / Conda runtime
+-----------------------------------
+
+Discover Conda installations/environments where practical.
+
+Persist a robust runtime identity:
+
+    type
+    environment prefix
+    display name
+
+Example:
+
+    {
+      "type": "conda",
+      "prefix": "C:\\Users\\...\\envs\\wangp",
+      "display_name": "wangp"
+    }
+
+A name alone is not sufficient.
+
+Validate with:
+
+    - environment interpreter exists
+    - harmless Python command
+    - WanGP-root import/startup compatibility probe
+
+IMPLEMENTATION RECOMMENDATION:
+
+Prefer launching the Python interpreter resolved from the selected environment
+prefix directly when that works reliably:
+
+    <env-prefix>\python.exe wgp.py ...
+
+This avoids relying on shell activation state.
+
+If the selected WanGP environment demonstrably depends on Conda activation
+scripts/environment variables, use:
+
+    conda run -p <prefix> ...
+
+The wizard probe should determine which launch strategy is valid and persist
+the strategy only if needed.
+
+Do not import WanGP from Forge's interpreter.
+
+8.3 Step 3 - GPU selection
+--------------------------
+
+Enumerate physical NVIDIA GPUs with:
+
+    - name
+    - UUID
+    - total VRAM
+    - optional PCI bus identity for diagnostics
+
+Prefer NVML if available; nvidia-smi is an acceptable discovery path.
+
+Display friendly labels, persist UUID.
+
+Example display:
+
+    NVIDIA GeForce RTX 3090 - 24 GB
+    NVIDIA GeForce RTX 5090 - 32 GB    [selected]
+
+Persist:
+
+    GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+Launch environment:
+
+    CUDA_VISIBLE_DEVICES=<full selected GPU UUID>
+
+Post-launch health must verify that the child sees the intended device set.
+
+If the configured UUID disappears:
+
+    FAIL CLOSED.
+
+Do not silently fall back to another GPU.
+
+8.4 Step 4 - Bridge installation / compatibility
+------------------------------------------------
+
+The MiniPaint repo ships source for a companion plugin, conceptually:
+
+    wan2gp-minipaint-bridge
+
+Use WanGP's plugin system.
+
+Preferred plugin type:
+
+    extension
+
+The wizard verifies:
+
+    - bridge folder is present in selected WanGP install
+    - bridge manifest identifies this integration
+    - bridge version is compatible
+    - bridge declares minimum/current WanGP compatibility where appropriate
+    - installed bridge files match the extension-owned bridge release or a
+      supported version
+    - plugin is enabled
+    - restart requirement is known
+
+Updating the bridge must touch only the bridge-owned plugin folder.
+
+Do not modify unrelated WanGP plugins.
+
+Do not overwrite user code outside the bridge-owned folder.
+
+If a bridge update is required while WanGP is running, do not replace loaded
+plugin code in place and assume it becomes active. Coordinate a managed
+restart.
+
+8.5 Step 5 - security / launch validation
+-----------------------------------------
+
+Mandatory validations:
+
+    [OK] WanGP listener resolves to loopback only
+    [OK] --listen is absent
+    [OK] --share is absent
+    [OK] no 0.0.0.0 binding
+    [OK] selected GPU UUID applied
+    [OK] dynamic backend port assigned
+    [OK] root path configured for /wan2gp
+    [OK] bridge handshake succeeds
+    [OK] proxy base page succeeds
+    [OK] proxy static/resource request succeeds
+    [OK] bridge round trip through proxied iframe succeeds
+    [OK] browser-facing path remains on Forge origin
+    [OK] proxy route is covered by Forge's intended authentication boundary
+         when Forge authentication is enabled
+
+Only then write initialized=true.
+
+8.6 Setup transaction
+---------------------
+
+Do not destroy the old known-good setup until a new one succeeds.
+
+Recommended files:
+
+    wan2gp.json
+    wan2gp.backup.json
+    wan2gp.pending.json
+
+Reinitialize:
+
+    copy active config to backup
+    mark active integration uninitialized
+    build new pending config
+    validate pending config
+    atomically promote pending to active
+
+If new setup fails, preserve the backup and offer:
+
+    Restore previous working integration
+
+Restoring must revalidate the old paths/GPU/bridge before declaring it ready.
+
+================================================================================
+9. PERSISTENT CONFIGURATION
+================================================================================
+
+Use a versioned configuration file outside paths likely to be overwritten by an
+extension git update.
+
+CONFIRMED Forge-family code exposes a data_path concept.
+
+Preferred conceptual location:
+
+    <Forge data_path>/a1111-mini-paint-NEO/wan2gp.json
+
+Use the actual Forge Neo data-root API available at runtime.
+
+Fallback behavior must be explicit and logged.
+
+Suggested schema:
+
+{
+  "schema_version": 2,
+  "initialized": true,
+  "wangp_root": "D:\\AI\\Wan2GP",
+  "runtime": {
+    "type": "conda",
+    "prefix": "C:\\...\\envs\\wangp",
+    "display_name": "wangp",
+    "launch_strategy": "direct_python"
+  },
+  "gpu": {
+    "uuid": "GPU-..."
+  },
+  "integration": {
+    "proxy_path": "/wan2gp",
+    "auto_start": "lazy"
+  }
+}
+
+Do not persist:
+
+    - PID
+    - backend port
+    - browser channel nonce
+    - server integration secret
+    - Gradio session hash
+    - handoff ids
+    - temporary handoff paths
+    - receiver revision
+    - receiver cache
+
+Atomic write:
+
+    create temp in same filesystem
+    flush
+    fsync where supported/appropriate
+    os.replace/atomic replace
+
+Config schema migrations must be explicit.
+
+Unknown future schema version:
+
+    do not guess
+    show compatibility/reinitialize message
+
+================================================================================
+10. SETTINGS PAGE
+================================================================================
+
+Normal Forge Settings must not duplicate the wizard fields.
+
+The intended integration management surface is one action:
+
+    Reinitialize WanGP integration
+
+It should explain that it:
+
+    - does not uninstall WanGP
+    - does not delete models
+    - does not delete presets
+    - does not delete LoRAs
+    - does not delete outputs
+    - does not delete unrelated plugins
+
+SPECIAL ATTENTION:
+
+Forge settings systems are primarily designed around persisted values, not
+momentary buttons.
+
+Implementation preference:
+
+    - use the host's supported settings HTML/action mechanism if available;
+    - trigger a POST/action through extension-owned code;
+    - do not create a fake boolean option that permanently means
+      "reinitialize=true."
+
+If a fully native action control cannot be implemented cleanly in the exact
+Forge Neo build, keep one small Settings entry that navigates to the WanGP
+integration management panel containing the actual Reinitialize button.
+
+This is the only acceptable fallback to the action-only requirement.
+
+================================================================================
+11. WAN2GP PROCESS LIFECYCLE
+================================================================================
+
+Startup policy:
+
+    lazy
+
+Do not start WanGP on every Forge startup by default.
+
+11.1 When startup is allowed
+----------------------------
+
+Startup may be requested when:
+
+    - the user opens the WanGP tab after initialization
+    - an integration health action explicitly requests it
+
+IMPORTANT SESSION RULE:
+
+Opening MiniPaint -> Send to is NOT sufficient to invent a WanGP receiver if
+the WanGP iframe has never been loaded in this Forge page.
+
+An intelligent receiver is a property of a live WanGP UI session.
+
+If the process is stopped/unloaded when Send to opens:
+
+    WanGP: open the WanGP tab to start it and choose an input
+
+The Send menu may initiate process warm-up as a convenience, but it must not
+block indefinitely and must not expose a receiver until a live iframe/session
+has reported one.
+
+11.2 Startup sequence
+---------------------
+
+1. Read persistent integration config.
+2. Validate WanGP root.
+3. Validate environment prefix/interpreter.
+4. Validate GPU UUID exists.
+5. Validate bridge files/version.
+6. Acquire extension runtime lock.
+7. Select candidate loopback port.
+8. Generate runtime instance id.
+9. Generate server-side integration secret if used.
+10. Create clean child environment.
+11. Set CUDA_VISIBLE_DEVICES before Python startup.
+12. Set GRADIO_ROOT_PATH=/wan2gp.
+13. Set bridge-specific environment variables.
+14. Launch WanGP with cwd=<wangp_root>.
+15. Verify process remains alive.
+16. Verify loopback listener.
+17. Probe base HTTP health.
+18. Probe bridge availability/version.
+19. Mark runtime READY.
+20. Allow iframe load.
+
+11.3 Required child environment
+-------------------------------
+
+Conceptually:
+
+    CUDA_VISIBLE_DEVICES=<GPU UUID>
+    GRADIO_ROOT_PATH=/wan2gp
+    MINIPAINT_WANGP_INSTANCE_ID=<runtime opaque id>
+    MINIPAINT_WANGP_HANDOFF_ROOT=<controlled handoff directory>
+
+If a server-only bridge secret is required:
+
+    MINIPAINT_WANGP_BRIDGE_SECRET=<high-entropy runtime secret>
+
+Do not put the server secret into persistent config.
+
+11.4 WanGP command line
+-----------------------
+
+Required server constraints:
+
+    --server-name 127.0.0.1
+    --server-port <selected dynamic port>
+
+Forbidden:
+
+    --listen
+    --share
+
+Do not automatically add --open-browser.
+
+11.5 Port allocation
+--------------------
+
+A bind-test-then-launch port selection has a small race.
+
+Acceptable v1 behavior:
+
+    choose candidate loopback free port
+    launch
+    if address-in-use / health mismatch:
+        terminate owned failed child
+        choose another port
+        retry a bounded number of times
+
+Do not persist the port.
+
+Do not allow browser input to choose the upstream.
+
+11.6 Runtime state machine
+--------------------------
+
+Suggested:
+
+    STOPPED
+    STARTING
+    READY
+    STOPPING
+    CRASHED
+    INCOMPATIBLE
+    REINIT_REQUIRED
+
+Transitions must be synchronized.
+
+Two simultaneous browser events must not launch two WanGP children.
+
+Use a process lifecycle lock.
+
+11.7 Process ownership
+----------------------
+
+Only stop a process the extension owns.
+
+Track:
+
+    Popen/process handle
+    PID
+    runtime instance id
+    start timestamp
+    expected WanGP root
+    expected backend port
+
+Never terminate a process solely because a PID number matches stale persisted
+data.
+
+Do not persist PID.
+
+SPECIAL ATTENTION - process tree cleanup:
+
+On Windows, child/grandchild cleanup after Forge termination can require more
+than calling terminate() on one PID.
+
+Preferred robust Windows implementation if practical:
+
+    place the managed WanGP process tree in a Windows Job Object configured for
+    kill-on-job-close.
+
+Otherwise:
+
+    use a process group
+    terminate the exact tracked process tree carefully
+    test shutdown and Forge reload explicitly
+
+On POSIX, use a dedicated process group/session and terminate only that group.
+
+The implementation must never issue broad commands such as:
+
+    taskkill /IM python.exe
+    pkill python
+
+11.8 Crash handling
+-------------------
+
+If WanGP crashes:
+
+    preserve integration config
+    invalidate runtime bridge state
+    invalidate receiver cache/state
+    show Restart WanGP
+    keep diagnostic tail/log information
+    do not pretend iframe is usable
+
+11.9 Orphan / standalone process issue
+--------------------------------------
+
+SPECIAL ATTENTION:
+
+The safety of running two WanGP instances against the same root/config files at
+the same time is not established by the sources reviewed for this spec.
+
+v1 rule:
+
+    Do not intentionally launch a second managed WanGP instance if the
+    integration can positively identify an already-running managed instance.
+
+A separately launched standalone WanGP process is not automatically trusted or
+killed.
+
+Document for v1:
+
+    Avoid running a separate standalone WanGP instance against the same
+    configuration while the managed integration is active.
+
+Future optional work:
+
+    safe attach-to-existing-instance protocol with explicit bridge
+    compatibility, root path, GPU, and security verification.
+
+================================================================================
+12. REVERSE PROXY
+================================================================================
+
+12.1 Goal
+---------
+
+WanGP requires its HTTP service.
+
+The security goal is not "no socket."
+
+The security goal is:
+
+    no externally reachable WanGP backend socket
+
+Backend:
+
+    127.0.0.1:<dynamic>
+
+Browser:
+
+    <Forge origin>/wan2gp/
+
+12.2 Root path
+--------------
+
+Set:
+
+    GRADIO_ROOT_PATH=/wan2gp
+
+The public proxy prefix and Gradio root path must match exactly.
+
+Canonical public entry:
+
+    /wan2gp/
+
+Prefer redirecting:
+
+    /wan2gp -> /wan2gp/
+
+without exposing backend details.
+
+12.3 Proxy must support real application traffic
+------------------------------------------------
+
+The proxy must support, as required by the installed WanGP/Gradio version:
+
+    - GET
+    - HEAD
+    - POST
+    - PUT if requested by Gradio
+    - OPTIONS where appropriate
+    - multipart uploads
+    - large request bodies within configured limits
+    - streamed request bodies
+    - streamed response bodies
+    - server-sent/event-stream style connections
+    - range requests
+    - long-lived requests
+    - WebSocket upgrade if the installed stack uses it
+    - query strings
+    - redirects
+    - cookies required by WanGP/Gradio
+    - static assets
+    - media/file responses
+
+Do not buffer an entire video upload/download in Forge memory unless unavoidable.
+
+12.4 Headers
+------------
+
+Set/forward appropriate public-origin information, including:
+
+    Host
+    X-Forwarded-Host
+    X-Forwarded-Proto
+    X-Forwarded-Port
+
+Handle X-Forwarded-For according to Forge's existing trust model.
+
+Strip hop-by-hop headers as appropriate.
+
+Do not allow an inbound header to override the internally selected upstream
+host/port.
+
+12.5 No open proxy
+------------------
+
+Never implement:
+
+    /wan2gp/proxy?url=http://...
+
+The upstream is one internal runtime object:
+
+    host = 127.0.0.1
+    port = runtime.backend_port
+
+The browser cannot select it.
+
+12.6 Authentication boundary
+-----------------------------
+
+CRITICAL SPECIAL ATTENTION:
+
+A route dynamically attached to Forge's FastAPI app must be tested to confirm
+it receives the same intended authentication protection as normal Forge
+browser traffic.
+
+Acceptance test must include:
+
+    Forge auth enabled
+    unauthenticated client requests /wan2gp/
+        -> denied in the same manner as protected Forge content
+
+Do not assume route registration automatically equals auth coverage.
+
+If Forge's auth is applied outside FastAPI (for example by an external reverse
+proxy), document that deployment assumption but still keep WanGP loopback-only.
+
+12.7 Proxy health gate
+----------------------
+
+Do not declare the integration READY merely because:
+
+    GET /wan2gp/ returned 200
+
+Initialization/startup proxy probe should validate at least:
+
+    base page
+    one asset/resource
+    Gradio configuration/root-path correctness
+    one bridge event round trip
+
+Recommended extended test in automated suite:
+
+    one streaming/event call
+    one media/file request
+    WebSocket handshake if applicable to installed version
+
+12.8 Timeouts
+-------------
+
+Do not apply ordinary short API timeouts to Gradio event/queue streams.
+
+Have different timeout classes:
+
+    connection timeout
+    ordinary response timeout
+    streaming/queue idle timeout
+
+A generation can be long.
+
+Proxy timeout must not accidentally terminate a healthy WanGP generation.
+
+12.9 Error behavior
+-------------------
+
+If backend is unavailable:
+
+    return a controlled integration error page/status
+    do not leak random local stack traces to browser
+    log detailed diagnostic server-side
+    tab should offer Restart
+
+================================================================================
+13. BROWSER / IFRAME SESSION MODEL
+================================================================================
+
+This section is essential.
+
+WanGP's visible state is not merely server-global state.
+
+Gradio maintains browser sessions. Current Gradio exposes a per-page
+session_hash to callbacks.
+
+Therefore intelligent receiver state must be SESSION-SCOPED.
+
+13.1 One Forge page, one WanGP iframe session
+---------------------------------------------
+
+The WanGP iframe remains mounted when the user switches to MiniPaint.
+
+The bridge inside that iframe is the authority for that page's receiver state.
+
+MiniPaint parent must communicate with that exact iframe.
+
+Parent validation:
+
+    event.origin === expected Forge origin
+    event.source === wangpIframe.contentWindow
+    protocol version matches
+    channel id matches
+
+Iframe validation:
+
+    event.origin === expected Forge origin
+    event.source === window.parent
+    protocol version matches
+    channel id matches
+
+Never use "*" as production targetOrigin.
+
+13.2 Multiple Forge pages
+-------------------------
+
+Two browser tabs may each have:
+
+    Forge page A -> WanGP iframe session A
+    Forge page B -> WanGP iframe session B
+
+Receiver state from A must not be reused for B.
+
+Do not store "current receiver state" as one process-global bridge variable.
+
+The bridge may maintain diagnostics globally, but active UI values and
+revisions are session-scoped.
+
+13.3 Browser channel id vs server secret
+----------------------------------------
+
+A browser-visible nonce/channel id is useful for message correlation and
+confusion prevention.
+
+It is NOT a strong secret against arbitrary JavaScript already running on the
+same Forge origin.
+
+Do not describe it as the primary authentication boundary.
+
+If a server-to-server control endpoint exists, use a separate server-only
+runtime secret.
+
+Threat model:
+
+    Same-origin arbitrary code execution is already a compromise of Forge's
+    browser boundary.
+
+The integration must still:
+
+    - validate exact origin
+    - validate event.source
+    - validate protocol
+    - validate message type
+    - validate size/type
+    - bind messages to the intended iframe/session
+
+================================================================================
+14. COMPANION WANGP BRIDGE
+================================================================================
+
+14.1 Plugin type and scope
+--------------------------
+
+Use a narrow WanGP extension-style plugin.
+
+Conceptual layout:
+
+    wan2gp-minipaint-bridge/
+        __init__.py
+        plugin.py
+        compatibility.py
+        receiver_state.py
+        receiver_adapters.py
+        handoff.py
+        bridge_ui.py
+        bridge_js.py
+        theme.css
+        plugin_info.json
+
+No generation UI clone.
+
+No unrelated WanGP configuration.
+
+14.2 Bridge handshake
+---------------------
+
+Handshake should report conceptually:
+
+{
+  "protocol": 2,
+  "bridge_version": "x.y.z",
+  "instance_id": "...",
+  "wan2gp_version": "...",
+  "ready": true,
+  "capabilities": {
+    "receiver_query": true,
+    "image_handoff": true,
+    "verified_ack": true,
+    "theme": true
+  }
+}
+
+Do not require a WanGP version string comparison alone to prove compatibility.
+
+Compatibility should be functional:
+
+    required component/global hooks exist
+    bridge can read model/session state
+    bridge can apply at least supported v1 receivers
+    bridge round trip succeeds
+
+A version range may be an early filter, not the only test.
+
+14.3 Use upstream plugin hooks
+------------------------------
+
+Prefer:
+
+    request_component
+    request_global
+    post_ui_setup
+    on_model_change
+    add_custom_js
+
+where they fit.
+
+Avoid reaching through arbitrary module globals unless the supported plugin API
+cannot expose a required state.
+
+If a narrow compatibility shim must use an internal WanGP detail:
+
+    put it in compatibility.py
+    version-gate it
+    test it
+    do not expose it to MiniPaint
+
+14.4 Static capability source
+-----------------------------
+
+Use WanGP's current model metadata/schema API where practical to learn generic
+capabilities.
+
+Examples:
+
+    image start supported?
+    image end supported?
+    reference supported?
+    injected frames supported?
+    control image supported?
+
+This is only one input to receiver discovery.
+
+14.5 Live state source
+----------------------
+
+Live receiver state should come from current Gradio session values.
+
+The bridge query event should include/read the components that affect receiver
+meaning, such as as applicable:
+
+    selected model/model type
+    image_prompt_type
+    video_prompt_type
+    audio_prompt_type if it changes image availability
+    model-specific mode selector
+    start/end enable/source selection
+    reference enable/source selection
+    reference list/count
+    control mode
+    main/sub-view state where meaningful
+    any handler-specific selector required to disambiguate role
+
+Do not infer "active" only from a model definition.
+
+Example:
+
+    Model schema says reference images are supported.
+
+but:
+
+    user selected "Generate without Reference Images"
+
+Then:
+
+    reference receiver is not active.
+
+14.6 Do not rely only on on_model_change
+----------------------------------------
+
+on_model_change is useful to:
+
+    invalidate compatibility caches
+    refresh static model schema
+    rebuild adapter metadata
+
+It is not sufficient to know all live choices.
+
+The authoritative query occurs on demand in the active browser session.
+
+================================================================================
+15. RECEIVER ADAPTER LAYER
+================================================================================
+
+WanGP component implementation details may vary by role/version/model.
+
+Do not make the generic bridge assume:
+
+    start image is always gr.Image
+    reference is always gr.Gallery
+    value shape is always a filepath
+    list updates always behave identically
+
+Define a receiver adapter interface.
+
+Conceptually:
+
+    ReceiverAdapter:
+        logical_id
+        role
+        can_describe(session_state) -> descriptor or unavailable
+        snapshot(session_state) -> normalized value
+        apply(handoff_image, operation, session_state) -> component update(s)
+        verify(expected_image, result_state) -> verification
+        capacity(session_state) -> count/max_count
+        focus_hint() -> optional UI target
+
+Initial adapters:
+
+    StartFrameAdapter
+    EndFrameAdapter
+    ReferenceImageAdapter
+
+Later:
+
+    ControlImageAdapter
+    PositionedReferenceAdapter
+    StyleReferenceAdapter
+    other model-specific image adapters
+
+WanGP-specific component ids/types belong here.
+
+MiniPaint must never import those details.
+
+SPECIAL ATTENTION:
+
+The exact current elem_id/component type for every receiver must be confirmed in
+the actual WanGP version targeted during implementation.
+
+The plugin documentation supports request_component by elem_id, but this spec
+does not claim that every desired receiver has a forever-stable elem_id.
+
+If a component lacks a stable public id:
+
+    solve it in the bridge compatibility layer
+    version-gate it
+    add an integration test
+
+Do not fall back to parent-side DOM scraping.
+
+================================================================================
+16. INTELLIGENT RECEIVER CONTRACT
+================================================================================
+
+16.1 Request
+------------
+
+MiniPaint asks:
+
+    What image inputs can this exact WanGP iframe session meaningfully accept
+    right now?
+
+16.2 Response
+-------------
+
+Suggested protocol v2 shape:
+
+{
+  "protocol": 2,
+  "instance_id": "runtime-instance",
+  "bridge_session": "opaque-browser-session-id",
+  "state_revision": "sha256-or-opaque-revision",
+  "ready": true,
+  "model": {
+    "type": "...",
+    "label": "...",
+    "family": "..."
+  },
+  "view": "media_generator",
+  "receivers": [
+    {
+      "id": "image_refs",
+      "role": "reference",
+      "label": "Reference Image",
+      "menu_label": "Send Image to WanGP Reference",
+      "operation": "append",
+      "accept": ["image/png"],
+      "enabled": true,
+      "visible": true,
+      "count": 2,
+      "max_count": 9,
+      "focus_hint": "reference_images"
+    }
+  ]
+}
+
+Optional diagnostics:
+
+    reason
+    reason_code
+
+for disabled/unavailable receivers, but MiniPaint should normally display only
+active receivers.
+
+16.3 Stable logical ids
+-----------------------
+
+Initial logical ids:
+
+    start_frame
+    end_frame
+    reference
+    control_image
+    positioned_ref
+    style_ref
+
+The bridge may internally map them to current WanGP setting/component names.
+
+Do not expose raw DOM ids as the logical protocol contract.
+
+16.4 Receiver operation
+-----------------------
+
+Use bridge-reported semantics:
+
+    replace
+    append
+
+Do not encode operation solely by role on the MiniPaint side.
+
+Typical:
+
+    start_frame -> replace
+    end_frame   -> replace
+    reference   -> append
+
+but the bridge is authoritative.
+
+16.5 Capacity
+-------------
+
+A receiver may be model/state limited.
+
+Example current H3 reference image count is bounded.
+
+Bridge should report:
+
+    count
+    max_count
+
+When full:
+
+    enabled=false
+
+or omit the receiver from active actions and provide an unavailable reason for
+diagnostics.
+
+MiniPaint must not hardcode H3's numerical limit.
+
+================================================================================
+17. STATE REVISION / STALE-SEND PROTECTION
+================================================================================
+
+The menu state can become stale after it is shown.
+
+Example:
+
+    user opens Send to while Reference is active
+    user changes WanGP mode in another browser interaction
+    user clicks stale Reference action
+
+Sending to a newly invalid slot is unacceptable.
+
+17.1 Revision requirement
+-------------------------
+
+Every receiver response includes state_revision.
+
+Every send includes:
+
+    receiver id
+    state_revision
+    bridge_session
+
+Before applying the image, the bridge re-reads the relevant current values.
+
+If the receiver no longer matches:
+
+    reject with STALE_RECEIVER_STATE
+    do not redirect to another receiver
+    do not automatically switch model/mode
+
+17.2 Revision generation
+------------------------
+
+IMPLEMENTATION RECOMMENDATION:
+
+Do not rely only on one global integer incremented by event handlers, because a
+new upstream control could affect state without the bridge having registered
+the change callback.
+
+Prefer a deterministic fingerprint of normalized receiver-affecting live state.
+
+Example conceptual canonical state:
+
+{
+  "model_type": "...",
+  "image_prompt_type": "...",
+  "video_prompt_type": "...",
+  "model_mode": "...",
+  "active_view": "...",
+  "reference_count": 2,
+  "receiver_flags": {...}
+}
+
+Then:
+
+    state_revision = SHA-256(canonical_json) shortened for transport
+
+On receive:
+
+    recompute fingerprint
+    compare
+    then apply
+
+This is on-demand and requires no polling.
+
+================================================================================
+18. MINI PAINT SEND MENU
+================================================================================
+
+Existing destinations remain unchanged.
+
+Menu behavior:
+
+    Send to >
+        img2img
+        Inpaint
+        Extras
+        ImageStitch ...
+        <dynamic WanGP receiver actions>
+        Cancel
+
+18.1 Menu-open sequence
+-----------------------
+
+When Send to opens:
+
+1. Render normal local destinations immediately.
+2. Determine whether initialized.
+3. Determine whether managed WanGP is ready.
+4. Determine whether current Forge page has a live WanGP iframe/bridge session.
+5. If yes, issue one bounded receiver query.
+6. Replace WanGP status placeholder with exact receiver actions.
+7. Do not keep polling after the menu closes.
+
+18.2 Query timing
+-----------------
+
+Do not freeze the entire menu while waiting.
+
+Suggested transient state:
+
+    WanGP: checking active inputs...
+
+If response succeeds quickly, replace it with receiver actions.
+
+If it times out:
+
+    WanGP: unavailable - open WanGP tab
+
+No stale cached state should be silently shown as current.
+
+A very short cache may be used only to improve UI rendering if it is visibly
+treated as provisional and a fresh query replaces it before click eligibility.
+
+Preferred v1:
+
+    no clickable cached receiver.
+
+18.3 No live iframe
+-------------------
+
+If setup exists but user has not opened WanGP in this browser page:
+
+    WanGP: open WanGP tab to choose model/input
+
+Do not use default server model state as a substitute.
+
+18.4 Exact labels
+-----------------
+
+Examples:
+
+    Send Image to WanGP Start Frame
+    Send Image to WanGP End Frame
+    Send Image to WanGP Reference
+    Send Image to WanGP Control Image
+    Send Image to WanGP Style Reference
+
+If multiple receivers are active, show each.
+
+Do not collapse different roles into a vague "Send to WanGP."
+
+18.5 Current H3 examples
+------------------------
+
+Because current H3 Ref2VA can support optional start/end as well as references,
+these examples are intentionally state-driven.
+
+Example A:
+
+    H3 FL2VA
+    current UI exposes Start Image only
+
+Menu:
+
+    Send Image to WanGP Start Frame
+
+Example B:
+
+    H3 FL2VA
+    current UI exposes Start + End
+
+Menu:
+
+    Send Image to WanGP Start Frame
+    Send Image to WanGP End Frame
+
+Example C:
+
+    H3 Ref2VA
+    Reference Images active
+    no active start/end in the current UI state
+
+Menu:
+
+    Send Image to WanGP Reference
+
+Example D:
+
+    H3 Ref2VA
+    Reference Images active
+    Start Image active
+    End Image active
+
+Menu MAY correctly contain:
+
+    Send Image to WanGP Reference
+    Send Image to WanGP Start Frame
+    Send Image to WanGP End Frame
+
+if and only if the live bridge reports all three as active.
+
+Example E:
+
+    text-only/no-image state
+
+Menu:
+
+    no clickable WanGP image receiver
+
+Example F:
+
+    reference limit reached
+
+Menu:
+
+    no clickable reference action
+    optional disabled status:
+        WanGP Reference: limit reached
+
+================================================================================
+19. BROWSER BRIDGE PROTOCOL
+================================================================================
+
+Suggested message types:
+
+    WANGP_BRIDGE_HELLO
+    WANGP_BRIDGE_READY
+    WANGP_GET_RECEIVERS
+    WANGP_RECEIVERS
+    WANGP_RECEIVE_IMAGE
+    WANGP_RECEIVE_RESULT
+    WANGP_FOCUS_RECEIVER
+    WANGP_THEME_STATE
+    WANGP_RUNTIME_STATE
+
+Every envelope:
+
+{
+  "protocol": 2,
+  "type": "...",
+  "channel_id": "...",
+  "request_id": "...",
+  "payload": {...}
+}
+
+Rules:
+
+    - exact origin
+    - exact expected source window
+    - protocol version check
+    - request_id correlation
+    - size limits
+    - type whitelist
+    - unknown type rejected
+    - malformed payload rejected
+    - no eval
+    - no arbitrary function invocation
+    - no arbitrary path
+
+Parent timeout must be bounded for state/send acknowledgements.
+
+If iframe reloads:
+
+    old channel/session is invalid
+    new HELLO/READY handshake establishes a new channel
+
+================================================================================
+20. IMAGE HANDOFF TRANSPORT
+================================================================================
+
+20.1 Source pixels
+------------------
+
+Use the existing MiniPaint send semantics:
+
+    flatten visible layers
+    preserve expected transparency behavior
+    export lossless PNG
+
+Do not use the display JPEG/WebP copy as the authoritative handoff.
+
+20.2 Controlled handoff directory
+---------------------------------
+
+Forge writes the PNG into an integration-owned runtime directory.
+
+Conceptually:
+
+    <Forge data_path>/a1111-mini-paint-NEO/runtime/handoff/
+
+or an OS temp location owned by the integration.
+
+WanGP child receives the root in an environment variable.
+
+20.3 Handoff id
+---------------
+
+Use a cryptographically random opaque id.
+
+Recommended:
+
+    128 bits or more
+
+Transport:
+
+    handoff_id
+
+Do not transport:
+
+    arbitrary server path
+
+Bridge path construction should be equivalent to:
+
+    validate id against strict syntax
+    filename = id + ".png"
+    path = handoff_root / filename
+
+No separators are allowed in id.
+
+This is safer than accepting a path and then trying to sanitize it.
+
+20.4 Optional manifest
+----------------------
+
+Recommended manifest per handoff:
+
+{
+  "id": "...",
+  "created_at": "...",
+  "content_type": "image/png",
+  "bytes": 123456,
+  "width": 1024,
+  "height": 1024,
+  "sha256": "..."
+}
+
+The manifest may be in Forge process memory rather than a separate file.
+
+On WanGP receive, bridge validates:
+
+    id known/format valid
+    file exists under root
+    regular file
+    extension expected
+    size below limit
+    decode succeeds
+    dimensions reasonable
+    PNG signature/type expected
+    digest if provided
+
+20.5 Symlinks / junctions
+-------------------------
+
+Because Windows junctions and symlinks can complicate path checks:
+
+    do not let the browser create handoff filenames
+    do not follow user-supplied paths
+    create handoff root itself
+    use random fixed-shape filenames
+    validate resolved path remains under the root
+    reject non-regular-file surprises
+
+20.6 Size limits
+----------------
+
+Set an explicit maximum input image byte size and maximum pixel dimensions.
+
+Make limits generous enough for normal high-resolution MiniPaint use but finite.
+
+Error must say:
+
+    image too large for WanGP handoff
+
+not:
+
+    generic internal server error
+
+20.7 Cleanup
+------------
+
+On verified success:
+
+    delete temporary handoff file after WanGP no longer needs it
+
+If WanGP component value points directly at that file and Gradio still needs it,
+copy/import it into the receiver's normal backing mechanism before cleanup or
+delay cleanup until safe.
+
+On failed send:
+
+    delete unless retained briefly for diagnostics is explicitly enabled
+
+On startup:
+
+    remove stale handoff files older than configured runtime age
+
+Never delete files outside handoff root.
+
+================================================================================
+21. APPLYING AN IMAGE TO THE VISIBLE WANGP UI
+================================================================================
+
+This is one of the most important implementation details.
+
+The requirement is:
+
+    populate the actual current WanGP UI/session state
+
+not:
+
+    modify only a server-side generation dictionary
+
+not:
+
+    call generation immediately
+
+21.1 Preferred Gradio mechanism
+-------------------------------
+
+Bridge-owned Gradio event(s) should:
+
+    - receive bridge payload
+    - read live component inputs
+    - validate receiver/revision
+    - load handoff PNG
+    - return update/value to the actual receiver component(s)
+    - return acknowledgement/status to bridge component
+
+A practical implementation may wire a hidden bridge trigger to all v1 receiver
+components as possible outputs and return "no change" for non-target outputs.
+
+Alternatively, use one receiver-specific bridge event per adapter.
+
+Choose the approach that is stable in the installed WanGP/Gradio version.
+
+21.2 Do not use browser DOM assignment as source of truth
+---------------------------------------------------------
+
+Do not set:
+
+    input.value
+    file input internals
+    gallery DOM
+
+and then merely make it look correct.
+
+The server state WanGP will generate from must be updated through supported
+Gradio/plugin semantics.
+
+21.3 Side-effect event behavior
+-------------------------------
+
+SPECIAL ATTENTION:
+
+Programmatically returning a new component value may or may not trigger the
+same downstream UI events that a human upload triggers.
+
+For each receiver adapter, determine whether additional official event chaining
+is required to update dependent controls/previews.
+
+Acceptance criterion:
+
+    after bridge insertion, pressing Generate manually must use the inserted
+    image without requiring the user to re-touch the field.
+
+This must be tested per v1 receiver adapter.
+
+================================================================================
+22. REFERENCE APPEND SEMANTICS
+================================================================================
+
+Reference receivers are commonly additive.
+
+If current receiver descriptor says:
+
+    operation = append
+
+then bridge must:
+
+1. snapshot existing receiver list
+2. verify capacity
+3. append new image
+4. preserve existing order
+5. update receiver
+6. verify new count/value
+
+Do not silently replace references.
+
+Start/end are usually:
+
+    operation = replace
+
+but use bridge-reported operation.
+
+If the exact current upstream role has different semantics, the adapter owns it.
+
+================================================================================
+23. VERIFIED SEND
+================================================================================
+
+HTTP 200 is not sufficient.
+
+A successful send means:
+
+    the requested logical receiver in the intended live WanGP session now
+    contains the intended image under the intended operation semantics.
+
+23.1 Request
+------------
+
+Conceptually:
+
+{
+  "handoff_id": "...",
+  "receiver_id": "reference",
+  "bridge_session": "...",
+  "state_revision": "...",
+  "source": {
+    "width": 1024,
+    "height": 1024,
+    "sha256": "..."
+  }
+}
+
+23.2 Acknowledgement
+--------------------
+
+Conceptually:
+
+{
+  "ok": true,
+  "receiver_id": "reference",
+  "role": "reference",
+  "operation": "append",
+  "width": 1024,
+  "height": 1024,
+  "source_digest": "...",
+  "receiver_digest": "...",
+  "verification": "pixel-equivalent",
+  "new_count": 3,
+  "state_revision_after": "..."
+}
+
+23.3 Digest semantics
+---------------------
+
+A file SHA-256 is useful during transport.
+
+It may not remain byte-identical after Gradio decodes/re-encodes an image.
+
+Prefer verification levels:
+
+    byte-identical
+    pixel-equivalent
+    structurally verified
+
+For image receiver verification:
+
+    decode source
+    decode/snapshot destination if practical
+    compare dimensions/mode-normalized pixels
+
+This mirrors the target MiniPaint repository's philosophy of verifying what the
+destination will actually use.
+
+23.4 Success behavior
+---------------------
+
+On success:
+
+    log
+    success feedback
+    close Send menu
+    switch to WanGP top-level tab
+    optionally focus/scroll receiver if bridge supplies a safe focus hint
+
+23.5 Failure behavior
+---------------------
+
+On failure:
+
+    stay on MiniPaint
+    show concise reason
+    log detailed reason
+    do not switch as though success occurred
+    clean handoff appropriately
+
+================================================================================
+24. TRANSFER LOGGING
+================================================================================
+
+Reuse the existing send-log philosophy.
+
+WanGP send entry should include:
+
+    timestamp
+    destination label
+    runtime state
+    bridge protocol/version
+    model label/type
+    receiver id/role
+    operation
+    state revision
+    image dimensions
+    verification result
+    latency breakdown
+    error code/message if failed
+
+Do not log:
+
+    bridge secret
+    auth cookies
+    full arbitrary request headers
+    private handoff file contents
+
+Optional detailed steps:
+
+    receiver query: 42 ms
+    flatten/export: 18 ms
+    handoff write: 5 ms
+    bridge receive: 31 ms
+    receiver verify: 12 ms
+    final: pixel-equivalent
+
+Keep log rotation.
+
+================================================================================
+25. CURRENT WANGP MODEL CAPABILITY STRATEGY
+================================================================================
+
+The bridge determines receivers in three layers.
+
+Layer A - Generic static schema
+-------------------------------
+
+Use current WanGP model metadata where possible.
+
+Example capability fields:
+
+    start
+    end
+    reference
+    injected_frames
+    control
+
+Layer B - Current live UI values
+--------------------------------
+
+Read actual active session choices:
+
+    selected source mode
+    selected reference mode
+    model-specific selectors
+    active view
+    current list count
+    enable/disable flags
+
+Layer C - Compatibility adapter
+-------------------------------
+
+Resolve model/component quirks that generic schema does not fully describe.
+
+This layer may include narrow version-specific logic.
+
+Rule:
+
+    Generic capability says what COULD exist.
+    Live state says what IS selected.
+    Adapter says HOW to safely read/apply/verify it.
+
+================================================================================
+26. MINI MAX H3 CURRENT GUIDANCE
+================================================================================
+
+This section is a research snapshot, not a permanent model database.
+
+As reviewed on 2026-09-06:
+
+H3 FL2VA
+--------
+
+Current upstream documentation describes:
+
+    - text generation
+    - start image
+    - end image
+    - start + end
+    - control video / injected frame related workflows
+    - audio source options
+
+H3 Ref2VA
+---------
+
+Current upstream documentation describes:
+
+    - reference images
+    - reference videos
+    - reference audio
+    - optional start image
+    - optional end image
+
+Current upstream H3 code limits reference images and validates reference-media
+requirements.
+
+Therefore v1 acceptance testing should include H3 because it exercises:
+
+    replace receiver
+    append receiver
+    multiple simultaneous logical image roles
+    capacity
+    model/mode state changes
+
+But MiniPaint must not contain "if H3..." receiver rules.
+
+Those rules belong, if needed at all, inside the WanGP bridge adapter and should
+be derived from current WanGP state/schema.
+
+================================================================================
+27. THEME / NIGHT MODE
+================================================================================
+
+The iframe is a separate document.
+
+Parent Forge/Lobe CSS does not automatically style WanGP internals.
+
+Implement dark integration inside the WanGP plugin.
+
+Priorities:
+
+    - dark page background
+    - dark card/panel background
+    - readable text
+    - consistent input surfaces
+    - consistent dropdowns
+    - consistent buttons
+    - restrained borders
+    - compatible galleries
+    - compatible sliders
+    - compatible tabs
+    - reasonable radius/spacing
+    - no generation behavior changes
+
+Prefer:
+
+    Gradio theme variables
+    bridge-owned class/data attributes
+    narrowly scoped CSS
+
+Do not:
+
+    select controls by their English text label
+    alter hidden generation values
+    port the entire Lobe extension
+
+27.1 Theme synchronization
+--------------------------
+
+Night-first v1 is acceptable.
+
+Optional parent message:
+
+    WANGP_THEME_STATE
+
+Payload:
+
+    mode: dark/light
+    optional accent token
+
+Treat theme as presentation only.
+
+Theme failure must not disable image handoff.
+
+================================================================================
+28. FORGE INTEGRATION POINTS
+================================================================================
+
+The current target repo already has a small entry point registering:
+
+    on_ui_settings
+    on_ui_tabs
+    on_app_started
+    on_after_component where needed
+
+Maintain that pattern.
+
+Suggested entry-point change remains small:
+
+    import wangp registration module
+    register settings action
+    register WanGP tab
+    register app/proxy lifecycle routes
+    register cleanup hook where available
+
+Do not put reverse proxy, subprocess, and bridge logic directly in
+scripts/mini_paint.py.
+
+The current send_log module demonstrates that app_started receives the FastAPI
+app and can attach extension routes. This supports a Forge-side proxy/control
+module.
+
+================================================================================
+29. PROPOSED REPOSITORY LAYOUT
+================================================================================
+
+Suggested:
+
+    minipaint_neo/
+        wangp/
+            __init__.py
+
+            config.py
+                schema
+                load/save/migrate
+                active/pending/backup transaction
+
+            discovery.py
+                WanGP root validation
+                Conda/runtime discovery
+                GPU enumeration
+
+            runtime.py
+                state machine
+                process launch
+                environment
+                port retry
+                process ownership
+                restart/stop
+                health
+
+            proxy.py
+                /wan2gp/ forwarding
+                HTTP streaming
+                optional WebSocket forwarding
+                upstream validation
+                forwarded headers
+
+            bridge.py
+                Forge-side iframe/channel state
+                handshake state
+                request correlation
+                status
+
+            handoff.py
+                flatten/export integration boundary
+                handoff ids
+                manifests
+                validation
+                cleanup
+
+            ui.py
+                WanGP top-level tab shell
+                setup wizard
+                runtime health
+                iframe
+
+            settings.py
+                reinitialize action only
+
+            diagnostics.py
+                health report
+                safe log formatting
+
+    javascript/
+        minipaint_wangp.js
+            iframe lifecycle
+            postMessage protocol
+            receiver query
+            dynamic Send to items
+            tab switch after verified send
+
+    wan2gp_bridge/
+        wan2gp-minipaint-bridge/
+            __init__.py
+            plugin.py
+            compatibility.py
+            receiver_state.py
+            receiver_adapters.py
+            handoff.py
+            bridge_ui.py
+            bridge_js.py
+            theme.css
+            plugin_info.json
+
+    tests/
+        existing tests...
+        test_wangp_config.py
+        test_wangp_handoff.py
+        test_wangp_runtime.py
+        test_wangp_proxy.py
+        test_wangp_protocol.py
+        test_wangp_receiver_contract.py
+        browser_wangp_smoke.py
+
+    docs/
+        WAN2GP_TAB_DESIGN_INTENT_REVISED_2026-09-06.txt
+
+Exact names may change, separation of responsibilities should not.
+
+================================================================================
+30. FAILURE CODES
+================================================================================
+
+Use stable machine-readable failure codes plus friendly text.
+
+Suggested:
+
+    SETUP_REQUIRED
+    WANGP_ROOT_MISSING
+    RUNTIME_MISSING
+    RUNTIME_PROBE_FAILED
+    GPU_UUID_MISSING
+    BRIDGE_MISSING
+    BRIDGE_DISABLED
+    BRIDGE_VERSION_MISMATCH
+    BRIDGE_COMPONENT_INCOMPATIBLE
+    PROCESS_START_FAILED
+    PROCESS_EXITED
+    PORT_IN_USE
+    LOOPBACK_BIND_FAILED
+    PROXY_NOT_READY
+    PROXY_ROOT_PATH_FAILED
+    PROXY_STREAM_FAILED
+    AUTH_BOUNDARY_FAILED
+    IFRAME_NOT_READY
+    BRIDGE_SESSION_MISMATCH
+    RECEIVER_QUERY_TIMEOUT
+    NO_ACTIVE_RECEIVER
+    UNKNOWN_RECEIVER
+    STALE_RECEIVER_STATE
+    RECEIVER_DISABLED
+    RECEIVER_LIMIT_REACHED
+    HANDOFF_NOT_FOUND
+    HANDOFF_INVALID_ID
+    HANDOFF_INVALID_IMAGE
+    HANDOFF_TOO_LARGE
+    HANDOFF_DIGEST_MISMATCH
+    RECEIVER_APPLY_FAILED
+    RECEIVER_VERIFY_FAILED
+    WANGP_RESTARTED
+    INTERNAL_ERROR
+
+User-facing message should not expose secrets or raw local paths unless the
+screen is explicitly a local setup/diagnostic screen where the path is useful.
+
+================================================================================
+31. FAILURE UX
+================================================================================
+
+SETUP_REQUIRED
+    show setup wizard
+
+WANGP_ROOT_MISSING
+    show installation moved/not found
+    Reinitialize
+
+RUNTIME_MISSING
+    show selected environment not found
+    Reinitialize
+
+GPU_UUID_MISSING
+    say selected GPU is unavailable
+    do not fall back
+
+PROCESS_EXITED
+    show Restart WanGP
+
+BRIDGE_VERSION_MISMATCH
+    disable intelligent send
+    offer bridge update/reinitialize
+
+IFRAME_NOT_READY
+    Send menu:
+        WanGP: open WanGP tab and choose an input
+
+NO_ACTIVE_RECEIVER
+    omit WanGP actions or show disabled:
+        WanGP: no active image receiver
+
+STALE_RECEIVER_STATE
+    keep user in MiniPaint
+    say:
+        WanGP input changed; reopen Send to
+
+RECEIVER_LIMIT_REACHED
+    say exact role is full
+
+RECEIVER_VERIFY_FAILED
+    do not switch tabs
+    preserve detailed send log
+
+================================================================================
+32. SECURITY INVARIANTS
+================================================================================
+
+NETWORK
+-------
+
+    - backend only 127.0.0.1
+    - no --listen
+    - no --share
+    - no 0.0.0.0
+    - no user-selected proxy target
+    - browser uses Forge origin
+    - direct LAN test fails
+
+TLS
+---
+
+    - browser TLS terminates at Forge/public reverse proxy
+    - browser never calls http://127.0.0.1:<wan-port>
+    - no mixed-content path
+    - no second WanGP browser certificate required
+
+AUTH
+----
+
+    - /wan2gp/ is tested under the intended Forge auth boundary
+    - bridge operations are not assumed safe solely because backend is loopback
+    - exact message origin/source are checked
+
+BRIDGE
+------
+
+    - protocol version
+    - channel/session binding
+    - strict message whitelist
+    - payload limits
+    - unknown receivers rejected
+    - stale revision rejected
+    - no arbitrary function names
+    - no eval
+
+FILES
+-----
+
+    - browser never supplies arbitrary file path
+    - opaque handoff id only
+    - fixed controlled root
+    - strict id syntax
+    - canonical/root checks
+    - no traversal
+    - regular file check
+    - image decode validation
+    - size/dimension limits
+    - stale cleanup bounded to root
+
+PROCESS
+-------
+
+    - separate environment
+    - GPU environment set before Python/CUDA startup
+    - tracked process handle
+    - owned process only
+    - no broad Python process kill
+
+PROXY
+-----
+
+    - one internal upstream only
+    - no open proxy parameter
+    - strip inappropriate hop-by-hop headers
+    - no backend port disclosure in normal UI
+    - bounded request sizes where practical
+    - streaming rather than unbounded buffering
+
+================================================================================
+33. WHAT NOT TO ENABLE
+================================================================================
+
+Do not enable WanGP arbitrary filesystem MCP access for this feature.
+
+Current WanGP MCP documentation has an explicit option allowing arbitrary
+filesystem reads. This integration does not need it.
+
+Do not add:
+
+    --mcp-allow-read-file-system
+
+for MiniPaint handoff.
+
+The controlled handoff directory is sufficient.
+
+Do not expose a second WanGP MCP HTTP listener as part of this feature unless a
+future design explicitly requires it and separately reviews its security.
+
+================================================================================
+34. PERFORMANCE / RESOURCE BEHAVIOR
+================================================================================
+
+The integration does not own WanGP model offload policy.
+
+WanGP continues to manage:
+
+    VRAM offload
+    RAM use
+    model caching
+    performance profiles
+
+Integration responsibility:
+
+    physical CUDA visibility
+    process lifetime
+
+Keeping managed WanGP warm after first use is allowed.
+
+This is useful because model loading can be expensive.
+
+A future "Restart WanGP / release all WanGP VRAM" action may terminate/restart
+the owned child without touching Forge's CUDA context.
+
+Do not implement that as a prerequisite for v1.
+
+================================================================================
+35. CONCURRENCY
+================================================================================
+
+35.1 Process startup lock
+-------------------------
+
+Only one start operation per Forge integration runtime.
+
+35.2 Send serialization
+-----------------------
+
+Multiple image sends may occur quickly.
+
+Each send gets:
+
+    request_id
+    handoff_id
+    receiver revision
+
+Reference append operations must avoid lost updates.
+
+Example race:
+
+    send A snapshots 2 refs
+    send B snapshots 2 refs
+    A writes 3
+    B writes 3 and loses A
+
+Therefore adapter apply/verify for mutable list receivers must be serialized per
+bridge session/receiver or use a revision-safe atomic event flow.
+
+35.3 UI session isolation
+-------------------------
+
+Do not let session A's receiver update overwrite session B.
+
+35.4 Restart during send
+------------------------
+
+If WanGP runtime instance id changes during send:
+
+    reject
+    do not apply handoff to new instance under stale session
+
+================================================================================
+36. REINITIALIZE BEHAVIOR
+================================================================================
+
+Reinitialize should:
+
+    - stop extension-owned WanGP child if running
+    - invalidate runtime instance
+    - invalidate iframe channel
+    - invalidate receiver states
+    - preserve active config in backup
+    - mark setup incomplete
+    - return WanGP tab to wizard
+
+It must not:
+
+    - delete WanGP root
+    - delete environment
+    - delete models
+    - delete outputs
+    - delete presets
+    - delete unrelated plugins
+    - delete user LoRAs
+
+Bridge plugin folder may be updated only when the new setup explicitly installs
+the extension-owned bridge version.
+
+================================================================================
+37. LEGACY MINIPAINT FRONTEND
+================================================================================
+
+Primary target:
+
+    native Canvas frontend
+
+Legacy Old UI support is desirable but must not block core implementation.
+
+v1 acceptable sequencing:
+
+    Phase A:
+        Canvas intelligent WanGP Send to
+
+    Phase B:
+        legacy iframe MiniPaint parity
+
+If legacy support is added, use the same Forge/WanGP bridge and receiver
+contract.
+
+Do not implement a second independent WanGP integration inside legacy
+MiniPaint.
+
+================================================================================
+38. IMPLEMENTATION PHASES
+================================================================================
+
+PHASE 0 - Compatibility spikes
+------------------------------
+
+Before large implementation, prove:
+
+    A. Forge route can proxy current WanGP/Gradio under /wan2gp/
+    B. protected Forge deployment does not expose /wan2gp/ unauthenticated
+    C. current bridge plugin can request/read required receiver components
+    D. bridge Gradio event can populate Start Frame
+    E. bridge Gradio event can append Reference Image
+    F. pressing Generate manually uses bridge-inserted image
+    G. two browser sessions do not share live receiver state
+
+Do not skip Phase 0.
+
+It directly resolves the highest-risk unknowns.
+
+PHASE 1 - Config / setup / runtime
+----------------------------------
+
+    persistent schema
+    config transaction
+    WanGP root validation
+    environment validation
+    GPU UUID discovery
+    lazy runtime
+    loopback binding
+    runtime state machine
+    process ownership
+
+PHASE 2 - Secure proxy + real UI
+--------------------------------
+
+    /wan2gp/ reverse proxy
+    root_path
+    streaming
+    forwarded headers
+    auth-boundary test
+    top-level iframe
+    health/restart UI
+
+PHASE 3 - WanGP bridge
+----------------------
+
+    plugin install/update
+    handshake
+    custom JS
+    session binding
+    static capability read
+    live state query
+    start/end/reference adapters
+
+PHASE 4 - Intelligent MiniPaint Send to
+---------------------------------------
+
+    menu on-demand query
+    receiver descriptors
+    state fingerprint/revision
+    handoff id/storage
+    apply
+    verify
+    send log
+    tab switch
+
+PHASE 5 - Theme / polish
+------------------------
+
+    dark theme
+    iframe sizing
+    focus hint
+    error copy/report
+    legacy UI parity if desired
+
+PHASE 6 - Extended receiver roles
+---------------------------------
+
+    control image
+    positioned refs
+    style refs
+    other discovered roles
+
+PHASE 7 - Optional lifecycle tooling
+------------------------------------
+
+    hard restart / VRAM reset
+    attach-to-existing managed instance
+    optional send-and-generate as a separate feature
+
+================================================================================
+39. ACCEPTANCE TESTS - TARGET REPOSITORY REGRESSION
+================================================================================
+
+[ ] Existing MiniPaint tab still builds.
+[ ] Existing Canvas behavior still works.
+[ ] Existing Old UI fallback still works.
+[ ] img2img send unchanged.
+[ ] Inpaint send unchanged.
+[ ] Extras send unchanged.
+[ ] ImageStitch send unchanged.
+[ ] Existing send log still rotates.
+[ ] Existing browser smoke test still passes.
+[ ] No new document-wide MutationObserver.
+[ ] No permanent page polling.
+[ ] No startup synthetic host-tab clicking.
+[ ] CSS remains scoped.
+
+================================================================================
+40. ACCEPTANCE TESTS - SETUP / PERSISTENCE
+================================================================================
+
+[ ] Fresh install shows WanGP setup.
+[ ] Invalid WanGP root rejected clearly.
+[ ] Valid root accepted.
+[ ] Environment prefix enumerated/resolved.
+[ ] Wrong environment fails probe.
+[ ] GPU list shows names, UUIDs, VRAM.
+[ ] GPU UUID persists.
+[ ] Full Forge restart retains setup.
+[ ] Second launch does not rerun wizard.
+[ ] Runtime-only values are absent from config.
+[ ] Config write is atomic.
+[ ] Corrupt config gives safe recovery UX.
+[ ] Newer unsupported schema fails closed.
+[ ] Reinitialize preserves backup.
+[ ] Failed reinitialize can restore prior config after revalidation.
+
+================================================================================
+41. ACCEPTANCE TESTS - GPU
+================================================================================
+
+Example intended machine:
+
+    Forge -> RTX 3090
+    WanGP -> RTX 5090
+
+[ ] Forge remains on its configured device.
+[ ] Child environment contains selected 5090 UUID.
+[ ] WanGP sees only selected device set.
+[ ] Inside child selected physical card may be cuda:0.
+[ ] Removing configured GPU causes explicit failure.
+[ ] No automatic fallback to 3090.
+[ ] Changing OS GPU order does not change persisted physical selection.
+
+================================================================================
+42. ACCEPTANCE TESTS - NETWORK / SECURITY
+================================================================================
+
+[ ] WanGP listens on 127.0.0.1 only.
+[ ] --listen absent.
+[ ] --share absent.
+[ ] backend port dynamically selected.
+[ ] second LAN host cannot connect directly to backend.
+[ ] iframe source is /wan2gp/.
+[ ] browser network log does not show direct backend port requests.
+[ ] HTTPS Forge gives HTTPS iframe/content from browser perspective.
+[ ] /wan2gp/ preserves Forge authentication protection.
+[ ] unauthenticated request is denied where Forge auth is enabled.
+[ ] proxy cannot be made to request another localhost port.
+[ ] proxy cannot be made to request remote URL.
+[ ] path traversal handoff id rejected.
+[ ] slash/backslash in handoff id rejected.
+[ ] oversized image rejected.
+[ ] invalid PNG rejected.
+[ ] stale handoff rejected/cleaned.
+[ ] bridge message from unexpected origin rejected.
+[ ] bridge message from wrong source window rejected.
+[ ] unknown protocol rejected.
+[ ] unknown receiver rejected.
+[ ] stale session rejected.
+
+================================================================================
+43. ACCEPTANCE TESTS - PROXY
+================================================================================
+
+Against the installed WanGP/Gradio version:
+
+[ ] GET /wan2gp/ renders.
+[ ] static assets render.
+[ ] Gradio config/root URLs contain correct public subpath.
+[ ] normal control changes work.
+[ ] model switch works.
+[ ] dropdowns work.
+[ ] galleries work.
+[ ] file upload works.
+[ ] settings import/export works where WanGP normally supports it.
+[ ] queue event path works.
+[ ] long generation connection is not cut by proxy timeout.
+[ ] event/stream response is streamed.
+[ ] media playback/download works.
+[ ] HTTP range request works if required by video playback.
+[ ] WebSocket path works if current Gradio uses it.
+[ ] cookies/redirects do not escape /wan2gp unexpectedly.
+[ ] browser never navigates to direct 127.0.0.1 port.
+
+================================================================================
+44. ACCEPTANCE TESTS - BRIDGE SESSION
+================================================================================
+
+[ ] iframe HELLO/READY handshake works.
+[ ] reload iframe invalidates old session.
+[ ] old request id cannot complete into new session.
+[ ] receiver query reads current browser values.
+[ ] two Forge browser tabs get independent bridge sessions.
+[ ] changing model in browser A does not change receiver menu in B.
+[ ] changing receiver mode invalidates old revision.
+[ ] bridge restart invalidates parent state.
+[ ] no background polling required.
+
+================================================================================
+45. ACCEPTANCE TESTS - H3 CURRENT BEHAVIOR
+================================================================================
+
+The expected actions are based on live current state, not model-name assumptions.
+
+H3 FL2VA:
+
+[ ] Start active -> Start Frame action.
+[ ] End active -> End Frame action.
+[ ] Start + End active -> both.
+[ ] Start send replaces start, not reference.
+[ ] End send replaces end, not reference.
+
+H3 Ref2VA:
+
+[ ] Reference Images active -> Reference action.
+[ ] Reference send appends and preserves existing refs.
+[ ] Reference count is verified.
+[ ] Full reference capacity prevents another append.
+[ ] If current Ref2VA UI/state exposes Start, Start action appears.
+[ ] If current Ref2VA UI/state exposes End, End action appears.
+[ ] If Reference + Start + End are simultaneously active, all valid actions may
+    appear independently.
+[ ] No extension rule falsely removes Start/End merely because label contains
+    "Ref2VA."
+[ ] No extension rule invents Start/End if the current state does not expose
+    them.
+
+================================================================================
+46. ACCEPTANCE TESTS - VERIFIED SEND
+================================================================================
+
+[ ] MiniPaint flattens visible layers.
+[ ] actual handoff is PNG.
+[ ] handoff id contains no path.
+[ ] bridge validates id/file/type/size.
+[ ] reference append preserves old refs.
+[ ] start/end replacement only changes selected role.
+[ ] acknowledgement includes correct receiver.
+[ ] dimensions match.
+[ ] digest/pixel verification succeeds.
+[ ] successful send logged.
+[ ] successful send switches to WanGP.
+[ ] failed verification remains on MiniPaint.
+[ ] failed send logged.
+[ ] stale receiver remains on MiniPaint.
+[ ] stale receiver says reopen Send to.
+[ ] temporary file cleaned safely.
+
+================================================================================
+47. ACCEPTANCE TESTS - CONCURRENCY
+================================================================================
+
+[ ] two simultaneous startup requests produce one child.
+[ ] two reference appends do not lose one another.
+[ ] send during restart fails safely.
+[ ] send to old runtime instance rejected.
+[ ] handoff cleanup does not delete another in-flight handoff.
+[ ] process stop waits/bounds active bridge work safely.
+
+================================================================================
+48. OBSERVABILITY / DIAGNOSTICS
+================================================================================
+
+Provide a diagnostic report suitable for bug reports.
+
+Suggested content:
+
+    Forge version/build if available
+    Gradio version used by Forge
+    extension version
+    setup schema version
+    WanGP root basename or redacted path by default
+    environment display name
+    selected GPU name/UUID
+    runtime state
+    child PID
+    backend loopback port
+    WanGP version if reported
+    WanGP Gradio version if reported
+    bridge version/protocol
+    proxy health steps
+    current bridge session id truncated/redacted
+    current model label/type
+    receiver descriptors
+    last receiver revision
+    last send result
+    recent send-log lines
+
+Never include:
+
+    runtime secrets
+    passwords
+    cookies
+    auth headers
+
+"Copy diagnostic report" is recommended.
+
+================================================================================
+49. SPECIAL ATTENTION / NOT FULLY CONCLUSIVE FROM SOURCE REVIEW
+================================================================================
+
+These points are feasible but must receive deliberate developer attention.
+
+49.1 Exact receiver component ids/types
+---------------------------------------
+
+WanGP's plugin API supports requesting components by elem_id.
+
+However, this research did not establish a permanent guarantee that every
+desired image receiver across every relevant model/version has an unchanging
+elem_id and value type.
+
+Action:
+
+    build the adapter spike first
+    document exact requested ids/types for target WanGP revision
+    isolate them in compatibility.py
+    add tests
+    fail bridge compatibility if mandatory v1 components cannot be accessed
+
+Do not solve this by MiniPaint DOM scraping.
+
+49.2 Exact Gradio event side effects after programmatic receiver update
+-----------------------------------------------------------------------
+
+Returning a Gradio component value is the correct family of mechanism, but some
+WanGP controls may have dependent callbacks normally triggered by human
+interaction.
+
+Action:
+
+    for Start, End, Reference:
+        populate by bridge
+        inspect visible UI
+        press Generate without touching the field
+        verify generation receives it
+
+If an official downstream event must be called, put it in the adapter.
+
+49.3 Reverse proxy transport completeness
+-----------------------------------------
+
+root_path support is confirmed.
+
+Exact queue/stream/WebSocket behavior depends on the installed Gradio release.
+
+Action:
+
+    prototype proxy before building the full wizard
+    test streaming, queue, assets, video/media paths
+    do not ship a naive requests-based body-buffering proxy
+
+49.4 Forge authentication coverage
+----------------------------------
+
+The target repo proves extensions can register FastAPI routes on app_started.
+It does not by itself prove every dynamically added route is protected in every
+Forge auth configuration.
+
+Action:
+
+    test authenticated and unauthenticated /wan2gp/ explicitly.
+
+This is a release blocker.
+
+49.5 Windows process-tree ownership
+-----------------------------------
+
+A simple Popen handle is not always sufficient to guarantee grandchildren are
+terminated on host exit.
+
+Action:
+
+    prefer/test a Job Object or equivalent process-group ownership mechanism.
+
+Do not kill unrelated Python processes.
+
+49.6 Standalone WanGP running concurrently
+------------------------------------------
+
+Not conclusively proven safe with the same config/root.
+
+Action:
+
+    v1 document single managed instance expectation.
+    do not kill unknown process.
+    add attach mode only with explicit identity/bridge verification later.
+
+49.7 Settings-only Reinitialize button
+--------------------------------------
+
+Exact best Forge Neo UI mechanism should be confirmed.
+
+Action:
+
+    use supported action/HTML mechanism
+    avoid dummy persistent setting
+    if needed, Settings links to the one integration management action in WanGP
+    tab.
+
+49.8 Direct environment interpreter vs conda run
+------------------------------------------------
+
+Direct <prefix>/python is simpler and avoids shell activation, but environment
+activation scripts can matter on some installs.
+
+Action:
+
+    wizard probe both as needed
+    use the one proven valid for selected environment
+    log launch strategy
+
+49.9 Theme parity
+-----------------
+
+Exact Lobe visual parity is not a functional requirement.
+
+Action:
+
+    prioritize correct dark Gradio controls.
+    theme regressions must not block receiver handoff.
+
+49.10 Legacy MiniPaint UI
+-------------------------
+
+Primary target is Canvas.
+
+Action:
+
+    do not delay secure receiver bridge for complete legacy parity.
+
+================================================================================
+50. DEVELOPER IMPLEMENTATION ORDER - RECOMMENDED
+================================================================================
+
+Do not begin with the full wizard.
+
+Recommended first branch:
+
+1. Hard-code only DEV-TIME local values for a throwaway proxy spike.
+2. Launch current WanGP loopback with GRADIO_ROOT_PATH=/wan2gp.
+3. Prove real UI fully works through Forge /wan2gp/.
+4. Write minimal WanGP extension plugin.
+5. Request only one known receiver, preferably Start Frame.
+6. Create hidden bridge event.
+7. From parent iframe message, populate one image.
+8. Press Generate manually and prove WanGP uses it.
+9. Add Reference adapter and prove append.
+10. Add live receiver query.
+11. Add deterministic state revision.
+12. Test two browser sessions.
+13. Only after these pass, build persistent setup/discovery UX.
+
+Reason:
+
+The technically riskiest elements are component/session/proxy compatibility,
+not JSON persistence or GPU enumeration.
+
+Prove the compatibility boundaries first.
+
+================================================================================
+51. DEVELOPER RULES FOR UPSTREAM CHANGES
+================================================================================
+
+When WanGP updates:
+
+DO:
+
+    - run bridge compatibility tests
+    - query current model schema
+    - re-run Start/End/Reference integration tests
+    - update compatibility adapter only where needed
+    - update bridge minimum-version metadata if genuinely required
+
+DO NOT:
+
+    - patch MiniPaint with new model-name conditionals
+    - add DOM selectors for a newly moved upload widget
+    - trust old H3 behavior
+    - silently fall back to a different receiver
+
+When Gradio updates:
+
+DO:
+
+    - run proxy test suite
+    - run iframe bridge test
+    - run upload/queue/media tests
+
+When Forge updates:
+
+DO:
+
+    - run top-level tab smoke test
+    - run auth-boundary test
+    - run route-registration test
+    - run existing MiniPaint destinations
+
+================================================================================
+52. NON-GOALS FOR V1
+================================================================================
+
+Do not make v1 depend on:
+
+    - rebuilding WanGP UI in Forge
+    - automatic video generation after Send
+    - cross-machine WanGP
+    - LAN exposure
+    - public port forwarding
+    - second WanGP TLS certificate
+    - exact Lobe extension replication
+    - universal support for every WanGP media role
+    - DOM scraping
+    - permanent MutationObserver
+    - continuous receiver polling
+    - arbitrary filesystem API
+    - WanGP MCP arbitrary-read mode
+    - attach to an unknown pre-existing WanGP process
+    - complete legacy MiniPaint parity
+    - generic remote administration
+
+================================================================================
+53. OPTIONAL FUTURE FEATURES
+================================================================================
+
+Possible after v1:
+
+    - Send and Generate
+    - Control Image receiver
+    - positioned frame receiver
+    - style reference receiver
+    - status strip with GPU VRAM
+    - hard restart / release WanGP VRAM
+    - safe attach to an explicitly trusted existing WanGP instance
+    - light/dark live theme synchronization
+    - receiver focus/highlight
+    - video/audio handoff from other Forge surfaces
+    - stronger shared local IPC that bypasses browser for control while still
+      using the iframe for session identification
+
+Each should reuse the same logical receiver/session contract where applicable.
+
+================================================================================
+54. RESEARCH BASIS - 2026-09-06
+================================================================================
+
+Primary target repository:
+
+    https://github.com/RJSprod/a1111-mini-paint-NEO
+
+Current target-repo findings used by this spec:
+
+    - one stable Mini Paint tab
+    - ForgeCanvas default Canvas
+    - current Send to menu
+    - PNG sends
+    - visible-layer flattening
+    - verified destination philosophy
+    - transfer log
+    - no broad startup observers/polling
+    - small scripts/mini_paint.py
+    - minipaint_neo modular package
+    - app_started FastAPI route registration
+
+WanGP repository:
+
+    https://github.com/deepbeepmeep/Wan2GP
+
+WanGP plugin documentation:
+
+    https://github.com/deepbeepmeep/Wan2GP/blob/main/docs/PLUGINS.md
+
+Relevant confirmed plugin facilities:
+
+    WAN2GPPlugin
+    request_component
+    request_global
+    post_ui_setup
+    on_model_change
+    insert_after
+    add_tab
+    add_custom_js
+
+WanGP plugin implementation:
+
+    https://github.com/deepbeepmeep/Wan2GP/blob/main/shared/utils/plugins.py
+
+WanGP settings documentation:
+
+    https://github.com/deepbeepmeep/Wan2GP/blob/main/docs/SETTINGS.md
+
+Relevant settings:
+
+    image_prompt_type
+    image_start
+    image_end
+    image_refs
+    image_guide
+    video_prompt_type
+    frames_positions
+
+WanGP API documentation:
+
+    https://github.com/deepbeepmeep/Wan2GP/blob/main/docs/API.md
+
+Relevant current API research:
+
+    generic model metadata/schema exposes media input capabilities such as
+    image start/end/reference and normalized allowed setting values.
+
+WanGP CLI documentation:
+
+    https://github.com/deepbeepmeep/Wan2GP/blob/main/docs/CLI.md
+
+Relevant server controls:
+
+    --server-port
+    --server-name
+    --listen
+    --share
+    CUDA_VISIBLE_DEVICES environment behavior
+
+MiniMax H3 handler:
+
+    https://github.com/deepbeepmeep/Wan2GP/blob/main/models/minimax_h3/minimax_h3_handler.py
+
+Current important H3 research snapshot:
+
+    FL2VA:
+        start/end conditioning supported
+
+    Ref2VA:
+        references supported
+        optional start/end images also documented in current upstream
+        reference-image count limit enforced in current handler
+
+MiniMax H3 pipeline:
+
+    https://github.com/deepbeepmeep/Wan2GP/blob/main/models/minimax_h3/pipeline.py
+
+Current important pipeline evidence:
+
+    image_start and image_end are accepted as pipeline inputs;
+    start/end conditions are applied;
+    reference material is gated by reference mode/checkpoint.
+
+WanGP reverse-proxy issue:
+
+    https://github.com/deepbeepmeep/Wan2GP/issues/1415
+
+Research use:
+
+    documents GRADIO_ROOT_PATH=/wan2gp workaround and reverse-proxy forwarded
+    header / upgrade requirements.
+
+Gradio Blocks root_path:
+
+    https://gradio.app/docs/gradio/blocks
+
+Gradio reverse proxy guide:
+
+    https://gradio.app/guides/running-gradio-on-your-web-server-with-nginx
+
+Research use:
+
+    root_path / GRADIO_ROOT_PATH
+    forwarded host/protocol behavior
+    sub-path deployment
+
+Gradio Request:
+
+    https://gradio.app/docs/gradio/request
+
+Research use:
+
+    Gradio request exposes session_hash, reinforcing that UI state must be
+    treated as browser-session scoped.
+
+NVIDIA CUDA_VISIBLE_DEVICES:
+
+    https://docs.nvidia.com/deploy/topics/topic_5_2_1.html
+
+Research use:
+
+    UUIDs are supported and recommended over indices for unambiguous device
+    selection.
+
+Forge-family data path / extension environment reference:
+
+    https://github.com/lllyasviel/stable-diffusion-webui-forge/blob/main/modules/cmd_args.py
+
+Research use:
+
+    Forge-family code exposes a data_path concept suitable for persistent
+    extension-owned integration state.
+
+================================================================================
+55. FINAL PRODUCT INTENT
+================================================================================
+
+The finished feature should feel like WanGP became a first-class intelligent
+destination of MiniPaint.
+
+The user experience:
+
+    Generate in Forge Neo
+        -> send/open in MiniPaint
+        -> edit/crop/mask/layer/prepare
+        -> open WanGP
+        -> choose model and input mode using the real WanGP UI
+        -> return to MiniPaint
+        -> Send to
+        -> see only the image roles that the current WanGP session can use
+        -> choose exact role
+        -> image arrives in that actual visible WanGP input
+        -> transfer is verified
+        -> Forge returns to WanGP
+        -> user adjusts normal WanGP settings
+        -> user presses Generate
+
+The user should not need to know:
+
+    image_start
+    image_end
+    image_refs
+    internal component ids
+    backend port
+    GPU index ordering
+    WanGP's filesystem path for a handoff
+    Gradio session internals
+
+The user should never have to:
+
+    manually save/re-open the MiniPaint image
+    expose WanGP to the LAN
+    maintain a second copy of WanGP's controls
+    remember whether a historical version of H3 used a particular input matrix
+
+The implementation rule is:
+
+    Secure.
+    Same-origin.
+    Real WanGP.
+    Separate process.
+    Selected GPU UUID.
+    Live-session receiver discovery.
+    Stable logical receiver contract.
+    Revision-safe send.
+    Verified handoff.
+    No guessed destination.
+
+END OF REVISED DESIGN INTENT / IMPLEMENTATION SPECIFICATION

@@ -55,6 +55,12 @@ DESTINATION_LABELS = {
 # galleries. The host's hidden image textboxes are written from the browser.
 BACKEND_TARGETS = ("extras", "stitch_txt2img", "stitch_img2img")
 STITCH_TARGETS = ("stitch_txt2img", "stitch_img2img")
+# WanGP is not one of the destinations above and never becomes one: it has no
+# component here to write into. A request for it names a logical receiver in
+# the live WanGP page ("wangp.start_frame"), this side only prepares the PNG,
+# and the browser hands the file's opaque id to that page. See wangp/.
+WANGP_PREFIX = "wangp."
+WANGP_INSTRUCTION = "wangp_send"
 SCALE_MIN, SCALE_MAX = 10, 400
 
 PREFIX = "minipaint_canvas"
@@ -84,6 +90,13 @@ ASPECT_JS = f"(choice, w, h, original) => {{ if ({_JS}) {_JS}.setAspect(choice, 
 TOOL_JS = f"(tool) => {{ if ({_JS}) {_JS}.setTool(tool); }}"
 SIZE_JS = f"(size) => {{ if ({_JS}) {_JS}.setBrushSize(size); }}"
 SWITCH_JS = f"(target) => {{ if ({_JS}) {_JS}.switchTo(target); }}"
+# The WanGP half of a send, which only the browser can do: the picture is
+# already a file on disk, and the one page that can be asked to take it is the
+# WanGP iframe in this document. It switches tabs only on a verified
+# acknowledgement, so an unproved send leaves the user where they are.
+WANGP_DELIVER_JS = (
+    f"async (target, payload) => {{ if ({_JS}) {{ await {_JS}.deliverWanGP(target, payload); }} }}"
+)
 SWITCH_CANVAS_JS = f"() => {{ if ({_JS}) {_JS}.switchTo('canvas'); }}"
 CROP_JS = (
     f"(fg, state, mode, box) => {{ if ({_JS}) {_JS}.mark(); "
@@ -206,6 +219,117 @@ def resolve_destination(choice: str, has_mask: bool, has_expansion: bool) -> str
     if choice in DESTINATION_LABELS:
         return choice
     return suggested_destination(has_mask, has_expansion)
+
+
+def _wangp(name: str):
+    """One module of the WanGP package, or None if it will not import.
+
+    Contained on purpose and imported here rather than at the top of the file:
+    the WanGP integration is optional, it pulls in a good deal more than the
+    Canvas needs, and nothing about it may be able to stop this tab loading.
+    """
+    try:
+        from importlib import import_module
+
+        return import_module(f"..wangp.{name}", __package__)
+    except Exception:
+        return None
+
+
+def wangp_receiver_ids() -> tuple:
+    """The logical receiver ids this build knows, or none at all.
+
+    No WanGP package means no receiver is namable, which means a request that
+    claims one is refused rather than guessed at.
+    """
+    module = _wangp("protocol")
+    ids = getattr(module, "RECEIVER_IDS", ()) if module is not None else ()
+    return tuple(ids) if isinstance(ids, (tuple, list)) else ()
+
+
+def wangp_receiver(choice: str, known: typing.Optional[typing.Sequence[str]] = None) -> str:
+    """The WanGP input a Send to request names, or "" for every other request.
+
+    The menu writes "wangp.<receiver id>" and the id has to be one the shared
+    protocol declares. Anything else - a stray word, a path, an id this build
+    has never heard of - is not a destination, and the send falls through to
+    the ordinary local ones.
+    """
+    text = str(choice or "")
+    if not text.startswith(WANGP_PREFIX):
+        return ""
+    receiver = text[len(WANGP_PREFIX) :]
+    names = wangp_receiver_ids() if known is None else known
+    return receiver if receiver in names else ""
+
+
+def wangp_label(receiver_id: str) -> str:
+    """How the status line and the send log name one WanGP input.
+
+    Taken from the shared protocol's own menu label, minus the verb, so that
+    the line in the menu and the line in the log cannot drift apart.
+    """
+    module = _wangp("protocol")
+    labels = getattr(module, "DEFAULT_MENU_LABELS", {}) if module is not None else {}
+    menu_label = labels.get(receiver_id, "") if isinstance(labels, dict) else ""
+    verb = "Send Image to "
+    if isinstance(menu_label, str) and menu_label.startswith(verb):
+        return menu_label[len(verb) :]
+    return "WanGP " + str(receiver_id or "").replace("_", " ").title()
+
+
+def _digest(value: typing.Any) -> str:
+    """A hex digest as reported, or an empty string."""
+    text = str(value or "").strip().lower()
+    return text if 32 <= len(text) <= 128 and all(character in "0123456789abcdef" for character in text) else ""
+
+
+def _whole(value: typing.Any) -> int:
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else 0
+
+
+def wangp_report(value: typing.Any, known: typing.Optional[typing.Sequence[str]] = None) -> dict:
+    """The browser's account of how one WanGP handoff ended.
+
+    Only the browser can give this account: the acknowledgement comes from the
+    live WanGP page over postMessage and is the only evidence the picture
+    landed in the input the user chose. It is still input, so every field is
+    checked and anything unrecognised is dropped rather than repeated into a
+    status line or a log file.
+    """
+    try:
+        raw = json.loads(value) if isinstance(value, str) and value.strip() else {}
+    except ValueError:
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    names = wangp_receiver_ids() if known is None else known
+    receiver = str(raw.get("receiver_id") or "")
+    failure = str(raw.get("code") or "")
+    module = _wangp("protocol")
+    told = raw.get("handoff_id")
+    valid = getattr(module, "valid_handoff_id", None) if module is not None else None
+    return {
+        "handoff_id": str(told) if callable(valid) and valid(told) else "",
+        "receiver_id": receiver if receiver in names else "",
+        "ok": raw.get("ok") is True,
+        "code": failure if failure.replace("_", "").isalpha() and failure.isupper() else "",
+        "detail": str(raw.get("detail") or "")[:200],
+        "role": str(raw.get("role") or "")[:40],
+        "operation": str(raw.get("operation") or "")[:20],
+        "verification": str(raw.get("verification") or "")[:40],
+        "state_revision": str(raw.get("state_revision") or "")[:64],
+        "width": _whole(raw.get("width")),
+        "height": _whole(raw.get("height")),
+        "new_count": _whole(raw.get("new_count")),
+        # Evidence, kept in the shape the verifier expects. A digest is hex or
+        # it is nothing; anything else is dropped rather than passed along to
+        # be compared against something it could never match.
+        "source_digest": _digest(raw.get("source_digest")),
+        "receiver_digest": _digest(raw.get("receiver_digest")),
+        "source_pixel_digest": _digest(raw.get("source_pixel_digest")),
+        "receiver_pixel_digest": _digest(raw.get("receiver_pixel_digest")),
+    }
 
 
 def layer_list_html(doc: document.Document) -> str:
@@ -896,6 +1020,10 @@ class TouchCanvas:
         if image is None:
             return (*skips, *self._info(doc, mode, "There is no image to send."), "", "")
 
+        receiver = wangp_receiver(_request(request))
+        if receiver:
+            return self._send_to_wangp(doc, mode, receiver, notes)
+
         target = resolve_destination(_request(request), doc.has_mask, doc.has_expansion)
         label = DESTINATION_LABELS[target]
         if target not in self.targets:
@@ -935,6 +1063,123 @@ class TouchCanvas:
         delivered = [outgoing] if target in STITCH_TARGETS else outgoing
         outputs = [delivered if key == target else gr.skip() for key in self.image_targets]
         return (*outputs, *self._info(doc, mode, f"Sent to {label}.", notes), instruction, payload)
+
+    def _send_to_wangp(self, doc: document.Document, mode: str, receiver_id: str, notes: list) -> tuple:
+        """Prepare one image for the WanGP tab, and stop there.
+
+        The composite is written as a lossless PNG under the extension's own
+        handoff directory, and what goes back to the browser is that file's
+        opaque id - never a path, and never an image into one of the host's
+        inputs, because WanGP has none here to write into. The rest of the
+        send belongs to the browser: only the live WanGP page in this document
+        can be asked whether it took the picture, and only its verified
+        acknowledgement counts. ``wangp_result`` records how it ended.
+        """
+        skips = [gr.skip() for _ in self.image_targets]
+        handoff = _wangp("handoff")
+        errors = _wangp("errors")
+        label = wangp_label(receiver_id)
+        if handoff is None:
+            return (*skips, *self._info(doc, mode, "WanGP support is not available in this install, so nothing was sent."), "", "")
+
+        outgoing = self._outgoing(doc, "wangp", label, notes)
+        try:
+            prepared = handoff.write(outgoing)
+        except Exception as error:  # a full disk, an unreadable image, a refused size
+            code = str(getattr(error, "code", "") or "INTERNAL_ERROR")
+            sentence = errors.message(code) if errors is not None else "The image could not be prepared for WanGP."
+            log_quietly({"destination": f"Canvas -> {label}", "outcome": f"failed: {code}", "steps": list(notes)})
+            return (*skips, *self._info(doc, mode, sentence, notes), "", "")
+
+        # What was asked for, kept so the answer can be held to it. Without
+        # this the only record of the chosen input is the browser's own, and an
+        # acknowledgement naming a different one would be checked against
+        # itself. ``send_mask`` looks at the instruction before this, so a
+        # WanGP send in here cannot be mistaken for a pending inpaint.
+        doc.pending_send = {"wangp": receiver_id, "handoff": prepared.id}
+        doc.last_send = label
+        notes.append(f"a {outgoing.width}x{outgoing.height} PNG was prepared for {label}")
+        return (
+            *skips,
+            *self._info(doc, mode, f"Sending to {label}…", notes),
+            f"{WANGP_INSTRUCTION}:{receiver_id}",
+            prepared.id,
+        )
+
+    def wangp_result(self, state, report):
+        """The status line for a WanGP send, once the browser knows how it went.
+
+        The send log entry is built by ``wangp.bridge``, which owns what may
+        and may not be written to a file that outlives the run - no handoff id,
+        no channel, no session. The sentence shown here is the code's own, so
+        the screen and the log never disagree about what happened.
+        """
+        doc = document.ensure(state)
+        outcome = wangp_report(report)
+
+        # The prepared PNG has done its job either way: the bridge decoded it
+        # into WanGP's own component value, so nothing points at the file any
+        # more. This is the only moment that knows a send is over, and it runs
+        # before the report is judged - a send that failed, or one that came
+        # back naming no receiver at all, still leaves a file to let go of.
+        handoff = _wangp("handoff")
+        errors = _wangp("errors")
+        bridge = _wangp("bridge")
+
+        # The manifest of the file this send actually wrote, read before the
+        # file is let go. It is the only thing on this side that knows what was
+        # sent, and section 23 is explicit that an acknowledgement is a claim:
+        # the picture WanGP says it took has to be the one that left here.
+        expected = handoff.manifest_of(outcome["handoff_id"]) if handoff is not None else None
+        if handoff is not None and outcome["handoff_id"]:
+            handoff.discard(outcome["handoff_id"])
+
+        # The receiver this send was prepared for, from this side's own record
+        # rather than from the answer being judged.
+        pending = getattr(doc, "pending_send", None)
+        asked_for = pending.get("wangp") if isinstance(pending, dict) else ""
+        if isinstance(pending, dict) and pending.get("handoff") == outcome["handoff_id"]:
+            doc.pending_send = None
+
+        if outcome["ok"] and bridge is not None and isinstance(expected, dict):
+            proven, level, code = bridge.verify_result(
+                dict(expected, receiver_id=asked_for or outcome["receiver_id"], operation=outcome["operation"]),
+                dict(outcome, ok=True),
+            )
+            if not proven:
+                outcome["ok"] = False
+                outcome["code"] = code or "RECEIVER_VERIFY_FAILED"
+            elif level:
+                outcome["verification"] = level
+
+        if not outcome["receiver_id"]:
+            return gr.skip()
+        label = wangp_label(outcome["receiver_id"])
+        if outcome["ok"]:
+            doc.last_send = label
+            message = f"Sent to {label}."
+            notes = [note for note in (outcome["verification"], outcome["operation"]) if note]
+        else:
+            code = outcome["code"] or "INTERNAL_ERROR"
+            message = errors.message(code) if errors is not None else "The image was not sent to WanGP."
+            notes = []
+        if bridge is not None:
+            bridge.log_transfer(
+                {
+                    "destination": f"Canvas -> {label}",
+                    "receiver_id": outcome["receiver_id"],
+                    "receiver_role": outcome["role"],
+                    "operation": outcome["operation"],
+                    "state_revision": outcome["state_revision"],
+                    "width": outcome["width"],
+                    "height": outcome["height"],
+                    "verification": outcome["verification"],
+                    "error_code": "" if outcome["ok"] else (outcome["code"] or "INTERNAL_ERROR"),
+                    "error_detail": outcome["detail"],
+                }
+            )
+        summary = f"**{doc.describe()}** — {message}"
+        return _status(summary, notes)
 
     def send_mask(self, state, instruction):
         """The mask layer for the Inpaint canvas as a data URL, or an empty
@@ -1022,6 +1267,9 @@ class TouchCanvas:
                     elem_id=_id("targets"),
                 )
                 suggest_box = gr.Textbox("img2img", visible=False, elem_id=_id("suggest"))
+                # How a send to WanGP ended, written by the browser: it is the
+                # only side that hears the live WanGP page acknowledge it.
+                wangp_result = gr.Textbox("", visible=False, elem_id=_id("wangp_result"))
 
                 # Hidden wires between chained events. Values, not DOM.
                 crop_box = gr.Textbox("", visible=False, elem_id=_id("crop_box"))
@@ -1068,6 +1316,7 @@ class TouchCanvas:
             send_request=send_request,
             targets_box=targets_box,
             suggest_box=suggest_box,
+            wangp_result=wangp_result,
             panels={"crop": panel_crop, "mask": panel_mask, "expand": panel_expand, "layers": panel_layers},
             crop=crop,
             mask=mask,
@@ -1394,6 +1643,12 @@ class TouchCanvas:
             enables = [self.targets[f"{key}_enable"] for key in self.stitch_targets]
             sent.then(None, js=_stitch_enable_js(self.stitch_targets), inputs=[switch_box], outputs=enables)
         sent.then(None, js=SWITCH_JS, inputs=[switch_box], outputs=None)
+        # WanGP: the instruction names no host tab, so the switch above does
+        # nothing for it. The browser hands the prepared file's id to the live
+        # WanGP page and switches only if that page says it took the image;
+        # what it saw comes back through the hidden result box below.
+        sent.then(None, js=WANGP_DELIVER_JS, inputs=[switch_box, payload_box], outputs=None)
+        parts["wangp_result"].input(self.wangp_result, inputs=[state, parts["wangp_result"]], outputs=[status], **quiet)
         if "inpaint_mask" in self.targets:
             inpaint_uuid = getattr(self.targets["inpaint"], "elem_id", "") or ""
             mask_payload_box = parts["mask_payload_box"]

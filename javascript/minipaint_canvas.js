@@ -63,6 +63,13 @@ window.minipaintCanvas = (function () {
     const MIN_LAYER_SIDE = 8;
     const LAYER_ACTION_ID = "minipaint_canvas_layer_action";
     const MENU_ID = "minipaint_canvas_menu";
+    const WANGP_RESULT_ID = "minipaint_canvas_wangp_result";
+    // The WanGP tab's panel, for the one tab switcher below; a send that could
+    // not be verified never reaches it. The prefix is what a WanGP line in the
+    // Send to menu writes: the destination is a logical input of the live
+    // WanGP page, not a component of this WebUI.
+    const WANGP_TAB_PANEL_ID = "tab_wangp";
+    const WANGP_PREFIX = "wangp.";
     const SEND_REQUEST_ID = "minipaint_canvas_send_request";
     const TARGETS_ID = "minipaint_canvas_targets";
     const SUGGEST_ID = "minipaint_canvas_suggest";
@@ -100,6 +107,12 @@ window.minipaintCanvas = (function () {
         layerBounds: null,
         menu: null,
         menuSection: null,
+        // The Send to menu's WanGP lines: what one bounded query answered
+        // while that section was open, thrown away when the menu closes, and
+        // the receiver a click armed - captured at the click, because the
+        // state the user chose under is what the send has to be checked
+        // against, not whatever WanGP happens to show by the time it lands.
+        wangp: { token: 0, status: "", items: [], revision: "", session: "", pending: null },
         menuOutside: null,
         menuKey: null,
         frameGrip: null,
@@ -1072,6 +1085,147 @@ window.minipaintCanvas = (function () {
         return !!element && element.classList.contains(FOCUS_CLASS);
     }
 
+    /* ------------------------------------------------------------------ */
+    /* Send to: the WanGP lines                                              */
+    /* ------------------------------------------------------------------ */
+
+    /** The WanGP browser bridge, when this build has one. Its absence is a
+     * Send to menu with the destinations it always had, and nothing else. */
+    function wangp() {
+        const api = window.minipaintWanGP;
+        return api && typeof api.receivers === "function" ? api : null;
+    }
+
+    /**
+     * One bounded question, asked when Send to opens and never again while it
+     * stays open. A late answer is dropped: the menu it would have described
+     * is gone, and a remembered receiver list must never become clickable
+     * (section 18.2 - the exact input a picture would land in is a fact about
+     * the WanGP page right now, not a fact worth caching).
+     */
+    function queryWanGP() {
+        const w = S.wangp;
+        const token = ++w.token;
+        w.items = [];
+        w.revision = "";
+        w.session = "";
+        w.status = "";
+        const api = wangp();
+        if (!api || !api.state().present) { return; }
+        w.status = "WanGP: checking active inputs…";
+        api.receivers().then(function (answer) {
+            if (token !== w.token || S.menuSection !== "send") { return; }
+            if (answer && answer.ok) {
+                w.items = answer.receivers;
+                w.revision = answer.state_revision;
+                w.session = answer.bridge_session;
+                w.status = w.items.some(function (r) { return r.enabled; }) ? "" : wangpStatus("NO_ACTIVE_RECEIVER");
+            } else {
+                w.status = wangpStatus(answer ? answer.code : "");
+            }
+            renderMenu("send");
+        }, function () {
+            if (token !== w.token || S.menuSection !== "send") { return; }
+            w.status = wangpStatus("");
+            renderMenu("send");
+        });
+    }
+
+    /** The one line a failed or empty query leaves in the menu. Short, and
+     * about what the user can do next. */
+    function wangpStatus(code) {
+        if (code === "IFRAME_NOT_READY") { return "WanGP: open WanGP tab to choose model/input"; }
+        if (code === "NO_ACTIVE_RECEIVER") { return "WanGP: this model and mode take no image right now"; }
+        return "WanGP: unavailable — open WanGP tab";
+    }
+
+    /**
+     * The WanGP part of the Send to list: one exact action per active
+     * receiver, never a single vague "Send to WanGP". A receiver that is full
+     * or switched off is a line that says so and does nothing.
+     */
+    function wangpItems() {
+        const api = wangp();
+        if (!api || !api.state().present) { return []; }
+        const w = S.wangp;
+        const items = [];
+        if (w.status) { items.push({ menu: "status", label: w.status }); }
+        for (const receiver of w.items) {
+            if (receiver.enabled) {
+                items.push({ menu: "send", value: WANGP_PREFIX + receiver.id, label: receiver.menu_label });
+            } else if (receiver.full) {
+                items.push({ menu: "status", label: "WanGP " + receiver.label + ": limit reached" });
+            }
+        }
+        return items;
+    }
+
+    /** Remember, at the click, which receiver was chosen and the state the
+     * menu described when the user read it. The send is refused later if the
+     * WanGP page has moved on since. */
+    function armWanGP(value) {
+        const w = S.wangp;
+        const name = String(value || "");
+        if (name.indexOf(WANGP_PREFIX) !== 0) { w.pending = null; return; }
+        w.pending = { receiver: name.slice(WANGP_PREFIX.length), revision: w.revision, session: w.session };
+    }
+
+    /**
+     * The second half of a send to WanGP. The server flattened the picture,
+     * wrote it as a PNG and handed back nothing but the opaque id of that
+     * file; the pixels never went near a host input. The bridge answers with
+     * an acknowledgement it verified, and only that answer switches tabs -
+     * a failure stays here, says why in one line, and logs the detail.
+     */
+    async function deliverWanGP(instruction, handoffId) {
+        const parts = String(instruction || "").split(":");
+        if (parts[0] !== "wangp_send") { return; }
+        const armed = S.wangp.pending;
+        S.wangp.pending = null;
+        const api = wangp();
+        let result;
+        if (!api) {
+            result = { ok: false, code: "IFRAME_NOT_READY", message: "Open the WanGP tab and choose an input." };
+        } else if (!armed || armed.receiver !== parts[1]) {
+            result = { ok: false, code: "STALE_RECEIVER_STATE", message: api.message("STALE_RECEIVER_STATE") };
+        } else {
+            result = await api.send(armed.receiver, armed.revision, handoffId, { bridge_session: armed.session });
+        }
+        if (result.ok) {
+            api.focus(result.receiver_id);
+            switchTo("wangp");
+        } else {
+            notice("WanGP", result.message || "The image was not sent.");
+        }
+        // The server owns the send log; this is the only thing that knows how
+        // the transfer actually ended.
+        sendInput(WANGP_RESULT_ID, JSON.stringify({
+            // The prepared file is the server's to delete, and this is the
+            // only moment anything knows it is finished with - on a failure
+            // just as much as on a success.
+            handoff_id: String(handoffId || ""),
+            receiver_id: (armed && armed.receiver) || "",
+            ok: !!result.ok,
+            code: result.code || "",
+            detail: result.detail || "",
+            role: result.role || "",
+            operation: result.operation || "",
+            verification: result.verification || "",
+            width: result.width || 0,
+            height: result.height || 0,
+            new_count: result.new_count || 0,
+            state_revision: (armed && armed.revision) || "",
+            // The evidence, passed straight through. This side cannot judge it
+            // - only the half that still holds the manifest of the file it
+            // wrote can say whether what came back describes that file.
+            source_digest: result.source_digest || "",
+            receiver_digest: result.receiver_digest || "",
+            source_pixel_digest: result.source_pixel_digest || "",
+            receiver_pixel_digest: result.receiver_pixel_digest || "",
+            t: Date.now()
+        }));
+    }
+
     function menuItems(section) {
         const tick = function (on) { return on ? "✓ " : ""; };
         if (section === "edit") {
@@ -1089,6 +1243,9 @@ window.minipaintCanvas = (function () {
             for (const target of readTargets()) {
                 items.push({ menu: "send", value: String(target[0]), label: String(target[1]) + (target[0] === suggest ? "  · suggested" : "") });
             }
+            // The local destinations are drawn at once; the WanGP lines are
+            // whatever the bounded query has answered so far.
+            items.push(...wangpItems());
             items.push({ menu: "close", label: "Cancel" });
             return items;
         }
@@ -1114,6 +1271,13 @@ window.minipaintCanvas = (function () {
                 (item.menu === "back" ? " minipaint-menu-back" : "");
             button.dataset.menu = item.menu;
             if (item.value) { button.dataset.value = item.value; }
+            if (item.menu === "status") {
+                // Nothing to click, and no stylesheet rule for it: dim it here
+                // so it reads as the state it is reporting.
+                button.disabled = true;
+                button.style.opacity = "0.65";
+                button.style.cursor = "default";
+            }
             button.setAttribute("role", "menuitem");
             button.textContent = item.label;
             panel.appendChild(button);
@@ -1132,11 +1296,12 @@ window.minipaintCanvas = (function () {
 
     function menuAction(kind, value) {
         switch (kind) {
-            case "section": renderMenu(value); return;
+            case "section": if (value === "send") { queryWanGP(); } renderMenu(value); return;
             case "back": renderMenu(null); return;
             case "close": closeMenu(); return;
             case "press": closeMenu(); pressHidden(value); return;
-            case "send": closeMenu(); sendInput(SEND_REQUEST_ID, value + ":" + Date.now()); return;
+            case "send": armWanGP(value); closeMenu(); sendInput(SEND_REQUEST_ID, value + ":" + Date.now()); return;
+            case "status": return;
             case "panels": closeMenu(); setRail(railHidden()); return;
             case "focus": closeMenu(); setFocus(!focusOn()); return;
             default: return;
@@ -1176,6 +1341,11 @@ window.minipaintCanvas = (function () {
         if (!S.menu) { return; }
         S.menu.hidden = true;
         S.menuSection = null;
+        // An answer that arrives after this is nobody's: the next opening asks
+        // again rather than showing what was true a moment ago.
+        S.wangp.token += 1;
+        S.wangp.items = [];
+        S.wangp.status = "";
         if (S.menuOutside) { document.removeEventListener("pointerdown", S.menuOutside, true); S.menuOutside = null; }
         if (S.menuKey) { document.removeEventListener("keydown", S.menuKey, true); S.menuKey = null; }
     }
@@ -1841,25 +2011,28 @@ window.minipaintCanvas = (function () {
 
     /**
      * Go to a host tab after a handoff, using the host's own helpers for
-     * its tabs. For our tab, click its native tab button - the same thing
-     * the host's helpers do for theirs - found by the panel it controls.
+     * its tabs. For a tab of this extension's own - the Canvas, or WanGP -
+     * click its native tab button, the same thing the host's helpers do for
+     * theirs, found by the panel it controls. One switcher, one table.
      */
     function switchTo(target) {
         const helpers = {
             txt2img: "switch_to_txt2img", img2img: "switch_to_img2img", inpaint: "switch_to_inpaint", extras: "switch_to_extras",
             stitch_txt2img: "switch_to_txt2img", stitch_img2img: "switch_to_img2img"
         };
+        const ours = { canvas: TAB_PANEL_ID, wangp: WANGP_TAB_PANEL_ID };
         const name = String(target || "").split(":")[0];
         if (name in helpers) {
             if (typeof window[helpers[name]] === "function") { window[helpers[name]](); }
             return;
         }
-        if (name !== "canvas") { return; }
+        const panelId = ours[name];
+        if (!panelId) { return; }
         const nav = app().querySelector("#tabs > .tab-nav");
         if (!nav) { return; }
-        let button = nav.querySelector('button[aria-controls="' + TAB_PANEL_ID + '"]');
+        let button = nav.querySelector('button[aria-controls="' + panelId + '"]');
         if (!button) {
-            const panel = app().querySelector("#" + TAB_PANEL_ID);
+            const panel = app().querySelector("#" + panelId);
             const panels = Array.from(app().querySelectorAll("#tabs > .tabitem"));
             const index = panels.indexOf(panel);
             const buttons = nav.querySelectorAll("button");
@@ -1913,6 +2086,7 @@ window.minipaintCanvas = (function () {
         finishTransform: finishTransform,
         endTransform: endTransform,
         closeMenu: closeMenu,
+        deliverWanGP: deliverWanGP,
         refreshOverlays: refreshOverlays,
         onMode: onMode,
         setTool: setTool,

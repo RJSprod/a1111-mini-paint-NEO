@@ -1,0 +1,176 @@
+/*
+ * A dark WanGP, built out of Gradio's own theme variables.
+ *
+ * The iframe is a separate document, so nothing the Forge page wears reaches
+ * in here; this is the whole of the integration's night mode. It is written
+ * as variable overrides rather than as rules against WanGP's markup, because
+ * every rule that names a WanGP element is a rule that breaks the next time
+ * WanGP moves one. Gradio resolves these variables itself, so a control this
+ * file has never heard of still comes out dark.
+ *
+ * Two prohibitions from section 27, both load-bearing. Nothing here selects a
+ * control by its English text label - that would break on the first
+ * translation and on the first reworded button. And nothing here touches
+ * layout, visibility or value of any generation control: the theme may make
+ * WanGP look different and must never make it behave differently. If this
+ * file fails to load at all, image handoff carries on exactly as before.
+ *
+ * The scope is one attribute the bridge's own script sets on <html>. WanGP
+ * running on its own never has it, so an unmanaged install is untouched.
+ */
+
+:root[data-minipaint-theme="dark"] {
+  color-scheme: dark;
+
+  --mp-ink: #e6e8ee;
+  --mp-ink-dim: #a4aab8;
+  --mp-page: #14161b;
+  --mp-panel: #1b1e25;
+  --mp-raised: #21252e;
+  --mp-line: #2f343f;
+  --mp-line-soft: #262b34;
+  --mp-accent: #6ea8fe;
+  --mp-accent-ink: #0d1117;
+}
+
+/* Gradio's palette, remapped. These are the variables every Gradio component
+   reads, which is why so few explicit rules are needed below. */
+:root[data-minipaint-theme="dark"] .gradio-container,
+:root[data-minipaint-theme="dark"] body {
+  --body-background-fill: var(--mp-page);
+  --body-text-color: var(--mp-ink);
+  --body-text-color-subdued: var(--mp-ink-dim);
+
+  --background-fill-primary: var(--mp-panel);
+  --background-fill-secondary: var(--mp-raised);
+  --block-background-fill: var(--mp-panel);
+  --block-label-background-fill: var(--mp-raised);
+  --block-label-text-color: var(--mp-ink-dim);
+  --block-title-text-color: var(--mp-ink);
+  --block-border-color: var(--mp-line);
+  --block-shadow: none;
+  --panel-background-fill: var(--mp-panel);
+  --panel-border-color: var(--mp-line);
+
+  --border-color-primary: var(--mp-line);
+  --border-color-accent: var(--mp-accent);
+  --border-color-accent-subdued: var(--mp-line);
+
+  --input-background-fill: var(--mp-raised);
+  --input-background-fill-focus: var(--mp-raised);
+  --input-border-color: var(--mp-line);
+  --input-border-color-focus: var(--mp-accent);
+  --input-placeholder-color: var(--mp-ink-dim);
+  --input-shadow: none;
+
+  --button-secondary-background-fill: var(--mp-raised);
+  --button-secondary-background-fill-hover: var(--mp-line-soft);
+  --button-secondary-border-color: var(--mp-line);
+  --button-secondary-text-color: var(--mp-ink);
+  --button-primary-background-fill: var(--mp-accent);
+  --button-primary-background-fill-hover: var(--mp-accent);
+  --button-primary-border-color: var(--mp-accent);
+  --button-primary-text-color: var(--mp-accent-ink);
+  --button-cancel-background-fill: var(--mp-raised);
+  --button-cancel-text-color: var(--mp-ink);
+
+  --table-border-color: var(--mp-line);
+  --table-even-background-fill: var(--mp-panel);
+  --table-odd-background-fill: var(--mp-raised);
+  --table-text-color: var(--mp-ink);
+
+  --checkbox-background-color: var(--mp-raised);
+  --checkbox-background-color-selected: var(--mp-accent);
+  --checkbox-border-color: var(--mp-line);
+  --checkbox-border-color-focus: var(--mp-accent);
+  --checkbox-label-background-fill: var(--mp-raised);
+  --checkbox-label-background-fill-selected: var(--mp-line-soft);
+  --checkbox-label-border-color: var(--mp-line);
+  --checkbox-label-text-color: var(--mp-ink);
+
+  --slider-color: var(--mp-accent);
+  --accordion-text-color: var(--mp-ink);
+  --link-text-color: var(--mp-accent);
+  --link-text-color-hover: var(--mp-accent);
+  --link-text-color-visited: var(--mp-accent);
+
+  --color-accent: var(--mp-accent);
+  --color-accent-soft: var(--mp-line-soft);
+  --neutral-950: #0f1115;
+  --neutral-900: var(--mp-page);
+  --neutral-800: var(--mp-panel);
+  --neutral-700: var(--mp-raised);
+  --neutral-600: var(--mp-line);
+
+  --shadow-drop: none;
+  --shadow-drop-lg: none;
+
+  background-color: var(--mp-page);
+  color: var(--mp-ink);
+}
+
+/* The page itself. Gradio paints the container; the document behind it is the
+   browser's, and a light strip under a dark app is the one thing variables
+   alone will not fix. */
+:root[data-minipaint-theme="dark"] body {
+  background-color: var(--mp-page);
+}
+
+/* Native controls Gradio renders without a variable of their own: the dropdown
+   list, the scrollbar, and the file-drop surface. Selected structurally, never
+   by what they say. */
+:root[data-minipaint-theme="dark"] select,
+:root[data-minipaint-theme="dark"] option,
+:root[data-minipaint-theme="dark"] input,
+:root[data-minipaint-theme="dark"] textarea {
+  background-color: var(--mp-raised);
+  color: var(--mp-ink);
+  border-color: var(--mp-line);
+}
+
+:root[data-minipaint-theme="dark"] ::placeholder {
+  color: var(--mp-ink-dim);
+  opacity: 1;
+}
+
+:root[data-minipaint-theme="dark"] * {
+  scrollbar-color: var(--mp-line) var(--mp-panel);
+}
+
+:root[data-minipaint-theme="dark"] ::-webkit-scrollbar-track {
+  background: var(--mp-panel);
+}
+
+:root[data-minipaint-theme="dark"] ::-webkit-scrollbar-thumb {
+  background: var(--mp-line);
+  border-radius: 6px;
+}
+
+/* Restraint on borders and radius, applied only to Gradio's own block class so
+   that a WanGP-authored element keeps whatever WanGP gave it. */
+:root[data-minipaint-theme="dark"] .gradio-container .block,
+:root[data-minipaint-theme="dark"] .gradio-container .form {
+  border-color: var(--mp-line);
+  border-radius: 8px;
+}
+
+/* The bridge's own three components. They exist for messages, never for eyes,
+   and they are the only elements in this file the bridge owns outright. */
+.minipaint-bridge-io {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+  pointer-events: none !important;
+}
+
+/* Light is the untouched WanGP. The bridge sets the attribute either way so a
+   parent switching back gets its own theme, not a half-overridden dark one. */
+:root[data-minipaint-theme="light"] {
+  color-scheme: light;
+}

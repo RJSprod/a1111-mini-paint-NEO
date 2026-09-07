@@ -585,6 +585,8 @@ async def _auth_probe(request: typing.Any) -> typing.Any:
     """
     from starlette.responses import Response
 
+    if not signed_in(request):
+        return Response(status_code=401, headers={"Cache-Control": "no-store"})
     return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 
@@ -592,6 +594,11 @@ async def forward(request: typing.Any) -> typing.Any:
     """One browser request, streamed to the backend and streamed back."""
     from starlette.background import BackgroundTask
     from starlette.responses import StreamingResponse
+
+    # The same sign-in the rest of Forge asks for, asked here. This is what
+    # makes the route covered rather than merely believed to be.
+    if not signed_in(request):
+        return error_response(request, AUTH_BOUNDARY_FAILED, 401)
 
     if not serving_allowed():
         return error_response(request, AUTH_BOUNDARY_FAILED, 503)
@@ -766,7 +773,7 @@ async def _websocket_endpoint(websocket: typing.Any) -> None:
     # The same gate the HTTP side has. A socket is the one route a browser can
     # open without ever fetching the page, so refusing only in ``forward``
     # would leave the door it was meant to close.
-    if not serving_allowed():
+    if not signed_in(websocket) or not serving_allowed():
         await websocket.close(code=1011)
         return
 
@@ -1004,6 +1011,16 @@ def auth_boundary_report(app: typing.Any) -> dict:
 
     if not registered:
         report.update(ok=False, coverage="unknown", detail="the /wan2gp route is not registered on this app, so nothing can cover it.")
+    elif enforcing_auth():
+        # Not a guess any more. Gradio checks its login per route, so rather
+        # than try to detect whether that check reaches a route it was never
+        # attached to, these routes run the same check themselves - the app's
+        # auth dependency when it has one, its access-token cookie otherwise.
+        report.update(
+            ok=True,
+            coverage="enforced_here",
+            detail="every request to /wan2gp/ is checked against this Forge's own sign-in before it is forwarded.",
+        )
     elif auth_middleware:
         report.update(
             ok=True,
@@ -1062,6 +1079,44 @@ def set_auth_acknowledged(value: typing.Any) -> None:
     _acknowledged = bool(value)
 
 
+#: The Forge app our routes are mounted on, kept so the same sign-in check the
+#: rest of it uses can be run on ours.
+_app: typing.Dict[str, typing.Any] = {"app": None}
+
+
+def _host_auth_required(app: typing.Any) -> bool:
+    """Does this Forge ask anybody to sign in?"""
+    return bool(getattr(app, "auth", None) is not None or getattr(app, "auth_dependency", None) is not None)
+
+
+def signed_in(request: typing.Any) -> bool:
+    """Whether this request carries the sign-in the rest of Forge requires.
+
+    Gradio checks its login per route, which is why a route added by an
+    extension is not covered by it - so rather than detect that and refuse, we
+    run the same check here. This is deliberately a copy of what Gradio's own
+    ``get_current_user`` does with the app it is attached to: the auth
+    dependency when one is configured, otherwise the access-token cookie in
+    either of the two names it may have. A Forge that asks nobody to sign in
+    has nothing to check, and everybody passes.
+    """
+    app = _app.get("app")
+    if app is None or not _host_auth_required(app):
+        return True
+
+    dependency = getattr(app, "auth_dependency", None)
+    if dependency is not None:
+        try:
+            return dependency(request) is not None
+        except Exception:
+            return False
+
+    cookies = getattr(request, "cookies", None) or {}
+    cookie_id = getattr(app, "cookie_id", "")
+    token = cookies.get(f"access-token-{cookie_id}") or cookies.get(f"access-token-unsecure-{cookie_id}")
+    return bool(token) and (getattr(app, "tokens", None) or {}).get(token) is not None
+
+
 def auth_override() -> bool:
     return os.environ.get(AUTH_OVERRIDE_ENV, "").strip().lower() in _TRUE or _acknowledged
 
@@ -1069,6 +1124,12 @@ def auth_override() -> bool:
 def boundary_report() -> typing.Optional[dict]:
     """What ``install`` concluded, for the tab and the diagnostics report."""
     return dict(_boundary) if _boundary is not None else None
+
+
+def enforcing_auth() -> bool:
+    """Whether our routes are the ones applying this Forge's sign-in."""
+    app = _app.get("app")
+    return bool(app is not None and _host_auth_required(app))
 
 
 def serving_allowed() -> bool:
@@ -1119,6 +1180,7 @@ def install(app: typing.Any) -> None:
         app.add_event_handler("shutdown", _aclose_client)
 
     global _boundary
+    _app["app"] = app
     _boundary = auth_boundary_report(app)
     _log(f"reverse proxy ready at {PROXY_PREFIX} (one loopback upstream, chosen by the runtime only).")
     if not _boundary["ok"]:

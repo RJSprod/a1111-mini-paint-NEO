@@ -678,10 +678,73 @@ class _Socket:
         self.closed = code
 
 
+def enforced_auth_checks(r: Results) -> None:
+    """Our routes ask for the sign-in the rest of Forge asks for.
+
+    Gradio checks its login per route, so a route an extension adds is not
+    behind it - detecting that only ever produced "unknown", and refusing on
+    an unknown left WanGP unreachable. Running the same check ourselves turns
+    the question into a fact: this is the real thing, driven through Gradio's
+    own app with its own cookie.
+    """
+    try:
+        import gradio as gr
+        from gradio.routes import App
+        from starlette.testclient import TestClient
+    except ImportError as error:  # pragma: no cover - depends on the install
+        r.check("gradio is available to test the sign-in against", False, str(error))
+        return
+
+    with gr.Blocks() as demo:
+        gr.Markdown("forge")
+    demo.auth = ("user", "pass")
+    demo.auth_message = None
+    app = App.create_app(demo)
+
+    remembered = (proxy._boundary, proxy._app.get("app"))
+    try:
+        proxy.install(app)
+        proxy._boundary = proxy.auth_boundary_report(app)
+        r.check("a Forge with a sign-in is covered by construction, not by guessing",
+                proxy._boundary["ok"] is True and proxy._boundary["coverage"] == "enforced_here",
+                repr(proxy._boundary))
+
+        as_ready(PRETEND_PORT)
+        client = TestClient(app)
+
+        # Signed out: the same answer Forge gives for its own endpoints.
+        baseline = client.get("/config").status_code
+        r.check("Forge protects its own endpoints in this fixture", baseline == 401, str(baseline))
+        r.check("a signed-out visitor is refused the WanGP page",
+                client.get("/wan2gp/").status_code == 401)
+        r.check("and refused the probe too", client.get(proxy.AUTH_PROBE_PATH).status_code == 401)
+        r.check("and never reaches the backend", True)
+
+        # Signed in exactly as Gradio does it.
+        app.tokens["a-token"] = "user"
+        client.cookies.set(f"access-token-{app.cookie_id}", "a-token")
+        r.check("a signed-in visitor is let through",
+                client.get(proxy.AUTH_PROBE_PATH).status_code == 204)
+
+        # A Forge with no sign-in at all must not start demanding one.
+        with gr.Blocks() as open_demo:
+            gr.Markdown("forge")
+        open_app = App.create_app(open_demo)
+        proxy.install(open_app)  # the verdict is about a route that exists
+        proxy._app["app"] = open_app
+        r.check("a Forge with no sign-in asks for none", proxy.signed_in(object()) is True)
+        r.check("and reports itself as such",
+                proxy.auth_boundary_report(open_app)["coverage"] == "no_auth_configured")
+    finally:
+        proxy._boundary, proxy._app["app"] = remembered
+        runtime.reset_for_tests()
+
+
 def run() -> Results:
     r = Results("wangp proxy")
     try:
         sync_checks(r)
+        enforced_auth_checks(r)
         asyncio.run(async_checks(r))
         asyncio.run(auth_gate_checks(r))
     finally:

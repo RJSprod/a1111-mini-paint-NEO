@@ -327,11 +327,16 @@ def _default_spawn(command: typing.Sequence[str], cwd: str, env: typing.Mapping[
         "cwd": cwd,
         "env": dict(env),
         "stdin": subprocess.DEVNULL,
-        # stdout stays attached to Forge's console: WanGP's progress belongs
-        # where the user is already looking. stderr is a pipe because the
-        # crash screen needs the tail of it - and because a pipe nobody reads
-        # fills up and stops the child dead, it is drained on a thread.
-        "stderr": subprocess.PIPE,
+        # Both streams, into one pipe. stdout used to stay attached to Forge's
+        # console on the grounds that WanGP's progress belongs where the user
+        # is already looking - but it is also where WanGP says which plugins
+        # it loaded, and that line is the answer to the commonest failure
+        # there is: a bridge that is installed, enabled, and silent. The
+        # reader echoes what it reads, so the console still gets it. A pipe
+        # nobody reads fills up and stops the child dead, so it is drained on
+        # a thread.
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
         "close_fds": True,
     }
 
@@ -501,7 +506,9 @@ def _drain(child: _Child) -> None:
     emits a newline becomes several bounded chunks instead of one unbounded
     string.
     """
-    stream = getattr(child.process, "stderr", None)
+    # Both streams arrive on stdout now; stderr is kept as a fallback for a
+    # spawn seam (a test's fake process) that still hands one over.
+    stream = getattr(child.process, "stdout", None) or getattr(child.process, "stderr", None)
     if stream is None:
         return
     try:

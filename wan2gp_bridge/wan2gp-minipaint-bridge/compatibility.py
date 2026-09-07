@@ -437,6 +437,8 @@ class Host:
 
     def __init__(self, owner: typing.Any = None) -> None:
         self.owner = owner
+        #: What ``post_ui_setup`` was handed, keyed by elem_id.
+        self.handed: typing.Dict[str, typing.Any] = {}
 
     def _call(self, names: typing.Sequence[str], *args: typing.Any) -> typing.Any:
         for name in names:
@@ -454,11 +456,29 @@ class Host:
     def request_component(self, elem_id: str) -> typing.Any:
         return self._call(self._REQUEST_COMPONENT, elem_id)
 
+    def accept_components(self, handed: typing.Any) -> int:
+        """Take the mapping ``post_ui_setup`` was called with. Returns its size.
+
+        This is how the components actually arrive: WanGP resolves what was
+        asked for in ``setup_ui`` and passes the lot as the argument to
+        ``post_ui_setup``. Reading them off the plugin object instead - which
+        is what this did - finds nothing at all, and every receiver then looks
+        missing however right its elem_id was.
+        """
+        if not isinstance(handed, dict):
+            return 0
+        self.handed.update({str(key): value for key, value in handed.items()})
+        return len(self.handed)
+
     def read_component(self, elem_id: str) -> typing.Any:
+        # What post_ui_setup was handed, first: it is the documented route and
+        # the only one that needs nothing of the host but the call itself.
+        if elem_id in self.handed:
+            return self.handed[elem_id]
         found = self._call(self._READ_COMPONENT, elem_id)
         if found is not None:
             return found
-        # Some plugin hosts hand back a mapping instead of a getter.
+        # A host that keeps them on the plugin instead is still understood.
         for name in ("components", "requested_components", "resolved_components"):
             mapping = getattr(self.owner, name, None)
             if isinstance(mapping, dict) and elem_id in mapping:

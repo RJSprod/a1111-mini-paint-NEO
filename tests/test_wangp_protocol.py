@@ -633,6 +633,60 @@ def _first_candidate():
             sys.path.remove(folder)
 
 
+def component_handoff_checks(r: Results) -> None:
+    """The components arrive as an argument, and nowhere else.
+
+    WanGP resolves what ``setup_ui`` asked for and hands the mapping to
+    ``post_ui_setup``. Reading them off the plugin object instead finds
+    nothing, and every receiver then reports itself missing however right its
+    elem_id was - which is exactly what a real install said.
+    """
+    import sys as _sys
+
+    folder = str(BRIDGE_COPY.parent)
+    added = folder not in _sys.path
+    if added:
+        _sys.path.insert(0, folder)
+    try:
+        import compatibility
+    finally:
+        if added and folder in _sys.path:
+            _sys.path.remove(folder)
+
+    host = compatibility.Host(None)
+    compat = compatibility.Compatibility(host=host)
+
+    asked = compat.declare()
+    r.check("setup_ui asks for every candidate id", len(asked) > 5, str(len(asked)))
+    for wanted in ("image_start", "image_end", "image_refs", "image_prompt_type", "video_prompt_type"):
+        r.check(f"{wanted} is among the ids asked for", wanted in asked)
+
+    # Nothing handed over yet: this is the state a real install reported.
+    empty = compat.resolve()
+    r.check("with nothing handed over, the mandatory ones are missing",
+            bool(empty.missing_mandatory), repr(empty.missing_mandatory))
+
+    # Now the documented handoff.
+    handed = {name: f"component-{name}" for name in
+              ("image_start", "image_end", "image_refs", "image_prompt_type", "video_prompt_type")}
+    taken = host.accept_components(handed)
+    r.check("the mapping post_ui_setup was called with is taken", taken == len(handed), str(taken))
+
+    resolved = compat.resolve()
+    r.check("and every mandatory receiver then resolves",
+            not resolved.missing_mandatory, repr(resolved.missing_mandatory))
+    r.check("start and end frames are wired to the ids WanGP handed over",
+            resolved.elem_ids.get(compatibility.START_IMAGE) == "image_start"
+            and resolved.elem_ids.get(compatibility.END_IMAGE) == "image_end",
+            repr(resolved.elem_ids))
+    r.check("and the component itself is the object handed over, not a copy",
+            resolved.components.get(compatibility.START_IMAGE) == "component-image_start")
+
+    # A host that hands over nothing usable must not pretend otherwise.
+    r.check("a non-mapping is ignored rather than trusted",
+            compatibility.Host(None).accept_components(["not", "a", "dict"]) == 0)
+
+
 def run() -> Results:
     r = Results("wangp protocol")
     copy_checks(r)
@@ -643,6 +697,7 @@ def run() -> Results:
     fullness_checks(r)
     session_isolation_checks(r)
     loader_checks(r)
+    component_handoff_checks(r)
     handoff_checks(r)
     return r
 

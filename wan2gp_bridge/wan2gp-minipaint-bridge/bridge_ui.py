@@ -194,12 +194,30 @@ def wire(
     inputs = [controls.request, *state_components]
     outputs = [controls.ack, *receiver_components]
 
-    try:
-        event = controls.trigger.click(fn=handler, inputs=inputs, outputs=outputs, show_progress="hidden")
-    except TypeError:
-        # Older Gradio spells the progress argument differently, and it is a
-        # cosmetic argument; the event itself is what matters.
-        event = controls.trigger.click(fn=handler, inputs=inputs, outputs=outputs)
+    # ``trigger_mode="multiple"``: every click is a submission. Under Gradio's
+    # default, "once", the browser drops a click on this button while it
+    # believes an earlier one is still pending - and a submission that was
+    # queued and never processed leaves it believing exactly that, so every
+    # later request would be dropped in silence and answered only by the
+    # script's watchdog, which is what "did not answer in time" looked like
+    # from the Send menu. The bridge serialises its own requests, so allowing
+    # overlapping submissions costs nothing. The cosmetic argument and the
+    # mode are tried in turn for a Gradio that lacks either.
+    keywords = {"fn": handler, "inputs": inputs, "outputs": outputs}
+    event = None
+    for extra in (
+        {"show_progress": "hidden", "trigger_mode": "multiple"},
+        {"trigger_mode": "multiple"},
+        {"show_progress": "hidden"},
+        {},
+    ):
+        try:
+            event = controls.trigger.click(**keywords, **extra)
+            break
+        except TypeError:
+            continue
+    if event is None:
+        return False
 
     try:
         event.then(fn=None, inputs=[controls.ack], outputs=[], js=deliver_js)

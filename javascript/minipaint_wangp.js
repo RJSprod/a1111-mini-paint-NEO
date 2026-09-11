@@ -74,6 +74,10 @@ window.minipaintWanGP = (function () {
 
     const MAX_ENVELOPE_BYTES = 256 * 1024;
     const RECEIVER_QUERY_TIMEOUT_MS = 10000;
+    // How long an answer is still taken after its query timed out. The menu
+    // has already said "did not answer in time"; an answer inside this window
+    // corrects it in place rather than being thrown away.
+    const LATE_ANSWER_GRACE_MS = 60000;
     const RECEIVE_TIMEOUT_MS = 30000;
 
     // A handoff id and a channel id have one shape each, and a value that is
@@ -352,17 +356,32 @@ window.minipaintWanGP = (function () {
         return true;
     }
 
-    /** A request that expects one answer, with one deadline and no retry. */
-    function ask(kind, payload, timeout, expects) {
+    /** A request that expects one answer, with one deadline and no retry.
+     * ``late``, when given, is called with an answer that arrives after the
+     * deadline but inside the grace window - the promise has already resolved
+     * with the timeout by then, and this is how the answer still lands. */
+    function ask(kind, payload, timeout, expects, late) {
         const requestId = hex32();
+        const askedAt = Date.now();
         return new Promise(function (resolve) {
             const entry = {
                 type: expects,
                 channel: S.channelId,
                 session: S.bridgeSession,
+                askedAt: askedAt,
                 resolve: resolve,
+                late: typeof late === "function" ? late : null,
+                expired: false,
                 timer: setTimeout(function () {
-                    S.pending.delete(requestId);
+                    say(kind + ": no answer within " + timeout + " ms (" + requestId.slice(0, 8) + ")");
+                    if (entry.late) {
+                        // Kept, marked, and dropped later: an answer in the
+                        // grace window is still this request's answer.
+                        entry.expired = true;
+                        entry.timer = setTimeout(function () { S.pending.delete(requestId); }, LATE_ANSWER_GRACE_MS);
+                    } else {
+                        S.pending.delete(requestId);
+                    }
                     resolve(failure(RECEIVER_QUERY_TIMEOUT, kind));
                 }, timeout)
             };
@@ -371,7 +390,9 @@ window.minipaintWanGP = (function () {
                 clearTimeout(entry.timer);
                 S.pending.delete(requestId);
                 resolve(failure(IFRAME_NOT_READY, kind));
+                return;
             }
+            say(kind + ": asked (" + requestId.slice(0, 8) + ")");
         });
     }
 
@@ -380,6 +401,17 @@ window.minipaintWanGP = (function () {
         if (!entry) { return false; }
         clearTimeout(entry.timer);
         S.pending.delete(requestId);
+        const waited = Date.now() - (entry.askedAt || Date.now());
+        if (result && result.ok) {
+            say(entry.type + ": answered after " + waited + " ms" + (entry.expired ? " (late, taken)" : ""));
+        } else {
+            say(entry.type + ": refused after " + waited + " ms - " + ((result && result.code) || "?")
+                + ((result && result.detail) ? " (" + result.detail + ")" : "") + (entry.expired ? " (late)" : ""));
+        }
+        if (entry.expired) {
+            if (entry.late) { try { entry.late(result); } catch (e) { /* the menu's business */ } }
+            return true;
+        }
         entry.resolve(result);
         return true;
     }
@@ -850,14 +882,15 @@ window.minipaintWanGP = (function () {
      * does not poll, it does not retry, and two overlapping calls share the
      * one question rather than asking twice.
      */
-    function receivers() {
+    function receivers(options) {
         if (!ensure()) { return Promise.resolve(failure(IFRAME_NOT_READY, "no WanGP iframe in this page")); }
         if (!S.ready || !S.bridgeSession) {
             rearm();
             return Promise.resolve(failure(IFRAME_NOT_READY, "no bridge session in this page"));
         }
         if (S.query) { return S.query; }
-        const query = ask(GET_RECEIVERS, { bridge_session: S.bridgeSession }, RECEIVER_QUERY_TIMEOUT_MS, RECEIVERS)
+        const late = options && typeof options.late === "function" ? options.late : null;
+        const query = ask(GET_RECEIVERS, { bridge_session: S.bridgeSession }, RECEIVER_QUERY_TIMEOUT_MS, RECEIVERS, late)
             .then(function (answer) {
                 if (S.query === query) { S.query = null; }
                 return answer;

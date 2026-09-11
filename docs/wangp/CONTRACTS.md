@@ -200,10 +200,13 @@ The tab is built once and never destroyed; only visibility changes.
 
 ## `javascript/minipaint_wangp.js`
 
-`window.minipaintWanGP` with: `attach()`, `receivers()` (one bounded query,
-returns a promise of the normalised list — or the bridge's own failure code
-when it refused, never a stale-revision stand-in), `send(receiverId, revision,
-handoffId)`, `focus(receiverId)`, `state()`, `switchToWanGP()`. It validates
+`window.minipaintWanGP` with: `attach()`, `receivers({late})` (one bounded
+query, returns a promise of the normalised list — or the bridge's own failure
+code when it refused, never a stale-revision stand-in; `late` is called with an
+answer that arrives inside the minute after the deadline), `send(receiverId,
+revision, handoffId)`, `focus(receiverId)`, `state()`, `switchToWanGP()`. Every
+query is journalled: asked, answered after N ms, refused with a code, or no
+answer within the deadline. It validates
 `event.origin === window.location.origin` **and** `event.source ===
 iframe.contentWindow` on every message, checks the protocol version, the
 channel id and the request id, and drops everything else silently. No `"*"`

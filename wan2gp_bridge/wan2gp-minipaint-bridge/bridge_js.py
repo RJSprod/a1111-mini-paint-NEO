@@ -49,6 +49,10 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
 TRIGGER_ATTEMPTS = 20
 TRIGGER_RETRY_MS = 250
 
+#: How often the acknowledgement box is read while a request is in flight -
+#: the second route for an answer whose chained ``.then(js=...)`` never ran.
+ACK_POLL_MS = 300
+
 #: What ``.then(js=...)`` runs with the acknowledgement textbox's value. It
 #: names one method on one object and swallows its own failures, so a bridge
 #: that is not present cannot turn into a console error on every event.
@@ -81,6 +85,7 @@ def configuration(theme_css: str = "") -> dict:
         "triggerClass": bridge_ui.TRIGGER_CLASS,
         "triggerAttempts": TRIGGER_ATTEMPTS,
         "triggerRetryMs": TRIGGER_RETRY_MS,
+        "ackPollMs": ACK_POLL_MS,
         # Longer than the parent will wait, so in the ordinary case the parent
         # reports the timeout and this only ever unwedges the queue behind it.
         "roundTripMs": protocol.RECEIVE_TIMEOUT_MS + 5000,
@@ -119,6 +124,16 @@ _SCRIPT = r"""
   var watchdog = 0;
   var attempts = 0;
   var timer = 0;
+  // The request in flight, as the operator would want it described: when it
+  // was clicked, in which set of controls, and what the acknowledgement box
+  // held before - so a failure can say more than "nothing came back".
+  var flight = null;
+  var poll = 0;
+
+  function log(message) {
+    try { if (typeof console !== "undefined" && console.debug) { console.debug("[minipaint bridge] " + message); } }
+    catch (error) {}
+  }
   var encoder = (typeof TextEncoder !== "undefined") ? new TextEncoder() : null;
 
   function byteLength(text) {
@@ -219,7 +234,13 @@ _SCRIPT = r"""
       // The bridge components have not rendered yet. Bounded retries, then the
       // waiting requests are failed rather than kept forever: a Send that
       // silently never happens is worse than one that says it could not.
-      if (attempts >= CONFIG.triggerAttempts) { abandon("IFRAME_NOT_READY"); return; }
+      if (attempts >= CONFIG.triggerAttempts) {
+        var missing = "the bridge controls were not found on this page after " + attempts + " attempts ("
+          + columns().length + " column(s) present)";
+        log(missing);
+        abandon("IFRAME_NOT_READY", missing);
+        return;
+      }
       attempts += 1;
       if (!timer) { timer = window.setTimeout(function () { timer = 0; pump(); }, CONFIG.triggerRetryMs); }
       return;
@@ -228,6 +249,13 @@ _SCRIPT = r"""
     var next = pending.shift();
     busy = true;
     inFlight = next;
+    var ackField = fieldIn(column, CONFIG.ackClass);
+    flight = {
+      request: next,
+      clickedAt: Date.now(),
+      set: (column && column.id) || "(no id)",
+      ackBefore: ackField ? String(ackField.value || "") : ""
+    };
     // Nothing else clears ``busy``. If the Gradio round trip never lands - the
     // server errored, the queue dropped it, WanGP restarted underneath us -
     // then without this every later request would find the queue busy and
@@ -240,8 +268,16 @@ _SCRIPT = r"""
       if (!busy) { return; }
       busy = false;
       var stranded = inFlight;
+      var record = flight;
       inFlight = null;
-      if (stranded) { answer(stranded, { ok: false, code: "RECEIVER_QUERY_TIMEOUT" }); }
+      flight = null;
+      stopPoll();
+      if (stranded) {
+        var detail = "no acknowledgement " + (record ? (Date.now() - record.clickedAt) : 0) + " ms after the click on "
+          + (record ? record.set : "(no set)") + " - the Gradio event never completed, or its result never reached this page";
+        log(stranded.op + ": " + detail);
+        answer(stranded, { ok: false, code: "RECEIVER_QUERY_TIMEOUT", detail: detail });
+      }
       pump();
     }, CONFIG.roundTripMs);
     try {
@@ -252,19 +288,49 @@ _SCRIPT = r"""
       // and the receiver value itself is only ever returned by the callback.
       box.dispatchEvent(new Event("input", { bubbles: true }));
       button.click();
+      log(next.op + ": clicked on " + flight.set);
+      startPoll(ackField);
     } catch (error) {
       busy = false;
       inFlight = null;
+      flight = null;
+      stopPoll();
       if (watchdog) { window.clearTimeout(watchdog); watchdog = 0; }
-      answer(next, { ok: false, code: "INTERNAL_ERROR" });
+      answer(next, { ok: false, code: "INTERNAL_ERROR", detail: "the click could not be dispatched: " + String(error && error.message || error).slice(0, 120) });
     }
   }
 
-  function abandon(code) {
+  // The acknowledgement arrives through Gradio's own ``.then(js=...)`` on the
+  // event, and that is the mechanism that has to be right. This is the second
+  // route for the case where the event completed and wrote the box but the
+  // chained call never ran: the box is read while a request is in flight, and
+  // a value that changed and names this request is delivered the same way.
+  // Bounded by the watchdog, never runs while nothing is in flight.
+
+  function startPoll(ackField) {
+    stopPoll();
+    if (!ackField) { return; }
+    poll = window.setInterval(function () {
+      if (!busy || !flight) { stopPoll(); return; }
+      var now = String(ackField.value || "");
+      if (!now || now === flight.ackBefore) { return; }
+      var seen = null;
+      try { seen = JSON.parse(now); } catch (error) { seen = null; }
+      if (!seen || seen.request_id !== flight.request.request_id) { return; }
+      log(flight.request.op + ": acknowledgement read from the box (the chained call had not delivered it)");
+      deliver(now);
+    }, CONFIG.ackPollMs);
+  }
+
+  function stopPoll() {
+    if (poll) { window.clearInterval(poll); poll = 0; }
+  }
+
+  function abandon(code, detail) {
     var waiting = pending.slice();
     pending.length = 0;
     for (var index = 0; index < waiting.length; index += 1) {
-      answer(waiting[index], { ok: false, code: code });
+      answer(waiting[index], { ok: false, code: code, detail: detail || "" });
     }
   }
 
@@ -292,7 +358,11 @@ _SCRIPT = r"""
   function deliver(raw) {
     busy = false;
     inFlight = null;
+    var record = flight;
+    flight = null;
+    stopPoll();
     if (watchdog) { window.clearTimeout(watchdog); watchdog = 0; }
+    if (record) { log(record.request.op + ": acknowledged after " + (Date.now() - record.clickedAt) + " ms"); }
     var payload = null;
     try { payload = JSON.parse(String(raw || "")); } catch (error) { payload = null; }
 

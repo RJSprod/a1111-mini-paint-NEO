@@ -106,7 +106,10 @@ def health() -> dict
 `build_environment` starts from a copy of `os.environ` with
 `CUDA_VISIBLE_DEVICES` **set to the configured UUID** (never inherited),
 `GRADIO_ROOT_PATH=/wan2gp`, `MINIPAINT_WANGP_INSTANCE_ID`,
-`MINIPAINT_WANGP_HANDOFF_ROOT`, `MINIPAINT_WANGP_BRIDGE_SECRET`. Windows:
+`MINIPAINT_WANGP_HANDOFF_ROOT`, `MINIPAINT_WANGP_BRIDGE_SECRET`; Forge's
+interpreter variables (`PYTHON*`) and allocator variables
+(`FORGE_ALLOCATOR_VARIABLES`: `PYTORCH_CUDA_ALLOC_CONF`, `PYTORCH_ALLOC_CONF`)
+are removed. Windows:
 `CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB` and a Job Object with
 kill-on-close when `pywin32`/`ctypes` allow it. POSIX: `start_new_session`
 and `killpg` on the tracked pgid only. Never a name-based kill.

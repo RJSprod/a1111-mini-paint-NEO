@@ -378,6 +378,9 @@ def run() -> Results:
             "GRADIO_SHARE": "1",
             "PYTHONPATH": "/forge/lib",
             "PYTHONHOME": "/forge",
+            # What Forge's --cuda-malloc and --expandable-segments export.
+            "PYTORCH_CUDA_ALLOC_CONF": "backend:cudaMallocAsync",
+            "PYTORCH_ALLOC_CONF": "expandable_segments:True",
         }
         child = runtime.build_environment(config, 7999, "0123456789abcdef", "the-secret", environ=parent, handoff_root=handoff)
         r.check("the chosen GPU replaces the one Forge exported",
@@ -393,6 +396,12 @@ def run() -> Results:
         r.check("an inherited share permission is dropped", "GRADIO_SHARE" not in child)
         r.check("Forge's interpreter variables are dropped",
                 "PYTHONPATH" not in child and "PYTHONHOME" not in child)
+        r.check("Forge's allocator variables are dropped",
+                "PYTORCH_CUDA_ALLOC_CONF" not in child and "PYTORCH_ALLOC_CONF" not in child)
+        r.check("cudaMallocAsync reaches the child through no other name",
+                "cudaMallocAsync" not in json.dumps(child))
+        r.check("the allocator list names the variable --cuda-malloc exports",
+                "PYTORCH_CUDA_ALLOC_CONF" in runtime.FORGE_ALLOCATOR_VARIABLES)
         r.check("everything else is inherited", child["PATH"] == "/usr/bin")
         r.check("the parent environment is left alone", parent["CUDA_VISIBLE_DEVICES"] == FORGE_UUID)
 

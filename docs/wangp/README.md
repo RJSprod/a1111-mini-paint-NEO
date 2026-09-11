@@ -50,6 +50,12 @@ destinations in the Canvas's *Send to* menu.
 * **One GPU, by UUID.** The child is launched with `CUDA_VISIBLE_DEVICES` set to the
   physical UUID you chose. If that card is not in the machine, nothing starts; no other
   GPU is used instead.
+* **Forge's torch settings stay in Forge.** The child inherits Forge's environment so
+  that PATH and drivers are what a terminal would give it, minus Forge's
+  interpreter variables and the allocator variables `--cuda-malloc` and
+  `--expandable-segments` export (`PYTORCH_CUDA_ALLOC_CONF`, `PYTORCH_ALLOC_CONF`). WanGP
+  launched by hand never sees those, and under `cudaMallocAsync` its prompt enhancer's
+  CUDA-graph capture aborts the whole process.
 * **Startup is lazy.** Nothing is launched when Forge boots. Opening the tab (or opening
   *Send to*) asks for WanGP and returns immediately; the tab shows a "starting" card with
   a *Check again* button rather than blocking a Gradio event for a cold model load.

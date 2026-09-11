@@ -36,6 +36,7 @@ answers "no"; it is not an exception in somebody else's generate button.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import pathlib
@@ -116,6 +117,9 @@ class MiniPaintBridge:
         self.adapters: typing.Dict[str, receiver_adapters.ReceiverAdapter] = {}
         self.state_keys: typing.Tuple[str, ...] = ()
         self.receiver_keys: typing.Tuple[str, ...] = ()
+        #: The selector components after the receivers in the event's outputs,
+        #: in ``compatibility.switch_components`` order.
+        self.switch_keys: typing.Tuple[str, ...] = ()
         self.environ = environ
 
     # -- lifecycle -----------------------------------------------------------
@@ -128,6 +132,7 @@ class MiniPaintBridge:
         self.adapters = receiver_adapters.build_adapters(self.compat)
         self.state_keys = tuple(key for key, _ in self.compat.state_components())
         self.receiver_keys = tuple(self.compat.output_receivers())
+        self.switch_keys = tuple(key for key, _ in self.compat.switch_components())
         return resolution
 
     def forget(self) -> None:
@@ -178,7 +183,9 @@ class MiniPaintBridge:
 
         The order is the whole of sections 17, 22 and 23 in one place: the
         revision is checked against a state read in *this* call, the receiver
-        must be one this bridge is offering and active, the file is validated
+        must be one this bridge is offering - switched on, or allowed by the
+        model and switchable, in which case this call switches it - the file
+        is validated
         before it is decoded, the adapter appends or replaces, and only then
         is the result compared with what was sent. A failure at any step
         leaves WanGP exactly as it was.
@@ -193,10 +200,21 @@ class MiniPaintBridge:
             raise compatibility.BridgeError(compatibility.BRIDGE_SESSION_MISMATCH, "this send was prepared for another page")
 
         receiver_state.require_unchanged(state, request.get("state_revision"))
-        receiver_state.require_active(state, receiver_id)
+        receiver_state.require_offered(state, receiver_id)
 
         loaded = handoff.load(request.get("handoff_id"), request.get("source"), self.environ)
         applied = adapter.apply(loaded, adapter.operation, state)
+        # A receiver the model allows but the page has not selected is
+        # switched on in this same event - the Location radio, the End
+        # Image(s) checkbox or the reference dropdown, plus the letter string
+        # generation reads. Empty when it already was on.
+        switch = self.compat.switch_for(receiver_id, state.values)
+        if switch:
+            applied = dataclasses.replace(
+                applied,
+                switch_updates=dict(switch.updates),
+                chained=tuple(applied.chained) + tuple(switch.updates),
+            )
         verification = adapter.verify(loaded, applied)
 
         after = self._state_after(state, applied)
@@ -216,6 +234,7 @@ class MiniPaintBridge:
             "verification": verification.level,
             "state_revision_after": after.revision,
             "chained": list(applied.chained),
+            "switched": switch.token,
         }
         if not verification.ok:
             ack["code"] = verification.code or compatibility.RECEIVER_VERIFY_FAILED
@@ -235,7 +254,11 @@ class MiniPaintBridge:
         """
         values = dict(state.values)
         values[applied.component_key] = applied.value
-        return receiver_state.build(values, state.model, state.capabilities, state.view)
+        # The letter strings a switch rewrote are part of the fingerprint too.
+        for key in (compatibility.IMAGE_PROMPT_TYPE, compatibility.VIDEO_PROMPT_TYPE):
+            if key in applied.switch_updates:
+                values[key] = applied.switch_updates[key]
+        return receiver_state.build(values, state.model, state.capabilities, state.view, allowances=state.allowances)
 
     # -- the event -----------------------------------------------------------
 
@@ -309,7 +332,14 @@ class MiniPaintBridge:
         updates = bridge_ui.no_change(len(self.receiver_keys))
         if applied is not None and applied.receiver_id in self.receiver_keys:
             updates[self.receiver_keys.index(applied.receiver_id)] = applied.value
-        return [json.dumps(ack, default=str), *updates]
+        # Then the selector components, in the same order they were wired;
+        # "no change" for each one a switch did not name.
+        switched = bridge_ui.no_change(len(self.switch_keys))
+        if applied is not None:
+            for index, key in enumerate(self.switch_keys):
+                if key in applied.switch_updates:
+                    switched[index] = bridge_ui.update_for(applied.switch_updates[key])
+        return [json.dumps(ack, default=str), *updates, *switched]
 
 
 class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
@@ -331,6 +361,14 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         except TypeError:
             super().__init__()
         self.bridge = MiniPaintBridge(host=compatibility.Host(self))
+        # The globals are asked for here and not only in setup_ui: Wan2GP
+        # injects them right after constructing the plugin and never again,
+        # so a request made in setup_ui is a request nothing answers. Asking
+        # is a list append; it commits the bridge to nothing.
+        try:
+            self.bridge.compat.declare_globals()
+        except Exception:
+            pass
         #: Whether setup_ui declared anything - False when WanGP was started
         #: by hand, and the bridge is staying out of the way.
         self.declared = False
@@ -458,7 +496,11 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         instance = self.instances
         handler = self._make_handler()
         inputs = [component for _, component in self.bridge.compat.state_components()]
+        # The receivers first, then the selector components a send may switch
+        # (``switch_components`` order) - ``MiniPaintBridge.outputs`` returns
+        # one value per entry in exactly this order.
         outputs = list(self.bridge.compat.output_components())
+        outputs += [component for _, component in self.bridge.compat.switch_components()]
 
         def build_controls() -> typing.Any:
             # Runs inside WanGP's Blocks, inside the target's own container.

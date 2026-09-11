@@ -73,7 +73,7 @@ window.minipaintWanGP = (function () {
     const VERIFICATION_LEVELS = ["byte-identical", "pixel-equivalent", "structurally verified"];
 
     const MAX_ENVELOPE_BYTES = 256 * 1024;
-    const RECEIVER_QUERY_TIMEOUT_MS = 4000;
+    const RECEIVER_QUERY_TIMEOUT_MS = 10000;
     const RECEIVE_TIMEOUT_MS = 30000;
 
     // A handoff id and a channel id have one shape each, and a value that is
@@ -106,7 +106,7 @@ window.minipaintWanGP = (function () {
         IFRAME_NOT_READY: "Open the WanGP tab and choose an input.",
         BRIDGE_SESSION_MISMATCH: "That WanGP page is no longer the one this send was prepared for.",
         RECEIVER_QUERY_TIMEOUT: "WanGP did not answer in time.",
-        NO_ACTIVE_RECEIVER: "This WanGP model and mode take no image right now.",
+        NO_ACTIVE_RECEIVER: "This WanGP model takes no image.",
         UNKNOWN_RECEIVER: "WanGP does not have that input.",
         STALE_RECEIVER_STATE: "The WanGP input changed; reopen Send to.",
         RECEIVER_DISABLED: "That WanGP input is not active right now.",
@@ -234,18 +234,26 @@ window.minipaintWanGP = (function () {
         const maxCount = Number.isFinite(raw.max_count) ? Math.trunc(raw.max_count) : null;
         const full = maxCount !== null && count >= maxCount;
         const label = text(raw.label, 80) || id.replace(/_/g, " ");
+        const enabled = raw.enabled !== false && raw.visible !== false && !full;
+        // Switched on right now, as opposed to offered because the model
+        // allows it; a bridge that predates the distinction only ever offered
+        // what was switched on, so its silence means "selected".
+        const selected = raw.selected === undefined ? enabled : raw.selected === true;
+        const switchToken = (typeof raw.switch === "string" && /^[a-z_]{1,40}$/.test(raw.switch)) ? raw.switch : "";
         return {
             id: id,
             role: raw.role,
             label: label,
             menu_label: text(raw.menu_label, 120) || DEFAULT_MENU_LABELS[id] || ("Send Image to WanGP " + label),
             operation: raw.operation,
-            enabled: raw.enabled !== false && raw.visible !== false && !full,
+            enabled: enabled,
             count: count,
             max_count: maxCount,
             full: full,
             focus_hint: text(raw.focus_hint, 120),
-            reason_code: code(raw.reason_code)
+            reason_code: code(raw.reason_code),
+            selected: selected,
+            switch: enabled && !selected ? switchToken : ""
         };
     }
 
@@ -702,6 +710,14 @@ window.minipaintWanGP = (function () {
     function onReceivers(requestId, payload) {
         const entry = S.pending.get(requestId);
         if (!entry || entry.type !== RECEIVERS) { return; }
+        if (payload.ok === false) {
+            // The bridge answered and refused, and its code is the diagnosis.
+            // An error acknowledgement carries no state revision, so filing it
+            // as a stale revision - which is what happened - reached the menu
+            // as "unavailable" with the actual reason lost on the way.
+            settle(requestId, failure(code(payload.code) || INTERNAL_ERROR, text(payload.detail, 200)));
+            return;
+        }
         const session = text(payload.bridge_session, 128) || S.bridgeSession;
         if (entry.session && session !== entry.session) {
             settle(requestId, failure(BRIDGE_SESSION_MISMATCH));

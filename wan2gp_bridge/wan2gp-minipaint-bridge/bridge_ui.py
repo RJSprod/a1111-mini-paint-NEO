@@ -175,7 +175,9 @@ def wire(
 
     The output list is the acknowledgement followed by every v1 receiver
     component, which is section 21.1's "wire a hidden bridge trigger to all v1
-    receiver components as possible outputs and return no change for the rest".
+    receiver components as possible outputs and return no change for the rest"
+    - and, after those, the selector components a send may switch on
+    (``receiver_components`` carries both, receivers first).
     One event rather than one per receiver, because the request also has to be
     able to answer "what can you take right now", and that answer has to be
     computed from the same inputs in the same call as the apply.
@@ -204,6 +206,19 @@ def wire(
     except TypeError:
         event.then(fn=None, inputs=[controls.ack], outputs=[], _js=deliver_js)
     return True
+
+
+def update_for(change: typing.Any) -> typing.Any:
+    """One switch update as Gradio takes it.
+
+    A mapping is a property update - ``{"visible": True}`` to show the row a
+    click on the selector would have shown - and becomes ``gr.update(**...)``;
+    anything else is the component's new value (the radio's letter, the
+    checkbox's True, the dropdown's choice, the rewritten letter string).
+    """
+    if isinstance(change, dict):
+        return gr.update(**change) if gr is not None else dict(change)
+    return change
 
 
 def no_change(count: int) -> typing.List[typing.Any]:

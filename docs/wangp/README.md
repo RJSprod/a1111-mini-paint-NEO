@@ -59,11 +59,17 @@ destinations in the Canvas's *Send to* menu.
 * **Startup is lazy.** Nothing is launched when Forge boots. Opening the tab (or opening
   *Send to*) asks for WanGP and returns immediately; the tab shows a "starting" card with
   a *Check again* button rather than blocking a Gradio event for a cold model load.
-* **The Send destinations are WanGP's own answer.** When *Send to* opens, one bounded
-  question goes to the live WanGP page in your browser: *what image inputs can you accept
-  right now?* The answer becomes exact menu lines ("Send Image to WanGP Start Frame").
-  There is no cached list, no model-name table, and no DOM scraping. When there is no live
-  WanGP page in this Forge tab, the menu says so instead of guessing.
+* **The Send destinations are WanGP's own answer.** *Send to* always lists the three
+  places a picture can go — Start Frame, End Frame, Reference — and when it opens, one
+  bounded question goes to the live WanGP page in your browser: *which of these does the
+  model you have loaded take?* A scenario the model takes is a real menu action, whether
+  or not WanGP's own selector (the Location radio, the End Image(s) checkbox, the
+  reference dropdown) has been set to it: the send sets the selector as part of placing
+  the image, the same way a click would, and never touches the model. A scenario the
+  model does not take is greyed out and says so. When there is no live WanGP page in this
+  Forge tab, all three are greyed and the line above them says to open the tab. There is
+  no cached list, no model-name table, and no DOM scraping: what the model takes is read
+  from WanGP's own model definition, inside WanGP, per page.
 * **A send is verified before the tab switches.** The picture is flattened to a PNG on the
   server, handed to the browser as an opaque id, applied by a WanGP-side plugin through a
   real Gradio event, and acknowledged. Only a verified acknowledgement switches you to the
@@ -416,7 +422,8 @@ The ones worth knowing by sight:
 | `PROXY_ROOT_PATH_FAILED` | WanGP answers, but not under `/wan2gp/`. `GRADIO_ROOT_PATH` did not take effect in that build. |
 | `AUTH_BOUNDARY_FAILED` | this Forge has a sign-in that could not be *proven* to cover `/wan2gp/`. Fail-closed, not a claim that it is exposed. |
 | `IFRAME_NOT_READY` | there is no live WanGP page in this Forge tab yet. Open the WanGP tab and pick a model. |
-| `NO_ACTIVE_RECEIVER` | this model and mode take no image right now. Nothing is offered rather than something plausible. |
+| `NO_ACTIVE_RECEIVER` | the loaded model takes no image at all (no start frame, no end frame, no reference). Nothing is offered rather than something plausible. |
+| anything else on the Send menu's WanGP line | the bridge inside WanGP refused the receiver query and named why; the code is in the line (`WanGP: unavailable (CODE)`) and the sentence in WanGP's console as `[wan2gp-minipaint-bridge] CODE: detail`. |
 | `STALE_RECEIVER_STATE` | the WanGP page moved between the menu opening and the click. Reopen *Send to*. |
 | `BRIDGE_SESSION_MISMATCH` / `WANGP_RESTARTED` | the WanGP page or process is not the one this send was prepared for. The image was not applied. |
 | `RECEIVER_VERIFY_FAILED` | WanGP took an image, but it could not be confirmed as the one that was sent. The tab does not switch, and the log keeps the detail. |
@@ -471,8 +478,12 @@ to install one.
   already names control image, positioned reference and style reference, and the bridge
   publishes none of them, so Mini Paint never offers them. Adding one is three declarations
   in `compatibility.py` and a small adapter — no change on the Forge side.
-* **The element ids in `compatibility.py` are unverified against a running WanGP.** They
-  were written from WanGP's documented media-input naming, each carries a
-  `VERIFY ON A REAL INSTALL` comment, and a build that does not resolve them fails closed.
-  See `docs/wangp/PHASE0.md` for the checks that settle this, and for everything else that
-  could not be executed without a real Forge and a real WanGP.
+* **The component names in `compatibility.py` are Wan2GP's own variable names.** They
+  were checked against Wan2GP at commit `362c346` (the generator form's locals are what
+  the plugin API hands over by name; `"S"`/`"E"` in `image_prompt_type` and `"I"` in
+  `video_prompt_type` are the letters generation reads). A fork that renames one fails
+  closed: a missing mandatory component is `BRIDGE_COMPONENT_INCOMPATIBLE`, and a missing
+  optional one (the selector controls a send may switch, `image_mode`, the page `state`)
+  only takes away the "offer what the model allows" half — a receiver is then offered
+  only while WanGP's own selector already has it switched on, as before. See
+  `docs/wangp/PHASE0.md` for the checks that still want a real Forge and a real WanGP.

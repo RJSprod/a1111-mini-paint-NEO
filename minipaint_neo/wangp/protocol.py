@@ -79,6 +79,10 @@ DEFAULT_MENU_LABELS = {
 HANDOFF_ID_RE = re.compile(r"\A[0-9a-f]{32}\Z")
 HANDOFF_SUFFIX = ".png"
 
+#: What a send will switch on in WanGP for a receiver the model allows but
+#: the page has not selected: a short token from the bridge, or nothing.
+SWITCH_RE = re.compile(r"\A[a-z_]{1,40}\Z")
+
 #: Ceilings for one handoff. Generous for a high-resolution edit, finite.
 MAX_HANDOFF_BYTES = 64 * 1024 * 1024
 MAX_HANDOFF_PIXELS = 64 * 1024 * 1024
@@ -87,8 +91,11 @@ MAX_HANDOFF_SIDE = 16384
 #: A postMessage envelope this size or larger is dropped unread.
 MAX_ENVELOPE_BYTES = 256 * 1024
 
-#: How long the parent waits, in milliseconds.
-RECEIVER_QUERY_TIMEOUT_MS = 4000
+#: How long the parent waits, in milliseconds. The receiver query is one
+#: Gradio round trip inside WanGP; on a machine that is loading a model or
+#: pinning LoRAs at that moment, four seconds was not enough and read as
+#: "unavailable".
+RECEIVER_QUERY_TIMEOUT_MS = 10000
 RECEIVE_TIMEOUT_MS = 30000
 
 #: How the state fingerprint is shortened for transport.
@@ -181,6 +188,13 @@ def normalize_receiver(raw: typing.Any) -> typing.Optional[dict]:
     # what a naive "count >= max_count" does to a single-image slot.
     full = operation == APPEND and max_count is not None and count >= max_count
     enabled = bool(raw.get("enabled", True)) and bool(raw.get("visible", True)) and not full
+    # Switched on right now, as opposed to offered because the model allows
+    # it. A bridge that predates the distinction only ever offered what was
+    # switched on, so its silence means "selected".
+    selected = raw.get("selected")
+    selected = bool(selected) if isinstance(selected, bool) else enabled
+    switch = raw.get("switch")
+    switch = switch if isinstance(switch, str) and SWITCH_RE.match(switch) else ""
 
     label = str(raw.get("label") or receiver_id.replace("_", " ").title())
     menu_label = str(raw.get("menu_label") or DEFAULT_MENU_LABELS.get(receiver_id) or f"Send Image to WanGP {label}")
@@ -198,6 +212,8 @@ def normalize_receiver(raw: typing.Any) -> typing.Optional[dict]:
         "full": full,
         "focus_hint": str(focus_hint) if isinstance(focus_hint, str) else "",
         "reason_code": str(raw.get("reason_code") or ""),
+        "selected": selected,
+        "switch": switch if enabled and not selected else "",
     }
 
 

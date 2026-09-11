@@ -219,10 +219,15 @@ def wire(
     if event is None:
         return False
 
-    try:
-        event.then(fn=None, inputs=[controls.ack], outputs=[], js=deliver_js)
-    except TypeError:
-        event.then(fn=None, inputs=[controls.ack], outputs=[], _js=deliver_js)
+    # The chained delivery gets the same trigger mode, for the same reason:
+    # three acknowledgements that complete in the same second must all reach
+    # the page, not the first of them.
+    for extra in ({"js": deliver_js, "trigger_mode": "multiple"}, {"js": deliver_js}, {"_js": deliver_js}):
+        try:
+            event.then(fn=None, inputs=[controls.ack], outputs=[], **extra)
+            break
+        except TypeError:
+            continue
     return True
 
 

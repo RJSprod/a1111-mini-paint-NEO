@@ -53,6 +53,15 @@ TRIGGER_RETRY_MS = 250
 #: the second route for an answer whose chained ``.then(js=...)`` never ran.
 ACK_POLL_MS = 300
 
+#: How long an animation frame requested while a request is in flight may
+#: wait for the browser before a timer runs it instead. Gradio schedules every
+#: event trigger inside requestAnimationFrame, and a document that is not
+#: rendered - this page, whenever the Forge tab holding it is not the one on
+#: screen - is given no frames at all. Two frames' worth: long enough that a
+#: rendered page's own frame always wins, short enough that a hidden one
+#: answers well inside the parent's deadline.
+FRAME_FALLBACK_MS = 40
+
 #: What ``.then(js=...)`` runs with the acknowledgement textbox's value. It
 #: names one method on one object and swallows its own failures, so a bridge
 #: that is not present cannot turn into a console error on every event.
@@ -86,6 +95,7 @@ def configuration(theme_css: str = "") -> dict:
         "triggerAttempts": TRIGGER_ATTEMPTS,
         "triggerRetryMs": TRIGGER_RETRY_MS,
         "ackPollMs": ACK_POLL_MS,
+        "frameFallbackMs": FRAME_FALLBACK_MS,
         # Longer than the parent will wait, so in the ordinary case the parent
         # reports the timeout and this only ever unwedges the queue behind it.
         "roundTripMs": protocol.RECEIVE_TIMEOUT_MS + 5000,
@@ -133,6 +143,87 @@ _SCRIPT = r"""
   function log(message) {
     try { if (typeof console !== "undefined" && console.debug) { console.debug("[minipaint bridge] " + message); } }
     catch (error) {}
+  }
+
+  // -- animation frames while a request is in flight ----------------------------
+  //
+  // Gradio's Blocks schedules every event trigger inside requestAnimationFrame
+  // (for each dependency: requestAnimationFrame(() => Jt(dep, ...))), and so
+  // does the flush that writes an event's outputs into the page. A browser
+  // gives no animation frames to a document that is not being rendered, and
+  // this page is not rendered whenever the Forge tab holding its iframe is not
+  // the one on screen - which is precisely when Mini Paint's Send menu asks it
+  // what it can take. The click on the hidden trigger then enters Gradio's
+  // dispatch and waits for a frame that only arrives when the WanGP tab is
+  // opened again, long after anyone stopped waiting; nothing reaches the
+  // server meanwhile, so nothing is logged there either.
+  //
+  // WanGP's own focus patch reschedules exactly these frames for its hidden
+  // main tab and for a backgrounded browser, but each of its branches needs
+  // the main tab's panel to be measurable, and inside a display:none iframe
+  // nothing measures. So, while a bridge request is in flight and only then,
+  // every frame requested is also given a timer; whichever fires first runs
+  // the callback and cancels the other. A rendered page's frame always wins,
+  // so its rendering is untouched; a hidden page's timer answers instead.
+  // Installed on top of whatever requestAnimationFrame is at this moment -
+  // WanGP's patch wraps the native one before this script runs, and the
+  // order does not matter: this layer is transparent whenever nothing is in
+  // flight.
+
+  var FRAME_ID_BASE = 1073741824;
+  var previousRequestFrame = window.requestAnimationFrame;
+  var previousCancelFrame = window.cancelAnimationFrame;
+  var frames = Object.create(null);
+  var nextFrame = 1;
+  var timedFrames = 0;
+
+  function requestFrame(callback) {
+    if (!busy || typeof callback !== "function" || typeof previousRequestFrame !== "function") {
+      return previousRequestFrame.call(window, callback);
+    }
+    var id = FRAME_ID_BASE + (nextFrame++);
+    var entry = { native: 0, timer: 0, done: false };
+    frames[id] = entry;
+    var run = function (now, byTimer) {
+      if (entry.done) { return; }
+      entry.done = true;
+      delete frames[id];
+      if (entry.timer) { window.clearTimeout(entry.timer); entry.timer = 0; }
+      if (byTimer) {
+        timedFrames += 1;
+        if (entry.native) { try { previousCancelFrame.call(window, entry.native); } catch (error) {} }
+      }
+      entry.native = 0;
+      callback(typeof now === "number" ? now : (window.performance && window.performance.now ? window.performance.now() : Date.now()));
+    };
+    try {
+      entry.native = previousRequestFrame.call(window, function (now) { entry.native = 0; run(now, false); });
+    } catch (error) {
+      entry.native = 0;
+    }
+    entry.timer = window.setTimeout(function () { entry.timer = 0; run(undefined, true); }, CONFIG.frameFallbackMs);
+    return id;
+  }
+
+  function cancelFrame(id) {
+    var entry = frames[id];
+    if (!entry) {
+      if (typeof previousCancelFrame === "function") { return previousCancelFrame.call(window, id); }
+      return undefined;
+    }
+    entry.done = true;
+    delete frames[id];
+    if (entry.timer) { window.clearTimeout(entry.timer); entry.timer = 0; }
+    if (entry.native) { try { previousCancelFrame.call(window, entry.native); } catch (error) {} }
+    return undefined;
+  }
+
+  try {
+    window.requestAnimationFrame = requestFrame;
+    window.cancelAnimationFrame = cancelFrame;
+  } catch (error) {
+    // A page that will not let its frame functions be replaced keeps them;
+    // the bridge then works exactly as it did, on a rendered page only.
   }
   var encoder = (typeof TextEncoder !== "undefined") ? new TextEncoder() : null;
 
@@ -254,7 +345,8 @@ _SCRIPT = r"""
       request: next,
       clickedAt: Date.now(),
       set: (column && column.id) || "(no id)",
-      ackBefore: ackField ? String(ackField.value || "") : ""
+      ackBefore: ackField ? String(ackField.value || "") : "",
+      timedFramesBefore: timedFrames
     };
     // Nothing else clears ``busy``. If the Gradio round trip never lands - the
     // server errored, the queue dropped it, WanGP restarted underneath us -
@@ -274,7 +366,8 @@ _SCRIPT = r"""
       stopPoll();
       if (stranded) {
         var detail = "no acknowledgement " + (record ? (Date.now() - record.clickedAt) : 0) + " ms after the click on "
-          + (record ? record.set : "(no set)") + " - the Gradio event never completed, or its result never reached this page";
+          + (record ? record.set : "(no set)") + " - the Gradio event never completed, or its result never reached this page"
+          + " (" + (timedFrames - (record ? record.timedFramesBefore : 0)) + " frame(s) run by timer)";
         log(stranded.op + ": " + detail);
         answer(stranded, { ok: false, code: "RECEIVER_QUERY_TIMEOUT", detail: detail });
       }
@@ -362,7 +455,10 @@ _SCRIPT = r"""
     flight = null;
     stopPoll();
     if (watchdog) { window.clearTimeout(watchdog); watchdog = 0; }
-    if (record) { log(record.request.op + ": acknowledged after " + (Date.now() - record.clickedAt) + " ms"); }
+    if (record) {
+      log(record.request.op + ": acknowledged after " + (Date.now() - record.clickedAt) + " ms ("
+        + (timedFrames - record.timedFramesBefore) + " frame(s) run by timer)");
+    }
     var payload = null;
     try { payload = JSON.parse(String(raw || "")); } catch (error) { payload = null; }
 

@@ -536,13 +536,34 @@ window.minipaintWanGP = (function () {
      * anybody thought to open, and one red row that only says "did not
      * answer". Each line goes to the page's own log through a hidden textbox.
      */
+    // The journal box is one Gradio textbox, and Gradio reads it when its
+    // change event runs, not when the value is written: two lines written in
+    // the same tick reached the server as the second one twice and the first
+    // one never. So every line gets a sequence number, the box always holds
+    // the last few lines (LOG_WINDOW) rather than the last one, and the
+    // server journals each sequence number once - a write that is skipped
+    // over is carried by the next, and a write that is read twice is dropped.
+    const LOG_WINDOW = 24;
+    const LOG_PAGE = hex32().slice(0, 12);
+    const logLines = [];
+    let logFlush = 0;
+
+    function flushLog() {
+        logFlush = 0;
+        try {
+            writeBox(CLIENT_LOG_ELEM_ID, JSON.stringify({ p: LOG_PAGE, n: logSeq, lines: logLines.slice(-LOG_WINDOW) }));
+        } catch (e) { /* a log line is never worth an exception */ }
+    }
+
     function say(message) {
         try {
             logSeq += 1;
             if (typeof console !== "undefined" && console.debug) {
                 console.debug("MiniPaint WanGP:", message);
             }
-            writeBox(CLIENT_LOG_ELEM_ID, JSON.stringify({ n: logSeq, line: String(message).slice(0, 300) }));
+            logLines.push({ s: logSeq, line: String(message).slice(0, 300) });
+            if (logLines.length > LOG_WINDOW) { logLines.splice(0, logLines.length - LOG_WINDOW); }
+            if (!logFlush) { logFlush = setTimeout(flushLog, 0); }
         } catch (e) { /* a log line is never worth an exception */ }
     }
 
@@ -931,18 +952,26 @@ window.minipaintWanGP = (function () {
      * whole point of section 17: if the WanGP page moved since the user read
      * the menu, the bridge refuses rather than redirects.
      */
+    /** A send that stops here, before anything is asked: said once, in the
+     * journal, because a send that ends without a line anywhere is the one
+     * kind of failure nobody can diagnose afterwards. */
+    function refuse(failureCode, detail) {
+        say("send: refused before asking - " + failureCode + (detail ? " (" + text(detail, 120) + ")" : ""));
+        return Promise.resolve(failure(failureCode, detail));
+    }
+
     function send(receiverId, revision, handoffId, expected) {
         if (!ensure() || !S.ready || !S.bridgeSession) {
-            return Promise.resolve(failure(IFRAME_NOT_READY, "no bridge session in this page"));
+            return refuse(IFRAME_NOT_READY, "no bridge session in this page");
         }
-        if (RECEIVER_IDS.indexOf(receiverId) === -1) { return Promise.resolve(failure(UNKNOWN_RECEIVER, receiverId)); }
-        if (!HEX32.test(String(handoffId || ""))) { return Promise.resolve(failure(HANDOFF_INVALID_ID)); }
-        if (!REVISION_RE.test(String(revision || ""))) { return Promise.resolve(failure(STALE_RECEIVER_STATE, "no revision was captured")); }
+        if (RECEIVER_IDS.indexOf(receiverId) === -1) { return refuse(UNKNOWN_RECEIVER, receiverId); }
+        if (!HEX32.test(String(handoffId || ""))) { return refuse(HANDOFF_INVALID_ID, "the prepared file's id is not one this extension mints"); }
+        if (!REVISION_RE.test(String(revision || ""))) { return refuse(STALE_RECEIVER_STATE, "no revision was captured when the menu was built"); }
         const session = expected && expected.bridge_session ? String(expected.bridge_session) : S.bridgeSession;
-        if (session !== S.bridgeSession) { return Promise.resolve(failure(BRIDGE_SESSION_MISMATCH)); }
+        if (session !== S.bridgeSession) { return refuse(BRIDGE_SESSION_MISMATCH, "the menu was built for another bridge session"); }
         const receiver = known(receiverId);
-        if (receiver && receiver.full) { return Promise.resolve(failure(RECEIVER_LIMIT_REACHED, receiverId)); }
-        if (receiver && !receiver.enabled) { return Promise.resolve(failure(RECEIVER_DISABLED, receiverId)); }
+        if (receiver && receiver.full) { return refuse(RECEIVER_LIMIT_REACHED, receiverId); }
+        if (receiver && !receiver.enabled) { return refuse(RECEIVER_DISABLED, receiverId); }
 
         const requestId = hex32();
         const payload = {
@@ -962,6 +991,7 @@ window.minipaintWanGP = (function () {
                     S.pending.delete(requestId);
                     // Nothing came back, so nothing is proved: the send is a
                     // failure even though the image may in fact have landed.
+                    say(RECEIVE_IMAGE + ": no acknowledgement within " + RECEIVE_TIMEOUT_MS + " ms (" + requestId.slice(0, 8) + ")");
                     resolve(failure(RECEIVER_QUERY_TIMEOUT, "no acknowledgement"));
                 }, RECEIVE_TIMEOUT_MS)
             };
@@ -969,8 +999,11 @@ window.minipaintWanGP = (function () {
             if (!post(RECEIVE_IMAGE, requestId, payload)) {
                 clearTimeout(entry.timer);
                 S.pending.delete(requestId);
+                say(RECEIVE_IMAGE + ": the iframe would not take the message");
                 resolve(failure(IFRAME_NOT_READY, "the iframe would not take the message"));
+                return;
             }
+            say(RECEIVE_IMAGE + ": asked (" + requestId.slice(0, 8) + ") for " + receiverId);
         });
     }
 
@@ -1085,6 +1118,9 @@ window.minipaintWanGP = (function () {
         state: state,
         switchToWanGP: switchToWanGP,
         theme: theme,
-        message: sentence
+        message: sentence,
+        // One line into the same journal the handshake and the queries write
+        // to, for the Canvas's half of a send. Text only; nothing is parsed.
+        note: function (message) { say(text(message, 300)); }
     };
 })();

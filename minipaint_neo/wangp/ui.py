@@ -736,17 +736,47 @@ def acknowledge_auth(ticked: typing.Any, candidate: typing.Any) -> dict:
     return answers
 
 
+#: The highest line number journaled per browser page, so that a box value
+#: Gradio hands over twice is written once, and one it skipped over is caught
+#: up from the window the next value carries. A few pages at most; bounded.
+_client_log_seen: typing.Dict[str, int] = {}
+_CLIENT_LOG_PAGES = 32
+_CLIENT_LOG_LINES = 64
+
+
 def record_client_log(text: typing.Any) -> None:
-    """One line the browser wants in the page's log. Never raises.
+    """The lines the browser wants in the page's log. Never raises.
 
     The browser is a writer here like any other, so what it says is trimmed
     and scrubbed on the way in rather than trusted - it reaches a box a user
-    is invited to copy into a bug report.
+    is invited to copy into a bug report. The box carries a window of recent
+    lines, each numbered (``{"p": page, "lines": [{"s": n, "line": ...}]}``);
+    a line is journaled once per page, whatever Gradio made of the writes in
+    between. The older one-line shape (``{"line": ...}``) is still taken.
     """
     try:
         payload = json.loads(text) if isinstance(text, str) and text.strip() else None
-        if isinstance(payload, dict) and payload.get("line"):
-            journal.note("browser", payload["line"])
+        if not isinstance(payload, dict):
+            return
+        lines = payload.get("lines")
+        if not isinstance(lines, list):
+            if payload.get("line"):
+                journal.note("browser", payload["line"])
+            return
+        page = str(payload.get("p") or "")[:16]
+        if page not in _client_log_seen and len(_client_log_seen) >= _CLIENT_LOG_PAGES:
+            _client_log_seen.clear()
+        seen = _client_log_seen.get(page, 0)
+        for entry in lines[:_CLIENT_LOG_LINES]:
+            if not isinstance(entry, dict):
+                continue
+            number = entry.get("s")
+            line = entry.get("line")
+            if not isinstance(number, int) or isinstance(number, bool) or number <= seen or not isinstance(line, str) or not line:
+                continue
+            journal.note("browser", line[:300])
+            seen = number
+        _client_log_seen[page] = seen
     except Exception:
         return
 

@@ -263,6 +263,22 @@ def wangp_receiver(choice: str, known: typing.Optional[typing.Sequence[str]] = N
     return receiver if receiver in names else ""
 
 
+def _journal(source: str, message: str) -> None:
+    """One line into the WanGP journal (logs/wangp-log.txt), if this build has it.
+
+    The send log records how a transfer ended; the journal is where the
+    handshake, the queries and the plugin already write, so a send's steps
+    on this side go there too - the one file that shows all three halves.
+    """
+    module = _wangp("process_log")
+    if module is None:
+        return
+    try:
+        module.note(source, message)
+    except Exception:
+        pass
+
+
 def wangp_label(receiver_id: str) -> str:
     """How the status line and the send log name one WanGP input.
 
@@ -1016,11 +1032,13 @@ class TouchCanvas:
         """
         doc = document.ensure(state)
         skips = [gr.skip() for _ in self.image_targets]
+        receiver = wangp_receiver(_request(request))
         image, mask, notes = self._sync(doc, foreground)
         if image is None:
+            if receiver:
+                _journal("send", f"{wangp_label(receiver)}: nothing to send - the Canvas holds no image")
             return (*skips, *self._info(doc, mode, "There is no image to send."), "", "")
 
-        receiver = wangp_receiver(_request(request))
         if receiver:
             return self._send_to_wangp(doc, mode, receiver, notes)
 
@@ -1080,6 +1098,7 @@ class TouchCanvas:
         errors = _wangp("errors")
         label = wangp_label(receiver_id)
         if handoff is None:
+            _journal("send", f"{label}: the WanGP package is not importable here, so nothing was prepared")
             return (*skips, *self._info(doc, mode, "WanGP support is not available in this install, so nothing was sent."), "", "")
 
         outgoing = self._outgoing(doc, "wangp", label, notes)
@@ -1089,7 +1108,17 @@ class TouchCanvas:
             code = str(getattr(error, "code", "") or "INTERNAL_ERROR")
             sentence = errors.message(code) if errors is not None else "The image could not be prepared for WanGP."
             log_quietly({"destination": f"Canvas -> {label}", "outcome": f"failed: {code}", "steps": list(notes)})
+            _journal("send", f"{label}: the picture could not be prepared - {code}")
             return (*skips, *self._info(doc, mode, sentence, notes), "", "")
+        # The first half of the record, written now: a send whose second half
+        # never arrives then still shows that this side did its part, and the
+        # journal shows the browser being handed the file - or not.
+        log_quietly({
+            "destination": f"Canvas -> {label}",
+            "outcome": f"prepared {outgoing.width}x{outgoing.height}; waiting for the WanGP page to say it took it",
+            "steps": list(notes),
+        })
+        _journal("send", f"{label}: prepared {outgoing.width}x{outgoing.height}; the browser is handed the file to give to the WanGP page")
 
         # What was asked for, kept so the answer can be held to it. Without
         # this the only record of the chosen input is the browser's own, and an
@@ -1116,6 +1145,12 @@ class TouchCanvas:
         """
         doc = document.ensure(state)
         outcome = wangp_report(report)
+        _journal(
+            "send",
+            f"the browser reports: {outcome['receiver_id'] or '(no receiver named)'} "
+            + ("taken" if outcome["ok"] else f"not taken - {outcome['code'] or 'INTERNAL_ERROR'}"
+               + (f" ({outcome['detail']})" if outcome.get("detail") else "")),
+        )
 
         # The prepared PNG has done its job either way: the bridge decoded it
         # into WanGP's own component value, so nothing points at the file any

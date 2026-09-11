@@ -40,6 +40,7 @@ import dataclasses
 import hashlib
 import json
 import pathlib
+import time
 import typing
 
 try:
@@ -274,6 +275,7 @@ class MiniPaintBridge:
         came in with, because the browser correlates on them and an answer it
         cannot place is an answer it must throw away.
         """
+        started = time.perf_counter()
         request = _parse(raw_request)
         operation = request.get("op")
         instance = compatibility.instance_id(self.environ)
@@ -311,10 +313,15 @@ class MiniPaintBridge:
                 ack.update(result)
         except compatibility.BridgeError as error:
             ack.update({"ok": False, "ready": False, "code": error.code})
-            _note(f"{error.code}: {error.detail}")
+            _note(f"{operation}: {error.code}: {error.detail}")
         except Exception as error:  # pragma: no cover - the last line of defence
             ack.update({"ok": False, "ready": False, "code": compatibility.INTERNAL_ERROR})
-            _note(f"unexpected: {error!r}")
+            _note(f"{operation}: unexpected: {error!r}")
+        else:
+            # One line per request that went through, so the log outside
+            # WanGP can tell "the event ran and answered" from "the click
+            # never reached us" - the two look identical from the Send menu.
+            _note(_summary(operation, ack, time.perf_counter() - started))
 
         # The bridge session and instance id are restated after the fact: a
         # handshake payload carries its own copies, and the two must agree.
@@ -616,6 +623,26 @@ def _token(value: typing.Any, limit: int = 64) -> str:
     if not isinstance(value, str):
         return ""
     return "".join(character for character in value if character.isalnum() or character in "._:-")[:limit]
+
+
+def _summary(operation: typing.Any, ack: typing.Mapping[str, typing.Any], seconds: float) -> str:
+    """What one answered request amounted to, in receiver ids and tokens only."""
+    took = f"{seconds * 1000:.0f} ms"
+    if operation == "receive":
+        line = f"receive: {ack.get('receiver_id')} {ack.get('operation')} {ack.get('verification')} in {took}"
+        return line + (f", switched {ack['switched']}" if ack.get("switched") else "")
+    parts = []
+    for item in ack.get("receivers") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("selected"):
+            state = "selected"
+        elif item.get("enabled"):
+            state = f"allowed ({item.get('switch') or 'switch'})"
+        else:
+            state = "off"
+        parts.append(f"{item.get('id')} {state}")
+    return f"{operation}: answered in {took} - " + (", ".join(parts) if parts else "no receiver resolved")
 
 
 def _note(text: str) -> None:

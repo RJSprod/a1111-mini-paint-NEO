@@ -112,7 +112,7 @@ window.minipaintCanvas = (function () {
         // the receiver a click armed - captured at the click, because the
         // state the user chose under is what the send has to be checked
         // against, not whatever WanGP happens to show by the time it lands.
-        wangp: { token: 0, status: "", items: [], revision: "", session: "", pending: null },
+        wangp: { token: 0, status: "", items: [], revision: "", session: "", pending: null, failed: false },
         menuOutside: null,
         menuKey: null,
         frameGrip: null,
@@ -1110,22 +1110,30 @@ window.minipaintCanvas = (function () {
         w.revision = "";
         w.session = "";
         w.status = "";
+        w.failed = false;
         const api = wangp();
         if (!api || !api.state().present) { return; }
         w.status = "WanGP: checking active inputs…";
-        api.receivers().then(function (answer) {
+        // The same answer lands the same way whether it came in time or in
+        // the grace window after "did not answer in time": if this menu is
+        // still the one open, it is redrawn from what WanGP actually said.
+        const take = function (answer) {
             if (token !== w.token || S.menuSection !== "send") { return; }
             if (answer && answer.ok) {
                 w.items = answer.receivers;
                 w.revision = answer.state_revision;
                 w.session = answer.bridge_session;
+                w.failed = false;
                 w.status = w.items.some(function (r) { return r.enabled; }) ? "" : wangpStatus("NO_ACTIVE_RECEIVER");
             } else {
+                w.failed = true;
                 w.status = wangpStatus(answer ? answer.code : "");
             }
             renderMenu("send");
-        }, function () {
+        };
+        api.receivers({ late: take }).then(take, function () {
             if (token !== w.token || S.menuSection !== "send") { return; }
+            w.failed = true;
             w.status = wangpStatus("");
             renderMenu("send");
         });
@@ -1166,6 +1174,9 @@ window.minipaintCanvas = (function () {
         const present = !!api.state().present;
         const status = present ? w.status : wangpStatus("IFRAME_NOT_READY");
         if (status) { items.push({ menu: "status", label: status }); }
+        // One more bounded question, on request. Not a poll: it asks exactly
+        // once more, when a person asks for it.
+        if (present && w.failed) { items.push({ menu: "wangp-refresh", label: "WanGP: check again" }); }
         for (const scenario of WANGP_SCENARIOS) {
             const receiver = present ? (w.items.find(function (r) { return r.id === scenario[0]; }) || null) : null;
             const label = (receiver && receiver.menu_label) || scenario[1];
@@ -1323,6 +1334,7 @@ window.minipaintCanvas = (function () {
             case "close": closeMenu(); return;
             case "press": closeMenu(); pressHidden(value); return;
             case "send": armWanGP(value); closeMenu(); sendInput(SEND_REQUEST_ID, value + ":" + Date.now()); return;
+            case "wangp-refresh": queryWanGP(); renderMenu("send"); return;
             case "status": return;
             case "panels": closeMenu(); setRail(railHidden()); return;
             case "focus": closeMenu(); setFocus(!focusOn()); return;

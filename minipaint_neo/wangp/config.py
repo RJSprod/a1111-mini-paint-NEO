@@ -35,7 +35,7 @@ import re
 import tempfile
 import typing
 
-from .. import paths
+from .. import paths, scrub
 from .errors import (
     CONFIG_SCHEMA_TOO_NEW,
     CONFIG_UNREADABLE,
@@ -206,9 +206,10 @@ def config_dir() -> pathlib.Path:
         _state["dir"] = directory
         if fallback_reason and not _state["announced"]:
             _state["announced"] = True
-            print(
-                f"{_LOG_PREFIX} {fallback_reason}; keeping WanGP settings in {directory}, "
-                "which is inside the extension folder and goes away if the extension is reinstalled"
+            scrub.console(
+                f"{fallback_reason}; keeping WanGP settings in the extension's own "
+                f"{name}/ folder, which goes away if the extension is reinstalled",
+                _LOG_PREFIX,
             )
     directory.mkdir(parents=True, exist_ok=True)
     return directory

@@ -49,7 +49,8 @@ import threading
 import time
 import typing
 
-from . import discovery, errors, journal
+from .. import scrub
+from . import discovery, errors, journal, process_log
 from .config import DEFAULT_PROXY_PATH, runtime_dir
 from .errors import IntegrationError
 
@@ -102,7 +103,10 @@ STDERR_MAX_LINE = 2000
 
 #: WanGP's own console output stays visible; swallowing a traceback because it
 #: happened to arrive on the pipe we read would make every support request
-#: harder than it needs to be.
+#: harder than it needs to be. It is echoed *scrubbed*, which is a change from
+#: relaying it verbatim and is the whole point: WanGP prints the prompt and the
+#: output filename on the way through, and the WebUI console is the surface
+#: most likely to be photographed, streamed or pasted.
 ECHO_CHILD_STDERR = True
 
 _LOG_PREFIX = "MiniPaint WanGP:"
@@ -517,7 +521,16 @@ def _drain(child: _Child) -> None:
             if not raw:
                 break
             line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
-            stripped = line.rstrip("\r\n")
+            # Scrubbed once, here, at the only place the child's words enter
+            # this process. Everything downstream - the crash tail, the tab's
+            # console, the log file, the WebUI console, the sentence the error
+            # screen quotes - reads what this produces, so there is no path by
+            # which a raw line reaches a screen and no second writer to
+            # remember to fix. WanGP is a third-party application printing a
+            # user's prompts and output filenames; relaying that verbatim is
+            # what put them in the console in the first place.
+            body = line.rstrip("\r\n")
+            stripped = scrub.line(body, limit=STDERR_MAX_LINE)
             child.stderr_tail.append(stripped)
             # The child's own words, in the one place a user can read them.
             # This is where WanGP says which plugins it loaded, and it is the
@@ -526,7 +539,10 @@ def _drain(child: _Child) -> None:
                 journal.note("wangp", stripped)
             if ECHO_CHILD_STDERR:
                 try:
-                    sys.stderr.write(line)
+                    # The child's own line ending, kept: a chunk that arrived
+                    # without one is a progress bar mid-update, and adding a
+                    # newline to it turns one line into hundreds.
+                    sys.stderr.write(stripped + line[len(body) :])
                 except Exception:
                     pass
     except Exception:
@@ -702,7 +718,8 @@ class Runtime:
         self._clear_instance()
         self._fail(errors.PROCESS_EXITED, detail)
         self.state = CRASHED
-        print(f"{_LOG_PREFIX} {detail}")
+        process_log.end(child.instance_id, detail)
+        scrub.console(detail, _LOG_PREFIX)
 
     # -- start --------------------------------------------------------------
 
@@ -756,6 +773,16 @@ class Runtime:
             root_text = str(root)
             handoff = _text(handoff_root) or _handoff_root()
 
+            # Tell the scrubber what these two directories are before anything
+            # is launched. Almost every path WanGP prints is under one of them,
+            # and a labelled path - <wangp>/outputs/*.mp4 - is the difference
+            # between a log that says where a file went and one that says
+            # nothing at all. Registered per launch rather than at import,
+            # because the setup can be repointed at another install.
+            scrub.register_root("wangp", root_text)
+            scrub.register_root("runtime", _text(_section(config, "runtime").get("prefix")))
+            process_log.begin(instance_id, f"root {scrub.line(root_text)}")
+
             last_detail = ""
             for attempt in range(PORT_ATTEMPTS):
                 port = free_port()
@@ -796,7 +823,7 @@ class Runtime:
                 last_detail = detail
                 if not retryable:
                     raise self._fail(errors.PROCESS_START_FAILED, detail)
-                print(f"{_LOG_PREFIX} port {port} did not work out ({detail}); trying another")
+                scrub.console(f"port {port} did not work out ({detail}); trying another", _LOG_PREFIX)
 
             raise self._fail(errors.PORT_IN_USE, f"{PORT_ATTEMPTS} ports tried; last: {last_detail}")
 

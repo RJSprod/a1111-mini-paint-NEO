@@ -8,45 +8,50 @@ goes wrong the screen has room for one sentence, and the sentence is never
 enough to act on.
 
 So every step writes a line here, from whichever side it happened on -
-including the browser, which posts its own lines back. It is a ring buffer in
-memory and nothing else: it is not the transfer log, it does not survive a
-restart, and nothing reads it back to make a decision.
+including the browser, which posts its own lines back. In memory it is a ring
+buffer and nothing more: it is not the transfer log, it does not survive a
+restart, and nothing reads it back to make a decision. Every line is also
+mirrored into ``process_log``, which is the durable copy on disk - the tab
+needs the last few hundred lines and a bug report needs the whole run, and
+those are different requirements rather than one requirement with a setting.
 
-Secrets never reach it. The bridge secret and the backend port are the two
-things that must not be in something a user pastes into an issue, so they are
-replaced on the way in rather than trusted not to be passed.
+Nothing that identifies a person reaches it. Prompts, output filenames, paths,
+addresses and secrets are taken out by ``minipaint_neo.scrub`` on the way in
+rather than trusted not to be passed, because the largest writer here is
+WanGP itself, relayed a line at a time by ``runtime``, and what a third-party
+application prints is not something this code gets to promise anything about.
+The backend port goes too: it is not a secret the way a token is, but the
+browser is not supposed to learn it and this is rendered inside the tab.
 """
 
 from __future__ import annotations
 
 import collections
 import datetime
-import re
 import threading
 import typing
 
+from .. import scrub as _scrub
+from . import process_log
+
 #: Enough to hold a whole failed setup attempt, short enough to paste.
 MAX_LINES = 400
-MAX_LINE = 400
-
-_lock = threading.Lock()
-_lines: typing.Deque[str] = collections.deque(maxlen=MAX_LINES)
-
-#: Anything shaped like our runtime secret, and the backend port in the two
-#: forms it could be written. The port is not a secret in the way a token is,
-#: but the browser is not supposed to learn it and a pasted log is a browser
-#: away from anywhere.
-_SECRET = re.compile(r"(secret|token|password|authorization)\s*[=:]\s*\S+", re.IGNORECASE)
-_LOOPBACK = re.compile(r"\b(127\.0\.0\.1|localhost)[:/](\d{2,5})\b")
+MAX_LINE = _scrub.MAX_LINE
 
 
 def scrub(text: typing.Any) -> str:
-    """One line, with the two things that must not travel taken out."""
-    line = str(text)
-    line = _SECRET.sub(lambda match: f"{match.group(1)}=<hidden>", line)
-    line = _LOOPBACK.sub(lambda match: f"{match.group(1)}:<port>", line)
-    line = "".join(character if character.isprintable() else " " for character in line)
-    return line[:MAX_LINE]
+    """One line, with everything that identifies somebody taken out.
+
+    Kept as this module's own name for the operation because the tab, the
+    tests and the browser route all call it, and because what "safe enough for
+    the journal" means - no PII *and* no backend port - is a stricter rule
+    than the one the WebUI console runs under.
+    """
+    return _scrub.private(text, limit=MAX_LINE)
+
+
+_lock = threading.Lock()
+_lines: typing.Deque[str] = collections.deque(maxlen=MAX_LINES)
 
 
 def note(source: str, message: typing.Any) -> None:
@@ -58,6 +63,9 @@ def note(source: str, message: typing.Any) -> None:
             _lines.append(line)
     except Exception:  # pragma: no cover - a clock or a deque cannot really fail
         pass
+    # Outside the lock, and after the in-memory copy: the tab must not wait on
+    # a disk, and a disk that refuses must not cost the tab its line.
+    process_log.note(source, message)
 
 
 def lines() -> typing.List[str]:
@@ -72,5 +80,8 @@ def text() -> str:
 
 
 def clear() -> None:
+    """Empty what the tab shows. The file on disk is deliberately untouched:
+    a button that says "clear the console" is not a request to destroy the
+    only durable record of the run that has just gone wrong."""
     with _lock:
         _lines.clear()

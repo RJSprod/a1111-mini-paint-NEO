@@ -23,6 +23,9 @@ SUITES = [
     "test_imaging",
     "test_frontends",
     "test_workflow",
+    # What every writer in the extension is allowed to put on a screen or in a
+    # file. Ahead of the WanGP suites because it is the rule they all obey.
+    "test_logging_privacy",
     # The WanGP integration, in the order it is built: what survives a restart,
     # the files on their way out, the vocabulary all three sides share, the
     # child process, the route in front of it, and finally the gate that

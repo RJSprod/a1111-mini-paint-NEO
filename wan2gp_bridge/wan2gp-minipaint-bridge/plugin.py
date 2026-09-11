@@ -43,6 +43,7 @@ import typing
 
 try:
     from . import bridge_js, bridge_ui, compatibility, handoff, protocol, receiver_adapters, receiver_state
+    from . import scrub
 except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import bridge_js  # type: ignore[no-redef]
     import bridge_ui  # type: ignore[no-redef]
@@ -51,6 +52,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
     import receiver_adapters  # type: ignore[no-redef]
     import receiver_state  # type: ignore[no-redef]
+    import scrub  # type: ignore[no-redef]
 
 try:
     import gradio as gr
@@ -409,7 +411,10 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
             try:
                 import traceback
 
-                traceback.print_exc()
+                # Scrubbed rather than printed: every frame of a traceback is
+                # an absolute path, and on a single-user machine that is the
+                # account name, printed onto a console somebody screenshots.
+                print(scrub.block(traceback.format_exc()))
             except Exception:
                 pass
         return result
@@ -572,9 +577,15 @@ def _token(value: typing.Any, limit: int = 64) -> str:
 
 
 def _note(text: str) -> None:
-    """One line on WanGP's console. Never a path, never a digest, never an id."""
+    """One line on WanGP's console. Never a path, never a digest, never an id.
+
+    Scrubbed rather than merely written carefully. Most of what reaches here is
+    this module's own sentences, which carry nothing - but two of the callers
+    pass the repr of an exception they did not expect, and that is exactly
+    where somebody's home directory arrives on a console.
+    """
     try:
-        print(f"[{PLUGIN_NAME}] {text}")
+        print(f"[{PLUGIN_NAME}] {scrub.line(text)}")
     except Exception:
         pass
 

@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import typing
 
+from .. import scrub
+
 #: The one key. Named for what the entry is - a pointer at the management
 #: surface - rather than for an action, because nothing here performs one.
 MANAGE_KEY = "minipaint_wangp_manage"
@@ -136,4 +138,4 @@ def on_ui_settings() -> None:
     try:
         shared.opts.add_option(MANAGE_KEY, option_info(shared))
     except Exception as error:  # pragma: no cover - depends on the host
-        print(f"{_LOG_PREFIX} could not register the {MANAGE_KEY} settings entry ({error})")
+        scrub.console(f"could not register the {MANAGE_KEY} settings entry ({error})", _LOG_PREFIX)

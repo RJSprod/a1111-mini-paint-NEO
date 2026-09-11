@@ -44,12 +44,11 @@ import html
 import re
 import json
 import threading
-import traceback
 import typing
 
 import gradio as gr
 
-from .. import paths
+from .. import paths, scrub
 from . import bridge, config, diagnostics, discovery, errors, journal, runtime
 
 TAB_LABEL = "WanGP"
@@ -414,9 +413,9 @@ def _launch_now(active: typing.Any) -> None:
     try:
         runtime.start(active)
     except errors.IntegrationError as error:
-        print(f"{_LOG_PREFIX} WanGP did not start: {error.code} ({error.detail})")
+        scrub.console(f"WanGP did not start: {error.code} ({error.detail})", _LOG_PREFIX)
     except Exception:  # pragma: no cover - the runtime turns its own into codes
-        traceback.print_exc()
+        scrub.traceback_now(_LOG_PREFIX)
         with contextlib.suppress(Exception):
             runtime.mark(errors.INTERNAL_ERROR, "the launch raised an unexpected error")
 
@@ -1739,7 +1738,7 @@ def _wire_wizard(parts: dict, shell: dict, painted, show, console) -> None:
 
         proxy.set_auth_acknowledged(bool(document.integration.get("auth_checked")))
 
-        print(f"{_LOG_PREFIX} setup complete; the integration is initialized.")
+        scrub.console("setup complete; the integration is initialized.", _LOG_PREFIX)
         return (_good("Setup saved. The previous setup, if there was one, is kept as a backup."),) + show()
 
     parts["finish"].click(
@@ -1795,6 +1794,16 @@ def _build_management() -> dict:
         gr.Markdown("#### Console")
         parts["console"] = _copyable_textbox(
             label="Console", lines=18, placeholder="Press Refresh, or run the checks above."
+        )
+        # Where the same lines live once this box has scrolled past them, and
+        # why both are safe to paste. Said here rather than in the docs because
+        # this is the screen somebody is looking at when they need the file.
+        gr.Markdown(
+            "The last few hundred steps. The same lines, without the limit, are in "
+            "`logs/wangp-log.txt` inside this extension's folder. Prompts, filenames "
+            "and paths are removed from both as they are written, so either can go "
+            "into a bug report as it is. **Clear it** empties this box only; the file "
+            "keeps the run."
         )
         with gr.Row():
             parts["console_refresh"] = gr.Button("Refresh the console", elem_id="wangp_console_refresh")
@@ -1897,6 +1906,6 @@ def on_ui_tabs() -> list:
                 create_ui()
         return [(blocks, TAB_LABEL, TAB_ID)]
     except Exception as error:
-        traceback.print_exc()
-        print(f"{_LOG_PREFIX} the tab failed to build; Mini Paint is unaffected.")
+        scrub.traceback_now(_LOG_PREFIX)
+        scrub.console("the tab failed to build; Mini Paint is unaffected.", _LOG_PREFIX)
         return [(_fallback_tab(f"{type(error).__name__}: {error}".strip()), TAB_LABEL, TAB_ID)]

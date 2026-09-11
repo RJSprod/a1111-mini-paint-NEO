@@ -13,6 +13,8 @@ import gradio as gr
 
 from modules import shared
 
+from . import scrub
+
 SECTION = ("minipaint_canvas", "miniPaint / Canvas")
 
 USE_OLD_UI = "minipaint_use_old_ui"
@@ -113,7 +115,7 @@ def _add(key: str, info) -> None:
     try:
         shared.opts.add_option(key, info)
     except Exception as error:  # pragma: no cover - depends on the host
-        print(f"MiniPaint: could not register the {key} setting ({error})")
+        scrub.console(f"could not register the {key} setting ({error})")
 
 
 def on_ui_settings() -> None:

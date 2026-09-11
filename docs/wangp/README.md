@@ -191,6 +191,7 @@ ready.
 | the bridge plugin, as installed | `<WanGP root>/plugins/wan2gp-minipaint-bridge/` |
 | the bridge plugin, as shipped | `wan2gp_bridge/wan2gp-minipaint-bridge/` in this repository |
 | transfer log lines | `extensions/a1111-mini-paint-NEO/logs/send-log.txt`, shared with Mini Paint |
+| what the WanGP process said | `extensions/a1111-mini-paint-NEO/logs/wangp-log.txt`, rotating to `wangp-log.previous.txt` at 2 MB |
 
 The data root is asked for in the order `modules.paths_internal.data_path`,
 `modules.paths.data_path`, `modules.shared.cmd_opts.data_dir`. If none answers, the
@@ -222,6 +223,43 @@ accident cannot quietly start writing one. `bridge.py` does the same for the sen
 report reports the pid as `tracked`/`none` and the port as `bound to loopback`/`not
 bound`, never as numbers, because that report is rendered inside the tab and the browser
 must not learn the port.
+
+## Nothing written down identifies the user
+
+Every line this integration writes — to the WebUI console, to the tab's console, to
+`send-log.txt` or to `wangp-log.txt` — goes through `minipaint_neo/scrub.py` first. There
+is one pass and every writer calls it, because the alternative is each writer deciding for
+itself, which is how a log ends up holding a prompt.
+
+The hardest writer to reason about is not ours. WanGP is a third-party application whose
+output `runtime._drain` merely relays, and it prints lines like
+`Saving video to /home/sarah/Wan2GP/outputs/sarah_at_her_mothers_house.mp4`. Relaying that
+verbatim is what used to put prompts and filenames on the console. The scrub happens once,
+in the drain, at the only point the child's words enter the process — so the crash tail,
+the tab's console, the log file, the WebUI console and the sentence the error screen quotes
+all read the same scrubbed text, and there is no writer left to remember to fix.
+
+The rules are about shapes: prompt-ish keys taken to the end of the line; paths reduced to
+`<path>/*.mp4`; bare filenames with a content extension; URLs, e-mail addresses and
+non-loopback IP addresses; `key=value` credentials, vendor-prefixed tokens and any opaque
+run long enough to be an id or a digest. Exception types, error codes, module filenames in
+a traceback, versions, resolutions and WanGP's own setting names all survive — the pass is
+useless if it makes a log unreadable.
+
+`scrub.register_root(label, path)` is what keeps paths worth reading. `runtime` registers
+the WanGP root and the interpreter prefix at every launch and the extension registers its
+own folder at import, so a path under one of them comes out as `<wangp>/outputs/*.mp4`
+rather than a flat `<path>`: the tree a file sits in is structure, and the directories above
+it are the account name.
+
+Two properties are checked directly in `tests/test_logging_privacy.py`: scrubbing twice is
+scrubbing once (lines pass through more than one writer), and the pass never raises (its
+largest caller is the drain thread, and that thread dying means the child's pipe fills and
+WanGP freezes mid-generation).
+
+What it cannot remove is a bare personal name in free text with nothing structural around
+it — in practice, a model, LoRA or preset the user named themselves. That is kept on
+purpose: "which model failed" is the question a transfer log exists to answer.
 
 ## Security invariants you can check yourself
 
@@ -368,7 +406,7 @@ The ones worth knowing by sight:
 | code | what it actually means |
 | --- | --- |
 | `GPU_UUID_MISSING` | the card you chose is not in the machine. Nothing was started, and no other GPU was used. |
-| `PORT_IN_USE` / `LOOPBACK_BIND_FAILED` | a port was chosen but the child never opened it. Usually WanGP died during startup — its stderr tail is in the WebUI console. |
+| `PORT_IN_USE` / `LOOPBACK_BIND_FAILED` | a port was chosen but the child never opened it. Usually WanGP died during startup — its output tail is in the WebUI console, in the tab's console, and in `logs/wangp-log.txt`. |
 | `PROXY_ROOT_PATH_FAILED` | WanGP answers, but not under `/wan2gp/`. `GRADIO_ROOT_PATH` did not take effect in that build. |
 | `AUTH_BOUNDARY_FAILED` | this Forge has a sign-in that could not be *proven* to cover `/wan2gp/`. Fail-closed, not a claim that it is exposed. |
 | `IFRAME_NOT_READY` | there is no live WanGP page in this Forge tab yet. Open the WanGP tab and pick a model. |
@@ -385,7 +423,8 @@ the extension's commit, the protocol number, the shipped and installed bridge ve
 setup fields with paths reduced to their last component, the GPU UUID and whether that card
 is present, the runtime state and uptime, whether a child and a job object are tracked,
 whether the port is bound, the failure code, the proxy probe steps if one has run, the live
-bridge sessions with truncated channel ids, and the last forty transfer-log lines.
+bridge sessions with truncated channel ids, the last forty transfer-log lines, and the last
+twenty-five lines of the WanGP process log.
 
 No secret, cookie or authorization header has a line in it — not even a redacted one. The
 pid and the port are reported as facts rather than numbers. The GPU UUID *is* included in
@@ -394,6 +433,9 @@ identifies a piece of hardware rather than a person.
 
 The report never raises: every field is collected inside its own guard, and one that could
 not be collected says `unavailable`.
+
+The two log tails it quotes are safe to carry for the same reason the files are safe to
+attach: they were scrubbed as they were written, not as they were read.
 
 ## Reinitialize
 

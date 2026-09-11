@@ -191,7 +191,11 @@ def check_location(r: Results, base: pathlib.Path) -> None:
             directory = config.config_dir()
         said = spoken.getvalue()
         r.check("the fallback lands inside the extension", directory == base / "extension" / config.FALLBACK_DIRECTORY_NAME)
-        r.check("the fallback is audible", said.strip() != "" and str(directory) in said)
+        r.check("the fallback is audible", said.strip() != "" and config.FALLBACK_DIRECTORY_NAME in said)
+        # Audible, and still not a line naming somebody's home directory: the
+        # sentence says which folder inside the extension, which is the part a
+        # reader can act on, and nothing about where the extension is.
+        r.check("but it does not print the absolute path", str(directory) not in said, said)
         r.check("the fallback says why it is a bad place", "reinstalled" in said)
         r.check("the fallback is announced once", config.config_dir() == directory)
         spoken = io.StringIO()

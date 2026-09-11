@@ -79,6 +79,20 @@ LOOPBACK = "127.0.0.1"
 #: is cheap insurance against a later edit adding one by habit.
 FORBIDDEN_ARGUMENTS = ("--listen", "--share", "--open-browser", "--server-name=0.0.0.0")
 
+#: Allocator settings Forge exports into its own process - ``--cuda-malloc``
+#: writes ``PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync`` and
+#: ``--expandable-segments`` writes ``PYTORCH_ALLOC_CONF`` (Forge Neo,
+#: ``modules_forge/cuda_malloc.py``). WanGP started on its own never sees
+#: either; a child that inherits them runs WanGP on Forge's torch tuning. The
+#: first one is a crash, not a slowdown: under cudaMallocAsync an allocation
+#: made while a CUDA graph is being captured is a graph node with no memory
+#: behind it yet, Triton refuses the address ("cannot be accessed from Triton
+#: (cpu tensor?)"), and the abort that follows takes the whole process. WanGP's
+#: prompt enhancer captures a graph on first use, which is exactly where it
+#: died. Dropped for the reason PYTHONPATH is: Forge's torch is not the
+#: child's torch.
+FORGE_ALLOCATOR_VARIABLES = ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF")
+
 #: How many times a start may lose the port race before it gives up. The
 #: window between "this port was free" and "the child bound it" is small but
 #: real, and the only honest fix is to try again on a different number.
@@ -173,6 +187,12 @@ def build_environment(
     devices visible where the user chose one. The value is the physical UUID
     rather than an index, so a driver reshuffle or a reboot cannot repoint it.
 
+    Forge's allocator variables are dropped for the same reason its
+    interpreter variables are: they describe Forge's torch, and WanGP launched
+    by hand never has them. Everything else in Forge's environment is
+    inherited, so the child sees the same PATH and drivers a terminal
+    would give it.
+
     ``GRADIO_ROOT_PATH`` is the mount point the proxy serves, and the two
     Gradio server variables are pinned to the same loopback address and port
     as the command line - not because the arguments are insufficient, but so
@@ -189,6 +209,11 @@ def build_environment(
         child.pop(key, None)
     # A share tunnel is not something the child may inherit permission for.
     for key in ("GRADIO_SHARE", "GRADIO_ROOT_PATH"):
+        child.pop(key, None)
+    # Forge's torch is not the child's torch either: its allocator flags are
+    # exported as environment variables and would otherwise arrive here as if
+    # they were WanGP's own. See FORGE_ALLOCATOR_VARIABLES for the crash.
+    for key in FORGE_ALLOCATOR_VARIABLES:
         child.pop(key, None)
 
     child["CUDA_VISIBLE_DEVICES"] = _gpu_uuid_of(config)

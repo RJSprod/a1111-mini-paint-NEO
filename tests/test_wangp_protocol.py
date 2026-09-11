@@ -986,7 +986,7 @@ const listeners = {};
 let clicks = 0;
 let callbackRuns = 0;
 let nativeRuns = 0;
-const parent = { postMessage(envelope, origin) { posted.push({ type: envelope.type, origin: origin }); } };
+const parent = { postMessage(envelope, origin) { posted.push({ type: envelope.type, origin: origin, code: envelope.payload && envelope.payload.code || "" }); } };
 class Event { constructor(type) { this.type = type; } }
 const box = { tagName: "TEXTAREA", value: "", dispatchEvent() {} };
 const ack = { tagName: "TEXTAREA", value: "" };
@@ -1056,10 +1056,23 @@ const channel = "c".repeat(32);
 (listeners.message || []).forEach(function (fn) {
   fn({ origin: ORIGIN, source: parent, data: { protocol: 2, type: "WANGP_BRIDGE_HELLO", channel_id: channel, request_id: "r1", payload: {} } });
 });
+if (process.argv[5] === "refuse") {
+  // After the hello: one send the page cannot act on (a handoff id that is
+  // not one), and one on a channel this page was never bound to.
+  setTimeout(function () {
+    (listeners.message || []).forEach(function (fn) {
+      fn({ origin: ORIGIN, source: parent, data: { protocol: 2, type: "WANGP_RECEIVE_IMAGE", channel_id: channel, request_id: "r2",
+        payload: { handoff_id: "nope", receiver_id: "start_frame", state_revision: "abcdef12" } } });
+      fn({ origin: ORIGIN, source: parent, data: { protocol: 2, type: "WANGP_RECEIVE_IMAGE", channel_id: "d".repeat(32), request_id: "r3",
+        payload: { handoff_id: "e".repeat(32), receiver_id: "start_frame", state_revision: "abcdef12" } } });
+    });
+  }, 150);
+}
 setTimeout(function () {
   const handle = window.__minipaintFrames || null;
   console.log(JSON.stringify({
     posted: posted.map(function (p) { return p.type; }),
+    codes: posted.map(function (p) { return p.code; }),
     origins: posted.map(function (p) { return p.origin; }),
     clicks: clicks, callbackRuns: callbackRuns, nativeRuns: nativeRuns, flushRan: flushRan,
     framesLeftUnrun: nativeFrames.filter(Boolean).length,
@@ -1112,18 +1125,18 @@ def frame_fallback_checks(r: Results) -> None:
         (root / "head.js").write_text(bridge_js.head_script(), encoding="utf-8")
         (root / "harness.js").write_text(_FRAME_HARNESS, encoding="utf-8")
         results = {}
-        for mode in ("hidden", "visible"):
-            for head in ("head", "-"):
-                try:
-                    run = subprocess.run([node, str(root / "harness.js"), str(root / "bridge.js"), mode,
-                                          str(root / "head.js") if head == "head" else "-"],
-                                         capture_output=True, text=True, timeout=30, check=False)
-                    results[(mode, head)] = (_json.loads(run.stdout.strip().splitlines()[-1]) if run.stdout.strip()
-                                             else {"error": run.stderr[-300:]})
-                except Exception as error:
-                    results[(mode, head)] = {"error": str(error)[:300]}
+        for mode, head, extra in (("hidden", "head", ""), ("hidden", "-", ""), ("visible", "head", ""), ("visible", "-", ""),
+                                  ("hidden", "head", "refuse")):
+            try:
+                run = subprocess.run([node, str(root / "harness.js"), str(root / "bridge.js"), mode,
+                                      str(root / "head.js") if head == "head" else "-"] + ([extra] if extra else []),
+                                     capture_output=True, text=True, timeout=30, check=False)
+                results[(mode, head, extra)] = (_json.loads(run.stdout.strip().splitlines()[-1]) if run.stdout.strip()
+                                                else {"error": run.stderr[-300:]})
+            except Exception as error:
+                results[(mode, head, extra)] = {"error": str(error)[:300]}
 
-    hidden = results.get(("hidden", "head"), {})
+    hidden = results.get(("hidden", "head", ""), {})
     r.check("the head script replaces the page's requestAnimationFrame before Gradio captures it",
             hidden.get("replaced") is True and hidden.get("where") == "head", repr(hidden))
     r.check("a hidden page's click is dispatched once", hidden.get("clicks") == 1, repr(hidden))
@@ -1137,7 +1150,7 @@ def frame_fallback_checks(r: Results) -> None:
     r.check("and it is posted to the page's own origin, nothing wider",
             hidden.get("origins") == ["http://forge.test"], repr(hidden))
 
-    late = results.get(("hidden", "-"), {})
+    late = results.get(("hidden", "-", ""), {})
     r.check("without the head copy the page script installs the timer late and says so",
             late.get("replaced") is True and late.get("where") == "late", repr(late))
     r.check("and then a hidden page's click still runs its own frame by timer",
@@ -1147,12 +1160,20 @@ def frame_fallback_checks(r: Results) -> None:
             late.get("flushRan") is False and late.get("callbackRuns") == 0 and late.get("posted") == [], repr(late))
 
     for head in ("head", "-"):
-        visible = results.get(("visible", head), {})
+        visible = results.get(("visible", head, ""), {})
         r.check(f"a rendered page's own frames win ({'with' if head == 'head' else 'without'} the head copy) - "
                 "the flush and the click's - and the trigger runs exactly once",
                 visible.get("callbackRuns") == 1 and visible.get("nativeRuns") == 2 and visible.get("flushRan") is True
                 and visible.get("posted") == ["WANGP_BRIDGE_READY"], repr(visible))
         r.check("and no frame is left pending behind the timer", visible.get("framesLeftUnrun") == 0, repr(visible))
+
+    refused = results.get(("hidden", "head", "refuse"), {})
+    r.check("a send the page cannot act on is refused at once with a code, not dropped for the parent to time out on",
+            refused.get("posted") == ["WANGP_BRIDGE_READY", "WANGP_RECEIVE_RESULT"] and refused.get("codes", [None, None])[1] == "HANDOFF_INVALID_ID",
+            repr(refused))
+    r.check("and never becomes a click", refused.get("clicks") == 1, repr(refused))
+    r.check("while a send on a channel this page was never bound to is not answered at all",
+            refused.get("posted", []).count("WANGP_RECEIVE_RESULT") == 1, repr(refused))
 
 
 class _FakeLoader:

@@ -838,10 +838,19 @@ def handoff_release_checks(r: Results) -> None:
             r.check("a failed send removes its file too", not failed.path.exists())
 
             nameless = wangp_handoff.write(Image.new("RGBA", (4, 4)))
-            canvas.wangp_result(None, _json.dumps({
-                "handoff_id": nameless.id, "receiver_id": "", "ok": False, "code": "IFRAME_NOT_READY",
-            }))
+            journal = []
+            original_journal = canvas_ui._journal
+            canvas_ui._journal = lambda source, message: journal.append((source, message))
+            try:
+                canvas.wangp_result(None, _json.dumps({
+                    "handoff_id": nameless.id, "receiver_id": "", "ok": False, "code": "IFRAME_NOT_READY",
+                }))
+            finally:
+                canvas_ui._journal = original_journal
             r.check("a send that never named a receiver still releases its file", not nameless.path.exists())
+            r.check("and is written to the journal rather than skipped in silence - the one send that left no trace anywhere",
+                    any(source == "send" and "(no receiver named)" in message and "IFRAME_NOT_READY" in message for source, message in journal),
+                    str(journal))
 
             # Section 23: an acknowledgement is a claim, and this side still
             # holds the manifest of the file it wrote, so the claim is checked
@@ -890,6 +899,42 @@ def handoff_release_checks(r: Results) -> None:
             wangp_handoff.discard(survivor.id)
         finally:
             wangp_config.use_config_dir(None)
+
+
+def client_log_checks(r: Results) -> None:
+    """The browser's journal lines arrive once each, whatever Gradio made of the writes.
+
+    The page writes one hidden textbox, and Gradio reads it when its change
+    event runs rather than when the value lands: a value written over before
+    it was read is gone, and one read twice is journaled twice. So the box
+    carries a numbered window of recent lines and the server journals each
+    number once per page.
+    """
+    from minipaint_neo.wangp import ui as wangp_ui
+    import json as _json
+
+    recorded = []
+    original = wangp_ui.journal.note
+    wangp_ui.journal.note = lambda source, message: recorded.append((source, message))
+    try:
+        wangp_ui._client_log_seen.clear()
+        first = _json.dumps({"p": "page1", "n": 2, "lines": [{"s": 1, "line": "one"}, {"s": 2, "line": "two"}]})
+        wangp_ui.record_client_log(first)
+        r.check("every numbered line in a window is journaled, in order", [m for _, m in recorded] == ["one", "two"], str(recorded))
+        wangp_ui.record_client_log(first)
+        r.check("the same value read twice by Gradio is journaled once", [m for _, m in recorded] == ["one", "two"], str(recorded))
+        wangp_ui.record_client_log(_json.dumps({"p": "page1", "n": 4, "lines": [{"s": 2, "line": "two"}, {"s": 3, "line": "three"}, {"s": 4, "line": "four"}]}))
+        r.check("a value that was skipped over is caught up from the next window", [m for _, m in recorded] == ["one", "two", "three", "four"], str(recorded))
+        wangp_ui.record_client_log(_json.dumps({"p": "page2", "n": 1, "lines": [{"s": 1, "line": "elsewhere"}]}))
+        r.check("another page counts on its own", recorded[-1][1] == "elsewhere" and len(recorded) == 5, str(recorded))
+        wangp_ui.record_client_log(_json.dumps({"n": 9, "line": "the one-line shape"}))
+        r.check("the older one-line shape is still taken", recorded[-1][1] == "the one-line shape")
+        wangp_ui.record_client_log(_json.dumps({"p": "page1", "lines": [{"s": "9", "line": "x"}, {"s": 9, "line": ""}, "junk", {"s": True, "line": "y"}]}))
+        r.check("and a line without a real number or text is dropped, not journaled", len(recorded) == 6, str(recorded[6:]))
+        r.check("every line is filed under the browser", all(source == "browser" for source, _ in recorded))
+    finally:
+        wangp_ui.journal.note = original
+        wangp_ui._client_log_seen.clear()
 
 
 def session_record_checks(r: Results) -> None:
@@ -1324,6 +1369,7 @@ def run() -> Results:
         log_checks(r)
         tab_checks(r)
         handoff_release_checks(r)
+        client_log_checks(r)
         session_record_checks(r)
         wizard_checks(r)
         channel_reuse_checks(r)

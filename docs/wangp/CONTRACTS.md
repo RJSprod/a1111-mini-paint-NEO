@@ -254,7 +254,22 @@ is missing; its failure details then say `frame timer installed late`, and the
 plugin's log says why the head copy could not be placed. It also reads the
 acknowledgement box while a request is in flight (`ACK_POLL_MS`) as a second
 route for the chained `.then(js=…)` delivery, and its failure answers carry a
-`detail`.
+`detail`. A `WANGP_RECEIVE_IMAGE` on the bound channel that the page cannot act
+on - a handoff id that is not 32 lowercase hex characters, a receiver id the
+protocol does not declare, no state revision - is answered at once with a
+`WANGP_RECEIVE_RESULT` carrying `ok: false` and the code
+(`HANDOFF_INVALID_ID`, `UNKNOWN_RECEIVER`, `STALE_RECEIVER_STATE`) rather than
+dropped; a message on another channel is still dropped without a reply, and
+only the console says so.
+
+Every step of a send is one line in the journal (`logs/wangp-log.txt`), so a
+send that fails leaves a trace whichever half stopped: the Forge side writes
+under `send` (`prepared WxH`, `nothing to send`, `the browser reports: …`),
+the page under `browser` (`send: … chosen from the menu`, `deliver: …`,
+`send: refused before asking - CODE`, `WANGP_RECEIVE_IMAGE: asked (id)`,
+`no acknowledgement within N ms`) through `minipaintWanGP.note`, and the plugin
+under `wangp`. `Canvas -> WanGP …` in `logs/send-log.txt` is written twice per
+send: `prepared …` when the file is written, then how it ended.
 
 ## Tests
 

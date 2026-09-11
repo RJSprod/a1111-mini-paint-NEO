@@ -1201,6 +1201,17 @@ window.minipaintCanvas = (function () {
         const name = String(value || "");
         if (name.indexOf(WANGP_PREFIX) !== 0) { w.pending = null; return; }
         w.pending = { receiver: name.slice(WANGP_PREFIX.length), revision: w.revision, session: w.session };
+        noteWanGP("send: " + w.pending.receiver + " chosen from the menu (revision " + (w.revision ? "held" : "missing")
+            + ", session " + (w.session ? "held" : "missing") + "); the request is written for the server");
+    }
+
+    /** One line into the WanGP journal, through the bridge, for the steps of
+     * a send that only this file sees. A build without the bridge, or an
+     * older one without ``note``, loses the line and nothing else. */
+    function noteWanGP(message) {
+        const api = wangp();
+        if (!api || typeof api.note !== "function") { return; }
+        try { api.note(message); } catch (e) { /* a log line is never worth an exception */ }
     }
 
     /**
@@ -1216,6 +1227,8 @@ window.minipaintCanvas = (function () {
         const armed = S.wangp.pending;
         S.wangp.pending = null;
         const api = wangp();
+        noteWanGP("deliver: the server prepared the picture for " + (parts[1] || "?") + " (file id " + (handoffId ? "present" : "missing")
+            + ", armed for " + (armed ? armed.receiver : "nothing") + ")");
         let result;
         if (!api) {
             result = { ok: false, code: "IFRAME_NOT_READY", message: "Open the WanGP tab and choose an input." };
@@ -1225,9 +1238,11 @@ window.minipaintCanvas = (function () {
             result = await api.send(armed.receiver, armed.revision, handoffId, { bridge_session: armed.session });
         }
         if (result.ok) {
+            noteWanGP("deliver: WanGP took it into " + result.receiver_id + " (" + (result.verification || "unverified") + "); switching to the WanGP tab");
             api.focus(result.receiver_id);
             switchTo("wangp");
         } else {
+            noteWanGP("deliver: failed - " + (result.code || "INTERNAL_ERROR") + (result.detail ? " (" + result.detail + ")" : ""));
             notice("WanGP", result.message || "The image was not sent.");
         }
         // The server owns the send log; this is the only thing that knows how

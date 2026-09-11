@@ -399,6 +399,7 @@ __MINIPAINT_FRAME_WRAPPER__
   function submit(request) {
     pending.push(request);
     attempts = 0;
+    log(request.op + ": queued (" + pending.length + " waiting, the page is " + (busy ? "busy with a request" : "idle") + ")");
     pump();
   }
 
@@ -609,7 +610,15 @@ __MINIPAINT_FRAME_WRAPPER__
       return;
     }
 
-    if (!channelId || message.channel_id !== channelId) { return; }
+    if (!channelId || message.channel_id !== channelId) {
+      // Another page's channel, or a parent that has not said hello yet. Not
+      // answered - a reply to a stranger is information - but said in the
+      // console, because a send that vanishes here looks exactly like one
+      // that was never made.
+      log("dropped " + message.type + ": channel " + message.channel_id.slice(0, 8) + ", this page is bound to "
+        + (channelId ? channelId.slice(0, 8) : "no channel yet"));
+      return;
+    }
 
     if (message.type === CONFIG.types.getReceivers) {
       submit({ op: "receivers", request_id: message.request_id, channel_id: channelId });
@@ -618,9 +627,22 @@ __MINIPAINT_FRAME_WRAPPER__
 
     if (message.type === CONFIG.types.receiveImage) {
       var wanted = message.payload;
-      if (!isHex32(wanted.handoff_id)) { return; }
-      if (CONFIG.receiverIds.indexOf(wanted.receiver_id) === -1) { return; }
-      if (typeof wanted.state_revision !== "string" || !wanted.state_revision) { return; }
+      // A request this page cannot act on is refused with a code, so the
+      // parent learns at once rather than after its timeout. The parent is
+      // already bound to this channel, so it is not a stranger.
+      var refusal = null;
+      if (!isHex32(wanted.handoff_id)) {
+        refusal = ["HANDOFF_INVALID_ID", "the handoff id is not 32 lowercase hex characters"];
+      } else if (CONFIG.receiverIds.indexOf(wanted.receiver_id) === -1) {
+        refusal = ["UNKNOWN_RECEIVER", "no receiver named " + String(wanted.receiver_id).slice(0, 40)];
+      } else if (typeof wanted.state_revision !== "string" || !wanted.state_revision) {
+        refusal = ["STALE_RECEIVER_STATE", "the request carried no state revision"];
+      }
+      if (refusal) {
+        log("receive: refused before the click - " + refusal[0] + " (" + refusal[1] + ")");
+        post(CONFIG.types.receiveResult, message.request_id, { ok: false, code: refusal[0], detail: refusal[1] });
+        return;
+      }
       submit({
         op: "receive",
         request_id: message.request_id,

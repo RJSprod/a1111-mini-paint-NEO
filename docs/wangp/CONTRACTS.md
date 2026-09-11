@@ -233,14 +233,28 @@ the updated components under `chained`. Unknown is never allowed: a build that
 hands over no definition, or none of the selector controls, offers exactly what
 it offered before.
 
-The in-page script (`bridge_js.py`) wraps `requestAnimationFrame` while one of
-its requests is in flight: Gradio schedules event triggers and output flushes
-inside animation frames, and the iframe is not rendered while the Forge tab
-holding it is not on screen, so each such frame is also given a timer and the
-first to fire runs the callback (`FRAME_FALLBACK_MS`). Outside a request the
-page's frames are untouched. It also reads the acknowledgement box while a
-request is in flight (`ACK_POLL_MS`) as a second route for the chained
-`.then(js=…)` delivery, and its failure answers carry a `detail`.
+The frame timer (`bridge_js.head_script`, placed by `page_head`) wraps
+`requestAnimationFrame` in the page head, before Gradio's modules load. Gradio
+schedules every event trigger inside an animation frame and gates it on its
+component-update flush, which Gradio's core schedules through a reference it
+captured when its module was evaluated; the iframe is not rendered while the
+Forge tab holding it is not on screen, and a browser that gives such a
+document no frames leaves that flush - and every bridge request behind it -
+waiting until the WanGP tab is opened again. So every frame requested in the
+page is also given a timer, short while a bridge request is in flight
+(`FRAME_FALLBACK_MS`) and longer otherwise (`IDLE_FRAME_FALLBACK_MS`), and the
+first to fire runs the callback; a rendered page's own frame always wins.
+`page_head.install` wraps Gradio's template loader (`gradio.routes.templates`)
+for `frontend/index.html` and `frontend/share.html` only, inserting the script
+before the `<script type="module">` tag - the way WanGP's own focus patch goes
+in - once, and leaves every other template alone. The page script
+(`bridge_js.document_script`) finds the head copy through
+`window.__minipaintFrames` and installs the wrapper itself only when the copy
+is missing; its failure details then say `frame timer installed late`, and the
+plugin's log says why the head copy could not be placed. It also reads the
+acknowledgement box while a request is in flight (`ACK_POLL_MS`) as a second
+route for the chained `.then(js=…)` delivery, and its failure answers carry a
+`detail`.
 
 ## Tests
 

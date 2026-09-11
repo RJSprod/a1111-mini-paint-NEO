@@ -44,13 +44,14 @@ import time
 import typing
 
 try:
-    from . import bridge_js, bridge_ui, compatibility, handoff, protocol, receiver_adapters, receiver_state
+    from . import bridge_js, bridge_ui, compatibility, handoff, page_head, protocol, receiver_adapters, receiver_state
     from . import scrub
 except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import bridge_js  # type: ignore[no-redef]
     import bridge_ui  # type: ignore[no-redef]
     import compatibility  # type: ignore[no-redef]
     import handoff  # type: ignore[no-redef]
+    import page_head  # type: ignore[no-redef]
     import protocol  # type: ignore[no-redef]
     import receiver_adapters  # type: ignore[no-redef]
     import receiver_state  # type: ignore[no-redef]
@@ -410,6 +411,7 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         # because nothing built before the Blocks exist is on the page. They
         # are asked for in post_ui_setup, from the page itself.
         self._inject_script()
+        self._inject_head()
         return result
 
     def post_ui_setup(self, *args: typing.Any, **kwargs: typing.Any) -> typing.Any:
@@ -588,6 +590,36 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
             "this WanGP exposes no way to add JavaScript (tried add_custom_js, add_js, "
             "custom_js); the bridge cannot reach the browser and intelligent send stays off"
         )
+
+    def _inject_head(self) -> None:
+        """The frame timer, into the page head - before Gradio's modules load.
+
+        Gradio's core captures ``requestAnimationFrame`` when its module is
+        evaluated and schedules its component flush through that reference;
+        every event trigger waits for that flush. The page script runs after
+        the app has mounted, so a wrapper it installs never sees the flush,
+        and a page the browser is not rendering - this one, whenever the
+        Forge tab holding its iframe is not on screen - leaves the flush, and
+        every bridge request behind it, waiting for a frame that never comes.
+        ``page_head`` puts the same wrapper into the HTML before the module,
+        the way WanGP's own focus patch goes in. The page templates are read
+        from Gradio's own module, so a build without it is a note, not a crash.
+        """
+        if getattr(self, "head_installed", False):
+            return
+        try:
+            installed, why = page_head.install(bridge_js.head_script(), getattr(self, "page_templates", None))
+        except Exception as error:
+            installed, why = False, f"{type(error).__name__}: {error}"
+        self.head_installed = bool(installed)
+        if installed:
+            _note(f"frame timer script placed in the page head ({why})")
+        else:
+            _note(
+                f"the frame timer script could not be placed in the page head ({why}); the page "
+                "script installs it late, and a request from a hidden tab may then wait until the "
+                "WanGP tab is opened"
+            )
 
 
 # ----------------------------------------------------------------- helpers --

@@ -1131,30 +1131,52 @@ window.minipaintCanvas = (function () {
         });
     }
 
-    /** The one line a failed or empty query leaves in the menu. Short, and
-     * about what the user can do next. */
+    /** The one line a failed or empty query leaves in the menu. Short, about
+     * what the user can do next, and - when the bridge named a code - carrying
+     * it, because "unavailable" on its own sent people reading source. */
     function wangpStatus(code) {
-        if (code === "IFRAME_NOT_READY") { return "WanGP: open WanGP tab to choose model/input"; }
-        if (code === "NO_ACTIVE_RECEIVER") { return "WanGP: this model and mode take no image right now"; }
-        return "WanGP: unavailable — open WanGP tab";
+        if (code === "IFRAME_NOT_READY") { return "WanGP: open the WanGP tab first"; }
+        if (code === "NO_ACTIVE_RECEIVER") { return "WanGP: this model takes no image"; }
+        if (code === "RECEIVER_QUERY_TIMEOUT") { return "WanGP: did not answer in time — open Send to again"; }
+        return "WanGP: unavailable" + (code ? " (" + code + ")" : "") + " — open WanGP tab";
     }
 
+    /** The three places a picture can go in WanGP, in the menu's fixed order. */
+    const WANGP_SCENARIOS = [
+        ["start_frame", "Send Image to WanGP Start Frame"],
+        ["end_frame", "Send Image to WanGP End Frame"],
+        ["reference", "Send Image to WanGP Reference"]
+    ];
+
     /**
-     * The WanGP part of the Send to list: one exact action per active
-     * receiver, never a single vague "Send to WanGP". A receiver that is full
-     * or switched off is a line that says so and does nothing.
+     * The WanGP part of the Send to list: the three scenarios, always, each
+     * an exact action when the live WanGP page offers it and a greyed line
+     * when it does not - because there is no WanGP page yet, because the
+     * query failed (the status line above says why), or because the loaded
+     * model has no such input. The bridge offers a scenario the model allows
+     * even when WanGP's own selector has not been set to it; the send then
+     * sets the selector. Nothing here guesses: a greyed line is a fact about
+     * now, and a bounded query later may turn it into an action.
      */
     function wangpItems() {
         const api = wangp();
-        if (!api || !api.state().present) { return []; }
+        if (!api) { return []; }
         const w = S.wangp;
         const items = [];
-        if (w.status) { items.push({ menu: "status", label: w.status }); }
-        for (const receiver of w.items) {
-            if (receiver.enabled) {
-                items.push({ menu: "send", value: WANGP_PREFIX + receiver.id, label: receiver.menu_label });
-            } else if (receiver.full) {
-                items.push({ menu: "status", label: "WanGP " + receiver.label + ": limit reached" });
+        const present = !!api.state().present;
+        const status = present ? w.status : wangpStatus("IFRAME_NOT_READY");
+        if (status) { items.push({ menu: "status", label: status }); }
+        for (const scenario of WANGP_SCENARIOS) {
+            const receiver = present ? (w.items.find(function (r) { return r.id === scenario[0]; }) || null) : null;
+            const label = (receiver && receiver.menu_label) || scenario[1];
+            if (receiver && receiver.enabled) {
+                items.push({ menu: "send", value: WANGP_PREFIX + receiver.id, label: label });
+            } else if (receiver && receiver.full) {
+                items.push({ menu: "status", label: label + " — limit reached" });
+            } else if (receiver) {
+                items.push({ menu: "status", label: label + " — not for this model" });
+            } else {
+                items.push({ menu: "status", label: label });
             }
         }
         return items;

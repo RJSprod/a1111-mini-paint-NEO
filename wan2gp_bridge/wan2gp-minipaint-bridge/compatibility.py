@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.0.1"
+BRIDGE_VERSION = "1.1.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -112,6 +112,18 @@ VIDEO_PROMPT_TYPE = "video_prompt_type"
 AUDIO_PROMPT_TYPE = "audio_prompt_type"
 MODEL_MODE = "model_mode"
 MODEL_SELECTOR = "model_selector"
+#: Everything below is optional: what a send may *switch*, and what it needs
+#: to know whether switching is allowed. A build that hands none of them over
+#: behaves exactly as before - a receiver is offered only while WanGP's own
+#: selector already has it switched on.
+IMAGE_MODE = "image_mode"
+SESSION_STATE = "session_state"
+IMAGE_PROMPT_RADIO = "image_prompt_radio"
+END_IMAGES_CHECKBOX = "end_images_checkbox"
+REFERENCE_SELECTOR = "reference_selector"
+START_ROW = "start_row"
+END_ROW = "end_row"
+REFERENCE_ROW = "reference_row"
 
 # VERIFY ON A REAL INSTALL (section 49.1): every elem_id below was taken from
 # WanGP's documented media-input naming and from the receiver example in
@@ -183,6 +195,53 @@ COMPONENTS: typing.Tuple[ComponentSpec, ...] = (
         mandatory=False,
         known_for="the model dropdown itself; read so the model is a fact about this page",
     ),
+    # -- what a send may switch, and what decides whether it may ------------
+    # Wan2GP hands plugins the generator form's own locals by name
+    # (``locals_dict = locals()`` in wgp.py, then
+    # ``run_component_insertion_and_setup``), so these are the variable names
+    # of that form. Confirmed against Wan2GP at 362c346.
+    ComponentSpec(
+        key=IMAGE_MODE,
+        candidates=("image_mode",),
+        kind="selection",
+        mandatory=False,
+        known_for="Wan2GP: hidden gr.Number, 0 = video output, 1/2 = image output",
+        note="in image-output mode Wan2GP strips S/E/V/L from what the model allows",
+    ),
+    ComponentSpec(
+        key=SESSION_STATE,
+        candidates=("state",),
+        kind="state",
+        mandatory=False,
+        known_for="Wan2GP: the per-page gr.State; get_state_model_type(state) is this page's model",
+    ),
+    ComponentSpec(
+        key=IMAGE_PROMPT_RADIO,
+        candidates=("image_prompt_type_radio",),
+        kind="selection",
+        mandatory=False,
+        known_for="Wan2GP: the Location radio; its .change recomputes image_prompt_type and shows the start row",
+    ),
+    ComponentSpec(
+        key=END_IMAGES_CHECKBOX,
+        candidates=("image_prompt_type_endcheckbox",),
+        kind="selection",
+        mandatory=False,
+        known_for="Wan2GP: the End Image(s) checkbox; its .change adds E and shows the end row",
+    ),
+    ComponentSpec(
+        key=REFERENCE_SELECTOR,
+        candidates=("video_prompt_type_image_refs",),
+        kind="selection",
+        mandatory=False,
+        known_for="Wan2GP: the reference-images dropdown; wired with .input, so a value set from the server does not run its handler",
+    ),
+    ComponentSpec(key=START_ROW, candidates=("image_start_row",), kind="container", mandatory=False,
+                  known_for="Wan2GP: the row holding image_start"),
+    ComponentSpec(key=END_ROW, candidates=("image_end_row",), kind="container", mandatory=False,
+                  known_for="Wan2GP: the row holding image_end"),
+    ComponentSpec(key=REFERENCE_ROW, candidates=("image_refs_row",), kind="container", mandatory=False,
+                  known_for="Wan2GP: the row holding image_refs"),
 )
 
 COMPONENTS_BY_KEY = {spec.key: spec for spec in COMPONENTS}
@@ -190,7 +249,24 @@ COMPONENTS_BY_KEY = {spec.key: spec for spec in COMPONENTS}
 #: Globals asked for through ``request_global``. These are session/process
 #: facts rather than widgets, and the plugin API is the only sanctioned way to
 #: see them.
-GLOBALS: typing.Tuple[str, ...] = ("model_type", "model_def", "state", "server_config", "wan2gp_version", "active_view")
+GLOBALS: typing.Tuple[str, ...] = (
+    "model_type", "model_def", "state", "server_config", "wan2gp_version", "active_view",
+    # Wan2GP passes its whole module namespace to ``inject_globals`` and sets
+    # each requested name as an attribute on the plugin, so functions can be
+    # asked for too. These two are how Wan2GP's own handlers find the model
+    # a page is on and what that model allows.
+    "get_model_def", "get_state_model_type",
+)
+
+#: What a send switches on for a receiver that the model allows but the page
+#: has not selected. Short tokens, carried in the receiver descriptor so the
+#: menu can say a send will change the Location, and in the acknowledgement
+#: so the log says it did.
+SWITCH_TOKENS: typing.Mapping[str, str] = {
+    protocol.START_FRAME: "location",
+    protocol.END_FRAME: "end_images",
+    protocol.REFERENCE: "reference_images",
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -442,6 +518,9 @@ class Host:
         self.owner = owner
         #: What ``post_ui_setup`` was handed, keyed by elem_id.
         self.handed: typing.Dict[str, typing.Any] = {}
+        #: The globals asked for, by name: the only ones ``read_global`` will
+        #: take off the plugin object itself.
+        self.requested_globals: typing.Set[str] = set()
 
     def _call(self, names: typing.Sequence[str], *args: typing.Any) -> typing.Any:
         for name in names:
@@ -507,12 +586,23 @@ class Host:
         return None
 
     def request_global(self, name: str) -> typing.Any:
+        self.requested_globals.add(str(name))
         return self._call(self._REQUEST_GLOBAL, name)
 
     def read_global(self, name: str) -> typing.Any:
         found = self._call(self._READ_GLOBAL, name)
         if found is not None:
             return found
+        # Wan2GP's own route (shared/utils/plugins.py, inject_globals): every
+        # requested global is set as an attribute of that name on the plugin
+        # object, and a restricted one is set to None. Read here rather than
+        # through a method the API does not have, and only for a name that was
+        # asked for - a plugin attribute that merely shares a name is not a
+        # WanGP global.
+        if name in self.requested_globals:
+            found = getattr(self.owner, name, None)
+            if found is not None:
+                return found
         for attribute in ("globals", "requested_globals", "resolved_globals"):
             mapping = getattr(self.owner, attribute, None)
             if isinstance(mapping, dict) and name in mapping:
@@ -589,9 +679,23 @@ class Compatibility:
             for elem_id in spec.candidates:
                 self.host.request_component(elem_id)
                 asked.append(elem_id)
+        self.declare_globals()
+        return asked
+
+    def declare_globals(self) -> typing.List[str]:
+        """Ask for the globals. Safe to call more than once, and early.
+
+        Wan2GP injects globals once, right after it constructs the plugin
+        (``initialize_plugins``: load, then ``inject_globals``) and long before
+        ``setup_ui`` runs - so a global first asked for in ``setup_ui`` is
+        never delivered, and every ``read_global`` answers None. The plugin
+        calls this from ``__init__`` for that reason; ``declare`` calls it
+        again because asking twice costs nothing and a host that injects
+        later still gets the request.
+        """
         for name in self.global_names:
             self.host.request_global(name)
-        return asked
+        return list(self.global_names)
 
     # -- phase two ----------------------------------------------------------
 
@@ -683,6 +787,24 @@ class Compatibility:
             # section 44 tests when it changes the model in tab A and expects
             # tab B's menu not to move.
             MODEL_SELECTOR,
+            # What the model *allows* depends on the output mode and on the
+            # model this page is on, and both are session values too.
+            IMAGE_MODE, SESSION_STATE,
+        )
+        return [(key, self.resolution.component(key)) for key in keys if self.resolution.component(key) is not None]
+
+    def switch_components(self) -> typing.List[typing.Tuple[str, typing.Any]]:
+        """The components a send may update besides the receiver, as (key, component).
+
+        In a fixed order, because they become the tail of the bridge event's
+        outputs and ``plugin.py`` places each update by position. Only the
+        ones this build resolved: an output that is not a component is the
+        crash ``Host.is_component`` exists to prevent.
+        """
+        keys = (
+            IMAGE_PROMPT_TYPE, VIDEO_PROMPT_TYPE,
+            IMAGE_PROMPT_RADIO, END_IMAGES_CHECKBOX, REFERENCE_SELECTOR,
+            START_ROW, END_ROW, REFERENCE_ROW,
         )
         return [(key, self.resolution.component(key)) for key in keys if self.resolution.component(key) is not None]
 
@@ -744,16 +866,25 @@ class Compatibility:
             return True
         return _short(self.host.read_global("model_type")) in chosen
 
-    def model_descriptor(self, selected: typing.Any = None) -> typing.Dict[str, str]:
+    def model_descriptor(
+        self,
+        selected: typing.Any = None,
+        definition: typing.Any = None,
+        model_type: typing.Any = "",
+    ) -> typing.Dict[str, str]:
         """The model block of the receiver answer: type, label, family.
 
         Strings only, and only the three the protocol names. The bridge does
         not publish a model database and MiniPaint does not keep one; this is
-        for the diagnostics line and the send log.
+        for the diagnostics line and the send log. A type and definition
+        already read for this page (``page_model``) are used as given; the
+        process-wide globals are the fallback for a page that agrees with them.
         """
         current = self.selection_is_current(selected)
-        model_type = self.host.read_global("model_type") if current else _first_scalar(selected)
-        definition = self.host.read_global("model_def") if current else None
+        if not model_type:
+            model_type = self.host.read_global("model_type") if current else _first_scalar(selected)
+        if not isinstance(definition, dict):
+            definition = self.host.read_global("model_def") if current else None
         label = _walk(definition, ("name",)) or _walk(definition, ("label",))
         family = _walk(definition, ("family",)) or _walk(definition, ("architecture",))
         return {
@@ -761,6 +892,152 @@ class Compatibility:
             "label": _short(label) or _short(model_type),
             "family": _short(family),
         }
+
+    # -- what this page's model allows: layer A, read the way Wan2GP reads it --
+
+    def page_model(self, live: typing.Mapping[str, typing.Any]) -> typing.Tuple[str, typing.Optional[dict]]:
+        """``(model_type, model_def)`` for the page whose event supplied ``live``.
+
+        The same two steps Wan2GP's own handlers take: the model type out of
+        this page's ``state`` through ``get_state_model_type``, then its
+        definition through ``get_model_def``. Both are globals this plugin
+        asked for; a build that hands over neither leaves the definition None,
+        and None means "unknown", never "allowed". The dropdown value is the
+        fallback for the type, and the process-wide globals the fallback for
+        a page that agrees with them - which is exactly what they were before.
+        """
+        model_type = ""
+        reader = self.host.read_global("get_state_model_type")
+        state = live.get(SESSION_STATE)
+        if callable(reader) and isinstance(state, dict):
+            try:
+                model_type = _short(reader(state))
+            except Exception:
+                model_type = ""
+        if not model_type:
+            model_type = _short(_first_scalar(live.get(MODEL_SELECTOR)))
+        current = self.selection_is_current(live.get(MODEL_SELECTOR))
+        if not model_type and current:
+            model_type = _short(self.host.read_global("model_type"))
+
+        definition: typing.Any = None
+        getter = self.host.read_global("get_model_def")
+        if callable(getter) and model_type:
+            try:
+                definition = getter(model_type)
+            except Exception:
+                definition = None
+        if not isinstance(definition, dict) and current:
+            definition = self.host.read_global("model_def")
+        return model_type, definition if isinstance(definition, dict) else None
+
+    def allowances(self, live: typing.Mapping[str, typing.Any]) -> typing.Dict[str, typing.Optional[bool]]:
+        """Which receivers this page's model could take if its selector were set.
+
+        True, False or None per receiver, and None is "not known", which the
+        rest of the bridge treats exactly like False: an input is offered
+        beyond the live selection only when the definition says the model
+        takes it *and* this build handed over the control a send would have
+        to switch. The rules are Wan2GP's own (wgp.py, generate_video_tab):
+
+        * start: ``S`` in ``image_prompt_types_allowed``, and only in video
+          output mode - ``image_mode != 0`` strips ``SEVL`` before the radio
+          is even built;
+        * end: ``E`` allowed, and either always enabled for the model or a
+          start choice possible, since the checkbox only shows beside one
+          (``end_frames_option_visible``);
+        * reference: an ``image_ref_choices`` entry whose letters include
+          ``I``, which is what the reference dropdown offers; a model without
+          the key hides the dropdown and takes no reference image.
+        """
+        _model_type, definition = self.page_model(live)
+        if not isinstance(definition, dict):
+            return {receiver_id: None for receiver_id in V1_RECEIVERS}
+
+        allowed_types = str(definition.get("image_prompt_types_allowed") or "")
+        mode = _image_mode(live.get(IMAGE_MODE))
+        start: typing.Optional[bool]
+        end: typing.Optional[bool]
+        if mode is None:
+            start = end = None
+        else:
+            if mode != 0:
+                allowed_types = _del_letters(allowed_types, "SEVL")
+            start = "S" in allowed_types
+            end = "E" in allowed_types and (start or bool(definition.get("end_frames_always_enabled", False)))
+        reference: typing.Optional[bool] = _reference_choice(definition) is not None
+
+        def gated(answer: typing.Optional[bool], switchable: bool) -> typing.Optional[bool]:
+            # A "yes" the bridge could not act on is not offered; a "no" is a
+            # no whatever was handed over.
+            if answer is False:
+                return False
+            return answer if switchable else None
+
+        return {
+            protocol.START_FRAME: gated(start, self.component(IMAGE_PROMPT_RADIO) is not None),
+            protocol.END_FRAME: gated(
+                end, self.component(END_IMAGES_CHECKBOX) is not None and self.component(IMAGE_PROMPT_RADIO) is not None
+            ),
+            protocol.REFERENCE: gated(reference, self.component(REFERENCE_SELECTOR) is not None),
+        }
+
+    def switch_for(self, receiver_id: str, live: typing.Mapping[str, typing.Any]) -> "Switch":
+        """The component updates that switch ``receiver_id`` on for this page.
+
+        Empty when it already is on. Otherwise the same edits Wan2GP's own
+        handlers make when a person uses the control - the selector's value
+        *and* the hidden letter string generation reads, because the radio's
+        ``.change`` handler will recompute the string from these very values
+        while the reference dropdown's ``.input`` handler does not run for a
+        value set from the server. Writing both makes the outcome the same
+        either way. The rows are shown for the same reason: what a click
+        would have revealed, a send reveals.
+        """
+        image_prompt = _text_value(live.get(IMAGE_PROMPT_TYPE))
+        video_prompt = _text_value(live.get(VIDEO_PROMPT_TYPE))
+        updates: typing.Dict[str, typing.Any] = {}
+
+        if receiver_id == protocol.START_FRAME:
+            if "S" in image_prompt:
+                return Switch()
+            updates[IMAGE_PROMPT_RADIO] = "S"
+            updates[IMAGE_PROMPT_TYPE] = _add_letters(_del_letters(image_prompt, "VLTS"), "S")
+            if self.component(START_ROW) is not None:
+                updates[START_ROW] = {"visible": True}
+            return Switch(SWITCH_TOKENS[receiver_id], updates)
+
+        if receiver_id == protocol.END_FRAME:
+            if "E" in image_prompt:
+                return Switch()
+            letters = _add_letters(image_prompt, "E")
+            if not any(letter in letters for letter in "SVL"):
+                updates[IMAGE_PROMPT_RADIO] = "S"
+                letters = _add_letters(_del_letters(letters, "VLTS"), "S")
+                if self.component(START_ROW) is not None:
+                    updates[START_ROW] = {"visible": True}
+            updates[END_IMAGES_CHECKBOX] = True
+            updates[IMAGE_PROMPT_TYPE] = letters
+            if self.component(END_ROW) is not None:
+                updates[END_ROW] = {"visible": True}
+            return Switch(SWITCH_TOKENS[receiver_id], updates)
+
+        if receiver_id == protocol.REFERENCE:
+            if "I" in video_prompt:
+                return Switch()
+            _model_type, definition = self.page_model(live)
+            choice = _reference_choice(definition)
+            if choice is None:
+                return Switch()
+            block = definition.get("image_ref_choices") if isinstance(definition, dict) else None
+            letters_filter = str((block or {}).get("letters_filter") or "KFI")
+            updates[REFERENCE_SELECTOR] = choice
+            updates[VIDEO_PROMPT_TYPE] = _add_letters(_del_letters(video_prompt, letters_filter), choice)
+            if self.component(REFERENCE_ROW) is not None:
+                updates[REFERENCE_ROW] = {"visible": True}
+            return Switch(SWITCH_TOKENS[receiver_id], updates)
+
+        return Switch()
 
     # -- the handshake -------------------------------------------------------
 
@@ -806,7 +1083,77 @@ class Compatibility:
         return payload
 
 
+@dataclasses.dataclass(frozen=True)
+class Switch:
+    """What a send changes besides the receiver: a token for the record, and
+    the updates by component key. Empty means the receiver is already on."""
+
+    token: str = ""
+    updates: typing.Mapping[str, typing.Any] = dataclasses.field(default_factory=dict)
+
+    def __bool__(self) -> bool:
+        return bool(self.updates)
+
+
 # ----------------------------------------------------------------- helpers --
+
+
+def _del_letters(source: typing.Any, letters: str) -> str:
+    """Wan2GP's ``del_in_sequence``: drop each of ``letters`` from the flags."""
+    text = str(source or "")
+    for letter in letters:
+        text = text.replace(letter, "")
+    return text
+
+
+def _add_letters(source: typing.Any, letters: str) -> str:
+    """Wan2GP's ``add_to_sequence``: append each of ``letters`` not already there."""
+    text = str(source or "")
+    for letter in letters:
+        if letter not in text:
+            text += letter
+    return text
+
+
+def _text_value(value: typing.Any) -> str:
+    """A flag string as Gradio hands it back: a string, or nothing."""
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else str(value)
+
+
+def _image_mode(value: typing.Any) -> typing.Optional[int]:
+    """Wan2GP's ``image_mode`` as an int, or None when the build did not hand it over."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _reference_choice(definition: typing.Any) -> typing.Optional[str]:
+    """The first reference-dropdown value that injects reference images.
+
+    Wan2GP builds the dropdown from ``image_ref_choices["choices"]``, a list
+    of ``(label, letters)`` pairs, and reads ``I`` in the chosen letters as
+    "use the reference gallery". The first such choice is the one a person
+    reaching for references would pick; a model without the key has no
+    dropdown and no reference input.
+    """
+    if not isinstance(definition, dict):
+        return None
+    block = definition.get("image_ref_choices")
+    if not isinstance(block, dict):
+        return None
+    choices = block.get("choices")
+    if not isinstance(choices, (list, tuple)):
+        return None
+    for entry in choices:
+        letters = entry[1] if isinstance(entry, (list, tuple)) and len(entry) >= 2 else entry
+        if isinstance(letters, str) and "I" in letters:
+            return letters
+    return None
 
 
 def _walk(source: typing.Any, path: typing.Sequence[str]) -> typing.Any:

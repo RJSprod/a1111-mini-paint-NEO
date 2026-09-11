@@ -64,6 +64,9 @@ class Applied:
     previous_count: int
     new_count: int
     chained: typing.Tuple[str, ...] = ()
+    #: The selector updates that switch this receiver on, by component key -
+    #: empty when it already was. ``plugin.py`` places them by position.
+    switch_updates: typing.Mapping[str, typing.Any] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -112,6 +115,19 @@ def as_image(value: typing.Any) -> typing.Any:
         except Exception:
             return None
     return None
+
+
+def gallery_shaped(component: typing.Any) -> bool:
+    """Whether a receiver takes a list rather than one picture.
+
+    Wan2GP's start and end frames are galleries ("images as starting points
+    for new videos in the queue" - one video per image), not single Image
+    components, and a gallery handed a bare PIL image raises inside Gradio's
+    postprocess after the callback has returned - which the bridge would never
+    see. So a single-image receiver writes ``[image]`` when the component it
+    resolved is a Gallery and the image itself otherwise.
+    """
+    return component is not None and type(component).__name__ == "Gallery"
 
 
 def gallery_entries(value: typing.Any) -> typing.List[typing.Any]:
@@ -209,6 +225,7 @@ class ReceiverAdapter:
             return None
         count, max_count = self.capacity(state)
         active = state.active(self.logical_id)
+        offered = state.offered(self.logical_id)
         return {
             "id": self.logical_id,
             "role": self.role,
@@ -216,12 +233,16 @@ class ReceiverAdapter:
             "menu_label": protocol.DEFAULT_MENU_LABELS.get(self.logical_id, ""),
             "operation": self.operation,
             "accept": ["image/png"],
-            "enabled": active,
-            "visible": active,
+            "enabled": offered,
+            "visible": offered,
             "count": count,
             "max_count": max_count,
             "focus_hint": self.focus_hint(),
-            "reason_code": "" if active else compatibility.RECEIVER_DISABLED,
+            # Switched on right now, as opposed to offered because the model
+            # allows it - and what a send would flip in the latter case.
+            "selected": active,
+            "switch": "" if active or not offered else compatibility.SWITCH_TOKENS.get(self.logical_id, ""),
+            "reason_code": "" if offered else compatibility.RECEIVER_DISABLED,
         }
 
     # -- reading and writing --------------------------------------------------
@@ -295,7 +316,7 @@ class ReceiverAdapter:
                 compatibility.BRIDGE_COMPONENT_INCOMPATIBLE,
                 f"{self.logical_id} has no resolved component in this build",
             )
-        receiver_state.require_active(state, self.logical_id)
+        receiver_state.require_offered(state, self.logical_id)
         if operation and operation != self.operation:
             # The descriptor said what this receiver does. A caller asking for
             # something else is out of date, and guessing which one it meant
@@ -330,13 +351,16 @@ class SingleImageAdapter(ReceiverAdapter):
         # The PIL image itself, not the handoff path. Gradio imports it into
         # its own cache on postprocess, which is section 20.7's "copy it into
         # the receiver's normal backing mechanism" - the receiver never ends
-        # up pointing at a file another process is about to sweep.
+        # up pointing at a file another process is about to sweep. As a
+        # one-element list when the receiver is a gallery, which is what
+        # Wan2GP's start and end frames are - see ``gallery_shaped``.
+        value: typing.Any = [loaded.image] if gallery_shaped(self.component()) else loaded.image
         return Applied(
             receiver_id=self.logical_id,
             role=self.role,
             operation=self.operation,
             component_key=self.component_key,
-            value=loaded.image,
+            value=value,
             previous_count=previous,
             new_count=1,
         )

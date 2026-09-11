@@ -201,7 +201,8 @@ The tab is built once and never destroyed; only visibility changes.
 ## `javascript/minipaint_wangp.js`
 
 `window.minipaintWanGP` with: `attach()`, `receivers()` (one bounded query,
-returns a promise of the normalised list), `send(receiverId, revision,
+returns a promise of the normalised list — or the bridge's own failure code
+when it refused, never a stale-revision stand-in), `send(receiverId, revision,
 handoffId)`, `focus(receiverId)`, `state()`, `switchToWanGP()`. It validates
 `event.origin === window.location.origin` **and** `event.source ===
 iframe.contentWindow` on every message, checks the protocol version, the
@@ -215,6 +216,19 @@ SHARED block is byte-identical to `minipaint_neo/wangp/protocol.py`'s.
 `compatibility.py` is the only file allowed to know a WanGP component id, and
 every id it wants is version-gated and reported in the handshake so a build
 that lacks one fails closed with `BRIDGE_COMPONENT_INCOMPATIBLE`.
+
+A receiver descriptor carries `enabled` (offered: switched on now, *or* allowed
+by this page's model definition and switchable), `selected` (switched on now)
+and `switch` (`location`, `end_images`, `reference_images`, or empty — what the
+send will set). Allowances come from `get_model_def(get_state_model_type(state))`
+— the same two globals Wan2GP's own handlers use, asked for in `__init__`
+because Wan2GP injects globals once, right after constructing the plugin. A
+send to an allowed-but-unselected receiver updates the selector, the letter
+string generation reads and the row's visibility in the same Gradio event that
+places the image; the acknowledgement names the switch under `switched` and
+the updated components under `chained`. Unknown is never allowed: a build that
+hands over no definition, or none of the selector controls, offers exactly what
+it offered before.
 
 ## Tests
 

@@ -48,6 +48,7 @@ CANONICAL_KEYS = (
     "image_prompt_type",
     "video_prompt_type",
     "audio_prompt_type",
+    "image_mode",
     "reference_count",
     "start_present",
     "end_present",
@@ -117,9 +118,26 @@ class SessionState:
     model: typing.Mapping[str, str]
     capabilities: typing.Mapping[str, typing.Optional[bool]]
     view: str
+    #: Layer A on its own: what this page's model could take if the selector
+    #: were set, per receiver. See ``compatibility.Compatibility.allowances``.
+    allowances: typing.Mapping[str, typing.Optional[bool]] = dataclasses.field(default_factory=dict)
 
     def value(self, component_key: str) -> typing.Any:
         return self.values.get(component_key)
+
+    def allowed(self, receiver_id: str) -> bool:
+        """The model takes this input and a send could switch it on.
+
+        Only a definite yes counts. "Unknown" - a build that handed over no
+        model definition, or none of the controls a switch would need - is
+        not permission, which keeps a build that lacks the new components on
+        exactly the behaviour it had: offered only while switched on.
+        """
+        return self.allowances.get(receiver_id) is True
+
+    def offered(self, receiver_id: str) -> bool:
+        """What the menu enables: switched on now, or allowed and switchable."""
+        return self.active(receiver_id) or self.allowed(receiver_id)
 
     def active(self, receiver_id: str) -> bool:
         """Layer A and layer B together, in the order section 25 states them.
@@ -171,6 +189,7 @@ def canonical_state(
         "image_prompt_type": selection_text(values.get(compatibility.IMAGE_PROMPT_TYPE)),
         "video_prompt_type": selection_text(values.get(compatibility.VIDEO_PROMPT_TYPE)),
         "audio_prompt_type": selection_text(values.get(compatibility.AUDIO_PROMPT_TYPE)),
+        "image_mode": selection_text(values.get(compatibility.IMAGE_MODE)),
         "reference_count": item_count(values.get(compatibility.REFERENCE_GALLERY)),
         "start_present": value_present(values.get(compatibility.START_IMAGE)),
         "end_present": value_present(values.get(compatibility.END_IMAGE)),
@@ -183,6 +202,7 @@ def build(
     model: typing.Optional[typing.Mapping[str, str]] = None,
     capabilities: typing.Optional[typing.Mapping[str, typing.Optional[bool]]] = None,
     view: str = "",
+    allowances: typing.Optional[typing.Mapping[str, typing.Optional[bool]]] = None,
 ) -> SessionState:
     """Read once, normalise once, fingerprint once."""
     model = dict(model or {})
@@ -195,6 +215,7 @@ def build(
         model=model,
         capabilities=capabilities,
         view=str(view or ""),
+        allowances=dict(allowances or {}),
     )
 
 
@@ -212,11 +233,13 @@ def read(
     still consulted, but only once this page's own selection agrees with them.
     """
     selected = live.get(compatibility.MODEL_SELECTOR)
+    model_type, definition = compat.page_model(live)
     return build(
         values=live,
-        model=compat.model_descriptor(selected),
-        capabilities=compat.model_capabilities(schema, selected),
+        model=compat.model_descriptor(selected, definition=definition, model_type=model_type),
+        capabilities=compat.model_capabilities(schema if schema is not None else definition, selected),
         view=str(compat.host.read_global("active_view") or ""),
+        allowances=compat.allowances(live),
     )
 
 
@@ -240,6 +263,24 @@ def require_active(state: SessionState, receiver_id: typing.Any) -> None:
         raise compatibility.BridgeError(compatibility.UNKNOWN_RECEIVER, f"no such logical receiver: {receiver_id!r}")
     if not state.active(str(receiver_id)):
         raise compatibility.BridgeError(compatibility.RECEIVER_DISABLED, f"{receiver_id} is not selected in this session")
+
+
+def require_offered(state: SessionState, receiver_id: typing.Any) -> None:
+    """That receiver must exist and be switched on, or allowed and switchable.
+
+    The gate a send passes through. The second half is the whole of the
+    "send to a scenario" feature: a model that takes a start frame is a
+    destination whether or not the Location radio has been touched, and the
+    send flips the radio itself. Neither switched on nor allowed is still a
+    refusal, and still without choosing something else.
+    """
+    if receiver_id not in protocol.RECEIVER_IDS:
+        raise compatibility.BridgeError(compatibility.UNKNOWN_RECEIVER, f"no such logical receiver: {receiver_id!r}")
+    if not state.offered(str(receiver_id)):
+        raise compatibility.BridgeError(
+            compatibility.RECEIVER_DISABLED,
+            f"{receiver_id} is neither selected on this page nor allowed by its model",
+        )
 
 
 def changed_keys(before: SessionState, after: SessionState) -> typing.List[str]:

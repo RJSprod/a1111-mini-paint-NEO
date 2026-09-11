@@ -29,6 +29,8 @@ from harness import Results, ROOT, setup_path
 setup_path()
 
 import importlib.util  # noqa: E402
+import json  # noqa: E402
+import pathlib  # noqa: E402
 import re  # noqa: E402
 
 from minipaint_neo.wangp import protocol  # noqa: E402
@@ -425,6 +427,41 @@ def receiver_checks(r: Results) -> None:
 # ---------------------------------------------------------------- handoffs --
 
 
+def offered_checks(r: Results) -> None:
+    """The descriptor says *why* an input is offered: switched on, or allowed.
+
+    ``enabled`` is what the menu acts on and it now covers both. ``selected``
+    says whether WanGP's own selector already has the input switched on and
+    ``switch`` names what a send will set when it does not - so a Forge side
+    can tell the two apart, and so a bridge that predates the distinction (it
+    only ever offered what was switched on) reads as "selected".
+    """
+    base = {"role": "start", "operation": protocol.REPLACE, "enabled": True}
+    allowed = protocol.normalize_receiver({"id": protocol.START_FRAME, "selected": False, "switch": "location", **base})
+    r.check("an allowed, unselected receiver is enabled", allowed["enabled"] is True)
+    r.check("and not selected", allowed["selected"] is False)
+    r.check("and names the switch a send will make", allowed["switch"] == "location", repr(allowed["switch"]))
+
+    selected = protocol.normalize_receiver({"id": protocol.START_FRAME, "selected": True, "switch": "location", **base})
+    r.check("a selected receiver carries no switch, whatever the bridge sent", selected["switch"] == "")
+
+    legacy = protocol.normalize_receiver({"id": protocol.START_FRAME, **base})
+    r.check("a bridge that says nothing about selection is read as selected", legacy["selected"] is True)
+    r.check("and switches nothing", legacy["switch"] == "")
+
+    off = protocol.normalize_receiver({"id": protocol.START_FRAME, "role": "start", "operation": protocol.REPLACE,
+                                       "enabled": False, "selected": False, "switch": "location"})
+    r.check("a disabled receiver carries no switch either", off["switch"] == "" and off["enabled"] is False)
+
+    for wrong in ("Location", "loc ation", "x" * 41, 7, None, ["location"]):
+        odd = protocol.normalize_receiver({"id": protocol.START_FRAME, "selected": False, "switch": wrong, **base})
+        r.check(f"a switch that is not a token is dropped ({wrong!r})", odd["switch"] == "")
+    r.check("a selection flag that is not a boolean falls back to enabled",
+            protocol.normalize_receiver({"id": protocol.START_FRAME, "selected": "yes", **base})["selected"] is True)
+    r.check("the query waits longer than one busy Gradio round trip",
+            protocol.RECEIVER_QUERY_TIMEOUT_MS >= 10000, str(protocol.RECEIVER_QUERY_TIMEOUT_MS))
+
+
 def handoff_checks(r: Results) -> None:
     r.check("32 lowercase hex characters is a handoff id",
             protocol.valid_handoff_id("0123456789abcdef0123456789abcdef") is True)
@@ -614,6 +651,318 @@ def loader_checks(r: Results) -> None:
             for entry in added:
                 if entry in sys.path:
                     sys.path.remove(entry)
+
+
+class _Wgp:
+    """What a plugin sees of Wan2GP: the hooks, and the globals it injects as
+    attributes - here ``get_model_def`` and ``get_state_model_type``, the two
+    the bridge reads a page's model through."""
+
+    def __init__(self, definitions):
+        self.definitions = definitions
+        self.asked_globals = []
+        self.asked_components = []
+
+    def request_component(self, name):
+        self.asked_components.append(name)
+
+    def request_global(self, name):
+        self.asked_globals.append(name)
+
+    def get_model_def(self, model_type):
+        return self.definitions.get(model_type)
+
+    @staticmethod
+    def get_state_model_type(state):
+        return state["model_type"]
+
+
+class _Handed:
+    """A Gradio-shaped component, as ``post_ui_setup`` hands them over."""
+
+    def __init__(self, name):
+        self._id = name
+        self.name = name
+
+    def get_config(self):
+        return {}
+
+
+class Gallery(_Handed):
+    """Shaped and named like Gradio's Gallery, which is what Wan2GP's start
+    and end frames are."""
+
+
+_VIDEO_MODEL = {
+    "name": "A video model",
+    "image_prompt_types_allowed": "TSEV",
+    "image_ref_choices": {"choices": [("None", ""), ("People / Objects", "I"), ("Landscape then people", "KI")],
+                          "letters_filter": "KFI"},
+}
+_TEXT_ONLY_MODEL = {"name": "Text only", "image_prompt_types_allowed": "T"}
+_IMAGE_MODEL = {"name": "An image model", "image_prompt_types_allowed": "TSV",
+                "image_ref_choices": {"choices": [("None", ""), ("Reference", "I")], "letters_filter": "I"}}
+
+_FORM_NAMES = ("image_start", "image_end", "image_refs", "image_prompt_type", "video_prompt_type", "model_choice",
+               "image_mode", "state", "image_prompt_type_radio", "image_prompt_type_endcheckbox",
+               "video_prompt_type_image_refs", "image_start_row", "image_end_row", "image_refs_row")
+
+
+def _bridge_on(bridge_plugin, definitions, names=_FORM_NAMES, root="/tmp", galleries=()):
+    """A resolved bridge inside a Wan2GP that hands over ``names`` and knows ``definitions``."""
+    wgp = _Wgp(definitions)
+    bridge = bridge_plugin.MiniPaintBridge(
+        host=bridge_plugin.compatibility.Host(wgp),
+        environ={"MINIPAINT_WANGP_INSTANCE_ID": "i", "MINIPAINT_WANGP_HANDOFF_ROOT": str(root)},
+    )
+    bridge.compat.declare_globals()
+    handed = {name: (Gallery(name) if name in galleries else _Handed(name)) for name in names}
+    bridge.compat.host.accept_components(handed)
+    bridge.resolve()
+    return bridge, wgp
+
+
+def _page(compatibility, **overrides):
+    """A fresh page on a video model, keyed by the bridge's component keys -
+    the shape ``live_values`` produces from the event's positional inputs -
+    with ``overrides`` applied by key."""
+    page = {
+        compatibility.IMAGE_PROMPT_TYPE: "T",
+        compatibility.VIDEO_PROMPT_TYPE: "",
+        compatibility.IMAGE_MODE: 0,
+        compatibility.SESSION_STATE: {"model_type": "video"},
+        compatibility.MODEL_SELECTOR: "video",
+        compatibility.START_IMAGE: None,
+        compatibility.END_IMAGE: None,
+        compatibility.REFERENCE_GALLERY: [],
+    }
+    page.update(overrides)
+    return page
+
+
+def _on_model(compatibility, page, model_type, **overrides):
+    """The same page after switching to ``model_type``."""
+    changed = dict(page)
+    changed[compatibility.SESSION_STATE] = {"model_type": model_type}
+    changed[compatibility.MODEL_SELECTOR] = model_type
+    changed.update(overrides)
+    return changed
+
+
+def _answer(bridge, live, op="receivers", **extra):
+    """One bridge event, with this page's values, as Gradio would call it."""
+    request = {"op": op, "request_id": "r1", "channel_id": "c" * 32, **extra}
+    values = [live.get(key) for key in bridge.state_keys]
+    return bridge.handle(json.dumps(request), values, "session-hash-of-this-page")
+
+
+def allowance_checks(r: Results) -> None:
+    """What the model allows is offered, and a send switches it on.
+
+    Section 25 had two layers: what the model could take and what the page has
+    switched on, and an input was offered only when both said yes. That made
+    the Send menu empty on a fresh WanGP page - the Location radio starts on
+    Text Prompt - until the user went to the WanGP tab and changed it. Now
+    the first layer is read the way Wan2GP reads it, from the page's own
+    model definition, and a send to an allowed input sets the selector
+    itself, in the same event that places the image. Unknown is never
+    allowed: a build that hands over less offers exactly what it did.
+    """
+    import sys as _sys
+
+    folder = str(BRIDGE_COPY.parent)
+    added = folder not in _sys.path
+    if added:
+        _sys.path.insert(0, folder)
+    try:
+        import plugin as bridge_plugin
+        compatibility = bridge_plugin.compatibility
+    finally:
+        if added and folder in _sys.path:
+            _sys.path.remove(folder)
+
+    fresh = _page(compatibility)
+    bridge, wgp = _bridge_on(bridge_plugin, {"video": _VIDEO_MODEL, "text": _TEXT_ONLY_MODEL, "image": _IMAGE_MODEL})
+
+    r.check("the globals Wan2GP injects at construction are asked for before setup_ui",
+            {"get_model_def", "get_state_model_type"} <= set(wgp.asked_globals), str(wgp.asked_globals))
+    r.check("and a requested global is read off the plugin object, which is where Wan2GP puts it",
+            callable(bridge.compat.host.read_global("get_model_def")))
+    r.check("while an attribute that was never asked for is not mistaken for a global",
+            bridge.compat.host.read_global("definitions") is None)
+
+    # -- a fresh page on a video model: nothing selected, everything allowed
+    ack, applied = _answer(bridge, fresh)
+    r.check("a fresh page answers ready", ack.get("ok") is True and ack.get("ready") is True, str(ack.get("code")))
+    by_id = {item["id"]: item for item in ack["receivers"]}
+    r.check("start, end and reference are all offered on a video model",
+            all(by_id[key]["enabled"] for key in ("start_frame", "end_frame", "reference")), repr(by_id))
+    r.check("and none of them is selected yet",
+            not any(by_id[key]["selected"] for key in ("start_frame", "end_frame", "reference")))
+    r.check("each names what a send would switch",
+            (by_id["start_frame"]["switch"], by_id["end_frame"]["switch"], by_id["reference"]["switch"])
+            == ("location", "end_images", "reference_images"), repr([v["switch"] for v in by_id.values()]))
+    r.check("so the answer does not claim the model takes no image", ack.get("reason_code") != "NO_ACTIVE_RECEIVER")
+
+    # -- the switch a send would make, computed from Wan2GP's own letter rules
+    start = bridge.compat.switch_for("start_frame", fresh)
+    r.check("a start frame send sets the Location radio to S",
+            start.updates.get(compatibility.IMAGE_PROMPT_RADIO) == "S", repr(dict(start.updates)))
+    r.check("and rewrites the letter string generation reads, dropping T the way the radio handler does",
+            start.updates.get(compatibility.IMAGE_PROMPT_TYPE) == "S")
+    r.check("and shows the start row", start.updates.get(compatibility.START_ROW) == {"visible": True})
+    r.check("and says so", start.token == "location")
+
+    end = bridge.compat.switch_for("end_frame", fresh)
+    r.check("an end frame send ticks End Image(s)", end.updates.get(compatibility.END_IMAGES_CHECKBOX) is True)
+    r.check("and, with no start or continue chosen, chooses Start with Image too",
+            end.updates.get(compatibility.IMAGE_PROMPT_RADIO) == "S")
+    letters = end.updates.get(compatibility.IMAGE_PROMPT_TYPE, "")
+    r.check("so the letters carry both S and E", "S" in letters and "E" in letters, repr(letters))
+
+    reference = bridge.compat.switch_for("reference", fresh)
+    r.check("a reference send picks the first dropdown choice that injects references",
+            reference.updates.get(compatibility.REFERENCE_SELECTOR) == "I", repr(dict(reference.updates)))
+    r.check("and writes I into the video letters, since the dropdown's .input handler will not run",
+            reference.updates.get(compatibility.VIDEO_PROMPT_TYPE) == "I")
+    r.check("and shows the reference row", reference.updates.get(compatibility.REFERENCE_ROW) == {"visible": True})
+
+    # -- already switched on: offered, selected, nothing to switch
+    chosen = dict(fresh, image_prompt_type="SE", video_prompt_type="KI")
+    ack, _ = _answer(bridge, chosen)
+    by_id = {item["id"]: item for item in ack["receivers"]}
+    r.check("a selected receiver reads as selected", by_id["start_frame"]["selected"] is True)
+    r.check("and carries no switch", by_id["start_frame"]["switch"] == "" and by_id["reference"]["switch"] == "")
+    r.check("a switch for a selected receiver is empty", not bridge.compat.switch_for("start_frame", chosen))
+    r.check("and so is one for references already on", not bridge.compat.switch_for("reference", chosen))
+
+    # -- a text-only model: nothing is offered, and it says so
+    text = _on_model(compatibility, fresh, "text")
+    ack, _ = _answer(bridge, text)
+    r.check("a model that takes no image offers nothing",
+            not any(item["enabled"] for item in ack["receivers"]), repr(ack["receivers"]))
+    r.check("and the answer says that is why", ack.get("reason_code") == "NO_ACTIVE_RECEIVER")
+
+    # -- image output mode strips the start/end choice, as Wan2GP does
+    image = _on_model(compatibility, fresh, "image", **{compatibility.IMAGE_MODE: 1})
+    ack, _ = _answer(bridge, image)
+    by_id = {item["id"]: item for item in ack["receivers"]}
+    r.check("in image-output mode a start frame is not offered", by_id["start_frame"]["enabled"] is False)
+    r.check("but a reference still is", by_id["reference"]["enabled"] is True)
+
+    # -- unknown is not allowed: fewer components, same old behaviour
+    fewer = tuple(name for name in _FORM_NAMES if name not in ("image_prompt_type_radio", "image_prompt_type_endcheckbox"))
+    lesser, _ = _bridge_on(bridge_plugin, {"video": _VIDEO_MODEL}, names=fewer)
+    ack, _ = _answer(lesser, fresh)
+    by_id = {item["id"]: item for item in ack["receivers"]}
+    r.check("without the Location radio a start frame is offered only when selected",
+            by_id["start_frame"]["enabled"] is False and by_id["end_frame"]["enabled"] is False)
+    r.check("while references, whose dropdown resolved, still are", by_id["reference"]["enabled"] is True)
+    ack, _ = _answer(lesser, chosen)
+    r.check("and a selected start frame is offered as it always was",
+            {item["id"]: item for item in ack["receivers"]}["start_frame"]["enabled"] is True)
+
+    blind, _ = _bridge_on(bridge_plugin, {})
+    ack, _ = _answer(blind, fresh)
+    r.check("a build whose model definition cannot be read offers nothing beyond the selection",
+            not any(item["enabled"] for item in ack["receivers"]))
+    ack, _ = _answer(blind, chosen)
+    r.check("and everything the selection switched on",
+            all(item["enabled"] for item in ack["receivers"]))
+
+
+def switch_apply_checks(r: Results) -> None:
+    """A send to an allowed input places the image and flips the selector in
+    one event, and its acknowledgement says which; one to an input that is
+    neither selected nor allowed is refused without choosing another."""
+    import sys as _sys
+    import tempfile
+
+    try:
+        from PIL import Image
+    except ImportError:
+        r.check("Pillow is available for the switch apply checks (skipped)", True)
+        return
+
+    folder = str(BRIDGE_COPY.parent)
+    added = folder not in _sys.path
+    if added:
+        _sys.path.insert(0, folder)
+    try:
+        import plugin as bridge_plugin
+        compatibility = bridge_plugin.compatibility
+    finally:
+        if added and folder in _sys.path:
+            _sys.path.remove(folder)
+
+    fresh = _page(compatibility)
+
+    with tempfile.TemporaryDirectory(prefix="minipaint-wangp-switch-") as root:
+        handoff_id = "0123456789abcdef0123456789abcdef"
+        picture = Image.new("RGBA", (4, 4), (10, 200, 30, 255))
+        picture.save(pathlib.Path(root) / f"{handoff_id}.png", format="PNG")
+
+        bridge, _ = _bridge_on(bridge_plugin, {"video": _VIDEO_MODEL, "text": _TEXT_ONLY_MODEL},
+                               root=root, galleries=("image_start", "image_end"))
+        answer, _ = _answer(bridge, fresh)
+        revision = answer["state_revision"]
+
+        ack, applied = _answer(bridge, fresh, op="receive", handoff_id=handoff_id, receiver_id="start_frame",
+                               state_revision=revision, source={})
+        r.check("the send to an unselected start frame is accepted", ack.get("ok") is True, str(ack.get("code")))
+        r.check("and verified against the pixels that were sent", ack.get("verification") == "pixel-equivalent")
+        r.check("the acknowledgement says the Location was switched", ack.get("switched") == "location")
+        r.check("and lists the components it updated",
+                set(ack.get("chained", ())) >= {compatibility.IMAGE_PROMPT_RADIO, compatibility.IMAGE_PROMPT_TYPE})
+        r.check("the fingerprint after the send differs from the one before",
+                ack.get("state_revision_after") and ack["state_revision_after"] != revision)
+        r.check("a gallery-shaped start frame is written as a one-element list",
+                isinstance(applied.value, list) and len(applied.value) == 1)
+
+        outputs = bridge.outputs(ack, applied)
+        r.check("the event returns the acknowledgement, every receiver, then every switch component",
+                len(outputs) == 1 + len(bridge.receiver_keys) + len(bridge.switch_keys), str(len(outputs)))
+        offset = 1 + len(bridge.receiver_keys)
+        placed = dict(zip(bridge.switch_keys, outputs[offset:]))
+        r.check("the radio output is S", placed.get(compatibility.IMAGE_PROMPT_RADIO) == "S", repr(placed))
+        r.check("the letter string output carries S", placed.get(compatibility.IMAGE_PROMPT_TYPE) == "S")
+        row = placed.get(compatibility.START_ROW)
+        r.check("the start row is shown", isinstance(row, dict) and row.get("visible") is True, repr(row))
+        untouched = placed.get(compatibility.REFERENCE_SELECTOR)
+        r.check("a component the switch did not name is left alone",
+                untouched is None or (isinstance(untouched, dict) and "value" not in untouched), repr(untouched))
+        r.check("the start frame itself is written at its own position",
+                outputs[1 + bridge.receiver_keys.index("start_frame")] is applied.value)
+
+        # Already selected: the image lands and nothing is switched.
+        chosen = dict(fresh, image_prompt_type="S")
+        answer, _ = _answer(bridge, chosen)
+        ack, applied = _answer(bridge, chosen, op="receive", handoff_id=handoff_id, receiver_id="start_frame",
+                               state_revision=answer["state_revision"], source={})
+        r.check("a send to a selected start frame switches nothing",
+                ack.get("ok") is True and ack.get("switched") == "" and not applied.switch_updates)
+
+        # Neither selected nor allowed: refused, and nothing else chosen.
+        text = _on_model(compatibility, fresh, "text")
+        answer, _ = _answer(bridge, text)
+        ack, applied = _answer(bridge, text, op="receive", handoff_id=handoff_id, receiver_id="start_frame",
+                               state_revision=answer["state_revision"], source={})
+        r.check("a send to an input the model does not take is refused",
+                ack.get("ok") is False and ack.get("code") == compatibility.RECEIVER_DISABLED, str(ack.get("code")))
+        r.check("and nothing was applied", applied is None)
+
+        # The plugin asks for its globals when it is constructed, not later.
+        class Recording(bridge_plugin.MiniPaintBridgePlugin):
+            def __init__(self):
+                self.asked = []
+                super().__init__()
+
+            def request_global(self, name):
+                self.asked.append(name)
+
+        constructed = Recording()
+        r.check("MiniPaintBridgePlugin asks for its globals in __init__",
+                "get_model_def" in constructed.asked and "wan2gp_version" in constructed.asked, str(constructed.asked))
 
 
 def _first_candidate():
@@ -1228,7 +1577,10 @@ def run() -> Results:
     envelope_checks(r)
     revision_checks(r)
     receiver_checks(r)
+    offered_checks(r)
     fullness_checks(r)
+    allowance_checks(r)
+    switch_apply_checks(r)
     session_isolation_checks(r)
     loader_checks(r)
     component_handoff_checks(r)

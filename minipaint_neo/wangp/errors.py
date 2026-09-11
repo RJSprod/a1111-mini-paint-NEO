@@ -88,7 +88,7 @@ MESSAGES: dict[str, str] = {
     IFRAME_NOT_READY: "Open the WanGP tab and choose an input.",
     BRIDGE_SESSION_MISMATCH: "That WanGP page is no longer the one this send was prepared for.",
     RECEIVER_QUERY_TIMEOUT: "WanGP did not answer in time.",
-    NO_ACTIVE_RECEIVER: "This WanGP model and mode take no image right now.",
+    NO_ACTIVE_RECEIVER: "This WanGP model takes no image.",
     UNKNOWN_RECEIVER: "WanGP does not have that input.",
     STALE_RECEIVER_STATE: "The WanGP input changed; reopen Send to.",
     RECEIVER_DISABLED: "That WanGP input is not active right now.",

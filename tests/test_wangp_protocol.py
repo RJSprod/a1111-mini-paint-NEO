@@ -1027,6 +1027,9 @@ const document = {
 globalThis.Event = Event;
 globalThis.TextEncoder = require("util").TextEncoder;
 new Function("window", "document", script)(window, document);
+// A flush left pending from before any request - what a hidden page accumulates.
+let preFrameRan = false;
+window.requestAnimationFrame(function () { preFrameRan = true; });
 const channel = "c".repeat(32);
 (listeners.message || []).forEach(function (fn) {
   fn({ origin: ORIGIN, source: parent, data: { protocol: 2, type: "WANGP_BRIDGE_HELLO", channel_id: channel, request_id: "r1", payload: {} } });
@@ -1035,7 +1038,7 @@ setTimeout(function () {
   console.log(JSON.stringify({
     posted: posted.map(function (p) { return p.type; }),
     origins: posted.map(function (p) { return p.origin; }),
-    clicks: clicks, callbackRuns: callbackRuns, nativeRuns: nativeRuns,
+    clicks: clicks, callbackRuns: callbackRuns, nativeRuns: nativeRuns, preFrameRan: preFrameRan,
     framesLeftUnrun: nativeFrames.filter(Boolean).length,
     replaced: window.requestAnimationFrame.name === "requestFrame"
   }));
@@ -1097,12 +1100,14 @@ def frame_fallback_checks(r: Results) -> None:
             hidden.get("posted") == ["WANGP_BRIDGE_READY"] and hidden.get("nativeRuns") == 0, repr(hidden))
     r.check("and the frame the browser never gave is cancelled rather than left waiting",
             hidden.get("framesLeftUnrun") == 0, repr(hidden))
+    r.check("a frame requested before any request - a pending flush - runs by timer too",
+            hidden.get("preFrameRan") is True, repr(hidden))
     r.check("and it is posted to the page's own origin, nothing wider",
             hidden.get("origins") == ["http://forge.test"], repr(hidden))
 
     visible = results.get("visible", {})
-    r.check("a rendered page's own frame wins and the callback runs exactly once",
-            visible.get("callbackRuns") == 1 and visible.get("nativeRuns") == 1
+    r.check("a rendered page's own frames win - the pending one and the click's - and the callback runs exactly once",
+            visible.get("callbackRuns") == 1 and visible.get("nativeRuns") == 2 and visible.get("preFrameRan") is True
             and visible.get("posted") == ["WANGP_BRIDGE_READY"], repr(visible))
     r.check("and no frame is left pending behind the timer", visible.get("framesLeftUnrun") == 0, repr(visible))
 

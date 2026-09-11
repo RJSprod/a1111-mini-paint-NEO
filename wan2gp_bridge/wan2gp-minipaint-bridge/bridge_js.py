@@ -53,14 +53,19 @@ TRIGGER_RETRY_MS = 250
 #: the second route for an answer whose chained ``.then(js=...)`` never ran.
 ACK_POLL_MS = 300
 
-#: How long an animation frame requested while a request is in flight may
-#: wait for the browser before a timer runs it instead. Gradio schedules every
-#: event trigger inside requestAnimationFrame, and a document that is not
-#: rendered - this page, whenever the Forge tab holding it is not the one on
-#: screen - is given no frames at all. Two frames' worth: long enough that a
-#: rendered page's own frame always wins, short enough that a hidden one
-#: answers well inside the parent's deadline.
+#: How long an animation frame may wait for the browser before a timer runs
+#: it instead - while a bridge request is in flight, and at any other time.
+#: Gradio schedules every event trigger inside requestAnimationFrame, and
+#: gates that trigger on its pending component-update flush, which is itself
+#: scheduled inside requestAnimationFrame; a document that is not rendered -
+#: this page, whenever the Forge tab holding it is not the one on screen, in
+#: an engine that gives such a document no frames - accumulates a pending
+#: flush that never runs, and every click afterwards waits behind it. So the
+#: timer stands behind every frame, not only the ones asked for during a
+#: request: quickly while one is in flight, more slowly otherwise. A rendered
+#: page's own frame arrives in a sixtieth of a second and always wins.
 FRAME_FALLBACK_MS = 40
+IDLE_FRAME_FALLBACK_MS = 150
 
 #: What ``.then(js=...)`` runs with the acknowledgement textbox's value. It
 #: names one method on one object and swallows its own failures, so a bridge
@@ -96,6 +101,7 @@ def configuration(theme_css: str = "") -> dict:
         "triggerRetryMs": TRIGGER_RETRY_MS,
         "ackPollMs": ACK_POLL_MS,
         "frameFallbackMs": FRAME_FALLBACK_MS,
+        "idleFrameFallbackMs": IDLE_FRAME_FALLBACK_MS,
         # Longer than the parent will wait, so in the ordinary case the parent
         # reports the timeout and this only ever unwedges the queue behind it.
         "roundTripMs": protocol.RECEIVE_TIMEOUT_MS + 5000,
@@ -145,30 +151,32 @@ _SCRIPT = r"""
     catch (error) {}
   }
 
-  // -- animation frames while a request is in flight ----------------------------
+  // -- animation frames, with a timer behind each ------------------------------
   //
   // Gradio's Blocks schedules every event trigger inside requestAnimationFrame
-  // (for each dependency: requestAnimationFrame(() => Jt(dep, ...))), and so
-  // does the flush that writes an event's outputs into the page. A browser
-  // gives no animation frames to a document that is not being rendered, and
-  // this page is not rendered whenever the Forge tab holding its iframe is not
-  // the one on screen - which is precisely when Mini Paint's Send menu asks it
-  // what it can take. The click on the hidden trigger then enters Gradio's
-  // dispatch and waits for a frame that only arrives when the WanGP tab is
-  // opened again, long after anyone stopped waiting; nothing reaches the
-  // server meanwhile, so nothing is logged there either.
+  // (for each dependency: requestAnimationFrame(() => wait_then_trigger(...))),
+  // and that trigger first waits for Gradio's pending component-update flush
+  // to finish - a flush that is itself scheduled inside requestAnimationFrame.
+  // Some engines give no animation frames at all to a document that is not
+  // being rendered, and this page is not rendered whenever the Forge tab
+  // holding its iframe is not the one on screen - which is precisely when
+  // Mini Paint's Send menu asks it what it can take. A flush left pending
+  // while the page was hidden then never runs, and every click afterwards
+  // waits behind it until the WanGP tab is opened again, long after anyone
+  // stopped waiting; nothing reaches the server meanwhile, so nothing is
+  // logged there either.
   //
   // WanGP's own focus patch reschedules exactly these frames for its hidden
   // main tab and for a backgrounded browser, but each of its branches needs
   // the main tab's panel to be measurable, and inside a display:none iframe
-  // nothing measures. So, while a bridge request is in flight and only then,
-  // every frame requested is also given a timer; whichever fires first runs
-  // the callback and cancels the other. A rendered page's frame always wins,
-  // so its rendering is untouched; a hidden page's timer answers instead.
-  // Installed on top of whatever requestAnimationFrame is at this moment -
-  // WanGP's patch wraps the native one before this script runs, and the
-  // order does not matter: this layer is transparent whenever nothing is in
-  // flight.
+  // nothing measures. So every frame requested in this page is also given a
+  // timer - a short one while a bridge request is in flight, a longer one
+  // otherwise - and whichever fires first runs the callback and cancels the
+  // other. A rendered page's own frame arrives in a sixtieth of a second and
+  // always wins, so its rendering is untouched; a hidden page's timer keeps
+  // Gradio's flush and dispatch moving. Installed on top of whatever
+  // requestAnimationFrame is at this moment - WanGP's patch wraps the native
+  // one before this script runs, and either order works.
 
   var FRAME_ID_BASE = 1073741824;
   var previousRequestFrame = window.requestAnimationFrame;
@@ -178,7 +186,7 @@ _SCRIPT = r"""
   var timedFrames = 0;
 
   function requestFrame(callback) {
-    if (!busy || typeof callback !== "function" || typeof previousRequestFrame !== "function") {
+    if (typeof callback !== "function" || typeof previousRequestFrame !== "function") {
       return previousRequestFrame.call(window, callback);
     }
     var id = FRAME_ID_BASE + (nextFrame++);
@@ -201,7 +209,8 @@ _SCRIPT = r"""
     } catch (error) {
       entry.native = 0;
     }
-    entry.timer = window.setTimeout(function () { entry.timer = 0; run(undefined, true); }, CONFIG.frameFallbackMs);
+    entry.timer = window.setTimeout(function () { entry.timer = 0; run(undefined, true); },
+      busy ? CONFIG.frameFallbackMs : CONFIG.idleFrameFallbackMs);
     return id;
   }
 

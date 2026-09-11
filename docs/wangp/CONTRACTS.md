@@ -233,6 +233,15 @@ the updated components under `chained`. Unknown is never allowed: a build that
 hands over no definition, or none of the selector controls, offers exactly what
 it offered before.
 
+The in-page script (`bridge_js.py`) wraps `requestAnimationFrame` while one of
+its requests is in flight: Gradio schedules event triggers and output flushes
+inside animation frames, and the iframe is not rendered while the Forge tab
+holding it is not on screen, so each such frame is also given a timer and the
+first to fire runs the callback (`FRAME_FALLBACK_MS`). Outside a request the
+page's frames are untouched. It also reads the acknowledgement box while a
+request is in flight (`ACK_POLL_MS`) as a second route for the chained
+`.then(js=…)` delivery, and its failure answers carry a `detail`.
+
 ## Tests
 
 `tests/test_wangp_*.py`, in the existing style: a `run()` returning

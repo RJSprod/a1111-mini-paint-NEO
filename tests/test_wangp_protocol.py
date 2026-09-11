@@ -965,6 +965,148 @@ def switch_apply_checks(r: Results) -> None:
                 "get_model_def" in constructed.asked and "wan2gp_version" in constructed.asked, str(constructed.asked))
 
 
+_FRAME_HARNESS = r"""
+// The real bridge script, in a page that is either rendered (frames fire) or
+// not (frames never fire), driven through one hello. What Gradio does on a
+// click - schedule the trigger inside requestAnimationFrame - is done here
+// by the fake button, and the acknowledgement is delivered the way the
+// chained .then(js=...) delivers it.
+const fs = require("fs");
+const script = fs.readFileSync(process.argv[2], "utf8");
+const mode = process.argv[3];
+const ORIGIN = "http://forge.test";
+const posted = [];
+const nativeFrames = [];
+const listeners = {};
+let clicks = 0;
+let callbackRuns = 0;
+let nativeRuns = 0;
+const parent = { postMessage(envelope, origin) { posted.push({ type: envelope.type, origin: origin }); } };
+class Event { constructor(type) { this.type = type; } }
+const box = { tagName: "TEXTAREA", value: "", dispatchEvent() {} };
+const ack = { tagName: "TEXTAREA", value: "" };
+const button = { tagName: "BUTTON", click() { clicks += 1; onClick(); } };
+const column = {
+  id: "minipaint_bridge_1", parentElement: null,
+  querySelector(selector) {
+    if (selector === ".minipaint-bridge-request") { return box; }
+    if (selector === ".minipaint-bridge-ack") { return ack; }
+    if (selector === ".minipaint-bridge-trigger") { return button; }
+    return null;
+  }
+};
+function onClick() {
+  window.requestAnimationFrame(function () {
+    callbackRuns += 1;
+    const request = JSON.parse(box.value);
+    ack.value = JSON.stringify({ op: request.op, request_id: request.request_id, channel_id: request.channel_id,
+      ok: true, ready: true, bridge_session: "s", instance_id: "i", receivers: [], state_revision: "abcdef12" });
+    window.__minipaintBridge.deliver(ack.value);
+  });
+}
+const window = {
+  location: { origin: ORIGIN }, parent: parent,
+  addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+  setTimeout: setTimeout, clearTimeout: clearTimeout, setInterval: setInterval, clearInterval: clearInterval,
+  performance: { now() { return Date.now(); } },
+  requestAnimationFrame(callback) {
+    const id = nativeFrames.push(callback);
+    if (mode === "visible") {
+      setTimeout(function () { const fn = nativeFrames[id - 1]; if (fn) { nativeFrames[id - 1] = null; nativeRuns += 1; fn(Date.now()); } }, 5);
+    }
+    return id;
+  },
+  cancelAnimationFrame(id) { nativeFrames[id - 1] = null; }
+};
+const document = {
+  getElementsByClassName(name) { return name === "minipaint-bridge-column" ? [column] : []; },
+  getElementById() { return null; },
+  documentElement: { setAttribute() {} }, head: { appendChild() {} }, body: null,
+  createElement() { return { textContent: "" }; }
+};
+globalThis.Event = Event;
+globalThis.TextEncoder = require("util").TextEncoder;
+new Function("window", "document", script)(window, document);
+const channel = "c".repeat(32);
+(listeners.message || []).forEach(function (fn) {
+  fn({ origin: ORIGIN, source: parent, data: { protocol: 2, type: "WANGP_BRIDGE_HELLO", channel_id: channel, request_id: "r1", payload: {} } });
+});
+setTimeout(function () {
+  console.log(JSON.stringify({
+    posted: posted.map(function (p) { return p.type; }),
+    origins: posted.map(function (p) { return p.origin; }),
+    clicks: clicks, callbackRuns: callbackRuns, nativeRuns: nativeRuns,
+    framesLeftUnrun: nativeFrames.filter(Boolean).length,
+    replaced: window.requestAnimationFrame.name === "requestFrame"
+  }));
+  process.exit(0);
+}, 400);
+"""
+
+
+def frame_fallback_checks(r: Results) -> None:
+    """A hidden iframe still answers: Gradio's frames get a timer in flight.
+
+    Gradio schedules every event trigger inside requestAnimationFrame, and a
+    document that is not rendered - the WanGP iframe whenever the Forge tab
+    holding it is not on screen, which is when the Send menu asks - is given
+    no frames. The bridge script runs each frame requested while one of its
+    requests is in flight from a timer as well, whichever comes first. This
+    drives the real script through a hello in both kinds of page.
+    """
+    import json as _json
+    import shutil
+    import subprocess
+    import sys as _sys
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        r.check("node is available for the frame fallback checks (skipped)", True)
+        return
+
+    folder = str(BRIDGE_COPY.parent)
+    added = folder not in _sys.path
+    if added:
+        _sys.path.insert(0, folder)
+    try:
+        import bridge_js
+    finally:
+        if added and folder in _sys.path:
+            _sys.path.remove(folder)
+
+    with tempfile.TemporaryDirectory(prefix="minipaint-wangp-frames-") as scratch:
+        root = pathlib.Path(scratch)
+        (root / "bridge.js").write_text(bridge_js.document_script(""), encoding="utf-8")
+        (root / "harness.js").write_text(_FRAME_HARNESS, encoding="utf-8")
+        results = {}
+        for mode in ("hidden", "visible"):
+            try:
+                run = subprocess.run([node, str(root / "harness.js"), str(root / "bridge.js"), mode],
+                                     capture_output=True, text=True, timeout=30, check=False)
+                results[mode] = _json.loads(run.stdout.strip().splitlines()[-1]) if run.stdout.strip() else {"error": run.stderr[-300:]}
+            except Exception as error:
+                results[mode] = {"error": str(error)[:300]}
+
+    hidden = results.get("hidden", {})
+    r.check("the script replaces the page's requestAnimationFrame", hidden.get("replaced") is True, repr(hidden))
+    r.check("a hidden page's click is dispatched once", hidden.get("clicks") == 1, repr(hidden))
+    r.check("and Gradio's frame callback still runs, from the timer, exactly once",
+            hidden.get("callbackRuns") == 1, repr(hidden))
+    r.check("so the acknowledgement reaches the parent although no frame ever fired",
+            hidden.get("posted") == ["WANGP_BRIDGE_READY"] and hidden.get("nativeRuns") == 0, repr(hidden))
+    r.check("and the frame the browser never gave is cancelled rather than left waiting",
+            hidden.get("framesLeftUnrun") == 0, repr(hidden))
+    r.check("and it is posted to the page's own origin, nothing wider",
+            hidden.get("origins") == ["http://forge.test"], repr(hidden))
+
+    visible = results.get("visible", {})
+    r.check("a rendered page's own frame wins and the callback runs exactly once",
+            visible.get("callbackRuns") == 1 and visible.get("nativeRuns") == 1
+            and visible.get("posted") == ["WANGP_BRIDGE_READY"], repr(visible))
+    r.check("and no frame is left pending behind the timer", visible.get("framesLeftUnrun") == 0, repr(visible))
+
+
 def _first_candidate():
     """The first place ``compatibility`` looks for WanGP's base class."""
     import sys
@@ -1581,6 +1723,7 @@ def run() -> Results:
     fullness_checks(r)
     allowance_checks(r)
     switch_apply_checks(r)
+    frame_fallback_checks(r)
     session_isolation_checks(r)
     loader_checks(r)
     component_handoff_checks(r)

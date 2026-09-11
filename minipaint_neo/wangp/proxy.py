@@ -39,6 +39,7 @@ import urllib.parse
 
 import httpx
 
+from .. import scrub
 from . import journal
 from .errors import (
     AUTH_BOUNDARY_FAILED,
@@ -133,7 +134,7 @@ _state: typing.Dict[str, typing.Any] = {"client": None, "loop": None, "injected"
 
 def _log(text: str) -> None:
     journal.note("proxy", text)
-    print(f"{_LOG_PREFIX} {text}")
+    scrub.console(text, _LOG_PREFIX)
 
 
 def _log_once(key: str, text: str) -> None:

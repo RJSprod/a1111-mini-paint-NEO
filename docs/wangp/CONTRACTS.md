@@ -148,6 +148,36 @@ def check_send(channel_id, receiver_id, state_revision) -> dict   # raises Integ
 Session state is per browser page, keyed by channel id — never one global.
 An instance id change invalidates every session bound to the old one.
 
+## `scrub.py` / `journal.py` / `process_log.py` — what may be written down
+
+```python
+# minipaint_neo/scrub.py  (not WanGP-specific: every writer in the extension uses it)
+def line(text, limit=0) -> str          # PII out; the backend port kept (console)
+def private(text, limit=MAX_LINE) -> str  # line(), plus the port (anything the tab renders)
+def block(text, limit=MAX_LINE) -> str  # a traceback, scrubbed frame by frame
+def console(text, prefix="MiniPaint:") -> None
+def traceback_now(prefix="MiniPaint:") -> None
+def register_root(label, path) -> None  # "<wangp>/outputs/*.mp4" instead of "<path>"
+def forget_roots() -> None
+def known_roots() -> list[tuple[str, str]]
+# journal.py                            the tab's console: a ring buffer, and a mirror to disk
+MAX_LINES = 400
+def note(source, message) -> None       # scrubbed, then in-memory, then process_log
+def lines() -> list[str]; def text() -> str; def clear() -> None   # clear() leaves the file
+# process_log.py                        logs/wangp-log.txt, beside logs/send-log.txt
+MAX_BYTES = 2_000_000
+def note(source, message) -> None       # never raises; latches off after one refusal
+def begin(instance_id="", detail="") -> None; def end(instance_id="", detail="") -> None
+def tail(limit=40) -> list[str]; def path() -> str
+def use_log_dir(directory) -> None      # test seam; nothing in the extension calls it
+```
+
+Every line the extension prints or writes goes through `scrub` first, once, at the point
+it enters the process — for the child's output that is `runtime._drain`, which is why the
+crash tail, the journal, the log file and the console all hold the same scrubbed text.
+`scrub` never raises: its largest caller is the drain thread, and that thread dying fills
+the child's pipe and freezes WanGP mid-generation. Scrubbing twice is scrubbing once.
+
 ## `ui.py` / `settings.py` / `diagnostics.py`
 
 ```python
@@ -160,6 +190,7 @@ def on_ui_settings() -> None    # ONE entry, pointing at the tab's Reinitialize;
 # diagnostics.py
 def report() -> str             # redacted, paste-into-a-bug text
 def redact_path(path) -> str
+LOG_TAIL_LINES = 40; PROCESS_TAIL_LINES = 25   # the two log tails the report carries
 ```
 
 The tab is built once and never destroyed; only visibility changes.

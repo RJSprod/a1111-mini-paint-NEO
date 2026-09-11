@@ -4,6 +4,13 @@ the legacy editor writes it through.
 Kept as it was: the legacy bridge posts to the route from the browser, and the
 touch canvas appends to the same file from Python, so one file tells the whole
 story whichever frontend is mounted.
+
+Every line goes through ``minipaint_neo.scrub`` on the way in. The Python side
+already hands over a whitelisted record - ``bridge.build_log_record`` decides
+what a transfer is allowed to say about itself - but the browser posts to the
+route below with whatever it likes, and this file outlives the run it
+describes. A destination or a step carrying an output filename is the same
+leak as one in the console, and it is a more permanent one.
 """
 
 from __future__ import annotations
@@ -12,6 +19,7 @@ import datetime
 import threading
 import typing
 
+from . import scrub
 from .paths import root_path
 
 SEND_LOG_ROUTE = "/minipaint/log"
@@ -23,10 +31,14 @@ _send_log_lock = threading.Lock()
 
 
 def _clean(value: typing.Any, limit: int = SEND_LOG_MAX_LINE) -> str:
-    """One printable line. The browser is the only writer, but it is still input."""
+    """One printable line with nothing in it that identifies a person.
+
+    The browser is the only writer of the route below, but it is still input,
+    and a frontend that decides to be helpful by naming the file it just sent
+    is one release away at all times.
+    """
     text = value if isinstance(value, str) else repr(value)
-    text = "".join(character if character.isprintable() else " " for character in text)
-    return text[:limit]
+    return scrub.line(text, limit)
 
 
 def format_send_entry(record: typing.Any) -> str:
@@ -80,7 +92,7 @@ def announce_send_log(frontend: str = "miniPaint") -> None:
             }
         )
     except OSError as error:
-        print(f"MiniPaint: could not write {SEND_LOG_PATH}: {error}")
+        scrub.console(f"could not write {SEND_LOG_PATH}: {error}")
 
 
 def log_quietly(record: dict) -> None:
@@ -88,7 +100,7 @@ def log_quietly(record: dict) -> None:
     try:
         append_send_log(record)
     except OSError as error:  # pragma: no cover - disk problems
-        print(f"MiniPaint: could not write {SEND_LOG_PATH}: {error}")
+        scrub.console(f"could not write {SEND_LOG_PATH}: {error}")
 
 
 def on_app_started(_demo, app) -> None:
@@ -112,7 +124,9 @@ def on_app_started(_demo, app) -> None:
         try:
             path = append_send_log(record)
         except OSError as error:
-            return {"ok": False, "error": str(error)}
-        return {"ok": True, "path": str(path)}
+            return {"ok": False, "error": scrub.line(error)}
+        # Scrubbed on the way back out as well: the answer to "where did that
+        # go?" is a path, and the browser is the one reader of this route.
+        return {"ok": True, "path": scrub.line(path)}
 
-    print(f"MiniPaint: transfer log route ready at {SEND_LOG_ROUTE}, writing to {SEND_LOG_PATH}")
+    scrub.console(f"transfer log route ready at {SEND_LOG_ROUTE}, writing to {SEND_LOG_PATH}")

@@ -36,12 +36,18 @@ import typing
 
 from .. import paths
 from ..send_log import SEND_LOG_PATH
-from . import bridge, config, discovery, errors, protocol, runtime
+from . import bridge, config, discovery, errors, process_log, protocol, runtime
 from .errors import AUTH_BOUNDARY_FAILED
 
 #: How much of the transfer log to carry. Enough for one failed send and the
 #: successful one before it, short enough to stay pasteable.
 LOG_TAIL_LINES = 40
+
+#: How much of the WanGP process log to carry. Shorter than the transfer log's
+#: tail because WanGP is chatty and the useful part of a failed start is the
+#: end of it - the whole file is beside the extension for anyone who needs
+#: more, and it is scrubbed there too, so pointing at it costs nothing.
+PROCESS_TAIL_LINES = 25
 
 #: What a field says when it could not be collected. One phrase, so a reader
 #: can tell "we did not look" from "we looked and there is nothing".
@@ -271,6 +277,7 @@ def fields(
         )
 
     collected.append(("sends in flight", ", ".join(sessions.get("sends_in_flight") or []) or "none"))
+    collected.append(("wangp process log", redact_path(process_log.path(), full_paths)))
     return collected
 
 
@@ -307,11 +314,22 @@ def report(full_paths: bool = False, probe_result: typing.Optional[dict] = None)
     if not tail:
         lines.append("  (empty)")
 
+    # What the child process said, which is the half of a WanGP failure the
+    # transfer log cannot see. Safe to carry for the same reason the file is
+    # safe to attach: it was scrubbed before it was written.
+    lines.append("")
+    lines.append("recent WanGP process log")
+    process_tail = process_log.tail(PROCESS_TAIL_LINES)
+    lines.extend(f"  {line}" for line in process_tail)
+    if not process_tail:
+        lines.append("  (empty)")
+
     lines.append("")
     lines.append(
         "Paths are shown as their last component, and no secret, cookie or "
         "authorization header appears above. The backend port and the child pid "
         "are reported as present or absent on purpose: the browser must never "
-        "learn the port."
+        "learn the port. Both logs quoted above were scrubbed of prompts, "
+        "filenames and paths as they were written, not as they were read."
     )
     return "\n".join(lines) + "\n"

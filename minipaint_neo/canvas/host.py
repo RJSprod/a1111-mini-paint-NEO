@@ -22,6 +22,8 @@ import typing
 
 import gradio as gr
 
+from .. import scrub
+
 RECEIVE_TABS = ("txt2img", "img2img", "extras")
 GALLERY_IDS = {f"{tab}_gallery": tab for tab in RECEIVE_TABS}
 ANCHOR_IDS = {f"{tab}_send_to_extras": tab for tab in RECEIVE_TABS}
@@ -285,7 +287,7 @@ def gallery_image(payload: typing.Any):
             if isinstance(image, Image.Image):
                 return image
         except Exception as error:
-            print(f"MiniPaint: the host could not decode the gallery image ({error})")
+            scrub.console(f"the host could not decode the gallery image ({error})")
 
     # Gradio 4 galleries hand back (image, caption) tuples, possibly in a list.
     if isinstance(payload, list) and payload:

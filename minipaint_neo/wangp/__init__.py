@@ -41,7 +41,8 @@ def _on_app_started(_demo, app) -> None:
     is started here - startup is lazy, and a Forge that boots is a Forge with
     no WanGP process in it.
     """
-    from . import config, handoff, proxy, ui
+    from .. import scrub
+    from . import config, handoff, process_log, proxy, ui
 
     ui.remember_app(app)
 
@@ -56,14 +57,20 @@ def _on_app_started(_demo, app) -> None:
 
     proxy.install(app)
 
+    # Open the WanGP log at boot rather than at the first line of child output,
+    # for the reason send_log.announce_send_log gives: an empty folder is a
+    # useless answer to "where is the log?", and a missing file after a restart
+    # should point at the extension not having loaded rather than at WanGP.
+    process_log.note("session", f"routes installed; WanGP output will be logged to {process_log.path()}")
+
     # Prepared images from a previous run are files nobody will ever ask for
     # again; boot is the one moment it is certain no send is in flight.
     try:
         removed = handoff.sweep()
         if removed:
-            print(f"{_LOG_PREFIX} cleared {removed} stale handoff file(s).")
+            scrub.console(f"cleared {removed} stale handoff file(s).", _LOG_PREFIX)
     except Exception as error:  # pragma: no cover - a cleanup is never fatal
-        print(f"{_LOG_PREFIX} the handoff folder could not be swept ({error}).")
+        scrub.console(f"the handoff folder could not be swept ({error}).", _LOG_PREFIX)
 
 
 def register(script_callbacks) -> None:
@@ -78,6 +85,7 @@ def register(script_callbacks) -> None:
     and none of them is a reason to lose Mini Paint, which is why the caller
     wraps this whole function as well.
     """
+    from .. import scrub
     from . import settings, ui
 
     for name, hook, callback in (
@@ -88,7 +96,7 @@ def register(script_callbacks) -> None:
         try:
             getattr(script_callbacks, hook)(callback)
         except Exception as error:  # pragma: no cover - depends on the host
-            print(f"{_LOG_PREFIX} the {name} could not be registered ({error}).")
+            scrub.console(f"the {name} could not be registered ({error}).", _LOG_PREFIX)
 
     # Where the host offers it, stop the child we own when the extension is
     # unloaded. Only ever our own tracked process; nothing is looked up by name.
@@ -98,4 +106,4 @@ def register(script_callbacks) -> None:
 
             script_callbacks.on_script_unloaded(lambda: runtime.stop())
         except Exception as error:  # pragma: no cover - depends on the host
-            print(f"{_LOG_PREFIX} the cleanup hook could not be registered ({error}).")
+            scrub.console(f"the cleanup hook could not be registered ({error}).", _LOG_PREFIX)

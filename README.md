@@ -420,6 +420,53 @@ says which frontend loaded. **If `logs/send-log.txt` does not exist after restar
 WebUI, this version of the extension is not the one running.** It rotates once it passes
 1 MB.
 
+## The WanGP process log
+
+WanGP is started as a child process, so everything it prints — which model it loaded, which
+plugins it found, the traceback when it fell over — used to exist only on the console Forge
+was launched from, and only until it scrolled. It is now also written to:
+
+```
+extensions/a1111-mini-paint-NEO/logs/wangp-log.txt
+```
+
+Every line is timestamped and tagged with which half of the integration said it (`wangp`
+for the child's own words, plus `runtime`, `proxy`, `browser` and `checks`). It rotates to
+`wangp-log.previous.txt` at 2 MB, so there is always at least one full run of history and
+never more than two files.
+
+## Nothing in a log identifies you
+
+Prompts and output filenames are the same thing twice — WanGP names a file after the prompt
+that produced it — and both used to reach the WebUI console verbatim, because the child's
+output was relayed there unchanged. That is fixed at the source: every line the extension
+writes anywhere, to the console or to either log file, goes through one redaction pass
+first. What it takes out:
+
+* **prompts and captions**, in every syntax they get printed in — `Prompt: …`,
+  `--prompt "…"`, `{"prompt": "…"}`;
+* **paths**, down to `<path>/*.mp4` — or `<wangp>/outputs/*.mp4` where the directory is one
+  the integration knows, since the tree a file sits in is structure and the folders above it
+  are your account name;
+* **filenames** with a content extension, with or without a directory in front;
+* **URLs, e-mail addresses and non-loopback IP addresses**;
+* **credentials** — `key=value` secrets, vendor-prefixed tokens, and any opaque run long
+  enough to be an id or a digest.
+
+What stays is what a failure is diagnosed from: exception types and messages, error codes,
+module filenames and line numbers in a traceback, version numbers, resolutions, frame
+counts, timings, and the names of WanGP's own settings. `<wangp>/outputs/*.mp4` still tells
+you a video was written and where it went.
+
+Both log files are therefore safe to attach to a bug report without reading them line by
+line first, which is the point — a log you have to audit before sharing is a log you will
+not share.
+
+One thing the pass cannot remove is a bare personal name typed into free text with nothing
+structural around it. In practice that means a **model, LoRA or preset you named yourself**,
+which is kept deliberately: "which model failed" is the question these logs exist to answer.
+Renaming it is the only fix.
+
 ## Layout of the code
 
 ```
@@ -429,6 +476,7 @@ minipaint_neo/
     router.py                    builds exactly one frontend, with the fallbacks
     legacy_ui.py                 the original iframe tab, unchanged in behaviour
     send_log.py                  logs/send-log.txt and its route
+    scrub.py                     the one redaction pass every writer goes through
     canvas/ui.py                 the touch Canvas: components and events
     canvas/surface.py            the host's canvas, built from its pieces for this tab
     canvas/host.py               what the Canvas needs from the WebUI (galleries, inputs, ImageStitch), found without touching its tabs
@@ -444,6 +492,8 @@ minipaint_neo/
         bridge.py                which browser page is talking to which live WanGP session
         protocol.py              the vocabulary all three sides share
         errors.py                the failure codes and their sentences
+        journal.py               the tab's console: the last 400 steps, in memory
+        process_log.py           logs/wangp-log.txt: the same steps, on disk, bounded
         ui.py / settings.py / diagnostics.py    the tab, the one Settings entry, the report
 javascript/main.js               legacy bridge, parent-frame side (unchanged)
 javascript/minipaint_canvas.js   attaches the canvas; crop frame, touch gestures, tools, the rail's height, the layer list, waits, focus mode

@@ -37,7 +37,9 @@ try:
 
     wangp.register(script_callbacks)
 except Exception as _wangp_error:  # pragma: no cover - depends on the host
-    print(f"MiniPaint: the WanGP integration did not load ({_wangp_error}); Mini Paint is unaffected.")
+    from minipaint_neo import scrub  # noqa: E402
+
+    scrub.console(f"the WanGP integration did not load ({_wangp_error}); Mini Paint is unaffected.")
 
 # The touch Canvas puts a small "send to Canvas" button in each output panel.
 # It is created by an ordinary component hook, so it is only registered when

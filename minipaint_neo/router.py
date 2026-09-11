@@ -10,11 +10,10 @@ tab order, hidden-tab settings and themes see one stable tab.
 from __future__ import annotations
 
 import contextlib
-import traceback
 
 import gradio as gr
 
-from . import legacy_ui, settings
+from . import legacy_ui, scrub, settings
 
 TAB_LABEL = "Mini Paint"
 TAB_ID = "minipaint"
@@ -87,12 +86,12 @@ def _canvas_tab():
 def on_ui_tabs():
     """Build the one tab. Its label and id never change."""
     if settings.use_old_ui():
-        print("MiniPaint: mounting the legacy miniPaint editor (Old UI is on).")
+        scrub.console("mounting the legacy miniPaint editor (Old UI is on).")
         return [(_legacy_tab(), TAB_LABEL, TAB_ID)]
 
     missing = missing_components()
     if missing:
-        print(f"MiniPaint: {missing}; mounting the legacy miniPaint editor.")
+        scrub.console(f"{missing}; mounting the legacy miniPaint editor.")
         return [
             (
                 _legacy_tab(
@@ -109,8 +108,8 @@ def on_ui_tabs():
             blocks = _canvas_tab()
         return [(blocks, TAB_LABEL, TAB_ID)]
     except Exception as error:
-        traceback.print_exc()
-        print("MiniPaint: the touch Canvas failed to build; loading the legacy miniPaint editor instead.")
+        scrub.traceback_now()
+        scrub.console("the touch Canvas failed to build; loading the legacy miniPaint editor instead.")
         reason = f"{type(error).__name__}: {error}".strip()
         return [
             (

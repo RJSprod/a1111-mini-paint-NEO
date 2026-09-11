@@ -53,14 +53,27 @@ TRIGGER_RETRY_MS = 250
 #: the second route for an answer whose chained ``.then(js=...)`` never ran.
 ACK_POLL_MS = 300
 
-#: How long an animation frame requested while a request is in flight may
-#: wait for the browser before a timer runs it instead. Gradio schedules every
-#: event trigger inside requestAnimationFrame, and a document that is not
-#: rendered - this page, whenever the Forge tab holding it is not the one on
-#: screen - is given no frames at all. Two frames' worth: long enough that a
-#: rendered page's own frame always wins, short enough that a hidden one
-#: answers well inside the parent's deadline.
+#: How long an animation frame may wait for the browser before a timer runs
+#: it instead - while a bridge request is in flight, and at any other time.
+#: Gradio schedules every event trigger inside requestAnimationFrame, and
+#: gates that trigger on its pending component-update flush, which is itself
+#: scheduled inside requestAnimationFrame; a document that is not rendered -
+#: this page, whenever the Forge tab holding it is not the one on screen, in
+#: an engine that gives such a document no frames - accumulates a pending
+#: flush that never runs, and every click afterwards waits behind it. So the
+#: timer stands behind every frame, not only the ones asked for during a
+#: request: quickly while one is in flight, more slowly otherwise. A rendered
+#: page's own frame arrives in a sixtieth of a second and always wins.
+#:
+#: The timer has to be in place before Gradio's modules load. Gradio's core
+#: captures ``requestAnimationFrame`` once, when its module is evaluated, and
+#: schedules the flush through that captured reference - so a wrapper
+#: installed by the page script, which runs after the app has mounted, never
+#: sees the flush at all. ``head_script`` is the same wrapper for the page
+#: head (``page_head`` puts it there); the page script only installs it late
+#: when the head copy is missing, and says so in its failure details.
 FRAME_FALLBACK_MS = 40
+IDLE_FRAME_FALLBACK_MS = 150
 
 #: What ``.then(js=...)`` runs with the acknowledgement textbox's value. It
 #: names one method on one object and swallows its own failures, so a bridge
@@ -96,6 +109,7 @@ def configuration(theme_css: str = "") -> dict:
         "triggerRetryMs": TRIGGER_RETRY_MS,
         "ackPollMs": ACK_POLL_MS,
         "frameFallbackMs": FRAME_FALLBACK_MS,
+        "idleFrameFallbackMs": IDLE_FRAME_FALLBACK_MS,
         # Longer than the parent will wait, so in the ordinary case the parent
         # reports the timeout and this only ever unwedges the queue behind it.
         "roundTripMs": protocol.RECEIVE_TIMEOUT_MS + 5000,
@@ -106,7 +120,115 @@ def configuration(theme_css: str = "") -> dict:
 def document_script(theme_css: str = "", config: typing.Optional[dict] = None) -> str:
     """The whole script, ready for ``add_custom_js``."""
     payload = json.dumps(config if config is not None else configuration(theme_css), sort_keys=True)
-    return _SCRIPT.replace("__MINIPAINT_BRIDGE_CONFIG__", payload)
+    return _SCRIPT.replace("__MINIPAINT_FRAME_WRAPPER__", _FRAME_WRAPPER).replace("__MINIPAINT_BRIDGE_CONFIG__", payload)
+
+
+def head_options() -> dict:
+    """What the head copy of the frame timer needs: the two delays."""
+    return {"frameFallbackMs": FRAME_FALLBACK_MS, "idleFrameFallbackMs": IDLE_FRAME_FALLBACK_MS}
+
+
+def head_script(options: typing.Optional[dict] = None) -> str:
+    """The frame timer alone, for the page head - see ``page_head``.
+
+    It runs before Gradio's modules, so it must not need anything the page
+    script needs: no protocol, no controls, no parent. It installs the same
+    wrapper the page script would, and leaves ``window.__minipaintFrames`` for
+    the page script to find, so the timer is installed exactly once.
+    """
+    payload = json.dumps(options if options is not None else head_options(), sort_keys=True)
+    return _HEAD_SCRIPT.replace("__MINIPAINT_FRAME_WRAPPER__", _FRAME_WRAPPER).replace("__MINIPAINT_FRAME_OPTIONS__", payload)
+
+
+# The wrapper itself, shared by both scripts so that there is one of it.
+# Every frame requested through it is also given a timer - a short one while
+# a bridge request is in flight, a longer one otherwise - and whichever fires
+# first runs the callback and cancels the other. A rendered page's own frame
+# arrives in a sixtieth of a second and always wins, so its rendering is
+# untouched; a hidden page's timer keeps Gradio's flush and dispatch moving.
+# Installed on top of whatever requestAnimationFrame is at that moment -
+# WanGP's focus patch wraps the native one in the head too, and either order
+# works. The handle it leaves on the window says where it was installed and
+# counts the frames that ran by timer, for the failure details.
+_FRAME_WRAPPER = r"""
+  function installFrames(window, options, where) {
+    if (window.__minipaintFrames) { return window.__minipaintFrames; }
+    var previousRequestFrame = window.requestAnimationFrame;
+    var previousCancelFrame = window.cancelAnimationFrame;
+    if (typeof previousRequestFrame !== "function" || typeof previousCancelFrame !== "function") { return null; }
+    var FRAME_ID_BASE = 1073741824;
+    var frames = Object.create(null);
+    var nextFrame = 1;
+    var handle = {
+      installed: where,
+      busy: false,
+      timedFrames: 0,
+      nativeFrames: 0,
+      frameFallbackMs: options.frameFallbackMs,
+      idleFrameFallbackMs: options.idleFrameFallbackMs
+    };
+
+    function requestFrame(callback) {
+      if (typeof callback !== "function") { return previousRequestFrame.call(window, callback); }
+      var id = FRAME_ID_BASE + (nextFrame++);
+      var entry = { native: 0, timer: 0, done: false };
+      frames[id] = entry;
+      var run = function (now, byTimer) {
+        if (entry.done) { return; }
+        entry.done = true;
+        delete frames[id];
+        if (entry.timer) { window.clearTimeout(entry.timer); entry.timer = 0; }
+        if (byTimer) {
+          handle.timedFrames += 1;
+          if (entry.native) { try { previousCancelFrame.call(window, entry.native); } catch (error) {} }
+        } else {
+          handle.nativeFrames += 1;
+        }
+        entry.native = 0;
+        callback(typeof now === "number" ? now : (window.performance && window.performance.now ? window.performance.now() : Date.now()));
+      };
+      try {
+        entry.native = previousRequestFrame.call(window, function (now) { entry.native = 0; run(now, false); });
+      } catch (error) {
+        entry.native = 0;
+      }
+      entry.timer = window.setTimeout(function () { entry.timer = 0; run(undefined, true); },
+        handle.busy ? handle.frameFallbackMs : handle.idleFrameFallbackMs);
+      return id;
+    }
+
+    function cancelFrame(id) {
+      var entry = frames[id];
+      if (!entry) { return previousCancelFrame.call(window, id); }
+      entry.done = true;
+      delete frames[id];
+      if (entry.timer) { window.clearTimeout(entry.timer); entry.timer = 0; }
+      if (entry.native) { try { previousCancelFrame.call(window, entry.native); } catch (error) {} }
+      return undefined;
+    }
+
+    try {
+      window.requestAnimationFrame = requestFrame;
+      window.cancelAnimationFrame = cancelFrame;
+    } catch (error) {
+      // A page that will not let its frame functions be replaced keeps them;
+      // the bridge then works exactly as it did, on a rendered page only.
+      return null;
+    }
+    window.__minipaintFrames = handle;
+    return handle;
+  }
+"""
+
+
+_HEAD_SCRIPT = r"""
+(function () {
+  "use strict";
+  if (typeof window === "undefined" || window.__minipaintFrames) { return; }
+__MINIPAINT_FRAME_WRAPPER__
+  try { installFrames(window, __MINIPAINT_FRAME_OPTIONS__, "head"); } catch (error) {}
+})();
+"""
 
 
 _SCRIPT = r"""
@@ -145,86 +267,51 @@ _SCRIPT = r"""
     catch (error) {}
   }
 
-  // -- animation frames while a request is in flight ----------------------------
+  // -- animation frames, with a timer behind each ------------------------------
   //
   // Gradio's Blocks schedules every event trigger inside requestAnimationFrame
-  // (for each dependency: requestAnimationFrame(() => Jt(dep, ...))), and so
-  // does the flush that writes an event's outputs into the page. A browser
-  // gives no animation frames to a document that is not being rendered, and
-  // this page is not rendered whenever the Forge tab holding its iframe is not
-  // the one on screen - which is precisely when Mini Paint's Send menu asks it
-  // what it can take. The click on the hidden trigger then enters Gradio's
-  // dispatch and waits for a frame that only arrives when the WanGP tab is
-  // opened again, long after anyone stopped waiting; nothing reaches the
-  // server meanwhile, so nothing is logged there either.
+  // (for each dependency: requestAnimationFrame(() => wait_then_trigger(...))),
+  // and that trigger first waits for Gradio's pending component-update flush
+  // to finish - a flush that is itself scheduled inside requestAnimationFrame,
+  // through a reference Gradio's core captured when its module loaded. Some
+  // engines give no animation frames at all to a document that is not being
+  // rendered, and this page is not rendered whenever the Forge tab holding
+  // its iframe is not the one on screen - which is precisely when Mini
+  // Paint's Send menu asks it what it can take. A flush left pending while
+  // the page was hidden then never runs, and every click afterwards waits
+  // behind it until the WanGP tab is opened again, long after anyone stopped
+  // waiting; nothing reaches the server meanwhile, so nothing is logged there
+  // either.
   //
-  // WanGP's own focus patch reschedules exactly these frames for its hidden
-  // main tab and for a backgrounded browser, but each of its branches needs
-  // the main tab's panel to be measurable, and inside a display:none iframe
-  // nothing measures. So, while a bridge request is in flight and only then,
-  // every frame requested is also given a timer; whichever fires first runs
-  // the callback and cancels the other. A rendered page's frame always wins,
-  // so its rendering is untouched; a hidden page's timer answers instead.
-  // Installed on top of whatever requestAnimationFrame is at this moment -
-  // WanGP's patch wraps the native one before this script runs, and the
-  // order does not matter: this layer is transparent whenever nothing is in
-  // flight.
-
-  var FRAME_ID_BASE = 1073741824;
-  var previousRequestFrame = window.requestAnimationFrame;
-  var previousCancelFrame = window.cancelAnimationFrame;
-  var frames = Object.create(null);
-  var nextFrame = 1;
-  var timedFrames = 0;
-
-  function requestFrame(callback) {
-    if (!busy || typeof callback !== "function" || typeof previousRequestFrame !== "function") {
-      return previousRequestFrame.call(window, callback);
-    }
-    var id = FRAME_ID_BASE + (nextFrame++);
-    var entry = { native: 0, timer: 0, done: false };
-    frames[id] = entry;
-    var run = function (now, byTimer) {
-      if (entry.done) { return; }
-      entry.done = true;
-      delete frames[id];
-      if (entry.timer) { window.clearTimeout(entry.timer); entry.timer = 0; }
-      if (byTimer) {
-        timedFrames += 1;
-        if (entry.native) { try { previousCancelFrame.call(window, entry.native); } catch (error) {} }
-      }
-      entry.native = 0;
-      callback(typeof now === "number" ? now : (window.performance && window.performance.now ? window.performance.now() : Date.now()));
-    };
-    try {
-      entry.native = previousRequestFrame.call(window, function (now) { entry.native = 0; run(now, false); });
-    } catch (error) {
-      entry.native = 0;
-    }
-    entry.timer = window.setTimeout(function () { entry.timer = 0; run(undefined, true); }, CONFIG.frameFallbackMs);
-    return id;
-  }
-
-  function cancelFrame(id) {
-    var entry = frames[id];
-    if (!entry) {
-      if (typeof previousCancelFrame === "function") { return previousCancelFrame.call(window, id); }
-      return undefined;
-    }
-    entry.done = true;
-    delete frames[id];
-    if (entry.timer) { window.clearTimeout(entry.timer); entry.timer = 0; }
-    if (entry.native) { try { previousCancelFrame.call(window, entry.native); } catch (error) {} }
-    return undefined;
-  }
-
+  // So every frame requested in this page is also given a timer, and the
+  // wrapper that does it is installed in the page head, before Gradio's
+  // modules load, so that the captured reference is the wrapper itself. This
+  // script only installs it late - after the app has mounted, where the
+  // flush is out of reach - when the head copy is missing, and its failure
+  // details say which of the two it found.
+__MINIPAINT_FRAME_WRAPPER__
+  var framesHandle = null;
   try {
-    window.requestAnimationFrame = requestFrame;
-    window.cancelAnimationFrame = cancelFrame;
+    framesHandle = installFrames(window, { frameFallbackMs: CONFIG.frameFallbackMs, idleFrameFallbackMs: CONFIG.idleFrameFallbackMs }, "late");
   } catch (error) {
-    // A page that will not let its frame functions be replaced keeps them;
-    // the bridge then works exactly as it did, on a rendered page only.
+    framesHandle = null;
   }
+  var timerWhere = framesHandle
+    ? (framesHandle.installed === "head" ? "frame timer in the page head" : "frame timer installed late - Gradio's own flush is not covered")
+    : "no frame timer - the page kept its own frame functions";
+  log(timerWhere);
+
+  function setBusy(value) {
+    busy = !!value;
+    if (framesHandle) { framesHandle.busy = busy; }
+  }
+
+  function timedFrames() { return framesHandle ? framesHandle.timedFrames : 0; }
+
+  function framesNote(record) {
+    return (timedFrames() - (record ? record.timedFramesBefore : 0)) + " frame(s) run by timer; " + timerWhere;
+  }
+
   var encoder = (typeof TextEncoder !== "undefined") ? new TextEncoder() : null;
 
   function byteLength(text) {
@@ -338,7 +425,7 @@ _SCRIPT = r"""
     }
 
     var next = pending.shift();
-    busy = true;
+    setBusy(true);
     inFlight = next;
     var ackField = fieldIn(column, CONFIG.ackClass);
     flight = {
@@ -346,7 +433,7 @@ _SCRIPT = r"""
       clickedAt: Date.now(),
       set: (column && column.id) || "(no id)",
       ackBefore: ackField ? String(ackField.value || "") : "",
-      timedFramesBefore: timedFrames
+      timedFramesBefore: timedFrames()
     };
     // Nothing else clears ``busy``. If the Gradio round trip never lands - the
     // server errored, the queue dropped it, WanGP restarted underneath us -
@@ -358,7 +445,7 @@ _SCRIPT = r"""
     watchdog = window.setTimeout(function () {
       watchdog = 0;
       if (!busy) { return; }
-      busy = false;
+      setBusy(false);
       var stranded = inFlight;
       var record = flight;
       inFlight = null;
@@ -367,7 +454,7 @@ _SCRIPT = r"""
       if (stranded) {
         var detail = "no acknowledgement " + (record ? (Date.now() - record.clickedAt) : 0) + " ms after the click on "
           + (record ? record.set : "(no set)") + " - the Gradio event never completed, or its result never reached this page"
-          + " (" + (timedFrames - (record ? record.timedFramesBefore : 0)) + " frame(s) run by timer)";
+          + " (" + framesNote(record) + ")";
         log(stranded.op + ": " + detail);
         answer(stranded, { ok: false, code: "RECEIVER_QUERY_TIMEOUT", detail: detail });
       }
@@ -384,7 +471,7 @@ _SCRIPT = r"""
       log(next.op + ": clicked on " + flight.set);
       startPoll(ackField);
     } catch (error) {
-      busy = false;
+      setBusy(false);
       inFlight = null;
       flight = null;
       stopPoll();
@@ -449,15 +536,14 @@ _SCRIPT = r"""
   }
 
   function deliver(raw) {
-    busy = false;
+    setBusy(false);
     inFlight = null;
     var record = flight;
     flight = null;
     stopPoll();
     if (watchdog) { window.clearTimeout(watchdog); watchdog = 0; }
     if (record) {
-      log(record.request.op + ": acknowledged after " + (Date.now() - record.clickedAt) + " ms ("
-        + (timedFrames - record.timedFramesBefore) + " frame(s) run by timer)");
+      log(record.request.op + ": acknowledged after " + (Date.now() - record.clickedAt) + " ms (" + framesNote(record) + ")");
     }
     var payload = null;
     try { payload = JSON.parse(String(raw || "")); } catch (error) { payload = null; }
@@ -518,7 +604,7 @@ _SCRIPT = r"""
       channelId = message.channel_id;
       focusable = Object.create(null);
       pending.length = 0;
-      busy = false;
+      setBusy(false);
       submit({ op: "hello", request_id: message.request_id, channel_id: channelId });
       return;
     }

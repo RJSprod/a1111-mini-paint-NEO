@@ -967,13 +967,18 @@ def switch_apply_checks(r: Results) -> None:
 
 _FRAME_HARNESS = r"""
 // The real bridge script, in a page that is either rendered (frames fire) or
-// not (frames never fire), driven through one hello. What Gradio does on a
-// click - schedule the trigger inside requestAnimationFrame - is done here
-// by the fake button, and the acknowledgement is delivered the way the
-// chained .then(js=...) delivers it.
+// not (frames never fire), driven through one hello. What Gradio does is
+// modelled the way Gradio really does it: its core captures
+// requestAnimationFrame when its module loads and schedules its component
+// flush through that captured reference; a click schedules the trigger
+// inside requestAnimationFrame, and the trigger waits for the pending flush.
+// The head script, when given, runs before the capture - as it does on the
+// page - and the page script after it; the acknowledgement is delivered the
+// way the chained .then(js=...) delivers it.
 const fs = require("fs");
 const script = fs.readFileSync(process.argv[2], "utf8");
 const mode = process.argv[3];
+const headPath = process.argv[4];
 const ORIGIN = "http://forge.test";
 const posted = [];
 const nativeFrames = [];
@@ -995,15 +1000,6 @@ const column = {
     return null;
   }
 };
-function onClick() {
-  window.requestAnimationFrame(function () {
-    callbackRuns += 1;
-    const request = JSON.parse(box.value);
-    ack.value = JSON.stringify({ op: request.op, request_id: request.request_id, channel_id: request.channel_id,
-      ok: true, ready: true, bridge_session: "s", instance_id: "i", receivers: [], state_revision: "abcdef12" });
-    window.__minipaintBridge.deliver(ack.value);
-  });
-}
 const window = {
   location: { origin: ORIGIN }, parent: parent,
   addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
@@ -1026,18 +1022,50 @@ const document = {
 };
 globalThis.Event = Event;
 globalThis.TextEncoder = require("util").TextEncoder;
+if (headPath && headPath !== "-") {
+  new Function("window", "document", fs.readFileSync(headPath, "utf8"))(window, document);
+}
+// Gradio's core, loading: the reference it will schedule every flush through.
+const captured = window.requestAnimationFrame;
+let flushPending = false;
+let flushRan = false;
+const waiters = [];
+function scheduleFlush() {
+  if (flushPending) { return; }
+  flushPending = true;
+  captured.call(window, function () { flushPending = false; flushRan = true; waiters.splice(0).forEach(function (fn) { fn(); }); });
+}
+function onClick() {
+  // Blocks: requestAnimationFrame(() => wait_then_trigger_api_call(...)), and
+  // the trigger waits for the pending flush before it does anything.
+  window.requestAnimationFrame(function () {
+    const go = function () {
+      callbackRuns += 1;
+      const request = JSON.parse(box.value);
+      ack.value = JSON.stringify({ op: request.op, request_id: request.request_id, channel_id: request.channel_id,
+        ok: true, ready: true, bridge_session: "s", instance_id: "i", receivers: [], state_revision: "abcdef12" });
+      window.__minipaintBridge.deliver(ack.value);
+    };
+    if (flushPending) { waiters.push(go); } else { go(); }
+  });
+}
 new Function("window", "document", script)(window, document);
+// A flush left pending from before any request - what a hidden page accumulates.
+scheduleFlush();
 const channel = "c".repeat(32);
 (listeners.message || []).forEach(function (fn) {
   fn({ origin: ORIGIN, source: parent, data: { protocol: 2, type: "WANGP_BRIDGE_HELLO", channel_id: channel, request_id: "r1", payload: {} } });
 });
 setTimeout(function () {
+  const handle = window.__minipaintFrames || null;
   console.log(JSON.stringify({
     posted: posted.map(function (p) { return p.type; }),
     origins: posted.map(function (p) { return p.origin; }),
-    clicks: clicks, callbackRuns: callbackRuns, nativeRuns: nativeRuns,
+    clicks: clicks, callbackRuns: callbackRuns, nativeRuns: nativeRuns, flushRan: flushRan,
     framesLeftUnrun: nativeFrames.filter(Boolean).length,
-    replaced: window.requestAnimationFrame.name === "requestFrame"
+    replaced: window.requestAnimationFrame.name === "requestFrame",
+    where: handle ? handle.installed : null,
+    timed: handle ? handle.timedFrames : null
   }));
   process.exit(0);
 }, 400);
@@ -1045,14 +1073,17 @@ setTimeout(function () {
 
 
 def frame_fallback_checks(r: Results) -> None:
-    """A hidden iframe still answers: Gradio's frames get a timer in flight.
+    """A hidden iframe still answers: Gradio's frames get a timer, from the head.
 
-    Gradio schedules every event trigger inside requestAnimationFrame, and a
-    document that is not rendered - the WanGP iframe whenever the Forge tab
-    holding it is not on screen, which is when the Send menu asks - is given
-    no frames. The bridge script runs each frame requested while one of its
-    requests is in flight from a timer as well, whichever comes first. This
-    drives the real script through a hello in both kinds of page.
+    Gradio schedules every event trigger inside requestAnimationFrame and
+    gates it on its component flush, which its core schedules through a
+    reference captured when the module loaded. A document that is not
+    rendered - the WanGP iframe whenever the Forge tab holding it is not on
+    screen, which is when the Send menu asks - is given no frames. The frame
+    timer therefore has to be in the page before the module: this drives the
+    real scripts through a hello in a hidden and in a rendered page, with the
+    head copy installed and without it, and shows that without it a hidden
+    page never answers - which is the failure this exists to prevent.
     """
     import json as _json
     import shutil
@@ -1078,33 +1109,181 @@ def frame_fallback_checks(r: Results) -> None:
     with tempfile.TemporaryDirectory(prefix="minipaint-wangp-frames-") as scratch:
         root = pathlib.Path(scratch)
         (root / "bridge.js").write_text(bridge_js.document_script(""), encoding="utf-8")
+        (root / "head.js").write_text(bridge_js.head_script(), encoding="utf-8")
         (root / "harness.js").write_text(_FRAME_HARNESS, encoding="utf-8")
         results = {}
         for mode in ("hidden", "visible"):
-            try:
-                run = subprocess.run([node, str(root / "harness.js"), str(root / "bridge.js"), mode],
-                                     capture_output=True, text=True, timeout=30, check=False)
-                results[mode] = _json.loads(run.stdout.strip().splitlines()[-1]) if run.stdout.strip() else {"error": run.stderr[-300:]}
-            except Exception as error:
-                results[mode] = {"error": str(error)[:300]}
+            for head in ("head", "-"):
+                try:
+                    run = subprocess.run([node, str(root / "harness.js"), str(root / "bridge.js"), mode,
+                                          str(root / "head.js") if head == "head" else "-"],
+                                         capture_output=True, text=True, timeout=30, check=False)
+                    results[(mode, head)] = (_json.loads(run.stdout.strip().splitlines()[-1]) if run.stdout.strip()
+                                             else {"error": run.stderr[-300:]})
+                except Exception as error:
+                    results[(mode, head)] = {"error": str(error)[:300]}
 
-    hidden = results.get("hidden", {})
-    r.check("the script replaces the page's requestAnimationFrame", hidden.get("replaced") is True, repr(hidden))
+    hidden = results.get(("hidden", "head"), {})
+    r.check("the head script replaces the page's requestAnimationFrame before Gradio captures it",
+            hidden.get("replaced") is True and hidden.get("where") == "head", repr(hidden))
     r.check("a hidden page's click is dispatched once", hidden.get("clicks") == 1, repr(hidden))
-    r.check("and Gradio's frame callback still runs, from the timer, exactly once",
-            hidden.get("callbackRuns") == 1, repr(hidden))
+    r.check("the flush Gradio scheduled through its captured reference runs, from the timer",
+            hidden.get("flushRan") is True and hidden.get("nativeRuns") == 0, repr(hidden))
+    r.check("and Gradio's trigger runs behind it exactly once", hidden.get("callbackRuns") == 1, repr(hidden))
     r.check("so the acknowledgement reaches the parent although no frame ever fired",
-            hidden.get("posted") == ["WANGP_BRIDGE_READY"] and hidden.get("nativeRuns") == 0, repr(hidden))
-    r.check("and the frame the browser never gave is cancelled rather than left waiting",
+            hidden.get("posted") == ["WANGP_BRIDGE_READY"], repr(hidden))
+    r.check("and the frames the browser never gave are cancelled rather than left waiting",
             hidden.get("framesLeftUnrun") == 0, repr(hidden))
     r.check("and it is posted to the page's own origin, nothing wider",
             hidden.get("origins") == ["http://forge.test"], repr(hidden))
 
-    visible = results.get("visible", {})
-    r.check("a rendered page's own frame wins and the callback runs exactly once",
-            visible.get("callbackRuns") == 1 and visible.get("nativeRuns") == 1
-            and visible.get("posted") == ["WANGP_BRIDGE_READY"], repr(visible))
-    r.check("and no frame is left pending behind the timer", visible.get("framesLeftUnrun") == 0, repr(visible))
+    late = results.get(("hidden", "-"), {})
+    r.check("without the head copy the page script installs the timer late and says so",
+            late.get("replaced") is True and late.get("where") == "late", repr(late))
+    r.check("and then a hidden page's click still runs its own frame by timer",
+            late.get("clicks") == 1 and (late.get("timed") or 0) >= 1, repr(late))
+    r.check("but Gradio's flush, scheduled through the reference captured before, never runs - "
+            "the trigger waits for it and nothing is answered: the failure the head copy exists for",
+            late.get("flushRan") is False and late.get("callbackRuns") == 0 and late.get("posted") == [], repr(late))
+
+    for head in ("head", "-"):
+        visible = results.get(("visible", head), {})
+        r.check(f"a rendered page's own frames win ({'with' if head == 'head' else 'without'} the head copy) - "
+                "the flush and the click's - and the trigger runs exactly once",
+                visible.get("callbackRuns") == 1 and visible.get("nativeRuns") == 2 and visible.get("flushRan") is True
+                and visible.get("posted") == ["WANGP_BRIDGE_READY"], repr(visible))
+        r.check("and no frame is left pending behind the timer", visible.get("framesLeftUnrun") == 0, repr(visible))
+
+
+class _FakeLoader:
+    """Jinja's loader, as far as ``page_head`` touches it."""
+
+    def __init__(self, sources):
+        self.sources = dict(sources)
+        self.calls = 0
+
+    def get_source(self, environment, template):
+        self.calls += 1
+        return self.sources[template], "/templates/" + template, (lambda: True)
+
+
+class _FakeTemplates:
+    def __init__(self, sources):
+        self.env = type("Env", (), {})()
+        self.env.loader = _FakeLoader(sources)
+        self.env.cleared = 0
+        self.env.cache = type("Cache", (), {"clear": lambda cache: setattr(self.env, "cleared", self.env.cleared + 1)})()
+
+
+_PAGE_TEMPLATE = (
+    "<!doctype html><html><head><meta charset=\"utf-8\">\n"
+    "<script>window.__gradioFocusQueuePatch = {};</script>\n"
+    "<script type=\"module\" crossorigin src=\"./assets/index-abc.js\"></script>\n"
+    "</head><body></body></html>"
+)
+
+
+def page_head_checks(r: Results) -> None:
+    """The frame timer goes into the page head, before Gradio's module.
+
+    Gradio's core captures ``requestAnimationFrame`` when its module loads;
+    a script that must be seen by that capture has to be in the HTML before
+    the module tag. ``page_head`` wraps the template loader the way WanGP's
+    own focus patch does, for the two page templates only, once.
+    """
+    import sys as _sys
+
+    folder = str(BRIDGE_COPY.parent)
+    added = folder not in _sys.path
+    if added:
+        _sys.path.insert(0, folder)
+    try:
+        import bridge_js
+        import page_head
+        import plugin as bridge_plugin
+    finally:
+        if added and folder in _sys.path:
+            _sys.path.remove(folder)
+
+    script = bridge_js.head_script()
+    r.check("the head script is the frame timer and nothing else - no protocol, no parent, no controls",
+            "installFrames(window" in script and "__minipaintFrames" in script
+            and "postMessage" not in script and "minipaint-bridge" not in script, str(len(script)))
+    r.check("and it carries the two delays the page script uses",
+            '"frameFallbackMs": %d' % bridge_js.FRAME_FALLBACK_MS in script
+            and '"idleFrameFallbackMs": %d' % bridge_js.IDLE_FRAME_FALLBACK_MS in script)
+
+    injected = page_head.inject(_PAGE_TEMPLATE, "SCRIPT")
+    module_at = injected.find(page_head.MODULE_TAG)
+    script_at = injected.find("SCRIPT")
+    patch_at = injected.find("__gradioFocusQueuePatch")
+    r.check("inject puts the script before the module tag", 0 <= script_at < module_at, str((script_at, module_at)))
+    r.check("and after what was already there - WanGP's own head script keeps its place",
+            patch_at < script_at, str((patch_at, script_at)))
+    r.check("in a script tag of its own", "<script>\nSCRIPT\n</script>" in injected)
+    r.check("a source that already carries the sentinel is left alone",
+            page_head.inject(injected.replace("SCRIPT", page_head.SENTINEL), "AGAIN") == injected.replace("SCRIPT", page_head.SENTINEL))
+    without_module = "<html><head><title>x</title></head><body></body></html>"
+    r.check("a template without a module tag gets it before </head>",
+            page_head.inject(without_module, "S").find("S") < page_head.inject(without_module, "S").find("</head>"))
+    r.check("and one without either gets it at the end, never nothing",
+            page_head.inject("<p>bare</p>", "S").endswith("<script>\nS\n</script>\n"))
+
+    fake = _FakeTemplates({"frontend/index.html": _PAGE_TEMPLATE, "frontend/share.html": _PAGE_TEMPLATE,
+                           "frontend/other.html": _PAGE_TEMPLATE})
+    installed, why = page_head.install("SCRIPT", fake)
+    r.check("install wraps the loader and clears the template cache", installed and why == "installed" and fake.env.cleared == 1,
+            str((installed, why, fake.env.cleared)))
+    source, filename, uptodate = fake.env.loader.get_source("env", "frontend/index.html")
+    r.check("the page template comes back with the script before the module tag, name and freshness untouched",
+            0 <= source.find("SCRIPT") < source.find(page_head.MODULE_TAG) and filename == "/templates/frontend/index.html"
+            and uptodate() is True, str(filename))
+    share, _, _ = fake.env.loader.get_source("env", "frontend/share.html")
+    other, _, _ = fake.env.loader.get_source("env", "frontend/other.html")
+    r.check("the share page too, and no other template", "SCRIPT" in share and "SCRIPT" not in other)
+    again, why_again = page_head.install("OTHER", fake)
+    source_again, _, _ = fake.env.loader.get_source("env", "frontend/index.html")
+    r.check("a second install is a no-op that says so", again and why_again == "already installed"
+            and "OTHER" not in source_again and fake.env.cleared == 1, str((again, why_again)))
+    bare = type("Templates", (), {"env": type("Env", (), {"loader": object()})()})()
+    refused, why_refused = page_head.install("SCRIPT", bare)
+    r.check("a loader with no get_source is a reason, not a crash", refused is False and "get_source" in why_refused, why_refused)
+    r.check("and no templates at all is a reason too", page_head.install("SCRIPT", None)[0] in (True, False))
+
+    class Recorder:
+        def __init__(self):
+            self.order = []
+        def request_component(self, elem_id):
+            self.order.append("request_component")
+        def request_global(self, name):
+            self.order.append("request_global")
+        def add_custom_js(self, script):
+            self.order.append("add_custom_js")
+
+    host = Recorder()
+    templates = _FakeTemplates({"frontend/index.html": _PAGE_TEMPLATE})
+    instance = _bare_plugin(bridge_plugin, host, add_custom_js=host.add_custom_js, page_templates=templates)
+    instance.setup_ui()
+    page, _, _ = templates.env.loader.get_source("env", "frontend/index.html")
+    r.check("setup_ui places the head script through the template loader, in the same phase as the page script",
+            getattr(instance, "head_installed", False) is True and "installFrames(window" in page
+            and page.find("installFrames(window") < page.find(page_head.MODULE_TAG), str(host.order[:4]))
+    calls = templates.env.cleared
+    instance._inject_head()
+    r.check("and a second pass does not wrap the loader twice", templates.env.cleared == calls)
+
+    def broken(script, templates=None):
+        raise RuntimeError("no loader today")
+
+    original = page_head.install
+    page_head.install = broken
+    try:
+        quiet = _bare_plugin(bridge_plugin, host, add_custom_js=host.add_custom_js)
+        quiet._inject_head()
+    finally:
+        page_head.install = original
+    r.check("a loader that cannot be wrapped leaves the flag down and the page script to its late install",
+            getattr(quiet, "head_installed", None) is False)
 
 
 def _first_candidate():
@@ -1273,6 +1452,7 @@ def injection_timing_checks(r: Results) -> None:
     instance.instances = 0
     instance.injected = False
     instance.add_custom_js = host.add_custom_js
+    instance.page_templates = _FakeTemplates({"frontend/index.html": _PAGE_TEMPLATE})
 
     instance.setup_ui()
     r.check("the script is handed over during setup_ui", "add_custom_js" in host.order, str(host.order[:3]))
@@ -1327,6 +1507,9 @@ def _bare_plugin(bridge_plugin, host, **hooks):
     instance.wired = False
     instance.instances = 0
     instance.injected = False
+    # The head script goes through Gradio's template loader; a fake one keeps
+    # these checks off the real Gradio in this process.
+    instance.page_templates = _FakeTemplates({"frontend/index.html": _PAGE_TEMPLATE})
     for name, hook in hooks.items():
         setattr(instance, name, hook)
     return instance
@@ -1724,6 +1907,7 @@ def run() -> Results:
     allowance_checks(r)
     switch_apply_checks(r)
     frame_fallback_checks(r)
+    page_head_checks(r)
     session_isolation_checks(r)
     loader_checks(r)
     component_handoff_checks(r)

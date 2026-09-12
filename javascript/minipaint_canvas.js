@@ -77,6 +77,12 @@ window.minipaintCanvas = (function () {
     const WANGP_PAYLOAD_ID = "minipaint_canvas_payload";
     const WANGP_WATCH_MS = 150;
     const WANGP_WATCH_LIMIT_MS = 90000;
+    // When the boxes stay empty this long after the click, the hidden fetch
+    // button asks the server for the prepared send again, through an event
+    // that writes the two boxes and nothing else; then again every so often.
+    const WANGP_FETCH_ID = "minipaint_canvas_wangp_fetch";
+    const WANGP_FETCH_AFTER_MS = 1500;
+    const WANGP_FETCH_EVERY_MS = 5000;
     const HANDOFF_ID_RE = /^[0-9a-f]{32}$/;
     const SEND_REQUEST_ID = "minipaint_canvas_send_request";
     const TARGETS_ID = "minipaint_canvas_targets";
@@ -1235,6 +1241,7 @@ window.minipaintCanvas = (function () {
         if (w.watch) { clearInterval(w.watch); w.watch = 0; }
         const before = boxValue(WANGP_PAYLOAD_ID);
         const started = Date.now();
+        let fetched = 0;
         w.watch = setInterval(function () {
             const armed = w.pending;
             if (!armed) { clearInterval(w.watch); w.watch = 0; return; }
@@ -1245,6 +1252,14 @@ window.minipaintCanvas = (function () {
                 noteWanGP("deliver: the prepared file was read from the page's own boxes (the chained step had not delivered it)");
                 deliverWanGP(instruction, payload);
                 return;
+            }
+            const waited = Date.now() - started;
+            if (waited > WANGP_FETCH_AFTER_MS && Date.now() - fetched > WANGP_FETCH_EVERY_MS) {
+                // The send event's outputs have not reached the boxes. Ask
+                // for the prepared send through the small event instead.
+                fetched = Date.now();
+                noteWanGP("deliver: the boxes are still empty " + Math.round(waited / 100) / 10 + " s after the click; asking the server for the prepared file again");
+                pressHidden(WANGP_FETCH_ID);
             }
             if (Date.now() - started > WANGP_WATCH_LIMIT_MS) {
                 clearInterval(w.watch); w.watch = 0;

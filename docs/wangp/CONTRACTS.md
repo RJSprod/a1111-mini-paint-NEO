@@ -278,9 +278,14 @@ second (`WANGP_WATCH_MS`) and delivers the moment they hold this send's
 instruction and a fresh 32-hex file id, for at most `WANGP_WATCH_LIMIT_MS`.
 Whichever route runs first delivers and the other finds nothing armed; a
 chained step that arrives with a stale instruction, or with the file id of the
-previous send, leaves the armed send to the watcher. A send whose answer never
-reaches the boxes ends with `deliver: gave up after N s` in the journal and a
-notice on the status line.
+previous send, leaves the armed send to the watcher. When the boxes are still
+empty `WANGP_FETCH_AFTER_MS` after the click, the watcher presses the hidden
+fetch button (`minipaint_canvas_wangp_fetch`), whose event (`wangp_fetch`,
+inputs `[state]`, outputs `[switch_box, payload_box]`) hands the prepared send
+over again from the record kept when the file was written - and nothing when
+none is pending or the file has been released; it presses again every
+`WANGP_FETCH_EVERY_MS`. A send whose answer never reaches the boxes ends with
+`deliver: gave up after N s` in the journal and a notice on the status line.
 
 ## Tests
 

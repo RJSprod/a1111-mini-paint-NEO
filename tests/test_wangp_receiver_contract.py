@@ -892,6 +892,18 @@ def handoff_release_checks(r: Results) -> None:
             r.check("one whose file digest does not match is refused",
                     "Sent to" not in corrupted, corrupted[:200])
 
+            # The prepared send, handed over a second time through the small
+            # event, from the record kept when the file was written - and
+            # nothing once that file is gone, or when nothing was prepared.
+            again = wangp_handoff.write(Image.new("RGBA", (4, 4)))
+            document.pending_send = {"wangp": "end_frame", "handoff": again.id}
+            r.check("the fetch hands the prepared send over again, instruction and file id",
+                    canvas.wangp_fetch(document) == ("wangp_send:end_frame", again.id))
+            wangp_handoff.discard(again.id)
+            r.check("but nothing once the file has been released", canvas.wangp_fetch(document) == ("", ""))
+            document.pending_send = None
+            r.check("and nothing when no send was prepared", canvas.wangp_fetch(document) == ("", ""))
+
             # Nothing is deleted on the strength of an id we did not mint.
             survivor = wangp_handoff.write(Image.new("RGBA", (4, 4)))
             canvas.wangp_result(None, _json.dumps({"handoff_id": "../../etc/passwd", "receiver_id": "start_frame", "ok": True}))

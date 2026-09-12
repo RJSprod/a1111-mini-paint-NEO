@@ -66,7 +66,7 @@ def run() -> Results:
     r.check("Extras and the ImageStitch galleries are written from the backend", canvas.image_targets == ["extras", "stitch_txt2img", "stitch_img2img"], str(canvas.image_targets))
     r.check("the inpaint mask layer was found", canvas.targets["inpaint_mask"] is refs["init_img_with_mask"].foreground)
     r.check("the ImageStitch galleries and their boxes are the host's", canvas.targets["stitch_txt2img"] is refs["txt2img_stitch_gallery"] and canvas.targets["stitch_img2img_enable"] is refs["img2img_stitch_enable"])
-    r.check("the destinations offered are the ones found, in the menu's order", canvas.destinations == ["img2img", "inpaint", "extras", "stitch_txt2img", "stitch_img2img"], str(canvas.destinations))
+    r.check("the destinations offered are the ones found, in the menu's order, then Clipboard", canvas.destinations == ["img2img", "inpaint", "extras", "stitch_txt2img", "stitch_img2img", "clipboard"], str(canvas.destinations))
 
     # ---- the session rebuild Gradio does after an update output, under Forge's patches ----
     from minipaint_neo.canvas import surface as surface_module

@@ -182,7 +182,7 @@ def run() -> Results:
             and all(component(f"minipaint_canvas_panel_{m}")["props"].get("visible") is False for m in ("mask", "expand", "layers")))
     r.check("the layer list is server-rendered html with no image yet", component("minipaint_canvas_layer_list")["type"] == "html" and "No image yet" in component("minipaint_canvas_layer_list")["props"]["value"])
     r.check("what the menu presses is hidden", all(component(f"minipaint_canvas_{name}")["props"].get("visible") is False for name in ("open", "undo", "redo", "reset", "save", "send_request", "targets", "suggest")))
-    r.check("the menu reads the destinations this WebUI has, ImageStitch for both tabs", json.loads(component("minipaint_canvas_targets")["props"]["value"]) == [["img2img", "img2img"], ["inpaint", "img2img Inpaint"], ["extras", "Extras"], ["stitch_txt2img", "ImageStitch (txt2img)"], ["stitch_img2img", "ImageStitch (img2img)"]])
+    r.check("the menu reads the destinations this WebUI has, ImageStitch for both tabs, and Clipboard last", json.loads(component("minipaint_canvas_targets")["props"]["value"]) == [["img2img", "img2img"], ["inpaint", "img2img Inpaint"], ["extras", "Extras"], ["stitch_txt2img", "ImageStitch (txt2img)"], ["stitch_img2img", "ImageStitch (img2img)"], ["clipboard", "Clipboard"]])
     r.check("no menu opens inside the rail: every picker there is chips, but the aspect at its top", all(component(f"minipaint_canvas_{name}")["type"] == "radio" for name in ("expand_fill", "expand_snap", "mask_smoothing", "expand_amount", "mask_tool"))
             and component("minipaint_canvas_crop_aspect")["type"] == "dropdown")
 
@@ -287,7 +287,10 @@ def run() -> Results:
     receive = by_elem("txt2img_send_to_minipaint")
     steps = chain(receive[0]) if receive else []
     r.check("receive picks the gallery image in the browser", len(receive) == 1 and "pickGalleryImage" in receive[0]["js"] and refs["txt2img_gallery"]._id in receive[0]["inputs"] and receive[0]["backend_fn"])
-    r.check("receive ends by switching to the Canvas tab", len(steps) == 4 and "switchTo('canvas')" in (steps[3].get("js") or "") and not steps[3]["backend_fn"], str(len(steps)))
+    r.check("receive then asks the server where it landed and switches to that tab - the Canvas, or Clipboard under the intercept",
+            len(steps) == 5 and steps[3]["backend_fn"] and steps[3]["outputs"] == [component("minipaint_canvas_switch")["id"]]
+            and "switchTo(target)" in (steps[4].get("js") or "") and not steps[4]["backend_fn"]
+            and steps[4]["inputs"] == [component("minipaint_canvas_switch")["id"]], str(len(steps)))
 
     # -- what the canvas holds: the input event, filtered in the browser
     canvas_input = deps_targeting(background["id"], "input")

@@ -397,7 +397,7 @@ class MiniPaintBridge:
         inherited: typing.List[str] = []
         originals: typing.Dict[str, typing.Any] = {}
         written: typing.Dict[str, typing.Any] = {}
-        written_digests: typing.Dict[str, typing.List[str]] = {}
+        written_digests: typing.Dict[str, typing.List[typing.List[int]]] = {}
         working = dict(effective)
 
         def take(key: str, value: typing.Any) -> None:
@@ -435,7 +435,7 @@ class MiniPaintBridge:
             else:
                 value = images[0].image
             take(component_key, value)
-            written_digests[component_key] = [item.pixel_digest for item in images]
+            written_digests[component_key] = [handoff.loose_signature(item.image) for item in images]
             applied[field] = len(images) if field == protocol.QUEUE_FIELD_REFERENCES else True
             # The same switch a menu send makes, computed from the values as
             # they will be once the earlier overrides of this request land.

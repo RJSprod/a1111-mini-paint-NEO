@@ -11,11 +11,18 @@ answer and to put the picture where it belongs. That is this plugin.
 
 It is deliberately small. It adds no generation UI, changes no generation
 behaviour, touches no WanGP setting, and never presses Generate. It answers
-two questions and performs one action:
+two questions and performs two actions:
 
 * *what image inputs can this exact page accept right now?*
 * *here is one PNG; put it in the start frame / the end frame / the reference
   list, and prove that you did.*
+* *add this page to your queue as it is, with this prompt and these pictures
+  on top for that one task, and tell me whether you did* (protocol 3). The
+  overrides go into the form's own components as replacements, WanGP's
+  `client_id` and `add_to_queue_trigger` are written so that WanGP's own
+  add-to-queue chain runs, the task is looked for by its client id, and the
+  overrides are put back afterwards - each only where the page still holds
+  what the bridge wrote.
 
 It also carries a dark stylesheet, because the embedded WanGP is a separate
 document and nothing the Forge page wears reaches into it.
@@ -49,6 +56,13 @@ Forge, in the browser or in Mini Paint changes.
   looked about right.
 * It will not silently replace your reference images. A reference send reads
   the list, checks the capacity, appends, and verifies the count.
+* It will not generate, abort, or watch progress. A queue request adds to
+  WanGP's queue through WanGP's own chain and nothing else; `process_tasks`
+  is never called, and a request nobody confirmed is reported as
+  *unconfirmed*, never as queued and never as refused.
+* It will not clear a WanGP field on a caller's behalf. A field the caller
+  leaves out is the page's own; a field it supplies overrides the page for
+  that one task and is restored.
 
 ## Installation
 
@@ -76,8 +90,10 @@ The installed layout:
     receiver_state.py      normalised live state, and its fingerprint
     receiver_adapters.py   how each input is read, filled and verified
     handoff.py             validating the PNG that Forge left behind an id
+    admission.py           one pending queue request per page: confirm, refuse, expire, restore
     bridge_ui.py           three invisible Gradio components, placed by WanGP's insert_after
     bridge_js.py           the script that runs in the WanGP document
+    page_head.py           the frame timer, placed in the page head before Gradio's modules
     protocol.py            the shared vocabulary, copied verbatim
     theme.css              the dark theme
     plugin_info.json       name, version, protocol, compatibility range
@@ -110,6 +126,14 @@ bridge asks the plugin API for each component it needs, records which ones it
 actually got, and reports the result in its handshake. A build that resolves
 everything is ready; a build that does not names what is missing.
 
+The queue operation needs six more of the form's variables - `prompt`,
+`wizard_prompt`, `wizard_prompt_activated_var`, `client_id`,
+`add_to_queue_trigger` and the page `state` - and the globals
+`get_unique_id` and `get_gen_info`. A build that lacks one keeps the image
+send exactly as it was; the handshake says `capabilities.queue: false` with
+the missing names, and a queue request is refused with
+`BRIDGE_COMPONENT_INCOMPATIBLE`.
+
 Adding a new receiver - a control image, a positioned reference - is three
 declarations and no new machinery: a row in `compatibility.COMPONENTS`, a row
 in `RECEIVER_COMPONENTS` and `SELECTION_RULES`, and a small subclass in
@@ -132,6 +156,14 @@ once per WanGP revision:
    confirm the generation used the inserted image. If a dependent control
    needs an official event to fire, it goes in that adapter's
    `downstream_updates`.
+4. Queue a request with a prompt override from the Clipboard tab, then read
+   the task in WanGP's queue: its `params.client_id` must be the request id
+   and its prompt the override, and the form must show its own prompt again
+   once the tab says *Added to WanGP queue*. Then queue a prompt WanGP's
+   validation rejects and confirm how that build records it: `queue_errors`
+   keyed by the client id, or a list of entries naming it, are both read;
+   any other shape leaves the answer *unconfirmed* and is the row to fix in
+   `admission.refusal_evidence`.
 
 ## Licence
 

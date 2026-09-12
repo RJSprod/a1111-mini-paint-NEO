@@ -212,6 +212,10 @@ iframe.contentWindow` on every message, checks the protocol version, the
 channel id and the request id, and drops everything else silently. No `"*"`
 target origin. No polling once a menu closes.
 
+Protocol 3 adds `queue(request)`, `confirmQueue(requestId)`, `queueAndConfirm(request)`
+and `capabilities()`, and `state().queue` from the handshake's `capabilities.queue`;
+the shapes are in `docs/clipboard/CONTRACTS.md`.
+
 ## `wan2gp_bridge/wan2gp-minipaint-bridge/` — the WanGP-side plugin
 
 Standalone; imports nothing of ours. Ships its own `protocol.py` copy whose
@@ -287,8 +291,19 @@ none is pending or the file has been released; it presses again every
 `WANGP_FETCH_EVERY_MS`. A send whose answer never reaches the boxes ends with
 `deliver: gave up after N s` in the journal and a notice on the status line.
 
+Bridge 1.2.0 (protocol 3) adds the `queue` and `confirm` operations and `admission.py`:
+a queue request overlays the prompt and the image inputs on the live form *as
+replacements*, writes WanGP's `client_id` and `add_to_queue_trigger` so WanGP's own
+chain runs, keeps a per-session `PendingAdmission`, confirms through
+`get_gen_info(state)` (a task whose `params.client_id` is the request id), refuses
+only on a correlated `queue_errors` entry, expires to `ADMISSION_UNCONFIRMED`, and
+puts every override back where the page still holds what the bridge wrote. The
+full contract is in `docs/clipboard/CONTRACTS.md`.
+
 ## Tests
 
 `tests/test_wangp_*.py`, in the existing style: a `run()` returning
 `harness.Results`, no pytest, nothing that needs WanGP, Forge or a network.
-Add the new suites to `tests/run.py`.
+Add the new suites to `tests/run.py`. Protocol 3's own suites are `tests/test_wangp_queue.py`,
+`tests/test_interop.py`, `tests/test_clipboard_store.py`, `tests/test_clipboard_ui.py` and
+`tests/test_queue_e2e.py`.

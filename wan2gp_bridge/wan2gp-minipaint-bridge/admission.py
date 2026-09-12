@@ -77,8 +77,9 @@ class PendingAdmission:
     originals: typing.Dict[str, typing.Any] = dataclasses.field(default_factory=dict)
     #: What the bridge wrote into each of them.
     written: typing.Dict[str, typing.Any] = dataclasses.field(default_factory=dict)
-    #: For the gallery components: the pixel digests of what was written.
-    written_digests: typing.Dict[str, typing.List[str]] = dataclasses.field(default_factory=dict)
+    #: For the gallery components: the loose signatures of what was written,
+    #: compared with a tolerance (see ``gallery_digests``).
+    written_digests: typing.Dict[str, typing.List[typing.List[int]]] = dataclasses.field(default_factory=dict)
     #: applied / inherited / ignored, as the answer reports them.
     summary: typing.Dict[str, typing.Any] = dataclasses.field(default_factory=dict)
     model: typing.Dict[str, str] = dataclasses.field(default_factory=dict)
@@ -203,16 +204,27 @@ def letters(value: typing.Any) -> str:
     return "".join(sorted(set(receiver_state.selection_text(value))))
 
 
-def gallery_digests(value: typing.Any) -> typing.List[str]:
-    """What a gallery shows, as pixel digests, entry by entry.
+def gallery_digests(value: typing.Any) -> typing.List[typing.List[int]]:
+    """What a gallery shows, as loose signatures, entry by entry.
 
     A gallery value comes back from Gradio as file paths in its own cache,
     never as the objects the bridge wrote, so identity and equality say
-    nothing; the pixels do. Bounded, and an entry that will not decode is an
-    empty digest, which matches nothing.
+    nothing - and the cache is lossy WebP by Gradio's default, so the exact
+    pixels say nothing either. What survives is the picture: its size and
+    a coarse thumbnail, compared with a tolerance (``handoff.loose_signature``
+    and ``handoff.signatures_match``). Bounded, and an entry that will not
+    decode is an empty signature, which matches nothing.
     """
     entries = receiver_adapters.gallery_entries(value)[:MAX_COMPARED_ENTRIES]
-    return [handoff.pixel_digest(receiver_adapters.as_image(entry)) for entry in entries]
+    return [handoff.loose_signature(receiver_adapters.as_image(entry)) for entry in entries]
+
+
+def galleries_match(current: typing.Sequence[typing.Any], written: typing.Sequence[typing.Any]) -> bool:
+    """Whether a gallery still shows the pictures the bridge put there:
+    the same number of entries, each one the same picture within tolerance."""
+    if len(current) != len(written):
+        return False
+    return all(handoff.signatures_match(left, right) for left, right in zip(current, written))
 
 
 def unchanged(record: PendingAdmission, key: str, live: typing.Mapping[str, typing.Any]) -> bool:
@@ -220,7 +232,7 @@ def unchanged(record: PendingAdmission, key: str, live: typing.Mapping[str, typi
     current = live.get(key)
     written = record.written.get(key)
     if key in GALLERY_KEYS:
-        return gallery_digests(current) == list(record.written_digests.get(key) or [])
+        return galleries_match(gallery_digests(current), list(record.written_digests.get(key) or []))
     if key in LETTER_KEYS:
         return letters(current) == letters(written)
     return receiver_state.selection_text(current) == receiver_state.selection_text(written)
@@ -321,6 +333,7 @@ __all__ = [
     "Ledger",
     "PendingAdmission",
     "RESTORE_GROUPS",
+    "galleries_match",
     "gallery_digests",
     "letters",
     "matching_tasks",

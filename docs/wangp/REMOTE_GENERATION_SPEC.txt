@@ -1,0 +1,626 @@
+a1111-mini-paint-NEO  --  WanGP remote generation
+Design intent and technical specification
+================================================================================
+
+Status      design intent, no code written for it yet
+Written     2026-09-12, after the send-to-WanGP work in pull requests #36 to #40
+Audience    the developer who implements "configure everything on the WanGP tab,
+            then start a new generation from another tab"
+Ground      every statement about WanGP below was read from Wan2GP at commit
+            362c346 (wgp.py, shared/utils/plugins.py) or proven in a running
+            reproduction; nothing is assumed from documentation
+
+
+0. THE GOAL
+--------------------------------------------------------------------------------
+
+The user configures WanGP once, in the WanGP tab: model, resolution, length,
+steps, LoRAs, everything the generator form holds. Then, from another Forge
+tab (Mini Paint today, possibly txt2img tomorrow), they hand WanGP a picture
+and a prompt and say "generate", without touching the WanGP tab. WanGP runs it
+exactly as if Generate had been pressed on its own page, with the form as it
+was left. The WanGP tab opens by itself so the progress is visible.
+
+Everything needed for that exists in WanGP's plugin API and in the bridge that
+is already shipped. What is missing is small: a prompt, a "generate" flag, and
+a few read-back operations. The size of the work is in getting the details
+right, and those details are what this document is for.
+
+
+1. WHAT EXISTS TODAY (verified end to end)
+--------------------------------------------------------------------------------
+
+Three halves, one protocol.
+
+  Forge side        minipaint_neo/wangp/*  and the Send menu in
+                    minipaint_neo/canvas/ui.py.  Starts WanGP as a child on a
+                    loopback port (runtime.py), serves it under /wan2gp/ on the
+                    Forge origin (proxy.py), writes prepared PNGs into a handoff
+                    folder (handoff.py), keeps the record of which browser page
+                    talks to which WanGP session (bridge.py), journals every
+                    step (process_log.py -> logs/wangp-log.txt).
+
+  Browser           javascript/minipaint_wangp.js is the parent-page half: it
+                    finds the iframe, runs the hello handshake, asks the
+                    receiver list, hands a prepared file id over, judges the
+                    acknowledgement.  javascript/minipaint_canvas.js owns the
+                    Send menu and the delivery of one send (deliverWanGP).
+
+  WanGP plugin      wan2gp_bridge/wan2gp-minipaint-bridge/, installed by the
+                    setup wizard into <WanGP>/plugins/.  Asks WanGP for the form
+                    components by their real names, places a hidden request box,
+                    an acknowledgement box and a trigger button next to
+                    image_prompt_type, and wires ONE Gradio event that answers
+                    "hello", "receivers" and "receive".  bridge_js.py is the
+                    script inside the WanGP page; page_head.py puts the frame
+                    timer into the page head.
+
+Operations today (protocol.py, identical SHARED block on both sides):
+
+  WANGP_BRIDGE_HELLO     -> WANGP_BRIDGE_READY     bind a channel, learn the model
+  WANGP_GET_RECEIVERS    -> WANGP_RECEIVERS        what the page can take right now
+  WANGP_RECEIVE_IMAGE    -> WANGP_RECEIVE_RESULT   place one prepared PNG into one
+                                                   receiver, switching WanGP's own
+                                                   selector when needed
+  WANGP_FOCUS_RECEIVER   (no answer)               scroll the receiver into view
+  WANGP_THEME_STATE      (no answer)               light or dark
+
+Receivers today: start_frame (image_start gallery), end_frame (image_end
+gallery), reference (image_refs gallery).  The plugin reports each as selected
+(WanGP's selector already on it), allowed (the model definition permits it and
+the send will switch the selector) or off.
+
+The picture never crosses postMessage.  The Forge side writes a PNG under the
+handoff root, an id of 32 lowercase hex characters names it, the plugin reads
+the file itself from MINIPAINT_WANGP_HANDOFF_ROOT, and the acknowledgement
+carries digests and a verification level the Forge side checks against the
+manifest it kept.  Keep this shape for anything new: ids and text cross
+between pages, bytes never do.
+
+
+2. HOW WANGP REALLY WORKS  --  build on these, they were all confirmed
+--------------------------------------------------------------------------------
+
+2.1  The plugin API (shared/utils/plugins.py, class WAN2GPPlugin)
+
+  request_component(name)    The name is a local variable of WanGP's generator
+                             tab builder.  WanGP calls
+                             run_component_insertion_and_setup(all_components)
+                             with that function's locals, sets each requested
+                             name as an attribute on the plugin, then calls
+                             post_ui_setup(requested_components).  Ask in
+                             setup_ui (or __init__); read in post_ui_setup.
+                             The bridge resolves names through
+                             compatibility.COMPONENTS so a rename upstream is a
+                             logged mismatch, not a crash.
+
+  request_global(name)       Injected ONCE, right after the plugin is
+                             constructed (initialize_plugins -> inject_globals),
+                             as attributes on the plugin object.  A request made
+                             in setup_ui is a request nothing answers.  That
+                             cost a full round of debugging: ask in __init__,
+                             read with getattr(self, name).
+
+  insert_after(target, fn)   After every plugin's post_ui_setup, WanGP enters
+                             the container that holds `target`, calls fn(),
+                             and moves the container's last child behind the
+                             target.  fn must create exactly one component and
+                             return it.  Read the event's inputs and outputs
+                             BEFORE the builder runs: WanGP builds the form
+                             twice (Media Generator, and the hidden Edit tab)
+                             and hands each form's components to a fresh
+                             post_ui_setup; a builder that looked components up
+                             at run time would wire set 1 to set 2's values.
+
+  add_custom_js(code)        Concatenated into gr.Blocks(js=...) inside a
+                             function body, and run by Gradio AFTER the app has
+                             mounted.  Anything that must run before Gradio's
+                             modules load cannot go here (see 3.1).
+
+  add_tab, register_data_hook, register_deepy_prime_tool,
+  register_deepy_zero_tool, set_global(name, value)   exist; not needed here.
+
+  Globals worth requesting (all real names in wgp.py):
+    get_model_def(model_type)            the model definition dict
+    get_state_model_type(state)          the page's current model
+    server_config                        WanGP's settings dict
+    get_unique_id()                      what the Generate button writes (2.3)
+    get_gen_info(state)                  state["gen"]: queue and progress (2.5)
+    get_model_settings(state, model_type)the saved form values for a model
+    abort_generation(state, client_id)   what the Abort button calls
+    init_generate(...)                   the Generate button's own function
+
+2.2  The generator form
+
+  Names and kinds the plugin already resolves (compatibility.py): image_start,
+  image_end, image_refs (galleries of PIL images: write a LIST, a bare image
+  raises inside Gradio's postprocess after the callback returned),
+  image_prompt_type (text, letters), video_prompt_type (text, letters),
+  image_mode (number: 0 video, other values strip S/E/V/L from the allowed
+  letters), state (gr.State, per session), image_prompt_type_radio (Location:
+  T text, S start image, V continue video, L last frame ...),
+  image_prompt_type_endcheckbox (End Image(s)), video_prompt_type_image_refs
+  (reference dropdown whose choices carry letters, I is a reference image),
+  image_start_row, image_end_row, image_refs_row (visibility), model_choice.
+
+  Letter strings drive generation, not the widgets.  WanGP's own handlers keep
+  them in sync: the radio's .change rewrites image_prompt_type with
+  del_in_sequence/add_to_sequence semantics; the reference dropdown is wired
+  with .input, whose handler does NOT run for a value set by the server.  So a
+  plugin that switches a selector must also write the letter string itself
+  (compatibility.switch_for does; reuse it).
+
+  What the model allows comes from the definition:
+  image_prompt_types_allowed (letters), image_ref_choices (choices with
+  letters, plus letters_filter).  Unknown is never allowed.
+
+2.3  The Generate button is a trigger textbox  --  this is the key discovery
+
+  generate_btn.click only calls init_generate, which does gallery bookkeeping
+  and returns a fresh get_unique_id() into generate_trigger, a hidden gr.Text.
+  Everything happens on generate_trigger.change, one chain:
+
+    validate_wizard_prompt(state, wizard_prompt_activated_var,
+                           wizard_variables_var, prompt, wizard_prompt,
+                           *prompt_vars) -> prompt
+    save_inputs(target_state, *gen_inputs)      every form value into state
+    process_prompt_and_add_tasks(state, current_gallery_tab, model_choice)
+                                                the task(s) into gen["queue"]
+    prepare_generate_media(state)
+    activate_status(state)
+    process_tasks(state)                        runs the queue
+    finalize_generation(state)
+
+  gen_inputs is the whole form, collected by the FRONTEND when the change
+  fires, from the page as it is at that moment.  So the way to start a
+  generation from a plugin is to WRITE generate_trigger (a new unique id) as
+  one more output of the plugin's own event, after the outputs that place the
+  image and the prompt.  Gradio applies all outputs, the changed trigger fires
+  WanGP's own chain, and the chain reads the picture and the prompt the plugin
+  just wrote.  Nothing is bypassed, nothing is re-implemented.
+
+  add_to_queue_trigger (also a hidden gr.Text, written with get_unique_id())
+  runs the same chain without process_tasks: "queue it, do not start".
+
+  Do not click the button from the browser: it has no elem_id, and the click
+  only does what init_generate does.  If the gallery bookkeeping matters
+  (gen["selected"], gen["last_selected"], gen["audio_selected"] ...), chain
+  init_generate with its real inputs (state, output, last_choice,
+  audio_files_paths, audio_file_selected) before writing the trigger, or write
+  the trigger and accept the bookkeeping's defaults.
+
+  Validation happens inside the chain, with gr.Info notices on WanGP's page,
+  and state["validate_success"] set to 1 on success.  The plugin's
+  acknowledgement can only say "generation requested"; whether it started is a
+  status read-back (2.5) a moment later.
+
+  If a generation is running, WanGP queues the new one behind it.  That is its
+  normal behaviour and needs no handling, only reporting.
+
+2.4  Prompt semantics
+
+  prompt                  gr.Textbox, 3 lines, elem_id PROMPT_ADVANCED_ELEM_ID
+  wizard_prompt           gr.Textbox, shown instead when the wizard is on
+  wizard_prompt_activated_var   gr.Text, "on" when the wizard is on
+  alt_prompt, negative_prompt, prompt_enhancer (gr.Text, hidden)
+
+  validate_wizard_prompt returns the plain prompt untouched when the wizard is
+  off, and REBUILDS it from wizard_prompt and the wizard variables when the
+  wizard is on.  So: read wizard_prompt_activated_var in the event; when it is
+  "on", write wizard_prompt (or switch the wizard off first, which WanGP's
+  own switch_prompt_type does), otherwise write prompt.
+
+  Each line of the prompt is a separate generation (multi_prompts_gen_type
+  decides how lines combine).  A prompt from Mini Paint should be sent as one
+  line unless the user wants several.
+
+  Prompts are private.  The journal scrubs prompts, filenames and paths
+  (scrub.private); the send log must never store prompt text either.  Log
+  lengths and hashes, not words.
+
+2.5  Generation state, for read-back
+
+  get_gen_info(state) is state["gen"], a dict WanGP fills while working.  Keys
+  seen in wgp.py: queue (list of tasks, each with params and a client_id),
+  in_progress, status, status_display, progress_status, progress_phase,
+  prompt_no, prompts_max, repeat_no, total_generation, window_no,
+  total_windows, abort, early_stop, edit_overrides, queue_paused_for_edit,
+  current_gallery_source, selected, last_selected.
+
+  gen_status is a gr.Text refreshed by status_trigger.change ->
+  refresh_status_async(state).  output is the results gallery (file paths of
+  generated videos or images); last_choice the selected index.
+
+  abort_generation(state, client_id="") is what the Abort button calls; with a
+  client_id it removes only that client's queued tasks.  clear_queue_action
+  exists.  Plugins get client_id through set_wgp_global / task params.
+
+2.6  Two control sets, one page
+
+  WanGP builds the generator form twice and the bridge places one set of
+  controls in each ("set 1", "set 2" in the log).  The browser script picks the
+  set whose surroundings are displayed.  Any new op must keep working on
+  whichever set answered; never look controls up by id.
+
+
+3. BROWSER AND GRADIO LESSONS  --  the expensive ones
+--------------------------------------------------------------------------------
+
+3.1  Gradio captures requestAnimationFrame at module load
+
+  Gradio's core bundle does, at evaluation time:
+      const uv = typeof window < "u" ? requestAnimationFrame : async e => await e();
+  and schedules its component flush through uv.  Every event trigger waits
+  for that flush.  A wrapper installed later (from add_custom_js, which runs
+  after mount) never sees it.  An iframe the browser is not rendering gets no
+  frames in some browsers, so a page hidden behind another Forge tab left the
+  flush waiting, and every bridge request behind it, until the tab was opened.
+
+  Fix that works: put the wrapper into the HTML before the module tag.
+  page_head.py wraps gradio.routes.templates.env.loader.get_source for
+  frontend/index.html and frontend/share.html - the same technique WanGP's own
+  gradio_queue_focus_patch uses - and inserts bridge_js.head_script().  The
+  wrapper gives every frame a timer (short while a request is in flight,
+  longer otherwise); a rendered page's own frame always wins.  The page
+  script finds window.__minipaintFrames and only installs late when the head
+  copy is missing, and its failure text says which it found.
+
+  Rule: anything that has to run before Gradio's modules load goes through the
+  template loader, never through js= or add_custom_js.
+
+3.2  A Gradio event's outputs are not a delivery mechanism across pages
+
+  The Forge-side send event returns about fifteen outputs (state, status,
+  galleries as no-ops, the instruction and the prepared file id).  On the
+  user's machine the function ran, the file was prepared, and the outputs
+  never reached the page: the chained .then(js=...) step ran with an empty
+  instruction, and reading the boxes from the DOM found them empty too.
+  Nothing reproduced it, not even with every Forge Neo page script loaded.
+
+  What works now, and should be the pattern for every new op:
+    - record what was prepared on the server side, in the session document,
+      when it is prepared (doc.pending_send);
+    - deliver from the page's own boxes with a bounded watcher, whichever of
+      the chained step or the watcher comes first;
+    - when the boxes stay empty, press a hidden button whose event has the
+      smallest possible output list (two textboxes) and hands the record over
+      again (TouchCanvas.wangp_fetch);
+    - give up loudly, with a journal line and a status notice, never silently.
+  A small event with textbox outputs is the most reliable thing Gradio has.
+  Do not hang a feature on a big event's outputs, and never on a .then(js=)
+  alone.
+
+3.3  The journal channel loses and duplicates lines unless numbered
+
+  The browser writes lines into one hidden textbox; Gradio reads it when its
+  change event runs, not when the value is written.  Two lines in one tick
+  arrived as the second one twice.  The box now carries a numbered window of
+  recent lines ({"p": page, "lines": [{"s": n, "line": ...}]}) and the server
+  journals each number once per page (record_client_log).  Use
+  minipaintWanGP.note(text) for any new browser-side step.
+
+3.4  Every step leaves a line, and a refusal beats silence
+
+  The one failure nobody can diagnose is the one with no trace.  Today a send
+  leaves, in order: send: <receiver> chosen from the menu; <label>: prepared
+  WxH; deliver: ...; WANGP_RECEIVE_IMAGE: asked (id); the plugin's receive:
+  ...; WANGP_RECEIVE_RESULT: answered after N ms; the browser reports: ...
+  The iframe answers a request it cannot act on with a code
+  (HANDOFF_INVALID_ID, UNKNOWN_RECEIVER, STALE_RECEIVER_STATE) instead of
+  dropping it.  Keep this discipline for every new op: a line at each hop, a
+  code for every refusal, and README's failure table tells the reader which
+  gap means which half.
+
+3.5  Mechanics that must be kept
+
+  - Same origin only: the iframe is /wan2gp/ on the Forge origin; postMessage
+    targets that origin, never "*"; messages from any other source or channel
+    are dropped (and only the console says so).
+  - One channel id per iframe load (32 hex), one request id per question,
+    answers correlated on both; a late answer inside a grace window is still
+    taken (receivers), an unknown one is ignored.
+  - The plugin event is wired with trigger_mode="multiple": Gradio's default
+    "once" drops clicks while a request is pending.
+  - The handler's gr.Request parameter is the first POSITIONAL parameter;
+    placed after *values it is never filled and every hello is refused with
+    BRIDGE_SESSION_MISMATCH.
+  - The acknowledgement comes back two ways: .then(js=DELIVER_JS) on the
+    event, and a poll of the acknowledgement box while a request is in
+    flight (ACK_POLL_MS); a watchdog fails the request after roundTripMs.
+  - The revision: the receivers answer carries a fingerprint of the page's
+    state; a send names the revision the menu was built from, and the plugin
+    refuses a stale one (require_unchanged) rather than redirecting.
+  - Bridge version is checked by exact equality; any change to the plugin
+    folder needs a bump, and the setup wizard's step 4 reinstalls it.
+
+3.6  Process and environment
+
+  - Forge exports PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync under
+    --cuda-malloc; inherited by WanGP it breaks CUDA graph capture in the
+    prompt enhancer.  runtime.build_environment strips the allocator
+    variables and PYTHON* variables, sets CUDA_VISIBLE_DEVICES to the chosen
+    GPU uuid, GRADIO_ROOT_PATH=/wan2gp, GRADIO_SERVER_NAME/PORT,
+    PYTHONNOUSERSITE=1.
+  - WanGP is launched with cwd=<wangp root> and argv[0] "wgp.py": its own
+    focus patch installs only under those conditions.
+  - Health is a base-page probe on the loopback port, then the proxied asset
+    and a bridge round trip from the checks.
+
+3.7  How to test the next feature the way this one was finally tested
+
+  Unit level: tests/test_wangp_protocol.py builds the bridge with fixtures
+  (_bridge_on, _page, _on_model, Gallery) keyed by compatibility's component
+  keys; frame_fallback_checks drives the real iframe script under Node with a
+  fake window and models Gradio's captured reference.  Add a check per new
+  op there, and a check per new field in the protocol whitelists on both
+  copies.
+
+  End to end (the harness that found every remaining defect; rebuild it from
+  this description, it is short):
+    - a stand-in WanGP: a Gradio app whose generator form uses WanGP's real
+      variable names (image_start, image_end, image_refs as gr.Gallery,
+      image_prompt_type, video_prompt_type as gr.Text, the radio, the
+      checkbox, the dropdown, the rows, state, model_choice, prompt,
+      generate_trigger), plus WanGP's plugin base class (WAN2GPPlugin and
+      InsertAfterRequest lifted from shared/utils/plugins.py), plus the ten
+      lines of WanGP's own loading loop: import <plugin>.plugin, instantiate,
+      setup_ui, inject globals as attributes, post_ui_setup(requested), then
+      run each insert_after request inside the target's parent.  wgp.py
+      takes --server-name and --server-port and imports gradio (the setup
+      probe parses it for that).  Give it get_model_def and
+      get_state_model_type globals returning a definition with
+      image_prompt_types_allowed "TSEV" and image_ref_choices.
+    - a "runtime" for the extension's config: a folder with bin/python that
+      execs the system interpreter (unset PYTHONNOUSERSITE if packages live
+      in the user site), launch_strategy "direct_python", a fake GPU uuid
+      with discovery.list_gpus monkeypatched to return it, auth_checked
+      true; write it with config.atomic_write(config.config_path(),
+      config._dumps(Config(...))) after config.use_config_dir(<scratch>).
+    - the Forge-shaped host: tests/forge_like.build_host(lambda:
+      router.on_ui_tabs() + wangp_ui.on_ui_tabs(), extra_head=...) under
+      Gradio 4.40.0 with fastapi 0.127.1 / pydantic 2.10.6 (Forge Neo's
+      pins) in its own venv, the head carrying Forge Neo's script.js, every
+      javascript/*.js, the forge canvas.js/css, and the extension's
+      javascript/*.js; after launch call wangp._on_app_started(demo, app).
+    - Playwright/Chromium: open the WanGP tab, press Start WanGP if shown,
+      poll runtime.health() for READY, press "Check again", wait for
+      #wangp_iframe and minipaintWanGP.state().ready; open a picture in the
+      Canvas through the host canvas's own file input; Menu -> Send to ->
+      the WanGP line; watch the iframe's #image_start img count, the radio,
+      the visible tab panels, the send log and the journal.
+    - variants that paid for themselves: a head script that withholds native
+      animation frames while the document has no layout (the hidden-iframe
+      browser); window.minipaintCanvas.deliverWanGP stubbed to a no-op (the
+      chained step never running); TouchCanvas._info raising when
+      doc.pending_send names a WanGP receiver (the send event failing after
+      the file is prepared).  A new op should get the same three.
+
+
+4. THE FEATURE: REMOTE GENERATION
+--------------------------------------------------------------------------------
+
+4.1  Intent
+
+  From the Mini Paint tab: "Send to WanGP Start Frame and generate", with the
+  prompt typed in a small field next to the menu (or taken from txt2img's
+  prompt box; see 4.4).  The picture lands, the prompt lands, WanGP's own
+  Generate chain runs, the WanGP tab opens.  Nothing about the model or the
+  rest of the form is touched: what the user configured stays.
+
+4.2  Protocol (protocol.py SHARED block, both copies, byte-identical)
+
+  Extend WANGP_RECEIVE_IMAGE's payload with optional, whitelisted fields:
+    prompt            string, <= PROMPT_MAX_CHARS (say 4000), stripped of
+                      control characters; absent means "leave the prompt"
+    negative_prompt   same shape, optional
+    generate          "none" | "start" | "queue"   (default "none")
+  Extend the acknowledgement:
+    prompt_written    "prompt" | "wizard_prompt" | ""    which box took it
+    generation        "started" | "queued" | "not_requested" | "refused"
+    queue_length      integer after the request
+  Add operations:
+    WANGP_GENERATE      -> WANGP_GENERATE_RESULT     start (or queue) with the
+                                                     page as it is; optional
+                                                     prompt fields as above
+    WANGP_GET_STATUS    -> WANGP_STATUS              in_progress, queue length,
+                                                     progress_phase/status,
+                                                     prompt_no/prompts_max,
+                                                     model, gen_status text
+    WANGP_GET_RESULTS   -> WANGP_RESULTS             the output gallery's
+                                                     entries as opaque result
+                                                     ids and kinds (image or
+                                                     video), newest first
+    WANGP_ABORT         -> WANGP_ABORT_RESULT        abort_generation for this
+                                                     bridge's tasks only
+  Raise MAX_ENVELOPE_BYTES to fit a prompt; keep every field whitelisted in
+  normalize_* on both sides; anything unlisted is dropped, never repeated.
+
+4.3  Plugin
+
+  Request in setup_ui (components) and __init__ (globals):
+    prompt, wizard_prompt, wizard_prompt_activated_var, negative_prompt,
+    generate_trigger, add_to_queue_trigger, gen_status, output, last_choice,
+    audio_files_paths, audio_file_selected, current_gallery_tab;
+    get_unique_id, get_gen_info, abort_generation, init_generate.
+  Mark them optional in compatibility.COMPONENTS: a build without one refuses
+  the op with BRIDGE_COMPONENT_INCOMPATIBLE and keeps the image send.
+
+  Event outputs, in wired order (MiniPaintBridge.outputs returns one value per
+  entry): [ack, *receivers, *switch components, prompt, wizard_prompt,
+  negative_prompt, generate_trigger, add_to_queue_trigger].  "No change" for
+  everything the op did not touch (bridge_ui.no_change).
+
+  receive with generate != "none", and WANGP_GENERATE:
+    1. apply the image and the switch as today (receive) or nothing (generate);
+    2. choose the prompt box from wizard_prompt_activated_var;
+    3. write the trigger with get_unique_id(); "queue" writes
+       add_to_queue_trigger instead;
+    4. answer with generation "started"/"queued".  The chain runs after the
+       event returns; the ack cannot see validation.  Mini Paint follows with
+       WANGP_GET_STATUS after a second to report "running" or "queued", and
+       shows WanGP's notice text if the chain refused (validate_success 0).
+  Keep receive's verification: the image is placed and verified first; a
+  generate on an unverified placement is refused with the verification code.
+
+  status: read get_gen_info(state) and the gen_status value from the event's
+  inputs; never touch them.
+  results: map output's file paths to opaque ids kept in the plugin (a dict
+  per session, bounded); the Forge side fetches a result through a new proxy
+  route by id, the plugin serving the bytes from the path it holds, only for
+  paths under WanGP's own output folder.  Ids and kinds cross the bridge,
+  paths never do.
+  abort: abort_generation(state, client_id) with the client_id the plugin
+  puts into the tasks it queued (set_wgp_global / process_prompt_and_add_tasks
+  reads client_id from the saved inputs); never abort the user's own tasks.
+
+4.4  Forge side
+
+  Prompt source, one of (decide before coding):
+    a) a one-line field under the Canvas status line, remembered per session,
+       sent with the next WanGP line;
+    b) the txt2img prompt box, read in the browser at click time.
+  a) is contained and honest about what is sent; b) needs no new control.  Do
+  not do both in the first version.
+
+  Menu lines: "Send Image to WanGP Start Frame" stays; add "... and generate"
+  variants, greyed with " - WanGP is busy" when the last status said
+  in_progress and the user asked not to queue, and a "WanGP: generate with the
+  page as it is" line for WANGP_GENERATE.  All go through the same armed
+  send -> prepared record -> two-route delivery -> fetch fallback (3.2).
+
+  Records: the send log entry names the receiver and "generation requested";
+  the journal gets the status read-back.  Never the prompt.
+
+  Read-back into the Canvas: a "receive from WanGP" button that lists
+  WANGP_GET_RESULTS and opens the chosen image (or a video's first frame,
+  extracted on the Forge side) into the Canvas, through the proxy route
+  above.  This closes the loop the user asked for.
+
+4.5  Browser
+
+  No new mechanics.  Fields pass through normaliseReceiver-style whitelists;
+  WANGP_GET_STATUS is asked with the same ask() and timeouts as receivers and
+  is never polled on a timer for longer than one bounded follow-up after a
+  generate.  Every new op notes its steps with minipaintWanGP.note.
+
+4.6  Failure modes and their words
+
+  WanGP busy and generate "start"     answered generation "queued"; menu says so
+  Wizard on, prompt sent              written to wizard_prompt; ack says which
+  Validation refused in the chain     status read-back reports validate_success
+                                      0 and the last gr.Info text if reachable;
+                                      otherwise "WanGP declined the request; its
+                                      page says why"
+  Component missing in this WanGP     BRIDGE_COMPONENT_INCOMPATIBLE, image send
+                                      still offered
+  Prompt too long / not text          refused before asking, in the parent
+  Results path outside WanGP's output UNKNOWN_RESULT, never served
+
+4.7  Tests
+
+  protocol: new fields and ops normalised on both copies; envelope limit.
+  plugin: generate writes the right box for wizard on/off, writes the trigger
+  with a fresh id, refuses on a failed verification, answers status from a
+  fixture gen dict, maps results to ids and refuses foreign paths.
+  frontends: the new menu lines and the fetch/watcher wiring unchanged.
+  end to end: the stand-in WanGP gets a prompt box, a wizard flag, a
+  generate_trigger with a .change that appends to a list; the harness asserts
+  the list grew and the prompt box holds the text, in the three variants of
+  3.7.
+
+
+5. OTHER FUNCTIONS THAT CAN BE INVOKED THE SAME WAY
+--------------------------------------------------------------------------------
+
+Each is a component in the generator form (write it as an event output) or a
+function reachable through request_global.  "Write" means: an output of the
+plugin's event, the value shaped as the component expects, with WanGP's own
+letter strings or triggers written alongside where noted.
+
+  Prompt                  prompt / wizard_prompt (2.4)          write text
+  Negative prompt         negative_prompt (Textbox)             write text
+  Seed                    seed (Slider, -1 random)              write int
+  Resolution              resolution (Dropdown)                 write one of
+                                                                 its choices
+  Length                  video_length (Slider, frames)         write int;
+                                                                 bounds depend
+                                                                 on the model
+  Steps                   num_inference_steps (Slider)          write int
+  Guidance                per-model sliders; the saved-settings
+                          key is guidance_scale, the component
+                          name varies by build                  verify in your
+                                                                 WanGP first
+  Batch / repeats         batch_size, repeat_generation         write int
+  LoRAs                   loras_multipliers (Textbox) is a form
+                          component; the LoRA list itself is a
+                          panel the LoRA Browser plugin builds
+                          (saved-settings key activated_loras)  out of scope
+                                                                 for a send
+  Control image / video   image_guide (Image), video_guide,
+                          video_mask (Video), audio_guide       files: same
+                                                                 handoff shape
+                                                                 as PNGs, new
+                                                                 kinds
+  Prompt enhancer         prompt_enhancer (hidden Text)         write flag text
+  Start generation        generate_trigger <- get_unique_id()   (2.3)
+  Add to queue only       add_to_queue_trigger <- get_unique_id()
+  Abort own tasks         abort_generation(state, client_id)    call
+  Clear the queue         clear_queue_action(state)             call; whole
+                                                                 queue, ask first
+  Status                  get_gen_info(state), gen_status       read
+  Results                 output (Gallery of paths), last_choice read; serve
+                                                                 by id (4.3)
+  Model                   model_choice (Dropdown)               write starts
+                                                                 WanGP's model
+                                                                 switch chain:
+                                                                 slow, unloads;
+                                                                 out of scope
+                                                                 for "configure
+                                                                 in the tab"
+  Saved settings          get_model_settings(state, type),
+                          save_inputs(...)                      read; do not
+                                                                 call save_inputs
+                                                                 yourself, the
+                                                                 chain does
+  Extend a sample         onemorewindow_btn -> one_more_window   call with state
+
+
+6. NON-GOALS AND CAUTIONS
+--------------------------------------------------------------------------------
+
+  - Do not re-implement the generation chain server-side; write the trigger.
+  - Do not click WanGP's buttons from the browser; write the components.
+  - Do not write gen_inputs wholesale from Mini Paint; the user configured
+    the form on the WanGP tab and that is the point.
+  - Do not switch models from a send in the first version.
+  - Do not log prompts, file names or paths; the journal scrubs, the send log
+    must not receive them.
+  - Do not depend on a single Gradio event's outputs, a .then(js=), or
+    animation frames of a hidden page; see section 3 for what to do instead.
+  - Bump the bridge version for any plugin change; the wizard's step 4 is how
+    it reaches the user's WanGP.
+
+
+7. FILE MAP
+--------------------------------------------------------------------------------
+
+  minipaint_neo/wangp/protocol.py, wan2gp_bridge/.../protocol.py   SHARED block
+  minipaint_neo/wangp/{runtime,proxy,handoff,bridge,ui,process_log,config,
+                       discovery,errors,journal}.py
+  minipaint_neo/canvas/ui.py     send(), _send_to_wangp, wangp_fetch,
+                                 wangp_result, the .then chain
+  javascript/minipaint_wangp.js  parent half: attach, hello, receivers, send,
+                                 focus, note, state
+  javascript/minipaint_canvas.js Send menu, armWanGP, watchWanGP, deliverWanGP
+  wan2gp_bridge/wan2gp-minipaint-bridge/
+      plugin.py            MiniPaintBridge (handle, receive, outputs),
+                           MiniPaintBridgePlugin (hooks, _place, _inject_*)
+      compatibility.py     component specs, allowances, switch_for, globals
+      receiver_state.py    the page's state fingerprint (revision)
+      receiver_adapters.py how each receiver takes a picture and verifies it
+      bridge_ui.py         the hidden controls and the wired event
+      bridge_js.py         the in-page script and the head frame timer
+      page_head.py         the template-loader injection
+      handoff.py           reading the prepared file by id
+  docs/wangp/README.md     setup, failure table (which log line means what)
+  docs/wangp/CONTRACTS.md  the contracts, kept current with the code

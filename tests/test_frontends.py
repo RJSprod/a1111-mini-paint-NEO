@@ -334,6 +334,12 @@ def run() -> Results:
     r.check("a browser-only step writes the chosen host textbox and leaves the other untouched",
             len(deliver) == 1 and not deliver[0]["backend_fn"] and '"__type__": "update"' in deliver[0]["js"] and deliver[0]["inputs"] == [switch_id, payload_id])
     r.check("send is followed by the tab switch", any("switchTo" in (f.get("js") or "") and not f["backend_fn"] for f in follow))
+    r.check("and by the browser's WanGP delivery step, reading the instruction and payload",
+            any("deliverWanGP" in (f.get("js") or "") and not f["backend_fn"] and f["inputs"] == [switch_id, payload_id] for f in follow))
+    fetch = by_elem("minipaint_canvas_wangp_fetch", "click")
+    r.check("the hidden fetch button hands the prepared send over again into the same two boxes, and nothing else",
+            len(fetch) == 1 and fetch[0]["backend_fn"] and fetch[0]["outputs"] == [switch_id, payload_id]
+            and component("minipaint_canvas_wangp_fetch")["props"].get("visible") is False, str(fetch))
     waits = [f for f in follow if "waitForHostImage" in (f.get("js") or "")]
     r.check("and by a wait on the Inpaint canvas", len(waits) == 1 and waits[0]["backend_fn"] and f'"{inpaint.uuid}"' in waits[0]["js"])
     after_wait = followers(waits[0]) if waits else []

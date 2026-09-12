@@ -1135,6 +1135,28 @@ class TouchCanvas:
             prepared.id,
         )
 
+    def wangp_fetch(self, state):
+        """The prepared send, again, into the two boxes the browser watches.
+
+        The browser presses this when the send event's own outputs never
+        reached the page - on one machine they did not, three times out of
+        three, with the file prepared and nothing else wrong. The record was
+        kept on this side when the file was written, so it is handed over a
+        second time through an event that writes two textboxes and nothing
+        else. Nothing is prepared here: a send that was never prepared, or
+        whose file has since been released, hands over nothing.
+        """
+        doc = document.ensure(state)
+        pending = getattr(doc, "pending_send", None)
+        receiver = str(pending.get("wangp") or "") if isinstance(pending, dict) else ""
+        handoff_id = str(pending.get("handoff") or "") if isinstance(pending, dict) else ""
+        handoff = _wangp("handoff")
+        if receiver and handoff_id and handoff is not None and handoff.manifest_of(handoff_id) is not None:
+            _journal("send", f"{wangp_label(receiver)}: the page asked for the prepared file again; handed over")
+            return f"{WANGP_INSTRUCTION}:{receiver}", handoff_id
+        _journal("send", "the page asked for a prepared file, but none is pending on this side")
+        return "", ""
+
     def wangp_result(self, state, report):
         """The status line for a WanGP send, once the browser knows how it went.
 
@@ -1305,6 +1327,7 @@ class TouchCanvas:
                 # How a send to WanGP ended, written by the browser: it is the
                 # only side that hears the live WanGP page acknowledge it.
                 wangp_result = gr.Textbox("", visible=False, elem_id=_id("wangp_result"))
+                wangp_fetch = gr.Button("Fetch the prepared WanGP send", visible=False, elem_id=_id("wangp_fetch"))
 
                 # Hidden wires between chained events. Values, not DOM.
                 crop_box = gr.Textbox("", visible=False, elem_id=_id("crop_box"))
@@ -1352,6 +1375,7 @@ class TouchCanvas:
             targets_box=targets_box,
             suggest_box=suggest_box,
             wangp_result=wangp_result,
+            wangp_fetch=wangp_fetch,
             panels={"crop": panel_crop, "mask": panel_mask, "expand": panel_expand, "layers": panel_layers},
             crop=crop,
             mask=mask,
@@ -1684,6 +1708,10 @@ class TouchCanvas:
         # what it saw comes back through the hidden result box below.
         sent.then(None, js=WANGP_DELIVER_JS, inputs=[switch_box, payload_box], outputs=None)
         parts["wangp_result"].input(self.wangp_result, inputs=[state, parts["wangp_result"]], outputs=[status], **quiet)
+        # The prepared send, a second time, through an event with two
+        # textboxes and nothing else in it - what the browser presses when
+        # the send event's own outputs never reached its boxes.
+        parts["wangp_fetch"].click(self.wangp_fetch, inputs=[state], outputs=[switch_box, payload_box], **quiet)
         if "inpaint_mask" in self.targets:
             inpaint_uuid = getattr(self.targets["inpaint"], "elem_id", "") or ""
             mask_payload_box = parts["mask_payload_box"]

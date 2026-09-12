@@ -271,6 +271,17 @@ the page under `browser` (`send: … chosen from the menu`, `deliver: …`,
 under `wangp`. `Canvas -> WanGP …` in `logs/send-log.txt` is written twice per
 send: `prepared …` when the file is written, then how it ended.
 
+The delivery has two routes. Gradio's chained browser step on the send event
+(`.then(js=…)` with the instruction and payload boxes as inputs) is the first;
+from the click on, the Canvas also reads those two boxes itself a few times a
+second (`WANGP_WATCH_MS`) and delivers the moment they hold this send's
+instruction and a fresh 32-hex file id, for at most `WANGP_WATCH_LIMIT_MS`.
+Whichever route runs first delivers and the other finds nothing armed; a
+chained step that arrives with a stale instruction, or with the file id of the
+previous send, leaves the armed send to the watcher. A send whose answer never
+reaches the boxes ends with `deliver: gave up after N s` in the journal and a
+notice on the status line.
+
 ## Tests
 
 `tests/test_wangp_*.py`, in the existing style: a `run()` returning

@@ -70,6 +70,14 @@ window.minipaintCanvas = (function () {
     // WanGP page, not a component of this WebUI.
     const WANGP_TAB_PANEL_ID = "tab_wangp";
     const WANGP_PREFIX = "wangp.";
+    // The two boxes the server fills when a send is prepared: the instruction
+    // and the prepared file's id. Gradio's chained browser step reads them for
+    // us; the watcher below reads them itself when that step does not come.
+    const WANGP_SWITCH_ID = "minipaint_canvas_switch";
+    const WANGP_PAYLOAD_ID = "minipaint_canvas_payload";
+    const WANGP_WATCH_MS = 150;
+    const WANGP_WATCH_LIMIT_MS = 90000;
+    const HANDOFF_ID_RE = /^[0-9a-f]{32}$/;
     const SEND_REQUEST_ID = "minipaint_canvas_send_request";
     const TARGETS_ID = "minipaint_canvas_targets";
     const SUGGEST_ID = "minipaint_canvas_suggest";
@@ -112,7 +120,7 @@ window.minipaintCanvas = (function () {
         // the receiver a click armed - captured at the click, because the
         // state the user chose under is what the send has to be checked
         // against, not whatever WanGP happens to show by the time it lands.
-        wangp: { token: 0, status: "", items: [], revision: "", session: "", pending: null, failed: false },
+        wangp: { token: 0, status: "", items: [], revision: "", session: "", pending: null, failed: false, watch: 0, delivered: "" },
         menuOutside: null,
         menuKey: null,
         frameGrip: null,
@@ -1203,6 +1211,49 @@ window.minipaintCanvas = (function () {
         w.pending = { receiver: name.slice(WANGP_PREFIX.length), revision: w.revision, session: w.session };
         noteWanGP("send: " + w.pending.receiver + " chosen from the menu (revision " + (w.revision ? "held" : "missing")
             + ", session " + (w.session ? "held" : "missing") + "); the request is written for the server");
+        watchWanGP();
+    }
+
+    function boxValue(id) {
+        const target = document.querySelector("#" + id + " textarea");
+        return target ? String(target.value || "") : "";
+    }
+
+    /**
+     * The second route to the delivery. The server answers a send by filling
+     * the instruction and payload boxes, and Gradio's chained browser step
+     * then hands them to deliverWanGP - on one machine that step went quiet
+     * after the server had done its part, with no error anywhere. So from
+     * the click on, the boxes themselves are read a few times a second: the
+     * moment they hold this send's instruction and a fresh file id, the
+     * delivery goes ahead from here. Whichever route runs first delivers;
+     * the other finds nothing armed and stops. Bounded, and idle whenever
+     * nothing is armed.
+     */
+    function watchWanGP() {
+        const w = S.wangp;
+        if (w.watch) { clearInterval(w.watch); w.watch = 0; }
+        const before = boxValue(WANGP_PAYLOAD_ID);
+        const started = Date.now();
+        w.watch = setInterval(function () {
+            const armed = w.pending;
+            if (!armed) { clearInterval(w.watch); w.watch = 0; return; }
+            const instruction = boxValue(WANGP_SWITCH_ID);
+            const payload = boxValue(WANGP_PAYLOAD_ID);
+            if (instruction === "wangp_send:" + armed.receiver && HANDOFF_ID_RE.test(payload) && payload !== before && payload !== w.delivered) {
+                clearInterval(w.watch); w.watch = 0;
+                noteWanGP("deliver: the prepared file was read from the page's own boxes (the chained step had not delivered it)");
+                deliverWanGP(instruction, payload);
+                return;
+            }
+            if (Date.now() - started > WANGP_WATCH_LIMIT_MS) {
+                clearInterval(w.watch); w.watch = 0;
+                w.pending = null;
+                noteWanGP("deliver: gave up after " + Math.round((Date.now() - started) / 1000) + " s - the server's instruction never reached "
+                    + "this page (the instruction box holds " + JSON.stringify(instruction.slice(0, 40)) + ")");
+                notice("WanGP", "The picture was prepared, but the page never received it. logs/wangp-log.txt has the steps.");
+            }
+        }, WANGP_WATCH_MS);
     }
 
     /** One line into the WanGP journal, through the bridge, for the steps of
@@ -1223,9 +1274,29 @@ window.minipaintCanvas = (function () {
      */
     async function deliverWanGP(instruction, handoffId) {
         const parts = String(instruction || "").split(":");
-        if (parts[0] !== "wangp_send") { return; }
-        const armed = S.wangp.pending;
-        S.wangp.pending = null;
+        const w = S.wangp;
+        if (parts[0] !== "wangp_send") {
+            // Not a send to WanGP - unless one is armed, in which case the
+            // chained step ran before the server's answer reached the boxes,
+            // and the watcher will deliver from them when it does.
+            if (w.pending) {
+                noteWanGP("deliver: the chained step ran with " + JSON.stringify(String(instruction || "").slice(0, 40))
+                    + " while armed for " + w.pending.receiver + "; waiting for the boxes instead");
+            }
+            return;
+        }
+        if (HANDOFF_ID_RE.test(String(handoffId || "")) && handoffId === w.delivered) {
+            // The watcher got there first, or this is the previous send's
+            // file: either way that file has been delivered already, and a
+            // second delivery would only report a stale send that never was.
+            noteWanGP("deliver: the chained step ran with a file already delivered"
+                + (w.pending ? " while armed for " + w.pending.receiver + "; waiting for the boxes instead" : ""));
+            return;
+        }
+        const armed = w.pending;
+        w.pending = null;
+        if (w.watch) { clearInterval(w.watch); w.watch = 0; }
+        if (HANDOFF_ID_RE.test(String(handoffId || ""))) { w.delivered = String(handoffId); }
         const api = wangp();
         noteWanGP("deliver: the server prepared the picture for " + (parts[1] || "?") + " (file id " + (handoffId ? "present" : "missing")
             + ", armed for " + (armed ? armed.receiver : "nothing") + ")");

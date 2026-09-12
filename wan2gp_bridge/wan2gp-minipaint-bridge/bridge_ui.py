@@ -176,8 +176,10 @@ def wire(
     The output list is the acknowledgement followed by every v1 receiver
     component, which is section 21.1's "wire a hidden bridge trigger to all v1
     receiver components as possible outputs and return no change for the rest"
-    - and, after those, the selector components a send may switch on
-    (``receiver_components`` carries both, receivers first).
+    - and, after those, the selector components a send may switch on, and
+    after those the components only a queue request writes: the prompt
+    boxes, WanGP's client id and its add-to-queue trigger
+    (``receiver_components`` carries all of them, receivers first).
     One event rather than one per receiver, because the request also has to be
     able to answer "what can you take right now", and that answer has to be
     computed from the same inputs in the same call as the apply.
@@ -231,14 +233,33 @@ def wire(
     return True
 
 
+class Raw:
+    """A component value that must be written as it is, whatever its shape.
+
+    A restore puts back the value a component had before the bridge wrote
+    it, and that value is whatever Gradio handed the event - a list, a
+    string, a bool, occasionally a mapping. ``update_for`` reads a bare
+    mapping as a property update, so a value that must not be read that way
+    travels wrapped.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: typing.Any) -> None:
+        self.value = value
+
+
 def update_for(change: typing.Any) -> typing.Any:
-    """One switch update as Gradio takes it.
+    """One component write as Gradio takes it.
 
     A mapping is a property update - ``{"visible": True}`` to show the row a
     click on the selector would have shown - and becomes ``gr.update(**...)``;
-    anything else is the component's new value (the radio's letter, the
-    checkbox's True, the dropdown's choice, the rewritten letter string).
+    a ``Raw`` is its value, untouched; anything else is the component's new
+    value (the radio's letter, the checkbox's True, the dropdown's choice,
+    the rewritten letter string, the prompt text).
     """
+    if isinstance(change, Raw):
+        return change.value
     if isinstance(change, dict):
         return gr.update(**change) if gr is not None else dict(change)
     return change

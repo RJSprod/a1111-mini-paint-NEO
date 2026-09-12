@@ -16,13 +16,14 @@ import hashlib
 import json
 import re
 import typing
+import unicodedata
 
 # ---------------------------------------------------------------- SHARED --
 # Everything between this marker and END SHARED is duplicated verbatim in
 # wan2gp_bridge/wan2gp-minipaint-bridge/protocol.py. Change one, change both;
 # the test fails otherwise.
 
-PROTOCOL = 2
+PROTOCOL = 3
 
 #: postMessage types. Anything not in here is dropped without a reply.
 HELLO = "WANGP_BRIDGE_HELLO"
@@ -34,11 +35,16 @@ RECEIVE_RESULT = "WANGP_RECEIVE_RESULT"
 FOCUS_RECEIVER = "WANGP_FOCUS_RECEIVER"
 THEME_STATE = "WANGP_THEME_STATE"
 RUNTIME_STATE = "WANGP_RUNTIME_STATE"
+#: Protocol 3: add the live page to WanGP's queue, and ask whether it landed.
+QUEUE_REQUEST = "WANGP_QUEUE_REQUEST"
+QUEUE_RESULT = "WANGP_QUEUE_RESULT"
+QUEUE_CONFIRM = "WANGP_QUEUE_CONFIRM"
+QUEUE_STATUS = "WANGP_QUEUE_STATUS"
 
 #: What the parent page may send into the iframe.
-TO_BRIDGE = frozenset({HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE})
+TO_BRIDGE = frozenset({HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM})
 #: What the iframe may send out to the parent page.
-TO_PARENT = frozenset({READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE})
+TO_PARENT = frozenset({READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS})
 
 #: Stable logical receiver ids. The bridge maps these onto whatever the
 #: installed WanGP calls them; MiniPaint only ever sees these.
@@ -86,7 +92,11 @@ MAX_HANDOFF_BYTES = 64 * 1024 * 1024
 MAX_HANDOFF_PIXELS = 64 * 1024 * 1024
 MAX_HANDOFF_SIDE = 16384
 
-#: A postMessage envelope this size or larger is dropped unread.
+#: A postMessage envelope this size or larger is dropped unread. A queue
+#: request is a prompt of at most PROMPT_MAX_CHARS characters - under 24 KiB
+#: of JSON however it is escaped - plus a handful of 32-character ids, so the
+#: ceiling that was already here holds it ten times over and is not raised.
+#: Image bytes never cross postMessage.
 MAX_ENVELOPE_BYTES = 256 * 1024
 
 #: How long the parent waits, in milliseconds. The receiver query is one
@@ -99,9 +109,98 @@ RECEIVE_TIMEOUT_MS = 30000
 #: How the state fingerprint is shortened for transport.
 REVISION_LENGTH = 32
 
+# -- the queue: minipaint.wangp.queue/v1 -----------------------------------
+
+#: The public contract the queue operation carries, by name, so a caller can
+#: ask for it and a log can say which one answered.
+QUEUE_CONTRACT = "minipaint.wangp.queue/v1"
+PUBLIC_API_VERSION = 1
+
+#: A queue request id is the same shape as a handoff id, for the same
+#: reason: a fixed grammar cannot be talked into meaning something else. It
+#: is also the client_id WanGP's own queue tasks carry, which is how an
+#: admission is proved.
+REQUEST_ID_RE = HANDOFF_ID_RE
+
+#: The four things a queue request may override. Anything else on the live
+#: page - model, resolution, length, steps, seed, guidance, LoRAs - is always
+#: the page's own.
+QUEUE_FIELD_PROMPT = "prompt"
+QUEUE_FIELD_START = "start"
+QUEUE_FIELD_END = "end"
+QUEUE_FIELD_REFERENCES = "references"
+QUEUE_FIELDS = (QUEUE_FIELD_PROMPT, QUEUE_FIELD_START, QUEUE_FIELD_END, QUEUE_FIELD_REFERENCES)
+
+#: Which logical receiver each image field of a request addresses.
+QUEUE_FIELD_RECEIVERS = {
+    QUEUE_FIELD_START: START_FRAME,
+    QUEUE_FIELD_END: END_FRAME,
+    QUEUE_FIELD_REFERENCES: REFERENCE,
+}
+
+#: Prompt ceiling, in characters. Longer is refused, never truncated: a
+#: prompt cut short is a different prompt, and nobody asked for that one.
+PROMPT_MAX_CHARS = 4000
+
+#: How many reference images one request may supply. A bound rather than a
+#: model fact; the live page decides what the model takes.
+MAX_QUEUE_REFERENCES = 16
+
+#: What the bridge answers the moment the request event ran. "requested" and
+#: "duplicate" mean the admission attempt was made (or had already been made
+#: for this id); neither means WanGP's queue holds it yet - only a confirmed
+#: status says that.
+ADMISSION_REQUESTED = "requested"
+ADMISSION_DUPLICATE = "duplicate"
+ADMISSION_REFUSED = "refused"
+ADMISSIONS = (ADMISSION_REQUESTED, ADMISSION_DUPLICATE, ADMISSION_REFUSED)
+
+#: What a confirmation answers. "expired" is a pending admission that ran out
+#: of time without proof either way; it is never reported as a refusal.
+QUEUE_PENDING = "pending"
+QUEUE_QUEUED = "queued"
+QUEUE_REFUSED = "refused"
+QUEUE_EXPIRED = "expired"
+QUEUE_STATUSES = (QUEUE_PENDING, QUEUE_QUEUED, QUEUE_REFUSED, QUEUE_EXPIRED)
+
+#: Timeouts for the two queue round trips, and the bounded confirmation
+#: schedule: one confirmation at once, then a short sequence, then nothing.
+#: The parent never installs a permanent timer and never confirms past the
+#: end of the sequence.
+QUEUE_REQUEST_TIMEOUT_MS = 30000
+QUEUE_CONFIRM_TIMEOUT_MS = 10000
+QUEUE_CONFIRM_DELAYS_MS = (0, 100, 300, 700, 1500, 3000)
+
+#: How long the bridge keeps an unconfirmed admission as the owner of the
+#: live form before it is expired and the overrides put back. Long enough
+#: for a busy WanGP to run its own queue chain; short enough that a request
+#: nobody could confirm does not lock the page for a coffee break.
+PENDING_ADMISSION_SECONDS = 20.0
+#: How long a terminal record is kept, so a retried request id is recognised.
+ADMISSION_RECORD_SECONDS = 600.0
+MAX_ADMISSION_RECORDS = 512
+
+#: The failure codes the queue contract can name from either side. Spelled
+#: here as well as in errors.py / compatibility.py so the normalisers, which
+#: both copies share, can refuse with them.
+QUEUE_CODE_REQUEST_INVALID = "REQUEST_INVALID"
+QUEUE_CODE_PROMPT_TOO_LONG = "PROMPT_TOO_LONG"
+QUEUE_CODE_REQUEST_ID_CONFLICT = "REQUEST_ID_CONFLICT"
+QUEUE_CODE_BUSY = "QUEUE_BUSY"
+QUEUE_CODE_REFUSED = "QUEUE_REQUEST_REFUSED"
+QUEUE_CODE_UNCONFIRMED = "ADMISSION_UNCONFIRMED"
+QUEUE_CODE_VALIDATION_REFUSED = "WANGP_VALIDATION_REFUSED"
+
+#: The shape of a failure code, so a bridge cannot hand the menu a sentence.
+CODE_RE = re.compile(r"\A[A-Z][A-Z0-9_]{2,59}\Z")
+
 
 def valid_handoff_id(value: typing.Any) -> bool:
     return isinstance(value, str) and bool(HANDOFF_ID_RE.match(value))
+
+
+def valid_request_id(value: typing.Any) -> bool:
+    return isinstance(value, str) and bool(REQUEST_ID_RE.match(value))
 
 
 def canonical_json(value: typing.Any) -> str:
@@ -229,6 +328,221 @@ def normalize_receivers(raw: typing.Any) -> list:
         if descriptor and descriptor["id"] not in seen:
             seen[descriptor["id"]] = descriptor
     return [seen[key] for key in RECEIVER_IDS if key in seen]
+
+
+# -- the queue: normalisation -------------------------------------------------
+
+
+def clean_prompt(value: typing.Any) -> typing.Optional[str]:
+    """The prompt as it may cross, or None for "inherit the page's".
+
+    Absent, None, not a string, empty or whitespace-only all mean inherit:
+    for v1 there is no way to say "clear the prompt", and an empty box in a
+    UI means "use WanGP's". Control characters are removed - the ones in
+    the Unicode ``Cc`` class - except ordinary newlines and tabs, since a
+    prompt is lines and WanGP's own semantics apply to those. Nothing else is
+    touched: joiners, marks and emoji are the user's text.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.replace("\r\n", "\n").replace("\r", "\n")
+    kept = "".join(
+        character for character in text
+        if character in "\n\t" or unicodedata.category(character) != "Cc"
+    )
+    kept = kept.strip()
+    return kept or None
+
+
+def normalize_queue_request(raw: typing.Any) -> typing.Tuple[dict, str]:
+    """``(request, code)``: the request with exactly the whitelisted fields,
+    or a code saying why it cannot be one.
+
+    The semantics of section 0 are written here and nowhere else: a field
+    that is absent, null or UI-empty is *inherited* from the live page, and a
+    field that is supplied overrides the page for this one queued request.
+    An empty reference list is absence. Nothing unlisted survives - not a
+    path, not a filename, not a model, not a setting - and an id that is not
+    exactly the handoff shape is refused rather than repaired.
+    """
+    if not isinstance(raw, dict):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+
+    request_id = raw.get("request_id")
+    if not valid_request_id(request_id):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+
+    session = raw.get("bridge_session")
+    request: dict = {
+        "request_id": request_id,
+        "bridge_session": session if isinstance(session, str) and re.match(r"\A[A-Za-z0-9._:-]{1,128}\Z", session) else "",
+    }
+
+    prompt = raw.get("prompt")
+    if prompt is not None and not isinstance(prompt, str):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    cleaned = clean_prompt(prompt)
+    if cleaned is not None:
+        if len(cleaned) > PROMPT_MAX_CHARS:
+            return {}, QUEUE_CODE_PROMPT_TOO_LONG
+        request["prompt"] = cleaned
+
+    for key in ("start_handoff_id", "end_handoff_id"):
+        value = raw.get(key)
+        if value is None or value == "":
+            continue
+        if not valid_handoff_id(value):
+            return {}, QUEUE_CODE_REQUEST_INVALID
+        request[key] = value
+
+    references = raw.get("reference_handoff_ids")
+    if references is not None:
+        if not isinstance(references, (list, tuple)):
+            return {}, QUEUE_CODE_REQUEST_INVALID
+        if len(references) > MAX_QUEUE_REFERENCES:
+            return {}, QUEUE_CODE_REQUEST_INVALID
+        kept = []
+        for value in references:
+            if value is None or value == "":
+                continue
+            if not valid_handoff_id(value):
+                return {}, QUEUE_CODE_REQUEST_INVALID
+            kept.append(value)
+        if kept:
+            request["reference_handoff_ids"] = kept
+
+    return request, ""
+
+
+def queue_overrides(request: typing.Mapping[str, typing.Any]) -> typing.List[str]:
+    """Which of the four fields a normalised request supplies, in order."""
+    supplied = []
+    if request.get("prompt") is not None:
+        supplied.append(QUEUE_FIELD_PROMPT)
+    if request.get("start_handoff_id"):
+        supplied.append(QUEUE_FIELD_START)
+    if request.get("end_handoff_id"):
+        supplied.append(QUEUE_FIELD_END)
+    if request.get("reference_handoff_ids"):
+        supplied.append(QUEUE_FIELD_REFERENCES)
+    return supplied
+
+
+def queue_payload_hash(request: typing.Mapping[str, typing.Any]) -> str:
+    """One digest of what a request overrides, for idempotency.
+
+    The same request id with the same digest is a retry and is answered from
+    the record; the same id with a different digest is a conflict. The prompt
+    text goes into the hash and never into the record, so a dedupe table
+    holds no words.
+    """
+    canonical = {
+        "prompt": request.get("prompt"),
+        "start": request.get("start_handoff_id") or "",
+        "end": request.get("end_handoff_id") or "",
+        "references": list(request.get("reference_handoff_ids") or []),
+    }
+    return hashlib.sha256(canonical_json(canonical).encode("utf-8")).hexdigest()
+
+
+def queue_summary(
+    applied: typing.Any = None,
+    inherited: typing.Any = None,
+    ignored: typing.Any = None,
+) -> dict:
+    """The applied / inherited / ignored triple, in one shape on both sides.
+
+    ``applied`` says per field whether the request's value went in (a count
+    for references); ``inherited`` lists the fields the page kept its own
+    value for; ``ignored`` lists a field the request supplied that the live
+    model could not use, with the code that says why. A field is in exactly
+    one of the three.
+    """
+    applied = applied if isinstance(applied, dict) else {}
+    out_applied = {
+        QUEUE_FIELD_PROMPT: bool(applied.get(QUEUE_FIELD_PROMPT)),
+        QUEUE_FIELD_START: bool(applied.get(QUEUE_FIELD_START)),
+        QUEUE_FIELD_END: bool(applied.get(QUEUE_FIELD_END)),
+        QUEUE_FIELD_REFERENCES: 0,
+    }
+    count = applied.get(QUEUE_FIELD_REFERENCES)
+    if isinstance(count, bool):
+        count = 1 if count else 0
+    if isinstance(count, (int, float)) and count > 0:
+        out_applied[QUEUE_FIELD_REFERENCES] = int(count)
+
+    out_ignored = []
+    seen = set()
+    for item in ignored if isinstance(ignored, (list, tuple)) else []:
+        if not isinstance(item, dict):
+            continue
+        field = item.get("field")
+        code = item.get("code")
+        if field not in QUEUE_FIELDS or field in seen:
+            continue
+        seen.add(field)
+        out_ignored.append({"field": field, "code": code if isinstance(code, str) and CODE_RE.match(code) else "RECEIVER_DISABLED"})
+
+    named = set(inherited) if isinstance(inherited, (list, tuple, set)) else set()
+    out_inherited = [
+        field for field in QUEUE_FIELDS
+        if field in named and not out_applied[field] and field not in seen
+    ]
+    return {"applied": out_applied, "inherited": out_inherited, "ignored": out_ignored}
+
+
+def _code_or(value: typing.Any, fallback: str = "") -> str:
+    return value if isinstance(value, str) and CODE_RE.match(value) else fallback
+
+
+def _whole(value: typing.Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value) if value > 0 else 0
+
+
+def normalize_queue_result(raw: typing.Any) -> dict:
+    """The immediate answer to a queue request, as the parent will use it.
+
+    A result that does not say a valid admission is a refusal: the parent
+    must never show "added to queue" from this message, and it must not show
+    it from a message it cannot read either.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    admission = raw.get("admission")
+    ok = raw.get("ok") is True and admission in (ADMISSION_REQUESTED, ADMISSION_DUPLICATE)
+    summary = queue_summary(raw.get("applied"), raw.get("inherited"), raw.get("ignored"))
+    model = raw.get("model") if isinstance(raw.get("model"), dict) else {}
+    return {
+        "ok": ok,
+        "request_id": raw.get("request_id") if valid_request_id(raw.get("request_id")) else "",
+        "bridge_session": raw.get("bridge_session") if isinstance(raw.get("bridge_session"), str) else "",
+        "admission": admission if admission in ADMISSIONS else ADMISSION_REFUSED,
+        "applied": summary["applied"],
+        "inherited": summary["inherited"],
+        "ignored": summary["ignored"],
+        "code": "" if ok else _code_or(raw.get("code"), QUEUE_CODE_REFUSED),
+        "model": {
+            "type": str(model.get("type") or "")[:120],
+            "label": str(model.get("label") or "")[:120],
+            "family": str(model.get("family") or "")[:120],
+        },
+    }
+
+
+def normalize_queue_status(raw: typing.Any) -> dict:
+    """One confirmation answer. An unreadable status is "pending", never
+    "queued": only a positive, well-formed observation counts."""
+    raw = raw if isinstance(raw, dict) else {}
+    status = raw.get("status")
+    ok = raw.get("ok") is True and status in QUEUE_STATUSES
+    return {
+        "ok": ok,
+        "request_id": raw.get("request_id") if valid_request_id(raw.get("request_id")) else "",
+        "status": status if ok else QUEUE_PENDING,
+        "tasks_added": _whole(raw.get("tasks_added")) if ok else 0,
+        "code": _code_or(raw.get("code"), "" if ok else QUEUE_CODE_UNCONFIRMED),
+    }
 
 
 # ------------------------------------------------------------ END SHARED --

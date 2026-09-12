@@ -168,6 +168,9 @@ class Document:
         # A send into Inpaint writes the mask in a later step; this is what
         # that step needs to know, and it is consumed by it.
         self.pending_send: typing.Optional[dict] = None
+        #: Where the last gallery receive landed, for the follow-up step that
+        #: switches tabs: "canvas", or "clipboard" under the intercept.
+        self.pending_switch: str = ""
         # Bumped whenever a layer changes, so the browser's drag preview is
         # only re-sent when it is stale; pixel_version stays put when layers
         # only moved, so the picture in that preview is not remade for a move.

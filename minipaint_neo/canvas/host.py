@@ -257,6 +257,41 @@ def staged(image):
     return image
 
 
+def gallery_file(payload: typing.Any) -> typing.Optional[str]:
+    """The file a gallery item stands for, when the host proves it may be read.
+
+    A Forge output gallery item names a file the host serves from its own
+    temporary or output directory, and that file carries the generation
+    metadata a decoded picture loses. The path is taken only through the
+    host's own policy - the same ``check_tmp_file`` its paste machinery
+    applies - so a payload naming anything else answers None and the caller
+    decodes the pixels instead. Never a path the browser invented.
+    """
+    candidate = payload
+    if isinstance(candidate, list) and candidate:
+        candidate = candidate[0]
+    if isinstance(candidate, tuple) and candidate:
+        candidate = candidate[0]
+    if isinstance(candidate, dict):
+        nested = candidate.get("image")
+        if isinstance(nested, dict):
+            candidate = nested
+        candidate = candidate.get("path") or candidate.get("name")
+    if not isinstance(candidate, str) or not candidate:
+        return None
+    try:
+        from modules import shared, ui_tempdir
+
+        if not ui_tempdir.check_tmp_file(shared.demo, candidate):
+            return None
+    except Exception:
+        return None
+    try:
+        return candidate if os.path.isfile(candidate) and not os.path.islink(candidate) else None
+    except OSError:
+        return None
+
+
 def gallery_image(payload: typing.Any):
     """The image the browser picked out of a gallery, as PIL.
 

@@ -146,6 +146,58 @@ def pixel_digest(image: typing.Any) -> str:
         return ""
 
 
+#: The side of the thumbnail a loose signature keeps: 8x8 RGBA means 256
+#: small integers per picture, enough to tell one picture from another and
+#: too coarse to tell an original from its lossy re-encode.
+SIGNATURE_SIDE = 8
+
+#: How far, on average per channel, two loose signatures may differ and
+#: still be one picture. Gradio caches what it shows a gallery as lossy WebP
+#: (its default ``format``), and a WebP round trip moves an 8x8 average by
+#: a unit or two; a different picture moves it by tens.
+SIGNATURE_TOLERANCE = 12.0
+
+
+def loose_signature(image: typing.Any) -> typing.List[int]:
+    """What the image looks like, as a value that survives a lossy re-encode.
+
+    ``pixel_digest`` proves that two decodes are the same pixels, and the
+    moment Gradio caches a picture it wrote as WebP - which is what a
+    gallery does with a PIL image it is handed - the pixels are no longer
+    exactly the same, only the picture is. The signature is the size and an
+    8x8 box-filtered RGBA thumbnail, compared with a tolerance by
+    ``signatures_match``; a user swapping the picture for another moves it
+    far beyond that tolerance, a re-encode does not. Empty for anything
+    that is not an image.
+    """
+    if image is None or Image is None:
+        return []
+    try:
+        converted = image if getattr(image, "mode", "") == "RGBA" else image.convert("RGBA")
+        thumb = converted.resize((SIGNATURE_SIDE, SIGNATURE_SIDE), getattr(Image, "BOX", getattr(Image, "BILINEAR", 2)))
+        return [converted.width, converted.height, *thumb.tobytes()]
+    except Exception:
+        return []
+
+
+def signatures_match(left: typing.Any, right: typing.Any, tolerance: float = SIGNATURE_TOLERANCE) -> bool:
+    """Whether two loose signatures describe one picture: same size, and an
+    average per-channel distance within the tolerance. Two empty signatures
+    are not a match - nothing is not the same as nothing."""
+    if not isinstance(left, (list, tuple)) or not isinstance(right, (list, tuple)):
+        return False
+    if len(left) != len(right) or len(left) < 3 or left[0:2] != right[0:2]:
+        return False
+    body_left, body_right = left[2:], right[2:]
+    if not body_left:
+        return False
+    try:
+        total = sum(abs(int(a) - int(b)) for a, b in zip(body_left, body_right))
+    except (TypeError, ValueError):
+        return False
+    return total / len(body_left) <= tolerance
+
+
 def _refuse_oversized(size: int, width: int = 0, height: int = 0) -> None:
     if size > protocol.MAX_HANDOFF_BYTES:
         raise compatibility.BridgeError(compatibility.HANDOFF_TOO_LARGE, f"{size} bytes")

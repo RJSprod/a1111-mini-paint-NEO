@@ -50,7 +50,11 @@ DESTINATION_LABELS = {
     "extras": "Extras",
     "stitch_txt2img": "ImageStitch (txt2img)",
     "stitch_img2img": "ImageStitch (img2img)",
+    # The Clipboard tab's library: a picture goes in as a file, and the
+    # document here is not changed by the send.
+    "clipboard": "Clipboard",
 }
+CLIPBOARD_TARGET = "clipboard"
 # Destinations written from the backend: an Image and the ImageStitch
 # galleries. The host's hidden image textboxes are written from the browser.
 BACKEND_TARGETS = ("extras", "stitch_txt2img", "stitch_img2img")
@@ -98,6 +102,9 @@ WANGP_DELIVER_JS = (
     f"async (target, payload) => {{ if ({_JS}) {{ await {_JS}.deliverWanGP(target, payload); }} }}"
 )
 SWITCH_CANVAS_JS = f"() => {{ if ({_JS}) {_JS}.switchTo('canvas'); }}"
+# After a gallery receive: the tab the receive landed in - the Canvas, or
+# Clipboard when the intercept is on - as the server said it.
+SWITCH_TO_JS = f"(target) => {{ if ({_JS}) {_JS}.switchTo(target); }}"
 CROP_JS = (
     f"(fg, state, mode, box) => {{ if ({_JS}) {_JS}.mark(); "
     f"return [fg, state, mode, {_JS} ? {_JS}.cropBox() : '']; }}"
@@ -219,6 +226,31 @@ def resolve_destination(choice: str, has_mask: bool, has_expansion: bool) -> str
     if choice in DESTINATION_LABELS:
         return choice
     return suggested_destination(has_mask, has_expansion)
+
+
+#: The TouchCanvas most recently built, for the Clipboard tab to wire its
+#: own send into. One per mounted UI; a Reload UI replaces it.
+_current: typing.Dict[str, typing.Any] = {"canvas": None}
+
+
+def current() -> typing.Optional["TouchCanvas"]:
+    """The Canvas of the UI being built, or None when there is none."""
+    return _current.get("canvas")
+
+
+def _clipboard(name: str = ""):
+    """The Clipboard package, or one of its modules, or None.
+
+    Contained the way ``_wangp`` is: Clipboard is optional, and nothing
+    about it may stop the Canvas from loading or a send from passing
+    through.
+    """
+    try:
+        from importlib import import_module
+
+        return import_module(f"..clipboard.{name}" if name else "..clipboard", __package__)
+    except Exception:
+        return None
 
 
 def _wangp(name: str):
@@ -574,17 +606,108 @@ class TouchCanvas:
         return (None, *self._info(doc, "crop", "Opened.", notes, reset_aspect=True))
 
     def receive(self, payload, state, mode, tab: str):
-        """An image arriving from a txt2img / img2img / Extras gallery."""
+        """An image arriving from a txt2img / img2img / Extras gallery.
+
+        With Clipboard's intercept on, the same button puts the picture into
+        the Clipboard library instead - its original file when the host
+        proves which one it is, its pixels otherwise - and the follow-up
+        step switches to that tab. An import that fails says so and passes
+        the picture through to the Canvas, so the send never vanishes.
+        """
         doc = document.ensure(state)
         image = host.gallery_image(payload)
         if image is None:
+            doc.pending_switch = "canvas"
             return self._unchanged(doc, mode, "Pick an image in the gallery first.")
 
-        notes = ["the previous image is one Undo away"] if doc.has_image else []
+        notes = []
+        if self._intercepting():
+            try:
+                asset = self._import_to_clipboard(payload, image, tab)
+            except Exception as error:
+                code = str(getattr(error, "code", "") or type(error).__name__)
+                notes.append(f"Clipboard could not take it ({code}), so it came here instead")
+                log_quietly({"destination": f"{tab} -> Clipboard", "outcome": f"failed: {code}; passed through to the Canvas"})
+            else:
+                doc.pending_switch = CLIPBOARD_TARGET
+                log_quietly({"destination": f"{tab} -> Clipboard", "outcome": f"imported {asset.width}x{asset.height} ({asset.source})"})
+                return self._unchanged(doc, mode, "Sent to Clipboard.")
+
+        doc.pending_switch = "canvas"
+        if doc.has_image:
+            notes.append("the previous image is one Undo away")
         doc.checkpoint("receive")
         doc.load(imaging.to_rgba(image), tab)
         log_quietly({"destination": f"{tab} -> Canvas", "outcome": f"received {doc.image.width}x{doc.image.height}"})
         return self._commit(doc, "crop", f"Received from {tab}.", notes)
+
+    def after_receive(self, state):
+        """Which tab the receive landed in: what the follow-up step switches to."""
+        doc = document.ensure(state)
+        target = getattr(doc, "pending_switch", "") or "canvas"
+        doc.pending_switch = ""
+        return target
+
+    def _intercepting(self) -> bool:
+        clipboard = _clipboard()
+        return bool(clipboard is not None and clipboard.intercept_enabled())
+
+    def _import_to_clipboard(self, payload, image, tab: str):
+        """The gallery picture into the Clipboard library, bytes first.
+
+        The host's own file when its policy proves the payload names one -
+        that keeps a generated PNG's metadata - and the decoded pixels as a
+        PNG otherwise.
+        """
+        store = _clipboard("store")
+        if store is None:
+            raise RuntimeError("the Clipboard package is not available")
+        library = store.store()
+        path = host.gallery_file(payload)
+        if path:
+            try:
+                with open(path, "rb") as stream:
+                    data = stream.read(store.MAX_BYTES + 1)
+                return library.import_bytes(data, os.path.basename(path), "forge_gallery")
+            except Exception:
+                pass  # the pixels are still here; they go in as a PNG
+        return library.import_image(image, f"{tab}-output", "forge_gallery")
+
+    def receive_picture(self, image, state, mode, origin: str, label: str):
+        """A picture handed in by another tab, into the same document path a
+        gallery send takes: Layer 1 over a Background, one Undo away."""
+        doc = document.ensure(state)
+        if image is None:
+            return self._unchanged(doc, mode, f"{label} had nothing to send.")
+        notes = ["the previous image is one Undo away"] if doc.has_image else []
+        doc.checkpoint("receive")
+        doc.load(imaging.to_rgba(image), origin)
+        log_quietly({"destination": f"{label} -> Canvas", "outcome": f"received {doc.image.width}x{doc.image.height}"})
+        return self._commit(doc, "crop", f"Received from {label}.", notes)
+
+    def receive_from(self, event, provider, inputs, origin: str = "clipboard", label: str = "Clipboard"):
+        """Wire an outside trigger into the receive chain, and the tab switch.
+
+        ``provider`` is handed the values of ``inputs`` and returns the PIL
+        image to receive, or None. The chain is the same three steps a
+        gallery send takes - image, wait for the canvas, mask layer - and it
+        ends by switching to the Canvas tab. Only for a Canvas that has been
+        built: before ``build`` there is nothing to wire into.
+        """
+        chain = self._structural
+        if chain is None:
+            raise RuntimeError("the Canvas has not been built yet")
+
+        def fn(*values):
+            state, mode = values[-2], values[-1]
+            try:
+                image = provider(*values[:-2])
+            except Exception as error:
+                code = str(getattr(error, "code", "") or type(error).__name__)
+                return self._unchanged(document.ensure(state), mode, f"{label} could not hand the picture over ({code}).")
+            return self.receive_picture(image, state, mode, origin, label)
+
+        return chain(event, fn, list(inputs) + [self.state, self.mode_state]).then(None, js=SWITCH_CANVAS_JS)
 
     def open_file(self, file, state, mode):
         doc = document.ensure(state)
@@ -1044,6 +1167,8 @@ class TouchCanvas:
 
         target = resolve_destination(_request(request), doc.has_mask, doc.has_expansion)
         label = DESTINATION_LABELS[target]
+        if target == CLIPBOARD_TARGET:
+            return (*skips, *self._send_to_clipboard(doc, mode, notes), "", "")
         if target not in self.targets:
             return (*skips, *self._info(doc, mode, f"{label} was not found in this WebUI, so nothing was sent."), "", "")
 
@@ -1081,6 +1206,30 @@ class TouchCanvas:
         delivered = [outgoing] if target in STITCH_TARGETS else outgoing
         outputs = [delivered if key == target else gr.skip() for key in self.image_targets]
         return (*outputs, *self._info(doc, mode, f"Sent to {label}.", notes), instruction, payload)
+
+    def _send_to_clipboard(self, doc: document.Document, mode: str, notes: list) -> tuple:
+        """The composite into the Clipboard library as a PNG. The document stays.
+
+        No tab switch: the status line says it went, and the Clipboard tab
+        selects it when it is next opened. A Clipboard with no storage
+        folder yet says so, loudly, rather than dropping the send.
+        """
+        store = _clipboard("store")
+        errors = _wangp("errors")
+        if store is None:
+            return self._info(doc, mode, "Clipboard is not available in this install, so nothing was sent.")
+        outgoing = self._outgoing(doc, CLIPBOARD_TARGET, "Clipboard", notes)
+        stem = os.path.splitext(doc.filename or "")[0] if getattr(doc, "filename", "") else ""
+        try:
+            asset = store.store().import_image(outgoing, stem or "minipaint", "minipaint")
+        except Exception as error:
+            code = str(getattr(error, "code", "") or "INTERNAL_ERROR")
+            sentence = errors.message(code) if errors is not None else "The picture could not be put into Clipboard."
+            log_quietly({"destination": "Canvas -> Clipboard", "outcome": f"failed: {code}", "steps": list(notes)})
+            return self._info(doc, mode, sentence, notes)
+        doc.last_send = "Clipboard"
+        log_quietly({"destination": "Canvas -> Clipboard", "outcome": f"sent {outgoing.width}x{outgoing.height}", "steps": list(notes)})
+        return self._info(doc, mode, f"Sent to Clipboard as {asset.filename}.", notes)
 
     def _send_to_wangp(self, doc: document.Document, mode: str, receiver_id: str, notes: list) -> tuple:
         """Prepare one image for the WanGP tab, and stop there.
@@ -1274,6 +1423,13 @@ class TouchCanvas:
         self.image_targets = [key for key in BACKEND_TARGETS if key in self.targets]
         self.stitch_targets = [key for key in STITCH_TARGETS if key in self.targets]
         self.destinations = [key for key in DESTINATION_LABELS if key in self.targets]
+        # Clipboard is a destination whenever its package loads: a library
+        # with no folder yet answers the send with a sentence, not silence.
+        if _clipboard() is not None and _clipboard().available():
+            self.destinations.append(CLIPBOARD_TARGET)
+        self.state = None
+        self.mode_state = None
+        self._structural = None
 
         with gr.Row(elem_id=_id("root"), elem_classes=["minipaint-canvas-root"], equal_height=False):
             with gr.Column(elem_id=_id("work"), elem_classes=["minipaint-work"], scale=1, min_width=320):
@@ -1359,6 +1515,7 @@ class TouchCanvas:
         layers["preview"] = layer_preview
         layers["underlay"] = layer_underlay
 
+        _current["canvas"] = self
         self._wire(
             state=state,
             mode_state=mode_state,
@@ -1583,6 +1740,12 @@ class TouchCanvas:
                 .then(self.commit_foreground, inputs=[state, wait_flag], outputs=[foreground], **quiet)
             )
 
+        # Kept for a tab built after this one that hands pictures in
+        # (Clipboard's Send to Mini Paint), so it takes the same chain.
+        self.state = state
+        self.mode_state = mode_state
+        self._structural = structural
+
         # -- the menu: drawn in the browser, pressing the hidden controls below
         parts["menu_btn"].click(None, js=MENU_JS)
 
@@ -1719,14 +1882,16 @@ class TouchCanvas:
                 self.send_mask, inputs=[state, switch_box], outputs=[mask_payload_box], **quiet
             ).then(None, js=DELIVER_MASK_JS, inputs=[switch_box, mask_payload_box], outputs=[self.targets["inpaint_mask"]])
 
-        # -- receive: the small button next to "send to extras" in each output panel
+        # -- receive: the small button next to "send to extras" in each output
+        # panel. The chain ends by switching to the tab the picture landed
+        # in - the Canvas, or Clipboard when its intercept is on.
         for tab, button, gallery in host.receive_buttons():
             structural(
                 button.click,
                 lambda payload, state, mode, tab=tab: self.receive(payload, state, mode, tab),
                 [gallery, state, mode_state],
                 js=PICK_JS,
-            ).then(None, js=SWITCH_CANVAS_JS)
+            ).then(self.after_receive, inputs=[state], outputs=[switch_box], **quiet).then(None, js=SWITCH_TO_JS, inputs=[switch_box])
 
 
 def create_ui() -> TouchCanvas:

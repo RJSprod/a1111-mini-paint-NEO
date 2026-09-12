@@ -69,6 +69,7 @@ window.minipaintCanvas = (function () {
     // Send to menu writes: the destination is a logical input of the live
     // WanGP page, not a component of this WebUI.
     const WANGP_TAB_PANEL_ID = "tab_wangp";
+    const CLIPBOARD_TAB_PANEL_ID = "tab_minipaint_clipboard";
     const WANGP_PREFIX = "wangp.";
     // The two boxes the server fills when a send is prepared: the instruction
     // and the prepared file's id. Gradio's chained browser step reads them for
@@ -2155,7 +2156,7 @@ window.minipaintCanvas = (function () {
             txt2img: "switch_to_txt2img", img2img: "switch_to_img2img", inpaint: "switch_to_inpaint", extras: "switch_to_extras",
             stitch_txt2img: "switch_to_txt2img", stitch_img2img: "switch_to_img2img"
         };
-        const ours = { canvas: TAB_PANEL_ID, wangp: WANGP_TAB_PANEL_ID };
+        const ours = { canvas: TAB_PANEL_ID, wangp: WANGP_TAB_PANEL_ID, clipboard: CLIPBOARD_TAB_PANEL_ID };
         const name = String(target || "").split(":")[0];
         if (name in helpers) {
             if (typeof window[helpers[name]] === "function") { window[helpers[name]](); }

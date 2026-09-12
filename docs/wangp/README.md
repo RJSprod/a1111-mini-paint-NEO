@@ -200,6 +200,8 @@ ready.
 | the previous setup | `…/wan2gp.backup.json` |
 | a setup being validated | `…/wan2gp.pending.json` (short-lived) |
 | prepared images on their way to WanGP | `…/runtime/handoff/<32 hex>.png`, mode `0700` where the platform has it |
+| images staged through the public queue API | `…/runtime/staging/<32 hex>.png`, swept after 30 minutes |
+| the Clipboard tab's folder, index, draft and history | `…/clipboard.json`, `…/clipboard-index.json`, `…/clipboard-draft.json`, `…/clipboard-history.json` — see `docs/clipboard/README.md` |
 | the bridge plugin, as installed | `<WanGP root>/plugins/wan2gp-minipaint-bridge/` |
 | the bridge plugin, as shipped | `wan2gp_bridge/wan2gp-minipaint-bridge/` in this repository |
 | transfer log lines | `extensions/a1111-mini-paint-NEO/logs/send-log.txt`, shared with Mini Paint |
@@ -227,6 +229,7 @@ to any other file:
 * the Gradio **session hash**
 * **handoff ids** and handoff **paths**
 * the last **receiver revision** and any **receiver cache**
+* **queue request ids**, staged **tokens**, and the **prompt text** of a queue request (the Clipboard tab's own history keeps a prompt only when you typed one there)
 
 `config.py` enforces this twice — a named `NEVER_PERSISTED` set is stripped from every
 section, and then only the keys the schema declares survive — so widening a whitelist by
@@ -366,6 +369,9 @@ something has actually gone wrong; if WanGP is running happily and you have just
 its bridge, use **Reinitialize** and set up again, or reload the WebUI. (A restart button
 that is always visible is worth having and is not in this version.)
 
+Bridge 1.2.0 speaks protocol 3 (the queue operation); the extension's copy and the installed
+copy must match, so updating one half means updating the other and restarting WanGP.
+
 Version comparison is exact equality, not a range: the two halves of the protocol are
 released together, so an installed bridge that is *newer* than the extension is as wrong as
 one that is older. Either way the code is `BRIDGE_VERSION_MISMATCH`, the tab stays usable,
@@ -430,6 +436,10 @@ The ones worth knowing by sight:
 | `STALE_RECEIVER_STATE` | the WanGP page moved between the menu opening and the click. Reopen *Send to*. |
 | `BRIDGE_SESSION_MISMATCH` / `WANGP_RESTARTED` | the WanGP page or process is not the one this send was prepared for. The image was not applied. |
 | `RECEIVER_VERIFY_FAILED` | WanGP took an image, but it could not be confirmed as the one that was sent. The tab does not switch, and the log keeps the detail. |
+| `QUEUE_BUSY` | a queue request from this page is still being confirmed; the form has one owner at a time. Try again in a moment. |
+| `ADMISSION_UNCONFIRMED` | a queue request was written and WanGP's chain ran, but no task carrying the request appeared within the wait and WanGP recorded no error. Look at WanGP's queue before trying again: it may be there. |
+| `WANGP_VALIDATION_REFUSED` | WanGP's own validation declined the queued request; the WanGP page has the detail, and nothing was added. |
+| `QUEUE_REQUEST_REFUSED` / `REQUEST_ID_CONFLICT` / `REQUEST_INVALID` | the bridge did not take a queue request: the reason is in the plugin's line (`[wan2gp-minipaint-bridge] queue: CODE: detail`). The queue codes and the Clipboard codes are read in full in `docs/clipboard/README.md`. |
 
 ## Diagnostics
 
@@ -477,6 +487,12 @@ to install one.
   The legacy miniPaint (Old UI) frontend has its own send path and does not offer them.
 * **No always-visible Restart.** *Restart WanGP* is offered on the error surface, which is
   where it is usually wanted, but not while WanGP is running normally.
+* **The queue adds, and only adds.** Protocol 3's queue request (the Clipboard tab, and any
+  extension calling `window.minipaintInterop`) overlays a prompt and up to three image inputs
+  on the live page and runs WanGP's own add-to-queue chain. It never presses Generate, never
+  aborts, reports no progress and changes no setting; and a gallery it wrote is compared for
+  the restore by a coarse signature with a tolerance, because Gradio caches what a gallery
+  shows as lossy WebP. See `docs/clipboard/README.md`.
 * **Three receivers.** Start frame, end frame and reference are the v1 set. The protocol
   already names control image, positioned reference and style reference, and the bridge
   publishes none of them, so Mini Paint never offers them. Adding one is three declarations

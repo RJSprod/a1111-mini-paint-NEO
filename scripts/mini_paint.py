@@ -41,6 +41,29 @@ except Exception as _wangp_error:  # pragma: no cover - depends on the host
 
     scrub.console(f"the WanGP integration did not load ({_wangp_error}); Mini Paint is unaffected.")
 
+# The public queue API (window.minipaintInterop, minipaint.wangp.queue/v1)
+# and the Clipboard tab are two more contained integrations: each registers
+# itself, and each failing to load costs exactly itself. Clipboard is the
+# first caller of the public API, through the same surface any extension
+# uses; it is registered after WanGP so its tab sits beside it.
+try:
+    from minipaint_neo import interop  # noqa: E402
+
+    interop.register(script_callbacks)
+except Exception as _interop_error:  # pragma: no cover - depends on the host
+    from minipaint_neo import scrub  # noqa: E402
+
+    scrub.console(f"the public queue API did not load ({_interop_error}); Mini Paint is unaffected.")
+
+try:
+    from minipaint_neo import clipboard  # noqa: E402
+
+    clipboard.register(script_callbacks)
+except Exception as _clipboard_error:  # pragma: no cover - depends on the host
+    from minipaint_neo import scrub  # noqa: E402
+
+    scrub.console(f"the Clipboard tab did not load ({_clipboard_error}); Mini Paint and WanGP are unaffected.")
+
 # The touch Canvas puts a small "send to Canvas" button in each output panel.
 # It is created by an ordinary component hook, so it is only registered when
 # that frontend is the one being built; the legacy editor adds its own button

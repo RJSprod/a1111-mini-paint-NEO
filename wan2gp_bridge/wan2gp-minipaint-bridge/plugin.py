@@ -23,6 +23,15 @@ produced the value it is about to write. Outputs the request is not addressing
 come back as ``gr.update()`` - "no change" - so owning every receiver in one
 event cannot turn a start-frame send into a cleared reference list.
 
+Protocol 3 adds the queue: one request writes the caller's prompt and images
+into the live form as replacements, writes WanGP's own ``client_id`` and its
+``add_to_queue_trigger``, and lets WanGP's own chain validate and build the
+tasks. The bridge never calls ``process_tasks`` and never re-implements
+``process_prompt_and_add_tasks``. A later confirmation reads the queue, and
+once the admission is settled either way the overrides are put back - each
+one only if it is still what the bridge wrote. ``admission`` keeps those
+records; this module keeps the order of operations.
+
 The bridge never generates, never switches model or mode, and never redirects
 a send. Its whole job is to put one picture where the user said and then prove
 that is where it went; every path that cannot prove it ends in a code and a
@@ -44,9 +53,10 @@ import time
 import typing
 
 try:
-    from . import bridge_js, bridge_ui, compatibility, handoff, page_head, protocol, receiver_adapters, receiver_state
-    from . import scrub
+    from . import admission, bridge_js, bridge_ui, compatibility, handoff, page_head, protocol
+    from . import receiver_adapters, receiver_state, scrub
 except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
+    import admission  # type: ignore[no-redef]
     import bridge_js  # type: ignore[no-redef]
     import bridge_ui  # type: ignore[no-redef]
     import compatibility  # type: ignore[no-redef]
@@ -69,7 +79,13 @@ THEME_FILE = "theme.css"
 #: The operations the hidden trigger understands. A request naming anything
 #: else is answered with a refusal rather than ignored, so that a parent stuck
 #: on an older protocol gets a code instead of a timeout.
-OPERATIONS = ("hello", "receivers", "receive")
+OPERATIONS = ("hello", "receivers", "receive", "queue", "confirm")
+
+#: What the answer to a queue operation is keyed by in the request box: the
+#: queue payload sits under its own key so its ``request_id`` - the public
+#: one, which is also WanGP's client id - cannot be confused with the
+#: correlation id every box request carries.
+QUEUE_KEY = "queue"
 
 
 def _theme_css(folder: typing.Optional[pathlib.Path] = None) -> str:
@@ -114,6 +130,7 @@ class MiniPaintBridge:
         self,
         host: typing.Optional["compatibility.Host"] = None,
         environ: typing.Optional[typing.Mapping[str, str]] = None,
+        clock: typing.Callable[[], float] = time.monotonic,
     ) -> None:
         self.compat = compatibility.Compatibility(host=host, environ=environ)
         self.adapters: typing.Dict[str, receiver_adapters.ReceiverAdapter] = {}
@@ -122,7 +139,12 @@ class MiniPaintBridge:
         #: The selector components after the receivers in the event's outputs,
         #: in ``compatibility.switch_components`` order.
         self.switch_keys: typing.Tuple[str, ...] = ()
+        #: The queue-only components after those, in ``queue_components`` order.
+        self.queue_keys: typing.Tuple[str, ...] = ()
         self.environ = environ
+        #: What the bridge has written into the live form for a queue request,
+        #: per page, and what has been proved about it since.
+        self.ledger = admission.Ledger(clock=clock)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -135,6 +157,7 @@ class MiniPaintBridge:
         self.state_keys = tuple(key for key, _ in self.compat.state_components())
         self.receiver_keys = tuple(self.compat.output_receivers())
         self.switch_keys = tuple(key for key, _ in self.compat.switch_components())
+        self.queue_keys = tuple(key for key, _ in self.compat.queue_components())
         return resolution
 
     def forget(self) -> None:
@@ -262,6 +285,263 @@ class MiniPaintBridge:
                 values[key] = applied.switch_updates[key]
         return receiver_state.build(values, state.model, state.capabilities, state.view, allowances=state.allowances)
 
+    # -- the queue: protocol 3 -----------------------------------------------
+
+    def _unique_id(self) -> str:
+        """What the native Add-to-queue button writes into its trigger.
+
+        WanGP's own ``get_unique_id``, asked for as a global; a build that
+        does not hand it over gets a fresh value minted here, because the
+        trigger's change is what runs the chain and its value is only ever
+        required to differ from the last one.
+        """
+        getter = self.compat.host.read_global("get_unique_id")
+        if callable(getter):
+            try:
+                value = str(getter())
+                if value:
+                    return value
+            except Exception:
+                pass
+        return f"minipaint-{time.time_ns()}"
+
+    def _gen_info(self, live: typing.Mapping[str, typing.Any]) -> typing.Any:
+        """This page's generation record, the way WanGP's own handlers read it."""
+        state = live.get(compatibility.SESSION_STATE)
+        getter = self.compat.host.read_global("get_gen_info")
+        if callable(getter) and isinstance(state, dict):
+            try:
+                found = getter(state)
+                if isinstance(found, dict):
+                    return found
+            except Exception:
+                pass
+        if isinstance(state, dict) and isinstance(state.get("gen"), dict):
+            return state["gen"]
+        return {}
+
+    def _require_queue(self, request: typing.Mapping[str, typing.Any], bridge_session: str) -> None:
+        wanted = request.get("bridge_session")
+        if isinstance(wanted, str) and wanted and bridge_session and wanted != bridge_session:
+            raise compatibility.BridgeError(compatibility.BRIDGE_SESSION_MISMATCH, "this request was prepared for another page")
+        missing = self.compat.queue_missing()
+        if missing:
+            raise compatibility.BridgeError(
+                compatibility.BRIDGE_COMPONENT_INCOMPATIBLE, f"the queue needs {', '.join(missing)}"
+            )
+
+    def queue(
+        self,
+        raw: typing.Any,
+        bridge_session: str,
+        live: typing.Mapping[str, typing.Any],
+    ) -> typing.Tuple[dict, typing.Dict[str, typing.Any]]:
+        """Section 14, in its order. Returns (ack fields, writes by key).
+
+        Everything that can refuse does so before anything is written: the
+        request is normalised, the session and the components checked, every
+        supplied image staged and decoded, the owner of the form consulted.
+        Only then are the overrides applied - as replacements - the client
+        id and the trigger written, and the record kept. A request that
+        supplies nothing writes the client id and the trigger and nothing
+        else: it queues the live page as it is.
+        """
+        request, code = protocol.normalize_queue_request(raw)
+        if code:
+            raise compatibility.BridgeError(code, "the queue request did not normalise")
+        self._require_queue(request, bridge_session)
+        now = self.ledger.now()
+        request_id = request["request_id"]
+        digest = protocol.queue_payload_hash(request)
+
+        existing = self.ledger.get(bridge_session, request_id)
+        if existing is not None:
+            if existing.payload_hash != digest:
+                raise compatibility.BridgeError(compatibility.REQUEST_ID_CONFLICT, f"{request_id[:8]} was used for another payload")
+            # A retry. The first delivery already asked WanGP; asking again
+            # would queue the task twice, so the answer is the record's.
+            ack = {"admission": protocol.ADMISSION_DUPLICATE}
+            ack.update(existing.answer())
+            return ack, {}
+
+        writes: typing.Dict[str, typing.Any] = {}
+        effective = dict(live)
+        owner = self.ledger.owner(bridge_session)
+        if owner is not None:
+            if not owner.expired(now):
+                raise compatibility.BridgeError(compatibility.QUEUE_BUSY, f"{owner.request_id[:8]} still owns the live form")
+            # Nobody confirmed the previous request and its time is up. Its
+            # overrides are put back - each only where the page still holds
+            # what the bridge wrote - before this request captures anything,
+            # so that what it captures is the page and not the last overlay.
+            restored = self._settle(owner, protocol.QUEUE_EXPIRED, compatibility.ADMISSION_UNCONFIRMED, live, now)
+            writes.update(restored)
+            effective.update({key: value.value for key, value in restored.items() if isinstance(value, bridge_ui.Raw)})
+
+        # Every image first, and any failure refuses the whole request. A
+        # half-composed request is worse than none.
+        loaded: typing.Dict[str, typing.List[handoff.LoadedHandoff]] = {}
+        if request.get("start_handoff_id"):
+            loaded[protocol.QUEUE_FIELD_START] = [handoff.load(request["start_handoff_id"], None, self.environ)]
+        if request.get("end_handoff_id"):
+            loaded[protocol.QUEUE_FIELD_END] = [handoff.load(request["end_handoff_id"], None, self.environ)]
+        if request.get("reference_handoff_ids"):
+            loaded[protocol.QUEUE_FIELD_REFERENCES] = [
+                handoff.load(item, None, self.environ) for item in request["reference_handoff_ids"]
+            ]
+
+        state = receiver_state.read(self.compat, effective)
+        supplied = protocol.queue_overrides(request)
+        applied: typing.Dict[str, typing.Any] = {}
+        ignored: typing.List[dict] = []
+        inherited: typing.List[str] = []
+        originals: typing.Dict[str, typing.Any] = {}
+        written: typing.Dict[str, typing.Any] = {}
+        written_digests: typing.Dict[str, typing.List[typing.List[int]]] = {}
+        working = dict(effective)
+
+        def take(key: str, value: typing.Any) -> None:
+            if key not in originals:
+                originals[key] = working.get(key)
+            written[key] = value
+            working[key] = value
+            writes[key] = value
+
+        for field in (protocol.QUEUE_FIELD_START, protocol.QUEUE_FIELD_END, protocol.QUEUE_FIELD_REFERENCES):
+            if field not in supplied:
+                inherited.append(field)
+                continue
+            receiver_id = protocol.QUEUE_FIELD_RECEIVERS[field]
+            component_key = compatibility.RECEIVER_COMPONENTS[receiver_id]
+            component = self.compat.component(component_key)
+            if component is None:
+                ignored.append({"field": field, "code": compatibility.BRIDGE_COMPONENT_INCOMPATIBLE})
+                continue
+            if not state.offered(receiver_id):
+                # Supplied, and not something this model takes: kept by the
+                # caller, reported, and not written. The rest still queues.
+                ignored.append({"field": field, "code": compatibility.RECEIVER_DISABLED})
+                continue
+            images = loaded[field]
+            if field == protocol.QUEUE_FIELD_REFERENCES:
+                declared = self.compat.declared_capacity(receiver_id)
+                ceiling = int(declared) if declared else compatibility.FALLBACK_REFERENCE_MAX
+                if len(images) > ceiling:
+                    ignored.append({"field": field, "code": compatibility.RECEIVER_LIMIT_REACHED})
+                    continue
+            # Replacement, never append: supplied means "this, for this task".
+            if receiver_adapters.gallery_shaped(component):
+                value: typing.Any = [item.image for item in images]
+            else:
+                value = images[0].image
+            take(component_key, value)
+            written_digests[component_key] = [handoff.loose_signature(item.image) for item in images]
+            applied[field] = len(images) if field == protocol.QUEUE_FIELD_REFERENCES else True
+            # The same switch a menu send makes, computed from the values as
+            # they will be once the earlier overrides of this request land.
+            switch = self.compat.switch_for(receiver_id, working)
+            for key, change in switch.updates.items():
+                if isinstance(change, dict):
+                    writes[key] = change  # a row's visibility: shown, not restored
+                    continue
+                take(key, change)
+
+        if protocol.QUEUE_FIELD_PROMPT in supplied:
+            wizard_on = str(working.get(compatibility.WIZARD_ACTIVE) or "").strip().lower() == "on"
+            target = compatibility.WIZARD_PROMPT if wizard_on else compatibility.PROMPT
+            if self.compat.component(target) is None:
+                ignored.append({"field": protocol.QUEUE_FIELD_PROMPT, "code": compatibility.BRIDGE_COMPONENT_INCOMPATIBLE})
+            else:
+                take(target, request["prompt"])
+                applied[protocol.QUEUE_FIELD_PROMPT] = True
+        else:
+            inherited.append(protocol.QUEUE_FIELD_PROMPT)
+
+        # The correlation WanGP will copy into every task it makes, then the
+        # trigger whose change runs WanGP's own chain. Last, and together.
+        take(compatibility.CLIENT_ID, request_id)
+        writes[compatibility.ADD_TO_QUEUE_TRIGGER] = self._unique_id()
+
+        summary = protocol.queue_summary(applied, inherited, ignored)
+        record = admission.PendingAdmission(
+            request_id=request_id,
+            bridge_session=bridge_session,
+            payload_hash=digest,
+            created_at=now,
+            originals=originals,
+            written=written,
+            written_digests=written_digests,
+            summary=summary,
+            model=dict(state.model),
+        )
+        self.ledger.add(record)
+
+        ack = {"admission": protocol.ADMISSION_REQUESTED}
+        ack.update(record.answer())
+        return ack, writes
+
+    def confirm(
+        self,
+        raw: typing.Any,
+        bridge_session: str,
+        live: typing.Mapping[str, typing.Any],
+    ) -> typing.Tuple[dict, typing.Dict[str, typing.Any]]:
+        """Section 15.2: a bounded admission check, never a progress API.
+
+        Queued when a task carries the request as its client id; refused only
+        on explicit, correlated evidence; expired when the record's time is
+        up with neither; otherwise pending. A record that has once been seen
+        queued stays queued whatever the queue looks like now. Reaching a
+        terminal state is also the moment the overrides are put back.
+        """
+        raw = raw if isinstance(raw, dict) else {}
+        request_id = raw.get("request_id")
+        if not protocol.valid_request_id(request_id):
+            raise compatibility.BridgeError(compatibility.REQUEST_INVALID, "a confirmation names a 32-hex request id")
+        self._require_queue(raw, bridge_session)
+
+        record = self.ledger.get(bridge_session, request_id)
+        if record is None:
+            raise compatibility.BridgeError(compatibility.REQUEST_INVALID, f"no admission record for {request_id[:8]}")
+        if record.terminal:
+            return record.answer(), {}
+
+        now = self.ledger.now()
+        gen = self._gen_info(live)
+        count = admission.matching_tasks(gen, request_id)
+        writes: typing.Dict[str, typing.Any] = {}
+        if count > 0:
+            record.seen_queued = True
+            record.tasks_added_max = max(record.tasks_added_max, count)
+            writes = self._settle(record, protocol.QUEUE_QUEUED, "", live, now)
+        elif admission.refusal_evidence(gen, request_id):
+            writes = self._settle(record, protocol.QUEUE_REFUSED, compatibility.WANGP_VALIDATION_REFUSED, live, now)
+        elif record.expired(now):
+            writes = self._settle(record, protocol.QUEUE_EXPIRED, compatibility.ADMISSION_UNCONFIRMED, live, now)
+        return record.answer(), writes
+
+    def _settle(
+        self,
+        record: "admission.PendingAdmission",
+        status: str,
+        code: str,
+        live: typing.Mapping[str, typing.Any],
+        now: float,
+    ) -> typing.Dict[str, typing.Any]:
+        """Make a record terminal and put its overrides back where they still
+        can be. Returns the writes, wrapped so their shape is never misread."""
+        record.settle(status, code, now)
+        updates, restored, skipped = admission.restore_plan(record, live)
+        record.restored = True
+        record.restored_keys = list(restored)
+        record.skipped_keys = list(skipped)
+        record.forget_private()
+        if skipped:
+            _note(f"queue {record.request_id[:8]}: restore skipped for {', '.join(skipped)}; the page changed meanwhile")
+        if restored:
+            _note(f"queue {record.request_id[:8]}: overrides restored ({', '.join(restored)}); admission {record.status}")
+        return {key: bridge_ui.Raw(value) for key, value in updates.items()}
+
     # -- the event -----------------------------------------------------------
 
     def handle(
@@ -269,12 +549,14 @@ class MiniPaintBridge:
         raw_request: typing.Any,
         values: typing.Sequence[typing.Any],
         session_hash: typing.Any,
-    ) -> typing.Tuple[dict, typing.Optional["receiver_adapters.Applied"]]:
+    ) -> typing.Tuple[dict, typing.Any]:
         """One request in, one acknowledgement out. Never raises.
 
         The acknowledgement always carries the request id and the channel id it
         came in with, because the browser correlates on them and an answer it
-        cannot place is an answer it must throw away.
+        cannot place is an answer it must throw away. The second value is what
+        to write: an ``Applied`` for an image send, a mapping of component key
+        to value for a queue operation, None for everything else.
         """
         started = time.perf_counter()
         request = _parse(raw_request)
@@ -291,7 +573,7 @@ class MiniPaintBridge:
             "instance_id": instance,
             "bridge_session": session,
         }
-        applied: typing.Optional[receiver_adapters.Applied] = None
+        result: typing.Any = None
 
         try:
             if operation not in OPERATIONS:
@@ -305,18 +587,32 @@ class MiniPaintBridge:
                     "this Gradio build did not supply a session hash",
                 )
 
-            state = self.state(values)
             if operation in ("hello", "receivers"):
-                ack.update(self.describe(state, session))
+                ack.update(self.describe(self.state(values), session))
                 ack["ok"] = bool(ack.get("ready"))
+            elif operation == "receive":
+                answer, result = self.receive(request, self.state(values), session)
+                ack.update(answer)
+            elif operation == "queue":
+                answer, result = self.queue(request.get(QUEUE_KEY), session, self.live_values(values))
+                ack.update(answer)
+                ack["ok"] = True
             else:
-                result, applied = self.receive(request, state, session)
-                ack.update(result)
+                answer, result = self.confirm(request.get(QUEUE_KEY), session, self.live_values(values))
+                ack.update(answer)
+                ack["ok"] = True
         except compatibility.BridgeError as error:
             ack.update({"ok": False, "ready": False, "code": error.code})
+            if operation in ("queue", "confirm"):
+                ack["admission"] = protocol.ADMISSION_REFUSED
+                wanted = request.get(QUEUE_KEY) if isinstance(request.get(QUEUE_KEY), dict) else {}
+                if protocol.valid_request_id(wanted.get("request_id")):
+                    ack["queue_request_id"] = wanted["request_id"]
             _note(f"{operation}: {error.code}: {error.detail}")
         except Exception as error:  # pragma: no cover - the last line of defence
             ack.update({"ok": False, "ready": False, "code": compatibility.INTERNAL_ERROR})
+            if operation in ("queue", "confirm"):
+                ack["admission"] = protocol.ADMISSION_REFUSED
             _note(f"{operation}: unexpected: {error!r}")
         else:
             # One line per request that went through, so the log outside
@@ -328,26 +624,34 @@ class MiniPaintBridge:
         # handshake payload carries its own copies, and the two must agree.
         ack["bridge_session"] = session
         ack["instance_id"] = instance
-        return ack, applied
+        return ack, result
 
-    def outputs(self, ack: dict, applied: typing.Optional["receiver_adapters.Applied"]) -> typing.List[typing.Any]:
-        """The event's return: the acknowledgement, then every receiver.
+    def outputs(self, ack: dict, result: typing.Any) -> typing.List[typing.Any]:
+        """The event's return: the acknowledgement, then every component.
 
-        Every receiver output is "no change" except the one that was written,
-        which is the mechanism section 21.1 describes and the reason a single
-        event can safely own all of them.
+        Receivers first, then the selector components, then the queue-only
+        ones, each in the order it was wired. Every output is "no change"
+        except the ones the operation wrote, which is the mechanism section
+        21.1 describes and the reason a single event can safely own all of
+        them. An ``Applied`` (an image send) and a mapping (a queue
+        operation) are both taken.
         """
-        updates = bridge_ui.no_change(len(self.receiver_keys))
-        if applied is not None and applied.receiver_id in self.receiver_keys:
-            updates[self.receiver_keys.index(applied.receiver_id)] = applied.value
-        # Then the selector components, in the same order they were wired;
-        # "no change" for each one a switch did not name.
-        switched = bridge_ui.no_change(len(self.switch_keys))
-        if applied is not None:
-            for index, key in enumerate(self.switch_keys):
-                if key in applied.switch_updates:
-                    switched[index] = bridge_ui.update_for(applied.switch_updates[key])
-        return [json.dumps(ack, default=str), *updates, *switched]
+        writes: typing.Dict[str, typing.Any] = {}
+        if isinstance(result, receiver_adapters.Applied):
+            writes[result.component_key] = bridge_ui.Raw(result.value)
+            writes.update(result.switch_updates)
+        elif isinstance(result, dict):
+            writes = dict(result)
+
+        receiver_component_keys = [compatibility.RECEIVER_COMPONENTS.get(receiver_id, "") for receiver_id in self.receiver_keys]
+        placed: typing.List[typing.Any] = []
+        for keys in (receiver_component_keys, self.switch_keys, self.queue_keys):
+            block = bridge_ui.no_change(len(keys))
+            for index, key in enumerate(keys):
+                if key in writes:
+                    block[index] = bridge_ui.update_for(writes[key])
+            placed.extend(block)
+        return [json.dumps(ack, default=str), *placed]
 
 
 class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
@@ -440,6 +744,9 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
                 f"not ready: missing {', '.join(resolution.missing_mandatory)}. "
                 f"Resolved: {', '.join(sorted(resolution.elem_ids.values())) or 'nothing'}."
             )
+        missing_queue = self.bridge.compat.queue_missing()
+        if missing_queue:
+            _note(f"the queue operation is off on this build: missing {', '.join(missing_queue)}; image send is unaffected")
 
         # Nothing this plugin does may take WanGP down with it. It already
         # has, once: a value that was not a component reached a Gradio event,
@@ -506,10 +813,12 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         handler = self._make_handler()
         inputs = [component for _, component in self.bridge.compat.state_components()]
         # The receivers first, then the selector components a send may switch
-        # (``switch_components`` order) - ``MiniPaintBridge.outputs`` returns
-        # one value per entry in exactly this order.
+        # (``switch_components`` order), then what only a queue request
+        # writes (``queue_components`` order) - ``MiniPaintBridge.outputs``
+        # returns one value per entry in exactly this order.
         outputs = list(self.bridge.compat.output_components())
         outputs += [component for _, component in self.bridge.compat.switch_components()]
+        outputs += [component for _, component in self.bridge.compat.queue_components()]
 
         def build_controls() -> typing.Any:
             # Runs inside WanGP's Blocks, inside the target's own container.
@@ -560,8 +869,8 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         def handler(request: typing.Any, *values: typing.Any) -> typing.List[typing.Any]:
             raw = values[0] if values else ""
             session_hash = getattr(request, "session_hash", None)
-            ack, applied = bridge.handle(raw, values[1:], session_hash)
-            return bridge.outputs(ack, applied)
+            ack, result = bridge.handle(raw, values[1:], session_hash)
+            return bridge.outputs(ack, result)
 
         # Gradio recognises the parameter by its annotation, and this module
         # postpones annotations, so the real class is attached here instead of
@@ -658,11 +967,29 @@ def _token(value: typing.Any, limit: int = 64) -> str:
 
 
 def _summary(operation: typing.Any, ack: typing.Mapping[str, typing.Any], seconds: float) -> str:
-    """What one answered request amounted to, in receiver ids and tokens only."""
+    """What one answered request amounted to, in receiver ids and tokens only.
+
+    A queue line names the request by its first eight characters, the fields
+    it applied and the ones it left to the page - never the prompt, never a
+    filename, never a path.
+    """
     took = f"{seconds * 1000:.0f} ms"
     if operation == "receive":
         line = f"receive: {ack.get('receiver_id')} {ack.get('operation')} {ack.get('verification')} in {took}"
         return line + (f", switched {ack['switched']}" if ack.get("switched") else "")
+    if operation in ("queue", "confirm"):
+        short = str(ack.get("queue_request_id") or "")[:8] or "?"
+        applied = ack.get("applied") if isinstance(ack.get("applied"), dict) else {}
+        names = [field for field in protocol.QUEUE_FIELDS if applied.get(field)]
+        ignored = [item.get("field") for item in (ack.get("ignored") or []) if isinstance(item, dict)]
+        line = f"{operation} {short}: {ack.get('admission') or ack.get('status')} in {took}"
+        if operation == "queue":
+            line += f"; overrides {', '.join(names) or 'none (the live page as it is)'}"
+            if ignored:
+                line += f"; ignored {', '.join(str(item) for item in ignored)}"
+        else:
+            line += f"; status {ack.get('status')}, {ack.get('tasks_added', 0)} task(s)"
+        return line
     parts = []
     for item in ack.get("receivers") or []:
         if not isinstance(item, dict):

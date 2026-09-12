@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.1.5"
+BRIDGE_VERSION = "1.2.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -65,6 +65,15 @@ HANDOFF_INVALID_IMAGE = "HANDOFF_INVALID_IMAGE"
 HANDOFF_TOO_LARGE = "HANDOFF_TOO_LARGE"
 HANDOFF_DIGEST_MISMATCH = "HANDOFF_DIGEST_MISMATCH"
 INTERNAL_ERROR = "INTERNAL_ERROR"
+#: The queue operation's own codes (protocol 3). The same strings as
+#: ``protocol.QUEUE_CODE_*`` and as errors.py's, for the same reason.
+REQUEST_INVALID = "REQUEST_INVALID"
+REQUEST_ID_CONFLICT = "REQUEST_ID_CONFLICT"
+PROMPT_TOO_LONG = "PROMPT_TOO_LONG"
+QUEUE_BUSY = "QUEUE_BUSY"
+QUEUE_REQUEST_REFUSED = "QUEUE_REQUEST_REFUSED"
+ADMISSION_UNCONFIRMED = "ADMISSION_UNCONFIRMED"
+WANGP_VALIDATION_REFUSED = "WANGP_VALIDATION_REFUSED"
 
 
 class BridgeError(Exception):
@@ -124,6 +133,16 @@ REFERENCE_SELECTOR = "reference_selector"
 START_ROW = "start_row"
 END_ROW = "end_row"
 REFERENCE_ROW = "reference_row"
+#: Protocol 3, the queue: the prompt boxes, the wizard flag that says which
+#: of them generation reads, WanGP's own correlation id, and the hidden
+#: trigger whose change runs WanGP's native add-to-queue chain. All optional
+#: for the image send; the queue refuses without the critical ones.
+PROMPT = "prompt"
+WIZARD_PROMPT = "wizard_prompt"
+WIZARD_ACTIVE = "wizard_active"
+CLIENT_ID = "client_id"
+ADD_TO_QUEUE_TRIGGER = "add_to_queue_trigger"
+GALLERY_TAB = "gallery_tab"
 
 # VERIFY ON A REAL INSTALL (section 49.1): every elem_id below was taken from
 # WanGP's documented media-input naming and from the receiver example in
@@ -242,6 +261,23 @@ COMPONENTS: typing.Tuple[ComponentSpec, ...] = (
                   known_for="Wan2GP: the row holding image_end"),
     ComponentSpec(key=REFERENCE_ROW, candidates=("image_refs_row",), kind="container", mandatory=False,
                   known_for="Wan2GP: the row holding image_refs"),
+    # -- the queue (protocol 3) ----------------------------------------------
+    # Confirmed against Wan2GP at 362c346: ``add_to_queue_trigger.change``
+    # runs validate_wizard_prompt -> save_inputs -> process_prompt_and_add_tasks
+    # -> update_status, and never process_tasks; ``save_inputs`` reads
+    # ``client_id`` into every task it makes.
+    ComponentSpec(key=PROMPT, candidates=("prompt",), kind="text", mandatory=False,
+                  known_for="Wan2GP: the prompt textbox generation reads when the wizard is off"),
+    ComponentSpec(key=WIZARD_PROMPT, candidates=("wizard_prompt",), kind="text", mandatory=False,
+                  known_for="Wan2GP: the prompt textbox shown, and read, when the wizard is on"),
+    ComponentSpec(key=WIZARD_ACTIVE, candidates=("wizard_prompt_activated_var",), kind="text", mandatory=False,
+                  known_for='Wan2GP: hidden gr.Text, "on" while the prompt wizard is on'),
+    ComponentSpec(key=CLIENT_ID, candidates=("client_id",), kind="text", mandatory=False,
+                  known_for="Wan2GP: hidden gr.Textbox; save_inputs copies it into each queued task's params"),
+    ComponentSpec(key=ADD_TO_QUEUE_TRIGGER, candidates=("add_to_queue_trigger",), kind="text", mandatory=False,
+                  known_for="Wan2GP: hidden gr.Text; its change runs the native queue-only chain"),
+    ComponentSpec(key=GALLERY_TAB, candidates=("current_gallery_tab",), kind="state", mandatory=False,
+                  known_for="Wan2GP: which output gallery is showing; read by process_prompt_and_add_tasks"),
 )
 
 COMPONENTS_BY_KEY = {spec.key: spec for spec in COMPONENTS}
@@ -256,7 +292,15 @@ GLOBALS: typing.Tuple[str, ...] = (
     # asked for too. These two are how Wan2GP's own handlers find the model
     # a page is on and what that model allows.
     "get_model_def", "get_state_model_type",
+    # Protocol 3, the queue: what the native Add-to-queue button writes into
+    # its trigger, and the per-page generation record the confirmation reads.
+    "get_unique_id", "get_gen_info",
 )
+
+#: What the queue operation cannot do without. The image send keeps working
+#: on a build that lacks any of these; a queue request is refused with
+#: BRIDGE_COMPONENT_INCOMPATIBLE naming the missing one.
+QUEUE_CRITICAL: typing.Tuple[str, ...] = (CLIENT_ID, ADD_TO_QUEUE_TRIGGER, PROMPT, SESSION_STATE)
 
 #: What a send switches on for a receiver that the model allows but the page
 #: has not selected. Short tokens, carried in the receiver descriptor so the
@@ -790,8 +834,27 @@ class Compatibility:
             # What the model *allows* depends on the output mode and on the
             # model this page is on, and both are session values too.
             IMAGE_MODE, SESSION_STATE,
+            # Protocol 3: what a queue request may overlay, read so that the
+            # original can be captured and put back; the selectors a switch
+            # may set, for the same reason; and which gallery tab is showing.
+            PROMPT, WIZARD_PROMPT, WIZARD_ACTIVE, CLIENT_ID, GALLERY_TAB,
+            IMAGE_PROMPT_RADIO, END_IMAGES_CHECKBOX, REFERENCE_SELECTOR,
         )
         return [(key, self.resolution.component(key)) for key in keys if self.resolution.component(key) is not None]
+
+    def queue_components(self) -> typing.List[typing.Tuple[str, typing.Any]]:
+        """The components only a queue request writes, as (key, component).
+
+        The tail of the bridge event's outputs, after the receivers and the
+        switch components, in this fixed order. Only the ones this build
+        resolved, for the reason ``switch_components`` gives.
+        """
+        keys = (PROMPT, WIZARD_PROMPT, CLIENT_ID, ADD_TO_QUEUE_TRIGGER)
+        return [(key, self.resolution.component(key)) for key in keys if self.resolution.component(key) is not None]
+
+    def queue_missing(self) -> typing.List[str]:
+        """The queue-critical components this build did not hand over."""
+        return [key for key in QUEUE_CRITICAL if self.resolution.component(key) is None]
 
     def switch_components(self) -> typing.List[typing.Tuple[str, typing.Any]]:
         """The components a send may update besides the receiver, as (key, component).
@@ -1066,6 +1129,10 @@ class Compatibility:
                 "receiver_query": ready,
                 "image_handoff": ready,
                 "verified_ack": ready,
+                # Protocol 3. False on a build that lacks a queue-critical
+                # component: the image send still works, a queue request is
+                # refused with BRIDGE_COMPONENT_INCOMPATIBLE naming it.
+                "queue": bool(ready and not self.queue_missing()),
                 # Theme is presentation. Section 27.1: it may fail on its own
                 # without taking image handoff with it, so it is reported
                 # separately and never gates ``ready``.
@@ -1080,6 +1147,8 @@ class Compatibility:
             payload["missing"] = missing
         if resolution.missing_optional:
             payload["absent"] = list(resolution.missing_optional)
+        if ready and self.queue_missing():
+            payload["queue_missing"] = list(self.queue_missing())
         return payload
 
 

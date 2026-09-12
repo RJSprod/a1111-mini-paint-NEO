@@ -36,6 +36,14 @@ SUITES = [
     "test_wangp_runtime",
     "test_wangp_proxy",
     "test_wangp_receiver_contract",
+    # Protocol 3: the queue operation inside the plugin - overlay, admit,
+    # confirm, restore - then the public API that carries it and the
+    # Clipboard tab that is its first client.
+    "test_wangp_queue",
+    "test_interop",
+    "test_clipboard_store",
+    "test_clipboard_ui",
+    "test_queue_e2e",
 ]
 
 

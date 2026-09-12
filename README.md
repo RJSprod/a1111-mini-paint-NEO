@@ -356,6 +356,59 @@ and what result proves it — and it is honest about which boxes nobody has tick
 never stored, the invariants you can check yourself, and how to read a failure code. The
 specification both follow is `docs/WAN2GP_TAB_DESIGN_INTENT_REVISED_2026-09-06.txt`.
 
+## The Clipboard tab
+
+A third top-level tab, **Clipboard**: a small file browser over one folder on the Forge
+host (left, two thirds), and a small **WanGP request** composer (right, one third) — three
+cards for *First Frame*, *Last Frame* and *Reference*, a prompt box, and one button, **Add
+to Queue**. It is the first client of a **public browser API** any extension may call,
+`window.minipaintInterop`, contract `minipaint.wangp.queue/v1`.
+
+**The rule.** A request is an overlay on the live WanGP page. A card left at *Use WanGP* and
+an empty prompt mean *whatever the WanGP page has right now*; a filled card or a typed
+prompt overrides the page for that one queued task and is put back afterwards. So the
+button is always a button: an empty composer asks WanGP to queue the page exactly as it is,
+a card put back with its × changes nothing on the WanGP page, and a picture the current
+model cannot use is kept, badged *Not used by current model*, sent, and reported as ignored
+rather than refused. Nothing is generated, aborted or watched: the request goes into
+**WanGP's own queue** through WanGP's own add-to-queue chain, and WanGP's own validation
+decides. Press Generate in WanGP as you always did.
+
+**What you get back.** *Added to WanGP queue.* only when a task carrying the request
+appeared in WanGP's queue; a refusal only when WanGP recorded one for exactly that request;
+otherwise *WanGP did not confirm…* — never a claim WanGP did not prove. Each confirmed
+recipe goes into **Queue Send History** (the prompt only if you typed one here), where
+*Load* puts it back into the composer without queueing anything.
+
+**The browser.** Menu → *Choose storage folder* first: Clipboard keeps its pictures in that
+folder on the machine running Forge and nowhere else, and never names it to the browser —
+every thumbnail is fetched by an opaque id. Upload, paste (Ctrl+V, or the paste panel when
+the browser will not let the page read its clipboard), drop a file on a card, sort, resize
+the thumbnails, rename, delete, refresh (files dropped into the folder by hand appear),
+and *Send selected to* Mini Paint, img2img, Inpaint, Extras or ImageStitch by the same
+routes the Canvas takes. A Forge PNG keeps every byte, so its generation parameters
+survive.
+
+**With Mini Paint.** The Canvas's *Send to* menu now offers **Clipboard**; *Send selected
+to Mini Paint* lands on the Canvas as Layer 1 over a Background, one Undo away; and the
+menu's **Intercept "Send to Mini Paint"** switch makes the gallery's 🖌️ button put the
+result *here* instead — its original file when Forge proves which one it is — and passes it
+through to the Canvas, with the reason, when Clipboard cannot take it.
+
+**Themed.** Every part of the tab is an ordinary Gradio component and every colour is a
+theme variable; there is no fixed white or black anywhere in it, so a night-mode theme
+reaches the grid, the cards, the menu and the history alike.
+
+**For other extensions.** `await window.minipaintInterop.wangp.enqueue({ prompt, images:
+{ start, end, references } })` with handles from `stageImage(blob)` (`{ kind: "staged",
+id }`) or Clipboard assets (`{ kind: "clipboard_asset", id }`); omitted fields inherit,
+calls are serialised, ids are never paths, and the answer is `queued`, `refused` (with a
+code) or `unconfirmed`. `docs/clipboard/README.md` is the guide, and
+`docs/clipboard/CONTRACTS.md` the contract, for both the tab and the API. Bridge plugin
+1.2.0 (protocol 3) carries the queue operation, so WanGP's bridge must be updated and
+WanGP restarted; a build lacking one of the six queue components keeps the image send and
+refuses the queue with `BRIDGE_COMPONENT_INCOMPATIBLE`.
+
 ## Legacy editor (Old UI)
 
 Everything below is unchanged from the original extension and applies when *Use Old UI* is
@@ -483,6 +536,13 @@ minipaint_neo/
     canvas/imaging.py            mask, crop and fill maths (Pillow only)
     canvas/outpaint.py           expansion with automatic mask
     canvas/document.py           layers on a canvas (the picture over a white Background), the composite, the mask, and the history of structural steps
+    interop.py                   the public queue API's server half: staging, preparing handoffs, /minipaint-interop/*
+    clipboard/                   the Clipboard tab (see docs/clipboard/README.md)
+        config.py                the folder, the intercept, the sort and the thumbnail size
+        store.py                 the library: one folder, opaque ids, containment, import, refresh, rename, delete
+        history.py               the composer's draft and Queue Send History
+        routes.py                a picture by its id, and bytes in
+        ui.py                    the tab: the browser, the composer, Add to Queue through the public API
     wangp/                       the WanGP tab, all of it (see docs/wangp/README.md)
         config.py                what survives a restart, and only that
         discovery.py             WanGP root, Conda/venv runtimes, GPUs, the bridge plugin
@@ -490,18 +550,21 @@ minipaint_neo/
         proxy.py                 /wan2gp/* on the Forge origin, streamed to that one port
         handoff.py               PNGs on their way out, as opaque ids under a fixed root
         bridge.py                which browser page is talking to which live WanGP session
-        protocol.py              the vocabulary all three sides share
+        protocol.py              the vocabulary all three sides share (protocol 3: the queue)
         errors.py                the failure codes and their sentences
         journal.py               the tab's console: the last 400 steps, in memory
         process_log.py           logs/wangp-log.txt: the same steps, on disk, bounded
         ui.py / settings.py / diagnostics.py    the tab, the one Settings entry, the report
 javascript/main.js               legacy bridge, parent-frame side (unchanged)
 javascript/minipaint_canvas.js   attaches the canvas; crop frame, touch gestures, tools, the rail's height, the layer list, waits, focus mode
-javascript/minipaint_wangp.js    the WanGP iframe: handshake, receiver query, verified send
+javascript/minipaint_wangp.js    the WanGP iframe: handshake, receiver query, verified send, queue and confirm
+javascript/minipaint_interop.js  window.minipaintInterop: the public queue API (v1, minipaint.wangp.queue/v1)
+javascript/minipaint_clipboard.js  the Clipboard tab's browser side: the grid, the menu, paste and drop, Add to Queue
 wan2gp_bridge/                   the companion plugin, installed into your WanGP
-style.css                        legacy rules, then rules scoped to the Canvas root
+style.css                        legacy rules, rules scoped to the Canvas root, then to the Clipboard root (theme variables only)
 miniPaint/                       the legacy editor itself
 docs/wangp/                      the WanGP operator's guide, the Phase 0 checklist, the module contracts
+docs/clipboard/                  the Clipboard tab and the public queue API: the guide and the contracts
 tests/                           see tests/README.md
 ```
 

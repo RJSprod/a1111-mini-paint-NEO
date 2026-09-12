@@ -44,7 +44,7 @@ window.minipaintWanGP = (function () {
     /* names, the ids and the ceilings are that file's, not this one's.       */
     /* -------------------------------------------------------------------- */
 
-    const PROTOCOL = 2;
+    const PROTOCOL = 3;
 
     const HELLO = "WANGP_BRIDGE_HELLO";
     const READY = "WANGP_BRIDGE_READY";
@@ -55,9 +55,16 @@ window.minipaintWanGP = (function () {
     const FOCUS_RECEIVER = "WANGP_FOCUS_RECEIVER";
     const THEME_STATE = "WANGP_THEME_STATE";
     const RUNTIME_STATE = "WANGP_RUNTIME_STATE";
+    // Protocol 3: the queue. A request overlays a prompt and images on the
+    // live page and asks it to add itself to WanGP's own queue; a
+    // confirmation asks whether it landed. See minipaint.wangp.queue/v1.
+    const QUEUE_REQUEST = "WANGP_QUEUE_REQUEST";
+    const QUEUE_RESULT = "WANGP_QUEUE_RESULT";
+    const QUEUE_CONFIRM = "WANGP_QUEUE_CONFIRM";
+    const QUEUE_STATUS = "WANGP_QUEUE_STATUS";
 
-    const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE];
-    const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE];
+    const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM];
+    const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS];
 
     const RECEIVER_IDS = ["start_frame", "end_frame", "reference", "control_image", "positioned_ref", "style_ref"];
     const ROLES = ["start", "end", "reference", "control", "positioned", "style"];
@@ -79,6 +86,17 @@ window.minipaintWanGP = (function () {
     // corrects it in place rather than being thrown away.
     const LATE_ANSWER_GRACE_MS = 60000;
     const RECEIVE_TIMEOUT_MS = 30000;
+    // The queue's two round trips, and the bounded confirmation schedule:
+    // once at once, then a short sequence, then never again. No timer
+    // outlives the call that started it.
+    const QUEUE_REQUEST_TIMEOUT_MS = 30000;
+    const QUEUE_CONFIRM_TIMEOUT_MS = 10000;
+    const QUEUE_CONFIRM_DELAYS_MS = [0, 100, 300, 700, 1500, 3000];
+    const PROMPT_MAX_CHARS = 4000;
+    const MAX_QUEUE_REFERENCES = 16;
+    const QUEUE_FIELDS = ["prompt", "start", "end", "references"];
+    const ADMISSIONS = ["requested", "duplicate", "refused"];
+    const QUEUE_STATUSES = ["pending", "queued", "refused", "expired"];
 
     // A handoff id and a channel id have one shape each, and a value that is
     // not exactly that shape is refused rather than repaired. See handoff.py.
@@ -103,6 +121,14 @@ window.minipaintWanGP = (function () {
     const HANDOFF_INVALID_ID = "HANDOFF_INVALID_ID";
     const WANGP_RESTARTED = "WANGP_RESTARTED";
     const INTERNAL_ERROR = "INTERNAL_ERROR";
+    const BRIDGE_COMPONENT_INCOMPATIBLE = "BRIDGE_COMPONENT_INCOMPATIBLE";
+    const REQUEST_INVALID = "REQUEST_INVALID";
+    const REQUEST_ID_CONFLICT = "REQUEST_ID_CONFLICT";
+    const PROMPT_TOO_LONG = "PROMPT_TOO_LONG";
+    const QUEUE_BUSY = "QUEUE_BUSY";
+    const QUEUE_REQUEST_REFUSED = "QUEUE_REQUEST_REFUSED";
+    const ADMISSION_UNCONFIRMED = "ADMISSION_UNCONFIRMED";
+    const WANGP_VALIDATION_REFUSED = "WANGP_VALIDATION_REFUSED";
 
     // The few sentences this side needs before the server can supply one. The
     // wording is errors.py's, kept short enough for a menu line.
@@ -118,7 +144,15 @@ window.minipaintWanGP = (function () {
         RECEIVER_VERIFY_FAILED: "WanGP took an image, but it could not be confirmed as the one that was sent.",
         HANDOFF_INVALID_ID: "That is not a handoff this extension made.",
         WANGP_RESTARTED: "WanGP restarted while the image was on its way.",
-        INTERNAL_ERROR: "The WanGP integration hit an unexpected problem."
+        INTERNAL_ERROR: "The WanGP integration hit an unexpected problem.",
+        BRIDGE_COMPONENT_INCOMPATIBLE: "This WanGP bridge needs to be reinstalled or updated.",
+        REQUEST_INVALID: "That queue request is not one this extension can carry.",
+        REQUEST_ID_CONFLICT: "That request id was already used for a different request.",
+        PROMPT_TOO_LONG: "The prompt is longer than WanGP queue requests allow (4000 characters).",
+        QUEUE_BUSY: "WanGP is still taking the previous queue request; try again in a moment.",
+        QUEUE_REQUEST_REFUSED: "WanGP did not take the queue request.",
+        ADMISSION_UNCONFIRMED: "WanGP did not confirm that the request was added to the queue.",
+        WANGP_VALIDATION_REFUSED: "WanGP declined the queue request; check the WanGP page for details."
     };
 
     /* The tab's own elements. The tab builds these once and only changes what
@@ -166,7 +200,11 @@ window.minipaintWanGP = (function () {
         listening: false,
         watcher: null,
         lastCode: "",
-        theme: ""
+        theme: "",
+        // Whether the bridge in this page can take a queue request at all: the
+        // handshake says, and a build that lacks a queue-critical component
+        // says no while still taking an image send.
+        queue: false
     };
 
     /* ------------------------------------------------------------------ */
@@ -447,6 +485,7 @@ window.minipaintWanGP = (function () {
             // that just replaced it.
             abandon(BRIDGE_SESSION_MISMATCH);
             S.ready = false;
+            S.queue = false;
             S.bridgeSession = "";
             S.receivers = [];
             S.revision = "";
@@ -674,7 +713,9 @@ window.minipaintWanGP = (function () {
         if (message.type === READY) { onReady(message.payload); return; }
         if (message.type === RUNTIME_STATE) { onRuntimeState(message.payload); return; }
         if (message.type === RECEIVERS) { onReceivers(message.requestId, message.payload); return; }
-        if (message.type === RECEIVE_RESULT) { onResult(message.requestId, message.payload); }
+        if (message.type === RECEIVE_RESULT) { onResult(message.requestId, message.payload); return; }
+        if (message.type === QUEUE_RESULT) { onQueueResult(message.requestId, message.payload); return; }
+        if (message.type === QUEUE_STATUS) { onQueueStatus(message.requestId, message.payload); }
     }
 
     /** Why an inbound message was dropped. Every rejection is silent by
@@ -734,6 +775,7 @@ window.minipaintWanGP = (function () {
         S.receivers = declared ? normaliseReceivers(payload.receivers) : [];
         S.revision = declared && REVISION_RE.test(text(payload.state_revision, 64)) ? payload.state_revision : "";
         S.ready = declared;
+        S.queue = declared && !!(payload.capabilities && payload.capabilities.queue === true);
         S.lastCode = declared ? "" : (failure || "BRIDGE_COMPONENT_INCOMPATIBLE");
         report(declared, S.lastCode);
         recordSession(true);
@@ -850,6 +892,234 @@ window.minipaintWanGP = (function () {
     }
 
     /* ------------------------------------------------------------------ */
+    /* The queue: minipaint.wangp.queue/v1 over protocol 3                  */
+    /* ------------------------------------------------------------------ */
+
+    /** applied / inherited / ignored as the shared normaliser shapes them: a
+     * field is in exactly one of the three, an ignored one carries a code. */
+    function normaliseQueueSummary(raw) {
+        const applied = raw && typeof raw.applied === "object" && raw.applied ? raw.applied : {};
+        const out = { prompt: applied.prompt === true, start: applied.start === true, end: applied.end === true, references: 0 };
+        if (Number.isFinite(applied.references) && applied.references > 0) { out.references = Math.trunc(applied.references); }
+        else if (applied.references === true) { out.references = 1; }
+        const ignored = [];
+        const seen = {};
+        for (const item of Array.isArray(raw && raw.ignored) ? raw.ignored : []) {
+            if (!item || typeof item !== "object" || QUEUE_FIELDS.indexOf(item.field) === -1 || seen[item.field]) { continue; }
+            seen[item.field] = true;
+            ignored.push({ field: item.field, code: code(item.code) || RECEIVER_DISABLED });
+        }
+        const named = Array.isArray(raw && raw.inherited) ? raw.inherited : [];
+        const inherited = QUEUE_FIELDS.filter(function (field) { return named.indexOf(field) !== -1 && !out[field] && !seen[field]; });
+        return { applied: out, inherited: inherited, ignored: ignored };
+    }
+
+    function normaliseQueueResult(raw) {
+        raw = raw && typeof raw === "object" ? raw : {};
+        const admission = ADMISSIONS.indexOf(raw.admission) === -1 ? "refused" : raw.admission;
+        const ok = raw.ok === true && admission !== "refused";
+        const summary = normaliseQueueSummary(raw);
+        return {
+            ok: ok,
+            request_id: HEX32.test(String(raw.request_id || "")) ? raw.request_id : "",
+            bridge_session: text(raw.bridge_session, 128),
+            admission: admission,
+            applied: summary.applied,
+            inherited: summary.inherited,
+            ignored: summary.ignored,
+            code: ok ? "" : (code(raw.code) || QUEUE_REQUEST_REFUSED),
+            detail: text(raw.detail, 200),
+            model: normaliseModel(raw.model) || S.model || { type: "", label: "", family: "" }
+        };
+    }
+
+    function normaliseQueueStatus(raw) {
+        raw = raw && typeof raw === "object" ? raw : {};
+        const ok = raw.ok === true && QUEUE_STATUSES.indexOf(raw.status) !== -1;
+        return {
+            ok: ok,
+            request_id: HEX32.test(String(raw.request_id || "")) ? raw.request_id : "",
+            status: ok ? raw.status : "pending",
+            tasks_added: ok && Number.isFinite(raw.tasks_added) && raw.tasks_added > 0 ? Math.trunc(raw.tasks_added) : 0,
+            code: code(raw.code) || (ok ? "" : ADMISSION_UNCONFIRMED),
+            detail: text(raw.detail, 200)
+        };
+    }
+
+    function onQueueResult(requestId, payload) {
+        const entry = S.pending.get(requestId);
+        if (!entry || entry.type !== QUEUE_RESULT) { return; }
+        const result = normaliseQueueResult(payload);
+        const session = result.bridge_session || S.bridgeSession;
+        if (entry.session && session !== entry.session) {
+            settle(requestId, failure(BRIDGE_SESSION_MISMATCH));
+            return;
+        }
+        if (!result.ok) {
+            settle(requestId, Object.assign(failure(result.code, result.detail), { admission: "refused", request_id: result.request_id }));
+            return;
+        }
+        settle(requestId, result);
+    }
+
+    function onQueueStatus(requestId, payload) {
+        const entry = S.pending.get(requestId);
+        if (!entry || entry.type !== QUEUE_STATUS) { return; }
+        const status = normaliseQueueStatus(payload);
+        if (!status.ok) {
+            settle(requestId, Object.assign(failure(status.code, status.detail), { status: "pending", request_id: status.request_id }));
+            return;
+        }
+        settle(requestId, status);
+    }
+
+    function queueRefusal(failureCode, detail, requestId) {
+        say("queue: refused before asking - " + failureCode + (detail ? " (" + text(detail, 120) + ")" : ""));
+        return Promise.resolve(Object.assign(failure(failureCode, detail), { admission: "refused", request_id: requestId || "" }));
+    }
+
+    /**
+     * Section 12.1: ask the live page to add itself to WanGP's queue with the
+     * given overrides. Every field is optional and an absent one is
+     * inherited from the page; the ids are handoff ids of files this
+     * extension wrote; the prompt is text and nothing else travels. Resolves
+     * with the immediate admission answer, which is never "queued" - that
+     * needs a confirmation.
+     */
+    function queue(request) {
+        request = request && typeof request === "object" ? request : {};
+        const requestId = HEX32.test(String(request.request_id || "")) ? String(request.request_id) : hex32();
+        if (request.request_id !== undefined && request.request_id !== null && request.request_id !== "" && requestId !== request.request_id) {
+            return queueRefusal(REQUEST_INVALID, "the request id is not 32 lowercase hex characters", "");
+        }
+        if (!ensure() || !S.ready || !S.bridgeSession) {
+            rearm();
+            return queueRefusal(IFRAME_NOT_READY, "no bridge session in this page", requestId);
+        }
+        if (!S.queue) { return queueRefusal(BRIDGE_COMPONENT_INCOMPATIBLE, "this bridge does not offer the queue", requestId); }
+        const payload = { request_id: requestId, bridge_session: S.bridgeSession };
+        if (request.prompt !== undefined && request.prompt !== null) {
+            if (typeof request.prompt !== "string") { return queueRefusal(REQUEST_INVALID, "the prompt is not text", requestId); }
+            if (request.prompt.length > PROMPT_MAX_CHARS) { return queueRefusal(PROMPT_TOO_LONG, "over " + PROMPT_MAX_CHARS + " characters", requestId); }
+            if (request.prompt.trim()) { payload.prompt = request.prompt; }
+        }
+        for (const name of ["start_handoff_id", "end_handoff_id"]) {
+            const value = request[name];
+            if (value === undefined || value === null || value === "") { continue; }
+            if (!HEX32.test(String(value))) { return queueRefusal(REQUEST_INVALID, name + " is not a handoff id", requestId); }
+            payload[name] = String(value);
+        }
+        const refs = request.reference_handoff_ids;
+        if (refs !== undefined && refs !== null) {
+            if (!Array.isArray(refs)) { return queueRefusal(REQUEST_INVALID, "reference_handoff_ids is not a list", requestId); }
+            const kept = refs.filter(function (item) { return item !== undefined && item !== null && item !== ""; });
+            if (kept.length > MAX_QUEUE_REFERENCES) { return queueRefusal(REQUEST_INVALID, "more than " + MAX_QUEUE_REFERENCES + " reference images", requestId); }
+            for (const item of kept) {
+                if (!HEX32.test(String(item))) { return queueRefusal(REQUEST_INVALID, "a reference id is not a handoff id", requestId); }
+            }
+            if (kept.length) { payload.reference_handoff_ids = kept.map(String); }
+        }
+        const overrides = QUEUE_FIELDS.filter(function (field) {
+            return field === "prompt" ? payload.prompt !== undefined
+                : field === "references" ? !!payload.reference_handoff_ids
+                : !!payload[field + "_handoff_id"];
+        });
+        say("queue " + requestId.slice(0, 8) + ": overrides " + (overrides.length ? overrides.join(", ") : "none (the live page as it is)"));
+        return ask(QUEUE_REQUEST, payload, QUEUE_REQUEST_TIMEOUT_MS, QUEUE_RESULT).then(function (answer) {
+            if (answer && answer.ok) { return answer; }
+            return Object.assign({ admission: "refused", request_id: requestId }, answer);
+        });
+    }
+
+    /** One bounded admission check for a request this page asked for. */
+    function confirmQueue(requestId) {
+        if (!HEX32.test(String(requestId || ""))) { return Promise.resolve(failure(REQUEST_INVALID, "not a request id")); }
+        if (!ensure() || !S.ready || !S.bridgeSession) { return Promise.resolve(failure(IFRAME_NOT_READY, "no bridge session in this page")); }
+        return ask(QUEUE_CONFIRM, { request_id: String(requestId), bridge_session: S.bridgeSession }, QUEUE_CONFIRM_TIMEOUT_MS, QUEUE_STATUS);
+    }
+
+    function pause(ms) {
+        return new Promise(function (resolve) { setTimeout(resolve, ms); });
+    }
+
+    /**
+     * The whole of one queue request: ask, then confirm on the bounded
+     * schedule of section 12.3, and stop at the first terminal answer.
+     * Resolves ``queued`` only on a positive observation; ``refused`` only on
+     * the bridge's own refusal or WanGP's correlated one; and ``unconfirmed``
+     * when the schedule ends with neither - never a guess either way.
+     */
+    async function queueAndConfirm(request) {
+        const asked = await queue(request);
+        const base = {
+            request_id: asked.request_id || "",
+            applied: asked.applied || normaliseQueueSummary({}).applied,
+            inherited: asked.inherited || [],
+            ignored: asked.ignored || [],
+            model: asked.model || S.model || { type: "", label: "", family: "" },
+            tasks_added: 0
+        };
+        if (!asked.ok) {
+            return Object.assign(base, { ok: false, status: "refused", code: asked.code || QUEUE_REQUEST_REFUSED,
+                                         message: sentence(asked.code || QUEUE_REQUEST_REFUSED), detail: asked.detail || "" });
+        }
+        let last = null;
+        for (const delay of QUEUE_CONFIRM_DELAYS_MS) {
+            if (delay) { await pause(delay); }
+            const status = await confirmQueue(asked.request_id);
+            last = status;
+            if (!status.ok) {
+                // The confirmation itself was refused or timed out. A refusal
+                // naming the request (no record, wrong session) will not
+                // change on the next try; a timeout may.
+                if (status.code === REQUEST_INVALID || status.code === BRIDGE_SESSION_MISMATCH || status.code === WANGP_RESTARTED) { break; }
+                continue;
+            }
+            if (status.status === "queued") {
+                return Object.assign(base, { ok: true, status: "queued", tasks_added: status.tasks_added || 1, code: "", message: "", detail: "" });
+            }
+            if (status.status === "refused") {
+                const why = status.code || WANGP_VALIDATION_REFUSED;
+                return Object.assign(base, { ok: false, status: "refused", code: why, message: sentence(why), detail: status.detail || "" });
+            }
+            if (status.status === "expired") { break; }
+        }
+        say("queue " + String(asked.request_id).slice(0, 8) + ": admission unconfirmed after " + QUEUE_CONFIRM_DELAYS_MS.length + " confirmation(s)"
+            + (last && last.code ? " (" + last.code + ")" : ""));
+        return Object.assign(base, { ok: false, status: "unconfirmed", code: ADMISSION_UNCONFIRMED, message: sentence(ADMISSION_UNCONFIRMED),
+                                     detail: (last && last.detail) || "" });
+    }
+
+    /**
+     * What the live page can take right now, as the public API describes it:
+     * one bounded receiver query, turned into per-input support flags.
+     * Advisory - a queue request is judged again, live, when it runs.
+     */
+    function capabilities() {
+        return receivers().then(function (answer) {
+            if (!answer || !answer.ok) {
+                const why = (answer && answer.code) || IFRAME_NOT_READY;
+                return { ok: false, code: why, message: sentence(why) };
+            }
+            const byId = {};
+            for (const receiver of answer.receivers || []) { byId[receiver.id] = receiver; }
+            const supported = function (id) { return !!(byId[id] && byId[id].enabled); };
+            return {
+                ok: true,
+                api_version: 1,
+                ready: true,
+                queue: !!S.queue,
+                model: S.model ? Object.assign({}, S.model) : { type: "", label: "", family: "" },
+                inputs: {
+                    start: { supported: supported("start_frame") },
+                    end: { supported: supported("end_frame") },
+                    references: { supported: supported("reference"), max_count: byId.reference ? byId.reference.max_count : null }
+                }
+            };
+        });
+    }
+
+    /* ------------------------------------------------------------------ */
     /* The public side                                                       */
     /* ------------------------------------------------------------------ */
 
@@ -933,6 +1203,7 @@ window.minipaintWanGP = (function () {
             model: S.model ? Object.assign({}, S.model) : null,
             receivers: S.receivers.map(function (receiver) { return Object.assign({}, receiver); }),
             pending: S.pending.size,
+            queue: S.queue,
             code: S.lastCode
         };
     }
@@ -1119,6 +1390,12 @@ window.minipaintWanGP = (function () {
         switchToWanGP: switchToWanGP,
         theme: theme,
         message: sentence,
+        // Protocol 3, the queue. window.minipaintInterop is the public face
+        // of these; they are the mechanics, and their shapes may change.
+        queue: queue,
+        confirmQueue: confirmQueue,
+        queueAndConfirm: queueAndConfirm,
+        capabilities: capabilities,
         // One line into the same journal the handshake and the queries write
         // to, for the Canvas's half of a send. Text only; nothing is parsed.
         note: function (message) { say(text(message, 300)); }

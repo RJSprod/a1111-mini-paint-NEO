@@ -214,6 +214,14 @@ def copy_checks(r: Results) -> None:
     raw = [descriptor(protocol.REFERENCE, "reference", operation=protocol.APPEND, count=1, max_count=3)]
     r.check("both copies normalise one receiver list the same way",
             plugin.normalize_receivers(raw) == protocol.normalize_receivers(raw))
+    request = {"request_id": "a" * 32, "prompt": " a cat\r\n\x07 ", "start_handoff_id": "b" * 32,
+               "reference_handoff_ids": ["c" * 32, ""], "model": "dropped"}
+    r.check("both copies normalise one queue request the same way",
+            plugin.normalize_queue_request(request) == protocol.normalize_queue_request(request))
+    r.check("and hash it the same way",
+            plugin.queue_payload_hash(protocol.normalize_queue_request(request)[0])
+            == protocol.queue_payload_hash(protocol.normalize_queue_request(request)[0]))
+    r.check("both copies name the queue contract", plugin.QUEUE_CONTRACT == protocol.QUEUE_CONTRACT == "minipaint.wangp.queue/v1")
 
 
 # ------------------------------------------------------------- the browser --
@@ -247,8 +255,27 @@ def browser_checks(r: Results) -> None:
         ("FOCUS_RECEIVER", protocol.FOCUS_RECEIVER),
         ("THEME_STATE", protocol.THEME_STATE),
         ("RUNTIME_STATE", protocol.RUNTIME_STATE),
+        ("QUEUE_REQUEST", protocol.QUEUE_REQUEST),
+        ("QUEUE_RESULT", protocol.QUEUE_RESULT),
+        ("QUEUE_CONFIRM", protocol.QUEUE_CONFIRM),
+        ("QUEUE_STATUS", protocol.QUEUE_STATUS),
     ):
         r.check(f"the browser names {name} the same way", js_string(source, name) == value, js_string(source, name))
+    for name, value in (
+        ("QUEUE_REQUEST_TIMEOUT_MS", protocol.QUEUE_REQUEST_TIMEOUT_MS),
+        ("QUEUE_CONFIRM_TIMEOUT_MS", protocol.QUEUE_CONFIRM_TIMEOUT_MS),
+        ("PROMPT_MAX_CHARS", protocol.PROMPT_MAX_CHARS),
+        ("MAX_QUEUE_REFERENCES", protocol.MAX_QUEUE_REFERENCES),
+    ):
+        r.check(f"the browser agrees on {name}", js_number(source, name) == value, str(js_number(source, name)))
+    delays = re.search(r"const QUEUE_CONFIRM_DELAYS_MS = \[([0-9, ]+)\];", source)
+    r.check("the browser confirms on the same bounded schedule, starting at once",
+            delays is not None and tuple(int(x) for x in delays.group(1).split(",")) == protocol.QUEUE_CONFIRM_DELAYS_MS,
+            delays.group(1) if delays else "missing")
+    r.check("the browser knows the four queue fields in order",
+            js_strings(source, "QUEUE_FIELDS") == protocol.QUEUE_FIELDS, str(js_strings(source, "QUEUE_FIELDS")))
+    r.check("and the admissions and statuses", js_strings(source, "ADMISSIONS") == protocol.ADMISSIONS
+            and js_strings(source, "QUEUE_STATUSES") == protocol.QUEUE_STATUSES)
 
     r.check("the browser allows the same types out of the parent",
             set(js_strings(source, "TO_BRIDGE")) == set(protocol.TO_BRIDGE), str(js_strings(source, "TO_BRIDGE")))
@@ -1054,16 +1081,16 @@ new Function("window", "document", script)(window, document);
 scheduleFlush();
 const channel = "c".repeat(32);
 (listeners.message || []).forEach(function (fn) {
-  fn({ origin: ORIGIN, source: parent, data: { protocol: 2, type: "WANGP_BRIDGE_HELLO", channel_id: channel, request_id: "r1", payload: {} } });
+  fn({ origin: ORIGIN, source: parent, data: { protocol: 3, type: "WANGP_BRIDGE_HELLO", channel_id: channel, request_id: "r1", payload: {} } });
 });
 if (process.argv[5] === "refuse") {
   // After the hello: one send the page cannot act on (a handoff id that is
   // not one), and one on a channel this page was never bound to.
   setTimeout(function () {
     (listeners.message || []).forEach(function (fn) {
-      fn({ origin: ORIGIN, source: parent, data: { protocol: 2, type: "WANGP_RECEIVE_IMAGE", channel_id: channel, request_id: "r2",
+      fn({ origin: ORIGIN, source: parent, data: { protocol: 3, type: "WANGP_RECEIVE_IMAGE", channel_id: channel, request_id: "r2",
         payload: { handoff_id: "nope", receiver_id: "start_frame", state_revision: "abcdef12" } } });
-      fn({ origin: ORIGIN, source: parent, data: { protocol: 2, type: "WANGP_RECEIVE_IMAGE", channel_id: "d".repeat(32), request_id: "r3",
+      fn({ origin: ORIGIN, source: parent, data: { protocol: 3, type: "WANGP_RECEIVE_IMAGE", channel_id: "d".repeat(32), request_id: "r3",
         payload: { handoff_id: "e".repeat(32), receiver_id: "start_frame", state_revision: "abcdef12" } } });
     });
   }, 150);
@@ -1806,6 +1833,19 @@ def placement_checks(r: Results) -> None:
             and config["columnClass"] == bridge_ui.COLUMN_CLASS)
 
 
+def _predict(client, body):
+    """Gradio's predict endpoint, wherever this Gradio keeps it.
+
+    Gradio 5 serves it under ``/gradio_api/``; Gradio 4 - Forge Neo's pin -
+    at the root. The first that answers anything but 404 is the one.
+    """
+    for path in ("/gradio_api/run/predict", "/run/predict", "/api/predict"):
+        response = client.post(path, json=body)
+        if response.status_code != 404:
+            return response
+    return response
+
+
 def session_hash_checks(r: Results) -> None:
     """The bridge's event is handed Gradio's request, and so a session hash.
 
@@ -1892,9 +1932,9 @@ def session_hash_checks(r: Results) -> None:
             "fn_index": index,
             "session_hash": session_hash,
         }
-        response = client.post("/gradio_api/run/predict", json=body)
+        response = _predict(client, body)
         r.check("Gradio ran the bridge's event", response.status_code == 200, str(response.status_code))
-        return _json.loads(response.json()["data"][0])
+        return _json.loads(response.json()["data"][0]) if response.status_code == 200 else {}
 
     hex32 = re.compile(r"^[0-9a-f]{32}$")
     first = hello("page-one")
@@ -1916,9 +1956,83 @@ def session_hash_checks(r: Results) -> None:
             "answered but refused" in parent and "stopHandshake();" in parent)
 
 
+def queue_request_checks(r: Results) -> None:
+    """Section 28.1: omitted is inherit, null and empty are omitted, ids are
+    exact, the prompt is bounded and cleaned, unknown fields go."""
+    good = "0123456789abcdef0123456789abcdef"
+    other = "fedcba9876543210fedcba9876543210"
+
+    r.check("a request id is 32 lowercase hex", protocol.valid_request_id(good) and not protocol.valid_request_id(good.upper()))
+    request, code = protocol.normalize_queue_request({"request_id": good})
+    r.check("a request with nothing in it is valid", code == "" and request == {"request_id": good, "bridge_session": ""}, repr(request))
+    r.check("and supplies nothing", protocol.queue_overrides(request) == [])
+    for label, raw in (("null", None), ("empty", ""), ("whitespace", " \n\t ")):
+        request, code = protocol.normalize_queue_request({"request_id": good, "prompt": raw, "start_handoff_id": None if raw is None else "",
+                                                          "end_handoff_id": None, "reference_handoff_ids": [] if raw is None else None})
+        r.check(f"{label} values normalise to absence", code == "" and "prompt" not in request and "start_handoff_id" not in request
+                and "reference_handoff_ids" not in request, repr(request))
+    request, code = protocol.normalize_queue_request({"request_id": good, "reference_handoff_ids": []})
+    r.check("an empty reference list is absence", code == "" and "reference_handoff_ids" not in request)
+    request, code = protocol.normalize_queue_request({"request_id": good, "prompt": "  one\r\ntwo\x00\x1b[31m  ", "bridge_session": "s.1"})
+    r.check("the prompt keeps its newlines and loses its control characters", request.get("prompt") == "one\ntwo[31m", repr(request.get("prompt")))
+    r.check("a bridge session token is kept", request.get("bridge_session") == "s.1")
+    r.check("an emoji sequence survives cleaning", protocol.clean_prompt("a \U0001F469\u200D\U0001F4BB b") == "a \U0001F469\u200D\U0001F4BB b")
+    request, code = protocol.normalize_queue_request({"request_id": good, "prompt": "x" * protocol.PROMPT_MAX_CHARS})
+    r.check("a prompt at the ceiling is taken", code == "" and len(request["prompt"]) == protocol.PROMPT_MAX_CHARS)
+    request, code = protocol.normalize_queue_request({"request_id": good, "prompt": "x" * (protocol.PROMPT_MAX_CHARS + 1)})
+    r.check("one over is PROMPT_TOO_LONG", code == "PROMPT_TOO_LONG")
+    request, code = protocol.normalize_queue_request({"request_id": good, "prompt": 7})
+    r.check("a prompt that is not text is REQUEST_INVALID", code == "REQUEST_INVALID")
+    for label, raw in (("no id", {}), ("a short id", {"request_id": good[:-1]}), ("a path as start", {"request_id": good, "start_handoff_id": "../" + good[3:]}),
+                       ("a list of paths", {"request_id": good, "reference_handoff_ids": ["/etc/passwd"]}),
+                       ("references not a list", {"request_id": good, "reference_handoff_ids": good}),
+                       ("too many references", {"request_id": good, "reference_handoff_ids": [good] * (protocol.MAX_QUEUE_REFERENCES + 1)}),
+                       ("not an object", [good])):
+        _request, code = protocol.normalize_queue_request(raw)
+        r.check(f"{label} is REQUEST_INVALID", code == "REQUEST_INVALID", code)
+    request, code = protocol.normalize_queue_request({"request_id": good, "start_handoff_id": other, "end_handoff_id": good,
+                                                      "reference_handoff_ids": [other, good], "prompt": "p",
+                                                      "model": "t2v", "resolution": "1x1", "path": "/tmp/x", "kwargs": {"a": 1}})
+    r.check("every override is carried and nothing unlisted is", set(request) == {"request_id", "bridge_session", "prompt", "start_handoff_id",
+            "end_handoff_id", "reference_handoff_ids"}, str(sorted(request)))
+    r.check("the overrides are named in field order", protocol.queue_overrides(request) == list(protocol.QUEUE_FIELDS))
+
+    first = protocol.queue_payload_hash(protocol.normalize_queue_request({"request_id": good, "prompt": "a"})[0])
+    same = protocol.queue_payload_hash(protocol.normalize_queue_request({"request_id": other, "prompt": "a"})[0])
+    different = protocol.queue_payload_hash(protocol.normalize_queue_request({"request_id": good, "prompt": "b"})[0])
+    r.check("the payload hash ignores the request id and sees the payload", first == same and first != different)
+    r.check("and is a hex digest, never the prompt", re.match(r"\A[0-9a-f]{64}\Z", first) is not None and "a" * 3 not in first)
+
+    summary = protocol.queue_summary({"prompt": True, "references": 2}, ["end", "start", "prompt"], [{"field": "start", "code": "RECEIVER_DISABLED"}, {"field": "nope"}])
+    r.check("a summary puts each field in exactly one place",
+            summary == {"applied": {"prompt": True, "start": False, "end": False, "references": 2},
+                        "inherited": ["end"], "ignored": [{"field": "start", "code": "RECEIVER_DISABLED"}]}, repr(summary))
+    result = protocol.normalize_queue_result({"ok": True, "admission": "requested", "request_id": good, "applied": {"start": True},
+                                              "inherited": ["prompt"], "model": {"label": "M", "type": "m"}})
+    r.check("an admitted result normalises", result["ok"] and result["admission"] == "requested" and result["applied"]["start"]
+            and result["inherited"] == ["prompt"] and result["model"]["label"] == "M" and result["code"] == "", repr(result))
+    r.check("an admission the parent cannot read is a refusal",
+            protocol.normalize_queue_result({"ok": True, "admission": "queued"})["ok"] is False
+            and protocol.normalize_queue_result({"ok": True, "admission": "queued"})["code"] == "QUEUE_REQUEST_REFUSED")
+    r.check("a refusal keeps its code", protocol.normalize_queue_result({"ok": False, "code": "QUEUE_BUSY"})["code"] == "QUEUE_BUSY")
+    status = protocol.normalize_queue_status({"ok": True, "status": "queued", "tasks_added": 3, "request_id": good})
+    r.check("a status normalises", status == {"ok": True, "request_id": good, "status": "queued", "tasks_added": 3, "code": ""}, repr(status))
+    r.check("an unreadable status is pending with no tasks, never queued",
+            protocol.normalize_queue_status({"ok": True, "status": "done", "tasks_added": 9})["status"] == "pending"
+            and protocol.normalize_queue_status({"status": "queued"})["tasks_added"] == 0)
+    r.check("the queue messages are whitelisted in their directions",
+            protocol.valid_envelope(protocol.envelope(protocol.QUEUE_REQUEST, "c" * 32, good), protocol.TO_BRIDGE)
+            and protocol.valid_envelope(protocol.envelope(protocol.QUEUE_STATUS, "c" * 32, good), protocol.TO_PARENT)
+            and not protocol.valid_envelope(protocol.envelope(protocol.QUEUE_RESULT, "c" * 32, good), protocol.TO_BRIDGE))
+    r.check("a full prompt fits the envelope many times over",
+            len(protocol.canonical_json({"prompt": "\u2603" * protocol.PROMPT_MAX_CHARS, "reference_handoff_ids": [good] * protocol.MAX_QUEUE_REFERENCES}))
+            * 8 < protocol.MAX_ENVELOPE_BYTES)
+
+
 def run() -> Results:
     r = Results("wangp protocol")
     copy_checks(r)
+    queue_request_checks(r)
     browser_checks(r)
     envelope_checks(r)
     revision_checks(r)

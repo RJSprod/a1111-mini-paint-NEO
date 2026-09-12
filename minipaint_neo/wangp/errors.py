@@ -59,6 +59,20 @@ HANDOFF_INVALID_IMAGE = "HANDOFF_INVALID_IMAGE"
 HANDOFF_TOO_LARGE = "HANDOFF_TOO_LARGE"
 HANDOFF_DIGEST_MISMATCH = "HANDOFF_DIGEST_MISMATCH"
 
+# -- the queue (minipaint.wangp.queue/v1) -----------------------------------
+REQUEST_INVALID = "REQUEST_INVALID"
+REQUEST_ID_CONFLICT = "REQUEST_ID_CONFLICT"
+PROMPT_TOO_LONG = "PROMPT_TOO_LONG"
+IMAGE_STAGE_INVALID = "IMAGE_STAGE_INVALID"
+IMAGE_STAGE_EXPIRED = "IMAGE_STAGE_EXPIRED"
+CLIPBOARD_NOT_CONFIGURED = "CLIPBOARD_NOT_CONFIGURED"
+CLIPBOARD_ASSET_UNKNOWN = "CLIPBOARD_ASSET_UNKNOWN"
+CLIPBOARD_ASSET_OUTSIDE_ROOT = "CLIPBOARD_ASSET_OUTSIDE_ROOT"
+QUEUE_BUSY = "QUEUE_BUSY"
+QUEUE_REQUEST_REFUSED = "QUEUE_REQUEST_REFUSED"
+ADMISSION_UNCONFIRMED = "ADMISSION_UNCONFIRMED"
+WANGP_VALIDATION_REFUSED = "WANGP_VALIDATION_REFUSED"
+
 # -- everything else --------------------------------------------------------
 WANGP_RESTARTED = "WANGP_RESTARTED"
 INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -102,6 +116,18 @@ MESSAGES: dict[str, str] = {
     HANDOFF_DIGEST_MISMATCH: "The prepared image changed on the way to WanGP.",
     WANGP_RESTARTED: "WanGP restarted while the image was on its way.",
     INTERNAL_ERROR: "The WanGP integration hit an unexpected problem.",
+    REQUEST_INVALID: "That queue request is not one this extension can carry.",
+    REQUEST_ID_CONFLICT: "That request id was already used for a different request.",
+    PROMPT_TOO_LONG: "The prompt is longer than WanGP queue requests allow (4000 characters).",
+    IMAGE_STAGE_INVALID: "That image could not be staged for WanGP.",
+    IMAGE_STAGE_EXPIRED: "The staged image is no longer there; stage it again.",
+    CLIPBOARD_NOT_CONFIGURED: "Clipboard has no storage folder yet; choose one in the Clipboard tab.",
+    CLIPBOARD_ASSET_UNKNOWN: "That image is no longer in the Clipboard folder; press Refresh.",
+    CLIPBOARD_ASSET_OUTSIDE_ROOT: "That image is not inside the Clipboard folder, so it was not used.",
+    QUEUE_BUSY: "WanGP is still taking the previous queue request; try again in a moment.",
+    QUEUE_REQUEST_REFUSED: "WanGP did not take the queue request.",
+    ADMISSION_UNCONFIRMED: "WanGP did not confirm that the request was added to the queue.",
+    WANGP_VALIDATION_REFUSED: "WanGP declined the queue request; check the WanGP page for details.",
 }
 
 #: Codes that mean "the setup on disk no longer describes reality". The tab

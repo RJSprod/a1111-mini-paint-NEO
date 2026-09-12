@@ -10,10 +10,12 @@ page was introduced on, and carrying an object as its payload. Anything else
 is dropped without a reply, because replying is itself information.
 
 Nothing that arrives is ever executed, named as a function, or turned into a
-path. A message can do exactly four things: ask who this page is, ask what it
-can accept, ask for one handoff id to be applied to one named receiver, or ask
+path. A message can do exactly six things: ask who this page is, ask what it
+can accept, ask for one handoff id to be applied to one named receiver, ask
 that a receiver already published in this page's own receiver list be scrolled
-into view. The handoff id is 32 hex characters or it is not a handoff id; the
+into view, ask that the live page - with a prompt or images overridden by
+handoff id - be added to WanGP's own queue, or ask whether such a request
+landed there. The handoff id is 32 hex characters or it is not a handoff id; the
 receiver must be one the server just described; the focus target must be an
 element id this script published itself.
 
@@ -94,10 +96,18 @@ def configuration(theme_css: str = "") -> dict:
             "receiveResult": protocol.RECEIVE_RESULT,
             "focusReceiver": protocol.FOCUS_RECEIVER,
             "themeState": protocol.THEME_STATE,
+            "queueRequest": protocol.QUEUE_REQUEST,
+            "queueResult": protocol.QUEUE_RESULT,
+            "queueConfirm": protocol.QUEUE_CONFIRM,
+            "queueStatus": protocol.QUEUE_STATUS,
         },
         "inbound": sorted(protocol.TO_BRIDGE),
         "receiverIds": list(protocol.RECEIVER_IDS),
         "maxEnvelopeBytes": protocol.MAX_ENVELOPE_BYTES,
+        # The queue request's own bounds, checked before the click so a
+        # request the page cannot carry is refused with a code at once.
+        "promptMaxChars": protocol.PROMPT_MAX_CHARS,
+        "maxQueueReferences": protocol.MAX_QUEUE_REFERENCES,
         # Classes, not ids: WanGP builds its form twice and the bridge places
         # one set of controls in each, so the script looks for "the set that
         # is on screen" rather than for one element.
@@ -519,12 +529,32 @@ __MINIPAINT_FRAME_WRAPPER__
     if (operation === "hello") { return CONFIG.types.ready; }
     if (operation === "receivers") { return CONFIG.types.receivers; }
     if (operation === "receive") { return CONFIG.types.receiveResult; }
+    if (operation === "queue") { return CONFIG.types.queueResult; }
+    if (operation === "confirm") { return CONFIG.types.queueStatus; }
     return "";
+  }
+
+  // A queue answer names the public request id - which is also WanGP's
+  // client id for the task - under ``request_id`` in its payload, as the
+  // contract says; the envelope keeps the correlation id of the message
+  // that asked. The plugin's acknowledgement carries the public id as
+  // ``queue_request_id`` so the two never share a key inside the box.
+  function publicPayload(payload) {
+    if (!payload || typeof payload !== "object" || typeof payload.queue_request_id !== "string") { return payload; }
+    var out = {};
+    for (var key in payload) { if (Object.prototype.hasOwnProperty.call(payload, key) && key !== "queue_request_id") { out[key] = payload[key]; } }
+    out.request_id = payload.queue_request_id;
+    return out;
   }
 
   function answer(request, payload) {
     var kind = replyType(request && request.op);
-    if (kind) { post(kind, request.request_id, payload); }
+    if (!kind) { return; }
+    if (request.queue && typeof request.queue.request_id === "string" && payload && typeof payload === "object") {
+      payload = Object.assign({ request_id: request.queue.request_id, admission: "refused" }, payload);
+      payload.request_id = request.queue.request_id;
+    }
+    post(kind, request.request_id, payload);
   }
 
   function remember(payload) {
@@ -566,7 +596,7 @@ __MINIPAINT_FRAME_WRAPPER__
     if (payload.op === "receivers" || payload.op === "hello") { remember(payload); }
 
     var kind = replyType(payload.op);
-    if (kind) { post(kind, payload.request_id, payload); }
+    if (kind) { post(kind, payload.request_id, publicPayload(payload)); }
     pump();
   }
 
@@ -593,6 +623,34 @@ __MINIPAINT_FRAME_WRAPPER__
     if (typeof payload !== "object" || Array.isArray(payload)) { return null; }
     message.payload = payload;
     return message;
+  }
+
+  // Why a queue request cannot be carried, as [code, detail], or null. The
+  // same rules the plugin applies again server-side; here they save a round
+  // trip and make the refusal arrive at once.
+  function queueProblem(asked) {
+    if (!asked || typeof asked !== "object") { return ["REQUEST_INVALID", "no payload"]; }
+    if (!isHex32(asked.request_id)) { return ["REQUEST_INVALID", "the request id is not 32 lowercase hex characters"]; }
+    if (asked.prompt !== undefined && asked.prompt !== null) {
+      if (typeof asked.prompt !== "string") { return ["REQUEST_INVALID", "the prompt is not text"]; }
+      if (asked.prompt.length > CONFIG.promptMaxChars) { return ["PROMPT_TOO_LONG", "the prompt is over " + CONFIG.promptMaxChars + " characters"]; }
+    }
+    var names = ["start_handoff_id", "end_handoff_id"];
+    for (var index = 0; index < names.length; index += 1) {
+      var value = asked[names[index]];
+      if (value !== undefined && value !== null && value !== "" && !isHex32(value)) {
+        return ["REQUEST_INVALID", names[index] + " is not a handoff id"];
+      }
+    }
+    var refs = asked.reference_handoff_ids;
+    if (refs !== undefined && refs !== null) {
+      if (!Array.isArray(refs)) { return ["REQUEST_INVALID", "reference_handoff_ids is not a list"]; }
+      if (refs.length > CONFIG.maxQueueReferences) { return ["REQUEST_INVALID", "more than " + CONFIG.maxQueueReferences + " reference images"]; }
+      for (var at = 0; at < refs.length; at += 1) {
+        if (!isHex32(refs[at])) { return ["REQUEST_INVALID", "a reference id is not a handoff id"]; }
+      }
+    }
+    return null;
   }
 
   function onMessage(event) {
@@ -652,6 +710,45 @@ __MINIPAINT_FRAME_WRAPPER__
         state_revision: wanted.state_revision,
         bridge_session: isToken(wanted.bridge_session) ? wanted.bridge_session : "",
         source: (wanted.source && typeof wanted.source === "object" && !Array.isArray(wanted.source)) ? wanted.source : {}
+      });
+      return;
+    }
+
+    if (message.type === CONFIG.types.queueRequest) {
+      var asked = message.payload;
+      // Section 12.1's whitelist, checked before the click. Anything not
+      // listed is dropped here; anything malformed is refused with a code.
+      var problem = queueProblem(asked);
+      if (problem) {
+        log("queue: refused before the click - " + problem[0] + " (" + problem[1] + ")");
+        post(CONFIG.types.queueResult, message.request_id, {
+          ok: false, code: problem[0], detail: problem[1], admission: "refused",
+          request_id: isHex32(asked.request_id) ? asked.request_id : ""
+        });
+        return;
+      }
+      var queue = { request_id: asked.request_id };
+      if (typeof asked.prompt === "string") { queue.prompt = asked.prompt; }
+      if (isHex32(asked.start_handoff_id)) { queue.start_handoff_id = asked.start_handoff_id; }
+      if (isHex32(asked.end_handoff_id)) { queue.end_handoff_id = asked.end_handoff_id; }
+      if (Array.isArray(asked.reference_handoff_ids) && asked.reference_handoff_ids.length) {
+        queue.reference_handoff_ids = asked.reference_handoff_ids.slice();
+      }
+      queue.bridge_session = isToken(asked.bridge_session) ? asked.bridge_session : "";
+      submit({ op: "queue", request_id: message.request_id, channel_id: channelId, queue: queue });
+      return;
+    }
+
+    if (message.type === CONFIG.types.queueConfirm) {
+      var wantedId = message.payload && message.payload.request_id;
+      if (!isHex32(wantedId)) {
+        log("confirm: refused before the click - REQUEST_INVALID");
+        post(CONFIG.types.queueStatus, message.request_id, { ok: false, code: "REQUEST_INVALID", request_id: "" });
+        return;
+      }
+      submit({
+        op: "confirm", request_id: message.request_id, channel_id: channelId,
+        queue: { request_id: wantedId, bridge_session: isToken(message.payload.bridge_session) ? message.payload.bridge_session : "" }
       });
       return;
     }

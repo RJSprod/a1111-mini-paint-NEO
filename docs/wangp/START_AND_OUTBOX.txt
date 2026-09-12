@@ -1,0 +1,492 @@
+================================================================================
+DESIGN INTENT — STARTING A GENERATION, AND THE OUTBOX
+Protocol 4 / bridge 1.3.0
+================================================================================
+
+This extends docs/wangp/CONTRACTS.md and docs/clipboard/CONTRACTS.md. Where it
+disagrees with them, it is because protocol 3 shipped a queue that queues and
+never starts; this is the correction.
+
+House style as there: from __future__ import annotations, docstrings that say
+*why*, typing.Optional[...], nothing the WebUI does not already ship, nothing
+that polls forever, nothing that can raise into WanGP.
+
+
+--------------------------------------------------------------------------------
+0. THE TWO PROBLEMS
+--------------------------------------------------------------------------------
+
+0.1  Add to Queue from the Clipboard tab lands a task in WanGP's queue and
+     nothing ever picks it up. The task is correct; the queue is correct; no
+     generation starts. When WanGP happens to be generating already, the
+     running loop consumes it and the fault is invisible. That is the whole
+     bug: we trigger the wrong half of WanGP.
+
+0.2  The button blocks. A press is not answered until the previous request has
+     been confirmed by WanGP, so composing several requests means waiting
+     between each. The waiting is inherent to the mechanism and cannot be
+     removed, but it is ours to absorb, not the user's to endure.
+
+The user-facing goal, in their words: one request going out as a package that
+uses WanGP's current settings and overrides only our images and prompt; press
+the button as often as you like; the complexity is masked.
+
+
+--------------------------------------------------------------------------------
+1. WHAT WAS VERIFIED, AND WHERE
+--------------------------------------------------------------------------------
+
+Read from Wan2GP's own source, not inferred. Line numbers are wgp.py at the
+revision fetched during design; treat them as landmarks, re-locate by name.
+
+1.1  generate_trigger exists.
+     wgp.py:12743 — `generate_trigger = gr.Text(visible=False)`, declared one
+     line above `add_to_queue_trigger`. Both are hidden text boxes whose
+     `.change` runs a chain.
+
+1.2  The Generate button barely does anything.
+     wgp.py:13211 — `generate_btn.click(fn=init_generate, ...,
+     outputs=[generate_trigger, mode])`. `init_generate` (wgp.py:9631) does
+     output-gallery bookkeeping and returns `get_unique_id(), ""`. The button's
+     entire effect is to write the trigger.
+
+1.3  The two chains differ in exactly one way.
+     add_to_queue_trigger.change (wgp.py:13214):
+         validate_wizard_prompt -> save_inputs -> process_prompt_and_add_tasks
+         -> update_status
+     generate_trigger.change (wgp.py:13230):
+         validate_wizard_prompt -> save_inputs -> process_prompt_and_add_tasks
+         -> prepare_generate_media -> activate_status -> process_tasks
+         -> finalize_generation -> unload_model_if_needed
+     Only the second reaches process_tasks. process_tasks is what generates.
+
+1.4  There is NO server-side guard against generating twice.
+     process_tasks (wgp.py:8548) returns early only when the queue is empty.
+     Otherwise it proceeds to set_main_generation_running,
+     acquire_main_GPU_ressources, sets gen["in_progress"] = True and starts a
+     worker thread.
+     acquire_main_GPU_ressources (shared/utils/process_locks.py:110) does not
+     exclude a second main generation:
+         if process_status is None or process_status == "process:main": break
+     It only waits on *other* GPU processes.
+
+1.5  The only guard is the button's visibility.
+     prepare_generate_media (wgp.py:8484) returns Generate hidden and
+     Add-to-queue visible while a run is live. That is the entire protection
+     Wan2GP has, and it exists only in the browser.
+
+1.6  Two concurrent runs would be genuinely destructive.
+     Both workers drain the same queue list and race on the module globals
+     wan_model / offloadobj / reload_needed / loaded_profile. release_model()
+     (wgp.py:244) nulls wan_model, calls offloadobj.release() and sets
+     reload_needed. One worker doing that mid-generation in the other strands
+     VRAM behind a released object nothing tracks. THIS IS WHY 1.5 IS
+     LOAD-BEARING.
+
+1.7  Clicking a button in WanGP's page is already how the bridge works.
+     bridge_js.py:481 — `button.click()`. Every bridge request today is a
+     value written into a textbox, an `input` event dispatched, and a click on
+     a hidden button. bridge_js.py:390 already resolves the `<button>` inside a
+     Gradio component host. WanGP is served behind /wan2gp/ on the Forge
+     origin, so there is no cross-origin barrier.
+
+1.8  The background-tab problem is already solved.
+     bridge_js.head_script, placed by page_head, wraps requestAnimationFrame
+     in WanGP's page head before Gradio's modules load, so Gradio's event
+     dispatch keeps running when the iframe is given no frames. A click needs
+     exactly this and already has it.
+
+1.9  A chained post-outputs step already exists.
+     bridge_ui.wire(controls, handler, inputs, outputs, bridge_js.DELIVER_JS)
+     (plugin.py:836) attaches Gradio's `.then(js=...)` to the bridge event.
+     That step runs after the event's outputs have been applied, which is the
+     only correct moment to click Generate.
+
+1.10 The overlay cannot cause a model reload.
+     The `.change` handlers on every component the overlay writes —
+     refresh_image_prompt_type_radio (wgp.py:12827),
+     refresh_image_prompt_type_endcheckbox (:12828),
+     refresh_video_prompt_type_image_refs (:12829) — only recompute letter
+     flags and row visibility. None touches the model or reload_needed. Ruled
+     out as a cause of the reloads reported during design.
+
+
+--------------------------------------------------------------------------------
+2. FEASIBILITY VERDICT
+--------------------------------------------------------------------------------
+
+Every mechanism this design needs is already in the codebase and proven in
+production by the image send:
+
+  - clicking a resolved WanGP button from the page script      1.7
+  - keeping Gradio responsive in a hidden iframe               1.8
+  - a post-outputs chained step to sequence the click          1.9
+  - fail-closed component resolution through the plugin API    compatibility.py
+  - a per-session overlay ledger with compare-before-restore   admission.py
+  - bounded, self-terminating watchers rather than polling     bridge_js, clipboard.js
+  - HTTP routes on Forge's app behind the sign-in gate         clipboard/routes.py
+
+Nothing here requires a new capability, a new dependency, or a DOM guess. The
+work is additive. FEASIBLE.
+
+The one thing it does NOT do is stated in section 9.
+
+
+--------------------------------------------------------------------------------
+3. THE PACKAGE
+--------------------------------------------------------------------------------
+
+One press produces one request. A request is a sparse overlay on the live
+WanGP form plus an intent about starting.
+
+    request = {
+        request_id?: <32 lowercase hex>,     # minted when absent
+        prompt?: string,                     # omitted/null/"" -> inherit
+        images?: {
+            start?: Handle,                  # omitted/null -> inherit
+            end?: Handle,
+            references?: Handle[],           # omitted/null/[] -> inherit; max 16
+        },
+        start?: "auto" | "never",            # default "auto"
+    }
+
+    Handle = { kind: "staged" | "clipboard_asset", id: <32 lowercase hex> }
+
+INHERITANCE IS THE CONTRACT. Model, resolution, steps, LoRAs, seed, guidance,
+sampler, every setting the user has on screen: used exactly as they are, read
+from the live form, never written, never defaulted, never round-tripped
+through us. We override only the fields the caller supplied, only for one
+task, and then we put the form back.
+
+    start: "auto"   the request should be generating as soon as WanGP can.
+                    Whether that means starting a run or joining one is not
+                    the caller's problem.
+    start: "never"  stage the task only. Protocol 3's behaviour, kept for
+                    batch composition and as the fail-safe in 4.3.
+
+The answer gains what actually happened:
+
+    Result (ok)  = { ok: true, status: "queued" | "started", request_id,
+                     tasks_added, queue_depth, model: {type, label},
+                     applied: {...}, inherited: [...], ignored: [...] }
+    Result (not) = { ok: false, status: "refused" | "unconfirmed",
+                     request_id, code, message }
+
+    "started"  this request is the one generating now
+    "queued"   in WanGP's queue; a live run will take it, or start:"never"
+    queue_depth  how many tasks sit ahead of it; best-effort, may be absent
+
+The public contract keeps its version for callers that do not pass `start`:
+omitting it yields "auto", which is the behaviour a caller asking for a queue
+request always expected. Additive, not breaking.
+
+
+--------------------------------------------------------------------------------
+4. THE START DECISION
+--------------------------------------------------------------------------------
+
+4.1  Who decides. Not the caller, and not a setting. The page decides, at the
+     last possible moment, from WanGP's own gate.
+
+4.2  The gate. After the overlay's outputs have been applied (1.9), the page
+     script reads the resolved Generate button:
+
+         visible            -> WanGP is idle    -> click Generate
+         hidden / absent    -> WanGP is busy    -> click Add-to-queue
+
+     This is not a heuristic. prepare_generate_media (1.5) is the only guard
+     Wan2GP has, and this reads that same guard. A human pressing the button
+     is reacting to precisely this signal.
+
+4.3  Fail-safe direction. When the gate cannot be read — neither button
+     resolves, neither is in the DOM, the page is mid-rebuild — fall back to
+     the hidden add_to_queue_trigger and report start:"unknown".
+
+     The asymmetry is deliberate and is the most important rule in this
+     document. Guessing wrong toward queue-only costs a task that waits; the
+     user presses Generate and recovers. Guessing wrong toward generate costs
+     two worker threads and a corrupted model global (1.6). When in doubt,
+     do not start.
+
+4.4  Why click rather than write generate_trigger. Two reasons, neither of
+     them about the reload:
+       (a) init_generate runs (1.2), so the output-gallery bookkeeping a
+           human press performs is performed. Writing the trigger skips it.
+       (b) The click site is the gate site. Reading visibility and clicking
+           the same element in the same tick closes the window in which the
+           user could press Generate by hand between our read and our write.
+
+4.5  Residual race. A human pressing Generate in the same animation frame as
+     our click is not excluded. The window is a few milliseconds and the
+     outcome is the 1.6 hazard, so it is acknowledged rather than dismissed:
+     the page re-reads visibility immediately before dispatching, and the
+     bridge records the attempt in the journal so a double-start is
+     diagnosable after the fact.
+
+4.6  Preference order for the start route, resolved fail-closed:
+       1. click the resolved Generate / Add-to-queue button   (preferred)
+       2. write the resolved hidden trigger                   (fallback)
+       3. neither resolves -> capabilities.start = false, "auto" degrades to
+          queue-only, the handshake says so, the tab says so
+
+
+--------------------------------------------------------------------------------
+5. TRANSPORT
+--------------------------------------------------------------------------------
+
+Split, and invisible to the caller.
+
+    images + prompt   ->  written server-side, by the bridge, into the live
+                          form as replacements, exactly as protocol 3 does.
+                          JS cannot reliably push image data into Gradio's
+                          inputs; this half does not change.
+
+    start             ->  a click in the page, after the outputs land.
+
+The order within one request is fixed and non-negotiable:
+
+    1. bridge validates, loads every handoff, refuses as a whole on any failure
+    2. bridge writes the overlay + records the PendingAdmission
+    3. Gradio applies the outputs to the page
+    4. the chained step (1.9) reads the gate and clicks
+    5. confirmation, as protocol 3, now also reporting started vs queued
+    6. the overlay is restored, compare-before-restore, as protocol 3
+
+Step 3 before step 4 is the reason the click lives in the chained step and not
+in the acknowledgement handler: Gradio sends the browser's current component
+values when an event fires, so a click that beats the overlay into the DOM
+would queue the user's old form.
+
+
+--------------------------------------------------------------------------------
+6. THE OUTBOX
+--------------------------------------------------------------------------------
+
+6.1  Why it exists. Serialisation cannot be removed — a request owns the WanGP
+     form from the write until the restore, so two overlapping requests would
+     write over each other. The outbox does not make anything parallel. It
+     moves the waiting off the user and off the button.
+
+6.2  Where it lives. Server-side, as the source of truth.
+     minipaint_neo/clipboard/outbox.py, persisted as clipboard-outbox.json
+     beside the draft and history documents, with the same atomic write and
+     quarantine-a-broken-file treatment.
+
+     Server-side because the point is to press the button and walk away: a
+     refresh, an accidental tab close, or a Forge tab switch must not lose
+     queued work. Jobs from the Clipboard tab reference clipboard assets —
+     files in the user's folder — so they are durably replayable.
+
+6.3  A job.
+
+         { job_id, request, created_at, state, attempts,
+           lease?: {token, expires_at}, result?, error? }
+
+         state: pending -> sending -> queued | started | failed | cancelled
+
+     `request` holds asset ids, never paths. The prompt is held because the
+     job is a snapshot of the composer at press time and must survive the
+     composer changing afterwards.
+
+6.4  The dispatcher. Browser-side, because the WanGP form it overlays is
+     Gradio session state belonging to the iframe in this document. One pump
+     per page:
+
+         claim next job (a lease) -> minipaintInterop.wangp.enqueue(request)
+         -> report the outcome -> claim next -> ... -> stop when empty
+
+     It starts on a press and STOPS WHEN THE OUTBOX DRAINS. Bounded and
+     self-terminating, in the shape of the existing armQueue watcher and the
+     page script's own pump(). It never polls on a timer with nothing to do.
+
+6.5  Routes, not hidden boxes. Added to clipboard/routes.py beside the image
+     and import routes, behind the same sign-in gate:
+
+         POST  /minipaint-clipboard/outbox/claim     -> next job + lease, or empty
+         POST  /minipaint-clipboard/outbox/report    -> outcome for a leased job
+         GET   /minipaint-clipboard/outbox           -> the list, for rendering
+
+     Hidden Gradio textboxes are single-slot and coalesce under a burst, which
+     is the mechanism the current blocking behaviour is built on. Routes do
+     not have that failure mode.
+
+6.6  Leases and multiple pages. A claim takes a short lease. Two Forge pages
+     open means two pumps; the lease is what makes the claim atomic so only
+     one of them gets a given job. An expired lease returns the job to
+     pending — see 7.2 for the one case where that is not safe.
+
+6.7  What the user sees. The button never blocks and never disables. The tab
+     shows the outbox as a list, each job with its own state, with cancel
+     while pending and retry when failed. History still records only confirmed
+     admissions, so it stays truthful.
+
+6.8  The emergent benefit. Job 1 finds WanGP idle and starts a run; jobs 2..N
+     find it busy and join that run. Many tasks in one run is also the shape
+     that keeps the model resident between tasks (9.2). The fix for the
+     blocking button improves the reload behaviour as a side effect.
+
+
+--------------------------------------------------------------------------------
+7. FAILURE AND RECOVERY
+--------------------------------------------------------------------------------
+
+7.1  A refused job is terminal and visible. It stays in the list with its
+     code and the sentence from errors.py. It is never retried automatically.
+
+7.2  An UNCONFIRMED job is never retried automatically. This is a rule, not a
+     default. `unconfirmed` means the bridge could not prove either way
+     whether WanGP took the task; retrying may queue it twice. The job is
+     surfaced for a manual decision.
+
+     Within one bridge session the ledger's duplicate handling would answer a
+     retry from the record, but a page reload mints a new bridge session and
+     the record is gone. Automatic retry is therefore unsafe in exactly the
+     case it would be most tempting.
+
+7.3  A crashed or closed page leaves a leased job. The lease expires and the
+     job returns to pending IF it never reached `sending`. A job that was
+     mid-dispatch when the page died is marked unconfirmed and follows 7.2.
+
+7.4  A WanGP restart invalidates the bridge session. Jobs still pending are
+     fine — they have not been written anywhere. Anything in flight is
+     unconfirmed.
+
+7.5  Nothing in the outbox may raise into Forge's UI thread, and nothing in
+     the bridge may raise into WanGP. Both halves answer with a code.
+
+
+--------------------------------------------------------------------------------
+8. MODULE MAP
+--------------------------------------------------------------------------------
+
+  wangp/protocol.py + the bridge's mirrored SHARED block
+      PROTOCOL = 4; START_AUTO / START_NEVER / START_UNKNOWN;
+      QUEUE_STARTED; `start` through normalize_queue_request;
+      capabilities.start in the handshake; queue_depth in the answer shapes.
+
+  wan2gp_bridge/.../compatibility.py
+      GENERATE_BUTTON, ADD_TO_QUEUE_BUTTON, GENERATE_TRIGGER specs;
+      START_CRITICAL; start_missing(); the resolved elem_ids published in
+      the handshake so the page can find the buttons without guessing.
+
+  wan2gp_bridge/.../plugin.py
+      queue() honours `start` and reports the chosen route;
+      confirm() distinguishes started from queued and reports depth.
+
+  wan2gp_bridge/.../bridge_js.py
+      the gate read and the click, in the chained step; the journal lines
+      for chose-generate / chose-queue / gate-unreadable.
+
+  javascript/minipaint_wangp.js, javascript/minipaint_interop.js
+      pass `start` through; surface started / queue_depth; the interop chain
+      stays as the in-browser serialiser beneath the outbox.
+
+  minipaint_neo/clipboard/outbox.py            (new)
+  minipaint_neo/clipboard/routes.py            claim / report / list
+  minipaint_neo/clipboard/ui.py                press -> append; the job list
+  javascript/minipaint_clipboard.js            the pump; the list rendering
+
+  docs/wangp/CONTRACTS.md, docs/clipboard/CONTRACTS.md
+      updated to protocol 4 rather than left describing protocol 3.
+
+
+--------------------------------------------------------------------------------
+9. WHAT THIS DOES NOT DO
+--------------------------------------------------------------------------------
+
+9.1  IT DOES NOT FIX THE MODEL RELOADS. Stated plainly because clicking the
+     real button looks like it should. The reload decision is in Python,
+     inside the generation function (wgp.py:6926):
+
+         if model_type != transformer_type or reload_needed
+            or profile != loaded_profile or config != loaded_config:
+                release_model(); load_models(...)
+
+     It compares the task's parameters against what is loaded. How the task
+     was triggered — our hidden trigger, our click, or a human's click — is
+     invisible to it. All three converge on the same chain (1.3).
+
+9.2  What the reloads probably are, for whoever picks this up. Within one run
+     the model stays resident; the condition above is false for a second task
+     on the same model. Across runs it can reload for four reasons: a
+     different model; reload_needed set by unload-after-generation
+     (preload_model_policy containing "U") or by releasing RAM; a different
+     profile; a different config group.
+
+     `profile` derives from output type — get_profile_type_for_model
+     (wgp.py:3889) returns "image" when image_mode > 0 and "video" otherwise —
+     so alternating image-output and video-output tasks reloads every time,
+     even within one run. The WanGP page inside our iframe and a WanGP page
+     used directly are two separate Gradio sessions with two separate forms;
+     if they disagree on output mode, profile or config group, every
+     alternation between them reloads.
+
+     Diagnosing it is a separate piece of work. A useful first step is
+     recording transformer_type / loaded_profile / loaded_config in the
+     journal at queue time, so a reload can be attributed to a specific task
+     rather than guessed at.
+
+9.3  It adds no Generate-while-busy override, no abort, no progress API, no
+     settings writes, and no model or mode switching. The bridge's standing
+     refusal to touch the model selector is unchanged.
+
+9.4  It does not make requests parallel. One at a time remains the rule (6.1).
+
+
+--------------------------------------------------------------------------------
+10. TESTS
+--------------------------------------------------------------------------------
+
+In the existing style: a run() returning harness.Results, no pytest, nothing
+that needs WanGP, Forge or a network. All added to tests/run.py.
+
+  tests/test_wangp_start.py
+      the gate: idle -> generate route, busy -> queue route, unreadable ->
+      queue route with start:"unknown"; start:"never" never takes the generate
+      route on any gate reading; a build resolving neither button reports
+      capabilities.start = false and degrades.
+
+  tests/test_clipboard_outbox.py
+      append under a burst; claim/lease/report; one job to one pump across two
+      claimants; lease expiry returns a pending job and does NOT return a
+      sending one; unconfirmed is never auto-retried; cancel while pending;
+      a quarantined broken document does not lose the rest.
+
+  tests/test_queue_e2e.py  (extended)
+      the WanGP-shaped app grows generate_btn, add_to_queue_btn,
+      generate_trigger and the visibility swap, so the gate is exercised
+      against Wan2GP's real variable names and the whole path is driven
+      through Gradio's predict endpoint with the test playing the browser.
+
+  Ordering is a test, not a hope: the e2e suite asserts the click observes the
+  overlay, never the pre-overlay form (section 5, step 3 before step 4).
+
+
+--------------------------------------------------------------------------------
+11. VERIFY ON A REAL INSTALL
+--------------------------------------------------------------------------------
+
+In the spirit of compatibility.py's own standing note. None of these block the
+build; each one changes a candidate list or a constant if it comes back
+different.
+
+  11.1  The elem_ids of generate_btn and add_to_queue_btn on the target
+        revision. The ids in compatibility.py must be corrected from a running
+        build, never from this document.
+
+  11.2  How Gradio hides the button on the target version — a style on the
+        wrapper, a class, or removal from the DOM. The gate read must match
+        what the build actually does, and must treat "absent" as busy.
+
+  11.3  That the chained step observes the overlay. If Gradio's output
+        application and the chained step ever invert, the click must move
+        behind an explicit confirmation that the values landed.
+
+  11.4  Whether queue_depth can be read honestly from get_gen_info on the
+        target build. If not, omit the field; do not estimate it.
+
+  11.5  preload_model_policy on the user's install, for 9.2.
+
+================================================================================
+END
+================================================================================

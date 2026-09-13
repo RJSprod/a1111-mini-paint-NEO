@@ -1,0 +1,1227 @@
+MINIPAINT NEO - PERFORMANCE AND RESPONSIVENESS
+DESIGN INTENT / IMPLEMENTATION SPECIFICATION
+Repository target: RJSprod/a1111-mini-paint-NEO
+Written against: 1d0fea2 (2026-09-13), branch claude/bold-babbage-392rbq
+Revision date: 2026-09-13
+Status: Implementation-grade design intent
+Scope: existing behaviour only. No new product features, no new user-facing
+       capability, no change to any published contract.
+
+================================================================================
+0. DOCUMENT PURPOSE AND CLASSIFICATION
+================================================================================
+
+This document specifies how to remove the performance problems present in the
+extension at the revision named above, without changing what the extension
+does.
+
+It exists because the installed extension is perceptibly slow in two distinct
+ways that have two distinct causes, and the fixes must not be confused with
+each other:
+
+    (a) The Canvas tab is slow to draw and slow to drag. This is local
+        rendering work in the browser. No server is involved.
+
+    (b) The Clipboard and WanGP integrations generate continuous background
+        traffic and confirm things later than they could. This is an
+        architectural consequence of every integration having added a poll as
+        a fallback for a Gradio chained step that occasionally did not fire.
+
+The stated preference driving this specification:
+
+    Server-side logic is preferred over browser-side polling. Where the
+    server already knows something, the server should say so. The browser
+    should not be asking.
+
+That preference is honoured throughout, with one explicitly identified
+exception (section 6.7) where the fact in question is not the server's to
+know at this revision, and section 6.7 says what to do about that.
+
+Findings and recommendations are classified as:
+
+    CONFIRMED
+        Read directly in the repository at the revision named above. File and
+        line references are given. These are statements of fact about the
+        current code, not opinions about it.
+
+    IMPLEMENTATION RECOMMENDATION
+        A design choice recommended here. Reasoned, but a judgement call. An
+        engineer may reach a different conclusion with cause.
+
+    SPECIAL ATTENTION
+        Correct behaviour depends on the installed Forge / Gradio / WanGP
+        version, the browser, or the host's ASGI configuration, and must be
+        proven by a targeted test rather than assumed.
+
+No SPECIAL ATTENTION item may be silently converted into a hardcoded
+assumption.
+
+House style, which this work follows and which the existing contracts
+documents already state: `from __future__ import annotations`; module
+docstrings that say *why*; `typing.Optional[...]` rather than `X | None`; no
+third-party dependency the WebUI does not already ship (Gradio, FastAPI /
+Starlette, Pillow, httpx are present; anything else is not); nothing that
+watches the whole document or polls forever.
+
+That last clause is the existing rule. This document is largely about making
+the code obey a rule it already declares.
+
+================================================================================
+1. THE PROBLEM, STATED PLAINLY
+================================================================================
+
+1.1 What the user reports
+-------------------------
+
+Continuous background refresh activity and general sluggishness since
+installation.
+
+1.2 What is actually happening
+------------------------------
+
+Two unrelated mechanisms, both CONFIRMED.
+
+FIRST: the Canvas tab contains two resize-feedback loops and a set of
+uncoalesced pointer handlers. These burn frame budget continuously and are
+independent of any network activity. Section 3.
+
+SECOND: the Clipboard and WanGP integrations run six concurrent polling loops.
+Each was added as a second route for a Gradio `.then(js=...)` chained step
+that was observed, on some machines, not to fire. Each poll therefore
+duplicates a path that already works most of the time, and the code comments
+at each site say so in as many words. Section 4.
+
+    javascript/minipaint_canvas.js:1236-1240 - "on one machine that step went
+    quiet after the server had done its part, with no error anywhere. So from
+    the click on, the boxes themselves are read a few times a second"
+
+    wan2gp_bridge/wan2gp-minipaint-bridge/bridge_js.py:500-505 - "This is the
+    second route for the case where the event completed and wrote the box but
+    the chained call never ran"
+
+The original instinct was right: the chained step is not reliable enough to
+be the only route. The implementation was the problem. A poll is a bad
+second route because it is simultaneously slower than the primary route and
+permanently expensive. Section 6 specifies a second route that is faster than
+the primary route and free when idle.
+
+1.3 The measured cost
+---------------------
+
+CONFIRMED, by reading the intervals in the source:
+
+    javascript/minipaint_interop.js:474 + clipboard/outbox.py:107-109
+        claim loop, 250-400 ms, per browser tab, whenever any job is queued.
+        Each claim performs a full JSON document read, a sweep, and usually a
+        full JSON document write (outbox.py:712-749, config.py:118/139).
+        ~4 requests/second/tab, each with disk I/O on both sides.
+
+    javascript/minipaint_interop.js:81,646
+        TRACK_MS = 3000, TRACK_MAX_MS = 6 hours. Per job, per page: ask the
+        bridge, then POST the answer back. Two round trips per 3 s. Continues
+        after a job is terminal.
+
+    javascript/minipaint_canvas.js:1246
+        WANGP_WATCH_MS = 150, for up to WANGP_WATCH_LIMIT_MS = 90 000. Reads
+        two textbox values ~7x/second, and fires a hidden Gradio button
+        (WANGP_FETCH_ID, a full server round trip) every 5 s after the first
+        1.5 s.
+
+    wan2gp_bridge/wan2gp-minipaint-bridge/bridge_js.py:56,509
+        ACK_POLL_MS = 300, inside the WanGP iframe, for the full round-trip
+        window.
+
+    javascript/minipaint_clipboard.js:487
+        QUEUE_WATCH_MS, same pattern again.
+
+    minipaint_neo/clipboard/outbox.py:542, WATCH_SECONDS = 2.0
+        Server thread re-reading and re-writing the whole outbox document
+        every 2 s while anything is enhancing.
+
+Aggregate, one tab, one send in flight: on the order of five server requests
+per second, most of them touching disk, plus roughly ten local DOM reads per
+second, plus a Gradio event per batch of browser log lines (section 4.7).
+
+1.4 The latency the polling actually delivers
+---------------------------------------------
+
+This is the part that matters most for the decision in section 2.
+
+A poll's mean latency is half its interval. So the current design already
+imposes:
+
+    claim turn              125 ms mean, 250 ms worst case
+    handoff delivery         75 ms mean, 150 ms worst case
+    WanGP queue position   1500 ms mean, 3000 ms worst case
+
+The 1.5 s mean on queue position is not a theoretical concern. It is the
+"waiting to find out something already happened" problem, arriving in small
+increments rather than one large one.
+
+Polling is not buying responsiveness here. It is paying continuously for
+latency it does not remove.
+
+================================================================================
+2. GOVERNING PRINCIPLES
+================================================================================
+
+These are the constraints every decision in sections 3 through 9 is measured
+against. If an implementation choice conflicts with one of these, the
+principle wins and this document is wrong and should be amended.
+
+2.1 Removing a poll must never increase latency
+-----------------------------------------------
+
+Non-negotiable, and the reason section 8 exists.
+
+The naive de-polling move - lengthen the interval - is forbidden. It trades
+the user's time for the machine's, which is backwards.
+
+The correct move is to invert the direction of the question. The server
+already knows the instant a job's state changes; it is the thing that changed
+it. Having the browser repeatedly ask is strictly worse than having the server
+say. Push is faster AND cheaper. There is no trade here to make.
+
+Every change in this document must be latency-neutral or latency-improving on
+the day it lands. Section 8 sequences the work so that this is structurally
+guaranteed rather than merely intended.
+
+2.2 The server owns state; the browser owns presentation
+--------------------------------------------------------
+
+Already the stated design of the outbox (clipboard/outbox.py module docstring:
+"The server is the authority"). This document extends the same rule to the
+*delivery* of that state, which is currently the browser's job and should not
+be.
+
+2.3 A fallback route must be cheaper than the primary route
+------------------------------------------------------------
+
+The present fallbacks cost more than the paths they protect. A fallback that
+runs continuously in order to catch an infrequent failure is not a fallback,
+it is a second primary route with worse economics.
+
+Replacement fallbacks must be free when nothing is wrong.
+
+2.4 One connection per page, not one per tab
+---------------------------------------------
+
+SPECIAL ATTENTION. Under HTTP/1.1 a browser permits six concurrent
+connections per origin. Forge needs those. A held connection per integration
+(Canvas, Clipboard, WanGP) would consume half the budget and could starve the
+host's own traffic.
+
+There must be exactly one held connection per browser page, shared by all
+three integrations. Section 6.2.
+
+2.5 No new dependencies
+-----------------------
+
+CONFIRMED that everything specified here is achievable with what Forge already
+ships. Server-Sent Events require no library: `StreamingResponse` is already
+imported and used in this repository at minipaint_neo/wangp/proxy.py:597,637.
+`EventSource` is native to every browser the extension supports.
+
+2.6 Nothing in this work changes a published contract
+------------------------------------------------------
+
+`minipaint.wangp.queue/v1` (docs/wangp/CONTRACTS.md, docs/clipboard/
+CONTRACTS.md) keeps every route, every field and every error code it has
+today. The event spine is additive. A caller that ignores it entirely
+continues to work exactly as it does now, at the performance it has now.
+
+This is what makes section 8's incremental sequence possible.
+
+================================================================================
+3. WORKSTREAM A - MINIPAINT / CANVAS (LOCAL RENDERING)
+================================================================================
+
+Independent of everything else in this document. No protocol change, no
+server involvement, no contract implication. Can be implemented, reviewed and
+merged entirely on its own, and should be, because it is the largest felt
+improvement for the smallest risk.
+
+A1. RESIZE FEEDBACK LOOPS
+-------------------------
+Severity: high. Suspected principal cause of the continuous background load.
+Classification: CONFIRMED.
+
+Where:
+    javascript/minipaint_canvas.js:703-706   ResizeObserver on S.imageContainer
+    javascript/minipaint_canvas.js:374-380   ResizeObserver on column children
+                                             and on the panel rail
+    javascript/minipaint_canvas.js:320       fitHeight writes
+                                             S.container.style.height
+    javascript/minipaint_canvas.js:341       sizeRail writes
+                                             panels.style.maxHeight
+
+The defect:
+
+    S.imageContainer is `imageContainer_<uuid>` (set at :234), a descendant of
+    the ForgeCanvas container whose height fitHeight() sets at :320. The
+    observer at :703 therefore watches an element that fitHeight() resizes.
+    Observe -> resize -> observe.
+
+    Separately, the observer at :374 explicitly observes the panel rail
+    (`observer.observe(panels)`), and sizeRail() at :341 writes that same
+    rail's style.maxHeight. The same loop again.
+
+Both loops are damped by a 1px guard (`Math.abs(height - current) > 1`), which
+prevents a runaway but does not prevent oscillation. Any sub-pixel chase - a
+scrollbar appearing and disappearing, a label that wraps at one height and not
+the other, a theme with fractional row gaps - leaves the two values hunting
+each other indefinitely, one frame apart.
+
+Why it is expensive: fitHeight() is one of the most layout-heavy functions in
+the file. It calls getBoundingClientRect() on the column, on the scroll
+parent, on the rail, and on every child of the column in a loop, interleaved
+with getComputedStyle(). Running that every frame forces synchronous layout
+every frame.
+
+Required behaviour:
+
+    - An element that this code writes to must not be an element this code
+      observes. Either observe a stable outer element instead, or unobserve
+      immediately before the write and re-observe on the following frame.
+
+    - All computed heights must be integers before comparison, so that the
+      comparison can actually reach equality and the loop can settle.
+
+    - fitHeight() must read all layout in one pass and write in a second
+      pass, never interleaved.
+
+IMPLEMENTATION RECOMMENDATION: add a development-only assertion that counts
+scheduleFit() invocations per second and logs once if it exceeds a threshold
+(say 10). A loop of this kind is invisible in normal use and will be
+reintroduced by a future layout change if nothing watches for it.
+
+A2. UNCOALESCED POINTER HANDLERS
+--------------------------------
+Severity: high. Largest felt improvement for drag, pan and pinch.
+Classification: CONFIRMED.
+
+Where:
+    javascript/minipaint_canvas.js:2045   canvas pointermove (capture)
+    javascript/minipaint_canvas.js:1799   transform box pointermove
+    javascript/minipaint_canvas.js:680    crop frame pointermove
+
+Each handler performs its full work synchronously, once per event:
+
+    :2068  S.instance.drawImage()   - a complete canvas repaint, during pan
+    :2064  moveLayerDrag(event)
+    :2059  updatePinch()
+    :2053  drawSelection(...)
+    :1805  moveTransform / scaleTransform, then positionOverlay()
+    :684   moveFrame(...)
+    :690   resizeFrame(...)
+
+Pointer devices deliver events at 120 Hz to 1000 Hz. The display refreshes at
+60 Hz to 120 Hz. The majority of this work is therefore discarded before it
+is ever seen, while still forcing layout and paint.
+
+Required behaviour:
+
+    - Each pointermove handler records the event state into the existing S.*
+      structures and schedules a single requestAnimationFrame callback that
+      performs the work. Coalesce: if a frame is already scheduled, update
+      the recorded state and return.
+
+    - preventDefault() and stopPropagation() must remain synchronous in the
+      handler. Only the drawing work is deferred.
+
+    - Pointer-up must flush any pending frame synchronously, so a drag that
+      ends between frames lands on the exact final position rather than the
+      last rendered one. This is a correctness requirement, not an
+      optimisation: without it, short drags will land short.
+
+SPECIAL ATTENTION: `getCoalescedEvents()` is available on most but not all
+targets. Do not depend on it. The rAF coalescing above is sufficient and
+portable.
+
+A3. THREE ROUND TRIPS PER STRUCTURAL EDIT
+-----------------------------------------
+Severity: medium.
+Classification: CONFIRMED.
+
+Where:
+    minipaint_neo/canvas/ui.py:1736-1741   structural()
+    minipaint_neo/canvas/ui.py:1729        commit_outputs (17 components)
+
+Every structural edit - crop, expand, and each layer operation - is:
+
+    server call  (returns commit_outputs, 17 components incl. the background)
+        -> browser hop (WAIT_JS, canvas/ui.py:84)
+        -> server call (commit_foreground)
+
+Three sequential round trips. The middle hop exists solely to wait for the
+canvas to finish loading the image before the mask layer is written, which is
+documented at canvas/ui.py:880-882 and is a real ordering requirement.
+
+Required behaviour:
+
+    The ordering requirement is real; the round trip to enforce it is not.
+    The browser adapter already wraps loadImage (:395-401) and therefore
+    already knows locally when a load has completed. The mask layer can be
+    returned by the first server call and applied by the adapter once its own
+    load resolves.
+
+    Target: one round trip per structural edit, with the ordering guaranteed
+    browser-side by the adapter that already tracks it.
+
+SPECIAL ATTENTION: test_frontends.py currently asserts the three-step shape
+("every step that replaces the image is image -> wait -> mask layer"). That
+assertion encodes the ordering requirement, which must survive, and the
+transport, which must not. The test must be rewritten to assert the ordering
+outcome rather than the chain shape. Do not delete the assertion.
+
+A4. IMAGES AS BASE64 IN HIDDEN TEXTBOXES
+----------------------------------------
+Severity: medium.
+Classification: CONFIRMED.
+
+Where:
+    minipaint_neo/canvas/imaging.py:399    display_data_url
+    minipaint_neo/canvas/surface.py:82-98  postprocess / preprocess
+
+The existing display-copy work (JPEG for opaque, WebP for see-through, rather
+than PNG) was the correct and larger half of this optimisation and should not
+be revisited. What remains:
+
+    - base64 is a 33% size penalty on every transfer.
+    - The payload travels inside the Gradio event JSON.
+    - Gradio retains a per-session copy of the component value.
+    - The browser parses a multi-megabyte string out of a DOM attribute.
+
+Required behaviour:
+
+    Write the display copy to the runtime directory and return a URL. The
+    browser fetches it as an ordinary binary response: no base64 expansion,
+    no Gradio event payload, no retained session copy, and the browser's image
+    decoder handles it off the main thread.
+
+    The handoff machinery for exactly this already exists (wangp/handoff.py,
+    opaque ids, no path ever crossing to the browser). Reuse it rather than
+    inventing a second mechanism.
+
+SPECIAL ATTENTION: the existing preprocess() at surface.py:90-98 exists
+because the canvas may hold one of our display copies when a step reads it
+back. Confirm this path is unaffected, or removed as no longer reachable,
+before merging.
+
+A5. TWO FORGECANVAS INSTANCES, AND A 50 MS WAIT ON A 100 MS POLL
+-----------------------------------------------------------------
+Severity: low.
+Classification: CONFIRMED.
+
+Where:
+    minipaint_neo/canvas/surface.py:123     the extension's own instance
+    miniPaint/src/js/libs/webui-host.js:189 wait_until, interval_ms default 50
+
+The extension creates its own ForgeCanvas alongside the host's, and each
+carries the host's own textarea poll. This repository's own comment at
+webui-host.js:186-189 names that poll as 100 ms.
+
+Required behaviour:
+
+    - Raise wait_until's default interval to 150 ms. Waiting at 50 ms on a
+      state that only changes every 100 ms cannot reduce latency; it only
+      triples the wakeups.
+
+    - IMPLEMENTATION RECOMMENDATION: investigate whether the extension's
+      instance can be created lazily, on first entry to the Canvas tab,
+      rather than at page load. A user who never opens the tab should not pay
+      for a second canvas.
+
+A6. DOCUMENT-WIDE MUTATIONOBSERVER AT STARTUP
+----------------------------------------------
+Severity: low, but paid on every page load.
+Classification: CONFIRMED.
+
+Where:
+    javascript/main.js:50   observe(root(), {childList:true, subtree:true})
+    javascript/main.js:71   100 ms setTimeout poll for the bridge
+
+The observer runs against the entire Gradio application during hydration -
+the noisiest possible moment in the page's life - for up to 30 s per target,
+across three targets sequentially. The callback performs a querySelector on
+each mutation batch.
+
+This path serves the legacy editor only, but the file is loaded and the cost
+is incurred on every page whether or not the legacy editor is in use.
+
+Required behaviour:
+
+    The components this code waits for exist by the time the tab's own Gradio
+    `load` event fires. Use that. The existing comment at main.js:7-10
+    correctly explains why `onUiLoaded()` is unsuitable; the tab's own load
+    event does not have that problem, and is what canvas/surface.py:179
+    already uses for the Canvas.
+
+================================================================================
+4. WORKSTREAM B - CLIPBOARD / WANGP
+================================================================================
+
+Every item in this section is either resolved by the event spine (section 6)
+or is an independent server-side fix. The event spine is the large piece; the
+rest are small and self-contained.
+
+B1. QUEUE PUMP CLAIM LOOP
+-------------------------
+Severity: high. Highest-volume traffic in the extension.
+Classification: CONFIRMED.
+Resolution: section 6.5 (held claim), not the event stream.
+
+    javascript/minipaint_interop.js:474        pump()
+    minipaint_neo/clipboard/outbox.py:107-109  WAIT_BUSY_MS 400, WAIT_TURN_MS
+                                               250, WAIT_ENHANCE_MS 1000
+    minipaint_neo/clipboard/outbox.py:700-751  claim()
+
+B2. WANGP JOB TRACKING
+----------------------
+Severity: high. Longest-lived loop; up to six hours per job.
+Classification: CONFIRMED.
+Resolution: section 6.7. This is the one item whose source of truth is not
+currently the server's, and section 6.7 addresses that directly.
+
+    javascript/minipaint_interop.js:81   TRACK_MS 3000, TRACK_MAX_MS 6h
+    javascript/minipaint_interop.js:646  startTracking
+
+B3. CANVAS -> WANGP SEND WATCHER
+--------------------------------
+Severity: high. Tightest interval in the extension.
+Classification: CONFIRMED.
+Resolution: section 6.6.
+
+    javascript/minipaint_canvas.js:1246   WANGP_WATCH_MS 150
+    javascript/minipaint_canvas.js:1262   WANGP_FETCH_EVERY_MS 5000, a full
+                                          Gradio round trip each time
+    minipaint_neo/canvas/ui.py:1872       the primary route it duplicates
+
+B4. BRIDGE ACKNOWLEDGEMENT POLL
+-------------------------------
+Severity: medium.
+Classification: CONFIRMED.
+Resolution: section 6.8. This one legitimately stays in the browser, because
+the fact it waits on is genuinely the iframe's. It must become event-driven
+within the iframe rather than a poll.
+
+    wan2gp_bridge/wan2gp-minipaint-bridge/bridge_js.py:56   ACK_POLL_MS 300
+    wan2gp_bridge/wan2gp-minipaint-bridge/bridge_js.py:509  startPoll
+
+B5. CLIPBOARD QUEUE WATCHER
+---------------------------
+Severity: medium.
+Classification: CONFIRMED.
+Resolution: section 6.6, identical to B3.
+
+    javascript/minipaint_clipboard.js:487   armQueue
+
+B6. ENHANCEMENT WATCHER THREAD
+------------------------------
+Severity: medium. Server-side, and independently fixable.
+Classification: CONFIRMED.
+
+    minipaint_neo/clipboard/outbox.py:542   while True / time.sleep(2.0)
+
+The thread re-reads and re-writes the entire outbox document every two seconds
+while any job is enhancing, in order to notice that the LLM has finished.
+
+Required behaviour:
+
+    The enhancement is initiated by this extension (clipboard/enhance.py). Its
+    completion is therefore an event this process can observe directly rather
+    than discover by re-reading a file. Await the completion - a callback, a
+    future, or a condition variable signalled by the enhance module - and
+    publish the transition onto the event spine (section 6.4).
+
+    The timer sweep remains, at a much longer interval (60 s is ample), for
+    lease expiry and terminal-job pruning, which are genuinely time-based and
+    have no event to wait on.
+
+B7. BROWSER DEBUG LOGGING THROUGH A GRADIO EVENT
+------------------------------------------------
+Severity: medium. Cheapest fix on this list.
+Classification: CONFIRMED.
+
+    javascript/minipaint_wangp.js:615-632   say() / flushLog()
+    minipaint_neo/wangp/ui.py:1351          client_log.change(...)
+    minipaint_neo/send_log.py:118           an existing plain FastAPI route
+
+Every diagnostic line written by the browser triggers a full Gradio event
+carrying up to 24 lines of JSON. This occurs during a send, which is precisely
+when B3's 150 ms watcher is also running and logging.
+
+The sequence-number and windowing design at minipaint_wangp.js:603-613 is
+sound and exists to work around a real Gradio behaviour. Keep the design;
+change the transport.
+
+Required behaviour:
+
+    Post to a plain route with `fetch(..., {keepalive: true})`, batched on a
+    1-2 s timer, coalescing all pending lines into one request. Gradio's event
+    machinery must not carry diagnostics.
+
+    send_log.py:118 already demonstrates the pattern, and its docstring
+    already states the reason ("A plain route rather than a Gradio event on
+    purpose: this has to keep working when what failed *is* the Gradio round
+    trip"). That reasoning applies here with equal force.
+
+B8. /wan2gp/ PROXY OVERHEAD
+---------------------------
+Severity: medium, continuous.
+Classification: CONFIRMED for the structure; SPECIAL ATTENTION for the fix.
+
+    minipaint_neo/wangp/proxy.py:594    forward()
+    minipaint_neo/wangp/proxy.py:367    response_headers()
+    minipaint_neo/wangp/proxy.py:90     STREAM_IDLE_TIMEOUT = None
+
+Every WanGP asset, event and heartbeat is double-hopped: browser -> Forge ->
+httpx -> WanGP. WanGP's own Gradio queue heartbeat becomes permanent traffic
+through this server.
+
+The proxy exists for sound reasons (same-origin, one auth boundary) and must
+not be removed.
+
+Required investigation:
+
+    - Confirm whether upstream `Cache-Control`, `ETag` and `Last-Modified`
+      survive response_headers(). If they are being stripped, static WanGP
+      assets are being re-fetched through the full proxy path on every page
+      load, and restoring them is a large and free win.
+
+    - STREAM_IDLE_TIMEOUT = None means a stalled upstream stream is held
+      forever. Give it a bound generous enough for a long generation but
+      finite.
+
+B9. BLOCKING SLEEPS IN REQUEST THREADS
+--------------------------------------
+Severity: medium when triggered.
+Classification: CONFIRMED.
+
+    minipaint_neo/wangp/runtime.py:958, 975   _await_health
+    minipaint_neo/wangp/runtime.py:1061       _terminate
+    minipaint_neo/wangp/runtime.py:1217, 1228
+
+`_await_health` spins on time.sleep(POLL_INTERVAL) for up to the full startup
+span. If it is reached from a Gradio event handler, that handler's thread is
+blocked for the duration.
+
+Required behaviour:
+
+    Start, stop and health-wait become background operations that return
+    immediately with a state. The tab learns the outcome from the event spine
+    (section 6.4), which is the same mechanism everything else uses and
+    removes the need for the tab to block or to poll for it.
+
+    This is a direct instance of the stated preference: the server knows when
+    WanGP becomes healthy, so the server should say so.
+
+B10. PER-LINE LOG FILE OPEN AND APPEND
+--------------------------------------
+Severity: low-medium. WanGP is a chatty child process.
+Classification: CONFIRMED.
+
+    minipaint_neo/wangp/process_log.py:82-92   _write()
+
+Each line opens the file, appends, and closes, holding _lock throughout. The
+largest writer is the thread draining the child's stdout, and WanGP emits a
+line per progress tick.
+
+Required behaviour:
+
+    Hold the handle open with normal buffering. Flush on a timer (1 s) and on
+    process exit. Preserve the rotation at MAX_BYTES and preserve the
+    `_state["broken"]` latch, whose reasoning at process_log.py:118-123 is
+    correct and should be kept verbatim (the latch itself is at :108 and :126).
+
+B11. REFRESH HASHES EVERY FILE
+------------------------------
+Severity: low in steady state, high on first scan of a large library.
+Classification: CONFIRMED.
+
+    minipaint_neo/clipboard/store.py:585-600   _inspect_file
+
+read_bytes() plus SHA-256 over the full file, synchronously inside the
+request. Correctly gated on mtime and size (store.py:558), so it is usually
+skipped - but the first scan of a large folder reads and hashes everything
+while the user waits.
+
+Required behaviour:
+
+    The digest exists only to recover an asset id after an external rename
+    (store.py:569-576). That is a rare recovery path, not a scan-time fact.
+
+    Compute dimensions and format from the file header alone at scan time.
+    Compute the digest lazily, only when an unclaimed file needs to be matched
+    against a missing one. Where a full scan is unavoidable, run it off the
+    request thread and let the grid populate as results arrive.
+
+================================================================================
+5. WORKSTREAM C - PAGE WEIGHT (SHARED)
+================================================================================
+
+C1. UNMINIFIED JAVASCRIPT ON EVERY PAGE
+---------------------------------------
+Classification: CONFIRMED.
+
+    javascript/minipaint_canvas.js      100 335 bytes
+    javascript/minipaint_wangp.js        75 803 bytes
+    javascript/minipaint_interop.js      42 830 bytes
+    javascript/minipaint_clipboard.js    35 478 bytes
+    javascript/main.js                    3 921 bytes
+                                        ---------
+                                        258 367 bytes
+
+AUTOMATIC1111 and Forge load every file in an extension's `javascript/`
+directory on every page of the WebUI. A user who only ever uses txt2img pays
+the parse cost of all of it.
+
+Required behaviour:
+
+    - Minify at build time. Ship a source map.
+
+    - IMPLEMENTATION RECOMMENDATION: load the tab-specific files from their
+      tab's own Gradio load event rather than from the global directory.
+      main.js is the only file that must be global.
+
+SPECIAL ATTENTION: the comment block at main.js:7-10 documents a real hazard
+in the host's load ordering. Any lazy-loading scheme must be verified against
+it, and against a Reload UI, which reloads the tab without reloading the page.
+
+C2. GRADIO COMPONENT COUNT
+--------------------------
+Classification: CONFIRMED.
+
+    minipaint_neo/canvas/ui.py       92 components, 28 with visible=False
+    minipaint_neo/clipboard/ui.py    88 components, 41 with visible=False
+    minipaint_neo/wangp/ui.py        74 components, 12 with visible=False
+                                    ---
+                                    254 components, 81 hidden
+
+A hidden textbox used as a message channel is not free. It appears in the
+page configuration JSON, is hydrated into a Svelte component, is held in the
+per-session state store, and is re-serialised on every event that names it as
+an input or output.
+
+Required behaviour:
+
+    The majority of the 81 hidden components are one-way command channels from
+    the browser to the server. Once the event spine exists (section 6), the
+    return direction is served by the stream and the outbound direction is a
+    `fetch` to a plain route. Both are cheaper than a component.
+
+    Consolidate. A realistic target is fewer than 20 hidden components across
+    all three tabs.
+
+    This is the single largest contributor to WebUI startup time attributable
+    to this extension, and it is also the item that most directly serves the
+    stated preference for moving logic off browser-mediated triggers.
+
+================================================================================
+6. THE EVENT SPINE (CORE DESIGN)
+================================================================================
+
+This section is the substance of the specification. Sections 3 and 5 are
+independent; this section is what replaces the six polling loops.
+
+6.1 Principle
+-------------
+
+The server changes the state. The server therefore knows, at the instant of
+the change, that it changed. It should say so on a connection that is already
+open.
+
+The browser's job is to render what it is told and to send user intent. It is
+not to interrogate.
+
+6.2 Transport: one Server-Sent Events stream per page
+------------------------------------------------------
+
+    GET /minipaint-interop/events?page=<page_id>&since=<revision>
+    Content-Type: text/event-stream
+
+CONFIRMED that this is straightforward in this codebase:
+
+    - The interop routes are Starlette `Route` objects with `async def`
+      endpoints, mounted directly onto Forge's app at interop.py:629-651
+      (`app.router.routes[0:0] = routes`). They do not pass through the WanGP
+      proxy.
+
+    - `StreamingResponse` is already imported and used in this repository at
+      wangp/proxy.py:597,637.
+
+    - The sign-in gate `_signed_in()` at interop.py:434 applies unchanged.
+
+Requirements:
+
+    (a) EXACTLY ONE stream per browser page, shared by Canvas, Clipboard and
+        WanGP. See principle 2.4. The stream is opened by
+        javascript/minipaint_interop.js, which all three already depend on,
+        and the other two subscribe to it in-process. Under no circumstances
+        should each integration open its own.
+
+    (b) Every event carries a monotonic `revision`, emitted as the SSE `id:`
+        field. The browser's native EventSource reconnection sends
+        `Last-Event-ID` automatically, so a dropped connection resumes at the
+        exact revision with no gap and no application code.
+
+    (c) A `since` query parameter serves the same purpose for an explicit
+        catch-up (first connect, or a tab returning to visibility).
+
+    (d) The server writes a `:keepalive` comment every 25 s. This is the
+        server writing two bytes on an open socket. It is not polling, and it
+        prevents intermediaries from closing an idle stream.
+
+    (e) The endpoint must be fully asynchronous. It must NOT call `_load()`
+        or any other blocking file read inside the generator - that would
+        block the event loop and make every route on the host slower. Serve
+        from the in-memory list, or use `asyncio.to_thread`.
+
+    (f) Events are advisory, never authoritative. An event says "something
+        about job X changed"; it may carry the new state for convenience. A
+        client that has lost confidence for any reason refetches from the
+        existing `GET /minipaint-interop/outbox` route, which stays as it is.
+        This keeps the stream from becoming a second source of truth.
+
+6.3 The publication point
+-------------------------
+
+CONFIRMED, and this is what makes the work tractable: every state mutation in
+the outbox already funnels through a single function.
+
+    minipaint_neo/clipboard/outbox.py:364   _save(jobs)
+
+There are 18 call sites (lines 547, 567, 579, 587, 680, 719, 749, 771, 792,
+812, 817, 829, 854, 887, 927, 951, 970, 990), and every one of them is already
+inside `with _lock:`.
+
+Required behaviour:
+
+    Extend `_save` to, under the same lock:
+
+        1. increment a module-level monotonic `revision`
+        2. append a compact record to a bounded in-memory ring buffer
+        3. signal every parked stream
+
+    No call site changes. The publication is a property of saving, which means
+    it cannot be forgotten by a future contributor adding a nineteenth
+    mutation.
+
+    The ring buffer must be bounded (256 entries is ample). A client whose
+    cursor has fallen off the end receives a `reset` event and refetches. It
+    must never receive an unbounded replay.
+
+IMPLEMENTATION RECOMMENDATION: the same treatment applies to
+`minipaint_neo/wangp/runtime.py`'s state transitions (B9) and to
+`minipaint_neo/clipboard/enhance.py`'s progress (B6). Both should publish onto
+the same spine rather than each growing a delivery mechanism.
+
+6.4 Event taxonomy
+------------------
+
+Minimum set. Each is something the server already knows at the moment it
+happens, and currently does not say.
+
+    job              a job's state changed: pending, enhancing, sending,
+                     queued, started, unconfirmed, failed, cancelled
+    enhance          enhancement progress or completion for a job
+    handoff          a prepared handoff file is ready for delivery (replaces
+                     B3 and B5's watchers)
+    runtime          WanGP process state changed (replaces B9's blocking wait)
+    reset            the client's cursor is too old; refetch
+
+Deliberately NOT on the stream: anything the server does not own. Section 6.7.
+
+6.5 The claim loop becomes a held request (B1)
+-----------------------------------------------
+
+The claim is distinct from everything above. It is not a status notification;
+it is a work handout with a lease, and it must remain a request/response so
+that the lease is issued to exactly one caller.
+
+Required behaviour:
+
+    `POST /minipaint-interop/outbox/claim` holds the request until one of:
+
+        - it is this page's turn (answer immediately with the job and lease)
+        - a bounded wait elapses, ~25 s (answer `{empty: true}`; the client
+          reconnects)
+        - the client disconnects
+
+    Implementation: a `threading.Condition` alongside the existing `_lock`,
+    or an asyncio primitive if the route is made fully async. The existing
+    `claim()` logic at outbox.py:700-751 is unchanged; it is wrapped in a wait
+    rather than rewritten.
+
+    The `wait` field in the response is retained for protocol compatibility
+    but becomes a long value (the reconnect interval), not a poll interval.
+    A client from before this change continues to work, more slowly - which
+    is the guarantee that makes section 8 safe.
+
+LATENCY EFFECT: the page ahead finishes, `_save` fires, the condition is
+signalled, and the waiting page receives its job in the same millisecond. This
+is faster than the current 250 ms poll, not slower.
+
+6.6 The Gradio chained-step fallbacks (B3, B5)
+-----------------------------------------------
+
+These watchers exist because `.then(js=...)` was observed not to fire. That
+observation stands and the fallback must stay. Only its mechanism changes.
+
+Required behaviour:
+
+    Replace the interval with a `handoff` event subscription. The primary
+    route (the Gradio chained step) and the fallback route (the event) race;
+    whichever arrives first delivers.
+
+    The existing de-duplication is already correct and must be preserved
+    exactly:
+
+        javascript/minipaint_canvas.js:1251,1304,1315   w.delivered
+        javascript/minipaint_clipboard.js:525-526      S.queued[nonce]
+
+    Delete: the 150 ms interval, WANGP_FETCH_EVERY_MS and its hidden-button
+    round trip, and WANGP_WATCH_LIMIT_MS's 90 s ceiling. The stream has no
+    ceiling and costs nothing, so the give-up path becomes a genuine error
+    condition rather than a timeout.
+
+LATENCY EFFECT: 75 ms mean becomes the time to write a TCP frame on loopback.
+
+6.7 WanGP queue position - the honest exception (B2)
+------------------------------------------------------
+Classification: SPECIAL ATTENTION.
+
+This is the one fact in the system that the server does not currently own. At
+this revision, queue position is visible only inside the WanGP iframe, via the
+bridge. That is why the tracking loop is in the browser.
+
+The stated preference - server-side over browser polling - cannot be satisfied
+by moving the existing loop. It requires giving the server the fact.
+
+Two routes, in order of preference:
+
+    OPTION 1 (preferred). The server asks WanGP directly.
+
+        The runtime owns the child process (runtime.py) and the proxy already
+        sees all of its traffic (proxy.py). Query WanGP's queue server-side
+        and publish onto the spine. The browser stops tracking entirely, and
+        N open tabs cost what one costs.
+
+        SPECIAL ATTENTION: requires confirming that WanGP exposes queue state
+        on an endpoint reachable from the server, independent of the browser
+        session. This must be proven by prototype before committing to it.
+        The revised WanGP design intent's own principle applies here - ask
+        what is true of the live installation, do not assume what was true
+        when this was written.
+
+    OPTION 2 (fallback, if Option 1 is disproven). One tracker per job.
+
+        The server issues a tracker lease using the identical mechanism to
+        the existing job lease (outbox.py:743-748). One page tracks; every
+        other page reads the result from the spine.
+
+        Reduces cost from (tabs x jobs) to (1 x jobs) without needing any new
+        capability from WanGP.
+
+Under EITHER option, cadence must be state-driven rather than fixed:
+
+    - While a job is `generating`, WanGP emits progress. Ride that signal.
+    - While a job is merely `waiting`, its position changes only when
+      something ahead of it finishes - which is a `job` event the server
+      already publishes. There is nothing to poll for.
+    - TRACK_MAX_MS's six-hour ceiling and the continued tracking of terminal
+      jobs (minipaint_interop.js:668,710) are defects regardless of which
+      option is chosen. Tracking stops when a job reaches a terminal state.
+
+6.8 The bridge acknowledgement (B4)
+------------------------------------
+
+This one stays in the browser, and legitimately so: the acknowledgement is
+written into the iframe's own DOM by the iframe's own Gradio event. No server
+is in a position to know it first.
+
+What must change is that a fact available in the same document is currently
+discovered by re-reading a value every 300 ms.
+
+Required behaviour:
+
+    Observe the acknowledgement textarea for its `input` event, or attach a
+    MutationObserver scoped to that single element. Not the document, not a
+    subtree - the one element, which is the discipline the rest of this
+    codebase already keeps (minipaint_wangp.js:1439-1450 states the rule
+    explicitly and follows it).
+
+    If a timed fallback is retained at all, it starts after 2 s rather than
+    immediately, so the normal path never pays for it. Principle 2.3.
+
+6.9 Optimistic local echo
+--------------------------
+Classification: IMPLEMENTATION RECOMMENDATION. Independent of 6.2-6.8 and can
+land before any of them.
+
+Even a 2 ms round trip is a round trip. Applications feel instant because they
+render before confirmation, not because their confirmations are fast.
+
+Required behaviour:
+
+    On press, render the outcome immediately with a pending marker. The
+    stream confirms (marker clears) or corrects (the row becomes a refusal
+    with its reason). The server remains the authority - outbox.py's module
+    docstring is unchanged - so corrections are authoritative, and rare.
+
+    Applies to: Add to Queue, Cancel, Retry, and Send to.
+
+    It must NOT be applied to anything whose refusal is common or whose
+    incorrect optimistic display would mislead - in particular, an enhanced
+    press while the LLM side is unavailable, which is refused before anything
+    is stored (outbox.py module docstring, final rule).
+
+LATENCY EFFECT: perceived latency for the common case becomes zero,
+independent of transport speed. This is the single largest responsiveness win
+available and the one least dependent on everything else in this document.
+
+6.10 Visibility and reconnection
+---------------------------------
+
+    - On `document.visibilitychange` to hidden: close the stream. Nothing is
+      being rendered.
+    - On visible: reconnect with `since=<last revision>`. One request returns
+      everything missed. The user is current before the tab finishes painting.
+    - EventSource reconnects automatically on network loss, carrying
+      `Last-Event-ID`. No application-level retry logic should be written;
+      writing one is how a reconnect storm gets built.
+
+This replaces the idea that a poll is needed to "be sure". The cursor makes
+certainty a single request.
+
+================================================================================
+7. LATENCY BUDGET AND ACCEPTANCE THRESHOLDS
+================================================================================
+
+Measured on loopback, which is the deployment target. A change that does not
+meet its threshold has not met this specification.
+
+    Signal                    Now (mean/worst)    Required after
+    -----------------------   -----------------   ---------------------
+    Claim turn                125 ms / 250 ms     < 10 ms
+    Handoff delivery           75 ms / 150 ms     < 10 ms
+    WanGP queue position      1500 ms / 3000 ms   < 250 ms on change
+    Job state change          up to 400 ms        < 10 ms
+    Enhancement completion    up to 2000 ms       < 10 ms
+    Perceived (with 6.9)      as above            0 ms
+
+    Traffic                   Now                 Required after
+    -----------------------   -----------------   ---------------------
+    Requests/sec, idle        ~0.7                0
+    Requests/sec, active      ~5                  0
+    Requests per job          hundreds            < 5
+    Held connections/page     0                   1
+
+    Canvas                    Now                 Required after
+    -----------------------   -----------------   ---------------------
+    Repaints during drag      1 per pointer event 1 per animation frame
+    scheduleFit calls/sec     unbounded (A1)      0 when layout is static
+
+Every latency figure above IMPROVES. None regresses. That is the test of
+whether this specification has been implemented correctly rather than merely
+implemented.
+
+================================================================================
+8. MIGRATION SEQUENCE
+================================================================================
+
+This ordering is a requirement, not a suggestion. It is what structurally
+guarantees principle 2.1.
+
+PHASE 0 - Canvas and self-contained server fixes
+    A1, A2, A5, B6, B7, B10.
+    No protocol change. No contract implication. Independently reviewable and
+    independently revertable. Largest felt improvement per unit of risk.
+    Ship this first regardless of what is decided about the rest.
+
+PHASE 1 - Build the spine alongside the existing polls
+    6.2, 6.3, 6.4. Add the stream. Wrap `_save`. Publish events.
+    DELETE NOTHING. Every existing poll keeps running.
+    Both routes race; existing de-duplication (6.6) handles the overlap.
+    Latency can only improve in this phase, because the stream is competing
+    with the polls rather than replacing them.
+
+PHASE 2 - Make the spine primary, demote the polls
+    6.5, 6.6, 6.8, 6.9.
+    Polls remain but their intervals lengthen sharply (150 ms -> 2 s,
+    3 s -> 30 s) and they gate on visibility and on the stream being known
+    broken. They are now true fallbacks per principle 2.3.
+    Instrument: count how often a poll delivers a fact the stream had not
+    already delivered. This number is the evidence required for Phase 3.
+
+PHASE 3 - Remove the demoted polls
+    Only once Phase 2's instrumentation shows the fallbacks effectively never
+    winning the race, over a meaningful period of real use.
+    Retain one reconcile-on-visibility fetch (6.10), which is a single
+    request and not a loop.
+
+PHASE 4 - Structural
+    A3, A4, C1, C2, B8, B9, B11, and 6.7 Option 1.
+    Larger changes with contract-adjacent surface. Should not begin until the
+    spine is proven.
+
+The protection is Phase 1: the push path must demonstrate itself faster while
+the old path is still present, before anything is removed. At no point in this
+sequence is the extension slower than it is today.
+
+================================================================================
+9. TEST REQUIREMENTS
+================================================================================
+
+The suites in `tests/` are the contract. Additions and amendments required:
+
+9.1 Amend, do not delete
+------------------------
+
+    test_frontends.py
+        Currently asserts "every step that replaces the image is image ->
+        wait -> mask layer". That assertion encodes BOTH an ordering
+        requirement (must survive A3) and a transport shape (must not).
+        Rewrite to assert the ordering outcome. Do not delete it.
+
+    test_clipboard_outbox.py
+        Every existing assertion about claim, lease, ordering and press order
+        must pass unchanged after 6.5. The held claim wraps `claim()`; it does
+        not alter its logic. If any of these tests need changing, the
+        implementation is wrong.
+
+9.2 New coverage
+----------------
+
+    test_interop.py
+        - the stream endpoint behind the sign-in gate, on a bare app
+        - an event published for every `_save` call site
+        - `since` / `Last-Event-ID` resume with no gap and no duplicate
+        - a cursor older than the ring buffer yields `reset`, never a replay
+        - keepalive emitted on an idle stream
+        - the generator performs no blocking read (assert via a seam)
+
+    test_clipboard_outbox.py
+        - a held claim returns the instant the job ahead is reported done
+        - a held claim returns `empty` at its bound, not later
+        - a client that disconnects mid-hold releases its slot
+        - a pre-spine client (one that ignores the stream and polls) still
+          works, per principle 2.6
+
+    browser_smoke.py
+        - exactly one EventSource per page across all three tabs (2.4)
+        - a drag produces at most one repaint per animation frame (A2)
+        - pointer-up lands on the exact final position, not the last rendered
+          one (A2, correctness)
+        - scheduleFit settles to zero calls/sec with static layout (A1)
+        - with the stream blocked at the network layer, every flow still
+          completes via the demoted fallbacks (Phase 2 safety)
+
+9.3 Privacy
+-----------
+
+    test_logging_privacy.py governs every writer in the extension. Event
+    payloads are a new writer and are subject to it without exception. No
+    prompt, filename, path, handoff id, session hash or secret may appear in
+    an event. Job ids are already truncated to 8 characters in the journal
+    (outbox.py:750) and the same discipline applies here.
+
+================================================================================
+10. WHAT MUST NOT CHANGE
+================================================================================
+
+Explicit non-goals. An implementation that violates any of these has failed
+regardless of what it achieves on latency.
+
+    - `minipaint.wangp.queue/v1` keeps every route, field and error code.
+      The spine is additive.
+    - The server remains the authority on queue state and ordering. The
+      stream is a delivery mechanism, never a second source of truth (6.2f).
+    - One lease at a time across every page. Press order preserved. The rules
+      in the outbox module docstring - an unconfirmed job is never retried by
+      the machine; an expired lease means unconfirmed once the overlay was
+      written; nothing is asked of WanGP while WanGP is not running - are
+      untouched.
+    - The sign-in boundary applies to the stream exactly as to every other
+      route (interop.py:434).
+    - No document-wide observers. No permanent polling. The existing rule,
+      now actually obeyed.
+    - No new third-party dependency.
+    - Graceful degradation: each integration failing to load costs exactly
+      itself (scripts/mini_paint.py:35-65). The spine must not become a
+      dependency whose absence breaks a tab. A page that cannot open the
+      stream falls back to the Phase 2 behaviour and says so once.
+
+================================================================================
+11. OPEN QUESTIONS FOR THE IMPLEMENTING ENGINEER
+================================================================================
+
+Each of these is a SPECIAL ATTENTION item requiring a decision or a prototype
+before the affected work begins.
+
+Q1. Does WanGP expose queue state to a server-side caller, independent of the
+    browser session? Determines 6.7 Option 1 versus Option 2. Prototype
+    before committing. This is the single largest open question in the
+    document.
+
+Q2. Does Forge's uvicorn configuration tolerate a long-held SSE connection per
+    page without consuming a worker? The interop routes are already
+    `async def`, which should make this free, but it must be measured under
+    the host's actual settings rather than assumed.
+
+Q3. Does any deployment run Forge behind a reverse proxy that buffers or
+    closes `text/event-stream`? If so, a long-poll variant of 6.2 is needed
+    as an alternative transport. The event taxonomy and the cursor design are
+    transport-independent by construction, so this affects only the endpoint.
+
+Q4. Are upstream cache headers surviving `response_headers()` at
+    proxy.py:367? Determines the size of B8's win.
+
+Q5. Can the extension's ForgeCanvas instance (A5) be created lazily without
+    breaking Reload UI, which reloads the tab without reloading the page?
+
+Q6. What is an acceptable minified-bundle target for C1, and is a build step
+    acceptable in this repository at all? The repo currently ships
+    hand-written JavaScript with no build for `javascript/`, and adding one
+    is a maintenance decision, not only a performance one.
+
+================================================================================
+12. FILE INDEX
+================================================================================
+
+Files this work touches, with the sections that touch them.
+
+    javascript/minipaint_canvas.js          A1, A2, A3, B3, 6.6
+    javascript/minipaint_interop.js         B1, B2, 6.2, 6.5, 6.7, 6.9, 6.10
+    javascript/minipaint_clipboard.js       B5, 6.6, 6.9
+    javascript/minipaint_wangp.js           B7, 6.2
+    javascript/main.js                      A6, C1
+    miniPaint/src/js/libs/webui-host.js     A5
+
+    minipaint_neo/canvas/ui.py              A3, A4
+    minipaint_neo/canvas/surface.py         A4, A5
+    minipaint_neo/canvas/imaging.py         A4
+    minipaint_neo/interop.py                6.2, 6.3, 6.4, 6.5
+    minipaint_neo/clipboard/outbox.py       B1, B6, 6.3, 6.5
+    minipaint_neo/clipboard/enhance.py      B6, 6.3
+    minipaint_neo/clipboard/store.py        B11
+    minipaint_neo/clipboard/ui.py           C2, 6.9
+    minipaint_neo/wangp/proxy.py            B8
+    minipaint_neo/wangp/runtime.py          B9, 6.3
+    minipaint_neo/wangp/process_log.py      B10
+    minipaint_neo/wangp/ui.py               B7, C2
+
+    wan2gp_bridge/wan2gp-minipaint-bridge/bridge_js.py    B4, 6.8
+
+    tests/test_frontends.py                 9.1
+    tests/test_interop.py                   9.2
+    tests/test_clipboard_outbox.py          9.1, 9.2
+    tests/test_logging_privacy.py           9.3
+    tests/browser_smoke.py                  9.2
+
+    docs/wangp/CONTRACTS.md                 amend for the events route
+    docs/clipboard/CONTRACTS.md             amend for the held claim
+
+================================================================================
+END OF SPECIFICATION
+================================================================================

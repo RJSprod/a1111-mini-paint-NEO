@@ -1,0 +1,424 @@
+MINIPAINT NEO - PERFORMANCE AND RESPONSIVENESS
+REVIEW RESPONSE TO THE REVISED DESIGN INTENT
+Repository target: RJSprod/a1111-mini-paint-NEO
+Code baseline: 1d0fea26bf063e24e40b76b826f7086626097a01 (2026-09-13)
+Reviews: PERFORMANCE_DESIGN_INTENT_2026-09-13_REVISED.txt
+Supersedes as the governing document: PERFORMANCE_DESIGN_INTENT_2026-09-13.txt
+Revision date: 2026-09-13
+Status: Review response. Not itself a specification.
+
+================================================================================
+0. VERDICT
+================================================================================
+
+Adopt the revised specification. Build from it, not from the original.
+
+The revision is not a stylistic pass over the original. It corrects eight
+substantive defects, two of which made parts of the original design
+unimplementable as written, and it adds a deployment assumption - a browser on
+a different machine from Forge - that changes the transport requirements rather
+than merely the acceptance numbers.
+
+Three gaps were found in the revision. All three are clarifications of one or
+two sentences, not redesigns. One of them (section 3.1) would produce a
+user-visible regression if the specification is implemented exactly as it
+currently reads, and should be resolved before Phase 2 begins.
+
+Nothing in this response asks for the revision's architecture to change.
+
+================================================================================
+1. VERIFICATION OF THE REVISION'S FACTUAL CLAIMS
+================================================================================
+
+The revision makes three concrete assertions about the code that contradict or
+resolve open items in the original. All three were checked against the baseline
+revision. All three are correct.
+
+1.1 R1 - proxy cache validators are not stripped
+------------------------------------------------
+CLAIM (revision section 11, R1): response_headers() preserves end-to-end
+Cache-Control, ETag and Last-Modified.
+
+VERIFIED CORRECT. minipaint_neo/wangp/proxy.py:367-388.
+
+The function lowercases the upstream pairs, computes `drop` as
+hop_by_hop_names(pairs) | {"content-length"}, rewrites `location` through
+rewrite_location() and `set-cookie` through rewrite_set_cookie(), and appends
+every other header unchanged. hop_by_hop_names() (proxy.py:244-250) returns the
+fixed HOP_BY_HOP set plus whatever the connection's own `Connection` header
+names. No cache validator appears in either set.
+
+CONSEQUENCE: the original's Q4 was answerable by reading one function and
+should not have shipped as an open question. The revision's redirection of the
+investigation upstream - does WanGP emit useful validators at all - is the
+correct remaining question.
+
+1.2 PAGE_ACTIVE_SECONDS
+-----------------------
+CLAIM (revision sections B1.3 and 6.13): currently 15 s.
+
+VERIFIED CORRECT. minipaint_neo/clipboard/outbox.py:103, PAGE_ACTIVE_SECONDS =
+15.0. Used at outbox.py:734 to decide whether the owner of the head job is
+still active. LEASE_SECONDS = 90.0 at outbox.py:100 for comparison.
+
+1.3 enhance.py exposes no completion notification
+--------------------------------------------------
+CLAIM (revision section B6): the repository does not establish that a
+callback/future notification exists; status() is the stable interaction.
+
+VERIFIED CORRECT. minipaint_neo/clipboard/enhance.py public surface is
+submit() at :524, status(llm_id) at :583, cancel() at :616, cancel_all() at
+:628, plus configuration and capability helpers. There is no callback, future,
+condition, subscription or equivalent anywhere in the module.
+
+Whether the external ModelSwitchRefiner API (mc_llm_api) exposes one is
+genuinely not determinable from this repository, which is precisely why the
+revision's Option A / Option B split is the correct treatment.
+
+CONSEQUENCE: the original's B6 instruction to "await the completion - a
+callback, a future, or a condition variable signalled by the enhance module"
+asserted a seam that does not exist.
+
+================================================================================
+2. CORRECTIONS ACCEPTED
+================================================================================
+
+Recorded so that these decisions are not re-litigated later by a reader who
+finds the original document. Each entry states what the original said, why it
+was wrong, and what the revision does instead.
+
+2.1 The held claim contradicted the one-connection rule
+--------------------------------------------------------
+ORIGINAL: section 6.5 specified a ~25 s held POST claim. Section 2.4 required
+exactly one held connection per browser page.
+
+DEFECT: these are mutually exclusive. Once the shared event transport is open,
+a held claim is a second long-lived HTTP/1.1 connection against a six-per-origin
+budget that Forge also needs.
+
+REVISION: claim stays immediate request/response; a targeted advisory
+`claim_ready` event wakes the page; the lease is still granted only under the
+outbox lock. This is also strictly more compatible - an old client that keeps
+polling the claim route is unaffected, because neither its timing nor its
+response shape changes.
+
+ACCEPTED without reservation. The revision's approach is better than the
+original's on both correctness and compatibility.
+
+2.2 The original heartbeat was invisible to the browser
+--------------------------------------------------------
+ORIGINAL: section 6.2(d) specified an SSE `:keepalive` comment every 25 s.
+
+DEFECT: EventSource does not surface comment frames to JavaScript. A comment
+keeps intermediaries from closing an idle connection, but no browser-side
+liveness watchdog can be built on it. The original then had no mechanism at all
+for detecting a silently black-holed connection.
+
+REVISION: an application-visible `heartbeat` event, carrying no id and not
+advancing the state revision, approximately every 15 s, feeding a local
+`lastFrameAt` watchdog with a 35-45 s deadline.
+
+ACCEPTED. This is the difference between a design that detects a dead remote
+link and one that does not.
+
+2.3 A5 raised latency and violated the original's own principle
+----------------------------------------------------------------
+ORIGINAL: raise webui-host.js wait_until's default interval from 50 ms to
+150 ms, on the reasoning that waiting faster than the ~100 ms producer "buys
+nothing."
+
+DEFECT: the reasoning is backwards. The two timers are unsynchronised, so mean
+detection delay is approximately half the observer's interval: ~25 ms at 50 ms,
+~75 ms at 150 ms. The change adds latency. It also violated the original's own
+section 2.1, which forbids lengthening an interval as an optimisation.
+
+REVISION: retain the current default unless a measured replacement proves
+neutral or faster; prefer an observable host state if Forge exposes one.
+
+ACCEPTED.
+
+2.4 B4 as originally written would not have fired
+--------------------------------------------------
+ORIGINAL: observe the acknowledgement textarea's `input` event, or attach a
+MutationObserver scoped to that element.
+
+DEFECT: programmatic assignment to a textarea's `value` property emits no
+`input` event. MutationObserver observes the `value` *attribute* - which is the
+element's default value - not the property. Neither mechanism reliably sees the
+write the bridge actually performs.
+
+REVISION: prototype three ordered options (a real Gradio component event, a
+narrow setter/update seam, MutationObserver only if a prototype proves the
+installed update path mutates observed DOM); if none is reliable, keep the
+value-read fallback but start it after a ~2 s grace and run it only while a
+bridge request is in flight.
+
+ACCEPTED. The revision's section 9.6 test list is the right way to hold this.
+
+2.5 B6 assumed a notification seam that does not exist
+-------------------------------------------------------
+See 1.3. ACCEPTED. The revision's Option B constraint - a server-side bounded
+observer that queries the external API directly and does not re-read and
+rewrite the whole outbox document to discover progress - preserves the actual
+performance goal without inventing an API.
+
+2.6 B2's justification was wrong
+---------------------------------
+ORIGINAL: "While a job is merely `waiting`, its position only changes when
+something ahead of it finishes - which is a `job` event the server already
+publishes. There is nothing to poll for."
+
+DEFECT: WanGP's queue may contain work created directly in WanGP or by another
+integration. MiniPaint's own outbox events cannot prove those external queue
+movements. The claim that there is nothing to observe was load-bearing for the
+original's conclusion and is false.
+
+REVISION: states the correction explicitly and permits an adaptive bounded
+cadence under Option 2 as the documented exception to the server-side
+preference.
+
+ACCEPTED. This was the most consequential error in the original.
+
+2.7 Q4 was answerable from the code
+------------------------------------
+See 1.1. ACCEPTED.
+
+2.8 The original assumed loopback deployment
+---------------------------------------------
+ORIGINAL: section 7 thresholds were stated for loopback, "which is the
+deployment target."
+
+DEFECT: that assumption was asserted, not established. If the browser may be on
+another machine, then transient disconnects, browser sleep, proxy buffering,
+VPN reconnect and server restart are normal conditions. The original had no
+`server_epoch`, no authoritative reconcile route, and no answer for a TCP path
+that fails without producing an application error.
+
+REVISION: sections 0 (deployment assumption), 1.4, 2.3, 2.9, 6.3, 6.9, 6.11 and
+7.4. Normal path is push; recovery is one authoritative sync; recovery is not a
+loop.
+
+ACCEPTED, and this is the revision's most valuable addition. The original's
+reliability argument rested on "EventSource usually reconnects," which is not a
+proof that no stale state survived an interruption. The epoch-namespaced cursor
+plus the sync route is that proof.
+
+================================================================================
+3. GAPS FOUND IN THE REVISION
+================================================================================
+
+Three items. Proposed resolution text is given for each so they can be dropped
+in without further design work.
+
+3.1 HIDDEN TABS WILL STALL THEIR OWN QUEUES
+--------------------------------------------
+Severity: user-visible regression. Resolve before Phase 2.
+Affects: revision sections 6.10 (VISIBILITY hidden) and 6.13.
+
+THE CHAIN:
+
+    section 6.10  hidden -> close the transport
+    section 6.13  transport disconnect -> 15 s grace -> page marked inactive
+                  -> no claim_ready
+    consequence   the page stops claiming its own work
+
+WHY NOBODY ELSE PICKS IT UP: a job can only be run by the page that composed
+it. In claim() (outbox.py:722-739) a page is handed `head` only when
+head["page"] == page_id, and otherwise `mine[0]` - its own oldest waiting job.
+Page presence governs only whether *other* pages may skip ahead of an inactive
+page's head job; it never transfers ownership. So a hidden page's jobs are not
+reassigned. They wait for that page to become visible again.
+
+WHAT HAPPENS TODAY: pump() waits with setTimeout. Chrome throttles background
+timers to roughly once per minute after approximately five minutes hidden, but
+does not stop them, and fetch responses still resolve. A hidden tab therefore
+continues to drain its queue, slowly.
+
+WHAT HAPPENS UNDER THE REVISION AS WRITTEN: it drains at zero.
+
+USER-VISIBLE FORM: queue ten items, switch to another tab for twenty minutes,
+return to find two were sent. This will be reported as a bug, and it will be
+attributed to the performance work.
+
+AGGRAVATING DETAIL: section 6.10 currently permits "close the transport after a
+short grace or immediately if implementation is simpler." The simpler
+implementation is the one that causes this.
+
+PROPOSED RESOLUTION - replace the VISIBILITY hidden clause in section 6.10
+with:
+
+    VISIBILITY hidden:
+        - stop all rendering and layout work immediately
+        - if this page has no non-terminal work of its own, close the
+          transport and mark continuity uncertain
+        - if this page has non-terminal work of its own (pending, enhancing,
+          sending, queued or started), KEEP the transport open so the page
+          continues to receive claim_ready and continues to drain its own
+          queue. A hidden page must not stall work that only it can run.
+        - a page that keeps its transport open while hidden performs no
+          rendering and no speculative fetching; it claims, runs and reports
+          exactly as a visible page does
+
+and add to section 6.13:
+
+    A page that holds non-terminal work of its own remains present while
+    hidden. Presence is not a proxy for visibility; it is a statement that the
+    page is still able to run the work it owns.
+
+SECONDARY CHECK: confirm that a browser tab which the OS or browser genuinely
+freezes (not merely hides) is still recovered by the existing visibility-restore
+sync path. Freezing is outside the extension's control; the requirement is only
+that recovery is correct, not that the connection survives.
+
+3.2 TARGETED EVENTS IN A SHARED RING ARE UNSPECIFIED
+-----------------------------------------------------
+Severity: low. Specification gap, not a defect.
+Affects: revision sections 6.4, 6.6, 6.8.
+
+Section 6.4 defines a single bounded ring (recommended 512 entries) with
+"subscribers keyed by page." Section 6.6 defines `claim_ready` as a hint
+targeted at one page. It is not stated whether targeted events enter the ring.
+
+IF THEY DO: replay after a gap delivers page A's claim_ready to page B. This is
+harmless in correctness terms - claim_ready is advisory, carries no lease, and
+a wasted claim returns empty - but it multiplies useless claim calls by the
+number of open tabs on every eligibility change, which is the traffic the work
+exists to remove.
+
+IF THEY DO NOT: claim_ready cannot be replayed. This is fine, because B1 item 8
+already requires maybeClaim() once after enqueue, reconnect, sync, retry or
+adopt, which covers exactly the case replay would have covered.
+
+The second reading is almost certainly what is intended. The risk is that it
+gets decided by accident during implementation.
+
+PROPOSED RESOLUTION - add to section 6.4:
+
+    Targeted events (currently claim_ready) are delivered only to their
+    addressed subscriber and are NOT placed in the shared replay ring. They are
+    recomputed from current eligibility on connect and on sync, which is what
+    B1 item 8 already requires. Only broadcast durable-state events enter the
+    ring.
+
+3.3 WHETHER claim_ready ADVANCES THE REVISION IS UNDEFINED
+-----------------------------------------------------------
+Severity: low. One sentence.
+Affects: revision section 6.3.
+
+Section 6.3 gives two rules: every durable state event gets the next revision;
+heartbeat does not advance revision and carries no id. `claim_ready` is neither
+a durable state change nor a heartbeat, and no rule covers it.
+
+IF IT ADVANCES: every page's cursor moves for an event most of them did not
+need. Workable, but section 6.10's gap-detection and duplicate-revision logic
+must tolerate a cursor advancing with no state the page cares about having
+changed.
+
+IF IT DOES NOT: it cannot be replayed - which is consistent with 3.2 and is the
+coherent choice.
+
+PROPOSED RESOLUTION - add to section 6.3, alongside the heartbeat rule:
+
+    Targeted advisory events (claim_ready) do not advance the state revision
+    and carry no id, for the same reason heartbeat does not: they describe an
+    opportunity, not a durable state change, and they are recomputed on connect
+    and sync rather than replayed.
+
+This makes 6.3, 6.4 and 6.8 mutually consistent.
+
+================================================================================
+4. SCOPE OBSERVATION
+================================================================================
+
+Not a defect. Delivery-risk control only, offered for the implementing
+engineer's judgement.
+
+The SSE -> long-poll fallback (revision section 6.12) is well-specified and is
+justified by the remote deployment assumption. It is also a substantial piece of
+work: a second transport, a never-overlap invariant, transition-back-at-
+lifecycle-boundary logic, and its own share of the test matrix in section 9.4.
+
+Section 8 builds it in Phase 2, before any evidence from real use.
+
+Prototype P1 in Phase 0.5 already tests SSE on the actual remote topology - the
+real LAN, VPN, tunnel or reverse proxy in use. If P1 passes cleanly on those
+paths, the fallback could be deferred behind a documented trigger and built when
+a deployment demonstrates it is needed.
+
+Deferring costs nothing architecturally: the cursor, epoch, replay, reset and
+event taxonomy are already transport-independent by construction, which is
+exactly what section 6.12 says.
+
+If the engineer already knows that a proxy in the real path buffers or closes
+text/event-stream, disregard this entirely and build it in Phase 2 as written.
+
+================================================================================
+5. CHECKED AND FOUND SOUND - NO ACTION
+================================================================================
+
+Recorded so that review effort is not spent on these again.
+
+    - Publication as a property of _save (revision 6.5). Verified: all durable
+      outbox mutations funnel through _save(jobs) at outbox.py:364, with 18 call
+      sites (547, 567, 579, 587, 680, 719, 749, 771, 792, 812, 817, 829, 854,
+      887, 927, 951, 970, 990), every one already inside `with _lock:`. Making
+      publication a property of saving is sound and cannot be forgotten by a
+      nineteenth mutation.
+
+    - Thread-safety boundary (revision 6.4). Correct. Synchronous mutation code
+      must not touch another thread's asyncio primitives;
+      loop.call_soon_threadsafe or an equivalent bridge is required. The
+      instruction not to perform socket writes under the outbox lock is
+      correct and important.
+
+    - Privacy treatment (revision 6.6, 9.8). Correct and stricter than the
+      original. Event and sync payloads are writers subject to
+      test_logging_privacy.py without exception.
+
+    - STREAM_IDLE_TIMEOUT (revision B8). The revision's refusal to make it
+      finite merely because an infinite timeout looks suspicious is correct.
+      The value is deliberate; changing it needs a proven liveness signal on
+      the relevant upstream stream, not an aesthetic judgement.
+
+    - Sync returning all jobs rather than only this page's. Consistent with the
+      existing GET /minipaint-interop/outbox route, which already returns
+      box.jobs() unfiltered (interop.py:542). No new exposure.
+
+    - Acceptance methodology (revision 7.1). p50/p95/p99 over repeated runs,
+      with network RTT reported separately, is the right replacement for the
+      original's single mean/worst figures.
+
+    - Migration sequence (revision 8). The Phase 0.5 prototype gate is a genuine
+      improvement on the original, which deferred its open questions to a
+      section at the end rather than making them block the work that depends on
+      them.
+
+    - C1 build tooling (revision, section C1). Correct that minification must
+      not smuggle in an unapproved build dependency, and correct that a
+      hand-maintained minified artifact with no deterministic regeneration path
+      is worse than no minification. Lazy loading is the real fix either way.
+
+================================================================================
+6. RECOMMENDED DISPOSITION
+================================================================================
+
+    1. Adopt PERFORMANCE_DESIGN_INTENT_2026-09-13_REVISED.txt as the governing
+       specification. Mark the original superseded rather than deleting it; the
+       corrections in section 2 above are only legible against it.
+
+    2. Apply the three proposed resolutions in section 3. They are drop-in text.
+       3.1 must land before Phase 2; 3.2 and 3.3 before the event hub is
+       implemented in Phase 1.
+
+    3. Decide section 4 (defer or build the long-poll fallback) at the Phase 0.5
+       gate, once P1 has reported on the real network topology.
+
+    4. Record the three verifications in section 1 in the repository alongside
+       the prototype outcomes that Phase 0.5 requires, so that the next reader
+       does not re-open them.
+
+No other changes to the revised specification are recommended.
+
+================================================================================
+END OF REVIEW RESPONSE
+================================================================================

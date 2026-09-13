@@ -668,10 +668,10 @@ window.minipaintWanGP = (function () {
      */
     function flushLog() {
         logFlush = 0;
-        if (!logLines.length) { return; }
+        if (!logLines.length) { return Promise.resolve(); }
         const body = JSON.stringify({ p: LOG_PAGE, n: logSeq, lines: logLines.slice(-LOG_WINDOW) });
         try {
-            fetch(CLIENT_LOG_ROUTE, {
+            return fetch(CLIENT_LOG_ROUTE, {
                 method: "POST",
                 credentials: "same-origin",
                 cache: "no-store",
@@ -680,6 +680,28 @@ window.minipaintWanGP = (function () {
                 body: body
             }).catch(function () { /* the next batch carries these lines */ });
         } catch (e) { /* a log line is never worth an exception */ }
+        return Promise.resolve();
+    }
+
+    /**
+     * Put the frame timer's state in the journal now, and wait until it is
+     * there.
+     *
+     * The handshake reports this too, but a report is collected long after
+     * the handshake - often on a page that has had no reason to shake hands
+     * since Forge last restarted - and the answer would then be missing from
+     * the one document somebody was going to send. The diagnostics button
+     * runs this first and waits for it, so the report it builds afterwards
+     * carries the line whether or not this page has a live bridge session.
+     */
+    async function reportFrames() {
+        try {
+            logSeq += 1;
+            logLines.push({ s: logSeq, line: String(frameTimerNote()).slice(0, 300) });
+            if (logLines.length > LOG_WINDOW) { logLines.splice(0, logLines.length - LOG_WINDOW); }
+            if (logFlush) { clearTimeout(logFlush); logFlush = 0; }
+            await flushLog();
+        } catch (e) { /* the report will simply not carry the line */ }
     }
 
     function say(message) {
@@ -1575,6 +1597,7 @@ window.minipaintWanGP = (function () {
         focus: focus,
         state: state,
         frameTimer: frameTimerNote,
+        reportFrames: reportFrames,
         switchToWanGP: switchToWanGP,
         theme: theme,
         message: sentence,

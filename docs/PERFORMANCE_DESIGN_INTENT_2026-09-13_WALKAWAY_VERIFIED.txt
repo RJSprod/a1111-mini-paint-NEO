@@ -1,0 +1,2884 @@
+MINIPAINT NEO - UNATTENDED GENERATION, PERFORMANCE, AND REMOTE CONTINUITY
+DESIGN INTENT / IMPLEMENTATION SPECIFICATION
+Repository target: RJSprod/a1111-mini-paint-NEO
+Current code baseline: 2ca4bdcf778ba7fd0cf3e45c28854403d36f6c63 (main, 2026-09-13)
+Relevant completed work: PR #49 through PR #53, including event-hub groundwork and
+                         foreground-time browser deadlines
+Related dependency: RJSprod/SD-Neo-ModelSwitchRefiner, mc_llm_api API_VERSION 1
+WanGP dependency: deepbeepmeep/Wan2GP, shared/api.py + shared/api_cli.py +
+                  shared/api_webui.py, and wgp.py
+Revision date: 2026-09-13
+Status: Governing replacement specification
+Supersedes: PERFORMANCE_DESIGN_INTENT_2026-09-13_WALKAWAY_COMPLETE.txt and all
+            earlier PERFORMANCE_DESIGN_INTENT_2026-09-13 variants for this effort
+
+Primary product requirement:
+    PRESS ADD TO QUEUE AND WALK AWAY.
+
+    After Forge durably acknowledges a submitted job, the browser that composed
+    it may be hidden, frozen, discarded, closed, disconnected, or powered off.
+    The job must continue through every required server-side stage until it either
+    produces its WanGP output or reaches an honest terminal error/cancelled state.
+
+    For an enhanced MiniMax request this includes making the configured LLM
+    enhancement runtime ready if it is cold, writing and tracking the enhanced
+    prompt, making the managed WanGP runtime ready if it is cold, submitting the
+    generation, and tracking it to completion. The browser is not an executor.
+
+Out of scope for this revision:
+    A video/results viewer. Successful generated-file paths are persisted on the
+    job for later Clipboard viewer work, but no new viewer/gallery UI is required.
+
+Deployment assumption:
+    The browser may be on another machine from Forge and may connect over LAN,
+    VPN, tunnel, or reverse proxy. The Forge machine is the execution host.
+
+================================================================================
+0. DOCUMENT PURPOSE, CLASSIFICATION, AND REVISION SUMMARY
+================================================================================
+
+0.1 Why this replacement exists
+-------------------------------
+
+The WALKAWAY_COMPLETE draft identified the right architecture. Its authority
+inversion - browser composes, server executes - is correct, is preserved here
+unchanged, and is the only architecture that satisfies the primary requirement.
+
+This revision exists because that draft's dependency claims were asserted rather
+than read. Every one of them has now been checked against source. Most are
+correct. Three are not, and one of the three makes the draft's central
+prototype gate (P5) ask for the wrong thing: it treats coexistence between
+unattended generation and the user's own WanGP tab as a property to be proved,
+when in fact no such property exists in Wan2GP today and it has to be built.
+
+The draft also required a substantial body of cross-repository work in
+ModelSwitchRefiner that the shipped mc_llm_api already makes unnecessary.
+
+Section 0.4 is the complete list of changes, each with its evidence. A reader
+who has already absorbed the WALKAWAY_COMPLETE draft can read 0.4, 2.12, B7,
+B7A, B22, and 14, and skip the rest as unchanged in substance.
+
+0.2 Classification vocabulary
+-----------------------------
+
+CONFIRMED
+    Verified against the repository or the dependency's source at the revision
+    named. A CONFIRMED claim in this document cites where it was read.
+
+REQUIRED ARCHITECTURE
+    A product/correctness requirement. An implementation may choose a different
+    mechanism only if it preserves the stated guarantee and tests.
+
+IMPLEMENTATION RECOMMENDATION
+    Preferred mechanism with room for an equivalent implementation.
+
+SPECIAL ATTENTION
+    Depends on the installed Forge/Gradio/WanGP/ModelSwitchRefiner/browser/proxy
+    environment and must be proven with a focused prototype or integration test.
+
+LEGACY COMPATIBILITY
+    Existing route/behaviour kept so old pages do not break, but not used by the
+    new unattended path.
+
+0.3 Verified factual baseline
+-----------------------------
+
+Each of the following was read at the revision named. Where the
+WALKAWAY_COMPLETE draft asserted the same fact, it is marked CONFIRMED; where
+it asserted something different, the correction is marked CORRECTED and is
+carried into 0.4.
+
+    CONFIRMED - PR #49 already fixed the two Canvas resize feedback loops,
+    coalesced pointer work to animation frames, moved browser logging off
+    Gradio, and reduced process-log per-line filesystem overhead.
+
+    CONFIRMED - Phase-1 event-hub groundwork exists at minipaint_neo/events.py.
+    It implements epoch:revision cursors (events.py:119-151), a bounded replay
+    ring, targeted advisory events that carry no revision and do not enter the
+    ring (events.py:217), thread-safe publication that never writes a socket on
+    the calling thread (events.py:161-215), and subscriber overflow detection.
+    Preserve and adapt this work rather than replacing it.
+
+    CONFIRMED - PR #53 changed browser-side bridge deadlines to spend
+    foreground time only. Keep that fix for legacy/manual browser operations.
+    It is not the unattended execution mechanism.
+
+    CONFIRMED - MiniPaint's managed WanGP runtime already speaks this
+    document's state vocabulary: STOPPED, STARTING, READY, STOPPING, CRASHED,
+    INCOMPATIBLE, REINIT_REQUIRED (minipaint_neo/wangp/runtime.py:58-66).
+    B6 is largely an integration of existing behaviour, not new behaviour.
+
+    CONFIRMED - Wan2GP publishes a Python API at shared/api.py. WanGPSession
+    is constructible without any Gradio object; its constructor takes
+    webui_state as an optional keyword and creates its own headless state when
+    that keyword is absent (api.py:584, _create_headless_state). submit_task()
+    (api.py:805) is non-blocking: it starts a daemon thread named
+    "wangp-session-job" and returns a SessionJob immediately. SessionJob
+    exposes cancel(), result(timeout), an events stream, and a done property.
+    GenerationResult is a frozen dataclass carrying generated_files: list[str],
+    success: bool, a cancelled property, and artifacts.
+
+    CONFIRMED - Wan2GP's settings contract is a flat dict. get_default_settings
+    (model_type) returns pristine defaults generated from WanGP, the model
+    handler and the model definition, with model_type included. Media inputs
+    are passed as file path strings, not PIL images and not base64. A virtual
+    media suffix syntax exists for frame ranges. This is the shape a captured
+    snapshot should take.
+
+    CORRECTED - WebUI-backed execution is not merely "can require" an active
+    Gradio session context. shared/api_webui.py refuses without one, in two
+    places: "WanGP WebUI session requires an active Gradio callback context"
+    and "WanGP WebUI session requires a live Gradio request with a session
+    hash". It further carries the message "WanGP API queue suspended while
+    waiting for Media Generator to get browser focus". The WebUI-backed session
+    is browser-bound by construction and is disqualified as an unattended
+    foundation by this document's own rules. See 0.4 (C2) and B7.
+
+    CORRECTED - There is no mutual exclusion between headless API generation
+    and WebUI generation in Wan2GP. The two paths use different and unlinked
+    mechanisms. The headless path holds a module-level RLock, _GENERATION_LOCK,
+    for the whole run (shared/api_cli.py:29, run_cli_job). The WebUI path does
+    not take that lock at all: wgp.py imports only apply_video_length_duration,
+    get_api_output_options and store_api_output_artifact from shared.api
+    (wgp.py:139) and never references _GENERATION_LOCK. The WebUI instead sets
+    a plain module global, gen_in_progress (wgp.py:4189-4193), from inside
+    process_tasks (wgp.py:8695). The headless worker never enters
+    process_tasks: it calls wgp.generate_media() directly
+    (shared/api_cli.py:121). Therefore a headless run never sets
+    gen_in_progress, and is_generation_in_progress() returns False while one is
+    running. See 0.4 (C1), 2.12, and B7A. This is the single most important
+    correction in this document.
+
+    CORRECTED - ModelSwitchRefiner does not need a readiness seam added. The
+    shipped mc_llm_api (API_VERSION = 1) already brings a cold runtime to
+    readiness as part of running a submitted job: submit_minimax() enqueues
+    through jobs.submit(), the worker thread runs mc_llm_jobs._run
+    (mc_llm_jobs.py:796), which drives mc_llm_sessions.minimax(), which obtains
+    a client through mc_llm_runtime.client() - documented as "A client for a
+    ready server, started or restarted as placement requires"
+    (mc_llm_runtime.py:4349-4351). Progress is reported as STATUS events on the
+    same feed the enhancement is tracked on. See 0.4 (C3), B4 and B5.
+
+    CONFIRMED - mc_llm_api.subscribe() exists (mc_llm_api.py:340) and returns a
+    Feed with queued/position/started/status/done/failed/cancelled events
+    (mc_llm_jobs.py:587-703). MiniPaint's enhance.py does not use it yet; it
+    polls status() (enhance.py:583). The draft's instruction to consume the
+    feed instead is correct and implementable against the shipped API.
+
+    CONFIRMED - mc_llm_api's `disabled` refusal is a policy state, not a cold
+    state. It is raised when mc_llm_studio.enabled() is false - "LLM Studio is
+    switched off in this WebUI's settings" (mc_llm_api.py:154-157). The draft's
+    caution about this is correct.
+
+    CONFIRMED - mc_llm_api.capabilities() (mc_llm_api.py:401) already returns
+    api_version, enabled, configured, vision, model, reason, max_queued,
+    feed_ttl, job_retention and the event vocabulary. These map directly onto
+    the states B5 requires MiniPaint to distinguish before submitting.
+
+    CORRECTED - The WanGP Python API offers no idempotency, client id or
+    deduplication for submitted tasks. Its documentation does not address the
+    subject and its submission path does not accept a caller-supplied key that
+    survives a restart. The durable ledger is therefore mandatory, not
+    advisory. See 0.4 (C4) and B8.
+
+    CONFIRMED, AND NEWLY SPECIFIED - The managed WanGP child's survival of a
+    Forge crash is platform-dependent, by deliberate existing design. On POSIX
+    the child is started with start_new_session=True and lives in its own
+    session (runtime.py:407); nothing but an explicit stop() signals its pgid,
+    so it survives Forge being killed. On Windows it is attached to a job
+    object carrying JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (runtime.py:415-418 and
+    the _attach_job_object block), which is "the part that survives Forge being
+    killed outright" - meaning the child is killed with Forge. B11's recovery
+    semantics differ between the two and this document now says how.
+
+    CONFIRMED - The existing WanGP bridge submits generation by writing
+    overrides into live Gradio components and then writing WanGP's own
+    generate_trigger or add_to_queue_trigger, so that "WanGP's own generate
+    chain runs exactly as its Generate button would run it" (wan2gp_bridge/
+    README.md). Its handler requires a gr.Request carrying a session_hash and
+    refuses without one (plugin.py:964-976, plugin.py:670-679). This is the
+    browser-bound path the new design replaces, not extends.
+
+    CONFIRMED - Neither /minipaint-interop/events nor /minipaint-interop/sync
+    exists today. minipaint_neo/interop.py registers stage, prepare, release,
+    contract, outbox list, outbox submit/claim/report/cancel/retry/adopt/
+    cancel_all/track, and enhance (interop.py:635-648). Section 6.2 describes
+    new routes, not retained ones.
+
+    CONFIRMED, WITH A CORRECTION OF DEGREE - The extension declares 84 Gradio
+    components with visible=False, not 81: canvas/ui.py 28, clipboard/ui.py 41,
+    wangp/ui.py 12, canvas/surface.py 2, legacy_ui.py 1. C2's direction is
+    unaffected.
+
+0.4 What this revision changes against the WALKAWAY_COMPLETE draft
+------------------------------------------------------------------
+
+Recorded so that these decisions are not re-litigated by a reader who finds the
+superseded draft. Each entry states what the draft said, what is actually true,
+and what this document does instead.
+
+C1. THE DRAFT TREATS GENERATION EXCLUSION AS A PROPERTY TO PROVE.
+    It is a property to build.
+
+    Draft P5 lists "coexistence/serialization with normal WanGP WebUI use" as
+    one bullet among eight, and draft B7 option C asks the implementer to
+    "prove that it shares WanGP's global generation/model locks safely with the
+    WebUI". Read at source (0.3, CORRECTED entry), the answer is that it does
+    not share them, in either direction, and nothing in Wan2GP prevents an
+    unattended headless generation and a user-initiated WebUI generation from
+    running concurrently on the same GPU against the same wgp module globals.
+
+    This is not a latent risk to be measured. It is reachable by the ordinary
+    product action: a user presses Add to Queue, walks away, comes back, opens
+    the WanGP tab and presses Generate.
+
+    Worse, it silently regresses shipped behaviour. The bridge's protocol-4
+    start route reads is_generation_in_progress live specifically so that it
+    never presses Generate during a running generation (compatibility.py:310
+    declares it, compatibility.py:893 reads it, and wan2gp_bridge/README.md
+    states the guarantee). Once unattended headless runs exist, that function
+    returns False while one is in flight and the guarantee quietly stops
+    holding.
+
+    This document adds principle 2.12 and requirement B7A. Exclusion is
+    REQUIRED ARCHITECTURE with its own acceptance tests. P5 is re-scoped to
+    verify a chosen adapter and its exclusion, not to discover one.
+
+C2. THE DRAFT RANKS A DISQUALIFIED ADAPTER SECOND.
+
+    Draft B7 orders candidates A (bridge-owned loopback backed by a
+    browser-independent session), B (inject/receive a session object "proven
+    browser-independent"), C (new headless WanGPSession inside the child).
+
+    Option B is the WebUI-backed session, and it is browser-bound by
+    construction and by explicit refusal (0.3). It cannot be made
+    browser-independent by injection. Ranking it above C sends an implementer
+    down a path the same document forbids.
+
+    This document removes option B, and merges A and C: the adapter is one
+    headless WanGPSession created inside the WanGP child and owned by the
+    MiniPaint bridge plugin, reached over authenticated loopback. B7 states it
+    as a decision.
+
+    Related, and newly recorded: Wan2GP's own API documentation tells plugins
+    not to call init(...) and states that WanGP injects a WebUI-backed session
+    for them. The chosen adapter is therefore a deliberate departure from
+    documented plugin guidance against an API with no published stability
+    guarantee. B7 requires the proven Wan2GP revision to be pinned in
+    compatibility.py the way element ids already are.
+
+C3. THE DRAFT REQUIRES CROSS-REPOSITORY WORK THAT IS ALREADY DONE.
+
+    Draft B4 STEP 2, draft B5, draft P3, draft Q1 and draft section 12 all
+    require a new ensure_minimax_ready() seam in ModelSwitchRefiner, with
+    join-the-same-start semantics, progress, and explicit not_configured /
+    no_vision refusals.
+
+    The shipped mc_llm_api already starts a cold llama-server as part of
+    running a submitted job (0.3), already emits stage text for the wait, and
+    already reports enabled / configured / vision / model / reason through
+    capabilities() before submission. The one thing it does not offer is
+    pre-warming without submitting, which this design does not need: nothing
+    between admission and enhancement depends on the runtime being hot first.
+
+    This document deletes the readiness seam requirement, deletes the
+    ENSURING_ENHANCER state, folds the wait into ENHANCING with stage text, and
+    reduces P3 to a verification-and-documentation task against the installed
+    ModelSwitchRefiner. Section 12's ModelSwitchRefiner work item is removed
+    and replaced by a different, smaller and better-targeted one - see C5.
+
+C4. THE DRAFT MAKES THE IDEMPOTENCY LEDGER OPTIONAL.
+
+    Draft B11 says the adapter "SHOULD keep a small durable idempotency/task
+    ledger"; draft 2.7 says submissions must carry an idempotency id "when the
+    receiving API supports one"; draft Q4 asks whether one is needed.
+
+    The WanGP API supports none (0.3). The conditional therefore always
+    resolves the same way, and the ledger is the only mechanism by which
+    B11 recovery after SUBMITTING_WANGP can avoid a duplicate generation.
+
+    This document makes the ledger REQUIRED ARCHITECTURE (B8), specifies where
+    it lives and what it keys on, and closes Q4.
+
+C5. THE DRAFT ASKS MODELSWITCHREFINER FOR THE WRONG ADDITION.
+
+    Having removed the readiness seam (C3), one genuine gap remains in
+    mc_llm_api's public surface, and the draft does not notice it: there is no
+    public way to make the enhancement runtime release its VRAM.
+    mc_llm_runtime has release() and a RELEASE_STOP mode that stops
+    llama-server to give VRAM back (mc_llm_runtime.py:70-74, 5617, 6513), but
+    none of it is exported through mc_llm_api, whose public surface is
+    submit_minimax, status, result, queue, busy, cancel, cancel_all, subscribe,
+    forget, variants, system_prompt, system_prompts and capabilities.
+
+    An enhanced cold job loads a language model and then, seconds later, wants
+    to load a video model on the same card. ModelSwitchRefiner's VRAM broker
+    arbitrates among things it knows about; MiniPaint's managed WanGP is a
+    separate OS process it does not know about.
+
+    This document adds B22 and re-points the cross-repository work item at a
+    public release/unload seam. It is additive, small, and the only
+    ModelSwitchRefiner change this design asks for - and even that is gated on
+    P6 measuring that it is needed.
+
+C6. THE DRAFT CARRIES A SNAPSHOT FIELD THAT NO LONGER MEANS ANYTHING.
+
+    Draft B1 requires "start mode / queue semantics" in the captured snapshot.
+    That field exists because protocol 4 decides between writing
+    generate_trigger and writing add_to_queue_trigger, which is a choice about
+    WanGP's WebUI queue. A headless session has no WebUI queue to join; every
+    server-executed job runs directly through submit_task.
+
+    This document marks the field legacy-only (B1) and states the consequence
+    in 1.4 and B9: a server-executed job is not visible in the WanGP tab's
+    queue, and MiniPaint's own queue is the only place it can be seen or
+    cancelled.
+
+C7. THE DRAFT'S PRESS-ORDER INVARIANT IS UNSCOPED.
+
+    Draft section 10 states "Press order remains the queue-order contract".
+    Press order is preserved among MiniPaint's own jobs. It says nothing about
+    tasks the user queued in the WanGP tab, which interleave according to
+    whatever exclusion B7A establishes.
+
+    This document scopes the invariant (section 10) and states the interleaving
+    rule explicitly (B7A).
+
+C8. THE DRAFT DESCRIBES TWO NEW ROUTES AS RETAINED.
+
+    Draft 6.2 says "Keep/add one shared family", listing
+    /minipaint-interop/events and /minipaint-interop/sync. Neither exists
+    (0.3). They are new, they land in Phase 4, and until they do, the browser
+    polling that section 7.9 forbids is still present: QUEUE_WATCH_MS = 150 in
+    minipaint_clipboard.js:68 and TRACK_MS = 3000 in minipaint_interop.js:81.
+
+    This document says so in 6.2 and sequences the acceptance criterion
+    accordingly in 7.9.
+
+C9. SMALLER CORRECTIONS.
+
+    - 84 hidden components, not 81 (0.3). C2's target restated against the
+      real number.
+    - Draft B1's SPECIAL ATTENTION note directs the snapshot at "a single
+      snapshot/compose operation" over the bridge's live DOM knowledge. The
+      settings dict and get_default_settings make a much smaller mechanism
+      available; B1 now specifies that instead.
+    - Draft B11 does not distinguish POSIX from Windows for in-flight
+      generation across a Forge restart. B11 now does.
+
+0.5 Scope change from the previous specification family
+--------------------------------------------------------
+
+Unchanged from the WALKAWAY_COMPLETE draft, and restated because it remains the
+governing scope decision: this effort deliberately permits server-owned
+execution, which the pre-WALKAWAY documents forbade. Public caller shapes
+remain compatible where practical; internal queue semantics are allowed to
+change because browser-owned execution cannot satisfy the primary use case.
+
+    - Add to Queue still means queue this request.
+    - Existing request fields remain meaningful, except as noted in C6.
+    - Jobs still preserve press order among themselves, as scoped by C7.
+    - Retries still do not guess across an ambiguous admission.
+    - Cancellation remains explicit.
+
+What changes is who performs the work after admission.
+
+================================================================================
+1. PRODUCT REQUIREMENTS
+================================================================================
+
+1.1 Primary acceptance statement
+--------------------------------
+
+A user may:
+
+    1. open Clipboard remotely;
+    2. compose a WanGP request, optionally with MiniMax H3 enhancement;
+    3. press Add to Queue;
+    4. receive a durable server admission acknowledgement;
+    5. immediately background/lock/close the browser or disconnect the browser
+       machine;
+    6. return later from the same or a different browser;
+    7. find the job terminal, with generated output paths recorded on success.
+
+No browser scheduling between steps 4 and 7 is permitted to be necessary for
+job progress.
+
+1.2 Enhanced MiniMax acceptance statement
+------------------------------------------
+
+If Enhance is requested for a supported MiniMax H3 target:
+
+    - the typed prompt and required source images are durably captured at press;
+    - the server preflights the enhancement installation through
+      mc_llm_api.capabilities() and refuses non-startable configurations with
+      an actionable terminal error before submitting anything;
+    - the server submits MiniMax enhancement, and the enhancement runtime is
+      brought to readiness by ModelSwitchRefiner's own job machinery as part of
+      that run, reported to MiniPaint as stage text on the event feed;
+    - the server tracks the enhancement to done/failed/cancelled through
+      mc_llm_api.subscribe() (status() fallback only for compatible older API
+      versions lacking feeds);
+    - the finished enhanced prompt is persisted into the job before WanGP
+      generation begins;
+    - then the server makes WanGP ready, submits generation, and tracks it to
+      completion;
+    - the browser may not exist during any of those stages.
+
+1.3 Cold WanGP acceptance statement
+-----------------------------------
+
+If the managed WanGP process is not running when an admitted job reaches its
+WanGP stage:
+
+    - MiniPaint starts its managed WanGP child using the existing ownership,
+      loopback and GPU-selection rules;
+    - STARTING is joined rather than duplicated;
+    - readiness waits on server/process state, not a browser timer;
+    - after READY, execution continues automatically;
+    - one cold start may take minutes without making the job a browser timeout.
+
+1.4 What is not promised
+------------------------
+
+This revision does not promise survival of a powered-off Forge machine.
+Durability means browser-independent execution while the execution host is
+running, plus defined reconciliation/recovery after Forge restart where safe.
+Recovery of a generation that was in flight when Forge itself died is
+platform-dependent and is specified in B11; it is not promised on Windows.
+
+This revision does not add a video viewer. Generation success is proved by
+WanGP GenerationResult and persisted generated-file paths.
+
+This revision does not make a server-executed job visible in the WanGP tab's
+own queue. A headless session keeps its own state; MiniPaint's Clipboard queue
+is the authoritative and only place an unattended job is listed, shown or
+cancelled. This is a consequence of the only browser-independent execution path
+Wan2GP offers, it is intended, and the UI must not imply otherwise.
+
+This revision does not promise that an unattended job and a user-initiated
+WanGP tab generation run in parallel. They are mutually excluded by B7A; one
+waits for the other.
+
+================================================================================
+2. GOVERNING PRINCIPLES
+================================================================================
+
+2.1 The server owns durable state and queued execution
+-----------------------------------------------------
+
+The outbox is not merely a scheduler. Once a job is durably admitted, Forge is
+responsible for advancing it. A browser page is never a required worker.
+
+2.2 The browser is a composer, not an executor
+----------------------------------------------
+
+The browser may read live WanGP form/session state while composing the request.
+At press it must produce a complete snapshot sufficient for server execution.
+After the durable admission response, browser state is irrelevant to execution.
+
+No lease may be granted to a browser for the new path. No page-presence rule may
+be load-bearing for generation progress.
+
+2.3 Snapshot semantics are explicit
+-----------------------------------
+
+An unattended job runs with the settings that existed when Add to Queue was
+pressed, not with whatever a WanGP page happens to contain later.
+
+This is intentional and visible in diagnostics. It is the only semantics that
+can survive the composer disappearing.
+
+If the target model changes after press, the queued job still names its captured
+model. The server validates that model and settings at execution time. It never
+silently substitutes the model currently selected in some browser.
+
+2.4 Dependencies are server-owned stages
+----------------------------------------
+
+A cold dependency is not a browser prerequisite.
+
+For enhanced jobs:
+
+    preflight enhancer -> enhance (readiness happens inside) -> ensure WanGP
+    -> generate
+
+For non-enhanced jobs:
+
+    ensure WanGP -> generate
+
+Cold dependencies are initialised serially. In particular, do not cold-start the
+enhancement LLM and the WanGP GPU workload at the same time; the pipeline above
+already guarantees this because enhancement reaches a terminal state before the
+WanGP stage begins. B22 governs what happens to the language model's VRAM at
+that boundary.
+
+2.5 Configuration errors are not cold-start states
+--------------------------------------------------
+
+The executor may automatically start/load a dependency that is installed and
+configured but cold.
+
+It must not guess missing configuration:
+
+    - missing ModelSwitchRefiner extension -> terminal actionable configuration
+      error for enhanced job
+    - LLM Studio switched off in settings -> terminal actionable policy refusal,
+      distinct from the above
+    - no configured enhancement model -> terminal actionable configuration error
+    - required vision capability unavailable -> terminal actionable enhancement
+      refusal
+    - missing WanGP installation/configuration/GPU UUID/model assets -> terminal
+      actionable configuration error
+
+The executor must distinguish "not started" from "not configured" from "switched
+off" in job state and errors.
+
+2.6 Do not reach through another project's private internals
+------------------------------------------------------------
+
+MiniPaint must not import ModelSwitchRefiner private state or flip
+implementation globals. Where a supported public operation is missing and
+genuinely needed, add a small supported API to ModelSwitchRefiner. As of this
+revision exactly one such addition is contemplated, it is additive, and it is
+gated on measurement: see B22.
+
+Server-side WanGP execution must use a supported WanGP API surface from inside
+the WanGP process, reached through a small authenticated loopback adapter owned
+by the WanGP bridge plugin. Do not script Gradio DOM controls from the server.
+
+The one place this principle is knowingly stretched is B7A, where the bridge
+must make Wan2GP's own WebUI aware that a headless generation is running. That
+stretch is bounded to a single documented global, is justified in B7A, and is
+version-pinned like every other Wan2GP fact the bridge knows.
+
+2.7 Exactly-once intent; at-most-once where truth is ambiguous
+--------------------------------------------------------------
+
+Every outbox job has a stable execution id. Because the receiving WanGP API
+carries no idempotency key of its own, the bridge keeps a durable ledger keyed
+by that id (B8) and answers a repeated submission from the ledger rather than
+from WanGP.
+
+If the server cannot prove whether a generation was admitted, it must record an
+ambiguous/unknown state rather than blindly submitting a duplicate.
+
+2.8 Input lifetime follows job lifetime
+---------------------------------------
+
+Any image or other prepared input referenced by a non-terminal job is pinned.
+Age-based sweep must not delete it.
+
+The input is released only after:
+
+    - terminal job state plus retention grace; or
+    - explicit job cancellation/failure cleanup after no consumer can still read
+      it.
+
+2.9 Push for observation, not for execution
+-------------------------------------------
+
+The event spine tells browsers what the server is doing. Losing the event spine
+may make a UI stale; it must never stop the job.
+
+On return/reconnect, authoritative sync repairs the view.
+
+2.10 No permanent high-frequency browser polling
+------------------------------------------------
+
+All previous performance principles remain:
+
+    - do not lengthen intervals as an optimisation;
+    - replace server-owned polling with events;
+    - retain bounded compatibility fallbacks only when proven necessary;
+    - one shared long-lived transport per page;
+    - no new runtime dependency merely for SSE.
+
+2.11 Remote admission must be small and unload-tolerant
+-------------------------------------------------------
+
+The final admission POST contains settings metadata and opaque server-side input
+ids, not image bytes.
+
+When its encoded body is safely below the browser keepalive quota, use a
+keepalive-capable final POST so an immediate navigation/close has the best chance
+of completing. The hard guarantee begins only after Forge returns durable
+admission acknowledgement. UI text must not claim a queued job exists before
+that acknowledgement.
+
+2.12 One card, one generation
+-----------------------------
+Classification: REQUIRED ARCHITECTURE. New in this revision.
+
+At most one generation may run against the configured GPU at any moment,
+whoever started it, by whichever path.
+
+Wan2GP does not enforce this across its two execution paths (0.3), and this
+design introduces the second path. The system that introduces the hazard owns
+the mitigation. Every mechanism, ordering rule and test that follows from this
+principle is collected in B7A.
+
+Three corollaries, stated here because they constrain design elsewhere:
+
+    - The executor may not assume it is the only thing using the card. A user
+      at the WanGP tab is a first-class competing writer, and their in-progress
+      work is never pre-empted, never aborted and never queued behind an
+      unattended job that has not yet started.
+
+    - Exclusion is process-wide inside the WanGP child, not Forge-wide. Forge
+      cannot see WanGP's generation state directly; the bridge can, and owns
+      the decision.
+
+    - An exclusion that only stops MiniPaint is half a fix. Wan2GP's own UI
+      must also refuse to start while an unattended generation is running, or
+      the user is handed a button that corrupts their own run.
+
+================================================================================
+3. WORKSTREAM A - MINIPAINT / CANVAS LOCAL RENDERING
+================================================================================
+This workstream is independent of unattended execution and the event spine, and
+is carried forward from the WALKAWAY_COMPLETE draft unchanged in substance.
+
+Current-main status at 2ca4bdc: A1 resize-loop correction and A2 pointer-event
+coalescing were already merged in PR #49. Their requirements remain here as
+regression requirements. A3-A6 remain structural follow-on work.
+
+A1. RESIZE FEEDBACK LOOPS
+-------------------------
+Severity: high
+Classification: CONFIRMED / REGRESSION REQUIREMENT
+
+Baseline locations:
+    javascript/minipaint_canvas.js around fitHeight(), sizeRail(), watchLayout()
+    and the ResizeObserver on S.imageContainer.
+
+Problem:
+
+    - code observes elements whose dimensions it also changes
+    - layout reads and writes are interleaved
+    - a 1 px guard damps, but does not structurally prevent, oscillation
+
+Required behaviour:
+
+    1. Do not observe an element this sizing path directly writes.
+       Prefer a stable parent/outer geometry source.
+
+    2. If the host structure makes that impossible, unobserve before the write
+       and re-observe on the following animation frame.
+
+    3. Round all target dimensions to integers before equality comparison.
+
+    4. fitHeight() must gather layout reads in one read phase and perform writes
+       afterwards. Do not alternate getBoundingClientRect/getComputedStyle and
+       style writes in the same pass.
+
+    5. A static layout must settle to zero scheduleFit() calls per second.
+
+Development instrumentation:
+
+    Add a development-only counter that reports a warning if scheduleFit() is
+    invoked more than 10 times in one second after the initial settling window.
+
+A2. UNCOALESCED POINTER HANDLERS
+--------------------------------
+Severity: high
+Classification: CONFIRMED / REGRESSION REQUIREMENT
+
+Applies to:
+    crop/frame dragging
+    transform move/scale
+    canvas selection
+    pinch
+    layer drag
+    pan / drawImage
+
+Required behaviour:
+
+    1. Pointer handlers synchronously update the latest pointer state.
+    2. preventDefault()/stopPropagation() remain synchronous where currently
+       required.
+    3. Actual drawing/layout work is performed by at most one
+       requestAnimationFrame callback per visual frame per interaction path.
+    4. If another pointermove arrives before the frame, replace the pending state
+       with the latest state and return.
+    5. pointerup MUST flush the pending final state synchronously before clearing
+       drag state. A short drag must land at the final pointer coordinate.
+    6. pointercancel must end cleanly without applying stale queued work.
+    7. Do not require getCoalescedEvents(); use it only as an optional enhancement
+       if ever added later.
+
+Acceptance:
+    at most one repaint / position application per animation frame during drag
+    exact final position after pointerup
+
+A3. STRUCTURAL EDITS: REMOVE THE IMAGE -> WAIT -> MASK ROUND TRIP CHAIN
+----------------------------------------------------------------------
+Severity: medium
+Classification: CONFIRMED / SPECIAL ATTENTION for exact adapter sequencing
+
+Current behaviour performs:
+
+    server structural edit
+        -> browser WAIT_JS step
+        -> second server commit_foreground call
+
+The ordering requirement is real: the mask must apply only after the background
+image has finished loading. The network round trip is not intrinsically required.
+
+Required design:
+
+    1. First server response returns both the new background display reference and
+       the foreground/mask payload needed for that structural result.
+
+    2. Browser adapter stores the pending foreground associated with that specific
+       background load generation.
+
+    3. The adapter's existing successful-load completion hook applies the pending
+       foreground only after the corresponding image load has completed.
+
+    4. A newer structural result invalidates an older pending foreground so an
+       out-of-order image load cannot apply the wrong mask.
+
+    5. Target is one server round trip per structural edit.
+
+Tests must preserve the ordering invariant while removing assertions that hardcode
+three transport steps.
+
+A4. REPLACE LARGE BASE64 DISPLAY VALUES WITH OPAQUE BINARY DISPLAY OBJECTS
+---------------------------------------------------------------------------
+Severity: medium
+Classification: SPECIAL ATTENTION
+
+Current display copies are base64 data URLs in hidden logical image textboxes.
+That has a ~33% base64 expansion, large event JSON values, session retention, and
+main-thread string parsing cost.
+
+Required design:
+
+    1. Reuse the security/lifecycle pattern of wangp/handoff.py, not necessarily
+       its PNG-only wire format.
+
+    2. Introduce an internal opaque display-object id. Browser-visible values may
+       contain the opaque id or a same-origin URL derived from it; no filesystem
+       path crosses to the browser.
+
+    3. Store the already-encoded display copy in the runtime directory in its
+       natural display format (JPEG for opaque images, WebP where transparency is
+       required) rather than re-encoding it to handoff PNG.
+
+    4. Add a signed-in same-origin GET route that resolves only a fixed-shape
+       opaque display id and returns the binary image.
+
+    5. The id is immutable: one id always names one byte sequence until expiry.
+
+    6. Cleanup occurs when superseded and by bounded age sweep. Cleanup must not
+       delete an object still referenced by the active Canvas load.
+
+    7. Confirm ForgeCanvas loadImage accepts an ordinary same-origin image URL on
+       the installed Forge versions. Prototype before committing the full change.
+
+    8. Confirm every server read-back path. surface.py preprocess currently expects
+       data:image/... for non-PNG display copies. If a URL can now reach Python,
+       either make that path impossible by construction or teach the component to
+       resolve only this extension's own opaque display object.
+
+Security:
+    signed-in route
+    fixed grammar id
+    no arbitrary path parameter
+    no prompt/session/filename in URL
+    no public directory serving
+
+A5. FORGECANVAS INSTANCE AND HOST wait_until
+--------------------------------------------
+Severity: low
+Classification: REVISED
+
+DO NOT automatically change wait_until() from 50 ms to 150 ms.
+
+Reason:
+    the producer's approximately 100 ms change cadence and the observer's timer are
+    unsynchronised. A 150 ms observer can add detection delay relative to 50 ms and
+    would conflict with the no-latency-regression rule.
+
+Required behaviour:
+
+    - retain the current default unless a measured replacement proves neutral or
+      faster
+    - prefer an event/observable host state if Forge exposes one
+    - if the poll remains, it is bounded by the existing transfer deadline
+
+IMPLEMENTATION RECOMMENDATION:
+    Investigate lazy construction of the extension's ForgeCanvas instance on the
+    first Canvas-tab activation. This is SPECIAL ATTENTION because Reload UI must
+    still construct exactly one usable instance.
+
+A6. DOCUMENT-WIDE MUTATIONOBSERVER AT STARTUP
+---------------------------------------------
+Severity: low
+Classification: CONFIRMED
+
+The legacy main.js path observes the whole Gradio app during hydration.
+
+Required behaviour:
+
+    - remove the document-wide startup MutationObserver
+    - bind from the relevant tab/component load lifecycle instead
+    - preserve the existing warning that generic onUiLoaded ordering is not an
+      adequate substitute
+    - verify first page load and Reload UI
+
+================================================================================
+4. WORKSTREAM B - SERVER-OWNED UNATTENDED QUEUE + CLIPBOARD / WANGP PERFORMANCE
+================================================================================
+
+B1. DURABLE JOB SNAPSHOT AT ADD TO QUEUE
+---------------------------------------
+Severity: fundamental
+Classification: REQUIRED ARCHITECTURE
+
+The Add to Queue button must submit a complete immutable execution snapshot.
+The snapshot is the contract between browser composition and server execution.
+
+SNAPSHOT SHAPE - REVISED IN THIS DOCUMENT
+
+The draft directed this at the bridge's live-DOM knowledge. Wan2GP offers a
+much smaller mechanism, and the snapshot should be built on it:
+
+    - WanGPSession.get_default_settings(model_type) returns pristine defaults
+      generated from WanGP, the model handler and the model definition, with
+      model_type included.
+    - submit_task(settings: dict) consumes exactly that flat dict shape.
+    - Media inputs inside it are file path strings.
+
+Therefore the captured snapshot is:
+
+    base        the model_type, resolved at press
+    deltas      every setting the composed request differs from
+                get_default_settings(model_type) by, as explicit values
+    inputs      opaque MiniPaint input ids, never paths and never browser paths
+
+and the executor reconstitutes the submitted dict server-side as
+defaults(model_type) updated with deltas, with opaque input ids resolved to
+paths readable by the WanGP child at submission time and not before.
+
+This is preferred over reading dozens of components because it keeps
+WanGP-shaped knowledge in WanGP's own API rather than growing
+compatibility.py, it survives WanGP rearranging its UI, and it makes the
+snapshot diffable in diagnostics: a job records what the user changed, not an
+undifferentiated dump.
+
+Required snapshot fields, using existing names where possible:
+
+    identity
+        request_id / job_id
+        created time
+        origin
+
+    target
+        WanGP model_type
+        model label/family/architecture when useful for validation/diagnostics
+        captured settings/schema version
+        the Wan2GP version the defaults were taken from
+
+    generation settings
+        the delta set described above, sufficient to reproduce the intended
+        WanGP request without reading a live browser form later
+        prompt typed by the user
+        seed and model-specific controls
+        LoRA/preset/profile identifiers by stable value, not DOM index
+
+    inputs
+        opaque ids for durable server-side first frame / last frame / reference
+        assets
+        never browser filesystem paths
+
+    enhancement
+        enhance_requested
+        selected MiniMax variant derived from captured target (fl2va/ref2va)
+        typed prompt retained separately from enhanced prompt
+        optional system-prompt override identifier/text under existing privacy
+        rules
+        which input slots are intended for enhancement
+
+    execution metadata
+        schema/protocol version
+        server admission id
+        retry_of where applicable
+
+LEGACY-ONLY FIELD
+
+    start mode / queue semantics
+        Retained in the schema for legacy browser-executed jobs only, and
+        ignored by the server executor. A headless session has no WebUI queue
+        to join, so protocol 4's generate-versus-queue decision does not exist
+        for a server-executed job. Do not surface it in new UI. See 0.4 (C6).
+
+The browser must not submit a partial request that says "inherit whatever the
+WanGP page has later." Inheritance is resolved into explicit values before
+server admission.
+
+SPECIAL ATTENTION - defaults provenance:
+    get_default_settings is evaluated inside the WanGP child, so the compose
+    step is a bridge round trip like any other. Cache the defaults per
+    (model_type, wan2gp_version) for the life of the runtime, and invalidate on
+    runtime restart. A snapshot whose defaults came from a different Wan2GP
+    version than the one executing it must be revalidated at execution time,
+    not silently replayed - see B8's validation rule.
+
+B2. SERVER EXECUTOR
+-------------------
+Severity: fundamental
+Classification: REQUIRED ARCHITECTURE
+
+Introduce one server-owned executor for the outbox.
+
+Properties:
+
+    - starts when at least one non-terminal executable job exists
+    - one coordinator instance per Forge process
+    - serializes jobs according to the press-order promise as scoped in
+      section 10
+    - does not require any browser presence
+    - wakes by condition/event on durable outbox change; it is not a 250 ms disk
+      polling loop
+    - stops sleeping when queue empty; idle cost is effectively zero
+    - all state transitions are persisted before publication
+    - publishes through the shared event hub after durable state changes
+
+Recommended high-level loop:
+
+    while next executable job exists:
+        load one job under outbox lock
+        persist stage transition
+        release lock
+        run dependency/action stage
+        reacquire lock only to persist resulting transition
+
+Never hold the outbox lock during:
+
+    process launch/readiness wait
+    LLM model load
+    prompt enhancement
+    WanGP generation
+    network I/O
+    event-stream consumption
+
+B3. JOB STATE MACHINE
+---------------------
+Classification: REQUIRED ARCHITECTURE
+
+The old states were designed around a browser lease. Add server-execution stages
+that describe what the job is actually waiting for.
+
+Normalized state family:
+
+    ADMITTED
+        durably accepted; inputs pinned; no browser required
+
+    WAITING
+        behind earlier job(s)
+
+    ENHANCING
+        MiniMax job submitted; queued, starting the runtime, loading the model,
+        or generating. The distinction between "the LLM is cold" and "the LLM
+        is writing" is carried as stage text from the external API's own STATUS
+        events, not as separate MiniPaint states. See 0.4 (C3).
+
+    ENHANCED
+        enhanced prompt persisted; ready for WanGP stage
+
+    ENSURING_WANGP
+        managed WanGP child/runtime becoming ready
+
+    WAITING_FOR_CARD
+        WanGP is READY but a generation is already running in the WanGP child -
+        the user's own, or another MiniPaint job. Required by B7A so that
+        exclusion is an honest, visible wait rather than a silent stall.
+
+    SUBMITTING_WANGP
+        handing immutable task to WanGP server-side API
+
+    WANGP_WAITING
+        accepted by WanGP but waiting ahead of generation
+
+    WANGP_GENERATING
+        generation active
+
+    COMPLETED
+        generation terminal success; generated file paths persisted
+
+    FAILED
+        terminal known failure
+
+    CANCELLED
+        terminal cancellation
+
+    EXECUTION_UNKNOWN
+        rare safety state: server cannot prove whether an external submission
+        was accepted/completed; never auto-duplicate
+
+REMOVED FROM THE DRAFT: ENSURING_ENHANCER. The shipped ModelSwitchRefiner API
+has no pre-warm operation and does not need one, because readiness is part of
+running the job (0.3). A state MiniPaint can neither enter nor leave observably
+is a state that lies in diagnostics. See 0.4 (C3).
+
+The public job representation may preserve compatibility aliases such as
+pending/queued/started, but internal logic must not pretend a browser lease is
+the execution truth.
+
+Every state includes:
+
+    updated timestamp
+    stage text suitable for UI
+    attempt counter where meaningful
+    structured error code/message on failure
+    dependency-specific id (llm_id / wangp_task_id) when known
+    generated_files on success
+
+B4. ENHANCED MINIMAX PIPELINE
+----------------------------
+Severity: fundamental for enhanced jobs
+Classification: REQUIRED ARCHITECTURE + CONFIRMED DEPENDENCY CAPABILITY
+
+For `enhance_requested == true`:
+
+STEP 1 - validate captured target
+    Derive MiniMax H3 variant from captured model. Existing FL2VA/Ref2VA mapping
+    rules remain. Do not choose a variant by hand if the model determines it.
+
+STEP 2 - preflight the installation
+    REVISED IN THIS DOCUMENT. The draft called for a new ModelSwitchRefiner
+    readiness seam here. The shipped API already covers it (0.3), so this step
+    is a read, not a start:
+
+        module = enhance.api()
+            None                     -> extension_missing, terminal
+        caps = mc_llm_api.capabilities()
+            caps["enabled"] is False -> policy refusal, terminal, distinct code
+            caps["configured"] False -> not_configured, terminal
+            caps["vision"] is False
+              and the plan carries a picture
+                                     -> no_vision, terminal
+
+    A preflight that passes says the request is startable. It does not say the
+    runtime is hot, and it does not need to: the run starts it.
+
+    Explicit user intent rule:
+        pressing Add to Queue with Enhance ON authorizes starting/loading the
+        configured enhancement runtime for that job. It does not authorize
+        inventing a model, changing which model is configured, or turning LLM
+        Studio on when a user has switched it off.
+
+STEP 3 - submit enhancement
+    Use mc_llm_api.submit_minimax() with:
+        typed prompt
+        derived variant
+        durable first/last/reference inputs according to existing mapping
+        configured/system override as today
+        origin="minipaint-clipboard"
+        remember=True unless product setting says otherwise
+
+    submit_minimax() enqueues and returns a job id immediately; the cold start,
+    if any, happens on ModelSwitchRefiner's own worker thread. The executor
+    must not block waiting for it - B19.
+
+    A Rejected carrying queue_full is a retryable refusal, not a terminal
+    failure; hold the job in WAITING and retry with backoff bounded by policy.
+
+STEP 4 - track enhancement server-side
+    Primary current API path: mc_llm_api.subscribe(llm_id).
+
+    Consume events until exactly one terminal event:
+        done -> persist enhanced prompt/caption/metadata
+        failed -> fail job honestly
+        cancelled -> cancel job
+
+    STATUS events carry the runtime's own stage text, including the cold-start
+    wait ("Waiting for the GPU...", model load). Publish that as coarse stage
+    text on MiniPaint's event spine so a returning user sees why an enhancement
+    has been running for two minutes. Do not log prompt text or captions.
+
+    The feed is a subscription with a TTL (mc_llm_jobs.FEED_TTL). A feed that
+    expires or raises is not a job failure: re-subscribe from the last cursor,
+    and reconcile against status(llm_id) before concluding anything terminal.
+
+    Compatibility fallback:
+        if an older supported ModelSwitchRefiner API exposes status() but not
+        subscribe(), use one bounded server-side status observer while this
+        enhancement is active. It must query the external API directly and stop
+        on terminal state; it must not re-read/rewrite the whole outbox every 2 s.
+
+STEP 5 - only after enhancement is persisted, advance to ENSURING_WANGP,
+    applying B22's VRAM handover rule at that boundary.
+
+Resource-order rule:
+    On a cold job, do not start WanGP before enhancement completes. Loading both
+    GPU-heavy dependencies at once wastes memory and creates avoidable contention.
+    The pipeline ordering above already guarantees this.
+
+B5. MODELSWITCHREFINER STATES
+-----------------------------
+Classification: REQUIRED ARCHITECTURE
+
+The job must distinguish, and every one of these is readable from the shipped
+public API without a new seam (0.3):
+
+    extension_missing
+        mc_llm_api is not importable. Terminal for enhanced job.
+        Source: enhance.api() returns None.
+
+    switched_off
+        The extension exists but LLM Studio is off in this WebUI's settings.
+        Terminal, and reported as a policy state with its own actionable
+        sentence - never as a cold runtime and never as a generic failure.
+        Source: capabilities()["enabled"] is False; the same condition
+        submit_minimax() refuses with code `disabled` (mc_llm_api.py:154-157).
+
+    not_configured
+        No usable enhancement model/projector is configured. Terminal; do not
+        guess or download a model silently.
+        Source: capabilities()["configured"] is False.
+
+    no_vision
+        The configured model has no vision projector and the plan carries a
+        picture. Terminal enhancement refusal.
+        Source: capabilities()["vision"] is False, and the same condition
+        refused at submit with code `no_vision`. Note that the owning
+        extension's internal check can also answer "unreadable" rather than
+        false, in which case it defers the judgement to the run; MiniPaint must
+        accept a refusal arriving at submit time as well as at preflight.
+
+    cold
+        Configured runtime/model exists but is not running/loaded. NOT a
+        MiniPaint state and NOT a MiniPaint action: submitting the job starts
+        it. Surfaced as ENHANCING stage text only.
+
+    busy
+        Another request is running or queued in the owning extension's queue.
+        Join that queue; never launch a second competing LLM runtime.
+        Source: busy() / queue() / position events on the feed.
+
+    queue_full
+        Retryable refusal at submit. Hold and retry with bounded backoff.
+
+    failed
+        Persist structured failure and stop the job.
+
+The draft's instruction that a cold runtime must not be reported as a permanent
+`disabled` configuration is preserved and is now mechanically satisfiable:
+`disabled` and `cold` are separately readable, and `disabled` is a real,
+distinct, policy-level state that this document refuses to work around. If a
+user has switched LLM Studio off, an enhanced job fails with that sentence.
+MiniPaint does not turn it back on.
+
+B6. ENSURE MANAGED WANGP
+------------------------
+Severity: fundamental
+Classification: REQUIRED ARCHITECTURE
+
+Use MiniPaint's existing managed WanGP runtime ownership rules:
+
+    - one managed WanGP per machine
+    - exact configured GPU UUID
+    - loopback only
+    - no attaching to arbitrary external process
+    - no name-based kill
+    - preserve allocator/environment isolation
+
+Executor behaviour, against the existing runtime states (0.3):
+
+    READY:
+        continue to B7A's admission check
+
+    STOPPED:
+        start managed child server-side and wait for READY
+
+    STARTING:
+        join existing start wait; do not start another child
+
+    STOPPING:
+        wait for the transition to settle, then re-evaluate; never race a stop
+
+    CRASHED:
+        one policy-controlled managed restart may be attempted if no ambiguous
+        generation is in flight; otherwise fail honestly
+
+    INCOMPATIBLE / REINIT_REQUIRED:
+        terminal actionable job failure; do not paper over configuration errors
+
+Browser pages do not start WanGP for queued execution. The executor does.
+
+B7. SERVER-TO-WANGP EXECUTION ADAPTER
+------------------------------------
+Severity: fundamental
+Classification: REQUIRED ARCHITECTURE (the adapter is decided in this revision)
+
+The receiving WanGP child is a separate managed process/environment. The new
+path needs a browser-independent server-to-server execution seam.
+
+THE ADAPTER IS DECIDED. The draft asked an implementer to choose among three
+candidates. Two of them do not survive reading the source (0.4, C2). The
+decision is:
+
+    The MiniPaint bridge plugin, running inside the managed WanGP child,
+    owns one headless WanGPSession - constructed with no webui_state, so it
+    creates its own state - and exposes generation over the bridge's existing
+    private authenticated loopback surface.
+
+Why this and not the alternatives:
+
+    - A WebUI-backed session (draft option B) refuses without an active Gradio
+      callback context and a live request with a session hash, and suspends its
+      queue waiting for browser focus (0.3). It is browser-bound by
+      construction. It is removed from consideration, not ranked.
+
+    - Driving the form and pressing generate_trigger is what the bridge does
+      today for the legacy path (0.3). It requires a live browser session and
+      is the thing this whole document exists to replace.
+
+    - A headless session inside the child needs no Gradio page, loads no second
+      copy of WanGP, starts no second OS process, and reaches WanGP's own model
+      runtime through WanGP's own API.
+
+Required properties of the adapter:
+
+    - the session is created lazily on first server-executed job and reused for
+      the life of the WanGP child
+    - it is reached only over the bridge's authenticated loopback surface
+    - Forge never holds a socket open for the duration of a generation:
+      submission returns a task id promptly and progress arrives by the feed
+      in B9
+    - the adapter honours B7A's exclusion before it submits anything
+    - the exact Wan2GP revision the adapter was proven against is pinned in
+      compatibility.py alongside the element ids, with the same rule: when a
+      Wan2GP release moves it, that is the one file to correct
+
+Forbidden:
+
+    - driving hidden Gradio buttons/DOM from Forge server code
+    - requiring active Gradio session context
+    - starting a second standalone WanGP process per job
+    - submitting through a browser iframe
+    - falling back to browser execution when the adapter fails
+
+SPECIAL ATTENTION - documented guidance departure:
+    Wan2GP's own API documentation tells plugins not to call init(...) and
+    states that WanGP injects a WebUI-backed session for them. This design
+    deliberately does otherwise, because the injected session is the one that
+    cannot run unattended. The consequence is that this is an undocumented
+    combination against an API with no published stability guarantee, so P5
+    verifies it and compatibility.py pins it. If a future Wan2GP publishes a
+    supported headless-for-plugins entry point, migrate to it.
+
+B7A. GENERATION EXCLUSION
+-------------------------
+Severity: blocking
+Classification: REQUIRED ARCHITECTURE. New in this revision. See 2.12 and
+0.4 (C1).
+
+THE PROBLEM, STATED EXACTLY
+
+Wan2GP has two generation paths and they do not exclude each other:
+
+    - The WebUI path sets and clears a plain module global, gen_in_progress
+      (wgp.py:4189-4193), inside process_tasks (wgp.py:8695). It takes no lock
+      that the API path respects.
+
+    - The headless path holds _GENERATION_LOCK for the whole run
+      (shared/api_cli.py:29) and calls wgp.generate_media() directly
+      (shared/api_cli.py:121), never entering process_tasks, so it never sets
+      gen_in_progress.
+
+    - wgp.py never references _GENERATION_LOCK; it imports three unrelated
+      helpers from shared.api (wgp.py:139).
+
+Two consequences, both reachable by ordinary use:
+
+    1. A user pressing Generate in the WanGP tab during an unattended run is
+       not stopped by anything, in either direction. Two generations proceed
+       against one card and one set of wgp module globals.
+
+    2. The bridge's existing protocol-4 guarantee silently stops holding. The
+       bridge reads is_generation_in_progress live (compatibility.py:310, 893)
+       precisely so it never presses Generate during a running generation. That
+       function returns False during a headless run.
+
+REQUIRED BEHAVIOUR
+
+    1. ONE EXCLUSION, OWNED BY THE BRIDGE.
+       The bridge plugin holds a single process-wide exclusion inside the WanGP
+       child covering both paths. Every server-executed submission acquires it;
+       nothing else in MiniPaint's path bypasses it.
+
+    2. THE WEBUI MUST SEE THE UNATTENDED RUN.
+       Before a headless generation begins, the bridge sets Wan2GP's own
+       gen_in_progress, and clears it when the run reaches a terminal state,
+       including on failure and on cancellation. This is what makes Wan2GP's
+       own UI gating (wgp.py:4241) refuse to start a second run, and it is the
+       minimum necessary stretch of principle 2.6: one documented global, set
+       by the plugin that already reads it, version-pinned like every other
+       Wan2GP fact the bridge knows.
+
+       Clearing it must be unconditional and exception-safe. A headless run
+       that dies without clearing the flag leaves the user's WanGP tab
+       permanently refusing to generate, which is a worse failure than the one
+       being prevented. Use try/finally and re-assert the correct value from
+       the bridge's own exclusion state rather than from a remembered bool.
+
+    3. THE BRIDGE MUST NOT START WHILE THE WEBUI IS RUNNING.
+       A submission arriving while is_generation_in_progress() is true is not
+       refused and not raced. The job moves to WAITING_FOR_CARD and the
+       executor retries. The user's in-progress work is never pre-empted,
+       aborted, or queued behind an unattended job that has not started.
+
+    4. CHECK-AND-ACQUIRE IS ATOMIC.
+       Reading is_generation_in_progress() and then submitting is a
+       check-then-act race with a user pressing Generate in between. The read
+       and the acquisition happen under the bridge's own exclusion, inside the
+       child, in one operation. Forge never makes this decision; it asks and is
+       told yes or not-yet.
+
+    5. THE WAIT IS HONEST AND VISIBLE.
+       WAITING_FOR_CARD is a published job state with stage text saying the
+       card is busy with WanGP's own work. It is not a stall, not a retry
+       storm, and not reported as an error. Retry on the bridge's own
+       notification where one exists, otherwise on a bounded backoff measured
+       in seconds, never sub-second.
+
+    6. INTERLEAVING RULE.
+       Among MiniPaint's own jobs, press order holds. Against WanGP tab work,
+       first-to-acquire wins and MiniPaint always yields to an already-running
+       WebUI generation. MiniPaint never holds the exclusion while merely
+       waiting for something else, and never holds it across an enhancement.
+
+    7. CANCELLATION RELEASES IT.
+       Cancelling an unattended job at any stage releases the exclusion and
+       clears gen_in_progress if this job set it.
+
+ACCEPTANCE
+
+    - With an unattended generation running, WanGP's own Generate button
+      refuses, with WanGP's own busy behaviour.
+    - With a WanGP tab generation running, an admitted MiniPaint job sits in
+      WAITING_FOR_CARD and starts only after the user's run finishes.
+    - The bridge's protocol-4 start route never presses Generate during an
+      unattended run. This is a regression test over existing shipped
+      behaviour, not a new feature test.
+    - A headless run that raises, is cancelled, or has its process killed
+      mid-run never leaves gen_in_progress stuck true for a surviving WebUI.
+    - Concurrent submission attempts from two MiniPaint jobs produce one
+      generation and one WAITING_FOR_CARD, never two generations.
+
+IF EXCLUSION CANNOT BE ESTABLISHED
+    Unattended generation is not complete and the release is blocked, on the
+    same terms as B7. Do not ship an adapter that can corrupt a user's own run.
+
+B8. WANGP SUBMISSION CONTRACT
+-----------------------------
+Classification: REQUIRED ARCHITECTURE
+
+The server executor sends the reconstituted settings dict (B1) and durable media
+references to the WanGP adapter.
+
+Requirements:
+
+    - the stable MiniPaint execution id is the ledger key; see below
+    - adapter validates model availability and settings before generation, and
+      revalidates when the snapshot's captured Wan2GP version differs from the
+      running one
+    - paths are resolved only on the server; browser never supplies arbitrary
+      filesystem paths
+    - admission response returns a durable task/job id before MiniPaint records
+      WANGP_WAITING/GENERATING
+    - no browser session state is consulted
+
+THE DURABLE LEDGER - MANDATORY
+
+    The WanGP Python API provides no idempotency key, client id or
+    deduplication of its own (0.3). The ledger is therefore the only mechanism
+    that makes repeated submission safe, and it is required before B11 enables
+    any automatic recovery after SUBMITTING_WANGP.
+
+    Required properties:
+
+        - lives in the MiniPaint bridge plugin, inside the WanGP child, because
+          that is the process that knows whether a SessionJob exists and is the
+          process whose lifetime bounds the generation
+        - keyed by MiniPaint execution id
+        - written durably before submit_task is called, not after
+        - records: execution id, submitted-at, the WanGP task/job id once
+          known, terminal outcome, and generated_files on success
+        - a duplicate submission with the same execution id never starts a
+          second generation: it returns the existing record, whatever state
+          that record is in
+        - a record whose submission was written but whose outcome was never
+          recorded resolves to ambiguous, which is what produces
+          EXECUTION_UNKNOWN upstream rather than a retry
+        - bounded and swept on the same terms as other bridge ledgers, but
+          never swept while its job is non-terminal
+
+Model change semantics:
+    The job names the captured model. If that model is unavailable when execution
+    reaches WanGP, fail with MODEL_UNAVAILABLE/MODEL_CHANGED-equivalent detail.
+    Never run against whatever model a user later selected in the WanGP tab.
+
+B9. TRACK WANGP TO FULFILLMENT
+------------------------------
+Classification: REQUIRED ARCHITECTURE
+
+Use the SessionJob event stream as the primary tracking path, consumed inside
+the WanGP child by the bridge and relayed to Forge over the loopback surface.
+SessionJob.result(timeout) exists but blocks; it is not the tracking mechanism
+and must never be called on a request-handling thread.
+
+Persist meaningful transitions:
+
+    accepted/waiting
+    starting/loading model if surfaced
+    generating/progress
+    completed
+    error/cancelled
+
+On completed GenerationResult:
+
+    - persist success/failure counts
+    - persist generated_files as normalized server-owned output paths, validated
+      to lie under the configured WanGP output root, according to existing
+      security practice
+    - raw paths are trusted-diagnostics material only: they do not cross to the
+      browser on the shared event stream (6.4) and do not enter normal logs
+    - do not require WanGP WebUI gallery registration
+    - do not build a viewer in this revision
+    - transition MiniPaint job to COMPLETED only after result is durable
+
+VISIBILITY, STATED PLAINLY
+
+    A headless session keeps its own state, so a server-executed job does not
+    appear in the WanGP tab's queue, its gallery, or its progress display.
+    MiniPaint's Clipboard queue is the only place it is visible. This is
+    intended (1.4). Do not add UI implying the WanGP tab will show it, and do
+    not attempt to inject it into WanGP's queue to make it visible - that is
+    the WebUI-backed path, and it is browser-bound.
+
+A later Clipboard viewer can consume these recorded outputs.
+
+B10. CANCELLATION
+-----------------
+Classification: REQUIRED ARCHITECTURE
+
+Cancel All / per-job cancel must now target the server executor, not a page lease.
+MiniPaint's cancel is authoritative for MiniPaint's jobs; WanGP's own Abort
+control does not reach a headless job and must not be presented as if it does.
+
+Cancellation by stage:
+
+    admitted/waiting
+        mark cancelled; release inputs after retention rule
+
+    enhancing
+        mc_llm_api.cancel(llm_id) / origin-scoped cancel as appropriate.
+        A cancel that arrives while the runtime is still cold is honoured by
+        the owning extension's own cooperative cancellation; MiniPaint does not
+        kill a llama-server to cancel a prompt.
+
+    enhanced / ensuring WanGP
+        do not kill a shared managed process solely because one job was cancelled;
+        mark request cancelled and stop before submission
+
+    waiting for card
+        release the claim if one is held, mark cancelled, and never disturb the
+        generation currently holding the exclusion
+
+    WanGP active
+        SessionJob.cancel() by execution id through the adapter, then wait for
+        the terminal event rather than assuming it. Release the B7A exclusion
+        and clear gen_in_progress in the same terminal path as a normal finish.
+
+Cancellation must remain browser-independent once the cancel request reaches
+Forge.
+
+B11. SERVER RESTART / RECOVERY
+------------------------------
+Classification: REQUIRED ARCHITECTURE
+
+Browser disappearance is the hard guarantee. Forge restart is a recovery case,
+and its semantics are platform-dependent by existing deliberate design (0.3).
+
+PLATFORM SEMANTICS - NEW IN THIS REVISION
+
+    POSIX: the managed child is started with start_new_session=True
+    (runtime.py:407) and survives Forge being killed. An in-flight generation
+    keeps running, the bridge's ledger keeps recording it, and Forge can
+    reconcile and re-attach after restart. Recovery to a real result is
+    achievable.
+
+    Windows: the child is attached to a job object carrying
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, which is deliberately "the part that
+    survives Forge being killed outright" - the child is killed with Forge. An
+    in-flight generation is lost. Recovery means proving that it was lost, not
+    recovering a result.
+
+    The behaviour difference is intended and is not to be "fixed" by orphaning
+    the child on Windows: the job object is what prevents a GPU-holding
+    orphan after a Forge crash.
+
+After Forge starts:
+
+    - load durable non-terminal jobs
+    - release stale browser-era leases from legacy jobs according to migration
+      rules
+    - resume ADMITTED/WAITING work
+    - ENSURING_WANGP and WAITING_FOR_CARD may restart idempotently
+    - ENHANCING jobs whose ModelSwitchRefiner in-process record disappeared may
+      restart enhancement from the preserved typed prompt, because WanGP has not
+      yet been submitted and nothing external is ambiguous
+    - SUBMITTING_WANGP / WANGP_* must reconcile against the bridge ledger by
+      execution id before any retry:
+          ledger says terminal      -> adopt that outcome
+          ledger says running and
+            the child is the same
+            process                 -> re-attach to the event feed
+          ledger says running and
+            the child is gone       -> EXECUTION_UNKNOWN, the expected Windows
+                                       outcome, never an automatic resubmit
+          no ledger record          -> the submission never happened; the job
+                                       may be resubmitted safely
+    - the B7A exclusion is reconstructed from the ledger and live child state on
+      startup, never assumed free
+
+B12. DURABLE INPUT LIFETIME
+---------------------------
+Classification: REQUIRED ARCHITECTURE
+
+The observed HANDOFF_NOT_FOUND failure must not recur. Today the handoff root is
+swept by age alone (DEFAULT_MAX_AGE_SECONDS = 6 * 3600, handoff.py:75, sweep at
+handoff.py:445-477) and knows nothing about queued work.
+
+At admission:
+
+    - convert transient staging handles into job-owned durable input records;
+      either retain the underlying safe object with a job pin or copy/link it into
+      a controlled job-input area
+    - record content metadata/digest needed for validation
+    - never store a browser-chosen path
+
+Sweeper rule:
+
+    active_job_reference => never sweep by age
+
+After terminal state:
+
+    - retain for a bounded grace suitable for retry/diagnostics
+    - then release automatically
+
+A manual retry creates/reuses input refs according to existing safety policy and
+must not discover that its source vanished only because the user walked away.
+
+Note the interaction with B7A: a job can now legitimately sit in
+WAITING_FOR_CARD for as long as the user's own WanGP work takes, which can far
+exceed the six-hour sweep age. The pin is what makes that safe.
+
+B13. LEGACY BROWSER CLAIM/PUMP PATH
+----------------------------------
+Classification: LEGACY COMPATIBILITY
+
+Keep existing claim/report routes temporarily so an already-loaded old page does
+not break during rolling development.
+
+New pages/jobs do not use browser leases to execute.
+
+Migration:
+
+    - mark browser claim executor deprecated internally
+    - do not publish claim_ready for server-executed jobs
+    - after compatibility window/tests, remove new-page timer pumping
+    - legacy browser jobs present during upgrade are either allowed to finish by
+      old semantics or explicitly migrated only if their execution state is known
+
+The event hub's targeted claim_ready mechanism may remain only for legacy jobs
+until that path is retired. It is not part of unattended generation.
+
+IMPORTANT: a legacy browser-executed job still drives WanGP through the form and
+generate_trigger. That path must also respect B7A's exclusion, or the migration
+window is exactly when the two-generations hazard is most likely.
+
+B14. BRIDGE ACKNOWLEDGEMENT FALLBACK
+------------------------------------
+Classification: RETAINED PERFORMANCE REQUIREMENT
+
+For browser operations that still use Gradio chained callbacks (snapshot/manual
+send/etc.), keep the earlier review decision:
+
+    - prefer a proven direct component/update hook
+    - programmatic textarea.value does not imply an input event
+    - use MutationObserver only if prototype proves the actual installed Gradio
+      path mutates observed DOM
+    - otherwise start the existing value-read fallback only after ~2 seconds and
+      only while a request is actually in flight
+
+This fallback no longer participates in generation after server admission.
+
+B15. ENHANCEMENT OUTBOX WATCHER
+-------------------------------
+Classification: REPLACED
+
+Delete/demote the 2-second outbox document watcher (outbox.py:112,
+WATCH_SECONDS = 2.0) once B4 uses the external API event feed.
+
+Do not keep both the feed and a full-document polling watcher permanently.
+
+B16. WANGP TRACKING LOOP
+------------------------
+Classification: REPLACED
+
+Per-browser 3-second tracking (minipaint_interop.js:81, TRACK_MS = 3000) is
+removed for server-executed jobs. The server owns the WanGP SessionJob feed and
+publishes state changes once for all browsers.
+
+B17. BROWSER DEBUG LOGGING
+--------------------------
+Classification: COMPLETED / REGRESSION REQUIREMENT
+
+PR #49 moved browser diagnostics off Gradio onto a plain batched route. Preserve
+that. Logging failure must never affect job execution.
+
+B18. /WANGP/ PROXY OVERHEAD
+---------------------------
+Classification: MEASURED FOLLOW-ON
+
+Keep prior conclusion:
+
+    - proxy already preserves normal end-to-end cache headers except hop-by-hop
+      fields/content-length
+    - investigate whether WanGP emits useful validators before changing proxy
+      cache behaviour
+    - do not impose a finite stream timeout without proving an upstream liveness
+      signal
+
+Unattended execution uses direct loopback server-to-server API inside/through the
+child bridge rather than routing bulk execution through the browser proxy.
+
+B19. RUNTIME START/STOP/HEALTH WAITS
+------------------------------------
+Classification: REQUIRED PERFORMANCE/CORRECTNESS FOLLOW-ON
+
+The executor itself must never block the ASGI event loop while waiting minutes
+for WanGP start, LLM readiness, or generation.
+
+Use worker thread / background coordinator and condition/event primitives.
+Async HTTP routes only enqueue/control/query. They do not run generation inline.
+
+This binds the bridge as well as Forge. Inside the WanGP child:
+
+    - the loopback submission handler must not block on _GENERATION_LOCK, which
+      run_cli_job holds for the whole generation (0.3). Submit, record the
+      ledger entry, return the task id; track by feed.
+    - SessionJob.result(timeout) blocks and is not called on a handler thread.
+    - WanGPSession.close() also takes _GENERATION_LOCK and will therefore wait
+      for any running generation. Never call it from a request path.
+
+B20. PROCESS LOG BUFFERING
+--------------------------
+Classification: COMPLETED / REGRESSION REQUIREMENT
+
+PR #49 implemented the per-line process-log reduction. Preserve crash-safe flush
+and Windows-safe rotation semantics.
+
+B21. LAZY FILE DIGESTS
+----------------------
+Classification: RETAINED FOLLOW-ON
+
+Do not hash every large file on every refresh when metadata proves unchanged.
+Retain the previous lazy digest recommendation and tests.
+
+B22. VRAM HANDOVER BETWEEN ENHANCER AND WANGP
+---------------------------------------------
+Severity: medium, rising to high on single-card installs
+Classification: SPECIAL ATTENTION. New in this revision. See 0.4 (C5).
+
+An enhanced cold job loads a language model onto the configured card and then,
+seconds later, wants a video model on the same card.
+
+The two are arbitrated by nothing in common. ModelSwitchRefiner has a VRAM
+broker with a safety margin and placement logic (mc_llm_runtime.py:466-590) that
+reasons about workloads it knows of; MiniPaint's managed WanGP is a separate OS
+process it does not know about. WanGP, for its part, sizes itself against
+whatever the card reports free at load time.
+
+Required investigation - P6 decides, do not guess:
+
+    1. Measure whether an enhanced cold chain on the target card actually
+       fails, degrades, or merely runs warm: cold enhancer, then cold WanGP,
+       sequentially, with GPU memory sampled at each stage boundary.
+
+    2. Measure whether the language model's residency measurably reduces what
+       WanGP can allocate, and whether WanGP's own sizing copes.
+
+If handover is needed, in preference order:
+
+    A. Ask ModelSwitchRefiner to release. This is the one place a public API
+       addition is genuinely warranted: mc_llm_runtime already has release()
+       and a RELEASE_STOP mode documented as "Stop llama-server - releases all
+       VRAM; weights stay warm in the page cache" (mc_llm_runtime.py:70-74),
+       but none of it is exported through mc_llm_api. Add a small additive
+       public seam there, and call it at the ENHANCED -> ENSURING_WANGP
+       boundary.
+
+       Note what the existing mode already gets right: stopping the server
+       returns VRAM while leaving the weights in the page cache, so the next
+       enhancement restarts from RAM rather than disk. The handover is cheap.
+
+    B. If no seam is added, order the stages so that the enhancement is
+       terminal before WanGP starts - which B4 STEP 5 already requires - and
+       document the measured headroom requirement for the install.
+
+Explicitly forbidden:
+
+    - MiniPaint calling mc_llm_runtime internals to force a release (2.6)
+    - killing a llama-server by process identity
+    - auto-killing a user's manually active WanGP job to make enhancement fit
+
+================================================================================
+5. WORKSTREAM C - PAGE WEIGHT AND COMPONENT COUNT
+================================================================================
+
+C1. GLOBAL JAVASCRIPT COST
+--------------------------
+Classification: REVISED
+
+Forge/A1111 loads every file in an extension's javascript/ directory globally.
+The largest win is not minification alone; it is not loading tab-only code on a
+page/session that never uses that tab.
+
+Required design:
+
+    - main.js remains the minimal global bootstrap
+    - move tab-specific code out of the globally auto-loaded directory into a
+      route/static location controlled by this extension
+    - load each bundle once from the tab's own lifecycle/load event
+    - idempotent loader: Reload UI must not create duplicate listeners/instances
+    - browser cache is allowed for immutable extension JS assets
+    - preserve graceful degradation if one optional integration script fails
+
+Minification:
+
+    Minification is desirable but not allowed to introduce an unapproved build
+    dependency in this performance change. Choose one of:
+
+        A. repository separately approves deterministic build tooling; commit the
+           tool/config/source maps
+        B. keep readable source and defer minification; lazy loading is still the
+           required performance fix
+
+Do not hand-maintain a minified artifact with no deterministic regeneration path.
+
+C2. GRADIO COMPONENT COUNT
+--------------------------
+Classification: CONFIRMED direction
+
+The event spine and plain authenticated fetch routes make many hidden textboxes
+used as message channels unnecessary.
+
+Required design:
+    - inventory every hidden component by purpose before removal
+    - one-way browser -> server commands become ordinary authenticated fetches
+    - server -> browser notifications use the shared event transport
+    - image display values move to opaque binary objects only after A4 proof
+    - keep hidden components that are actual ForgeCanvas implementation details
+      or are required by an unchanged host contract
+
+Target:
+    The current count is 84, not the 81 the draft states: canvas/ui.py 28,
+    clipboard/ui.py 41, wangp/ui.py 12, canvas/surface.py 2, legacy_ui.py 1.
+    Materially below 84; fewer than 20 remains a planning target, not a
+    correctness threshold until the inventory proves it.
+
+    Note that removing the browser's executor role (B13, B16) retires a
+    meaningful share of clipboard/ui.py's hidden components on its own, so run
+    the inventory after Phase 5 rather than before it.
+
+================================================================================
+6. EVENT SPINE, SYNC, AND REMOTE PRESENTATION CONTINUITY
+================================================================================
+
+The event spine remains required, but its purpose is now observation. Execution
+continues if every browser connection disappears.
+
+6.1 Authority model
+-------------------
+
+Authoritative state lives in durable outbox/job records plus dependency task ids.
+The browser's local state is a cache/presentation.
+
+All durable job transitions publish after persistence.
+
+6.2 Endpoints
+-------------
+
+Under the existing authenticated interop prefix. The first two are NEW - neither
+exists today (0.3) - and the draft's "keep/add" phrasing understated the work:
+
+    GET  /minipaint-interop/events                                        NEW
+        primary SSE stream for all MiniPaint state notifications
+
+    GET  /minipaint-interop/sync                                          NEW
+        authoritative snapshot: server_epoch, revision, jobs, runtime/dependency
+        summary, pending handoff/job-input summary safe for the caller
+
+    POST /minipaint-interop/outbox/submit
+        durable admission of complete job snapshot
+
+    POST /minipaint-interop/outbox/cancel
+    POST /minipaint-interop/outbox/cancel_all
+    POST /minipaint-interop/outbox/retry
+
+    LEGACY claim/report/adopt routes
+        retained temporarily for old pages only; new unattended path does not need
+        them
+
+The event hub module they are built on already exists and is not rewritten;
+these routes are its transport. Long-poll fallback remains transport-independent
+and conditional on the real remote-topology prototype, as specified in 6.9.
+
+6.3 Server epoch and revision
+-----------------------------
+
+Use the epoch:revision cursor semantics already implemented in events.py.
+
+    server_epoch
+        random/stable for one Forge process lifetime
+
+    revision
+        monotonic durable-state publication counter inside that epoch
+
+Every broadcast durable-state event advances revision and carries id:
+
+    <epoch>:<revision>
+
+Heartbeat does not advance revision and carries no id.
+
+Legacy targeted advisory events such as claim_ready also carry no id and do not
+enter the replay ring.
+
+6.4 Event taxonomy
+------------------
+
+Broadcast durable events should be coarse and scrubbed:
+
+    hello
+        epoch/current revision/capabilities
+
+    job
+        job id, state, stage, timestamps, safe progress fields, structured error
+        code, generated-file count/ids where privacy rules permit
+
+    dependency
+        safe state changes such as enhancer starting/ready, WanGP starting/ready;
+        never model paths, tokens or prompt text
+
+    runtime
+        managed WanGP runtime state, and whether the card is currently held by
+        WanGP's own WebUI work - B7A's exclusion is a legitimate thing for a
+        returning user to see, expressed as a coarse busy/free fact and nothing
+        more
+
+    handoff/input
+        opaque ids/state only
+
+    reset
+        replay not possible / epoch mismatch / subscriber overflow
+
+    heartbeat
+        application-visible liveness frame; no revision
+
+Do not send prompt text, enhanced prompt, captions, raw paths, secrets or image
+contents on the shared event stream. This includes generated_files: the count
+and opaque ids may cross, the paths may not.
+
+6.5 Publication points
+----------------------
+
+Publication is a consequence of durable save, not an optional call sprinkled at
+some mutation sites.
+
+For outbox/job state:
+
+    mutate under lock
+    persist atomically
+    capture safe event record/revision
+    release lock
+    enqueue notification to subscribers thread-safely
+
+Never write sockets while holding outbox lock. events.py already honours this;
+keep it that way.
+
+6.6 Replay and sync
+-------------------
+
+Retain bounded broadcast replay ring. If cursor is in ring, replay exactly what
+was missed. If too old, wrong epoch or subscriber overflow occurred, emit/reset
+and require one sync.
+
+Sync snapshot wins over stale local browser state.
+
+If events arrive while sync is in flight:
+
+    - buffer them
+    - apply snapshot at revision R
+    - discard buffered events <= R
+    - apply buffered events > R in order
+
+6.7 Browser lifecycle
+---------------------
+
+Because execution is server-owned, lifecycle becomes much simpler.
+
+VISIBLE:
+    keep stream live; render updates normally
+
+HIDDEN:
+    stop expensive rendering/layout work
+    the transport may remain open briefly or close according to network/resource
+    policy; job execution is unaffected either way
+    there is NO requirement to keep a hidden page alive just to drain work
+
+FROZEN:
+    close/abandon transport when freeze callback is observable
+    mark local continuity uncertain
+    job execution continues on server
+
+RESUME / VISIBLE / PAGESHOW:
+    reopen transport
+    authoritative sync once
+    render current server truth
+
+DISCARDED/CLOSED:
+    nothing special is required for execution
+    a later new page syncs current truth
+
+This replaces the previous rule that hidden pages with owned work must keep
+executing. No browser owns executable work now.
+
+6.8 Liveness watchdog
+---------------------
+
+Keep application-visible heartbeat (recommended ~15 s) because SSE comments are
+not visible to JavaScript.
+
+A cheap local timer compares Date.now() with lastFrameAt. It makes no network
+request while frames arrive.
+
+If a visible page sees no frames for STREAM_DEAD_MS (~35-45 s):
+
+    close stale transport
+    perform one authoritative sync
+    reconnect
+
+This only protects UI freshness. It has no effect on server executor state.
+
+6.9 Long-poll fallback gate
+---------------------------
+
+Keep the fully specified fallback transport but make implementation evidence-
+gated.
+
+During remote prototype P1, test every supported real path (LAN/VPN/tunnel/
+reverse proxy).
+
+If normal fetch/sync works but SSE is repeatedly buffered/closed/unusable on a
+supported path:
+    implement one-held-request long-poll transport with the same cursor/replay/
+    reset semantics before deleting old polls.
+
+If every supported path carries SSE cleanly:
+    defer long-poll implementation; retain design and trigger condition.
+
+Never run SSE and long-poll simultaneously for one page.
+
+6.10 Optimistic UI
+------------------
+
+The button may immediately show "Submitting..." locally, but must not show the
+job as durably queued until the admission response returns a job id.
+
+After durable ack, UI can show queued from the local response before the event
+stream echoes it. De-duplicate by job id/revision.
+
+6.11 Immediate-close robustness
+-------------------------------
+
+The final submit body must stay small by using server-side input ids. When within
+the browser keepalive quota, send it with fetch keepalive so a navigation/close
+that begins just after the click can still complete the request.
+
+The correctness boundary remains the server ack. If the user closes the page
+before the browser ever transmits the request, no system can honestly claim a
+job was admitted. The UI should make admission acknowledgement fast and clear.
+
+================================================================================
+7. ACCEPTANCE CRITERIA
+================================================================================
+
+7.1 Measurement discipline
+--------------------------
+
+Use repeated trials and report p50/p95/p99 where timing matters. Separate:
+
+    server processing delay
+    extension transport delay
+    external network RTT
+    model/runtime cold-start time
+    exclusion wait time
+    generation time
+
+Do not hide cold-start time inside browser-latency metrics, and do not hide
+B7A exclusion waiting inside generation time.
+
+7.2 PRESS AND WALK AWAY - REQUIRED PRODUCT TEST
+----------------------------------------------
+
+For each scenario below:
+
+    - compose request
+    - press Add to Queue
+    - wait only for durable admission acknowledgement
+    - immediately remove browser participation as specified
+    - do not interact again until after expected generation time
+    - verify job terminal success and output file exists
+
+Scenarios:
+
+    A. desktop tab backgrounded
+    B. mobile browser app backgrounded
+    C. phone locked/sleeping
+    D. tab closed
+    E. entire remote browser machine disconnected from Forge network
+    F. return from a different browser/device
+
+Generation must continue in A-E. F must see authoritative current state through
+sync.
+
+7.3 COLD NON-ENHANCED JOB
+-------------------------
+
+Start with managed WanGP STOPPED.
+
+Submit ordinary job and close browser after ack.
+
+Pass:
+    server starts WanGP
+    reaches READY
+    acquires the B7A exclusion
+    submits job server-side
+    tracks generation
+    persists generated file path(s)
+    browser not scheduled again
+
+7.4 COLD ENHANCED MINIMAX JOB
+-----------------------------
+
+Start with:
+    enhancement runtime/model not loaded/running but configured
+    managed WanGP STOPPED
+
+Submit Enhance=ON MiniMax H3 job and close browser after ack.
+
+Pass, in this order:
+    preflight passes against capabilities()
+    executor enters ENHANCING
+    configured enhancement runtime/model starts/loads, reported as stage text
+    MiniMax enhancement reaches done
+    enhanced prompt is persisted
+    B22's handover rule is applied at the boundary
+    executor starts/ensures WanGP
+    WanGP accepts captured settings/input
+    generation completes
+    generated file path(s) persisted
+    no browser action occurs after admission
+
+Also run with image-backed enhancement requiring vision.
+
+7.5 ENHANCER CONFIGURATION FAILURES
+-----------------------------------
+
+Missing extension, LLM Studio switched off, no configured model, no required
+vision projector, and queue capacity refusal each produce distinct actionable
+states. The first four are terminal; queue_full is retryable. No case is
+misreported as a generic browser timeout, and no case is misreported as another.
+
+7.6 WANGP CONFIGURATION FAILURES
+--------------------------------
+
+Missing install/configured GPU/model files/incompatible runtime produce explicit
+job failures. Executor does not silently select another GPU/model.
+
+7.7 INPUT RETENTION
+-------------------
+
+Queue a job with image inputs; artificially delay execution past the former
+handoff sweep age, including by holding it in WAITING_FOR_CARD. Input remains
+available until terminal state. No HANDOFF_NOT_FOUND caused by ordinary waiting.
+
+7.8 NO DUPLICATE GENERATION
+---------------------------
+
+Interrupt Forge between WanGP submission and local result persistence. On
+restart/recovery, reconcile by execution id against the bridge ledger. Test must
+produce either:
+
+    one recovered result (the POSIX case, child survived), or
+    EXECUTION_UNKNOWN requiring human decision (the Windows case, or any case
+    where the child is gone)
+
+Never two generated tasks from automatic blind retry. Run this test on both
+platforms; the expected outcome differs and both are passes.
+
+7.9 GENERATION EXCLUSION
+------------------------
+New in this revision.
+
+    - unattended run in progress -> WanGP tab Generate refuses
+    - WanGP tab run in progress -> admitted job sits in WAITING_FOR_CARD and
+      starts only after it finishes
+    - bridge protocol-4 auto start never fires during an unattended run
+      (regression test over existing shipped behaviour)
+    - headless run killed mid-generation -> a surviving WebUI is not left
+      permanently refusing to generate
+    - two MiniPaint jobs racing -> one generation, one wait
+    - cancelling from either state releases the exclusion
+
+7.10 EVENT/PRESENTATION PERFORMANCE
+-----------------------------------
+
+These become measurable at Phase 4, not before; until the routes in 6.2 exist,
+the 150 ms clipboard watcher and 3 s tracking timer are still present by design
+(0.3).
+
+Healthy idle visible page, after Phase 4:
+    background HTTP requests/sec = 0
+    one event stream
+
+Server job transition -> browser healthy local link:
+    no interval-shaped 150/250/1000/3000 ms delay
+    target p95 publication <25 ms under normal I/O
+    delivery bounded mainly by scheduling/network RTT
+
+Remote reconnect:
+    authoritative sync restores current job state without manual refresh
+
+7.11 CANVAS
+-----------
+
+Retain previous acceptance:
+    static layout settles to zero repeated fits
+    pointer work at most once per animation frame
+    pointerup exact final state
+
+7.12 NO VIEWER REQUIREMENT
+--------------------------
+
+A job passes this revision when WanGP reports success and generated output files
+exist and are persisted on the job. It need not appear in a new MiniPaint video
+viewer, and it will not appear in WanGP's own gallery or queue. Viewer work is
+explicitly deferred.
+
+================================================================================
+8. MIGRATION SEQUENCE
+================================================================================
+
+PHASE 0 - ALREADY MERGED / RETAIN
+---------------------------------
+
+A1 resize feedback fix
+A2 pointer coalescing
+B17 browser logging route
+B20 process-log buffering
+foreground-time browser deadlines for legacy operations
+Phase-1 event-hub groundwork already merged/developed
+
+Do not revert these.
+
+PHASE 0.5 - PROTOTYPE GATES
+---------------------------
+
+Re-scoped against the draft: P3 shrinks to verification, P5 changes from
+"discover an adapter" to "verify the chosen adapter and build its exclusion",
+and P8 is new.
+
+P1. REMOTE EVENT TRANSPORT
+    Real remote topology, heartbeat/reconnect/restart/proxy. Decides whether
+    long-poll fallback is required now. Unchanged.
+
+P2. SETTINGS SNAPSHOT
+    Prove that get_default_settings(model_type) plus a delta set round-trips to
+    an equivalent submitted task. Compare against exported WanGP settings for
+    representative MiniMax FL2VA/Ref2VA and at least one non-H3 model. Confirm
+    media inputs are accepted as path strings for every slot the product uses.
+
+P3. MODELSWITCHREFINER READINESS - VERIFICATION ONLY
+    The shipped API already lazily brings a configured cold runtime to
+    readiness on submit (0.3). Prove it end-to-end on the target install with
+    no browser: cold llama-server, submit_minimax, observe STATUS stage text,
+    reach done. Record the observed stage vocabulary so B4's UI text is real
+    rather than invented. Only if this fails does the draft's readiness-seam
+    work become necessary.
+
+P4. MODELSWITCHREFINER EVENT FEED
+    Verify subscribe()'s contract and terminal event behaviour against the
+    version actually shipped, including feed TTL expiry mid-enhancement and
+    reconciliation against status(). If an older deployment lacks it, document
+    the status-observer compatibility path.
+
+P5. WANGP SERVER-SIDE WRITE PATH AND EXCLUSION - BLOCKING GATE
+    Two halves, both blocking.
+
+    (a) WRITE PATH. Inside the managed WanGP child, prove that a headless
+        WanGPSession submits captured settings and image inputs with no
+        browser and no Gradio session and reaches a GenerationResult. Prove:
+            no active Gradio session needed
+            no second WanGP OS process
+            no duplicate model/runtime allocation beyond safe API behavior
+            cancel works
+            progress/completion events work
+            generated_files are returned
+            execution id reconciles through the bridge ledger
+        Record the exact Wan2GP revision and pin it in compatibility.py.
+
+    (b) EXCLUSION. Build and prove B7A. This is not a measurement; it is the
+        deliverable that makes (a) safe to ship. The acceptance list is 7.9.
+
+    This gate does not permit falling back to browser execution. If either half
+    fails, unattended release is blocked.
+
+P6. GPU RESOURCE ORDERING
+    On the target machine test:
+        cold enhancer -> cold WanGP sequentially, with VRAM sampled at each
+          stage boundary
+        warm WanGP idle -> enhancement request
+        enhancement busy -> queued WanGP job
+    Decides whether B22's release seam is required. Do not auto-kill a user's
+    manually active WanGP job to make enhancement fit.
+
+P7. KEEPALIVE ADMISSION
+    Measure final POST size with worst supported settings metadata and opaque ids.
+    Keep well below browser keepalive quota. Verify immediate close/navigation
+    after click still commonly completes submission on supported browsers, while
+    preserving the rule that server ack is the guarantee boundary.
+
+P8. CHILD LIFETIME ACROSS A FORGE CRASH - NEW
+    On both platforms, kill Forge mid-generation and record what happens to the
+    managed child and to an in-flight headless job. Confirms B11's
+    platform-dependent semantics against the installed builds rather than
+    against a reading of runtime.py, and establishes that the Windows outcome
+    is EXECUTION_UNKNOWN and not a silent duplicate.
+
+PHASE 1 - DURABLE SNAPSHOT + SERVER EXECUTOR
+--------------------------------------------
+
+Implement:
+    B1 snapshot schema
+    durable job-owned inputs B12
+    B2 executor skeleton/condition wake
+    B3 state machine
+    B11 restart recovery foundations
+
+New job may stop before external execution while adapters are still feature-
+flagged, but tests prove browser is no longer the scheduler.
+
+PHASE 2 - ENHANCER PIPELINE
+---------------------------
+
+Implement:
+    B4 preflight + MiniMax submit + subscribe() feed consumption
+    B5 state disambiguation
+    persist enhanced prompt
+    cancellation
+    privacy tests
+
+Run enhanced jobs to ENHANCED with browser closed.
+
+Note this phase no longer depends on a ModelSwitchRefiner change, so it can run
+in parallel with Phase 0.5's P5 rather than behind it.
+
+PHASE 3 - WANGP SERVER EXECUTION
+--------------------------------
+
+Implement:
+    B6 ensure managed child
+    B7 headless adapter
+    B7A exclusion - land this with or before the adapter, never after
+    B8 submission + ledger
+    B9 tracking/results
+    B10 cancellation
+    B22 handover if P6 requires it
+
+This phase is the first phase that satisfies press-and-walk-away end-to-end.
+Do not remove legacy browser path until all acceptance tests pass, and extend
+B7A's exclusion over the legacy path for the duration of the overlap (B13).
+
+PHASE 4 - EVENT CONSUMERS + REMOTE PRESENTATION
+-----------------------------------------------
+
+Build the two new routes and the consumers:
+    /minipaint-interop/events, /minipaint-interop/sync
+    durable job events
+    browser stream owner
+    heartbeat watchdog
+    visibility/freeze simplified presentation lifecycle
+    optional long-poll if P1 required it
+
+This phase improves observation; it is not required for server job progress. It
+is, however, where section 7.10's numbers become measurable.
+
+PHASE 5 - DEMOTE/REMOVE BROWSER EXECUTION POLLS
+-----------------------------------------------
+
+After unattended path proves stable:
+    new pages stop claim pumping
+    remove per-browser WanGP job tracking for server jobs
+    remove outbox enhancement full-document watcher
+    keep delayed bridge ACK fallback only where P2/installed Gradio needs it
+    retain legacy endpoints for compatibility window
+
+PHASE 6 - STRUCTURAL PERFORMANCE FOLLOW-ONS
+-------------------------------------------
+
+A3 structural one-round-trip
+A4 binary display objects
+A5 lazy ForgeCanvas investigation/result
+A6 startup observer removal
+B18 measured proxy changes only
+B19 async/background runtime waits
+B21 lazy digests
+C1 lazy JS loading
+C2 hidden-component consolidation, inventoried after Phase 5
+
+================================================================================
+9. TEST REQUIREMENTS
+================================================================================
+
+9.1 Existing suite
+------------------
+
+Keep full existing suite green, including current Gradio 4.40-specific regression
+coverage where applicable.
+
+9.2 Job snapshot contract
+-------------------------
+
+Test normalization and round-trip persistence for:
+
+    MiniMax FL2VA text only
+    FL2VA first+last frames
+    Ref2VA reference
+    custom system prompt override
+    non-enhanced request
+    model-specific settings / LoRAs
+    invalid/missing settings
+    a snapshot whose captured Wan2GP version differs from the running one
+
+No live DOM access after admission in executor tests.
+
+9.3 Durable input tests
+-----------------------
+
+    active jobs pin inputs beyond age sweep
+    a job held in WAITING_FOR_CARD past the sweep age keeps its inputs
+    terminal jobs release after retention grace
+    retry cannot reference swept active input
+    symlink/path escape protections remain
+    only opaque ids cross browser admission
+
+9.4 ModelSwitchRefiner tests
+----------------------------
+
+Fake external API must support the shipped contract: capabilities(), submit,
+subscribe feed, status reconciliation.
+
+Test:
+    preflight: extension missing / switched off / not configured / no vision
+    cold -> running -> done, with stage text surfaced
+    queue full -> retryable, bounded backoff, eventual submit
+    enhancement queued/running/done
+    failed
+    cancelled
+    feed TTL expiry mid-enhancement -> re-subscribe -> status reconciliation
+    feed disconnect/exception -> status reconciliation
+    prompt/caption never logged
+
+Use the real external API contract test shape where possible.
+
+9.5 WanGP adapter tests
+-----------------------
+
+Against WanGP test seam / representative installed API:
+
+    submit without browser session
+    stable execution id
+    idempotent duplicate submit resolves from the ledger
+    progress events
+    generated_files success
+    structured failure
+    cancel
+    cold process start
+    STARTING join
+    process crash before submit
+    process crash after submit reconciliation
+    ledger record written before submit_task, not after
+
+9.6 Exclusion tests
+-------------------
+New in this revision. The acceptance list in 7.9, as executable tests, plus:
+
+    submission handler never blocks on _GENERATION_LOCK
+    gen_in_progress cleared on every terminal path including exception and kill
+    exclusion state reconstructed correctly after a Forge restart
+    legacy browser-executed job also respects the exclusion during the
+      migration window
+
+9.7 End-to-end walk-away browser tests
+--------------------------------------
+
+Automate with Playwright/browser harness plus real/fake long-running server job:
+
+    click Add to Queue -> receive ack -> page.close()
+    server completes job
+    open new page -> sync -> completed
+
+Also exercise hidden, freeze where CDP supports it, offline/disconnected browser
+machine simulation and remote topology.
+
+Do not let fake job completion depend on browser JS timers.
+
+9.8 Enhanced cold chain integration
+-----------------------------------
+
+On target install:
+
+    both dependencies cold but configured
+    enhanced MiniMax job admitted
+    browser closed
+    enhancer starts/loads
+    prompt done
+    WanGP starts
+    generation done
+    output path exists
+
+Record timestamps for each stage and GPU memory snapshots sufficient to diagnose
+resource overlap. These are P6's evidence as well as this test's.
+
+9.9 Privacy
+-----------
+
+Every new writer/event/log is tested under existing privacy rules:
+
+    no prompt text in logs/events
+    no enhanced prompt/caption in logs/events
+    no raw user paths in browser-visible shared events, generated_files included
+    no credentials/tokens
+    generated output path handling follows existing trusted diagnostics policy
+
+9.10 Performance regressions
+----------------------------
+
+Retain Canvas smoke tests, event-hub thread safety/replay tests, proxy tests,
+process-log tests and request-count instrumentation from prior specification.
+
+================================================================================
+10. INVARIANTS / WHAT MUST NOT REGRESS
+================================================================================
+
+    - At most one generation runs against the configured GPU at any moment,
+      whoever started it, by whichever path.
+
+    - A user's in-progress WanGP tab generation is never pre-empted, aborted,
+      or made to wait behind an unattended job that has not started.
+
+    - Wan2GP's own Generate control refuses while an unattended generation is
+      running, rather than silently starting a second one.
+
+    - Press order remains the queue-order contract AMONG MINIPAINT'S OWN JOBS.
+      It says nothing about tasks queued in the WanGP tab, which interleave by
+      the exclusion rule in B7A. Scoped in this revision; previously unscoped.
+
+    - A completed server admission does not depend on the submitting page living.
+
+    - Input media referenced by an active job cannot be swept, including while
+      that job waits for the card.
+
+    - No automatic duplicate generation after ambiguous external admission. The
+      bridge ledger is the proof, and it is written before submission.
+
+    - WanGP managed-process ownership remains exact; no arbitrary-process attach
+      or kill-by-name.
+
+    - Exact configured GPU is respected; no silent fallback GPU.
+
+    - Enhancement variant follows captured WanGP model target.
+
+    - Typed prompt remains available beside enhanced prompt for diagnostics/retry,
+      under existing privacy rules.
+
+    - Prompt/enhanced text never enters normal logs/event spine.
+
+    - MiniPaint never mutates a ModelSwitchRefiner user preference to execute a
+      job. LLM Studio switched off stays switched off, and the job fails saying so.
+
+    - Browser event delivery is not an execution prerequisite.
+
+    - Server executor does not block the ASGI event loop, and the bridge's
+      loopback handlers do not block on WanGP's generation lock.
+
+    - No new permanent high-frequency browser polling.
+
+    - No new video viewer in this revision.
+
+================================================================================
+11. OPEN QUESTIONS
+================================================================================
+
+Most of the draft's open questions are closed by source reading (0.3, 0.4).
+Recorded here with their answers so they are not reopened.
+
+Q1. CLOSED. What ModelSwitchRefiner readiness method will be used?
+    None. submit_minimax() brings a configured cold runtime to readiness as
+    part of running the job, via mc_llm_runtime.client(). P3 verifies this on
+    the target install; the draft's new-API work is cancelled.
+
+Q2. CLOSED. Must job-scoped readiness change a persistent LLM Studio enable
+    setting?
+    No, and it must not. `disabled` is a user preference read from
+    mc_llm_studio.enabled(). An enhanced job submitted while LLM Studio is off
+    fails with that sentence. Cold readiness is entirely separate from the
+    feature-enable setting, which is what the draft preferred and what the code
+    already does.
+
+Q3. ANSWERED, PENDING VERSION PIN. Which WanGP adapter is browser-independent?
+    A headless WanGPSession constructed with no webui_state, owned by the
+    bridge plugin inside the managed child. The WebUI-backed session is not a
+    candidate. P5(a) records the exact Wan2GP revision for compatibility.py.
+
+Q4. CLOSED. Can the adapter guarantee an idempotent execution id across a Forge
+    restart?
+    Not from the WanGP API, which has none. The durable bridge ledger is
+    therefore mandatory and is specified in B8. Automatic recovery after
+    SUBMITTING_WANGP is gated on it.
+
+Q5. OPEN - P6 DECIDES. What GPU coordination is required when WanGP is warm and
+    MiniMax enhancement needs the same card?
+    B22 specifies the investigation and the preferred remedy. Do not guess from
+    cold tests.
+
+Q6. OPEN - P1 DECIDES. Does every supported remote path carry SSE cleanly?
+
+Q7. OPEN - A4 PROTOTYPE. Does ForgeCanvas accept ordinary same-origin binary
+    display URLs without breaking logical-image preprocess semantics?
+    Unrelated to unattended generation.
+
+Q8. OPEN - P8 DECIDES, NEW. Does the managed child's observed behaviour across a
+    Forge crash match runtime.py's platform intent on the installed builds?
+    B11's recovery semantics depend on the answer, and it differs by platform.
+
+Q9. OPEN, NEW. Is setting Wan2GP's gen_in_progress from the bridge (B7A rule 2)
+    stable across the Wan2GP versions in the supported range, and is there a
+    supported plugin-facing way to do it?
+    If a supported seam exists or can be contributed upstream, prefer it to
+    writing the global. Until then, the global is pinned in compatibility.py
+    like every other Wan2GP fact.
+
+================================================================================
+12. EXPECTED FILE / PROJECT TOUCH POINTS
+================================================================================
+
+MINIPAINT REPOSITORY
+
+    minipaint_neo/clipboard/outbox.py
+        new server-execution state model, durable snapshots, executor wake,
+        recovery, results; removal of lease/claim as the execution truth
+
+    minipaint_neo/clipboard/executor.py              NEW RECOMMENDED
+        coordinator/state-machine runner; no browser dependency
+
+    minipaint_neo/clipboard/enhance.py
+        capabilities() preflight, subscribe() feed consumption, status
+        reconciliation, compatibility fallback
+
+    minipaint_neo/clipboard/config.py
+        durable job/input document helpers as needed
+
+    minipaint_neo/interop.py
+        complete-submit/sync/event/control routes; legacy claim routes remain
+        temporarily
+
+    minipaint_neo/events.py
+        job/dependency/runtime publications on the existing epoch/replay spine
+
+    minipaint_neo/wangp/runtime.py
+        server executor ensure-ready integration; do not duplicate ownership logic
+
+    minipaint_neo/wangp/handoff.py / new job_inputs.py
+        active-job pin/lifetime semantics
+
+    javascript/minipaint_interop.js
+        compose/snapshot submit, stream/sync presentation; remove worker role
+
+    javascript/minipaint_clipboard.js
+        Add to Queue admission UI/status only; later viewer explicitly deferred
+
+    javascript/minipaint_wangp.js
+        bridge snapshot/manual operations; legacy execution path retained only
+        during migration
+
+    tests/*
+        executor, cold dependencies, exclusion, walk-away, event/sync, privacy,
+        regression
+
+WAN2GP BRIDGE PLUGIN (wan2gp_bridge/wan2gp-minipaint-bridge/*)
+
+    This is where the substance of Phase 3 lands.
+
+    a new execution module
+        headless WanGPSession ownership, submit, feed relay, cancel
+
+    a new exclusion module
+        B7A: the process-wide exclusion, gen_in_progress assertion, and the
+        atomic check-and-acquire
+
+    a new ledger module
+        B8: durable execution-id keyed record
+
+    compatibility.py
+        the pinned Wan2GP revision for the API surface and for gen_in_progress,
+        alongside the element ids it already pins
+
+    plugin.py / protocol.py
+        the private authenticated loopback surface for the above; the existing
+        browser-facing handler is untouched and remains the legacy path
+
+MODELSWITCHREFINER REPOSITORY (only if P6 shows B22's handover is required)
+
+    mc_llm_api.py
+        additive public VRAM release/unload seam wrapping the existing
+        mc_llm_runtime release modes
+
+    docs/21-external-llm-api.md
+        document the release contract
+
+    tests/test_llm_external_api.py
+        executable contract for it
+
+    The readiness seam the superseded draft required here is NOT needed.
+
+WANGP
+
+    Prefer no upstream fork beyond the existing MiniPaint bridge plugin. Use the
+    current shared/api.py public surface from inside the WanGP process. If the
+    bridge needs an adapter, exclusion or ledger, keep it in the installed
+    MiniPaint bridge plugin rather than patching unrelated WanGP UI code. The one
+    Wan2GP-owned value the bridge writes is gen_in_progress, under B7A rule 2 and
+    Q9.
+
+================================================================================
+13. IMPLEMENTATION CHECKLIST
+================================================================================
+
+Before unattended feature flag can become default:
+
+    [ ] complete snapshot contains all execution settings
+    [ ] snapshot built from get_default_settings + deltas, round-trip proven
+    [ ] final submit uses opaque durable input ids
+    [ ] server durable ack is fast and explicit
+    [ ] active inputs cannot be swept, including while waiting for the card
+    [ ] executor advances jobs with zero browser pages open
+    [ ] enhancer preflight distinguishes missing / off / unconfigured / no vision
+    [ ] enhancer cold start observed end-to-end with no browser
+    [ ] enhancer event feed consumed server-side, with TTL reconciliation
+    [ ] enhanced prompt persists before WanGP stage
+    [ ] WanGP cold start proven server-side
+    [ ] P5(a) browser-independent WanGP submission proven and version-pinned
+    [ ] P5(b) exclusion built and all of 7.9 passing
+    [ ] Wan2GP's own Generate refuses during an unattended run
+    [ ] bridge protocol-4 regression test passing
+    [ ] durable ledger written before submit, duplicate submit proven idempotent
+    [ ] generation progress/completion tracked server-side
+    [ ] generated_files persisted, paths kept off the event spine
+    [ ] cancellation works in each stage and releases the exclusion
+    [ ] close-tab walk-away test passes
+    [ ] locked-phone/background test passes
+    [ ] remote disconnect test passes
+    [ ] return-from-new-device sync test passes
+    [ ] no duplicate generation recovery test passes on both platforms
+    [ ] privacy suite passes
+    [ ] existing full suite passes
+    [ ] old browser claim path is not used by new jobs
+
+Before old browser execution loops are removed:
+
+    [ ] compatibility window decision recorded
+    [ ] in-flight legacy job migration behavior tested
+    [ ] legacy path proven to respect the exclusion
+    [ ] server executor request counts measured
+    [ ] event/sync remote tests passed
+    [ ] long-poll built if P1 requires it
+
+================================================================================
+14. RECOMMENDATIONS
+================================================================================
+
+Normative requirements are in sections 1-13. This section is judgement: what to
+do first, what to be sceptical of, and where this document is still guessing.
+
+14.1 Do B7A before B7, not after
+--------------------------------
+
+The natural order is to make submission work and then make it safe. Resist it.
+An adapter that works is immediately tempting to demo, and the window between
+"it generates" and "it cannot corrupt the user's run" is exactly when someone
+tries it on a real machine with the WanGP tab open. Build the exclusion first,
+against a stub that sleeps; then put the real adapter behind it.
+
+14.2 Treat the two-generations hazard as the release gate
+---------------------------------------------------------
+
+If one thing in this document slips, let it be Phase 4's event routes, not
+B7A. A stale UI is a nuisance. Two generations on one card is a corrupted
+output, an OOM, or a wedged WanGP that the user will reasonably blame on
+MiniPaint - and it happens on the first day someone uses the feature the way it
+is meant to be used.
+
+14.3 Verify the three corrections yourself before building on them
+-------------------------------------------------------------------
+
+Sections 0.3 and 0.4 rest on reading Wan2GP main and ModelSwitchRefiner main
+today. Both are moving targets and neither publishes a stability guarantee. The
+three that would most change the plan if they turn out to be wrong on YOUR
+installed versions are:
+
+    - that the WebUI path does not take _GENERATION_LOCK (if it does, B7A gets
+      much smaller)
+    - that submit_minimax starts a cold runtime (if it does not, the draft's
+      readiness-seam work comes back)
+    - that no idempotency key exists (if one appears, B8's ledger simplifies)
+
+Each is a ten-minute check against the installed source. Do them at the start
+of Phase 0.5, not when something fails.
+
+14.4 Keep the Wan2GP knowledge in one file, as you already do
+--------------------------------------------------------------
+
+compatibility.py is the best-designed thing in this integration: one file that
+knows every Wan2GP element id, setting name and flag letter, version-gated, so
+a Wan2GP release breaks one file and nothing else. The new API surface, the
+pinned revision, and gen_in_progress belong there under the same rule. Do not
+let api.py knowledge leak into the execution module the way DOM knowledge was
+kept from leaking into MiniPaint.
+
+14.5 Prefer the API's settings dict over growing DOM knowledge
+---------------------------------------------------------------
+
+B1 says this normatively; it is worth repeating as advice because the draft
+pointed the other way and the other way is the path of least resistance. The
+bridge already knows how to read components, so a compose operation built on
+component reads will feel faster to write. It will also be a permanent
+maintenance surface proportional to the number of settings WanGP has.
+get_default_settings plus a delta is smaller today and stays smaller.
+
+14.6 Ship Phase 2 early; it is independent now
+-----------------------------------------------
+
+Removing the ModelSwitchRefiner readiness requirement decouples the enhancer
+pipeline from the WanGP adapter. Phase 2 can land, be used, and be tested while
+P5 is still being proven. An enhanced job that reaches ENHANCED with the browser
+closed is already a visible improvement, and it de-risks the harder phase by
+proving the executor, the state machine and the input pinning in production
+first.
+
+14.7 Be honest in the UI about what walking away means
+-------------------------------------------------------
+
+Three things in this design are invisible to the user unless the UI says them:
+
+    - the job is not in WanGP's queue and will not appear there
+    - the job may be waiting for the card because of their own WanGP work
+    - on Windows, a Forge crash loses an in-flight generation
+
+The first two are ordinary status text. The third is a one-line note in the
+queue's help, not a dialog. All three are cheaper to say than to have someone
+discover.
+
+14.8 What this document is still guessing about
+-------------------------------------------------
+
+Stated plainly so it is not mistaken for confidence:
+
+    - Whether a headless WanGPSession and the WebUI can safely share wgp's
+      module state at all, even when serialized. Exclusion prevents concurrent
+      generation; it does not prove that alternating between the two paths
+      leaves the module in a good state. P5(a) should alternate several times,
+      not run once.
+
+    - Whether B22 is needed at all. It may turn out that WanGP's own sizing
+      copes with a resident language model on the target card, in which case
+      the ModelSwitchRefiner change never happens.
+
+    - Whether the exclusion wait is tolerable in practice. If a user habitually
+      leaves a long WanGP job running, unattended jobs may wait a long time.
+      That is correct behaviour and may still feel wrong; watch for it before
+      adding policy.
+
+    - The test suite's current state. It could not be run during this review -
+      gradio is not installed in the environment the review was performed in,
+      and tests/run.py fails at test_wangp_protocol.py:1606 for that reason.
+      Confirm green before Phase 1.
+
+================================================================================
+15. RATIONALE / FINAL ARCHITECTURAL STATEMENT
+================================================================================
+
+The browser cannot be made into a reliable background worker on mobile.
+Timer throttling, freezing, discard, app switching and network loss are browser
+policy outside MiniPaint's control. Pausing deadlines prevents false failures;
+it does not fulfill work.
+
+The only architecture that satisfies "tap Add to Queue and walk away" is to
+move execution ownership to the machine that remains running: Forge and the
+managed services beside it.
+
+The browser therefore has one critical job before it may disappear: describe
+exactly what the user asked for and obtain durable admission.
+
+After that:
+
+    Forge owns the job.
+
+    If enhancement is requested, Forge submits it to the configured MiniMax
+    writer, which starts its own runtime if it is cold, and tracks it to a
+    finished prompt.
+
+    Forge then ensures the managed WanGP runtime is ready, waits for the card
+    if the user is using it, submits the immutable captured generation settings
+    through a browser-independent WanGP API path, and tracks the generation to
+    a structured result.
+
+    Input lifetime is tied to the job, not to a timer or page.
+
+    Browser event streams are observers. They can fail all afternoon and the
+    generation still finishes.
+
+    When the user returns, one authoritative sync tells the truth.
+
+That architecture also makes the performance work cleaner. Browser polling can
+finally be removed rather than merely slowed down because there is no longer
+server work hidden behind a page that must be prodded every few hundred
+milliseconds.
+
+One thing the superseded draft did not say, and this document exists to say:
+moving execution off the browser puts a second writer on the GPU, and Wan2GP
+does not arbitrate between its two writers. The feature is not finished when it
+generates unattended. It is finished when it generates unattended without ever
+colliding with the person who owns the machine.
+
+================================================================================
+END OF SPECIFICATION
+================================================================================

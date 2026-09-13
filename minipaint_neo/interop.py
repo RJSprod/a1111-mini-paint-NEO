@@ -44,6 +44,15 @@ STAGE_ROUTE = ROUTE_PREFIX + "/stage"
 PREPARE_ROUTE = ROUTE_PREFIX + "/prepare"
 RELEASE_ROUTE = ROUTE_PREFIX + "/release"
 CONTRACT_ROUTE = ROUTE_PREFIX + "/contract"
+#: Protocol 4: the queue outbox. A press or an enqueue() is a job the server
+#: owns; a page claims the next one it may run and reports how it went.
+OUTBOX_ROUTE = ROUTE_PREFIX + "/outbox"
+OUTBOX_SUBMIT_ROUTE = OUTBOX_ROUTE + "/submit"
+OUTBOX_CLAIM_ROUTE = OUTBOX_ROUTE + "/claim"
+OUTBOX_REPORT_ROUTE = OUTBOX_ROUTE + "/report"
+OUTBOX_CANCEL_ROUTE = OUTBOX_ROUTE + "/cancel"
+OUTBOX_RETRY_ROUTE = OUTBOX_ROUTE + "/retry"
+OUTBOX_ADOPT_ROUTE = OUTBOX_ROUTE + "/adopt"
 
 #: The subfolder of the per-run runtime directory that holds staged images.
 #: Never configurable, for the reason the handoff root is not.
@@ -83,6 +92,8 @@ def contract() -> dict:
         "prompt_max_chars": protocol.PROMPT_MAX_CHARS,
         "max_references": protocol.MAX_QUEUE_REFERENCES,
         "kinds": list(KINDS),
+        "start_modes": list(protocol.START_MODES),
+        "outbox": OUTBOX_ROUTE,
     }
 
 
@@ -315,7 +326,13 @@ def normalize_public_request(raw: typing.Any) -> dict:
         if kept:
             images[protocol.QUEUE_FIELD_REFERENCES] = kept
 
-    request: typing.Dict[str, typing.Any] = {"request_id": request_id, "images": images}
+    start = raw.get("start")
+    if start is None or start == "":
+        start = protocol.START_AUTO
+    if start not in protocol.START_MODES:
+        raise IntegrationError(errors.REQUEST_INVALID, "start is auto or never")
+
+    request: typing.Dict[str, typing.Any] = {"request_id": request_id, "images": images, "start": start}
     if cleaned is not None:
         request["prompt"] = cleaned
     return request
@@ -351,7 +368,7 @@ def prepare(request: typing.Mapping[str, typing.Any]) -> dict:
     be resolved refuses the whole request, and the handoffs already written
     for it are let go: a half-prepared request is not queued.
     """
-    wire: typing.Dict[str, typing.Any] = {"request_id": request["request_id"]}
+    wire: typing.Dict[str, typing.Any] = {"request_id": request["request_id"], "start": request.get("start") or protocol.START_AUTO}
     if request.get("prompt") is not None:
         wire["prompt"] = request["prompt"]
     written: typing.List[str] = []
@@ -482,6 +499,83 @@ async def _contract_route(_request: typing.Any) -> typing.Any:
     return _json(contract())
 
 
+# ------------------------------------------------------------ the outbox --
+
+
+async def _body(request: typing.Any) -> dict:
+    try:
+        raw = await request.json()
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _outbox():
+    from .clipboard import outbox
+
+    return outbox
+
+
+async def _outbox_list_route(request: typing.Any) -> typing.Any:
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    try:
+        box = _outbox()
+        return _json({"ok": True, "jobs": box.jobs(), "running": box.wangp_running(), "counts": box.counts()})
+    except Exception as error:
+        _journal(f"outbox: list failed - {type(error).__name__}")
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+
+
+def _outbox_call(name: str, call: typing.Callable[[dict], typing.Any]):
+    async def route(request: typing.Any) -> typing.Any:
+        if not _signed_in(request):
+            return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+        raw = await _body(request)
+        try:
+            answer = call(raw)
+        except IntegrationError as error:
+            if error.code not in (errors.WANGP_NOT_RUNNING, errors.QUEUE_BUSY):
+                _journal(f"outbox {name}: refused - {error.code}")
+            status = 409 if error.code in (errors.WANGP_NOT_RUNNING, errors.QUEUE_BUSY) else 404 if error.code == errors.QUEUE_JOB_UNKNOWN else 400
+            return _refused(error, status)
+        except Exception as error:
+            _journal(f"outbox {name}: failed - {type(error).__name__}")
+            return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+        return _json(dict({"ok": True}, **answer))
+
+    route.__name__ = f"_outbox_{name}_route"
+    return route
+
+
+def _submit(raw: dict) -> dict:
+    origin = raw.get("origin") if raw.get("origin") in ("clipboard", "api") else "api"
+    return {"job": _outbox().submit(raw.get("request"), raw.get("page"), origin)}
+
+
+def _claim(raw: dict) -> dict:
+    box = _outbox()
+    if not box.wangp_running():
+        raise IntegrationError(errors.WANGP_NOT_RUNNING, "the managed WanGP is not serving")
+    return box.claim(raw.get("page"))
+
+
+def _report(raw: dict) -> dict:
+    return {"job": _outbox().report(raw.get("job_id"), raw.get("lease"), raw.get("phase"), raw.get("result"))}
+
+
+def _cancel(raw: dict) -> dict:
+    return {"job": _outbox().cancel(raw.get("job_id"))}
+
+
+def _retry(raw: dict) -> dict:
+    return {"job": _outbox().retry(raw.get("job_id"), raw.get("page"))}
+
+
+def _adopt(raw: dict) -> dict:
+    return {"job": _outbox().adopt(raw.get("job_id"), raw.get("page"))}
+
+
 def install(app: typing.Any) -> None:
     """Put the routes on Forge's FastAPI app. Called from ``on_app_started``."""
     if getattr(app, _INSTALLED_FLAG, False):
@@ -494,6 +588,13 @@ def install(app: typing.Any) -> None:
             Route(PREPARE_ROUTE, endpoint=_prepare_route, methods=["POST"]),
             Route(RELEASE_ROUTE, endpoint=_release_route, methods=["POST"]),
             Route(CONTRACT_ROUTE, endpoint=_contract_route, methods=["GET"]),
+            Route(OUTBOX_ROUTE, endpoint=_outbox_list_route, methods=["GET"]),
+            Route(OUTBOX_SUBMIT_ROUTE, endpoint=_outbox_call("submit", _submit), methods=["POST"]),
+            Route(OUTBOX_CLAIM_ROUTE, endpoint=_outbox_call("claim", _claim), methods=["POST"]),
+            Route(OUTBOX_REPORT_ROUTE, endpoint=_outbox_call("report", _report), methods=["POST"]),
+            Route(OUTBOX_CANCEL_ROUTE, endpoint=_outbox_call("cancel", _cancel), methods=["POST"]),
+            Route(OUTBOX_RETRY_ROUTE, endpoint=_outbox_call("retry", _retry), methods=["POST"]),
+            Route(OUTBOX_ADOPT_ROUTE, endpoint=_outbox_call("adopt", _adopt), methods=["POST"]),
         ]
         app.router.routes[0:0] = routes
         setattr(app, _INSTALLED_FLAG, True)
@@ -523,6 +624,13 @@ def register(script_callbacks: typing.Any) -> None:
 
 __all__ = [
     "CONTRACT_ROUTE",
+    "OUTBOX_ADOPT_ROUTE",
+    "OUTBOX_CANCEL_ROUTE",
+    "OUTBOX_CLAIM_ROUTE",
+    "OUTBOX_REPORT_ROUTE",
+    "OUTBOX_RETRY_ROUTE",
+    "OUTBOX_ROUTE",
+    "OUTBOX_SUBMIT_ROUTE",
     "KINDS",
     "KIND_CLIPBOARD",
     "KIND_STAGED",

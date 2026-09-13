@@ -200,6 +200,8 @@ ready.
 | the previous setup | `…/wan2gp.backup.json` |
 | a setup being validated | `…/wan2gp.pending.json` (short-lived) |
 | prepared images on their way to WanGP | `…/runtime/handoff/<32 hex>.png`, mode `0700` where the platform has it |
+| the machine-wide lock | `…/runtime/wangp.lock.json`: the **Forge server's** pid and start time, taken when a managed WanGP starts, dropped when it stops; never the child's pid, a port or a secret |
+| the queue outbox | `…/clipboard-outbox.json`: every Add to Queue press as a job - see `docs/clipboard/README.md` |
 | images staged through the public queue API | `…/runtime/staging/<32 hex>.png`, swept after 30 minutes |
 | the Clipboard tab's folder, index, draft and history | `…/clipboard.json`, `…/clipboard-index.json`, `…/clipboard-draft.json`, `…/clipboard-history.json` — see `docs/clipboard/README.md` |
 | the bridge plugin, as installed | `<WanGP root>/plugins/wan2gp-minipaint-bridge/` |
@@ -230,6 +232,7 @@ to any other file:
 * **handoff ids** and handoff **paths**
 * the last **receiver revision** and any **receiver cache**
 * **queue request ids**, staged **tokens**, and the **prompt text** of a queue request (the Clipboard tab's own history keeps a prompt only when you typed one there)
+* the **child's pid**: the lock file names the Forge *server* so a second Forge can ask the operating system whether that process still exists, and nothing is ever signalled, killed or connected to on the strength of it
 
 `config.py` enforces this twice — a named `NEVER_PERSISTED` set is stripped from every
 section, and then only the keys the schema declares survive — so widening a whitelist by
@@ -369,8 +372,9 @@ something has actually gone wrong; if WanGP is running happily and you have just
 its bridge, use **Reinitialize** and set up again, or reload the WebUI. (A restart button
 that is always visible is worth having and is not in this version.)
 
-Bridge 1.2.0 speaks protocol 3 (the queue operation); the extension's copy and the installed
-copy must match, so updating one half means updating the other and restarting WanGP.
+Bridge 1.3.0 speaks protocol 4 (the queue operation, and starting a run); the extension's copy
+and the installed copy must match, so updating one half means updating the other and restarting
+WanGP.
 
 Version comparison is exact equality, not a range: the two halves of the protocol are
 released together, so an installed bridge that is *newer* than the extension is as wrong as
@@ -383,6 +387,32 @@ each component it needs through WanGP's plugin API and reports what it actually 
 handshake. A build that is missing a mandatory one answers `ready=false` with
 `BRIDGE_COMPONENT_INCOMPATIBLE`, and the Send menu offers nothing rather than sending into
 something that looked about right.
+
+## Restart WanGP now: the emergency option
+
+*Integration management* has a **Restart WanGP now** button that is always there, beside
+Reinitialize. It is for the moment WanGP is wedged, holding the card, or not answering: it
+does more than the ordinary stop and says what it did.
+
+1. It reads the process tree of the WanGP this extension started - the process group it
+   created at launch on Linux and macOS, the job object on Windows - and, where
+   `nvidia-smi` is available, the chosen GPU's memory in use and which processes hold it.
+2. It ends the tree the way the ordinary stop does (a group signal or the job object, then
+   a kill, then a reap), and then waits until every pid of the tree is gone, escalating to
+   exactly those pids - each checked again for its group first - if any remain.
+3. It reads the GPU again and reports how much memory came back, whether any process of
+   ours is still on the card, and how much is held by processes it does not own and will
+   not touch.
+4. It invalidates every browser session and marks any queue request that was in flight as
+   unconfirmed, then asks for a fresh WanGP the way opening the tab does.
+
+The report appears under the button (and in the console and `logs/wangp-log.txt`):
+the processes found and their memory before, the stop and how long it took, the state
+after, and whether WanGP is starting again. Pids appear there because that is what a task
+manager shows; no path does. A machine without `nvidia-smi` gets the same restart with
+"VRAM unverified" said plainly - the tree is still verified by pid. The error surface's
+*Restart WanGP* runs the same verified restart. It works while a launch is stuck as well:
+the child a stuck start is waiting on is ended first.
 
 ## Reading a failure code
 
@@ -436,6 +466,8 @@ The ones worth knowing by sight:
 | `STALE_RECEIVER_STATE` | the WanGP page moved between the menu opening and the click. Reopen *Send to*. |
 | `BRIDGE_SESSION_MISMATCH` / `WANGP_RESTARTED` | the WanGP page or process is not the one this send was prepared for. The image was not applied. |
 | `RECEIVER_VERIFY_FAILED` | WanGP took an image, but it could not be confirmed as the one that was sent. The tab does not switch, and the log keeps the detail. |
+| `WANGP_ALREADY_MANAGED` | another Forge server on this machine holds the WanGP lock: its WanGP is the one to use, or stop that Forge first. Nothing was started. The lock names the Forge process, and a lock left by a Forge that is gone is removed by itself. |
+| `WANGP_NOT_RUNNING` | a queue request was pressed while the managed WanGP is not serving. Nothing was stored; open the WanGP tab, let it start, and press again. |
 | `QUEUE_BUSY` | a queue request from this page is still being confirmed; the form has one owner at a time. Try again in a moment. |
 | `ADMISSION_UNCONFIRMED` | a queue request was written and WanGP's chain ran, but no task carrying the request appeared within the wait and WanGP recorded no error. Look at WanGP's queue before trying again: it may be there. |
 | `WANGP_VALIDATION_REFUSED` | WanGP's own validation declined the queued request; the WanGP page has the detail, and nothing was added. |
@@ -480,19 +512,26 @@ to install one.
 
 ## Known limits
 
-* **One managed WanGP.** The extension runs a single child. A standalone WanGP you start
-  yourself against the same install is not detected, not attached to and not killed;
-  running both against one WanGP root is not something this version has proven safe.
+* **One managed WanGP.** The extension runs a single child per machine: a second Forge
+  server finds the first one's lock and refuses (`WANGP_ALREADY_MANAGED`) rather than
+  attaching, because attaching would mean sharing the bridge secret through a file. A
+  standalone WanGP you start yourself against the same install is still not detected, not
+  attached to and not killed; running both against one WanGP root is not something this
+  version has proven safe.
 * **The Canvas frontend only.** WanGP destinations appear in the Canvas's *Send to* menu.
   The legacy miniPaint (Old UI) frontend has its own send path and does not offer them.
 * **No always-visible Restart.** *Restart WanGP* is offered on the error surface, which is
   where it is usually wanted, but not while WanGP is running normally.
-* **The queue adds, and only adds.** Protocol 3's queue request (the Clipboard tab, and any
-  extension calling `window.minipaintInterop`) overlays a prompt and up to three image inputs
-  on the live page and runs WanGP's own add-to-queue chain. It never presses Generate, never
-  aborts, reports no progress and changes no setting; and a gallery it wrote is compared for
-  the restore by a coarse signature with a tolerance, because Gradio caches what a gallery
-  shows as lossy WebP. See `docs/clipboard/README.md`.
+* **The queue adds, and starts only an idle WanGP.** A queue request (the Clipboard tab, and
+  any extension calling `window.minipaintInterop`) overlays a prompt and up to three image
+  inputs on the live page and runs WanGP's own chain: the generate one when Wan2GP's own
+  process-wide flag says nothing is generating, the add-to-queue one otherwise, and the
+  queue one whenever that flag cannot be read. It never aborts, reports no progress and
+  changes no setting; and a gallery it wrote is compared for the restore by a coarse
+  signature with a tolerance, because Gradio caches what a gallery shows as lossy WebP. A
+  person pressing Generate in the same instant as the bridge writes the trigger is a race
+  the bridge cannot exclude, only make small; it is logged so a double start is
+  diagnosable. See `docs/clipboard/README.md`.
 * **Three receivers.** Start frame, end frame and reference are the v1 set. The protocol
   already names control image, positioned reference and style reference, and the bridge
   publishes none of them, so Mini Paint never offers them. Adding one is three declarations

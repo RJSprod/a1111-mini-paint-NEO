@@ -44,7 +44,7 @@ window.minipaintWanGP = (function () {
     /* names, the ids and the ceilings are that file's, not this one's.       */
     /* -------------------------------------------------------------------- */
 
-    const PROTOCOL = 3;
+    const PROTOCOL = 4;
 
     const HELLO = "WANGP_BRIDGE_HELLO";
     const READY = "WANGP_BRIDGE_READY";
@@ -96,7 +96,12 @@ window.minipaintWanGP = (function () {
     const MAX_QUEUE_REFERENCES = 16;
     const QUEUE_FIELDS = ["prompt", "start", "end", "references"];
     const ADMISSIONS = ["requested", "duplicate", "refused"];
-    const QUEUE_STATUSES = ["pending", "queued", "refused", "expired"];
+    const QUEUE_STATUSES = ["pending", "queued", "started", "refused", "expired"];
+    // Protocol 4: whether a request may start a generation. Omitted means
+    // "auto"; the bridge decides inside WanGP from WanGP's own flag.
+    const START_MODES = ["auto", "never"];
+    const START_ANSWERS = ["auto", "never", "unknown"];
+    const ROUTES = ["generate", "queue"];
 
     // A handoff id and a channel id have one shape each, and a value that is
     // not exactly that shape is refused rather than repaired. See handoff.py.
@@ -204,7 +209,12 @@ window.minipaintWanGP = (function () {
         // Whether the bridge in this page can take a queue request at all: the
         // handshake says, and a build that lacks a queue-critical component
         // says no while still taking an image send.
-        queue: false
+        queue: false,
+        // Protocol 4: whether it can start a generation (its generate trigger
+        // resolved), and whether WanGP was generating at the last answer -
+        // true, false, or null for a build that cannot say.
+        start: false,
+        generationRunning: null
     };
 
     /* ------------------------------------------------------------------ */
@@ -486,6 +496,8 @@ window.minipaintWanGP = (function () {
             abandon(BRIDGE_SESSION_MISMATCH);
             S.ready = false;
             S.queue = false;
+            S.start = false;
+            S.generationRunning = null;
             S.bridgeSession = "";
             S.receivers = [];
             S.revision = "";
@@ -776,6 +788,8 @@ window.minipaintWanGP = (function () {
         S.revision = declared && REVISION_RE.test(text(payload.state_revision, 64)) ? payload.state_revision : "";
         S.ready = declared;
         S.queue = declared && !!(payload.capabilities && payload.capabilities.queue === true);
+        S.start = declared && !!(payload.capabilities && payload.capabilities.start === true);
+        S.generationRunning = typeof payload.generation_running === "boolean" ? payload.generation_running : null;
         S.lastCode = declared ? "" : (failure || "BRIDGE_COMPONENT_INCOMPATIBLE");
         report(declared, S.lastCode);
         recordSession(true);
@@ -892,7 +906,7 @@ window.minipaintWanGP = (function () {
     }
 
     /* ------------------------------------------------------------------ */
-    /* The queue: minipaint.wangp.queue/v1 over protocol 3                  */
+    /* The queue: minipaint.wangp.queue/v1 over protocol 4                  */
     /* ------------------------------------------------------------------ */
 
     /** applied / inherited / ignored as the shared normaliser shapes them: a
@@ -929,7 +943,10 @@ window.minipaintWanGP = (function () {
             ignored: summary.ignored,
             code: ok ? "" : (code(raw.code) || QUEUE_REQUEST_REFUSED),
             detail: text(raw.detail, 200),
-            model: normaliseModel(raw.model) || S.model || { type: "", label: "", family: "" }
+            model: normaliseModel(raw.model) || S.model || { type: "", label: "", family: "" },
+            route: ROUTES.indexOf(raw.route) === -1 ? "" : raw.route,
+            start: START_ANSWERS.indexOf(raw.start) === -1 ? "" : raw.start,
+            generation_running: typeof raw.generation_running === "boolean" ? raw.generation_running : null
         };
     }
 
@@ -942,7 +959,9 @@ window.minipaintWanGP = (function () {
             status: ok ? raw.status : "pending",
             tasks_added: ok && Number.isFinite(raw.tasks_added) && raw.tasks_added > 0 ? Math.trunc(raw.tasks_added) : 0,
             code: code(raw.code) || (ok ? "" : ADMISSION_UNCONFIRMED),
-            detail: text(raw.detail, 200)
+            detail: text(raw.detail, 200),
+            queue_depth: ok && Number.isFinite(raw.queue_depth) && raw.queue_depth >= 0 ? Math.trunc(raw.queue_depth) : null,
+            route: ROUTES.indexOf(raw.route) === -1 ? "" : raw.route
         };
     }
 
@@ -1019,12 +1038,17 @@ window.minipaintWanGP = (function () {
             }
             if (kept.length) { payload.reference_handoff_ids = kept.map(String); }
         }
+        if (request.start !== undefined && request.start !== null && request.start !== "") {
+            if (START_MODES.indexOf(request.start) === -1) { return queueRefusal(REQUEST_INVALID, "start is not auto or never", requestId); }
+            payload.start = request.start;
+        }
         const overrides = QUEUE_FIELDS.filter(function (field) {
             return field === "prompt" ? payload.prompt !== undefined
                 : field === "references" ? !!payload.reference_handoff_ids
                 : !!payload[field + "_handoff_id"];
         });
-        say("queue " + requestId.slice(0, 8) + ": overrides " + (overrides.length ? overrides.join(", ") : "none (the live page as it is)"));
+        say("queue " + requestId.slice(0, 8) + ": overrides " + (overrides.length ? overrides.join(", ") : "none (the live page as it is)")
+            + "; start " + (payload.start || "auto"));
         return ask(QUEUE_REQUEST, payload, QUEUE_REQUEST_TIMEOUT_MS, QUEUE_RESULT).then(function (answer) {
             if (answer && answer.ok) { return answer; }
             return Object.assign({ admission: "refused", request_id: requestId }, answer);
@@ -1049,15 +1073,24 @@ window.minipaintWanGP = (function () {
      * the bridge's own refusal or WanGP's correlated one; and ``unconfirmed``
      * when the schedule ends with neither - never a guess either way.
      */
-    async function queueAndConfirm(request) {
+    async function queueAndConfirm(request, options) {
         const asked = await queue(request);
+        if (asked && asked.ok && options && typeof options.onAdmitted === "function") {
+            // The overlay is on the form from this moment; a caller that keeps
+            // a record of its own (the outbox) wants to know before the wait.
+            try { await options.onAdmitted(asked); } catch (e) { /* the caller's record, not this call */ }
+        }
         const base = {
             request_id: asked.request_id || "",
             applied: asked.applied || normaliseQueueSummary({}).applied,
             inherited: asked.inherited || [],
             ignored: asked.ignored || [],
             model: asked.model || S.model || { type: "", label: "", family: "" },
-            tasks_added: 0
+            tasks_added: 0,
+            route: asked.route || "",
+            start: asked.start || "",
+            generation_running: typeof asked.generation_running === "boolean" ? asked.generation_running : null,
+            queue_depth: null
         };
         if (!asked.ok) {
             return Object.assign(base, { ok: false, status: "refused", code: asked.code || QUEUE_REQUEST_REFUSED,
@@ -1075,8 +1108,9 @@ window.minipaintWanGP = (function () {
                 if (status.code === REQUEST_INVALID || status.code === BRIDGE_SESSION_MISMATCH || status.code === WANGP_RESTARTED) { break; }
                 continue;
             }
-            if (status.status === "queued") {
-                return Object.assign(base, { ok: true, status: "queued", tasks_added: status.tasks_added || 1, code: "", message: "", detail: "" });
+            if (status.status === "queued" || status.status === "started") {
+                return Object.assign(base, { ok: true, status: status.status, tasks_added: status.tasks_added || 1, code: "", message: "", detail: "",
+                                             queue_depth: status.queue_depth, route: status.route || base.route });
             }
             if (status.status === "refused") {
                 const why = status.code || WANGP_VALIDATION_REFUSED;
@@ -1109,6 +1143,8 @@ window.minipaintWanGP = (function () {
                 api_version: 1,
                 ready: true,
                 queue: !!S.queue,
+                start: !!S.start,
+                generation_running: S.generationRunning,
                 model: S.model ? Object.assign({}, S.model) : { type: "", label: "", family: "" },
                 inputs: {
                     start: { supported: supported("start_frame") },
@@ -1204,6 +1240,8 @@ window.minipaintWanGP = (function () {
             receivers: S.receivers.map(function (receiver) { return Object.assign({}, receiver); }),
             pending: S.pending.size,
             queue: S.queue,
+            start: S.start,
+            generation_running: S.generationRunning,
             code: S.lastCode
         };
     }

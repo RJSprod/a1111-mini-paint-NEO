@@ -156,7 +156,8 @@ def prepare_checks(r: Results, folder: pathlib.Path) -> None:
             protocol.valid_handoff_id(wire.get("start_handoff_id")) and len(wire.get("reference_handoff_ids", [])) == 1
             and protocol.valid_handoff_id(wire["reference_handoff_ids"][0]), str(wire))
     r.check("and carries the prompt and the request id, and nothing else",
-            set(wire) == {"request_id", "prompt", "start_handoff_id", "reference_handoff_ids", "handoff_ids"}, str(sorted(wire)))
+            set(wire) == {"request_id", "prompt", "start_handoff_id", "reference_handoff_ids", "handoff_ids", "start"}, str(sorted(wire)))
+    r.check("and carries the start mode, auto when the caller said nothing", wire.get("start") == "auto")
     r.check("the handoffs are real files under the handoff root",
             all(handoff.resolve(item).parent == handoff.handoff_root().resolve() for item in wire["handoff_ids"]))
     r.check("with the pictures that were behind the handles",
@@ -176,7 +177,11 @@ def prepare_checks(r: Results, folder: pathlib.Path) -> None:
     unknown = interop.normalize_public_request({"images": {"start": {"kind": "clipboard_asset", "id": OTHER}}})
     r.check("an unknown Clipboard asset is CLIPBOARD_ASSET_UNKNOWN", _refused(interop.prepare, unknown) == errors.CLIPBOARD_ASSET_UNKNOWN)
     plain = interop.prepare(interop.normalize_public_request({"request_id": GOOD}))
-    r.check("a request with no images prepares nothing and says so", plain == {"request_id": GOOD, "handoff_ids": []}, str(plain))
+    r.check("a request with no images prepares nothing and says so", plain == {"request_id": GOOD, "handoff_ids": [], "start": "auto"}, str(plain))
+    never = interop.prepare(interop.normalize_public_request({"request_id": GOOD, "start": "never"}))
+    r.check("start never travels as never", never.get("start") == "never")
+    r.check("an unknown start mode is REQUEST_INVALID", _refused(interop.normalize_public_request, {"start": "later"}) == errors.REQUEST_INVALID)
+    r.check("the contract names the start modes and the outbox", interop.contract()["start_modes"] == ["auto", "never"] and interop.contract()["outbox"] == interop.OUTBOX_ROUTE)
 
 
 def route_checks(r: Results, folder: pathlib.Path) -> None:

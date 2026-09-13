@@ -11,18 +11,22 @@
  * path or a WanGP letter flag: it hands over a Blob and gets a token, hands
  * over tokens and gets a code.
  *
- * Why it lives in the browser: the WanGP form a request overlays is Gradio
- * session state belonging to the iframe in *this* document. A server-only
- * endpoint could not know which page's session a caller meant; a page can.
- * The server is asked for two things only - to hold bytes behind a token,
- * and to turn tokens into the opaque handoffs the bridge reads.
+ * The server owns the line. enqueue() submits a job to the queue outbox on
+ * the Forge server and returns when that job has ended; the server hands out
+ * one lease at a time across every browser page, in the order the jobs were
+ * submitted, and each page runs only the jobs it submitted - the WanGP form
+ * a job overlays is Gradio session state belonging to the iframe in *this*
+ * document, so "the page's current settings" means this page's. A refresh,
+ * a closed tab or a second browser cannot lose or duplicate work, because
+ * nothing here holds a queue: this page is a pump that asks the server "is
+ * it my turn, and what do I run", runs it against the live page, and
+ * reports back. The server is also asked to hold bytes behind a token and
+ * to turn tokens into the opaque handoffs the bridge reads.
  *
- * Calls to enqueue() are serialised on one FIFO: a queue request owns the
- * live form from the moment the bridge writes into it until the admission is
- * settled and the overrides are put back, so a second request must wait its
- * turn rather than write over the first one's overlay. The bridge enforces
- * the same rule as defence in depth (QUEUE_BUSY); an ordinary caller never
- * sees it because the queue here goes first.
+ * Protocol 4: a request may say start: "auto" (the default - generating as
+ * soon as WanGP can) or "never" (stage the task only); the bridge decides
+ * inside WanGP, from WanGP's own flag, and the result says "started" or
+ * "queued". A press while WanGP is not running is refused, not stored.
  *
  * The wrapper normalises its public contract itself and delegates the
  * mechanics to window.minipaintWanGP, so that a change to the internal wire
@@ -36,13 +40,28 @@ window.minipaintInterop = (function () {
     const STAGE_ROUTE = "/minipaint-interop/stage";
     const PREPARE_ROUTE = "/minipaint-interop/prepare";
     const RELEASE_ROUTE = "/minipaint-interop/release";
+    const OUTBOX_ROUTE = "/minipaint-interop/outbox";
+    const OUTBOX_SUBMIT_ROUTE = OUTBOX_ROUTE + "/submit";
+    const OUTBOX_CLAIM_ROUTE = OUTBOX_ROUTE + "/claim";
+    const OUTBOX_REPORT_ROUTE = OUTBOX_ROUTE + "/report";
+    const OUTBOX_CANCEL_ROUTE = OUTBOX_ROUTE + "/cancel";
+    const OUTBOX_RETRY_ROUTE = OUTBOX_ROUTE + "/retry";
+    const OUTBOX_ADOPT_ROUTE = OUTBOX_ROUTE + "/adopt";
     const HEX32 = /^[0-9a-f]{32}$/;
     const CODE_RE = /^[A-Z][A-Z0-9_]{2,59}$/;
     const PROMPT_MAX_CHARS = 4000;
     const MAX_REFERENCES = 16;
     const KINDS = ["staged", "clipboard_asset"];
     const FIELDS = ["prompt", "start", "end", "references"];
+    const START_MODES = ["auto", "never"];
+    const ROUTES = ["generate", "queue"];
     const STAGE_MAX_BYTES = 32 * 1024 * 1024;
+    // How long enqueue() waits for its job to end before answering "pending"
+    // with the job id, and how many "not your turn yet" answers a pump takes
+    // before it stops and leaves the rest to the next press.
+    const ENQUEUE_WAIT_MS = 5 * 60 * 1000;
+    const PUMP_MAX_WAITS = 2000;
+    const PAGE_KEY = "minipaint.interop.page";
 
     // The sentences a caller may show. The server's errors.py owns the
     // wording; these are the ones this side needs before it can ask.
@@ -59,10 +78,13 @@ window.minipaintInterop = (function () {
         QUEUE_REQUEST_REFUSED: "WanGP did not take the queue request.",
         ADMISSION_UNCONFIRMED: "WanGP did not confirm that the request was added to the queue.",
         WANGP_VALIDATION_REFUSED: "WanGP declined the queue request; check the WanGP page for details.",
+        WANGP_NOT_RUNNING: "WanGP is not running. Open the WanGP tab and start it before adding to its queue.",
+        WANGP_RESTARTED: "WanGP restarted while the request was on its way.",
+        QUEUE_JOB_PENDING: "The request is waiting its turn in the queue outbox.",
+        QUEUE_JOB_UNKNOWN: "That queue job is no longer in the outbox.",
+        AUTH_BOUNDARY_FAILED: "Sign in to Forge first.",
         INTERNAL_ERROR: "The WanGP integration hit an unexpected problem."
     };
-
-    let chain = Promise.resolve();
 
     function bridge() {
         const api = window.minipaintWanGP;
@@ -154,6 +176,12 @@ window.minipaintInterop = (function () {
             if (kept.length > MAX_REFERENCES) { return refusal("REQUEST_INVALID", requestId, "more than " + MAX_REFERENCES + " reference images."); }
             if (kept.length) { request.images.references = kept; }
         }
+        if (raw.start !== undefined && raw.start !== null && raw.start !== "") {
+            if (START_MODES.indexOf(raw.start) === -1) { return refusal("REQUEST_INVALID", requestId, "start must be \"auto\" or \"never\"."); }
+            request.start = raw.start;
+        } else {
+            request.start = "auto";
+        }
         return { ok: true, request: request };
     }
 
@@ -221,7 +249,7 @@ window.minipaintInterop = (function () {
     }
 
     /* ------------------------------------------------------------------ */
-    /* The queue                                                             */
+    /* Results                                                               */
     /* ------------------------------------------------------------------ */
 
     function summary(result) {
@@ -241,27 +269,53 @@ window.minipaintInterop = (function () {
         return { type: String(raw.type || "").slice(0, 120), label: String(raw.label || "").slice(0, 120), family: String(raw.family || "").slice(0, 120) };
     }
 
-    /** The public result of section 11.5: codes, counts and the model - never
-     * a prompt, a filename or a path. */
-    function publicResult(result, requestId) {
+    /** The public result of section 11.5: statuses, codes, counts and the
+     * model - never a prompt, a filename or a path. */
+    function publicResult(result, requestId, jobId) {
         const three = summary(result);
-        if (result && result.ok && result.status === "queued") {
-            return { ok: true, status: "queued", request_id: requestId, tasks_added: Math.max(1, Math.trunc(result.tasks_added || 1)),
-                     model: model(result), applied: three.applied, inherited: three.inherited, ignored: three.ignored };
+        const base = { request_id: requestId || "", job_id: jobId || "" };
+        if (result && result.ok && (result.status === "queued" || result.status === "started")) {
+            return Object.assign(base, {
+                ok: true, status: result.status, tasks_added: Math.max(1, Math.trunc(result.tasks_added || 1)),
+                queue_depth: Number.isFinite(result.queue_depth) && result.queue_depth >= 0 ? Math.trunc(result.queue_depth) : null,
+                route: ROUTES.indexOf(result.route) === -1 ? "" : result.route,
+                model: model(result), applied: three.applied, inherited: three.inherited, ignored: three.ignored
+            });
         }
-        const status = result && result.status === "unconfirmed" ? "unconfirmed" : "refused";
-        const why = code(result && result.code) || (status === "unconfirmed" ? "ADMISSION_UNCONFIRMED" : "QUEUE_REQUEST_REFUSED");
-        return { ok: false, status: status, request_id: requestId, code: why, message: (result && result.message) || sentence(why) };
+        const status = result && result.status === "unconfirmed" ? "unconfirmed" : result && result.status === "pending" ? "pending" : "refused";
+        const why = code(result && result.code) || (status === "unconfirmed" ? "ADMISSION_UNCONFIRMED" : status === "pending" ? "QUEUE_JOB_PENDING" : "QUEUE_REQUEST_REFUSED");
+        return Object.assign(base, { ok: false, status: status, code: why, message: (result && result.message) || sentence(why) });
     }
 
-    async function enqueueNow(request) {
+    /** A job as the server holds it, as the public result a caller sees. */
+    function resultOfJob(job) {
+        if (!job || typeof job !== "object") { return publicResult({ ok: false, code: "QUEUE_JOB_UNKNOWN" }, "", ""); }
+        const requestId = job.request && job.request.request_id ? job.request.request_id : "";
+        if (job.state === "queued" || job.state === "started") {
+            return publicResult(Object.assign({ ok: true }, job.result || {}, { status: job.state }), requestId, job.job_id);
+        }
+        if (job.state === "pending" || job.state === "sending") {
+            return publicResult({ ok: false, status: "pending", code: "QUEUE_JOB_PENDING" }, requestId, job.job_id);
+        }
+        if (job.state === "cancelled") {
+            return publicResult({ ok: false, status: "refused", code: "QUEUE_REQUEST_REFUSED", message: "The request was cancelled before it was sent." }, requestId, job.job_id);
+        }
+        const error = job.error || {};
+        return publicResult({ ok: false, status: job.state === "unconfirmed" ? "unconfirmed" : "refused", code: error.code, message: error.message }, requestId, job.job_id);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Running one job against the live page                                 */
+    /* ------------------------------------------------------------------ */
+
+    async function execute(request, hooks) {
         const api = bridge();
         if (!api) { return refusal("IFRAME_NOT_READY", request.request_id); }
         const state = api.state();
         if (!state.present) { return refusal("IFRAME_NOT_READY", request.request_id); }
         if (state.ready && !state.queue) { return refusal("BRIDGE_COMPONENT_INCOMPATIBLE", request.request_id); }
 
-        let wire = { request_id: request.request_id };
+        let wire = { request_id: request.request_id, start: request.start || "auto" };
         if (request.prompt !== undefined) { wire.prompt = request.prompt; }
         let handoffs = [];
         if (hasImages(request)) {
@@ -281,13 +335,13 @@ window.minipaintInterop = (function () {
             });
             handoffs = Array.isArray(prepared.request.handoff_ids) ? prepared.request.handoff_ids : [];
         }
-        note("enqueue " + request.request_id.slice(0, 8) + ": " + FIELDS.filter(function (field) {
+        note("run " + request.request_id.slice(0, 8) + ": " + (FIELDS.filter(function (field) {
             return field === "prompt" ? wire.prompt !== undefined : field === "references" ? !!wire.reference_handoff_ids : !!wire[field + "_handoff_id"];
-        }).join(", ") + (handoffs.length ? " (" + handoffs.length + " image(s) prepared)" : ""));
+        }).join(", ") || "no overrides") + "; start " + wire.start + (handoffs.length ? " (" + handoffs.length + " image(s) prepared)" : ""));
 
         let result;
         try {
-            result = await api.queueAndConfirm(wire);
+            result = await api.queueAndConfirm(wire, { onAdmitted: hooks && hooks.onAdmitted });
         } catch (error) {
             result = { ok: false, status: "refused", code: "INTERNAL_ERROR" };
         } finally {
@@ -300,25 +354,176 @@ window.minipaintInterop = (function () {
         return publicResult(result, request.request_id);
     }
 
-    /**
-     * Add the live WanGP page - with these overrides, if any - to its queue.
-     * Resolves only after a bounded admission check: ``queued`` when a task
-     * was seen in WanGP's queue, ``refused`` with a code otherwise, or
-     * ``unconfirmed`` when the check ran out without proof either way. One
-     * call at a time, in order.
-     */
-    function enqueue(request) {
-        const normalised = normaliseRequest(request);
-        if (!normalised.ok) { return Promise.resolve(normalised); }
-        const run = chain.then(function () { return enqueueNow(normalised.request); })
-            .catch(function (error) { return refusal("INTERNAL_ERROR", normalised.request.request_id, String(error && error.message || error).slice(0, 120)); });
-        chain = run.then(function () { }, function () { });
-        return run;
+    /* ------------------------------------------------------------------ */
+    /* The outbox: the server owns the line; this page pumps its own jobs    */
+    /* ------------------------------------------------------------------ */
+
+    let pageToken = "";
+
+    /** This page's identity for the outbox: kept per browser tab, so a reload
+     * resumes the jobs it composed and a second tab is a second page. */
+    function pageId() {
+        if (pageToken) { return pageToken; }
+        try { pageToken = String(window.sessionStorage.getItem(PAGE_KEY) || ""); } catch (e) { pageToken = ""; }
+        if (!HEX32.test(pageToken)) {
+            pageToken = hex32();
+            try { window.sessionStorage.setItem(PAGE_KEY, pageToken); } catch (e) { /* this tab's memory only */ }
+        }
+        return pageToken;
+    }
+
+    const waiters = {};
+    let pumping = false;
+    let pumpAgain = false;
+
+    function emit(kind, job) {
+        try {
+            document.dispatchEvent(new CustomEvent("minipaint:outbox", { detail: { kind: kind, job: job || null, page: pageId() } }));
+        } catch (e) { /* a listener is never worth an exception */ }
+    }
+
+    function settleWaiters(job) {
+        const list = waiters[job.job_id];
+        if (!list) { return; }
+        delete waiters[job.job_id];
+        const result = resultOfJob(job);
+        for (const resolve of list) { try { resolve(result); } catch (e) { /* the caller's */ } }
+    }
+
+    async function runJob(job, lease) {
+        emit("sending", job);
+        const result = await execute(job.request, {
+            onAdmitted: function () {
+                return post(OUTBOX_REPORT_ROUTE, JSON.stringify({ job_id: job.job_id, lease: lease, phase: "sent" }));
+            }
+        });
+        let reported = null;
+        try { reported = await post(OUTBOX_REPORT_ROUTE, JSON.stringify({ job_id: job.job_id, lease: lease, phase: "done", result: result })); } catch (e) { reported = null; }
+        const settled = reported && reported.ok && reported.job ? reported.job : Object.assign({}, job, {
+            state: result.ok ? result.status : (result.status === "unconfirmed" ? "unconfirmed" : "failed"),
+            result: result, error: result.ok ? null : { code: result.code, message: result.message }
+        });
+        settleWaiters(settled);
+        emit("done", settled);
+        return settled;
+    }
+
+    /** Ask the server for this page's next job until there is none, one at a
+     * time. Bounded: it stops when the outbox has nothing of this page's,
+     * when WanGP is not running, or after a long wait for another page's
+     * turn, and it never polls with nothing to do. */
+    async function pump() {
+        if (pumping) { pumpAgain = true; return; }
+        pumping = true;
+        try {
+            let waits = 0;
+            while (true) {
+                pumpAgain = false;
+                let answer;
+                try { answer = await post(OUTBOX_CLAIM_ROUTE, JSON.stringify({ page: pageId() })); } catch (e) { answer = { ok: false, code: "INTERNAL_ERROR" }; }
+                if (!answer.ok) { note("pump: stopped - " + (code(answer.code) || "INTERNAL_ERROR")); emit("stopped", null); break; }
+                if (answer.job) { waits = 0; await runJob(answer.job, answer.lease); continue; }
+                if (answer.wait && answer.pending > 0) {
+                    waits += 1;
+                    if (waits > PUMP_MAX_WAITS) { note("pump: another page has held the turn for a long while; this page resumes on its next press"); break; }
+                    await pause(answer.wait);
+                    continue;
+                }
+                break;
+            }
+        } finally {
+            pumping = false;
+            if (pumpAgain) { pumpAgain = false; setTimeout(pump, 0); }
+        }
+    }
+
+    function pause(ms) {
+        return new Promise(function (resolve) { setTimeout(resolve, ms); });
+    }
+
+    function awaitJob(jobId, timeoutMs) {
+        return new Promise(function (resolve) {
+            (waiters[jobId] = waiters[jobId] || []).push(resolve);
+            if (!(timeoutMs > 0)) { return; }
+            setTimeout(function () {
+                const list = waiters[jobId];
+                if (!list) { return; }
+                const index = list.indexOf(resolve);
+                if (index !== -1) { list.splice(index, 1); }
+                if (!list.length) { delete waiters[jobId]; }
+                jobs().then(function (answer) {
+                    const found = (answer && answer.jobs || []).filter(function (item) { return item.job_id === jobId; })[0];
+                    resolve(resultOfJob(found || null));
+                }, function () {
+                    resolve(publicResult({ ok: false, status: "pending", code: "QUEUE_JOB_PENDING" }, "", jobId));
+                });
+            }, timeoutMs);
+        });
     }
 
     /**
-     * What the live page can take right now. Advisory: enqueue() judges the
-     * request again, live, when it runs.
+     * Add the live WanGP page - with these overrides, if any - to its queue.
+     * The request becomes a job in the server's outbox at once; this page
+     * runs it when the server says it is its turn; the promise resolves when
+     * the job has ended: ``started`` (this request is generating now),
+     * ``queued`` (in WanGP's queue), ``refused`` with a code, or
+     * ``unconfirmed``. Pass {wait: false} to get the job id back at once,
+     * or {timeoutMs} to bound the wait; a wait that runs out answers
+     * ``pending`` with the job id, never a guess.
+     */
+    function enqueue(request, options) {
+        const normalised = normaliseRequest(request);
+        if (!normalised.ok) { return Promise.resolve(normalised); }
+        const wait = !(options && options.wait === false);
+        const timeoutMs = options && Number.isFinite(options.timeoutMs) ? options.timeoutMs : ENQUEUE_WAIT_MS;
+        return post(OUTBOX_SUBMIT_ROUTE, JSON.stringify({ request: normalised.request, page: pageId(), origin: "api" })).then(function (answer) {
+            if (!answer.ok || !answer.job) { return refusal(code(answer.code) || "REQUEST_INVALID", normalised.request.request_id, answer.message); }
+            const job = answer.job;
+            note("enqueue " + job.job_id.slice(0, 8) + ": submitted (start " + (normalised.request.start || "auto") + ")");
+            const promised = wait ? awaitJob(job.job_id, timeoutMs) : Promise.resolve(resultOfJob(job));
+            emit("submitted", job);
+            setTimeout(pump, 0);
+            return promised;
+        }, function () {
+            return refusal("INTERNAL_ERROR", normalised.request.request_id, "The queue outbox could not be reached.");
+        });
+    }
+
+    /** Every job the server holds, with whether WanGP is running. */
+    async function jobs() {
+        try {
+            const response = await fetch(OUTBOX_ROUTE, { credentials: "same-origin", cache: "no-store" });
+            const payload = await response.json();
+            return payload && typeof payload === "object" ? payload : { ok: false, jobs: [] };
+        } catch (e) {
+            return { ok: false, jobs: [], code: "INTERNAL_ERROR" };
+        }
+    }
+
+    function cancel(jobId) {
+        return post(OUTBOX_CANCEL_ROUTE, JSON.stringify({ job_id: String(jobId || "") })).then(function (answer) {
+            if (answer.ok && answer.job) { settleWaiters(answer.job); emit("changed", answer.job); }
+            return answer;
+        });
+    }
+
+    function retry(jobId) {
+        return post(OUTBOX_RETRY_ROUTE, JSON.stringify({ job_id: String(jobId || ""), page: pageId() })).then(function (answer) {
+            if (answer.ok && answer.job) { emit("submitted", answer.job); setTimeout(pump, 0); }
+            return answer;
+        });
+    }
+
+    function adopt(jobId) {
+        return post(OUTBOX_ADOPT_ROUTE, JSON.stringify({ job_id: String(jobId || ""), page: pageId() })).then(function (answer) {
+            if (answer.ok && answer.job) { emit("changed", answer.job); setTimeout(pump, 0); }
+            return answer;
+        });
+    }
+
+    /**
+     * What the live page can take right now. Advisory: a job is judged
+     * again, live, when it runs.
      */
     function capabilities() {
         const api = bridge();
@@ -335,6 +540,8 @@ window.minipaintInterop = (function () {
                 api_version: VERSION,
                 ready: answer.ready === true,
                 queue: answer.queue === true,
+                start: answer.start === true,
+                generation_running: typeof answer.generation_running === "boolean" ? answer.generation_running : null,
                 model: model(answer),
                 inputs: {
                     start: { supported: !!(inputs.start && inputs.start.supported) },
@@ -353,7 +560,13 @@ window.minipaintInterop = (function () {
         wangp: {
             capabilities: capabilities,
             stageImage: stageImage,
-            enqueue: enqueue
+            enqueue: enqueue,
+            jobs: jobs,
+            cancel: cancel,
+            retry: retry,
+            adopt: adopt,
+            pump: pump,
+            pageId: pageId
         },
         // The sentence for a code, for a caller that wants the same words.
         message: function (failureCode) { return sentence(failureCode); }

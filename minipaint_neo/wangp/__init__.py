@@ -27,7 +27,7 @@ installed into the user's own WanGP ``plugins`` folder. It is the only piece
 that knows WanGP component ids; MiniPaint never does.
 """
 
-PROTOCOL = 3
+PROTOCOL = 4
 
 _LOG_PREFIX = "MiniPaint WanGP:"
 
@@ -62,6 +62,16 @@ def _on_app_started(_demo, app) -> None:
     # useless answer to "where is the log?", and a missing file after a restart
     # should point at the extension not having loaded rather than at WanGP.
     process_log.note("session", f"routes installed; WanGP output will be logged to {process_log.path()}")
+
+    # A lock left by a Forge that is gone would refuse the next start for
+    # nothing; boot is when it is certain this process holds no WanGP.
+    try:
+        from . import lock
+
+        if lock.sweep():
+            scrub.console("cleared a stale WanGP lock.", _LOG_PREFIX)
+    except Exception as error:  # pragma: no cover - a cleanup is never fatal
+        scrub.console(f"the WanGP lock could not be checked ({error}).", _LOG_PREFIX)
 
     # Prepared images from a previous run are files nobody will ever ask for
     # again; boot is the one moment it is certain no send is in flight.

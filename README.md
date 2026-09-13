@@ -339,6 +339,16 @@ when WanGP moves an input that is the file to correct and nothing in Forge or th
 changes. A build that does not expose an input the bridge needs fails closed: the tab keeps
 working, and *Send to* offers nothing rather than something that looked about right.
 
+**One WanGP, and an emergency stop.** The extension runs one WanGP per machine, not just
+per Forge: a second Forge server started against the same install finds the first one's
+lock and refuses to start another (`WANGP_ALREADY_MANAGED`) rather than putting a second
+process on the same card. *Integration management* also has **Restart WanGP now**, the
+emergency option: it ends every process of the WanGP this extension started — the whole
+process tree, a generation in progress included — waits until each one is gone, reads the
+chosen GPU before and after so the report can say how much memory came back, invalidates
+every browser session and any queue request in flight, and starts a fresh WanGP. It never
+touches a WanGP you started yourself or any other process on the card.
+
 **Reinitialize.** Settings → *miniPaint / Canvas* has one WanGP entry, and it is a
 paragraph with a link rather than a switch — the wizard's fields are not duplicated there,
 and there is no checkbox that would mean "reinitialize" forever. The button itself is in
@@ -367,18 +377,29 @@ to Queue**. It is the first client of a **public browser API** any extension may
 **The rule.** A request is an overlay on the live WanGP page. A card left at *Use WanGP* and
 an empty prompt mean *whatever the WanGP page has right now*; a filled card or a typed
 prompt overrides the page for that one queued task and is put back afterwards. So the
-button is always a button: an empty composer asks WanGP to queue the page exactly as it is,
-a card put back with its × changes nothing on the WanGP page, and a picture the current
-model cannot use is kept, badged *Not used by current model*, sent, and reported as ignored
-rather than refused. Nothing is generated, aborted or watched: the request goes into
-**WanGP's own queue** through WanGP's own add-to-queue chain, and WanGP's own validation
-decides. Press Generate in WanGP as you always did.
+button is a button whenever WanGP is running: an empty composer asks WanGP to run the page
+exactly as it is, a card put back with its × changes nothing on the WanGP page, and a
+picture the current model cannot use is kept, badged *Not used by current model*, sent, and
+reported as ignored rather than refused. While WanGP is not running the button says so and
+is off, and a press is refused rather than stored.
 
-**What you get back.** *Added to WanGP queue.* only when a task carrying the request
-appeared in WanGP's queue; a refusal only when WanGP recorded one for exactly that request;
-otherwise *WanGP did not confirm…* — never a claim WanGP did not prove. Each confirmed
-recipe goes into **Queue Send History** (the prompt only if you typed one here), where
-*Load* puts it back into the composer without queueing anything.
+**Press as often as you like.** Every press is a job in a queue the **server** owns, kept
+beside the draft and the history, so a refresh, a closed tab or a second browser loses
+nothing. Jobs are sent one at a time, in the order pressed across every browser, each by
+the page that composed it — so a job uses the WanGP settings its user is looking at — and
+the tab shows them under the button with *Cancel*, *Retry* and *Run from this page*. The
+first job to find WanGP idle **starts the run**, through WanGP's own generate trigger; the
+ones behind it join that run. The decision is made inside WanGP from WanGP's own
+process-wide "is a generation running" flag, never from a guess in the browser, and when
+that flag cannot be read the request is staged rather than started.
+
+**What you get back.** *WanGP started generating it.* when the request's task is the one a
+running loop is on; *Added to WanGP queue.* when a task carrying the request appeared in
+WanGP's queue, with how many sit ahead of it; a refusal only when WanGP recorded one for
+exactly that request; otherwise *WanGP did not confirm…* — never a claim WanGP did not
+prove, and never a retry the machine decided on. Each confirmed recipe goes into **Queue
+Send History** (the prompt only if you typed one here), where *Load* puts it back into the
+composer without queueing anything.
 
 **The browser.** Menu → *Choose storage folder* first: Clipboard keeps its pictures in that
 folder on the machine running Forge and nowhere else, and never names it to the browser —
@@ -400,14 +421,16 @@ theme variable; there is no fixed white or black anywhere in it, so a night-mode
 reaches the grid, the cards, the menu and the history alike.
 
 **For other extensions.** `await window.minipaintInterop.wangp.enqueue({ prompt, images:
-{ start, end, references } })` with handles from `stageImage(blob)` (`{ kind: "staged",
-id }`) or Clipboard assets (`{ kind: "clipboard_asset", id }`); omitted fields inherit,
-calls are serialised, ids are never paths, and the answer is `queued`, `refused` (with a
-code) or `unconfirmed`. `docs/clipboard/README.md` is the guide, and
-`docs/clipboard/CONTRACTS.md` the contract, for both the tab and the API. Bridge plugin
-1.2.0 (protocol 3) carries the queue operation, so WanGP's bridge must be updated and
-WanGP restarted; a build lacking one of the six queue components keeps the image send and
-refuses the queue with `BRIDGE_COMPONENT_INCOMPATIBLE`.
+{ start, end, references }, start: "auto" })` with handles from `stageImage(blob)`
+(`{ kind: "staged", id }`) or Clipboard assets (`{ kind: "clipboard_asset", id }`); omitted
+fields inherit, `start` defaults to `"auto"` (`"never"` stages only), the request joins the
+same server-owned queue as the tab's presses, ids are never paths, and the answer is
+`started`, `queued`, `refused` (with a code) or `unconfirmed`. `docs/clipboard/README.md`
+is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
+API. Bridge plugin 1.3.0 (protocol 4) carries the queue and start operations, so WanGP's
+bridge must be updated and WanGP restarted; a build lacking one of the six queue components
+keeps the image send and refuses the queue with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one
+lacking the generate trigger queues but never starts.
 
 ## Legacy editor (Old UI)
 
@@ -536,21 +559,24 @@ minipaint_neo/
     canvas/imaging.py            mask, crop and fill maths (Pillow only)
     canvas/outpaint.py           expansion with automatic mask
     canvas/document.py           layers on a canvas (the picture over a white Background), the composite, the mask, and the history of structural steps
-    interop.py                   the public queue API's server half: staging, preparing handoffs, /minipaint-interop/*
+    interop.py                   the public queue API's server half: staging, preparing handoffs, the outbox routes, /minipaint-interop/*
     clipboard/                   the Clipboard tab (see docs/clipboard/README.md)
         config.py                the folder, the intercept, the sort and the thumbnail size
         store.py                 the library: one folder, opaque ids, containment, import, refresh, rename, delete
         history.py               the composer's draft and Queue Send History
+        outbox.py                the queue outbox: every press a job the server owns, one lease at a time
         routes.py                a picture by its id, and bytes in
         ui.py                    the tab: the browser, the composer, Add to Queue through the public API
     wangp/                       the WanGP tab, all of it (see docs/wangp/README.md)
         config.py                what survives a restart, and only that
         discovery.py             WanGP root, Conda/venv runtimes, GPUs, the bridge plugin
-        runtime.py               the child process: one, ours, loopback, one GPU by UUID
+        runtime.py               the child process: one, ours, loopback, one GPU by UUID; the emergency restart
+        lock.py                  one managed WanGP per machine: the lock a second Forge finds
+        vram.py                  what the chosen GPU holds, as nvidia-smi reports it, for the restart's report
         proxy.py                 /wan2gp/* on the Forge origin, streamed to that one port
         handoff.py               PNGs on their way out, as opaque ids under a fixed root
         bridge.py                which browser page is talking to which live WanGP session
-        protocol.py              the vocabulary all three sides share (protocol 3: the queue)
+        protocol.py              the vocabulary all three sides share (protocol 4: the queue, and starting)
         errors.py                the failure codes and their sentences
         journal.py               the tab's console: the last 400 steps, in memory
         process_log.py           logs/wangp-log.txt: the same steps, on disk, bounded

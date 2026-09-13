@@ -705,6 +705,11 @@ def tab_checks(r: Results) -> None:
                          wangp_ui.OPEN_ELEM_ID, wangp_ui.REFRESH_ELEM_ID):
                 r.check(f"the browser half's {seam} is there", seam in ids)
 
+            r.check("Integration management holds the emergency restart and its report",
+                    {"wangp_manage_root", "wangp_restart_now", "wangp_restart_report", "wangp_reinitialize", "wangp_diagnostics_collect"} <= ids)
+            restart_now = component_of(page, "wangp_restart_now")
+            r.check("and the emergency restart is a stop-coloured button, always on the page",
+                    restart_now["props"].get("variant") == "stop" and restart_now["props"].get("visible") is not False)
             r.check("only the setup container is showing before setup",
                     component_of(page, wangp_ui.SETUP_ROOT_ID)["props"].get("visible", True) is True
                     and all(component_of(page, other)["props"].get("visible") is False

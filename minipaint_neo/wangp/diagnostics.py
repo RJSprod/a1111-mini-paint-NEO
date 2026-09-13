@@ -36,7 +36,7 @@ import typing
 
 from .. import paths
 from ..send_log import SEND_LOG_PATH
-from . import bridge, config, discovery, errors, process_log, protocol, runtime
+from . import bridge, config, discovery, errors, lock, process_log, protocol, runtime
 from .errors import AUTH_BOUNDARY_FAILED
 
 #: How much of the transfer log to carry. Enough for one failed send and the
@@ -227,6 +227,7 @@ def fields(
             # Facts, not values: see the module docstring.
             ("child process", "tracked" if health.get("pid_tracked") else "none"),
             ("job object", _yes(health.get("job_object"))),
+            ("machine lock", _guard(lambda: lock.status()["summary"])),
             ("backend port", "bound to loopback" if health.get("port_bound") else "not bound"),
             ("failure code", str(health.get("error_code") or "none")),
             ("failure message", str(health.get("message") or "")),

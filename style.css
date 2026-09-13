@@ -1310,3 +1310,69 @@
         --minipaint-clip-target: 48px;
     }
 }
+
+/* -- the queue: the outbox list in the composer ------------------------- */
+#minipaint_clipboard_root .minipaint-clip-outbox {
+    display: flex;
+    flex-direction: column;
+    gap: var(--minipaint-clip-gap, 8px);
+    max-height: 40vh;
+    overflow-y: auto;
+}
+#minipaint_clipboard_root .minipaint-clip-job {
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    border-left: 4px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    border-radius: var(--block-radius, 6px);
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.12));
+    color: var(--body-text-color, inherit);
+    padding: 6px 8px;
+    font-size: 0.85em;
+}
+#minipaint_clipboard_root .minipaint-clip-job-started { border-left-color: var(--color-accent, #ff7c00); }
+#minipaint_clipboard_root .minipaint-clip-job-queued { border-left-color: var(--color-accent, #ff7c00); }
+#minipaint_clipboard_root .minipaint-clip-job-sending { border-left-color: var(--border-color-accent-subdued, var(--color-accent, #ff7c00)); }
+#minipaint_clipboard_root .minipaint-clip-job-failed,
+#minipaint_clipboard_root .minipaint-clip-job-unconfirmed { border-left-color: var(--error-text-color, #d9534f); }
+#minipaint_clipboard_root .minipaint-clip-job-cancelled { opacity: 0.7; }
+#minipaint_clipboard_root .minipaint-clip-job-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 10px;
+}
+#minipaint_clipboard_root .minipaint-clip-job-state { font-weight: 600; }
+#minipaint_clipboard_root .minipaint-clip-job-when,
+#minipaint_clipboard_root .minipaint-clip-job-fields { color: var(--body-text-color-subdued, inherit); }
+#minipaint_clipboard_root .minipaint-clip-job-prompt {
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#minipaint_clipboard_root .minipaint-clip-job-outcome { margin-top: 2px; }
+#minipaint_clipboard_root .minipaint-clip-job-failed .minipaint-clip-job-outcome,
+#minipaint_clipboard_root .minipaint-clip-job-unconfirmed .minipaint-clip-job-outcome { color: var(--error-text-color, inherit); }
+#minipaint_clipboard_root .minipaint-clip-job-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+}
+#minipaint_clipboard_root .minipaint-clip-job-actions button {
+    background: var(--button-secondary-background-fill, transparent);
+    color: var(--button-secondary-text-color, inherit);
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    border-radius: var(--block-radius, 6px);
+    padding: 2px 8px;
+    font: inherit;
+    font-size: 0.9em;
+    cursor: pointer;
+}
+#minipaint_clipboard_root .minipaint-clip-job-actions button:hover {
+    background: var(--button-secondary-background-fill-hover, var(--background-fill-primary, transparent));
+}
+#minipaint_clipboard_root .minipaint-clip-queue button[disabled],
+#minipaint_clipboard_root .minipaint-clip-queue[disabled] {
+    cursor: not-allowed;
+    opacity: 0.6;
+}

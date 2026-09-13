@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.2.0"
+BRIDGE_VERSION = "1.3.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -142,6 +142,8 @@ WIZARD_PROMPT = "wizard_prompt"
 WIZARD_ACTIVE = "wizard_active"
 CLIENT_ID = "client_id"
 ADD_TO_QUEUE_TRIGGER = "add_to_queue_trigger"
+#: Protocol 4: the hidden text whose change runs WanGP's generate chain.
+GENERATE_TRIGGER = "generate_trigger"
 GALLERY_TAB = "gallery_tab"
 
 # VERIFY ON A REAL INSTALL (section 49.1): every elem_id below was taken from
@@ -276,6 +278,11 @@ COMPONENTS: typing.Tuple[ComponentSpec, ...] = (
                   known_for="Wan2GP: hidden gr.Textbox; save_inputs copies it into each queued task's params"),
     ComponentSpec(key=ADD_TO_QUEUE_TRIGGER, candidates=("add_to_queue_trigger",), kind="text", mandatory=False,
                   known_for="Wan2GP: hidden gr.Text; its change runs the native queue-only chain"),
+    # Confirmed against Wan2GP at 362c346 as well: ``generate_trigger.change``
+    # runs the same chain and then prepare_generate_media -> activate_status ->
+    # process_tasks; the Generate button's whole effect is to write it.
+    ComponentSpec(key=GENERATE_TRIGGER, candidates=("generate_trigger",), kind="text", mandatory=False,
+                  known_for="Wan2GP: hidden gr.Text declared beside add_to_queue_trigger; its change generates"),
     ComponentSpec(key=GALLERY_TAB, candidates=("current_gallery_tab",), kind="state", mandatory=False,
                   known_for="Wan2GP: which output gallery is showing; read by process_prompt_and_add_tasks"),
 )
@@ -295,12 +302,21 @@ GLOBALS: typing.Tuple[str, ...] = (
     # Protocol 3, the queue: what the native Add-to-queue button writes into
     # its trigger, and the per-page generation record the confirmation reads.
     "get_unique_id", "get_gen_info",
+    # Protocol 4: WanGP's own process-wide answer to "is a generation running",
+    # a module function so that what the bridge reads is live, not a value
+    # copied once at injection. It is what decides generate versus queue.
+    "is_generation_in_progress",
 )
 
 #: What the queue operation cannot do without. The image send keeps working
 #: on a build that lacks any of these; a queue request is refused with
 #: BRIDGE_COMPONENT_INCOMPATIBLE naming the missing one.
 QUEUE_CRITICAL: typing.Tuple[str, ...] = (CLIENT_ID, ADD_TO_QUEUE_TRIGGER, PROMPT, SESSION_STATE)
+
+#: What starting a generation cannot do without, beyond the queue set. A
+#: build that lacks it still queues; "auto" then degrades to the queue route
+#: and the answer says ``start: "unknown"``.
+START_CRITICAL: typing.Tuple[str, ...] = (GENERATE_TRIGGER,)
 
 #: What a send switches on for a receiver that the model allows but the page
 #: has not selected. Short tokens, carried in the receiver descriptor so the
@@ -849,12 +865,33 @@ class Compatibility:
         switch components, in this fixed order. Only the ones this build
         resolved, for the reason ``switch_components`` gives.
         """
-        keys = (PROMPT, WIZARD_PROMPT, CLIENT_ID, ADD_TO_QUEUE_TRIGGER)
+        keys = (PROMPT, WIZARD_PROMPT, CLIENT_ID, ADD_TO_QUEUE_TRIGGER, GENERATE_TRIGGER)
         return [(key, self.resolution.component(key)) for key in keys if self.resolution.component(key) is not None]
 
     def queue_missing(self) -> typing.List[str]:
         """The queue-critical components this build did not hand over."""
         return [key for key in QUEUE_CRITICAL if self.resolution.component(key) is None]
+
+    def start_missing(self) -> typing.List[str]:
+        """What the generate route needs and this build did not hand over."""
+        return [key for key in START_CRITICAL if self.resolution.component(key) is None]
+
+    def generation_running(self) -> typing.Optional[bool]:
+        """WanGP's own process-wide flag, read live, or None when it cannot be.
+
+        Only a callable counts: Wan2GP injects the requested module function,
+        and calling it reads the flag as it is now. A bare value under the
+        same name would be the flag as it was at injection, which is not an
+        answer, and None is what makes the start decision fall back to the
+        queue route rather than guess.
+        """
+        getter = self.host.read_global("is_generation_in_progress")
+        if not callable(getter):
+            return None
+        try:
+            return bool(getter())
+        except Exception:
+            return None
 
     def switch_components(self) -> typing.List[typing.Tuple[str, typing.Any]]:
         """The components a send may update besides the receiver, as (key, component).
@@ -1133,11 +1170,18 @@ class Compatibility:
                 # component: the image send still works, a queue request is
                 # refused with BRIDGE_COMPONENT_INCOMPATIBLE naming it.
                 "queue": bool(ready and not self.queue_missing()),
+                # Protocol 4. Whether a request may start a generation here:
+                # the queue set plus the generate trigger. Without it "auto"
+                # still queues, and says so.
+                "start": bool(ready and not self.queue_missing() and not self.start_missing()),
                 # Theme is presentation. Section 27.1: it may fail on its own
                 # without taking image handoff with it, so it is reported
                 # separately and never gates ``ready``.
                 "theme": True,
             },
+            # Live, and process-wide: true while any page's generation runs,
+            # false when none does, None when this build cannot say.
+            "generation_running": self.generation_running(),
         }
         if not ready:
             payload["code"] = BRIDGE_COMPONENT_INCOMPATIBLE
@@ -1149,6 +1193,8 @@ class Compatibility:
             payload["absent"] = list(resolution.missing_optional)
         if ready and self.queue_missing():
             payload["queue_missing"] = list(self.queue_missing())
+        if ready and self.start_missing():
+            payload["start_missing"] = list(self.start_missing())
         return payload
 
 

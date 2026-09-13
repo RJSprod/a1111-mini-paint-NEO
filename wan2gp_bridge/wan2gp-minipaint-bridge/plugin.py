@@ -183,6 +183,7 @@ class MiniPaintBridge:
     def describe(self, state: "receiver_state.SessionState", bridge_session: str) -> dict:
         """Section 16.2's answer for this page, right now."""
         payload = self.compat.handshake(bridge_session=bridge_session, environ=self.environ)
+        payload["generation_running"] = self.compat.generation_running()
         payload.update(
             {
                 "state_revision": state.revision,
@@ -285,7 +286,7 @@ class MiniPaintBridge:
                 values[key] = applied.switch_updates[key]
         return receiver_state.build(values, state.model, state.capabilities, state.view, allowances=state.allowances)
 
-    # -- the queue: protocol 3 -----------------------------------------------
+    # -- the queue: protocols 3 and 4 -----------------------------------------
 
     def _unique_id(self) -> str:
         """What the native Add-to-queue button writes into its trigger.
@@ -460,7 +461,9 @@ class MiniPaintBridge:
         # The correlation WanGP will copy into every task it makes, then the
         # trigger whose change runs WanGP's own chain. Last, and together.
         take(compatibility.CLIENT_ID, request_id)
-        writes[compatibility.ADD_TO_QUEUE_TRIGGER] = self._unique_id()
+        route, start_answer, running = self._start_route(request.get("start"))
+        trigger = compatibility.GENERATE_TRIGGER if route == protocol.ROUTE_GENERATE else compatibility.ADD_TO_QUEUE_TRIGGER
+        writes[trigger] = self._unique_id()
 
         summary = protocol.queue_summary(applied, inherited, ignored)
         record = admission.PendingAdmission(
@@ -473,12 +476,38 @@ class MiniPaintBridge:
             written_digests=written_digests,
             summary=summary,
             model=dict(state.model),
+            route=route,
+            start_mode=str(request.get("start") or protocol.START_AUTO),
+            start_answer=start_answer,
+            generation_running=running,
         )
         self.ledger.add(record)
 
         ack = {"admission": protocol.ADMISSION_REQUESTED}
         ack.update(record.answer())
         return ack, writes
+
+    def _start_route(self, wanted: typing.Any) -> typing.Tuple[str, str, typing.Optional[bool]]:
+        """Section 4 of protocol 4, decided here and not in a page.
+
+        Returns ``(route, start answer, generation_running)``. "never" is
+        the queue route whatever WanGP is doing. "auto" takes the generate
+        route only on a definite "nothing is generating" from WanGP's own
+        process-wide flag *and* a resolved generate trigger; a running
+        generation, a flag this build cannot read, or a missing trigger all
+        mean the queue route - the fail-safe direction, because a task that
+        waits costs a click and a second concurrent run costs the model.
+        The flag is read last, so the decision is as fresh as it can be.
+        """
+        mode = wanted if wanted in protocol.START_MODES else protocol.START_AUTO
+        running = self.compat.generation_running()
+        if mode == protocol.START_NEVER:
+            return protocol.ROUTE_QUEUE, protocol.START_NEVER, running
+        if self.compat.start_missing() or running is None:
+            return protocol.ROUTE_QUEUE, protocol.START_UNKNOWN, running
+        if running:
+            return protocol.ROUTE_QUEUE, protocol.START_AUTO, running
+        return protocol.ROUTE_GENERATE, protocol.START_AUTO, running
 
     def confirm(
         self,
@@ -513,7 +542,14 @@ class MiniPaintBridge:
         if count > 0:
             record.seen_queued = True
             record.tasks_added_max = max(record.tasks_added_max, count)
-            writes = self._settle(record, protocol.QUEUE_QUEUED, "", live, now)
+            position = admission.task_position(gen, request_id)
+            record.queue_depth = position
+            # Started: the request's task is at the head of this page's queue
+            # and the page's loop is running - WanGP's own two facts, read
+            # from its own record, never inferred from the route alone.
+            started = record.route == protocol.ROUTE_GENERATE and position == 0 and admission.generating(gen)
+            record.seen_status = protocol.QUEUE_STARTED if started else protocol.QUEUE_QUEUED
+            writes = self._settle(record, record.seen_status, "", live, now)
         elif admission.refusal_evidence(gen, request_id):
             writes = self._settle(record, protocol.QUEUE_REFUSED, compatibility.WANGP_VALIDATION_REFUSED, live, now)
         elif record.expired(now):
@@ -987,8 +1023,13 @@ def _summary(operation: typing.Any, ack: typing.Mapping[str, typing.Any], second
             line += f"; overrides {', '.join(names) or 'none (the live page as it is)'}"
             if ignored:
                 line += f"; ignored {', '.join(str(item) for item in ignored)}"
+            if ack.get("route"):
+                running = ack.get("generation_running")
+                line += f"; route {ack['route']} (start {ack.get('start')}, generation {'running' if running else 'idle' if running is False else 'unknown'})"
         else:
             line += f"; status {ack.get('status')}, {ack.get('tasks_added', 0)} task(s)"
+            if ack.get("queue_depth") is not None:
+                line += f", {ack['queue_depth']} ahead"
         return line
     parts = []
     for item in ack.get("receivers") or []:

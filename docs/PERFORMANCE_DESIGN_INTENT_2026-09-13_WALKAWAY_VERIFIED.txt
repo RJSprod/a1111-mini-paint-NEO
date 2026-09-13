@@ -118,12 +118,32 @@ carried into 0.4.
     GenerationResult is a frozen dataclass carrying generated_files: list[str],
     success: bool, a cancelled property, and artifacts.
 
-    CONFIRMED - Wan2GP's settings contract is a flat dict. get_default_settings
-    (model_type) returns pristine defaults generated from WanGP, the model
-    handler and the model definition, with model_type included. Media inputs
-    are passed as file path strings, not PIL images and not base64. A virtual
-    media suffix syntax exists for frame ranges. This is the shape a captured
-    snapshot should take.
+    CONFIRMED - Wan2GP's settings contract is a flat dict, and it is not
+    back-filled for a partial caller. submit_task normalizes shape only
+    (shared/api.py:1173 _normalize_task); wgp.validate_task copies params and
+    validates them without merging model defaults (wgp.py:8940-8955); the
+    result is filtered to generate_media's signature (shared/api_cli.py:155),
+    so an omitted key falls back to that function's own Python default, not to
+    anything appropriate for the model. A complete dict must therefore be sent.
+
+    WanGP supplies the complete dict three ways, and the difference matters:
+    get_default_settings(model_type) is factory defaults;
+    get_current_model_settings(state) (wgp.py:10720) is what the user has
+    configured in that session; collect_current_model_settings(state)
+    (wgp.py:10074) is the same normalized through prepare_inputs_dict and is
+    exactly what the Export Settings button writes (wgp.py:10097). B1 uses the
+    live ones. Media inputs are passed as file path strings, not PIL images and
+    not base64, with a virtual media suffix syntax for frame ranges.
+
+    CONFIRMED - WanGP caches the loaded model across submissions. The reload
+    branch fires only when model_type, profile or config differs from the
+    loaded one, or reload_needed is set (wgp.py:7020); prompt, images, seed and
+    LoRA selection are absent from that condition, and LoRAs are applied per
+    generation onto the resident transformer afterwards
+    (offload.load_loras_into_model, wgp.py:7144-7162). Back-to-back jobs
+    against one model therefore need no reload, provided the session is reused
+    and close() - which calls release_model (shared/api.py:848-853) - is not
+    called between them. See B7B.
 
     CORRECTED - WebUI-backed execution is not merely "can require" an active
     Gradio session context. shared/api_webui.py refuses without one, in two
@@ -134,20 +154,57 @@ carried into 0.4.
     is browser-bound by construction and is disqualified as an unattended
     foundation by this document's own rules. See 0.4 (C2) and B7.
 
-    CORRECTED - There is no mutual exclusion between headless API generation
-    and WebUI generation in Wan2GP. The two paths use different and unlinked
-    mechanisms. The headless path holds a module-level RLock, _GENERATION_LOCK,
-    for the whole run (shared/api_cli.py:29, run_cli_job). The WebUI path does
-    not take that lock at all: wgp.py imports only apply_video_length_duration,
-    get_api_output_options and store_api_output_artifact from shared.api
-    (wgp.py:139) and never references _GENERATION_LOCK. The WebUI instead sets
-    a plain module global, gen_in_progress (wgp.py:4189-4193), from inside
-    process_tasks (wgp.py:8695). The headless worker never enters
-    process_tasks: it calls wgp.generate_media() directly
-    (shared/api_cli.py:121). Therefore a headless run never sets
-    gen_in_progress, and is_generation_in_progress() returns False while one is
-    running. See 0.4 (C1), 2.12, and B7A. This is the single most important
-    correction in this document.
+    CORRECTED - Exclusion between headless API generation and WebUI generation
+    in Wan2GP is one-directional, not absent. Read carefully, because an
+    earlier revision of this document got it wrong in the alarming direction
+    and a reader who remembers that version will build more than is needed.
+
+    What is already handled:
+
+        - Two headless runs serialize. run_cli_job holds a module-level RLock,
+          _GENERATION_LOCK, for the whole run (shared/api_cli.py:29).
+
+        - A headless run DOES advertise itself. _prepare_state_for_run sets
+          wgp.gen_in_progress = True (shared/api.py:1095) and
+          _reset_state_after_run sets it False (shared/api.py:1108), and the
+          reset is called from a finally block (shared/api_cli.py:111-114), so
+          it survives an exception or a cancelled run.
+
+        - Therefore is_generation_in_progress() (wgp.py:4191-4193) reports True
+          during an unattended run, the bridge already reads it
+          (compatibility.py:310, 893), and the bridge's protocol-4 promise
+          never to press Generate during a generation KEEPS HOLDING. No
+          regression of shipped behaviour is introduced. The bridge will route
+          to the queue, as it already does when WanGP itself is busy.
+
+    What is genuinely unprotected:
+
+        - The WebUI-to-headless direction. wgp.py never references
+          _GENERATION_LOCK; it imports only apply_video_length_duration,
+          get_api_output_options and store_api_output_artifact from shared.api
+          (wgp.py:139). The WebUI's own generation sets gen_in_progress from
+          inside process_tasks (wgp.py:8695) and takes no lock the API path
+          respects. run_cli_job, for its part, acquires _GENERATION_LOCK and
+          then calls _prepare_state_for_run without first CHECKING
+          gen_in_progress. So a headless submission arriving while the user is
+          generating in the WanGP tab proceeds concurrently.
+
+        - Flag stomping. gen_in_progress is one shared boolean written by both
+          paths with no ownership and no nesting count. A headless run's
+          finally sets it False even if a WebUI generation is still running, so
+          after the shorter of two overlapping runs finishes the flag
+          under-reports, and anything gated on it - including the bridge - is
+          told the card is free when it is not.
+
+        - Note also that gen_in_progress is NOT what stops a second WebUI
+          generation. Inside wgp.py it is read in exactly one place,
+          release_RAM() (wgp.py:4241), which refuses to free models mid-run.
+          The WebUI's own protection against a double press is its queue, not
+          this flag. Do not expect setting the flag to make WanGP's UI refuse.
+
+    The remedy is therefore one check, not a mechanism: see 2.12 and B7A. This
+    is the most important correction in this document, and it is smaller than
+    an earlier revision claimed.
 
     CORRECTED - ModelSwitchRefiner does not need a readiness seam added. The
     shipped mc_llm_api (API_VERSION = 1) already brings a cold runtime to
@@ -223,26 +280,36 @@ C1. THE DRAFT TREATS GENERATION EXCLUSION AS A PROPERTY TO PROVE.
     Draft P5 lists "coexistence/serialization with normal WanGP WebUI use" as
     one bullet among eight, and draft B7 option C asks the implementer to
     "prove that it shares WanGP's global generation/model locks safely with the
-    WebUI". Read at source (0.3, CORRECTED entry), the answer is that it does
-    not share them, in either direction, and nothing in Wan2GP prevents an
-    unattended headless generation and a user-initiated WebUI generation from
-    running concurrently on the same GPU against the same wgp module globals.
+    WebUI". Read at source (0.3), the answer is half yes and half no, and the
+    half that is no is reachable by ordinary product use: a user presses Add to
+    Queue, walks away, comes back, opens the WanGP tab and presses Generate -
+    or, the unprotected order, is already generating there when the executor
+    reaches its WanGP stage.
 
-    This is not a latent risk to be measured. It is reachable by the ordinary
-    product action: a user presses Add to Queue, walks away, comes back, opens
-    the WanGP tab and presses Generate.
+    The good half: a headless run advertises itself through gen_in_progress and
+    clears it in a finally, so the bridge's existing protocol-4 promise never
+    to press Generate during a generation keeps holding, and two headless runs
+    serialize on _GENERATION_LOCK. Nothing shipped regresses.
 
-    Worse, it silently regresses shipped behaviour. The bridge's protocol-4
-    start route reads is_generation_in_progress live specifically so that it
-    never presses Generate during a running generation (compatibility.py:310
-    declares it, compatibility.py:893 reads it, and wan2gp_bridge/README.md
-    states the guarantee). Once unattended headless runs exist, that function
-    returns False while one is in flight and the guarantee quietly stops
-    holding.
+    The bad half: the headless path never CHECKS gen_in_progress before it
+    starts, the WebUI path takes no lock the headless path respects, and the
+    single shared boolean is stomped by whichever overlapping run finishes
+    first.
 
     This document adds principle 2.12 and requirement B7A. Exclusion is
-    REQUIRED ARCHITECTURE with its own acceptance tests. P5 is re-scoped to
-    verify a chosen adapter and its exclusion, not to discover one.
+    REQUIRED ARCHITECTURE with its own acceptance tests, but it is one
+    check-and-acquire plus an ownership fix for the flag, not a mechanism built
+    from nothing. P5 is re-scoped to verify a chosen adapter and its exclusion,
+    not to discover one.
+
+    HISTORICAL NOTE. A first revision of this document asserted that a headless
+    run never sets gen_in_progress and that the bridge's protocol-4 guarantee
+    silently stops holding. That was wrong: shared/api.py:1095 and 1108 set and
+    clear it. The error came from reasoning that because the headless worker
+    calls generate_media directly rather than entering process_tasks, the flag
+    set inside process_tasks could not be reached - without checking whether
+    the session set it elsewhere, which it does. It is recorded here because
+    the wrong version circulated and prescribed work that is not needed.
 
 C2. THE DRAFT RANKS A DISQUALIFIED ADAPTER SECOND.
 
@@ -359,10 +426,14 @@ C9. SMALLER CORRECTIONS.
 
     - 84 hidden components, not 81 (0.3). C2's target restated against the
       real number.
-    - Draft B1's SPECIAL ATTENTION note directs the snapshot at "a single
-      snapshot/compose operation" over the bridge's live DOM knowledge. The
-      settings dict and get_default_settings make a much smaller mechanism
-      available; B1 now specifies that instead.
+    - Draft B1 was right that the snapshot comes from one bridge compose
+      operation over the live session; it did not say which seam. B1 now names
+      it: get_current_model_settings / collect_current_model_settings, reached
+      through request_global, which is one call rather than a component sweep.
+      (An intermediate revision of this document proposed factory defaults plus
+      deltas instead. That was wrong: it discards the settings the user
+      configured in their own WanGP tab, which is the flow Add to Queue is
+      supposed to preserve.)
     - Draft B11 does not distinguish POSIX from Windows for in-flight
       generation across a Forge restart. B11 now does.
 
@@ -547,10 +618,10 @@ Server-side WanGP execution must use a supported WanGP API surface from inside
 the WanGP process, reached through a small authenticated loopback adapter owned
 by the WanGP bridge plugin. Do not script Gradio DOM controls from the server.
 
-The one place this principle is knowingly stretched is B7A, where the bridge
-must make Wan2GP's own WebUI aware that a headless generation is running. That
-stretch is bounded to a single documented global, is justified in B7A, and is
-version-pinned like every other Wan2GP fact the bridge knows.
+B7A requires the bridge to READ one Wan2GP global, is_generation_in_progress,
+which it already reads today. It explicitly does not write one. No MiniPaint
+code assigns wgp.gen_in_progress; the WanGP API maintains it for its own runs
+and does so correctly.
 
 2.7 Exactly-once intent; at-most-once where truth is ambiguous
 --------------------------------------------------------------
@@ -629,9 +700,11 @@ Three corollaries, stated here because they constrain design elsewhere:
       cannot see WanGP's generation state directly; the bridge can, and owns
       the decision.
 
-    - An exclusion that only stops MiniPaint is half a fix. Wan2GP's own UI
-      must also refuse to start while an unattended generation is running, or
-      the user is handed a button that corrupts their own run.
+    - Wan2GP's own UI needs no change for the MiniPaint-is-running case. A
+      headless run already sets gen_in_progress, the bridge already reads it,
+      and the bridge already routes to the queue rather than pressing Generate
+      when something is running. The missing half is the other order, and it
+      is MiniPaint's to fix because MiniPaint is the party arriving second.
 
 ================================================================================
 3. WORKSTREAM A - MINIPAINT / CANVAS LOCAL RENDERING
@@ -842,31 +915,105 @@ The snapshot is the contract between browser composition and server execution.
 
 SNAPSHOT SHAPE - REVISED IN THIS DOCUMENT
 
-The draft directed this at the bridge's live-DOM knowledge. Wan2GP offers a
-much smaller mechanism, and the snapshot should be built on it:
+The base of the snapshot is THE LIVE SETTINGS OF THE WANGP SESSION THE USER IS
+LOOKING AT, captured at press, with the request's prompt and images written
+over it. Not factory defaults.
 
-    - WanGPSession.get_default_settings(model_type) returns pristine defaults
-      generated from WanGP, the model handler and the model definition, with
-      model_type included.
-    - submit_task(settings: dict) consumes exactly that flat dict shape.
-    - Media inputs inside it are file path strings.
+This is what preserves the current flow for the user: they set their WanGP tab
+up the way they want it - resolution, steps, guidance, LoRAs, preset, profile -
+and Add to Queue means "that, with this prompt and these pictures". An earlier
+revision of this document proposed factory defaults plus deltas, which is
+smaller to transmit and wrong in the way that matters: it silently discards the
+user's configuration.
 
-Therefore the captured snapshot is:
+WanGP already has the exact function, and it is the one behind the Export
+Settings button that its own API documentation points callers at:
 
-    base        the model_type, resolved at press
-    deltas      every setting the composed request differs from
-                get_default_settings(model_type) by, as explicit values
-    inputs      opaque MiniPaint input ids, never paths and never browser paths
+    get_current_model_settings(state)           wgp.py:10720
+        the stored UI settings for the model this session is on, falling back
+        to that model's defaults when the session has none yet
 
-and the executor reconstitutes the submitted dict server-side as
-defaults(model_type) updated with deltas, with opaque input ids resolved to
-paths readable by the WanGP child at submission time and not before.
+    collect_current_model_settings(state)       wgp.py:10074
+        the same, run through prepare_inputs_dict("metadata", ...), which is
+        what export_settings serializes (wgp.py:10097). This is the canonical
+        settings JSON shape, and it is the shape submit_task consumes.
 
-This is preferred over reading dozens of components because it keeps
-WanGP-shaped knowledge in WanGP's own API rather than growing
-compatibility.py, it survives WanGP rearranging its UI, and it makes the
-snapshot diffable in diagnostics: a job records what the user changed, not an
-undifferentiated dump.
+Two properties of the second one are worth having on purpose:
+
+    - prepare_inputs_dict pops the Gradio state object (wgp.py:9666), so no
+      session handle is left in the dict to cross a process boundary.
+    - it rewrites activated_loras into LoRA URLs via get_lora_URL
+      (wgp.py:9679), which satisfies this section's own requirement that LoRAs
+      be captured by stable value rather than by DOM index. The normalization
+      is WanGP's, not something MiniPaint has to invent.
+
+REQUIRED COMPOSE OPERATION
+
+    1. One bridge operation, one plugin-API call.
+       The bridge reaches get_current_model_settings / collect_current_model_
+       settings through request_global, exactly as it already reaches
+       get_model_def, get_state_model_type, get_gen_info and
+       is_generation_in_progress (compatibility.py GLOBALS). No new WanGP code
+       and no component sweep. If a build does not expose it, the bridge
+       reports BRIDGE_COMPONENT_INCOMPATIBLE for compose, in the same shape it
+       already uses for a missing queue component.
+
+    2. It runs in the user's own session.
+       The compose call is a Gradio handler like the bridge's existing ones, so
+       it has the session_hash and therefore the state of the page the user is
+       actually looking at. This is the one moment the browser is required, and
+       it is before admission, which is exactly where principle 2.2 puts it.
+
+    3. Captured, then frozen.
+       The returned settings become the job's immutable base. Later changes in
+       the WanGP tab do not reach a queued job (principle 2.3). The job records
+       the Wan2GP version and model_type the base came from.
+
+    4. MiniPaint overwrites only what the request owns.
+       The typed prompt, and the image slots, replaced by MiniPaint's own
+       opaque durable input ids. Everything else is the user's configuration
+       and is carried through untouched.
+
+    5. Media never comes from the page.
+       Use collect_current_model_settings, not the _with_media variant. The
+       page's own transient media values are discarded and replaced by
+       MiniPaint's job-owned durable inputs (B12), resolved to paths readable
+       by the WanGP child at submission time and not before.
+
+    6. The settings do not have to travel through the browser.
+       PREFERRED: compose returns a short composition id to the page, and the
+       settings themselves reach Forge server-side - written into the shared
+       job-input area the bridge already reads handoffs from, or posted over
+       the loopback surface. The final admission POST then carries the
+       composition id, the prompt and the input ids, which keeps it far below
+       the keepalive quota (2.11, P7) and makes the settings untamperable from
+       the page.
+       ACCEPTABLE FALLBACK: the page relays the settings to Forge in the
+       admission POST, if the bridge-to-Forge direction is not already
+       available. Measure the body size against P7 if so.
+
+This also serves B7B's model residency. Two presses with no settings change
+between them compose identical bases, so model_type, profile and config are
+identical and the model stays resident - which is precisely the iterate-on-a-
+prompt workflow this design exists to make fast. Record the residency key
+(B7B rule 5) on the job alongside the base, so a reload that does happen is
+explained by a visible difference rather than appearing as an unexplained
+three-minute pause.
+
+SPECIAL ATTENTION - collect_current_model_settings is not a pure read.
+    It takes get_model_settings(state, model_type) BY REFERENCE, sets
+    ["state"] on it, and hands it to prepare_inputs_dict, which pops keys,
+    rewrites activated_loras and inserts custom_settings (wgp.py:10074-10081,
+    9665-9691). That mutates the session's stored settings. Deep-copy before
+    composing, or prove the mutation is idempotent on the installed build.
+    Composing must never change what the user's own WanGP tab will generate.
+
+FALLBACK, STATED HONESTLY
+    If the live settings cannot be read on a given build, the executor may fall
+    back to the API's get_default_settings(model_type) - factory defaults - but
+    the job MUST record that it did, and the UI must say so at press. A job
+    that silently runs at factory settings when the user had configured
+    something else is the failure this section exists to prevent.
 
 Required snapshot fields, using existing names where possible:
 
@@ -918,13 +1065,13 @@ The browser must not submit a partial request that says "inherit whatever the
 WanGP page has later." Inheritance is resolved into explicit values before
 server admission.
 
-SPECIAL ATTENTION - defaults provenance:
-    get_default_settings is evaluated inside the WanGP child, so the compose
-    step is a bridge round trip like any other. Cache the defaults per
-    (model_type, wan2gp_version) for the life of the runtime, and invalidate on
-    runtime restart. A snapshot whose defaults came from a different Wan2GP
-    version than the one executing it must be revalidated at execution time,
-    not silently replayed - see B8's validation rule.
+SPECIAL ATTENTION - base provenance:
+    The base is read from a live session inside the WanGP child, so it cannot
+    be cached across presses: the whole point is that it reflects what the user
+    has set right now. Compose on every press. A snapshot whose base was
+    captured from a different Wan2GP version than the one executing it must be
+    revalidated at execution time, not silently replayed - see B8's validation
+    rule.
 
 B2. SERVER EXECUTOR
 -------------------
@@ -1279,100 +1426,219 @@ Classification: REQUIRED ARCHITECTURE. New in this revision. See 2.12 and
 
 THE PROBLEM, STATED EXACTLY
 
-Wan2GP has two generation paths and they do not exclude each other:
+Wan2GP's two generation paths exclude each other in one direction only.
 
-    - The WebUI path sets and clears a plain module global, gen_in_progress
-      (wgp.py:4189-4193), inside process_tasks (wgp.py:8695). It takes no lock
-      that the API path respects.
+What already works, and must not be reimplemented:
 
-    - The headless path holds _GENERATION_LOCK for the whole run
-      (shared/api_cli.py:29) and calls wgp.generate_media() directly
-      (shared/api_cli.py:121), never entering process_tasks, so it never sets
-      gen_in_progress.
+    - Two headless runs serialize: run_cli_job holds _GENERATION_LOCK for the
+      whole run (shared/api_cli.py:29).
 
-    - wgp.py never references _GENERATION_LOCK; it imports three unrelated
-      helpers from shared.api (wgp.py:139).
+    - A headless run advertises itself: _prepare_state_for_run sets
+      wgp.gen_in_progress = True (shared/api.py:1095), _reset_state_after_run
+      sets it False (shared/api.py:1108), and the reset runs from a finally
+      block (shared/api_cli.py:111-114) so a raised, cancelled or aborted run
+      still clears it.
 
-Two consequences, both reachable by ordinary use:
+    - Consequently the bridge, which already reads is_generation_in_progress
+      live (compatibility.py:310, 893), already sees an unattended run and
+      already routes a queue request away from Generate. Protocol 4's promise
+      holds unchanged. Do not add a second flag beside Wan2GP's own.
 
-    1. A user pressing Generate in the WanGP tab during an unattended run is
-       not stopped by anything, in either direction. Two generations proceed
-       against one card and one set of wgp module globals.
+What is missing, and is this document's requirement:
 
-    2. The bridge's existing protocol-4 guarantee silently stops holding. The
-       bridge reads is_generation_in_progress live (compatibility.py:310, 893)
-       precisely so it never presses Generate during a running generation. That
-       function returns False during a headless run.
+    1. THE HEADLESS PATH NEVER CHECKS BEFORE IT STARTS.
+       run_cli_job acquires _GENERATION_LOCK - which the WebUI never takes,
+       since wgp.py does not reference it (wgp.py:139 imports three unrelated
+       helpers) - and then calls _prepare_state_for_run without first reading
+       gen_in_progress. A submission arriving while the user is generating in
+       the WanGP tab proceeds concurrently, against one card and one set of
+       wgp module globals.
+
+    2. THE FLAG HAS NO OWNER.
+       gen_in_progress is a single boolean written by both paths with no
+       nesting count. If the two ever do overlap, the first to finish clears
+       it while the other is still running, and everything gated on it - the
+       bridge included - is told the card is free when it is not.
 
 REQUIRED BEHAVIOUR
 
-    1. ONE EXCLUSION, OWNED BY THE BRIDGE.
-       The bridge plugin holds a single process-wide exclusion inside the WanGP
-       child covering both paths. Every server-executed submission acquires it;
-       nothing else in MiniPaint's path bypasses it.
+    1. CHECK BEFORE ACQUIRING, ATOMICALLY, IN THE BRIDGE.
+       This is the whole substance of the requirement. Before a server-executed
+       submission reaches submit_task, the bridge reads
+       is_generation_in_progress() and acquires its own exclusion in one
+       operation, inside the WanGP child. Reading and then submitting as two
+       steps is a check-then-act race with a user pressing Generate in between.
+       Forge never makes this decision; it asks and is told yes or not-yet.
 
-    2. THE WEBUI MUST SEE THE UNATTENDED RUN.
-       Before a headless generation begins, the bridge sets Wan2GP's own
-       gen_in_progress, and clears it when the run reaches a terminal state,
-       including on failure and on cancellation. This is what makes Wan2GP's
-       own UI gating (wgp.py:4241) refuse to start a second run, and it is the
-       minimum necessary stretch of principle 2.6: one documented global, set
-       by the plugin that already reads it, version-pinned like every other
-       Wan2GP fact the bridge knows.
+    2. NEVER PRE-EMPT THE USER.
+       A submission arriving while the WebUI is generating is not refused and
+       not raced. The job moves to WAITING_FOR_CARD and the executor retries.
+       The user's in-progress work is never pre-empted, aborted, or queued
+       behind an unattended job that has not started.
 
-       Clearing it must be unconditional and exception-safe. A headless run
-       that dies without clearing the flag leaves the user's WanGP tab
-       permanently refusing to generate, which is a worse failure than the one
-       being prevented. Use try/finally and re-assert the correct value from
-       the bridge's own exclusion state rather than from a remembered bool.
+    3. DO NOT DOUBLE-WRITE THE FLAG.
+       The API sets and clears gen_in_progress for its own runs and does it
+       correctly. The bridge must not set it too: two writers on one boolean is
+       the ownership problem above, not the fix for it. Where the bridge needs
+       to know whether the card is busy, it reads.
 
-    3. THE BRIDGE MUST NOT START WHILE THE WEBUI IS RUNNING.
-       A submission arriving while is_generation_in_progress() is true is not
-       refused and not raced. The job moves to WAITING_FOR_CARD and the
-       executor retries. The user's in-progress work is never pre-empted,
-       aborted, or queued behind an unattended job that has not started.
+       If the bridge ever does need to make an overlap survivable rather than
+       impossible, the correct shape is a nesting count or an owner token
+       contributed upstream to Wan2GP, not a second assignment from a plugin.
+       Prefer preventing the overlap, which requirement 1 does.
 
-    4. CHECK-AND-ACQUIRE IS ATOMIC.
-       Reading is_generation_in_progress() and then submitting is a
-       check-then-act race with a user pressing Generate in between. The read
-       and the acquisition happen under the bridge's own exclusion, inside the
-       child, in one operation. Forge never makes this decision; it asks and is
-       told yes or not-yet.
-
-    5. THE WAIT IS HONEST AND VISIBLE.
+    4. THE WAIT IS HONEST AND VISIBLE.
        WAITING_FOR_CARD is a published job state with stage text saying the
        card is busy with WanGP's own work. It is not a stall, not a retry
        storm, and not reported as an error. Retry on the bridge's own
        notification where one exists, otherwise on a bounded backoff measured
        in seconds, never sub-second.
 
-    6. INTERLEAVING RULE.
+    5. INTERLEAVING RULE.
        Among MiniPaint's own jobs, press order holds. Against WanGP tab work,
        first-to-acquire wins and MiniPaint always yields to an already-running
        WebUI generation. MiniPaint never holds the exclusion while merely
        waiting for something else, and never holds it across an enhancement.
 
-    7. CANCELLATION RELEASES IT.
-       Cancelling an unattended job at any stage releases the exclusion and
-       clears gen_in_progress if this job set it.
+    6. CANCELLATION RELEASES IT.
+       Cancelling an unattended job at any stage releases the bridge's
+       exclusion. The API's own finally clears gen_in_progress; the bridge does
+       not touch it.
 
 ACCEPTANCE
 
-    - With an unattended generation running, WanGP's own Generate button
-      refuses, with WanGP's own busy behaviour.
     - With a WanGP tab generation running, an admitted MiniPaint job sits in
-      WAITING_FOR_CARD and starts only after the user's run finishes.
-    - The bridge's protocol-4 start route never presses Generate during an
-      unattended run. This is a regression test over existing shipped
-      behaviour, not a new feature test.
-    - A headless run that raises, is cancelled, or has its process killed
-      mid-run never leaves gen_in_progress stuck true for a surviving WebUI.
+      WAITING_FOR_CARD and starts only after the user's run finishes. This is
+      the test that matters; it fails today.
+    - With an unattended generation running, the bridge's protocol-4 start
+      route routes to the queue rather than pressing Generate. This passes
+      today and is a regression test, not new work.
+    - is_generation_in_progress() reports True for the whole of an unattended
+      run and False after it, including when the run raises or is cancelled.
     - Concurrent submission attempts from two MiniPaint jobs produce one
       generation and one WAITING_FOR_CARD, never two generations.
+    - No MiniPaint code path assigns wgp.gen_in_progress.
 
 IF EXCLUSION CANNOT BE ESTABLISHED
     Unattended generation is not complete and the release is blocked, on the
-    same terms as B7. Do not ship an adapter that can corrupt a user's own run.
+    same terms as B7. Do not ship an adapter that can start a generation on top
+    of the user's own.
+
+B7B. MODEL RESIDENCY AND BACK-TO-BACK THROUGHPUT
+------------------------------------------------
+Severity: high for the intended workflow
+Classification: REQUIRED ARCHITECTURE + CONFIRMED DEPENDENCY BEHAVIOUR.
+New in this revision.
+
+THE REQUIREMENT
+
+A run of queued jobs that share a model - the ordinary case of iterating on a
+prompt or swapping input images against one model and one LoRA set - must not
+reload the video model between them. The second and subsequent jobs start
+generating without a model load.
+
+WHY THIS IS ACHIEVABLE - CONFIRMED
+
+WanGP caches the loaded model in module globals (wan_model, offloadobj,
+transformer_type, loaded_profile, loaded_config) and reloads only when one of
+four things differs (wgp.py:7020):
+
+    if model_type != transformer_type or reload_needed
+       or profile != loaded_profile or config != loaded_config:
+        release_model()
+        ... load_models(...) ...
+        reload_needed = False
+
+Prompt, input images, seed and LoRA selection appear nowhere in that condition.
+LoRAs in particular are applied per generation onto the already-resident
+transformer, after the reload decision, by offload.load_loras_into_model
+(wgp.py:7144-7162), with pinnedLora and max_reserved_loras making a repeat of
+the same set cheap.
+
+So: same model_type, same profile, same config, changed prompt or images or
+LoRAs -> no reload. The workflow this document exists to serve is the workflow
+WanGP is already fast at, provided MiniPaint does not throw the residency away.
+
+REQUIRED BEHAVIOUR
+
+    1. ONE LONG-LIVED SESSION PER WANGP CHILD.
+       The bridge creates its headless WanGPSession once and reuses it for
+       every job for the life of the child (B7). One session means one runtime
+       (_ensure_runtime is guarded by _RUNTIME_LOCK and memoized) and therefore
+       one resident model.
+
+    2. NEVER CALL close() BETWEEN JOBS.
+       WanGPSession.close() takes _GENERATION_LOCK and calls
+       runtime.module.release_model() (shared/api.py:848-853). It is the
+       explicit "throw the model away" operation. It is not a cleanup step
+       after a job, it is not how VRAM is freed between jobs, and calling it
+       per job converts every subsequent job into a cold start. Close only when
+       the child is being stopped.
+
+    3. DO NOT SILENTLY REORDER TO GROUP BY MODEL.
+       Alternating model_type between consecutive jobs forces a reload each
+       time, so grouping is tempting. Press order is the queue-order contract
+       (section 10) and must not be broken to win throughput. If grouping is
+       wanted, it is an explicit, visible queue option the user chooses, never
+       an executor optimisation applied behind their back.
+
+    4. SURFACE RELOADS IN DIAGNOSTICS.
+       When a job does cause a reload, record why - model_type changed,
+       profile changed, config changed, or reload_needed was set. A user who
+       sees "this one took three minutes longer" deserves the reason, and it is
+       the only way to catch a setting that is silently defeating residency.
+
+    5. KNOW WHAT ELSE SETS reload_needed ON THE SAME MODEL.
+       Residency is not guaranteed by model_type alone. At minimum, a change of
+       spatial_upsampling can change the VAE-upsampling requirement and set
+       reload_needed (wgp.py:7014-7015), and profile is derived per output type
+       (get_profile_type_for_model(model_type, image_mode)), so switching a job
+       between image and video output on one model can change the profile and
+       force a reload. Treat the full residency key as
+       (model_type, profile, config, VAE-upsampling requirement), not as
+       model_type.
+
+    6. VERIFY THE UNLOAD POLICY ON THE INSTALL.
+       WanGP has a preload_model_policy in which "U" means unload the model
+       after a generation. Its implementation, _unload_model_if_needed, is
+       wired into the WebUI's Gradio .then() chains (wgp.py:13458, 13494) and
+       not into generate_media, so it should not fire on the headless path -
+       but that is an inference from wiring, not a guarantee, and this document
+       has already been wrong once about exactly that kind of inference (0.4,
+       C1 historical note). Check it on the target install: if "U" is set and
+       it does fire, residency is defeated and the setting is the fix.
+
+    7. DO NOT CONFUSE THE TWO RELEASES.
+       B22's handover releases the LANGUAGE model through ModelSwitchRefiner.
+       release_model() releases the VIDEO model inside WanGP. An enhanced job
+       must never free the video model to make room for the language model it
+       has already finished with.
+
+IMPLEMENTATION RECOMMENDATION - BATCHING
+
+    submit_manifest(settings_list) submits N tasks as one SessionJob, and
+    _run_tasks_worker loops over them inside a single _GENERATION_LOCK
+    acquisition and a single reload decision. For a user who queues several
+    variations against one model it is the fastest available shape: the lock is
+    taken once and the model-load branch is evaluated once.
+
+    It is a recommendation and not a requirement because it costs granularity:
+    one SessionJob covering N MiniPaint jobs complicates per-job cancellation
+    (B10), per-job state (B3) and per-job ledger records (B8). Adopt it only
+    behind a measured benefit, and only with a mapping from each MiniPaint
+    execution id to its task within the manifest.
+
+ACCEPTANCE
+
+    - N queued jobs sharing model_type, profile and config, differing in
+      prompt, input images and LoRA selection, produce exactly one "Loading
+      Model" in the WanGP child's log.
+    - Time from submission to first denoising step on jobs 2..N is materially
+      below job 1, and the difference is approximately the model load time.
+    - Changing only the LoRA selection between two jobs does not reload the
+      model.
+    - No MiniPaint path calls WanGPSession.close() other than child shutdown.
+    - A job that does force a reload records which key changed.
 
 B8. WANGP SUBMISSION CONTRACT
 -----------------------------
@@ -1676,7 +1942,9 @@ This binds the bridge as well as Forge. Inside the WanGP child:
       ledger entry, return the task id; track by feed.
     - SessionJob.result(timeout) blocks and is not called on a handler thread.
     - WanGPSession.close() also takes _GENERATION_LOCK and will therefore wait
-      for any running generation. Never call it from a request path.
+      for any running generation. Never call it from a request path, and see
+      B7B rule 2: it releases the loaded model, so it is not a per-job cleanup
+      step under any circumstances.
 
 B20. PROCESS LOG BUFFERING
 --------------------------
@@ -2138,15 +2406,30 @@ platforms; the expected outcome differs and both are passes.
 ------------------------
 New in this revision.
 
-    - unattended run in progress -> WanGP tab Generate refuses
     - WanGP tab run in progress -> admitted job sits in WAITING_FOR_CARD and
-      starts only after it finishes
-    - bridge protocol-4 auto start never fires during an unattended run
-      (regression test over existing shipped behaviour)
-    - headless run killed mid-generation -> a surviving WebUI is not left
-      permanently refusing to generate
+      starts only after it finishes. This is the case that fails today.
+    - unattended run in progress -> bridge protocol-4 routes to the queue and
+      does not press Generate (regression test; passes today)
+    - is_generation_in_progress() is True for the whole unattended run and
+      False after it, including on exception and on cancellation
     - two MiniPaint jobs racing -> one generation, one wait
-    - cancelling from either state releases the exclusion
+    - cancelling from either state releases the bridge's exclusion
+    - no MiniPaint code path assigns wgp.gen_in_progress
+
+7.9A MODEL RESIDENCY
+--------------------
+New in this revision. The acceptance list in B7B, as a measured test:
+
+    queue N >= 3 jobs sharing model_type/profile/config, differing in prompt,
+      input images and LoRA selection
+    exactly one model load occurs across all N
+    time-to-first-step on jobs 2..N is materially below job 1
+    changing only the LoRA selection does not reload
+    a deliberate model_type change between two jobs DOES reload, and the job
+      records why
+
+Report job 1 and jobs 2..N separately. A mean across all N hides exactly the
+thing this test exists to measure.
 
 7.10 EVENT/PRESENTATION PERFORMANCE
 -----------------------------------
@@ -2211,10 +2494,15 @@ P1. REMOTE EVENT TRANSPORT
     long-poll fallback is required now. Unchanged.
 
 P2. SETTINGS SNAPSHOT
-    Prove that get_default_settings(model_type) plus a delta set round-trips to
-    an equivalent submitted task. Compare against exported WanGP settings for
-    representative MiniMax FL2VA/Ref2VA and at least one non-H3 model. Confirm
-    media inputs are accepted as path strings for every slot the product uses.
+    Prove the compose operation. Confirm the bridge can reach
+    get_current_model_settings / collect_current_model_settings through
+    request_global on the supported Wan2GP range, that the dict it returns
+    submits unchanged through submit_task, and that composing does not mutate
+    the user's own session settings (B1 SPECIAL ATTENTION). Compare the
+    composed dict against the same session's Export Settings output - they
+    should agree - for representative MiniMax FL2VA/Ref2VA and at least one
+    non-H3 model. Confirm media inputs are accepted as path strings for every
+    slot the product uses.
 
 P3. MODELSWITCHREFINER READINESS - VERIFICATION ONLY
     The shipped API already lazily brings a configured cold runtime to
@@ -2308,6 +2596,7 @@ Implement:
     B6 ensure managed child
     B7 headless adapter
     B7A exclusion - land this with or before the adapter, never after
+    B7B session reuse and model residency
     B8 submission + ledger
     B9 tracking/results
     B10 cancellation
@@ -2377,6 +2666,9 @@ Test normalization and round-trip persistence for:
     model-specific settings / LoRAs
     invalid/missing settings
     a snapshot whose captured Wan2GP version differs from the running one
+    composed base equals that session's Export Settings output
+    composing twice in a row yields the same base (no mutation side effect)
+    a user changing the WanGP tab after press does not affect the queued job
 
 No live DOM access after admission in executor tests.
 
@@ -2426,13 +2718,16 @@ Against WanGP test seam / representative installed API:
     process crash before submit
     process crash after submit reconciliation
     ledger record written before submit_task, not after
+    session reused across jobs; close() never called between them
+    same model_type across consecutive submits loads the model once
 
 9.6 Exclusion tests
 -------------------
 New in this revision. The acceptance list in 7.9, as executable tests, plus:
 
     submission handler never blocks on _GENERATION_LOCK
-    gen_in_progress cleared on every terminal path including exception and kill
+    check-and-acquire is atomic: a Generate press interleaved between the read
+      and the submit does not produce two generations
     exclusion state reconstructed correctly after a Forge restart
     legacy browser-executed job also respects the exclusion during the
       migration window
@@ -2495,8 +2790,9 @@ process-log tests and request-count instrumentation from prior specification.
     - A user's in-progress WanGP tab generation is never pre-empted, aborted,
       or made to wait behind an unattended job that has not started.
 
-    - Wan2GP's own Generate control refuses while an unattended generation is
-      running, rather than silently starting a second one.
+    - An unattended generation is visible to Wan2GP as a generation in
+      progress, so the bridge's queue-versus-Generate routing keeps working.
+      MiniPaint reads that state and never writes it.
 
     - Press order remains the queue-order contract AMONG MINIPAINT'S OWN JOBS.
       It says nothing about tasks queued in the WanGP tab, which interleave by
@@ -2514,6 +2810,10 @@ process-log tests and request-count instrumentation from prior specification.
       or kill-by-name.
 
     - Exact configured GPU is respected; no silent fallback GPU.
+
+    - Consecutive jobs sharing a model do not reload it. The executor never
+      frees the video model as a per-job cleanup step, and never reorders the
+      queue to win residency.
 
     - Enhancement variant follows captured WanGP model target.
 
@@ -2580,12 +2880,13 @@ Q8. OPEN - P8 DECIDES, NEW. Does the managed child's observed behaviour across a
     Forge crash match runtime.py's platform intent on the installed builds?
     B11's recovery semantics depend on the answer, and it differs by platform.
 
-Q9. OPEN, NEW. Is setting Wan2GP's gen_in_progress from the bridge (B7A rule 2)
-    stable across the Wan2GP versions in the supported range, and is there a
-    supported plugin-facing way to do it?
-    If a supported seam exists or can be contributed upstream, prefer it to
-    writing the global. Until then, the global is pinned in compatibility.py
-    like every other Wan2GP fact.
+Q9. OPEN, NEW. Should Wan2GP carry an owner token or nesting count on
+    gen_in_progress rather than a bare boolean?
+    B7A prevents the overlap rather than surviving it, so this is not blocking.
+    But the flag has two writers and no ownership, and if the two paths ever do
+    overlap - through a Wan2GP change, or a third caller - the first to finish
+    clears it under the second. If upstream would take it, a small ownership
+    change there is worth more than anything this repository can do downstream.
 
 ================================================================================
 12. EXPECTED FILE / PROJECT TOUCH POINTS
@@ -2638,12 +2939,19 @@ WAN2GP BRIDGE PLUGIN (wan2gp_bridge/wan2gp-minipaint-bridge/*)
 
     This is where the substance of Phase 3 lands.
 
+    a new compose operation
+        B1: one handler returning the live session's settings through
+        request_global; deep-copies before normalizing so the user's own tab is
+        unchanged
+
     a new execution module
-        headless WanGPSession ownership, submit, feed relay, cancel
+        headless WanGPSession ownership (one per child, B7B), submit, feed
+        relay, cancel; never close() except at child shutdown
 
     a new exclusion module
-        B7A: the process-wide exclusion, gen_in_progress assertion, and the
-        atomic check-and-acquire
+        B7A: the process-wide exclusion and the atomic check-and-acquire
+        against is_generation_in_progress. Reads Wan2GP's flag; never writes
+        it.
 
     a new ledger module
         B8: durable execution-id keyed record
@@ -2686,7 +2994,9 @@ WANGP
 Before unattended feature flag can become default:
 
     [ ] complete snapshot contains all execution settings
-    [ ] snapshot built from get_default_settings + deltas, round-trip proven
+    [ ] snapshot base is the live session's settings, round-trip proven
+    [ ] composing does not mutate the user's own WanGP tab settings
+    [ ] a factory-defaults fallback, if it ever fires, is recorded and shown
     [ ] final submit uses opaque durable input ids
     [ ] server durable ack is fast and explicit
     [ ] active inputs cannot be swept, including while waiting for the card
@@ -2698,9 +3008,12 @@ Before unattended feature flag can become default:
     [ ] WanGP cold start proven server-side
     [ ] P5(a) browser-independent WanGP submission proven and version-pinned
     [ ] P5(b) exclusion built and all of 7.9 passing
-    [ ] Wan2GP's own Generate refuses during an unattended run
+    [ ] admitted job waits for a running WanGP tab generation instead of
+        starting on top of it
     [ ] bridge protocol-4 regression test passing
+    [ ] no MiniPaint code path assigns wgp.gen_in_progress
     [ ] durable ledger written before submit, duplicate submit proven idempotent
+    [ ] consecutive same-model jobs load the model once
     [ ] generation progress/completion tracked server-side
     [ ] generated_files persisted, paths kept off the event spine
     [ ] cancellation works in each stage and releases the exclusion
@@ -2755,11 +3068,18 @@ today. Both are moving targets and neither publishes a stability guarantee. The
 three that would most change the plan if they turn out to be wrong on YOUR
 installed versions are:
 
-    - that the WebUI path does not take _GENERATION_LOCK (if it does, B7A gets
-      much smaller)
+    - that the WebUI path does not take _GENERATION_LOCK, and that the
+      headless path does not check gen_in_progress before starting (if either
+      changes, B7A gets smaller again or disappears)
     - that submit_minimax starts a cold runtime (if it does not, the draft's
       readiness-seam work comes back)
     - that no idempotency key exists (if one appears, B8's ledger simplifies)
+
+    This advice is not hypothetical. An earlier revision of this document got
+    the gen_in_progress question wrong by reasoning from call graphs instead of
+    reading the session, and prescribed a mechanism that was already there. Ten
+    minutes with the installed source is worth more than any amount of
+    inference about it, this document's own claims included.
 
 Each is a ten-minute check against the installed source. Do them at the start
 of Phase 0.5, not when something fails.
@@ -2774,15 +3094,25 @@ pinned revision, and gen_in_progress belong there under the same rule. Do not
 let api.py knowledge leak into the execution module the way DOM knowledge was
 kept from leaking into MiniPaint.
 
-14.5 Prefer the API's settings dict over growing DOM knowledge
----------------------------------------------------------------
+14.5 Compose from the live session, through one function
+---------------------------------------------------------
 
-B1 says this normatively; it is worth repeating as advice because the draft
-pointed the other way and the other way is the path of least resistance. The
-bridge already knows how to read components, so a compose operation built on
-component reads will feel faster to write. It will also be a permanent
-maintenance surface proportional to the number of settings WanGP has.
-get_default_settings plus a delta is smaller today and stays smaller.
+Two wrong turns are available here and both are tempting.
+
+The first is to read the form component by component. The bridge already knows
+how to read components, so it feels like the natural extension. It would be a
+permanent maintenance surface proportional to the number of settings WanGP has.
+
+The second - which an intermediate revision of this document recommended - is
+to start from factory defaults and record deltas. It produces a smaller
+payload and a prettier diff, and it throws away the user's configuration, which
+makes it the worse error of the two: the jobs would run, and they would run at
+settings nobody chose.
+
+get_current_model_settings is one call, returns what the user configured, and
+is the same path WanGP's own Export Settings button takes. Take it, deep-copy
+what it hands back, and keep the payload small by passing a composition id
+rather than the settings (B1 rule 6).
 
 14.6 Ship Phase 2 early; it is independent now
 -----------------------------------------------

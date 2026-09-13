@@ -333,8 +333,15 @@ Wan2GP's `is_generation_in_progress()` (requested as a global, read live) and wr
 `add_to_queue_trigger` otherwise (`start: "unknown"` when the flag or the trigger is
 missing); `confirm` answers `started` when the request's task is at the head of a
 running loop (`gen["in_progress"]`), `queued` otherwise, with `queue_depth`; the
-handshake carries `capabilities.start` and a live `generation_running`. The full
-contract is in `docs/clipboard/CONTRACTS.md`.
+handshake carries `capabilities.start` and a live `generation_running`. Bridge 1.4.0
+(protocol 5) adds the `track` operation - where the tasks this page admitted are in
+WanGP's queue now (`waiting` with a position, `generating`, `finished` for a request the
+page once saw queued whose task is gone, `unknown` for one it never admitted; the ledger
+remembers admitted ids for a day, past its admission records), read from
+`get_gen_info(state)` and never written - the `model_type` a request may insist on
+(refused with `MODEL_CHANGED`, untouched, when the page's model differs), the model
+block's `architecture` (`get_base_model_type`), `capabilities.track`, and a prompt
+ceiling of 12000 characters. The full contract is in `docs/clipboard/CONTRACTS.md`.
 
 ## Tests
 
@@ -342,5 +349,5 @@ contract is in `docs/clipboard/CONTRACTS.md`.
 `harness.Results`, no pytest, nothing that needs WanGP, Forge or a network.
 Add the new suites to `tests/run.py`. The queue's own suites are `tests/test_wangp_queue.py`,
 `tests/test_wangp_start.py`, `tests/test_interop.py`, `tests/test_clipboard_store.py`,
-`tests/test_clipboard_outbox.py`, `tests/test_clipboard_ui.py` and `tests/test_queue_e2e.py`;
+`tests/test_clipboard_outbox.py`, `tests/test_clipboard_enhance.py`, `tests/test_clipboard_ui.py` and `tests/test_queue_e2e.py`;
 the lock, the GPU report and the emergency restart are in `tests/test_wangp_runtime.py`.

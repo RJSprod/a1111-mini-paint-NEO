@@ -79,7 +79,7 @@ THEME_FILE = "theme.css"
 #: The operations the hidden trigger understands. A request naming anything
 #: else is answered with a refusal rather than ignored, so that a parent stuck
 #: on an older protocol gets a code instead of a timeout.
-OPERATIONS = ("hello", "receivers", "receive", "queue", "confirm")
+OPERATIONS = ("hello", "receivers", "receive", "queue", "confirm", "track")
 
 #: What the answer to a queue operation is keyed by in the request box: the
 #: queue payload sits under its own key so its ``request_id`` - the public
@@ -365,6 +365,18 @@ class MiniPaintBridge:
             ack.update(existing.answer())
             return ack, {}
 
+        # Protocol 5: a request composed for one model - an enhanced prompt
+        # is written for one H3 model - is refused, untouched, when this
+        # page is on another. A page whose model cannot be read is not
+        # refused on a guess.
+        wanted_model = request.get("model_type")
+        if wanted_model:
+            current_model = str(receiver_state.read(self.compat, live).model.get("type") or "")
+            if current_model and current_model != wanted_model:
+                raise compatibility.BridgeError(
+                    compatibility.MODEL_CHANGED, f"the page is on {current_model[:40]}; the request was composed for {wanted_model[:40]}"
+                )
+
         writes: typing.Dict[str, typing.Any] = {}
         effective = dict(live)
         owner = self.ledger.owner(bridge_session)
@@ -542,6 +554,7 @@ class MiniPaintBridge:
         if count > 0:
             record.seen_queued = True
             record.tasks_added_max = max(record.tasks_added_max, count)
+            self.ledger.remember_admitted(bridge_session, request_id)
             position = admission.task_position(gen, request_id)
             record.queue_depth = position
             # Started: the request's task is at the head of this page's queue
@@ -555,6 +568,46 @@ class MiniPaintBridge:
         elif record.expired(now):
             writes = self._settle(record, protocol.QUEUE_EXPIRED, compatibility.ADMISSION_UNCONFIRMED, live, now)
         return record.answer(), writes
+
+    def track(
+        self,
+        raw: typing.Any,
+        bridge_session: str,
+        live: typing.Mapping[str, typing.Any],
+    ) -> typing.Tuple[dict, typing.Dict[str, typing.Any]]:
+        """Protocol 5: where this page's admitted tasks are in WanGP's queue.
+
+        Read from the page's own generation record, the way a confirmation
+        reads it, and never written to: a task at the head of a running loop
+        is generating, a task further back is waiting with its position, and
+        a request this page once saw queued but finds no task for is
+        finished - which WanGP cannot tell from removed, so neither does the
+        answer. A request this page never saw admitted is unknown, not
+        finished: a reloaded page is a new session and cannot vouch for the
+        old one's tasks.
+        """
+        raw = raw if isinstance(raw, dict) else {}
+        ids = raw.get("request_ids")
+        if not isinstance(ids, (list, tuple)) or not ids or len(ids) > protocol.MAX_TRACKED_REQUESTS \
+                or not all(protocol.valid_request_id(item) for item in ids):
+            raise compatibility.BridgeError(compatibility.REQUEST_INVALID, f"a track names one to {protocol.MAX_TRACKED_REQUESTS} request ids")
+        self._require_queue(raw, bridge_session)
+        gen = self._gen_info(live)
+        tracked: typing.Dict[str, dict] = {}
+        for request_id in dict.fromkeys(ids):
+            found = admission.track_state(gen, request_id)
+            if found is not None:
+                self.ledger.remember_admitted(bridge_session, request_id)
+                tracked[request_id] = {"state": found[0], "position": found[1], "queue_depth": found[1]}
+            elif self.ledger.was_admitted(bridge_session, request_id):
+                tracked[request_id] = {"state": protocol.TRACK_FINISHED, "position": None, "queue_depth": None}
+            else:
+                tracked[request_id] = {"state": protocol.TRACK_UNKNOWN, "position": None, "queue_depth": None}
+        return {
+            "tracked": tracked,
+            "queue_length": admission.queue_length(gen),
+            "generation_running": self.compat.generation_running(),
+        }, {}
 
     def _settle(
         self,
@@ -633,12 +686,18 @@ class MiniPaintBridge:
                 answer, result = self.queue(request.get(QUEUE_KEY), session, self.live_values(values))
                 ack.update(answer)
                 ack["ok"] = True
+            elif operation == "track":
+                answer, result = self.track(request.get(QUEUE_KEY), session, self.live_values(values))
+                ack.update(answer)
+                ack["ok"] = True
             else:
                 answer, result = self.confirm(request.get(QUEUE_KEY), session, self.live_values(values))
                 ack.update(answer)
                 ack["ok"] = True
         except compatibility.BridgeError as error:
             ack.update({"ok": False, "ready": False, "code": error.code})
+            if operation == "track":
+                ack["tracked"] = {}
             if operation in ("queue", "confirm"):
                 ack["admission"] = protocol.ADMISSION_REFUSED
                 wanted = request.get(QUEUE_KEY) if isinstance(request.get(QUEUE_KEY), dict) else {}
@@ -1013,6 +1072,14 @@ def _summary(operation: typing.Any, ack: typing.Mapping[str, typing.Any], second
     if operation == "receive":
         line = f"receive: {ack.get('receiver_id')} {ack.get('operation')} {ack.get('verification')} in {took}"
         return line + (f", switched {ack['switched']}" if ack.get("switched") else "")
+    if operation == "track":
+        tracked = ack.get("tracked") if isinstance(ack.get("tracked"), dict) else {}
+        tally: typing.Dict[str, int] = {}
+        for item in tracked.values():
+            state = item.get("state") if isinstance(item, dict) else "?"
+            tally[str(state)] = tally.get(str(state), 0) + 1
+        found = ", ".join(f"{count} {state}" for state, count in sorted(tally.items())) or "nothing asked"
+        return f"track: {len(tracked)} request(s) in {took} - {found}"
     if operation in ("queue", "confirm"):
         short = str(ack.get("queue_request_id") or "")[:8] or "?"
         applied = ack.get("applied") if isinstance(ack.get("applied"), dict) else {}

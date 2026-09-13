@@ -372,9 +372,9 @@ something has actually gone wrong; if WanGP is running happily and you have just
 its bridge, use **Reinitialize** and set up again, or reload the WebUI. (A restart button
 that is always visible is worth having and is not in this version.)
 
-Bridge 1.3.0 speaks protocol 4 (the queue operation, and starting a run); the extension's copy
-and the installed copy must match, so updating one half means updating the other and restarting
-WanGP.
+Bridge 1.4.0 speaks protocol 5 (the queue operation, starting a run, tracking where a page's
+queued tasks are, and the model a request insists on); the extension's copy and the installed
+copy must match, so updating one half means updating the other and restarting WanGP.
 
 Version comparison is exact equality, not a range: the two halves of the protocol are
 released together, so an installed bridge that is *newer* than the extension is as wrong as
@@ -468,6 +468,8 @@ The ones worth knowing by sight:
 | `RECEIVER_VERIFY_FAILED` | WanGP took an image, but it could not be confirmed as the one that was sent. The tab does not switch, and the log keeps the detail. |
 | `WANGP_ALREADY_MANAGED` | another Forge server on this machine holds the WanGP lock: its WanGP is the one to use, or stop that Forge first. Nothing was started. The lock names the Forge process, and a lock left by a Forge that is gone is removed by itself. |
 | `WANGP_NOT_RUNNING` | a queue request was pressed while the managed WanGP is not serving. Nothing was stored; open the WanGP tab, let it start, and press again. |
+| `MODEL_CHANGED` | a queue request composed for one model - an enhanced prompt is written for one H3 model - reached a WanGP page that has since moved to another. Nothing was written; Retry writes it again for the model the page is on. |
+| `ENHANCE_*` | the prompt enhancer (ModelSwitchRefiner's MiniMax H3 writer) could not take a press: not installed or switched off (`ENHANCE_UNAVAILABLE`), the page not on an H3 model (`ENHANCE_MODEL_UNSUPPORTED`), no typed prompt, no vision for a picture, a full line, or a run that failed, was cancelled or was forgotten. `docs/clipboard/README.md` has each one. |
 | `QUEUE_BUSY` | a queue request from this page is still being confirmed; the form has one owner at a time. Try again in a moment. |
 | `ADMISSION_UNCONFIRMED` | a queue request was written and WanGP's chain ran, but no task carrying the request appeared within the wait and WanGP recorded no error. Look at WanGP's queue before trying again: it may be there. |
 | `WANGP_VALIDATION_REFUSED` | WanGP's own validation declined the queued request; the WanGP page has the detail, and nothing was added. |

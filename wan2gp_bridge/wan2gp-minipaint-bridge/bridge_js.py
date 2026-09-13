@@ -100,6 +100,8 @@ def configuration(theme_css: str = "") -> dict:
             "queueResult": protocol.QUEUE_RESULT,
             "queueConfirm": protocol.QUEUE_CONFIRM,
             "queueStatus": protocol.QUEUE_STATUS,
+            "queueTrack": protocol.QUEUE_TRACK,
+            "queueTracked": protocol.QUEUE_TRACKED,
         },
         "inbound": sorted(protocol.TO_BRIDGE),
         "receiverIds": list(protocol.RECEIVER_IDS),
@@ -109,6 +111,8 @@ def configuration(theme_css: str = "") -> dict:
         "promptMaxChars": protocol.PROMPT_MAX_CHARS,
         "maxQueueReferences": protocol.MAX_QUEUE_REFERENCES,
         "startModes": list(protocol.START_MODES),
+        "maxTrackedRequests": protocol.MAX_TRACKED_REQUESTS,
+        "modelTypePattern": protocol.MODEL_TYPE_RE.pattern.replace("\\A", "^").replace("\\Z", "$"),
         # Classes, not ids: WanGP builds its form twice and the bridge places
         # one set of controls in each, so the script looks for "the set that
         # is on screen" rather than for one element.
@@ -532,6 +536,7 @@ __MINIPAINT_FRAME_WRAPPER__
     if (operation === "receive") { return CONFIG.types.receiveResult; }
     if (operation === "queue") { return CONFIG.types.queueResult; }
     if (operation === "confirm") { return CONFIG.types.queueStatus; }
+    if (operation === "track") { return CONFIG.types.queueTracked; }
     return "";
   }
 
@@ -654,6 +659,10 @@ __MINIPAINT_FRAME_WRAPPER__
     if (asked.start !== undefined && asked.start !== null && asked.start !== "" && CONFIG.startModes.indexOf(asked.start) === -1) {
       return ["REQUEST_INVALID", "start is not auto or never"];
     }
+    if (asked.model_type !== undefined && asked.model_type !== null && asked.model_type !== ""
+        && !(typeof asked.model_type === "string" && new RegExp(CONFIG.modelTypePattern).test(asked.model_type))) {
+      return ["REQUEST_INVALID", "model_type is not a model type"];
+    }
     return null;
   }
 
@@ -738,8 +747,30 @@ __MINIPAINT_FRAME_WRAPPER__
       if (Array.isArray(asked.reference_handoff_ids) && asked.reference_handoff_ids.length) {
         queue.reference_handoff_ids = asked.reference_handoff_ids.slice();
       }
+      if (typeof asked.model_type === "string" && asked.model_type) { queue.model_type = asked.model_type; }
       queue.bridge_session = isToken(asked.bridge_session) ? asked.bridge_session : "";
       submit({ op: "queue", request_id: message.request_id, channel_id: channelId, queue: queue });
+      return;
+    }
+
+    if (message.type === CONFIG.types.queueTrack) {
+      // Protocol 5: one to maxTrackedRequests request ids, each a 32-hex id.
+      var wantedIds = message.payload && message.payload.request_ids;
+      var sound = Array.isArray(wantedIds) && wantedIds.length > 0 && wantedIds.length <= CONFIG.maxTrackedRequests;
+      if (sound) {
+        for (var atId = 0; atId < wantedIds.length; atId += 1) {
+          if (!isHex32(wantedIds[atId])) { sound = false; break; }
+        }
+      }
+      if (!sound) {
+        log("track: refused before the click - REQUEST_INVALID");
+        post(CONFIG.types.queueTracked, message.request_id, { ok: false, code: "REQUEST_INVALID", tracked: {} });
+        return;
+      }
+      submit({
+        op: "track", request_id: message.request_id, channel_id: channelId,
+        queue: { request_ids: wantedIds.slice(), bridge_session: isToken(message.payload.bridge_session) ? message.payload.bridge_session : "" }
+      });
       return;
     }
 

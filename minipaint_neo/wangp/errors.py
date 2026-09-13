@@ -77,6 +77,20 @@ QUEUE_REQUEST_REFUSED = "QUEUE_REQUEST_REFUSED"
 ADMISSION_UNCONFIRMED = "ADMISSION_UNCONFIRMED"
 WANGP_VALIDATION_REFUSED = "WANGP_VALIDATION_REFUSED"
 
+# -- prompt enhancement (ModelSwitchRefiner's MiniMax H3 writer) and protocol 5 --
+ENHANCE_UNAVAILABLE = "ENHANCE_UNAVAILABLE"
+ENHANCE_MODEL_UNSUPPORTED = "ENHANCE_MODEL_UNSUPPORTED"
+ENHANCE_PROMPT_REQUIRED = "ENHANCE_PROMPT_REQUIRED"
+ENHANCE_NO_VISION = "ENHANCE_NO_VISION"
+ENHANCE_IMAGE_UNREADABLE = "ENHANCE_IMAGE_UNREADABLE"
+ENHANCE_QUEUE_FULL = "ENHANCE_QUEUE_FULL"
+ENHANCE_SYSTEM_PROMPT_EMPTY = "ENHANCE_SYSTEM_PROMPT_EMPTY"
+ENHANCE_REFUSED = "ENHANCE_REFUSED"
+ENHANCE_FAILED = "ENHANCE_FAILED"
+ENHANCE_CANCELLED = "ENHANCE_CANCELLED"
+ENHANCE_LOST = "ENHANCE_LOST"
+MODEL_CHANGED = "MODEL_CHANGED"
+
 # -- everything else --------------------------------------------------------
 WANGP_RESTARTED = "WANGP_RESTARTED"
 INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -126,7 +140,7 @@ MESSAGES: dict[str, str] = {
     INTERNAL_ERROR: "The WanGP integration hit an unexpected problem.",
     REQUEST_INVALID: "That queue request is not one this extension can carry.",
     REQUEST_ID_CONFLICT: "That request id was already used for a different request.",
-    PROMPT_TOO_LONG: "The prompt is longer than WanGP queue requests allow (4000 characters).",
+    PROMPT_TOO_LONG: "The prompt is longer than WanGP queue requests allow (12000 characters).",
     IMAGE_STAGE_INVALID: "That image could not be staged for WanGP.",
     IMAGE_STAGE_EXPIRED: "The staged image is no longer there; stage it again.",
     CLIPBOARD_NOT_CONFIGURED: "Clipboard has no storage folder yet; choose one in the Clipboard tab.",
@@ -136,6 +150,18 @@ MESSAGES: dict[str, str] = {
     QUEUE_REQUEST_REFUSED: "WanGP did not take the queue request.",
     ADMISSION_UNCONFIRMED: "WanGP did not confirm that the request was added to the queue.",
     WANGP_VALIDATION_REFUSED: "WanGP declined the queue request; check the WanGP page for details.",
+    ENHANCE_UNAVAILABLE: "Prompt enhancement is not available: ModelSwitchRefiner's LLM Studio is not installed, is switched off, or has no model set up.",
+    ENHANCE_MODEL_UNSUPPORTED: "Enhanced prompts need a MiniMax H3 model (FL2VA or Ref2VA) loaded in WanGP; the WanGP page is on another model.",
+    ENHANCE_PROMPT_REQUIRED: "Enhanced mode needs a prompt typed in Clipboard; the WanGP page's own prompt cannot be enhanced from here.",
+    ENHANCE_NO_VISION: "The language model running in LLM Studio cannot see pictures, so a request with an image cannot be enhanced.",
+    ENHANCE_IMAGE_UNREADABLE: "One of the pictures could not be read for the enhancement.",
+    ENHANCE_QUEUE_FULL: "LLM Studio's request queue is full; try again in a moment.",
+    ENHANCE_SYSTEM_PROMPT_EMPTY: "A system prompt override cannot be blank; restore the default instead.",
+    ENHANCE_REFUSED: "LLM Studio refused the enhancement request.",
+    ENHANCE_FAILED: "The prompt enhancement failed.",
+    ENHANCE_CANCELLED: "The prompt enhancement was cancelled.",
+    ENHANCE_LOST: "The enhancement's record was gone before its result was collected (LLM Studio forgot it, or Forge restarted); retry to enhance again.",
+    MODEL_CHANGED: "The WanGP page moved to another model after the prompt was enhanced for it; retry to enhance it for the current model.",
 }
 
 #: Codes that mean "the setup on disk no longer describes reality". The tab

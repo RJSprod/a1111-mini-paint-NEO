@@ -1081,16 +1081,16 @@ new Function("window", "document", script)(window, document);
 scheduleFlush();
 const channel = "c".repeat(32);
 (listeners.message || []).forEach(function (fn) {
-  fn({ origin: ORIGIN, source: parent, data: { protocol: 4, type: "WANGP_BRIDGE_HELLO", channel_id: channel, request_id: "r1", payload: {} } });
+  fn({ origin: ORIGIN, source: parent, data: { protocol: 5, type: "WANGP_BRIDGE_HELLO", channel_id: channel, request_id: "r1", payload: {} } });
 });
 if (process.argv[5] === "refuse") {
   // After the hello: one send the page cannot act on (a handoff id that is
   // not one), and one on a channel this page was never bound to.
   setTimeout(function () {
     (listeners.message || []).forEach(function (fn) {
-      fn({ origin: ORIGIN, source: parent, data: { protocol: 4, type: "WANGP_RECEIVE_IMAGE", channel_id: channel, request_id: "r2",
+      fn({ origin: ORIGIN, source: parent, data: { protocol: 5, type: "WANGP_RECEIVE_IMAGE", channel_id: channel, request_id: "r2",
         payload: { handoff_id: "nope", receiver_id: "start_frame", state_revision: "abcdef12" } } });
-      fn({ origin: ORIGIN, source: parent, data: { protocol: 4, type: "WANGP_RECEIVE_IMAGE", channel_id: "d".repeat(32), request_id: "r3",
+      fn({ origin: ORIGIN, source: parent, data: { protocol: 5, type: "WANGP_RECEIVE_IMAGE", channel_id: "d".repeat(32), request_id: "r3",
         payload: { handoff_id: "e".repeat(32), receiver_id: "start_frame", state_revision: "abcdef12" } } });
     });
   }, 150);
@@ -2024,9 +2024,9 @@ def queue_request_checks(r: Results) -> None:
             protocol.valid_envelope(protocol.envelope(protocol.QUEUE_REQUEST, "c" * 32, good), protocol.TO_BRIDGE)
             and protocol.valid_envelope(protocol.envelope(protocol.QUEUE_STATUS, "c" * 32, good), protocol.TO_PARENT)
             and not protocol.valid_envelope(protocol.envelope(protocol.QUEUE_RESULT, "c" * 32, good), protocol.TO_BRIDGE))
-    r.check("a full prompt fits the envelope many times over",
+    r.check("a full prompt fits the envelope with room to spare, however it is escaped",
             len(protocol.canonical_json({"prompt": "\u2603" * protocol.PROMPT_MAX_CHARS, "reference_handoff_ids": [good] * protocol.MAX_QUEUE_REFERENCES}))
-            * 8 < protocol.MAX_ENVELOPE_BYTES)
+            * 3 < protocol.MAX_ENVELOPE_BYTES)
 
 
 def run() -> Results:

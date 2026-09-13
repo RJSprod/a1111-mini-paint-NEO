@@ -259,7 +259,7 @@ def request_checks(r: Results, root: str) -> None:
     r.check("a whitespace prompt is inheritance, not a clear",
             K.PROMPT not in writes and "prompt" in ack["inherited"], str(sorted(writes)))
     bridge, _ = _bridge({"video": VIDEO_MODEL}, root)
-    ack, writes = _call(bridge, fresh, "queue", {"request_id": ID_B, "bridge_session": session, "prompt": "x" * 4001})
+    ack, writes = _call(bridge, fresh, "queue", {"request_id": ID_B, "bridge_session": session, "prompt": "x" * (protocol.PROMPT_MAX_CHARS + 1)})
     r.check("a prompt over the ceiling is refused, not cut", ack.get("ok") is False and ack.get("code") == "PROMPT_TOO_LONG", str(ack.get("code")))
     r.check("and nothing is written for it", writes is None)
 
@@ -466,6 +466,80 @@ def confirm_checks(r: Results, root: str) -> None:
     r.check("and the old record is expired", bridge.ledger.get(session, ID_A).status == "expired")
 
 
+# ---------------------------------------------------------- protocol 5 --
+
+
+def track_checks(r: Results, root: str) -> None:
+    """Where this page's admitted tasks are in WanGP's queue, and the model
+    a request may insist on. Read from the page's own record, never written;
+    finished only for a request this page once saw queued; another page's
+    session cannot ask; a request composed for another model is refused
+    before anything is written."""
+    plugin, compatibility, admission, bridge_ui = _modules()
+    session = plugin.bridge_session_for("session-hash-of-this-page", "i")
+    K = compatibility
+    fresh = _page(K)
+    clock = _Clock()
+    bridge, _ = _bridge({"video": dict(VIDEO_MODEL, architecture="wan_video_base")}, root, clock=clock)
+
+    hello, _ = _call(bridge, fresh, "hello")
+    r.check("the handshake offers track beside queue and start", hello.get("capabilities", {}).get("track") is True and hello.get("protocol") == 5, str(hello.get("capabilities")))
+    r.check("and the model block names the architecture the definition carries",
+            hello.get("model", {}).get("architecture") == "wan_video_base" and hello["model"]["type"] == "video", str(hello.get("model")))
+
+    ack, writes = _call(bridge, fresh, "queue", {"request_id": ID_A, "bridge_session": session, "prompt": "to be tracked"})
+    after = _apply(fresh, writes)
+    tracked, more = _call(bridge, after, "track", {"request_ids": [ID_A], "bridge_session": session})
+    r.check("before any task exists a request this page has not seen queued is unknown, not finished",
+            tracked.get("ok") is True and tracked["tracked"][ID_A]["state"] == "unknown" and more == {}, str(tracked))
+    landed = _queued(after, ID_A, count=1)
+    status, _restore = _call(bridge, landed, "confirm", {"request_id": ID_A, "bridge_session": session})
+    r.check("(the admission is confirmed)", status.get("status") == "queued")
+    tracked, more = _call(bridge, landed, "track", {"request_ids": [ID_A, ID_D], "bridge_session": session})
+    r.check("a track answers per request: waiting at the head for the queued task, unknown for one this page never admitted",
+            tracked.get("ok") is True and tracked["tracked"][ID_A] == {"state": "waiting", "position": 0, "queue_depth": 0}
+            and tracked["tracked"][ID_D]["state"] == "unknown" and tracked.get("queue_length") == 1 and more == {}, str(tracked))
+    behind = dict(landed)
+    behind[K.SESSION_STATE] = {"model_type": "video", "gen": {"queue": [{"params": {"client_id": ID_C}}, {"params": {"client_id": ID_A}}], "in_progress": True}}
+    tracked, _ = _call(bridge, behind, "track", {"request_ids": [ID_A], "bridge_session": session})
+    r.check("a task behind another is waiting with its position, running loop or not", tracked["tracked"][ID_A] == {"state": "waiting", "position": 1, "queue_depth": 1}, str(tracked))
+    running = dict(landed)
+    running[K.SESSION_STATE] = {"model_type": "video", "gen": {"queue": [{"params": {"client_id": ID_A}}], "in_progress": True}}
+    tracked, _ = _call(bridge, running, "track", {"request_ids": [ID_A], "bridge_session": session})
+    r.check("a task at the head of a running loop is generating", tracked["tracked"][ID_A]["state"] == "generating" and tracked.get("generation_running") in (False, None), str(tracked))
+    tracked, _ = _call(bridge, fresh, "track", {"request_ids": [ID_A], "bridge_session": session})
+    r.check("once the task has left the queue a request this page saw admitted is finished, never unknown", tracked["tracked"][ID_A]["state"] == "finished", str(tracked))
+    clock.now += protocol.ADMISSION_RECORD_SECONDS + 1
+    bridge.ledger.get(session, ID_B)  # prunes the admission records
+    tracked, _ = _call(bridge, fresh, "track", {"request_ids": [ID_A], "bridge_session": session})
+    r.check("and stays finished long after the admission record itself is pruned", tracked["tracked"][ID_A]["state"] == "finished" and bridge.ledger.get(session, ID_A) is None)
+    clock.now += admission.TRACKED_ADMISSION_SECONDS + 1
+    bridge.ledger.remember_admitted(session, ID_B)
+    r.check("a day later the memory has lapsed", bridge.ledger.was_admitted(session, ID_A) is False and bridge.ledger.was_admitted(session, ID_B) is True)
+
+    tracked, _ = _call(bridge, fresh, "track", {"request_ids": [], "bridge_session": session})
+    r.check("a track with no ids is refused, with an empty answer", tracked.get("ok") is False and tracked.get("code") == "REQUEST_INVALID" and tracked.get("tracked") == {}, str(tracked))
+    tracked, _ = _call(bridge, fresh, "track", {"request_ids": ["nope"], "bridge_session": session})
+    r.check("and so is one with an id that is not one", tracked.get("ok") is False and tracked.get("code") == "REQUEST_INVALID")
+    tracked, _ = _call(bridge, fresh, "track", {"request_ids": [ID_A] * (protocol.MAX_TRACKED_REQUESTS + 1), "bridge_session": session})
+    r.check("and one that asks about too many", tracked.get("ok") is False)
+    other = plugin.bridge_session_for("another-page", "i")
+    tracked, _ = _call(bridge, fresh, "track", {"request_ids": [ID_A], "bridge_session": other})
+    r.check("another page's session cannot ask about this page's tasks", tracked.get("ok") is False and tracked.get("code") == "BRIDGE_SESSION_MISMATCH")
+
+    # -- the model a request insists on
+    ack, writes = _call(bridge, fresh, "queue", {"request_id": ID_B, "bridge_session": session, "prompt": "for another model", "model_type": "minimax_h3_fl2va"})
+    r.check("a request composed for another model is MODEL_CHANGED, and nothing is written",
+            ack.get("ok") is False and ack.get("code") == "MODEL_CHANGED" and ack.get("admission") == "refused" and not writes and bridge.ledger.owner(session) is None, str(ack))
+    ack, writes = _call(bridge, fresh, "queue", {"request_id": ID_B, "bridge_session": session, "prompt": "for this model", "model_type": "video"})
+    r.check("one composed for the model the page is on is admitted", ack.get("admission") == "requested" and _raw(writes.get(K.CLIENT_ID)) == ID_B, str(ack.get("code")))
+    ack, _ = _call(bridge, fresh, "queue", {"request_id": ID_C, "bridge_session": session, "prompt": "x", "model_type": "not a model!"})
+    r.check("a model type that is not one is REQUEST_INVALID", ack.get("ok") is False and ack.get("code") == "REQUEST_INVALID")
+    r.check("the shared normaliser carries the model type and hashes it into the payload",
+            protocol.normalize_queue_request({"request_id": ID_D, "model_type": "video"})[0].get("model_type") == "video"
+            and protocol.queue_payload_hash({"request_id": ID_D, "model_type": "video"}) != protocol.queue_payload_hash({"request_id": ID_D}))
+
+
 # ------------------------------------------------------------- the restore --
 
 
@@ -564,6 +638,7 @@ def run() -> Results:
         _pictures(root)
         request_checks(r, root)
         confirm_checks(r, root)
+        track_checks(r, root)
         restore_checks(r, root)
     return r
 

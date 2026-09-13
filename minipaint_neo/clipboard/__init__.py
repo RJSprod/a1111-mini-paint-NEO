@@ -14,6 +14,9 @@ The split:
 ``store``       the library: one folder on the Forge host, opaque asset ids,
                 containment, import, refresh, rename, delete, thumbnails.
 ``history``     the composer's draft and the recipes confirmed queued.
+``outbox``      the queue: every press a job the server owns, in press order.
+``enhance``     the prompt enhancer: ModelSwitchRefiner's MiniMax H3 writer,
+                the switch, the four system prompts and their overrides.
 ``routes``      a picture by its id, and bytes in.
 ``ui``          the tab: a browser on the left, a WanGP request composer on
                 the right, and the Add to Queue flow through

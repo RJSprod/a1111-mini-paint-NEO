@@ -146,7 +146,15 @@ needs one more variable, `generate_trigger`, and the module function
 `is_generation_in_progress`; a build that lacks the trigger says
 `capabilities.start: false` and every request is staged rather than
 started, and a build whose flag cannot be read answers `start: "unknown"`
-the same way.
+the same way. Bridge 1.4.0 (protocol 5) adds `track`: the page that admitted
+a request may ask where its task is in WanGP's queue - waiting with a
+position, generating at the head of a running loop, finished once a task
+this page saw queued is gone, unknown for a request it never admitted - read
+from the same `get_gen_info(state)` a confirmation reads and never written.
+A request may also name the model it was composed for (`model_type`); a page
+on another model refuses it with `MODEL_CHANGED` before anything is written.
+The model block gains `architecture`, through `get_base_model_type` when the
+definition does not carry one.
 
 Adding a new receiver - a control image, a positioned reference - is three
 declarations and no new machinery: a row in `compatibility.COMPONENTS`, a row

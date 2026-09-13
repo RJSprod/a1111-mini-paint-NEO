@@ -28,6 +28,15 @@
  * inside WanGP, from WanGP's own flag, and the result says "started" or
  * "queued". A press while WanGP is not running is refused, not stored.
  *
+ * Protocol 5: a job may be *enhanced* first - its prompt rewritten by the
+ * ModelSwitchRefiner extension's MiniMax H3 writer for the model the page is
+ * on - and waits in the line as "enhancing" until that prompt exists; the
+ * whole line can be cancelled at once; and once WanGP has a job, the page
+ * that queued it keeps asking the bridge where its task is (waiting,
+ * generating, gone) and tells the server, so the list shows each job's life
+ * in WanGP and not only its admission. A job composed for one model is
+ * refused, untouched, when the page has moved to another.
+ *
  * The wrapper normalises its public contract itself and delegates the
  * mechanics to window.minipaintWanGP, so that a change to the internal wire
  * protocol cannot change what a caller of version 1 sees.
@@ -40,27 +49,37 @@ window.minipaintInterop = (function () {
     const STAGE_ROUTE = "/minipaint-interop/stage";
     const PREPARE_ROUTE = "/minipaint-interop/prepare";
     const RELEASE_ROUTE = "/minipaint-interop/release";
+    const ENHANCE_ROUTE = "/minipaint-interop/enhance";
     const OUTBOX_ROUTE = "/minipaint-interop/outbox";
     const OUTBOX_SUBMIT_ROUTE = OUTBOX_ROUTE + "/submit";
     const OUTBOX_CLAIM_ROUTE = OUTBOX_ROUTE + "/claim";
     const OUTBOX_REPORT_ROUTE = OUTBOX_ROUTE + "/report";
     const OUTBOX_CANCEL_ROUTE = OUTBOX_ROUTE + "/cancel";
+    const OUTBOX_CANCEL_ALL_ROUTE = OUTBOX_ROUTE + "/cancel_all";
     const OUTBOX_RETRY_ROUTE = OUTBOX_ROUTE + "/retry";
     const OUTBOX_ADOPT_ROUTE = OUTBOX_ROUTE + "/adopt";
+    const OUTBOX_TRACK_ROUTE = OUTBOX_ROUTE + "/track";
     const HEX32 = /^[0-9a-f]{32}$/;
     const CODE_RE = /^[A-Z][A-Z0-9_]{2,59}$/;
-    const PROMPT_MAX_CHARS = 4000;
+    const PROMPT_MAX_CHARS = 12000;
     const MAX_REFERENCES = 16;
     const KINDS = ["staged", "clipboard_asset"];
     const FIELDS = ["prompt", "start", "end", "references"];
     const START_MODES = ["auto", "never"];
     const ROUTES = ["generate", "queue"];
+    const TRACK_STATES = ["waiting", "generating", "finished", "unknown"];
+    const WANGP_OPEN = ["accepted", "waiting", "generating"];
     const STAGE_MAX_BYTES = 32 * 1024 * 1024;
     // How long enqueue() waits for its job to end before answering "pending"
-    // with the job id, and how many "not your turn yet" answers a pump takes
-    // before it stops and leaves the rest to the next press.
+    // with the job id; how long a pump keeps asking while the line is held
+    // up ahead of it (an enhancement can take minutes, and several queue);
+    // how often it says so; how often a queued job's task is looked for in
+    // WanGP, and for how long at most.
     const ENQUEUE_WAIT_MS = 5 * 60 * 1000;
-    const PUMP_MAX_WAITS = 2000;
+    const PUMP_MAX_WAIT_MS = 4 * 60 * 60 * 1000;
+    const WAITING_EVENT_MS = 3000;
+    const TRACK_MS = 3000;
+    const TRACK_MAX_MS = 6 * 60 * 60 * 1000;
     const PAGE_KEY = "minipaint.interop.page";
 
     // The sentences a caller may show. The server's errors.py owns the
@@ -70,7 +89,7 @@ window.minipaintInterop = (function () {
         BRIDGE_COMPONENT_INCOMPATIBLE: "This WanGP bridge needs to be reinstalled or updated.",
         REQUEST_INVALID: "That queue request is not one this extension can carry.",
         REQUEST_ID_CONFLICT: "That request id was already used for a different request.",
-        PROMPT_TOO_LONG: "The prompt is longer than WanGP queue requests allow (4000 characters).",
+        PROMPT_TOO_LONG: "The prompt is longer than WanGP queue requests allow (12000 characters).",
         IMAGE_STAGE_INVALID: "That image could not be staged for WanGP.",
         IMAGE_STAGE_EXPIRED: "The staged image is no longer there; stage it again.",
         HANDOFF_TOO_LARGE: "The image is too large for the WanGP handoff.",
@@ -82,9 +101,21 @@ window.minipaintInterop = (function () {
         WANGP_RESTARTED: "WanGP restarted while the request was on its way.",
         QUEUE_JOB_PENDING: "The request is waiting its turn in the queue outbox.",
         QUEUE_JOB_UNKNOWN: "That queue job is no longer in the outbox.",
+        ENHANCE_UNAVAILABLE: "Prompt enhancement is not available: ModelSwitchRefiner's LLM Studio is not installed, is switched off, or has no model set up.",
+        ENHANCE_MODEL_UNSUPPORTED: "Enhanced prompts need a MiniMax H3 model (FL2VA or Ref2VA) loaded in WanGP; the WanGP page is on another model.",
+        ENHANCE_PROMPT_REQUIRED: "Enhanced mode needs a prompt typed in Clipboard; the WanGP page's own prompt cannot be enhanced from here.",
+        ENHANCE_NO_VISION: "The language model running in LLM Studio cannot see pictures, so a request with an image cannot be enhanced.",
+        ENHANCE_IMAGE_UNREADABLE: "One of the pictures could not be read for the enhancement.",
+        ENHANCE_QUEUE_FULL: "LLM Studio's request queue is full; try again in a moment.",
+        ENHANCE_REFUSED: "LLM Studio refused the enhancement request.",
+        ENHANCE_FAILED: "The prompt enhancement failed.",
+        ENHANCE_CANCELLED: "The prompt enhancement was cancelled.",
+        ENHANCE_LOST: "The enhancement's record was gone before its result was collected; retry to enhance again.",
+        MODEL_CHANGED: "The WanGP page moved to another model after the prompt was enhanced for it; retry to enhance it for the current model.",
         AUTH_BOUNDARY_FAILED: "Sign in to Forge first.",
         INTERNAL_ERROR: "The WanGP integration hit an unexpected problem."
     };
+    const ENHANCING_MESSAGE = "The prompt is being enhanced before it is queued.";
 
     function bridge() {
         const api = window.minipaintWanGP;
@@ -266,20 +297,31 @@ window.minipaintInterop = (function () {
 
     function model(result) {
         const raw = result && result.model && typeof result.model === "object" ? result.model : {};
-        return { type: String(raw.type || "").slice(0, 120), label: String(raw.label || "").slice(0, 120), family: String(raw.family || "").slice(0, 120) };
+        return { type: String(raw.type || "").slice(0, 120), label: String(raw.label || "").slice(0, 120), family: String(raw.family || "").slice(0, 120),
+                 architecture: String(raw.architecture || "").slice(0, 120) };
+    }
+
+    /** Where a queued job's task is in WanGP, as the server last heard. */
+    function wangpOf(job) {
+        const raw = job && job.wangp && typeof job.wangp === "object" ? job.wangp : null;
+        if (!raw) { return null; }
+        return { state: String(raw.state || "accepted"), position: Number.isFinite(raw.position) ? raw.position : null,
+                 queue_depth: Number.isFinite(raw.queue_depth) ? raw.queue_depth : null };
     }
 
     /** The public result of section 11.5: statuses, codes, counts and the
      * model - never a prompt, a filename or a path. */
-    function publicResult(result, requestId, jobId) {
+    function publicResult(result, requestId, jobId, job) {
         const three = summary(result);
         const base = { request_id: requestId || "", job_id: jobId || "" };
+        if (job && job.enhance_requested) { base.enhanced = !!(job.enhance && job.enhance.state === "done"); }
         if (result && result.ok && (result.status === "queued" || result.status === "started")) {
             return Object.assign(base, {
                 ok: true, status: result.status, tasks_added: Math.max(1, Math.trunc(result.tasks_added || 1)),
                 queue_depth: Number.isFinite(result.queue_depth) && result.queue_depth >= 0 ? Math.trunc(result.queue_depth) : null,
                 route: ROUTES.indexOf(result.route) === -1 ? "" : result.route,
-                model: model(result), applied: three.applied, inherited: three.inherited, ignored: three.ignored
+                model: model(result), applied: three.applied, inherited: three.inherited, ignored: three.ignored,
+                wangp: wangpOf(job)
             });
         }
         const status = result && result.status === "unconfirmed" ? "unconfirmed" : result && result.status === "pending" ? "pending" : "refused";
@@ -292,23 +334,28 @@ window.minipaintInterop = (function () {
         if (!job || typeof job !== "object") { return publicResult({ ok: false, code: "QUEUE_JOB_UNKNOWN" }, "", ""); }
         const requestId = job.request && job.request.request_id ? job.request.request_id : "";
         if (job.state === "queued" || job.state === "started") {
-            return publicResult(Object.assign({ ok: true }, job.result || {}, { status: job.state }), requestId, job.job_id);
+            return publicResult(Object.assign({ ok: true }, job.result || {}, { status: job.state }), requestId, job.job_id, job);
+        }
+        if (job.state === "enhancing") {
+            return publicResult({ ok: false, status: "pending", code: "QUEUE_JOB_PENDING", message: ENHANCING_MESSAGE }, requestId, job.job_id, job);
         }
         if (job.state === "pending" || job.state === "sending") {
-            return publicResult({ ok: false, status: "pending", code: "QUEUE_JOB_PENDING" }, requestId, job.job_id);
+            return publicResult({ ok: false, status: "pending", code: "QUEUE_JOB_PENDING" }, requestId, job.job_id, job);
         }
         if (job.state === "cancelled") {
-            return publicResult({ ok: false, status: "refused", code: "QUEUE_REQUEST_REFUSED", message: "The request was cancelled before it was sent." }, requestId, job.job_id);
+            const error = job.error || {};
+            return publicResult({ ok: false, status: "refused", code: error.code || "QUEUE_REQUEST_REFUSED",
+                                  message: error.message || "The request was cancelled before it was sent." }, requestId, job.job_id, job);
         }
         const error = job.error || {};
-        return publicResult({ ok: false, status: job.state === "unconfirmed" ? "unconfirmed" : "refused", code: error.code, message: error.message }, requestId, job.job_id);
+        return publicResult({ ok: false, status: job.state === "unconfirmed" ? "unconfirmed" : "refused", code: error.code, message: error.message }, requestId, job.job_id, job);
     }
 
     /* ------------------------------------------------------------------ */
     /* Running one job against the live page                                 */
     /* ------------------------------------------------------------------ */
 
-    async function execute(request, hooks) {
+    async function execute(request, hooks, job) {
         const api = bridge();
         if (!api) { return refusal("IFRAME_NOT_READY", request.request_id); }
         const state = api.state();
@@ -317,6 +364,15 @@ window.minipaintInterop = (function () {
 
         let wire = { request_id: request.request_id, start: request.start || "auto" };
         if (request.prompt !== undefined) { wire.prompt = request.prompt; }
+        // A job composed for one model - an enhanced prompt is written for
+        // one - insists on it: the bridge refuses with MODEL_CHANGED when the
+        // page has moved. Refused here first when this side already knows.
+        const composedFor = job && job.model && typeof job.model.type === "string" ? job.model.type : "";
+        if (composedFor && job.enhance_requested) {
+            const live = state.model && typeof state.model.type === "string" ? state.model.type : "";
+            if (live && live !== composedFor) { return refusal("MODEL_CHANGED", request.request_id); }
+            wire.model_type = composedFor;
+        }
         let handoffs = [];
         if (hasImages(request)) {
             let prepared;
@@ -337,7 +393,8 @@ window.minipaintInterop = (function () {
         }
         note("run " + request.request_id.slice(0, 8) + ": " + (FIELDS.filter(function (field) {
             return field === "prompt" ? wire.prompt !== undefined : field === "references" ? !!wire.reference_handoff_ids : !!wire[field + "_handoff_id"];
-        }).join(", ") || "no overrides") + "; start " + wire.start + (handoffs.length ? " (" + handoffs.length + " image(s) prepared)" : ""));
+        }).join(", ") || "no overrides") + "; start " + wire.start + (handoffs.length ? " (" + handoffs.length + " image(s) prepared)" : "")
+            + (wire.model_type ? "; for model " + wire.model_type : ""));
 
         let result;
         try {
@@ -351,7 +408,7 @@ window.minipaintInterop = (function () {
                 post(RELEASE_ROUTE, JSON.stringify({ handoff_ids: handoffs })).catch(function () { /* the sweep will */ });
             }
         }
-        return publicResult(result, request.request_id);
+        return publicResult(result, request.request_id, job ? job.job_id : "", job);
     }
 
     /* ------------------------------------------------------------------ */
@@ -376,9 +433,9 @@ window.minipaintInterop = (function () {
     let pumping = false;
     let pumpAgain = false;
 
-    function emit(kind, job) {
+    function emit(kind, job, extra) {
         try {
-            document.dispatchEvent(new CustomEvent("minipaint:outbox", { detail: { kind: kind, job: job || null, page: pageId() } }));
+            document.dispatchEvent(new CustomEvent("minipaint:outbox", { detail: Object.assign({ kind: kind, job: job || null, page: pageId() }, extra || {}) }));
         } catch (e) { /* a listener is never worth an exception */ }
     }
 
@@ -396,7 +453,7 @@ window.minipaintInterop = (function () {
             onAdmitted: function () {
                 return post(OUTBOX_REPORT_ROUTE, JSON.stringify({ job_id: job.job_id, lease: lease, phase: "sent" }));
             }
-        });
+        }, job);
         let reported = null;
         try { reported = await post(OUTBOX_REPORT_ROUTE, JSON.stringify({ job_id: job.job_id, lease: lease, phase: "done", result: result })); } catch (e) { reported = null; }
         const settled = reported && reported.ok && reported.job ? reported.job : Object.assign({}, job, {
@@ -405,27 +462,35 @@ window.minipaintInterop = (function () {
         });
         settleWaiters(settled);
         emit("done", settled);
+        if (settled.state === "queued" || settled.state === "started") { startTracking(settled); }
         return settled;
     }
 
     /** Ask the server for this page's next job until there is none, one at a
      * time. Bounded: it stops when the outbox has nothing of this page's,
-     * when WanGP is not running, or after a long wait for another page's
-     * turn, and it never polls with nothing to do. */
+     * when WanGP is not running, or after a long wait for the line ahead -
+     * another page's turn, or a prompt still being written - and it never
+     * polls with nothing to do. */
     async function pump() {
         if (pumping) { pumpAgain = true; return; }
         pumping = true;
         try {
-            let waits = 0;
+            let waitingSince = 0;
+            let lastSaid = 0;
             while (true) {
                 pumpAgain = false;
                 let answer;
                 try { answer = await post(OUTBOX_CLAIM_ROUTE, JSON.stringify({ page: pageId() })); } catch (e) { answer = { ok: false, code: "INTERNAL_ERROR" }; }
-                if (!answer.ok) { note("pump: stopped - " + (code(answer.code) || "INTERNAL_ERROR")); emit("stopped", null); break; }
-                if (answer.job) { waits = 0; await runJob(answer.job, answer.lease); continue; }
+                if (!answer.ok) { note("pump: stopped - " + (code(answer.code) || "INTERNAL_ERROR")); emit("stopped", null, { code: code(answer.code) }); break; }
+                if (answer.job) { waitingSince = 0; await runJob(answer.job, answer.lease); continue; }
                 if (answer.wait && answer.pending > 0) {
-                    waits += 1;
-                    if (waits > PUMP_MAX_WAITS) { note("pump: another page has held the turn for a long while; this page resumes on its next press"); break; }
+                    const now = Date.now();
+                    if (!waitingSince) { waitingSince = now; }
+                    if (now - waitingSince > PUMP_MAX_WAIT_MS) { note("pump: the line ahead has not moved for hours; this page resumes on its next press"); break; }
+                    if (now - lastSaid >= WAITING_EVENT_MS) {
+                        lastSaid = now;
+                        emit("waiting", null, { reason: String(answer.reason || ""), pending: answer.pending, head: String(answer.job_id || "") });
+                    }
                     await pause(answer.wait);
                     continue;
                 }
@@ -461,6 +526,16 @@ window.minipaintInterop = (function () {
         });
     }
 
+    /** The WanGP model this page is on, as the bridge last described it. */
+    function liveModel() {
+        const api = bridge();
+        if (!api) { return null; }
+        try {
+            const state = api.state();
+            return state && state.model && typeof state.model === "object" ? model({ model: state.model }) : null;
+        } catch (e) { return null; }
+    }
+
     /**
      * Add the live WanGP page - with these overrides, if any - to its queue.
      * The request becomes a job in the server's outbox at once; this page
@@ -470,16 +545,25 @@ window.minipaintInterop = (function () {
      * ``unconfirmed``. Pass {wait: false} to get the job id back at once,
      * or {timeoutMs} to bound the wait; a wait that runs out answers
      * ``pending`` with the job id, never a guess.
+     *
+     * {enhance: true|false} asks for, or declines, the MiniMax H3 rewrite
+     * of the prompt before it is queued; left out, the Clipboard tab's
+     * switch decides. The model the page is on travels with the request so
+     * the server can choose the H3 variant; pass {model} to say it yourself.
      */
     function enqueue(request, options) {
         const normalised = normaliseRequest(request);
         if (!normalised.ok) { return Promise.resolve(normalised); }
         const wait = !(options && options.wait === false);
         const timeoutMs = options && Number.isFinite(options.timeoutMs) ? options.timeoutMs : ENQUEUE_WAIT_MS;
-        return post(OUTBOX_SUBMIT_ROUTE, JSON.stringify({ request: normalised.request, page: pageId(), origin: "api" })).then(function (answer) {
+        const body = { request: normalised.request, page: pageId(), origin: "api" };
+        if (options && typeof options.enhance === "boolean") { body.enhance = options.enhance; }
+        const known = options && options.model && typeof options.model === "object" ? model({ model: options.model }) : liveModel();
+        if (known) { body.model = known; }
+        return post(OUTBOX_SUBMIT_ROUTE, JSON.stringify(body)).then(function (answer) {
             if (!answer.ok || !answer.job) { return refusal(code(answer.code) || "REQUEST_INVALID", normalised.request.request_id, answer.message); }
             const job = answer.job;
-            note("enqueue " + job.job_id.slice(0, 8) + ": submitted (start " + (normalised.request.start || "auto") + ")");
+            note("enqueue " + job.job_id.slice(0, 8) + ": submitted (start " + (normalised.request.start || "auto") + (job.state === "enhancing" ? ", enhancing" : "") + ")");
             const promised = wait ? awaitJob(job.job_id, timeoutMs) : Promise.resolve(resultOfJob(job));
             emit("submitted", job);
             setTimeout(pump, 0);
@@ -507,6 +591,33 @@ window.minipaintInterop = (function () {
         });
     }
 
+    /** Everything still waiting - enhancing or pending, whichever page
+     * pressed it - cancelled at once. A job already being sent is left to
+     * finish and counted in the answer as in_flight. */
+    function cancelAll() {
+        return post(OUTBOX_CANCEL_ALL_ROUTE, JSON.stringify({ page: pageId() })).then(function (answer) {
+            if (answer.ok) {
+                for (const job of Array.isArray(answer.jobs) ? answer.jobs : []) { settleWaiters(job); }
+                note("cancel all: " + (answer.cancelled || 0) + " cancelled, " + (answer.in_flight || 0) + " in flight");
+                emit("changed", null, { cancelled: answer.cancelled || 0, in_flight: answer.in_flight || 0 });
+            }
+            return answer;
+        });
+    }
+
+    /** Callers waiting on jobs the server has since settled - cancelled
+     * from the tab, say - get their answers. */
+    async function refreshWaiters() {
+        const pendingIds = Object.keys(waiters);
+        if (!pendingIds.length) { return 0; }
+        const answer = await jobs();
+        let settled = 0;
+        for (const job of (answer && answer.jobs) || []) {
+            if (waiters[job.job_id] && ["queued", "started", "failed", "unconfirmed", "cancelled"].indexOf(job.state) !== -1) { settleWaiters(job); settled += 1; }
+        }
+        return settled;
+    }
+
     function retry(jobId) {
         return post(OUTBOX_RETRY_ROUTE, JSON.stringify({ job_id: String(jobId || ""), page: pageId() })).then(function (answer) {
             if (answer.ok && answer.job) { emit("submitted", answer.job); setTimeout(pump, 0); }
@@ -520,6 +631,93 @@ window.minipaintInterop = (function () {
             return answer;
         });
     }
+
+    /* ------------------------------------------------------------------ */
+    /* Tracking: where this page's queued tasks are in WanGP                 */
+    /* ------------------------------------------------------------------ */
+
+    const tracked = new Map();
+    let trackTimer = 0;
+    let tracking = false;
+
+    /** Follow a job WanGP took, until its task has left WanGP's queue or the
+     * page can no longer see it. Only this page's own jobs: the bridge
+     * answers for the session that admitted them. */
+    function startTracking(job) {
+        if (!job || !job.job_id || !job.request || !HEX32.test(String(job.request.request_id || ""))) { return false; }
+        if (job.page && job.page !== pageId()) { return false; }
+        const seen = wangpOf(job);
+        if (seen && WANGP_OPEN.indexOf(seen.state) === -1) { return false; }
+        if (!tracked.has(job.job_id)) { tracked.set(job.job_id, { request_id: job.request.request_id, since: Date.now() }); }
+        scheduleTrack(0);
+        return true;
+    }
+
+    function scheduleTrack(delay) {
+        if (trackTimer || !tracked.size) { return; }
+        trackTimer = setTimeout(function () { trackTimer = 0; trackTick(); }, delay);
+    }
+
+    async function trackTick() {
+        if (tracking || !tracked.size) { return; }
+        tracking = true;
+        try {
+            const api = bridge();
+            const now = Date.now();
+            for (const [jobId, entry] of Array.from(tracked.entries())) {
+                if (now - entry.since > TRACK_MAX_MS) { tracked.delete(jobId); }
+            }
+            if (!tracked.size) { return; }
+            if (!api || typeof api.trackQueue !== "function") { scheduleTrack(TRACK_MS); return; }
+            const state = api.state();
+            if (!state.ready || !state.track) { scheduleTrack(TRACK_MS); return; }
+            const entries = Array.from(tracked.entries()).slice(0, 32);
+            const answer = await api.trackQueue(entries.map(function (pair) { return pair[1].request_id; }));
+            if (!answer || !answer.ok) { scheduleTrack(TRACK_MS); return; }
+            for (const [jobId, entry] of entries) {
+                const found = answer.tracked && answer.tracked[entry.request_id];
+                if (!found) { continue; }
+                let reported = null;
+                try {
+                    reported = await post(OUTBOX_TRACK_ROUTE, JSON.stringify({ job_id: jobId, page: pageId(), state: found.state, position: found.position, queue_depth: found.queue_depth }));
+                } catch (e) { reported = null; }
+                if (found.state === "finished" || found.state === "unknown") { tracked.delete(jobId); }
+                if (reported && reported.ok && reported.job) {
+                    const seen = wangpOf(reported.job);
+                    if (seen && WANGP_OPEN.indexOf(seen.state) === -1) { tracked.delete(jobId); }
+                    emit("tracked", reported.job);
+                } else if (reported && reported.ok === false && (code(reported.code) === "QUEUE_JOB_UNKNOWN" || code(reported.code) === "REQUEST_INVALID")) {
+                    // The server no longer holds the job, or it is not this page's to report on: nothing left to follow.
+                    tracked.delete(jobId);
+                }
+            }
+            if (tracked.size) { scheduleTrack(TRACK_MS); }
+        } finally {
+            tracking = false;
+        }
+    }
+
+    /** After a reload: pick up this page's queued jobs whose tasks were last
+     * seen still in WanGP. Bounded by the same clock as a fresh track. */
+    async function resumeTracking() {
+        const answer = await jobs();
+        let count = 0;
+        for (const job of (answer && answer.jobs) || []) {
+            if ((job.state === "queued" || job.state === "started") && job.page === pageId()) {
+                const seen = wangpOf(job);
+                if (!seen || WANGP_OPEN.indexOf(seen.state) !== -1) {
+                    const updated = Number(job.updated || 0) * 1000;
+                    if (updated && Date.now() - updated > TRACK_MAX_MS) { continue; }
+                    if (startTracking(job)) { count += 1; }
+                }
+            }
+        }
+        return count;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Capabilities                                                          */
+    /* ------------------------------------------------------------------ */
 
     /**
      * What the live page can take right now. Advisory: a job is judged
@@ -541,6 +739,7 @@ window.minipaintInterop = (function () {
                 ready: answer.ready === true,
                 queue: answer.queue === true,
                 start: answer.start === true,
+                track: answer.track === true,
                 generation_running: typeof answer.generation_running === "boolean" ? answer.generation_running : null,
                 model: model(answer),
                 inputs: {
@@ -554,18 +753,35 @@ window.minipaintInterop = (function () {
         });
     }
 
+    /** Whether prompts are enhanced, and whether they can be: the tab's
+     * switch, the LLM side, the variants and the slot rules. From the server. */
+    async function enhance() {
+        try {
+            const response = await fetch(ENHANCE_ROUTE, { credentials: "same-origin", cache: "no-store" });
+            const payload = await response.json();
+            return payload && typeof payload === "object" ? payload : { ok: false, code: "INTERNAL_ERROR" };
+        } catch (e) {
+            return { ok: false, code: "INTERNAL_ERROR", message: sentence("INTERNAL_ERROR") };
+        }
+    }
+
     return {
         version: VERSION,
         contract: CONTRACT,
         wangp: {
             capabilities: capabilities,
+            enhance: enhance,
             stageImage: stageImage,
             enqueue: enqueue,
             jobs: jobs,
             cancel: cancel,
+            cancelAll: cancelAll,
             retry: retry,
             adopt: adopt,
             pump: pump,
+            track: startTracking,
+            resumeTracking: resumeTracking,
+            refreshWaiters: refreshWaiters,
             pageId: pageId
         },
         // The sentence for a code, for a caller that wants the same words.

@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.3.0"
+BRIDGE_VERSION = "1.4.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -74,6 +74,8 @@ QUEUE_BUSY = "QUEUE_BUSY"
 QUEUE_REQUEST_REFUSED = "QUEUE_REQUEST_REFUSED"
 ADMISSION_UNCONFIRMED = "ADMISSION_UNCONFIRMED"
 WANGP_VALIDATION_REFUSED = "WANGP_VALIDATION_REFUSED"
+#: Protocol 5: a request composed for one model reached a page on another.
+MODEL_CHANGED = "MODEL_CHANGED"
 
 
 class BridgeError(Exception):
@@ -306,6 +308,9 @@ GLOBALS: typing.Tuple[str, ...] = (
     # a module function so that what the bridge reads is live, not a value
     # copied once at injection. It is what decides generate versus queue.
     "is_generation_in_progress",
+    # Protocol 5: the base model a finetune stands on, for the model block -
+    # an H3 finetune is still an H3 model to a prompt written for one.
+    "get_base_model_type",
 )
 
 #: What the queue operation cannot do without. The image send keeps working
@@ -972,13 +977,16 @@ class Compatibility:
         definition: typing.Any = None,
         model_type: typing.Any = "",
     ) -> typing.Dict[str, str]:
-        """The model block of the receiver answer: type, label, family.
+        """The model block of the receiver answer: type, label, family, and
+        (protocol 5) architecture.
 
-        Strings only, and only the three the protocol names. The bridge does
+        Strings only, and only the four the protocol names. The bridge does
         not publish a model database and MiniPaint does not keep one; this is
-        for the diagnostics line and the send log. A type and definition
-        already read for this page (``page_model``) are used as given; the
-        process-wide globals are the fallback for a page that agrees with them.
+        for the diagnostics line, the send log, and - the architecture - for
+        a caller that writes a prompt for one model family. A type and
+        definition already read for this page (``page_model``) are used as
+        given; the process-wide globals are the fallback for a page that
+        agrees with them.
         """
         current = self.selection_is_current(selected)
         if not model_type:
@@ -987,10 +995,19 @@ class Compatibility:
             definition = self.host.read_global("model_def") if current else None
         label = _walk(definition, ("name",)) or _walk(definition, ("label",))
         family = _walk(definition, ("family",)) or _walk(definition, ("architecture",))
+        architecture = _walk(definition, ("architecture",))
+        if not architecture and model_type:
+            base = self.host.read_global("get_base_model_type")
+            if callable(base):
+                try:
+                    architecture = base(model_type)
+                except Exception:
+                    architecture = ""
         return {
             "type": _short(model_type),
             "label": _short(label) or _short(model_type),
             "family": _short(family),
+            "architecture": _short(architecture),
         }
 
     # -- what this page's model allows: layer A, read the way Wan2GP reads it --
@@ -1174,6 +1191,9 @@ class Compatibility:
                 # the queue set plus the generate trigger. Without it "auto"
                 # still queues, and says so.
                 "start": bool(ready and not self.queue_missing() and not self.start_missing()),
+                # Protocol 5. Where this page's admitted tasks are in WanGP's
+                # queue: needs the same session state the queue needs.
+                "track": bool(ready and not self.queue_missing()),
                 # Theme is presentation. Section 27.1: it may fail on its own
                 # without taking image handoff with it, so it is reported
                 # separately and never gates ``ready``.

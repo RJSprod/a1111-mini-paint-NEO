@@ -39,7 +39,7 @@ from PIL import Image  # noqa: E402
 
 from minipaint_neo import interop  # noqa: E402
 from minipaint_neo.clipboard import config as clipboard_config  # noqa: E402
-from minipaint_neo.clipboard import history, outbox  # noqa: E402
+from minipaint_neo.clipboard import enhance, history, outbox  # noqa: E402
 from minipaint_neo.clipboard import store as clipboard_store  # noqa: E402
 from minipaint_neo.clipboard import ui as clipboard_ui  # noqa: E402
 from minipaint_neo.wangp import config as wangp_config  # noqa: E402
@@ -54,6 +54,8 @@ VIDEO_MODEL = {
     "image_ref_choices": {"choices": [("None", ""), ("People / Objects", "I"), ("Landscape then people", "KI")], "letters_filter": "KFI"},
 }
 TEXT_ONLY_MODEL = {"name": "Text only", "image_prompt_types_allowed": "T"}
+#: A MiniMax H3 model as Wan2GP defines one: its type names the variant.
+H3_MODEL = {"name": "MiniMax H3 FL2VA", "architecture": "minimax_h3_fl2va", "image_prompt_types_allowed": "TSEV"}
 PAGE_PROMPT = "the page's own prompt"
 
 ID_A = "0123456789abcdef0123456789abcdef"
@@ -144,7 +146,7 @@ class _Wgp:
     """What the plugin sees of Wan2GP: the hooks, and the injected globals."""
 
     def __init__(self):
-        self.definitions = {"video": VIDEO_MODEL, "text": TEXT_ONLY_MODEL}
+        self.definitions = {"video": VIDEO_MODEL, "text": TEXT_ONLY_MODEL, "minimax_h3_fl2va": H3_MODEL}
         self.inserts = []
         self.scripts = []
         self.unique = 0
@@ -253,7 +255,7 @@ def build_wangp(clock):
     with gr.Blocks(analytics_enabled=False) as demo:
         state = gr.State({"model_type": "video", "gen": {"queue": [], "queue_errors": {}}})
         current_gallery_tab = gr.State(0)
-        model_choice = gr.Dropdown(["video", "text"], value="video", label="model")
+        model_choice = gr.Dropdown(["video", "text", "minimax_h3_fl2va"], value="video", label="model")
         image_mode = gr.Number(value=0, visible=False)
         with gr.Row(visible=False) as image_start_row:
             image_start = gr.Gallery(label="start", type="pil")
@@ -460,7 +462,7 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
     plugin_session = hello.get("bridge_session")
     r.check("a hello through Gradio is ready and offers the queue",
             hello.get("ready") is True and hello.get("capabilities", {}).get("queue") is True and protocol.valid_handoff_id(plugin_session or ""), json.dumps(hello)[:200])
-    r.check("and speaks protocol 4", hello.get("protocol") == 4 and hello.get("bridge_version") == "1.3.0")
+    r.check("and speaks protocol 5", hello.get("protocol") == 5 and hello.get("bridge_version") == "1.4.0")
     r.check("and offers start, with WanGP idle", hello.get("capabilities", {}).get("start") is True and hello.get("generation_running") is False, json.dumps(hello.get("capabilities")))
 
     def queue(request_id, **fields):
@@ -675,6 +677,73 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
     interop.release(wire["handoff_ids"])
     page.finish_run()
 
+    # -- 11b. an enhanced press on an H3 model, through to WanGP and back out of its queue
+    from test_clipboard_enhance import FakeApi
+
+    fake = FakeApi()
+    enhance.use_api(fake)
+    try:
+        page.choose_model("minimax_h3_fl2va")
+        described = page.bridge({"op": "receivers", "request_id": "r-h3", "channel_id": "c" * 32})
+        model_block = described.get("model") or {}
+        r.check("the bridge's own model block names the H3 model and its architecture",
+                model_block.get("type") == "minimax_h3_fl2va" and model_block.get("architecture") == "minimax_h3_fl2va" and model_block.get("label") == "MiniMax H3 FL2VA", json.dumps(model_block))
+        r.check("the tab's line, fed that block, says ready for FL2VA", 'data-state="ready"' in tab.toggle_enhance(True, json.dumps(model_block)))
+        tab.assign("ref", ref_asset.asset_id)
+        instruction, line, listing, button = tab.prepare_queue("a rough idea for the H3 model", page_id, json.dumps(model_block))
+        job = outbox.jobs()[-1]
+        r.check("the press is an enhancing job for FL2VA, its first frame described and its reference left out",
+                job["state"] == "enhancing" and job["enhance"]["variant"] == "fl2va" and job["enhance"]["dropped"] == ["references"]
+                and fake.submissions[-1]["images"] == ["first_frame"] and line.startswith("Enhancing the prompt as FL2VA"), line)
+        r.check("the pump is told to wait for it", outbox.claim(page_id).get("reason") == "enhancing")
+        fake.run_next()
+        fake.finish(job["enhance"]["llm_id"], "ENHANCED: a rough idea, written at length for H3")
+        claimed = outbox.claim(page_id)
+        request = claimed["job"]["request"]
+        r.check("once written, the page claims the job carrying the enhanced prompt and the model it was written for",
+                request["prompt"].startswith("ENHANCED") and claimed["job"]["model"]["type"] == "minimax_h3_fl2va" and claimed["job"]["enhance"]["prompt_original"] == "a rough idea for the H3 model")
+        wire = interop.prepare(interop.normalize_public_request(request))
+        ack = queue(request["request_id"], prompt=wire["prompt"], start_handoff_id=wire["start_handoff_id"], reference_handoff_ids=wire["reference_handoff_ids"],
+                    start=wire["start"], model_type=claimed["job"]["model"]["type"])
+        r.check("the bridge admits it for the model the page is on", ack.get("admission") == "requested" and ack.get("route") == "generate", json.dumps(ack)[:200])
+        outbox.report(job["job_id"], claimed["lease"], "sent")
+        status = confirm(request["request_id"])
+        tasks = stand.tasks_for(request["request_id"])
+        r.check("WanGP's task carries the written prompt and the first frame; the reference, which this FL2VA model does not take, is reported ignored",
+                status.get("status") == "started" and len(tasks) == 1 and tasks[0]["params"]["prompt"].startswith("ENHANCED") and len(_images(tasks[0], "image_start")) == 1
+                and not _images(tasks[0], "image_refs") and any(item.get("field") == "references" for item in ack.get("ignored") or []), json.dumps(ack)[:200] + " " + str(status.get("status")))
+        reported = outbox.report(job["job_id"], claimed["lease"], "done", {
+            "ok": True, "status": status.get("status"), "request_id": request["request_id"], "tasks_added": status.get("tasks_added"), "queue_depth": status.get("queue_depth"),
+            "route": status.get("route"), "applied": status.get("applied"), "inherited": status.get("inherited"), "ignored": status.get("ignored"), "model": status.get("model")})
+        r.check("the outbox says started, generating in WanGP", reported["state"] == "started" and reported["wangp"]["state"] == "generating")
+
+        def track(*ids):
+            return page.bridge({"op": "track", "request_id": "t-" + ids[0][:8], "channel_id": "c" * 32, "queue": {"request_ids": list(ids), "bridge_session": session_of()}})
+
+        tracked = track(request["request_id"])
+        r.check("a track through Gradio finds the task generating at the head of the running loop",
+                tracked.get("ok") is True and tracked["tracked"][request["request_id"]]["state"] == "generating" and tracked.get("queue_length") == 1, json.dumps(tracked)[:200])
+        page.finish_run()
+        tracked = track(request["request_id"])
+        r.check("once the run is over the task is gone and the request, once seen queued, is finished", tracked["tracked"][request["request_id"]]["state"] == "finished", json.dumps(tracked)[:200])
+        outbox.track(job["job_id"], page_id, tracked["tracked"][request["request_id"]])
+        listing, text_line, history_listing, button = tab.refresh_outbox(page_id)
+        record = history.load_history()[0]
+        r.check("the tab shows it left WanGP's queue and the history keeps the typed prompt with the written one",
+                "Left WanGP" in listing and record["prompt_override"] == "a rough idea for the H3 model" and record["enhanced_prompt"].startswith("ENHANCED"), json.dumps(record)[:200])
+        interop.release(wire["handoff_ids"])
+
+        # the page moves to another model: a request composed for the H3 one is refused untouched
+        page.choose_model("video")
+        moved = queue("abcdabcd1234123456785678aaaabbbb", prompt="written for H3", model_type="minimax_h3_fl2va")
+        r.check("a request composed for the model the page has left is MODEL_CHANGED, and nothing is written",
+                moved.get("ok") is False and moved.get("code") == "MODEL_CHANGED" and page.value("client_id") == "" and page.value("prompt") == PAGE_PROMPT, json.dumps(moved)[:200])
+        tab.slot_action("clear:ref")
+        tab.toggle_enhance(False, "")
+    finally:
+        enhance.use_api(None)
+        enhance.set_enabled(False)
+
     # -- 12. another page is another owner
     other = Page(client, config, "page-two", plugin, handed, initial, controls)
     other_hello = other.bridge({"op": "hello", "request_id": "r3", "channel_id": "d" * 32})
@@ -697,7 +766,8 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
     log = process_log.path()
     written = pathlib.Path(log).read_text(encoding="utf-8") if os.path.isfile(log) else ""
     r.check("the Forge-side log holds no prompt text, no filename and no path",
-            "override prompt" not in written and "first.png" not in written and str(base) not in written and "from the Clipboard tab" not in written, written[-300:])
+            "override prompt" not in written and "first.png" not in written and str(base) not in written and "from the Clipboard tab" not in written
+            and "rough idea" not in written and "ENHANCED" not in written, written[-300:])
 
 
 def run() -> Results:
@@ -711,9 +781,11 @@ def run() -> Results:
         process_log.use_log_dir(base / "logs")
         clipboard_store.reset_for_tests()
         outbox.reset_for_tests()
+        enhance.reset_for_tests()
         try:
             run_checks(r, base)
         finally:
+            enhance.reset_for_tests()
             outbox.reset_for_tests()
             wangp_config.use_config_dir(None)
             clipboard_config.use_config_dir(None)

@@ -164,10 +164,15 @@ _GUARD = r"(?<![\w<>*])"
 #: No word boundary in front on purpose: the name that matters most here is
 #: ``MINIPAINT_WANGP_BRIDGE_SECRET``, and an underscore is a word character,
 #: so a leading \\b would let every environment variable through.
+#:
+#: Taken to the end of the line for the reason a prompt is: a value that
+#: stopped at the first space left ``authorization: Bearer <the actual token>``
+#: reading as redacted while the token itself sat in the log, because
+#: ``Bearer`` is a word and the secret was the next one.
 _SECRET = re.compile(
     r"(?i)(secrets?|tokens?|passwords?|passwd|pwd|authorization|api[_-]?keys?|"
     r"access[_-]?keys?|refresh[_-]?tokens?|bearer|hf[_-]?tokens?|session[_-]?hash|"
-    r"cookies?|credentials?)\b\s*[=:]\s*\S+"
+    r"cookies?|credentials?)\b\s*[=:]\s*(?!\s*<hidden>).*"
 )
 
 #: Vendor-prefixed tokens, which travel on their own with no key in front.
@@ -271,6 +276,140 @@ _BARE = re.compile(
 #: one copy away from anywhere - so it is taken out of everything the tab can
 #: show. See ``private``.
 _LOOPBACK = re.compile(r"\b(127\.0\.0\.1|localhost|\[::1\])[:/](\d{2,5})\b")
+
+# -- relayed prose ----------------------------------------------------------
+#: Everything above takes out *shapes*. This pair takes out *sentences*, and it
+#: exists because of one writer: WanGP's own prompt enhancer, which streams the
+#: prompt it has just written straight to stdout as a paragraph with no key in
+#: front of it. ``_TEXT_KEY`` cannot see that - there is no key to see - so
+#: seven prompts reached a log file that promises in its own header not to
+#: carry any. Only text this process did not write is judged this way; see
+#: ``Relay``.
+
+#: Punctuation a sentence puts around a word, stripped before a token is
+#: judged. "building." and "building" are the same word, and a rule that
+#: disagrees is a rule that a comma defeats.
+_WORD_EDGES = "\"'`.,;:!?()[]{}<>*\u2014\u2013-\u2026"
+
+#: Markers that make a line machine output. Enough to *clear* the latch below
+#: and never enough to keep a line the sentence test has already called prose:
+#: a prompt carrying a timecode, a bracketed shot heading or a stray angle
+#: bracket would otherwise buy its way through on a technicality.
+_MACHINE = re.compile(
+    r"""
+      %\|                            # a progress bar
+    | \b(?:it|steps|tok|B)/s\b       # a rate
+    | ^\s*File\s"                    # a traceback frame
+    | Traceback\s\(most\srecent
+    | \^\^\^
+    | \bline\s\d+,\sin\s
+    | \[[A-Za-z][^\]]{0,30}\]        # a bracketed tag: [GGUF], [WanGP][Triton]
+    | <[a-z][a-z0-9_-]{0,15}>        # a placeholder one of the rules above wrote
+    | \w+_\w+                        # a snake_case identifier
+    | \w+\(                          # a call: the source line under a frame
+    """,
+    re.VERBOSE,
+)
+
+#: WanGP names the prompt enhancer before it runs one, every time - as a
+#: progress bar, a loaded module or a settings note. That announcement is the
+#: only warning there is that the next thing on the pipe may be a prompt.
+_ENHANCER = re.compile(r"(?i)prompt[ _-]?enhanc")
+
+#: How many plain words in a row make a sentence. Measured against a real
+#: 12,774-line WanGP log rather than guessed: the machine lines in it top out
+#: at 16 words in a row (a torch OOM message, a CUDA warning), and the
+#: shortest prompt that leaked ran to 30. Nothing at all falls between. 22
+#: sits in that empty middle - far enough above 16 that a chatty new status
+#: line does not vanish, far enough below 30 that a prompt does not survive.
+PROSE_WORDS = 22
+
+#: Longer than any word a sentence uses, so an identifier that happens to be
+#: all letters does not read as one.
+_LONGEST_WORD = 20
+
+
+def _longest_word_run(text: str) -> int:
+    """The most plain words this line says in a row.
+
+    A plain word is alphabetic and nothing else: no digit, no underscore, no
+    slash, no bracket. Machine output is mostly tokens that are none of those
+    things - identifiers, numbers, units, paths, placeholders - so its runs
+    keep stopping. A sentence is the thing that does not stop.
+    """
+    best = current = 0
+    for token in text.split():
+        word = token.strip(_WORD_EDGES)
+        if word and word.isalpha() and len(word) <= _LONGEST_WORD:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 0
+    return best
+
+
+def reads_as_prose(text: typing.Any) -> bool:
+    """Whether this line is somebody's words rather than a program's.
+
+    Fails closed. A line this cannot make up its mind about is treated as
+    prose, because the cost of being wrong in that direction is a status line
+    nobody reads and the cost of being wrong in the other is a prompt in a
+    file the header calls safe to attach.
+    """
+    try:
+        return _longest_word_run(str(text)) >= PROSE_WORDS
+    except Exception:  # pragma: no cover - the whole point is that it cannot raise
+        return True
+
+
+class Relay:
+    """``line``, for text this process did not write.
+
+    One per draining thread: the latch is per-stream state, and two children
+    must not share it.
+
+    Two defences, because the first one is a threshold and a threshold is a
+    guess about text nobody has written yet:
+
+    *The sentence test.* A relayed line that reads as prose is replaced
+    whole. This is what catches the enhancer's paragraph, which has no key in
+    front of it and so is invisible to every rule above.
+
+    *The enhancer latch.* From the moment WanGP names its prompt enhancer
+    until the next line that is plainly machine output, a line without a
+    machine marker is withheld whatever its length. That is what catches a
+    prompt too short - or too finely chopped by the pipe - for the sentence
+    test to be sure about on its own.
+
+    What is withheld becomes ``<prompt>`` rather than nothing, so the log
+    still says that WanGP spoke and that this is what was taken out.
+    """
+
+    def __init__(self) -> None:
+        self._armed = False
+
+    def line(self, text: typing.Any, limit: int = 0) -> str:
+        """One relayed line, scrubbed, and emptied of prose if it is any."""
+        try:
+            cleaned = line(text, limit)
+            if not cleaned.strip():
+                return cleaned
+            machine = bool(_MACHINE.search(cleaned))
+            if reads_as_prose(cleaned) or (self._armed and not machine):
+                self._armed = False
+                return PROMPT
+            # The announcement arms; anything else that is plainly a program
+            # talking disarms. Checked in that order because the announcement
+            # is itself usually a progress bar, and would otherwise disarm
+            # itself on the way past.
+            if _ENHANCER.search(cleaned):
+                self._armed = True
+            elif machine:
+                self._armed = False
+            return cleaned
+        except Exception:  # pragma: no cover - a relay that throws must not leak
+            return PROMPT
+
 
 # -- registered roots -------------------------------------------------------
 

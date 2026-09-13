@@ -93,6 +93,21 @@ FORBIDDEN_ARGUMENTS = ("--listen", "--share", "--open-browser", "--server-name=0
 #: child's torch.
 FORGE_ALLOCATOR_VARIABLES = ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF")
 
+#: What we put back in their place. Dropping Forge's two variables leaves the
+#: child on PyTorch's default caching allocator, and that allocator hands back
+#: a fixed segment it cannot grow: a long WanGP session ends up holding a
+#: couple of gigabytes it has reserved, cannot use for the next block, and
+#: will not release. Four OOMs in one week's log died that way - two of them
+#: asking for 1.3 GiB with 1.9 GiB sitting reserved-but-unallocated on a card
+#: reporting zero free.
+#:
+#: ``expandable_segments`` is the setting PyTorch's own OOM message names for
+#: exactly that, and it is *not* the setting that crashed the prompt enhancer:
+#: that was ``backend:cudaMallocAsync``, a different knob on the same variable,
+#: and it stays out. Set rather than inherited, because what Forge chose for
+#: Forge's torch is not a decision about the child's.
+CHILD_ALLOCATOR_CONF = "expandable_segments:True"
+
 #: How many times a start may lose the port race before it gives up. The
 #: window between "this port was free" and "the child bound it" is small but
 #: real, and the only honest fix is to try again on a different number.
@@ -222,6 +237,9 @@ def build_environment(
     # they were WanGP's own. See FORGE_ALLOCATOR_VARIABLES for the crash.
     for key in FORGE_ALLOCATOR_VARIABLES:
         child.pop(key, None)
+    # ...and the one allocator setting we do want the child to have. See
+    # CHILD_ALLOCATOR_CONF: it is the fragmentation fix, not the crash.
+    child["PYTORCH_ALLOC_CONF"] = CHILD_ALLOCATOR_CONF
 
     child["CUDA_VISIBLE_DEVICES"] = _gpu_uuid_of(config)
     child["GRADIO_ROOT_PATH"] = DEFAULT_PROXY_PATH
@@ -547,6 +565,9 @@ def _drain(child: _Child) -> None:
     stream = getattr(child.process, "stdout", None) or getattr(child.process, "stderr", None)
     if stream is None:
         return
+    # One relay per draining thread. It carries the enhancer latch, which is
+    # state about *this* stream and must not be shared with another child's.
+    relay = scrub.Relay()
     try:
         while True:
             raw = stream.readline(STDERR_MAX_LINE)
@@ -562,7 +583,10 @@ def _drain(child: _Child) -> None:
             # user's prompts and output filenames; relaying that verbatim is
             # what put them in the console in the first place.
             body = line.rstrip("\r\n")
-            stripped = scrub.line(body, limit=STDERR_MAX_LINE)
+            # ``Relay`` rather than ``scrub.line``: WanGP prints prose as well
+            # as status, and its prompt enhancer streams a finished prompt to
+            # stdout with no key in front of it for any rule to catch.
+            stripped = relay.line(body, limit=STDERR_MAX_LINE)
             child.stderr_tail.append(stripped)
             # The child's own words, in the one place a user can read them.
             # This is where WanGP says which plugins it loaded, and it is the

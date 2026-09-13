@@ -70,6 +70,11 @@ LEAKS = (
     ("MINIPAINT_WANGP_BRIDGE_SECRET=o4Zq1v-not-a-real-one", "o4Zq1v"),
     ("hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345 loaded", "AbCdEfGhIj"),
     ("instance 9f3c2b1a4d5e6f708192a3b4c5d6e7f8 ready", "9f3c2b1a"),
+    # The value is the word after the scheme, not the scheme: a rule that
+    # stopped at the first space redacted "Bearer" and published the token.
+    ("authorization: Bearer eyJhbGciOiJIUzI1NiJ9.QQQQQQQQQQQQ", "eyJhbGci"),
+    ("Authorization = Basic cm9zYWxpbmQ6aHVudGVyMg==", "cm9zYWxpbmQ"),
+    ("cookie: session=abc; hf_token=QQQQQQQQQQQQQQQQQQQQ", "hf_token=Q"),
 )
 
 #: What a failure is actually diagnosed from. None of it identifies anybody,
@@ -310,12 +315,133 @@ def transfer_log_checks(r: Results) -> None:
         r.check(f"a malformed record is rendered, not raised ({odd!r:.24})", survived)
 
 
+def relayed_prose_checks(r: Results) -> None:
+    """The sentence, which no rule about shapes can see.
+
+    WanGP's prompt enhancer streams the prompt it has just written straight to
+    stdout: no key, no quotes, no filename, nothing for ``_TEXT_KEY`` to match
+    on. Seven of them reached a real log file that way before this existed.
+    The lines below are that sequence, in the order the pipe produced it.
+    """
+    # The enhancer's bar, the prompt it just wrote, the next thing the model
+    # did. Only the middle one belongs to a person.
+    bar = " Qwen3.5 prompt enhancement (vllm): 100%|##########| 1/1 [00:09<00:00,  9.36s/steps]"
+    prose = (
+        "she steps through the doorway and turns to look back at him while the light "
+        "behind her fades to nothing and the room falls quiet again"
+    )
+    after = " H3 denoising Spectrum anchor capture:   0%|          | 0/6 [00:00<?, ?steps/s]"
+
+    relay = scrub.Relay()
+    said = [relay.line(one, limit=1000) for one in (bar, prose, after)]
+    r.check("the enhancer's own progress bar survives", "Qwen3.5 prompt enhancement" in said[0], said[0])
+    r.check("the prompt it streamed does not", said[1].strip() == scrub.PROMPT, said[1])
+    r.check("none of the prompt's words survive",
+            not any(word in said[1] for word in ("doorway", "fades", "quiet")), said[1])
+    r.check("the next machine line survives", "H3 denoising" in said[2], said[2])
+
+    # The latch: a prompt too short for the sentence test is still a prompt,
+    # and the enhancer having just been named is the only warning there is.
+    short = scrub.Relay()
+    short.line(bar, limit=1000)
+    withheld = short.line(f"{PERSON} steps outside.", limit=1000)
+    r.check("a short line right after the enhancer is withheld too",
+            withheld.strip() == scrub.PROMPT, withheld)
+    r.check("and the name in it is gone with it", PERSON not in withheld, withheld)
+
+    # ...and the latch lets go, or it would eat the rest of the run.
+    short.line(after, limit=1000)
+    resumed = short.line("Loaded 3 models in 4.2 seconds", limit=1000)
+    r.check("the latch lets go once the machine is talking again",
+            "3 models in 4.2 seconds" in resumed, resumed)
+
+    # A sentence needs no latch: the enhancer is not the only thing that can
+    # print one, and the test above would pass a prose leak from anywhere else.
+    r.check("prose on its own is withheld with no latch armed",
+            scrub.Relay().line(prose, limit=1000).strip() == scrub.PROMPT)
+
+    # The other half of the promise. Every one of these is a line the OOM in
+    # the log this was written from was actually diagnosed from, and each is
+    # longer and wordier than most - which is exactly what makes them the ones
+    # a sentence test gets wrong.
+    machine = (
+        "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 40.00 MiB. GPU 0 has a "
+        "total capacity of 31.84 GiB of which 0 bytes is free.",
+        "This is technically allowed, but may indicate you are losing the last user-visible "
+        "tensor through which the allocation can be reclaimed.",
+        "The whole model was pinned to reserved RAM: 57 large blocks spread across 12043.01 MB",
+        "Async loading plan for model 'transformer' : base size of 58.22 MB will be preloaded "
+        "with a 210.29 MB async circular shuttle",
+        "[GGUF] linear backend=PyTorch dense weight materialization for Q5_K.",
+        "    return self.token_refiner([self.condition_proj(text_states[0])]).unsqueeze(0)",
+        "  File \"/opt/wangp/models/minimax_h3/pipeline.py\", line 893, in generate",
+    )
+    quiet = scrub.Relay()
+    for one in machine:
+        out = quiet.line(one, limit=1000)
+        r.check(f"a diagnosis survives the sentence test: {one[:38]}...",
+                out.strip() != scrub.PROMPT, out)
+
+    # Structural, like the two the module already promises.
+    twice = scrub.Relay()
+    once = twice.line(prose, limit=1000)
+    r.check("a withheld line stays withheld and stops shrinking",
+            scrub.Relay().line(once, limit=1000).strip() == scrub.PROMPT, once)
+    r.check("two relays do not share a latch", scrub.Relay()._armed is False)
+    for bad in (None, 3, object(), b"\xff\xfe"):
+        r.check(f"a relay never raises on {type(bad).__name__}",
+                isinstance(scrub.Relay().line(bad), str))
+
+
+def drain_prose_checks(r: Results) -> None:
+    """...and the drain is what has to be using it.
+
+    The rule being right is worth nothing if the one writer that matters goes
+    around it, so this is the same sequence again through the real drain, on
+    the three surfaces it feeds.
+    """
+    from test_wangp_runtime import FakeProcess, unused_pid
+
+    prose = (
+        "she steps through the doorway and turns to look back at him while the light "
+        "behind her fades to nothing and the room falls quiet again"
+    )
+    spoken = [
+        b" Qwen3.5 prompt enhancement (vllm): 100%|#####| 1/1 [00:09<00:00,  9.36s/steps]\n",
+        prose.encode("utf-8") + b"\n",
+        b"ModuleNotFoundError: No module named 'torch'\n",
+    ]
+    process = FakeProcess(unused_pid(), stderr_lines=list(spoken))
+    child = runtime._Child(process, "instance", WANGP_ROOT, 7862)
+
+    journal.clear()
+    console = io.StringIO()
+    import sys
+
+    previous = sys.stderr
+    sys.stderr = console
+    try:
+        runtime._drain(child)
+    finally:
+        sys.stderr = previous
+
+    surfaces = (("console", console.getvalue()), ("tab console", journal.text()),
+                ("crash tail", "\n".join(child.tail())))
+    for name, written in surfaces:
+        r.check(f"the {name} loses the streamed prompt", "doorway" not in written, written)
+        r.check(f"the {name} says something was taken out", scrub.PROMPT in written, written)
+        r.check(f"the {name} still says what went wrong",
+                "No module named 'torch'" in written, written)
+
+
 def run() -> Results:
     r = Results("logging privacy")
     kept_roots = scrub.known_roots()
     try:
         scrubber_checks(r)
         child_output_checks(r)
+        relayed_prose_checks(r)
+        drain_prose_checks(r)
         process_log_checks(r)
         journal_checks(r)
         transfer_log_checks(r)

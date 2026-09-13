@@ -32,6 +32,7 @@ fills - so a failure to log is swallowed, deliberately and completely.
 
 from __future__ import annotations
 
+import atexit
 import datetime
 import pathlib
 import threading
@@ -54,9 +55,12 @@ MAX_BYTES = 2_000_000
 MAX_LINE = 1000
 
 _lock = threading.Lock()
-#: Set once the first line is written, so the header is not repeated and a
-#: filesystem that refuses us is not asked again on every line of output.
-_state: typing.Dict[str, typing.Any] = {"opened": False, "broken": False}
+#: ``opened``  the session header has been written, so it is not repeated.
+#: ``broken``  the filesystem refused us; do not ask again on every line.
+#: ``handle``  the open file, held between lines (see ``_emit``).
+#: ``size``    bytes in the file this handle is writing to, counted rather
+#:             than stat()ed, so rotation costs no syscall of its own.
+_state: typing.Dict[str, typing.Any] = {"opened": False, "broken": False, "handle": None, "size": 0}
 
 
 def use_log_dir(directory: typing.Optional[typing.Any]) -> None:
@@ -67,6 +71,8 @@ def use_log_dir(directory: typing.Optional[typing.Any]) -> None:
     in the extension calls it.
     """
     global LOG_DIR, LOG_PATH, PREVIOUS_PATH
+    with _lock:
+        _shut()
     LOG_DIR = pathlib.Path(str(directory)) if directory is not None else root_path / "logs"
     LOG_PATH = LOG_DIR / "wangp-log.txt"
     PREVIOUS_PATH = LOG_DIR / "wangp-log.previous.txt"
@@ -79,16 +85,69 @@ def _stamp() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _write(text: str) -> None:
-    """Append, rotating at the cap. Caller holds the lock."""
+def _shut() -> None:
+    """Let the open file go, flushing whatever is in it. Caller holds the lock."""
+    handle = _state.get("handle")
+    _state["handle"] = None
+    _state["size"] = 0
+    if handle is None:
+        return
+    try:
+        handle.flush()
+    except Exception:
+        pass
+    try:
+        handle.close()
+    except Exception:
+        pass
+
+
+def _open() -> typing.Any:
+    """The file, opened if it is not already. Caller holds the lock."""
+    handle = _state.get("handle")
+    if handle is not None:
+        return handle
     LOG_DIR.mkdir(mode=0o755, parents=True, exist_ok=True)
     try:
-        if LOG_PATH.stat().st_size > MAX_BYTES:
-            LOG_PATH.replace(PREVIOUS_PATH)
+        _state["size"] = LOG_PATH.stat().st_size
     except OSError:
-        pass  # not there yet, which is the common case on the first line
-    with LOG_PATH.open("a", encoding="utf-8") as handle:
-        handle.write(text)
+        _state["size"] = 0  # not there yet, which is the common case
+    handle = LOG_PATH.open("a", encoding="utf-8")
+    _state["handle"] = handle
+    return handle
+
+
+def _write(text: str) -> None:
+    """Append, rotating at the cap. Caller holds the lock.
+
+    The file is held open between lines. It used to be opened, stat()ed,
+    written and closed for every line, and the busiest writer here is the
+    thread draining a child process that treats each step of a progress bar
+    as a line - so that was five or six syscalls per line, all of them in the
+    way of the pipe being emptied.
+
+    What is not deferred is the flush. This file exists to survive the thing
+    that went wrong, and the last second before a model takes the process
+    down with it is the part worth having; a buffer holding that second when
+    the crash arrives would defeat the reason the file is written at all. So
+    every line is flushed, which is still one syscall in place of six, and
+    the bound the specification asks for - no less often than once a second -
+    is met by a wide margin.
+    """
+    handle = _open()
+    # Rotation is decided from a count kept here rather than a stat() per
+    # line. MAX_BYTES is read each time because a test moves it.
+    if _state["size"] and _state["size"] + len(text.encode("utf-8", "replace")) > MAX_BYTES:
+        # Windows will not rename a file that is still open, so let go first.
+        _shut()
+        try:
+            LOG_PATH.replace(PREVIOUS_PATH)
+        except OSError:
+            pass
+        handle = _open()
+    handle.write(text)
+    handle.flush()
+    _state["size"] = _state.get("size", 0) + len(text.encode("utf-8", "replace"))
 
 
 def note(source: typing.Any, message: typing.Any) -> None:
@@ -143,6 +202,16 @@ def begin(instance_id: typing.Any = "", detail: typing.Any = "") -> None:
 def end(instance_id: typing.Any = "", detail: typing.Any = "") -> None:
     short = str(instance_id or "")[:8] or "unknown"
     note("session", f"--- WanGP run {short} ended --- {scrub.line(detail)}".rstrip())
+
+
+def close() -> None:
+    """Flush and let the file go. Registered for process exit; also the seam a
+    caller uses when it knows the run is over."""
+    with _lock:
+        _shut()
+
+
+atexit.register(close)
 
 
 def tail(limit: int = 40) -> typing.List[str]:

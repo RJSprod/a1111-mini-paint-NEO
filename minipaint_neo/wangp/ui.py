@@ -69,6 +69,11 @@ REFRESH_ELEM_ID = "wangp_refresh_request"
 BROWSER_CHECK_ELEM_ID = "wangp_browser_check"
 SESSION_ELEM_ID = "wangp_session"
 CLIENT_LOG_ELEM_ID = "wangp_client_log"
+#: Where the browser posts its own diagnostic lines. A plain route, for the
+#: reason ``send_log`` gives for having one: this has to keep working when
+#: what failed *is* the Gradio round trip, and a diagnostic line is the last
+#: thing that should be riding on the machinery it is there to describe.
+CLIENT_LOG_ROUTE = "/minipaint-wangp/client-log"
 
 #: The only URL the browser is ever given for WanGP. A path, so it resolves
 #: against the Forge origin the page is already on; it must stay equal to
@@ -812,6 +817,7 @@ def acknowledge_auth(ticked: typing.Any, candidate: typing.Any) -> dict:
 #: Gradio hands over twice is written once, and one it skipped over is caught
 #: up from the window the next value carries. A few pages at most; bounded.
 _client_log_seen: typing.Dict[str, int] = {}
+_CLIENT_LOG_INSTALLED = "_minipaint_wangp_client_log_installed"
 _CLIENT_LOG_PAGES = 32
 _CLIENT_LOG_LINES = 64
 
@@ -851,6 +857,57 @@ def record_client_log(text: typing.Any) -> None:
         _client_log_seen[page] = seen
     except Exception:
         return
+
+
+def install_client_log(app: typing.Any) -> None:
+    """Put the browser's log route on Forge's FastAPI app.
+
+    The lines used to arrive through a hidden Textbox's ``change`` event, so
+    every batch of diagnostics was a full Gradio round trip - during a send,
+    which is exactly when the page has the most to say and the least room to
+    say it in. The payload and its sequence rules are unchanged; only the way
+    it travels is.
+    """
+    if getattr(app, _CLIENT_LOG_INSTALLED, False):
+        return
+    try:
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        async def route(request: typing.Any) -> typing.Any:
+            if not _client_log_allowed(request):
+                return JSONResponse({"ok": False}, status_code=401, headers={"Cache-Control": "no-store"})
+            try:
+                body = await request.body()
+            except Exception:
+                return JSONResponse({"ok": False}, status_code=400, headers={"Cache-Control": "no-store"})
+            # record_client_log takes the text and never raises; it does the
+            # trimming, the scrubbing and the per-page sequence bookkeeping.
+            record_client_log(body.decode("utf-8", "replace"))
+            return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
+
+        route.__name__ = "_minipaint_wangp_client_log"
+        app.router.routes[0:0] = [Route(CLIENT_LOG_ROUTE, endpoint=route, methods=["POST"])]
+        setattr(app, _CLIENT_LOG_INSTALLED, True)
+    except Exception as error:  # pragma: no cover - depends on the host
+        scrub.console(f"the browser log route could not be registered ({error}); those lines are lost "
+                      "and nothing else is.", _LOG_PREFIX)
+
+
+def _client_log_allowed(request: typing.Any) -> bool:
+    """The same sign-in the proxy applies, where it is available.
+
+    ``proxy`` is imported here rather than at the top of the module, as every
+    other caller in this file does: a bare name would raise NameError, the
+    except below would swallow it, and the gate would stand open on every
+    request while looking exactly like a gate.
+    """
+    try:
+        from . import proxy
+
+        return bool(proxy.signed_in(request))
+    except Exception:
+        return True
 
 
 def record_session(channel: typing.Any, text: typing.Any) -> None:
@@ -1348,7 +1405,10 @@ def create_ui() -> None:
         return show()
 
     shell["session"].change(fn=record_session, inputs=[shell["channel"], shell["session"]], outputs=[])
-    shell["client_log"].change(fn=record_client_log, inputs=[shell["client_log"]], outputs=[])
+    # B7: no event is bound here any more. The browser posts its diagnostic
+    # lines to CLIENT_LOG_ROUTE, so they no longer travel as a Gradio round
+    # trip taken during the send they are describing. The hidden box itself
+    # stays until C2 does the component inventory; nothing writes it now.
     open_request.click(fn=open_tab, inputs=[shell["channel"]], outputs=painted)
     refresh_request.click(fn=show, inputs=[shell["channel"]], outputs=painted)
     start_btn.click(fn=open_tab, inputs=[shell["channel"]], outputs=painted)

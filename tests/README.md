@@ -5,6 +5,30 @@ python tests/run.py                                   # image maths, both fronte
 FORGE_ROOT=/path/to/forge-neo python tests/browser_smoke.py   # the real extension in a real browser
 ```
 
+## The Gradio the suite runs against
+
+Pin Gradio to the version the target Forge ships, and check a change against
+that one before shipping it:
+
+```
+pip install "gradio==4.40.0" "gradio-client==1.2.0" "huggingface_hub==0.24.6"
+```
+
+This is not housekeeping. Gradio's event graph behaves differently across major
+versions, and a page that assembles cleanly on one can have a button that does
+nothing on another. A change verified only against whatever Gradio happened to
+be installed is a change verified against the wrong thing. `huggingface_hub` is
+pinned because 4.40 imports a name that later releases removed.
+
+To check a second version, build a venv for it rather than moving the system
+install:
+
+```
+python3 -m venv --system-site-packages /tmp/venv-gradio6
+/tmp/venv-gradio6/bin/pip install "gradio==6.27.0"
+/tmp/venv-gradio6/bin/python tests/run.py
+```
+
 Nothing in `run.py` starts the WebUI. `tests/stubs/modules` stands in for the
 handful of `modules.*` names the extension touches, `tests/stubs/modules_forge`
 for Forge's canvas module (its markup, its hidden image textbox, and the

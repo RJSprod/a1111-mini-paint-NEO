@@ -725,6 +725,68 @@ window.minipaintWanGP = (function () {
         });
     } catch (e) { /* an old browser keeps the timer and nothing else changes */ }
 
+    /* ------------------------------------------------------------------ */
+    /* What the page's own lifecycle did                                     */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Say when this page stopped running and when it started again.
+     *
+     * Everything this extension does while a request is in flight is done by
+     * JavaScript in this page, so a page the browser has stopped running is a
+     * queue that has stopped moving - and on a phone that is the ordinary
+     * outcome of switching apps, not an edge case. From the outside it looks
+     * exactly like a bug in the queue: nothing happens, then everything
+     * happens at once when the tab comes back.
+     *
+     * The two are impossible to tell apart from a log of what the queue did,
+     * and identical to a person watching. They are trivial to tell apart from
+     * a log that also says when the page was running. So the page says it,
+     * and says how long it was away, because the length is the part that
+     * matters: a gap in the queue's activity either lines up with one of
+     * these or it does not, and that single fact decides where to look next.
+     *
+     * Transitions only - four listeners and no timer. Nothing is polled to
+     * produce this.
+     */
+    function watchLifecycle() {
+        let awaySince = 0;
+
+        const gone = function (why) {
+            if (awaySince) { return; }
+            awaySince = Date.now();
+            say("lifecycle: the page stopped running (" + why + ")");
+            if (logFlush) { clearTimeout(logFlush); logFlush = 0; }
+            flushLog();
+        };
+
+        const back = function (why) {
+            if (!awaySince) { say("lifecycle: " + why); return; }
+            const away = Math.round((Date.now() - awaySince) / 100) / 10;
+            awaySince = 0;
+            say("lifecycle: the page is running again after " + away + "s (" + why + ")"
+                + "; anything this page owed was owed for that long");
+        };
+
+        try {
+            document.addEventListener("visibilitychange", function () {
+                if (document.visibilityState === "hidden") { gone("hidden"); } else { back("visible"); }
+            });
+            // The Page Lifecycle events, where the engine has them. A frozen
+            // page runs nothing at all - not even a timer - which is the state
+            // a throttled one is usually mistaken for.
+            document.addEventListener("freeze", function () { gone("frozen"); });
+            document.addEventListener("resume", function () { back("resumed"); });
+            // A page restored from the back-forward cache was not reloaded and
+            // kept its state, so its queue picks up rather than starting over.
+            window.addEventListener("pageshow", function (event) {
+                if (event && event.persisted) { back("restored from the back-forward cache"); }
+            });
+            window.addEventListener("offline", function () { say("lifecycle: the browser reports it is offline"); });
+            window.addEventListener("online", function () { say("lifecycle: the browser reports it is online again"); });
+        } catch (e) { /* an engine without these tells us nothing, and costs nothing */ }
+    }
+
     function report(roundTrip, detail) {
         try {
             writeBox(BROWSER_CHECK_ELEM_ID, JSON.stringify({
@@ -1579,10 +1641,11 @@ window.minipaintWanGP = (function () {
 
     try {
         if (document.readyState === "loading") {
-            document.addEventListener("DOMContentLoaded", function () { startAuthProbe(); watchRoot(0); }, { once: true });
+            document.addEventListener("DOMContentLoaded", function () { startAuthProbe(); watchRoot(0); watchLifecycle(); }, { once: true });
         } else {
             startAuthProbe();
             watchRoot(0);
+            watchLifecycle();
         }
     } catch (e) {
         // A page this file cannot bind to is a Send menu without WanGP lines,

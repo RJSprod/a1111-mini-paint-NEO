@@ -74,11 +74,6 @@ CLIENT_LOG_ELEM_ID = "wangp_client_log"
 #: what failed *is* the Gradio round trip, and a diagnostic line is the last
 #: thing that should be riding on the machinery it is there to describe.
 CLIENT_LOG_ROUTE = "/minipaint-wangp/client-log"
-#: Put the frame timer's state in the journal before a report is built from it.
-FRAMES_JS = (
-    "async () => { try { if (window.minipaintWanGP && window.minipaintWanGP.reportFrames) "
-    "{ await window.minipaintWanGP.reportFrames(); } } catch (e) {} }"
-)
 
 #: The only URL the browser is ever given for WanGP. A path, so it resolves
 #: against the Forge origin the page is already on; it must stay equal to
@@ -2055,12 +2050,7 @@ def _wire_management(parts: dict, error_reinit_btn, painted, show, error_restart
                 probe_result = None
         return diagnostics.report(probe_result=probe_result)
 
-    # The frame timer's state lives only in the browser, and the report is
-    # usually collected on a page that has had no reason to shake hands since
-    # Forge restarted - so ask for it first and wait, rather than hoping a
-    # handshake happened to have run. An awaited js step finishes before the
-    # chained server step begins, which is what makes the ordering safe.
-    parts["collect"].click(None, js=FRAMES_JS).then(fn=collect, inputs=[], outputs=[parts["diagnostics"]])
+    parts["collect"].click(fn=collect, inputs=[], outputs=[parts["diagnostics"]])
 
     def read_console():
         return journal.text()

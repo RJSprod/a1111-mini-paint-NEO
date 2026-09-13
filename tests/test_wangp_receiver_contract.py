@@ -37,6 +37,7 @@ import hashlib  # noqa: E402
 import json  # noqa: E402
 import pathlib  # noqa: E402
 import tempfile  # noqa: E402
+import typing  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 
@@ -674,6 +675,31 @@ def dangling(page: dict) -> list:
             if any(item not in known for item in dependency["inputs"] + dependency["outputs"])]
 
 
+def button_fills_box(page: dict, button_id: str, box_id: str) -> typing.Tuple[bool, str]:
+    """Whether pressing ``button_id`` actually puts something in ``box_id``.
+
+    Not "does an event exist" - that passes for a chain which never writes the
+    box. The dependency the button itself triggers must have a backend
+    function and must name the box among its outputs. A first step that is
+    browser-only leaves the box to a ``.then()`` the press may never reach, and
+    the visible result is a button that does nothing at all.
+    """
+    button = component_of(page, button_id)
+    box = component_of(page, box_id)
+    if button is None or box is None:
+        return False, f"missing component ({button_id}={button is not None}, {box_id}={box is not None})"
+    triggered = [dependency for dependency in page["dependencies"]
+                 if any(target[0] == button["id"] for target in dependency.get("targets") or [])]
+    if not triggered:
+        return False, "the button triggers nothing"
+    first = triggered[0]
+    if not first.get("backend_fn"):
+        return False, "the press runs only in the browser; nothing fills the box"
+    if box["id"] not in (first.get("outputs") or []):
+        return False, f"the press writes {first.get('outputs')}, not the box"
+    return True, ""
+
+
 def tab_checks(r: Results) -> None:
     """Section 7: one tab, four containers, and a failure that stays inside it."""
     saved_hooks = list(script_callbacks.callbacks["after_component"])
@@ -696,6 +722,18 @@ def tab_checks(r: Results) -> None:
             ids = elem_ids(page)
 
             r.check("the page has the WanGP tab", "tab_wangp" in ids)
+
+            # A button whose only job is to fill a box must fill it on the
+            # press itself. Chaining the server step behind a browser-only
+            # first step shipped once and the report field simply stayed
+            # empty, with every structural check still green - "the events
+            # resolve" is not the same question as "the button works".
+            for button_id, box_id in (
+                ("wangp_diagnostics_collect", "wangp_diagnostic"),
+                ("wangp_console_refresh", "wangp_console"),
+            ):
+                ok, why = button_fills_box(page, button_id, box_id)
+                r.check(f"pressing {button_id} fills {box_id}", ok, why)
             r.check("and exactly one of it",
                     len([c for c in page["components"] if c["props"].get("elem_id") == "tab_wangp"]) == 1)
             for container in (wangp_ui.SETUP_ROOT_ID, wangp_ui.STARTING_ROOT_ID,

@@ -26,6 +26,10 @@ SUITES = [
     # What every writer in the extension is allowed to put on a screen or in a
     # file. Ahead of the WanGP suites because it is the rule they all obey.
     "test_logging_privacy",
+    # The event spine the integrations below are moving onto: the cursor, the
+    # bounded replay, the targeted advisory event, and the presence grace that
+    # keeps a remote browser's turn across a dropped connection.
+    "test_events",
     # The WanGP integration, in the order it is built: what survives a restart,
     # the files on their way out, the vocabulary all three sides share, the
     # child process, the route in front of it, and finally the gate that

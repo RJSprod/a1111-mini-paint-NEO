@@ -50,7 +50,7 @@ import time
 import typing
 
 from .. import scrub
-from . import discovery, errors, journal, process_log
+from . import discovery, errors, journal, lock, process_log, vram
 from .config import DEFAULT_PROXY_PATH, runtime_dir
 from .errors import IntegrationError
 
@@ -108,6 +108,13 @@ POLL_INTERVAL = 0.25
 
 #: How long a terminate is given before the group is killed outright.
 STOP_TIMEOUT = 20.0
+#: How long the emergency restart waits for every process of the child's
+#: tree to be gone after the stop, before it escalates and then reports
+#: what is left.
+TREE_EXIT_TIMEOUT = 15.0
+#: How long the emergency restart waits for a launch in progress to let go
+#: of the runtime lock once its child has been terminated.
+LOCK_WAIT_TIMEOUT = 30.0
 
 #: The child's stderr, kept for the crash screen. Bounded twice - lines and
 #: line length - because the reader has to keep draining the pipe no matter
@@ -630,6 +637,10 @@ class Runtime:
         self.error_code = ""
         self.error_detail = ""
         self._child: typing.Optional[_Child] = None
+        #: The child a launch in progress is waiting on. Only ever read by
+        #: the emergency restart, which is the one caller allowed to end a
+        #: launch from outside the lock that ``start`` holds for its length.
+        self._launching: typing.Optional[_Child] = None
         self._secret = ""
         self._last_instance_id = ""
 
@@ -741,6 +752,7 @@ class Runtime:
             child.exit_code = None
         detail = f"WanGP exited with code {child.exit_code}"
         self._clear_instance()
+        _release_lock()
         self._fail(errors.PROCESS_EXITED, detail)
         self.state = CRASHED
         process_log.end(child.instance_id, detail)
@@ -774,6 +786,16 @@ class Runtime:
 
             root = self._validate(config, gpus)
 
+            # One managed WanGP per machine, not just per Forge: another
+            # Forge server holding the lock means its WanGP is the one to
+            # use, and starting a second on the same card is refused.
+            try:
+                lock.claim()
+            except IntegrationError as error:
+                raise self._fail(error.code, error.detail)
+            except Exception as error:  # the lock is a guard, never a reason not to run
+                journal.note("runtime", f"the WanGP lock could not be checked ({type(error).__name__}); continuing")
+
             self.state = STARTING
             self.error_code = ""
             self.error_detail = ""
@@ -786,9 +808,13 @@ class Runtime:
             try:
                 return self._launch(config, spawn, probe, root, handoff_root, deadline_span)
             except IntegrationError:
+                _release_lock()
                 raise
             except Exception as error:
+                _release_lock()
                 raise self._fail(errors.PROCESS_START_FAILED, f"{type(error).__name__}: {error}")
+            finally:
+                self._launching = None
 
     def _launch(self, config, spawn, probe, root, handoff_root, deadline_span) -> "Runtime":
         """The launch itself, with the lock already held. See ``start``."""
@@ -824,6 +850,7 @@ class Runtime:
                     raise self._fail(errors.PROCESS_START_FAILED, f"{command[0]}: {error}")
 
                 child = _Child(process, instance_id, root_text, port)
+                self._launching = child
                 threading.Thread(
                     target=_drain, args=(child,), name="minipaint-wangp-stderr", daemon=True
                 ).start()
@@ -948,9 +975,11 @@ class Runtime:
             settled = self.state if self.state in (REINIT_REQUIRED, INCOMPATIBLE) else STOPPED
             if child is None:
                 self.state = settled
+                _release_lock()
                 return
             self.state = STOPPING
             self._terminate(child, timeout)
+            _release_lock()
             self.state = settled
             if settled == STOPPED:
                 self.error_code = ""
@@ -1037,6 +1066,190 @@ class Runtime:
             self.stop()
             return self.start(config, **keywords)
 
+    # -- the emergency restart --------------------------------------------
+
+    def tree_pids(self, child: typing.Optional[_Child] = None) -> typing.List[int]:
+        """Every pid that belongs to the child's process group, leader first.
+
+        On Linux the group is read back from ``/proc``: a process is ours
+        when its group id is the one ``_default_spawn`` created for the
+        child, which is a fact the kernel keeps, not a name we match. Other
+        platforms answer with the leader alone - the job object (Windows)
+        and the group signal (macOS) still end the whole tree, this is only
+        what the report can *name*.
+        """
+        child = child or self._child
+        if child is None or not child.pid:
+            return []
+        found: typing.List[int] = [child.pid]
+        if child.pgid and os.name != "nt":
+            try:
+                entries = os.listdir("/proc")
+            except Exception:
+                entries = []
+            for entry in entries:
+                if not entry.isdigit():
+                    continue
+                pid = int(entry)
+                if pid == child.pid:
+                    continue
+                try:
+                    if os.getpgid(pid) == child.pgid:
+                        found.append(pid)
+                except Exception:
+                    continue
+        return found
+
+    def _still_alive(self, pids: typing.Sequence[int], pgid: typing.Optional[int]) -> typing.List[int]:
+        """Which of these pids still exist *and* are still in our group.
+
+        The group test is what makes a recycled pid harmless: a number handed
+        to an unrelated process after ours died has a different group.
+        """
+        remaining: typing.List[int] = []
+        for pid in pids:
+            if not lock.pid_alive(pid):
+                continue
+            if pgid and os.name != "nt":
+                try:
+                    if os.getpgid(pid) != pgid:
+                        continue
+                except Exception:
+                    continue
+            remaining.append(pid)
+        return remaining
+
+    def emergency_restart(
+        self,
+        config: typing.Any,
+        gpu_uuid: str = "",
+        runner: typing.Optional[typing.Callable[..., typing.Any]] = None,
+        start_async: typing.Optional[typing.Callable[[typing.Any], typing.Any]] = None,
+        timeout: float = STOP_TIMEOUT,
+        **start_keywords: typing.Any,
+    ) -> dict:
+        """The emergency option: end every process of the WanGP we started,
+        prove they are gone and that the card's memory came back, then start
+        a fresh one. Returns a report a screen can render.
+
+        Works while a launch is stuck as well: ``start`` holds the runtime
+        lock for the whole of a launch, so the child it is waiting on is
+        terminated first, which ends that launch, and the lock is then taken
+        the ordinary way. Every step is a line of the report and of the
+        journal; nothing here raises.
+        """
+        import subprocess
+
+        runner = runner or subprocess.run
+        report: typing.Dict[str, typing.Any] = {
+            "ok": False, "steps": [], "before": None, "after": None, "pids": [], "remaining": [],
+            "freed_mb": None, "verified": False, "started": "not requested", "gpu": bool(str(gpu_uuid or "").strip()),
+        }
+        steps = report["steps"]
+
+        def note(text: str) -> None:
+            steps.append(text)
+            journal.note("restart", text)
+
+        # A launch in progress owns the lock; end its child so that it lets go.
+        held = self._lock.acquire(timeout=0.5)
+        if not held:
+            launching = self._launching
+            if launching is not None:
+                note("a launch was still in progress; its process was ended first")
+                self._terminate(launching, timeout)
+            held = self._lock.acquire(timeout=LOCK_WAIT_TIMEOUT)
+            if not held:
+                note("the runtime is busy and did not let go in time; nothing was restarted")
+                return report
+        try:
+            child = self._child
+            pgid = child.pgid if child is not None else None
+            pids = self.tree_pids(child)
+            report["pids"] = list(pids)
+            before = vram.snapshot(gpu_uuid, runner)
+            report["before"] = before
+            if child is None:
+                note("no WanGP of ours was running")
+            else:
+                held_by_ours = [entry for entry in before["processes"] if entry["pid"] in pids]
+                if before["available"]:
+                    memory = before.get("memory") or {}
+                    note(
+                        f"before: {len(pids)} process(es) in WanGP's tree; "
+                        f"{len(held_by_ours)} of them on the GPU holding {vram.mib(sum(e['used_mb'] or 0 for e in held_by_ours))}; "
+                        f"the card had {vram.mib(memory.get('used_mb'))} of {vram.mib(memory.get('total_mb'))} in use"
+                    )
+                else:
+                    note(f"before: {len(pids)} process(es) in WanGP's tree; the GPU could not be read ({before['detail']})")
+
+            started_at = time.time()
+            self.stop(timeout)
+            note(f"stop: the tree was signalled and the child reaped in {time.time() - started_at:.1f}s")
+
+            deadline = time.time() + TREE_EXIT_TIMEOUT
+            remaining = self._still_alive(pids, pgid)
+            while remaining and time.time() < deadline:
+                time.sleep(POLL_INTERVAL)
+                remaining = self._still_alive(pids, pgid)
+            if remaining:
+                # Escalate to exactly the pids proved to be ours a moment ago,
+                # each checked again for its group before the signal.
+                for pid in remaining:
+                    try:
+                        if os.name != "nt":
+                            os.kill(pid, signal.SIGKILL)
+                    except Exception:
+                        pass
+                time.sleep(POLL_INTERVAL * 2)
+                remaining = self._still_alive(pids, pgid)
+            report["remaining"] = remaining
+            if pids:
+                note("every process of the tree has exited" if not remaining else f"{len(remaining)} process(es) of the tree would not exit: {remaining}")
+
+            after = vram.snapshot(gpu_uuid, runner)
+            report["after"] = after
+            ours_after = [entry for entry in after["processes"] if entry["pid"] in pids]
+            if before["available"] and after["available"]:
+                used_before = (before.get("memory") or {}).get("used_mb")
+                used_after = (after.get("memory") or {}).get("used_mb")
+                if used_before is not None and used_after is not None:
+                    report["freed_mb"] = max(0, int(used_before) - int(used_after))
+                others = [entry for entry in after["processes"] if entry["pid"] not in pids]
+                note(
+                    f"after: {len(ours_after)} process(es) of ours still on the GPU; "
+                    f"{vram.mib(report['freed_mb'])} freed; the card has {vram.mib(used_after)} in use"
+                    + (f", {vram.mib(sum(e['used_mb'] or 0 for e in others))} of it by {len(others)} process(es) this extension does not own" if others else "")
+                )
+                report["verified"] = not remaining and not ours_after
+            else:
+                note("after: the GPU could not be read, so VRAM is unverified; the process tree is verified by pid")
+                report["verified"] = not remaining and not pids or (not remaining)
+
+            _notify_restart()
+            note("every browser session and any queue job in flight was invalidated")
+
+            if start_async is not None:
+                try:
+                    start_async(config)
+                    report["started"] = "requested"
+                    note("WanGP is starting again")
+                except Exception as error:
+                    report["started"] = "failed"
+                    note(f"WanGP could not be asked to start again ({type(error).__name__})")
+            else:
+                try:
+                    self.start(config, **start_keywords)
+                    report["started"] = "started"
+                    note("WanGP started again")
+                except IntegrationError as error:
+                    report["started"] = "failed"
+                    note(f"WanGP did not start again: {error.code}")
+            report["ok"] = report["started"] in ("requested", "started") and not remaining
+            return report
+        finally:
+            self._lock.release()
+
 
 # ------------------------------------------------------------- the module --
 
@@ -1093,6 +1306,36 @@ def _handoff_root() -> str:
         return ""
 
 
+def _release_lock() -> None:
+    """Let the machine-wide lock go. Contained: a lock that cannot be dropped
+    is a stale file the next claim removes, not a reason to fail a stop."""
+    try:
+        lock.release()
+    except Exception:
+        pass
+
+
+def _notify_restart() -> None:
+    """Tell the parts that hold work against a run that the run is over.
+
+    The bridge sessions go through ``_clear_instance``; the queue outbox is
+    a later module and is told here, contained, so a Forge without it still
+    restarts.
+    """
+    try:
+        from . import bridge
+
+        bridge.registry().invalidate_instance("")
+    except Exception:
+        pass
+    try:
+        from ..clipboard import outbox
+
+        outbox.on_wangp_restart()
+    except Exception:
+        pass
+
+
 def _invalidate_bridge(instance_id: str) -> None:
     """Tell the session registry that everything bound to this run is stale.
 
@@ -1122,6 +1365,10 @@ def stop(timeout: float = STOP_TIMEOUT) -> None:
 
 def restart(config: typing.Any, **keywords: typing.Any) -> Runtime:
     return current().restart(config, **keywords)
+
+
+def emergency_restart(config: typing.Any, **keywords: typing.Any) -> dict:
+    return current().emergency_restart(config, **keywords)
 
 
 def health() -> dict:

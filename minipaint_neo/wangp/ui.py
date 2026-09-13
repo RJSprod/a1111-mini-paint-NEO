@@ -90,6 +90,15 @@ STATE_DEGRADED = "DEGRADED"
 STATE_ERROR = "ERROR"
 STATE_STOPPED = "STOPPED"
 
+RESTART_NOTICE = (
+    "**Restart WanGP now** is the emergency option. It ends every process of the WanGP this "
+    "extension started - the whole process tree, a generation in progress included - waits "
+    "until each one is gone, reads the chosen GPU before and after so the report can say how "
+    "much memory came back, invalidates every browser session and any queue request in flight, "
+    "and starts a fresh WanGP. It never touches a WanGP you started yourself, or any other "
+    "process on the card."
+)
+
 #: What the error surface may offer. Section 31 decides which, per code.
 ACTION_SETUP = "setup"
 ACTION_RESTART = "restart"
@@ -527,6 +536,69 @@ def reinitialize() -> dict:
         return {"ok": False, "steps": steps + [f"the setup could not be cleared ({error})"]}
 
     return {"ok": True, "steps": steps}
+
+
+def restart_wangp() -> dict:
+    """The emergency restart, from whichever button asked for it.
+
+    The runtime does the work and writes the report; this reads the setup
+    it needs (the GPU to read before and after) and hands the fresh start to
+    the lazy launcher, so the event that pressed the button returns as soon
+    as the old process is proved gone rather than when the new one has
+    loaded its models.
+    """
+    try:
+        active = config.load()
+    except errors.IntegrationError as error:
+        return {"ok": False, "steps": [f"the setup could not be read ({error.code}); nothing was restarted"], "started": "failed"}
+    if active is None:
+        return {"ok": False, "steps": ["WanGP is not set up; there is nothing to restart"], "started": "failed"}
+    gpu = active.gpu if isinstance(active.gpu, dict) else {}
+    try:
+        return runtime.current().emergency_restart(
+            active, gpu_uuid=str(gpu.get("uuid") or ""), start_async=lambda candidate: request_start(candidate)
+        )
+    except Exception as error:  # pragma: no cover - the runtime reports its own
+        scrub.traceback_now(_LOG_PREFIX)
+        return {"ok": False, "steps": [f"the restart raised an unexpected error ({type(error).__name__})"], "started": "failed"}
+
+
+def restart_report_markdown(report: typing.Mapping[str, typing.Any]) -> str:
+    """The report as the management panel shows it: what was found, what
+    was done, what came back. No path and no port; pids are the numbers a
+    person would see in their own task manager."""
+    head = "**WanGP restarted.**" if report.get("ok") else "**The restart did not complete.**"
+    lines = [head, ""]
+    lines.extend(f"- {step}" for step in report.get("steps") or [])
+    before = report.get("before") or {}
+    if before.get("processes"):
+        pids = set(report.get("pids") or [])
+        ours = [entry for entry in before["processes"] if entry.get("pid") in pids]
+        if ours:
+            lines.append("")
+            lines.append("Processes of WanGP's tree on the GPU before the stop:")
+            lines.append("")
+            lines.append("| pid | process | memory |")
+            lines.append("| --- | --- | --- |")
+            for entry in ours:
+                lines.append(f"| {entry.get('pid')} | {entry.get('name') or 'unknown'} | {_mib(entry.get('used_mb'))} |")
+    if report.get("remaining"):
+        lines.append("")
+        lines.append(f"Still running, and not ours to end by name: {', '.join(str(pid) for pid in report['remaining'])}. "
+                     "Check your task manager; these may be processes another WanGP or another program owns.")
+    if report.get("started") == "requested":
+        lines.append("")
+        lines.append("WanGP is starting again. The tab shows the starting card until it answers; press *Check again* there.")
+    return "\n".join(lines)
+
+
+def _mib(value: typing.Any) -> str:
+    try:
+        from . import vram
+
+        return vram.mib(value)
+    except Exception:
+        return "unknown"
 
 
 def restore_previous() -> dict:
@@ -1269,9 +1341,10 @@ def create_ui() -> None:
         return paint(view, _keep_or_mint(channel))
 
     def restart() -> tuple:
-        with contextlib.suppress(Exception):
-            runtime.stop()
-        request_start()
+        # The error surface's Restart is the same verified restart as the
+        # management panel's; its report lands in the panel, where the
+        # management wiring reads it back.
+        _last_restart["report"] = restart_wangp()
         return show()
 
     shell["session"].change(fn=record_session, inputs=[shell["channel"], shell["session"]], outputs=[])
@@ -1285,7 +1358,7 @@ def create_ui() -> None:
     # The console lives with the diagnostics, but it is the wizard that
     # fills it, so the wizard is handed the box to write into.
     _wire_wizard(wizard, shell, painted, show, manage["console"])
-    _wire_management(manage, shell["error_reinit"], painted, show)
+    _wire_management(manage, shell["error_reinit"], painted, show, error_restart=shell["restart"])
 
 
 # --------------------------------------------------------------- wizard ----
@@ -1813,6 +1886,11 @@ def _build_management() -> dict:
                 parts["confirm_no"] = gr.Button("Keep it as it is", elem_id="wangp_reinitialize_no")
         parts["status"] = gr.Markdown("")
 
+        gr.Markdown("#### WanGP process")
+        gr.Markdown(RESTART_NOTICE)
+        parts["restart_now"] = gr.Button("Restart WanGP now", variant="stop", elem_id="wangp_restart_now")
+        parts["restart_report"] = gr.Markdown("", elem_id="wangp_restart_report")
+
         gr.Markdown("#### Diagnostics")
         parts["diagnostics"] = _copyable_textbox()
         parts["collect"] = gr.Button("Copy diagnostic report", elem_id="wangp_diagnostics_collect")
@@ -1862,9 +1940,28 @@ def _copyable_textbox(label: str = "Diagnostic report", lines: int = 12, placeho
         return gr.Textbox("", **common)
 
 
-def _wire_management(parts: dict, error_reinit_btn, painted, show) -> None:
+#: The last emergency restart's report, so the error surface's Restart and
+#: the management panel's button show the same thing.
+_last_restart: typing.Dict[str, typing.Any] = {"report": None}
+
+
+def _wire_management(parts: dict, error_reinit_btn, painted, show, error_restart=None) -> None:
     def ask():
         return gr.update(visible=True), gr.update(open=True), ""
+
+    def restart_now():
+        report = restart_wangp()
+        _last_restart["report"] = report
+        return (restart_report_markdown(report), gr.update(open=True)) + show()
+
+    parts["restart_now"].click(fn=restart_now, inputs=[], outputs=[parts["restart_report"], parts["accordion"]] + painted)
+    if error_restart is not None:
+        # After the error surface's Restart has run (its own click handler
+        # writes the report), show it in the panel as well.
+        error_restart.click(
+            fn=lambda: restart_report_markdown(_last_restart["report"] or {"ok": False, "steps": ["no restart has run yet"]}),
+            inputs=[], outputs=[parts["restart_report"]],
+        )
 
     parts["reinit"].click(fn=ask, inputs=[], outputs=[parts["confirm"], parts["accordion"], parts["status"]])
     error_reinit_btn.click(

@@ -71,8 +71,18 @@ class PendingAdmission:
     #: Once a confirmation has seen a matching task, this never goes back:
     #: a fast task may leave the queue before the next confirmation.
     seen_queued: bool = False
+    #: The positive status that was seen: queued, or started (protocol 4).
+    seen_status: str = ""
     tasks_added_max: int = 0
     code: str = ""
+    #: Protocol 4: which of WanGP's triggers committed the task, what the
+    #: request asked about starting, what WanGP's flag said when the bridge
+    #: decided, and how many tasks were ahead of it when last seen.
+    route: str = ""
+    start_mode: str = protocol.START_AUTO
+    start_answer: str = protocol.START_AUTO
+    generation_running: typing.Optional[bool] = None
+    queue_depth: typing.Optional[int] = None
     #: The live value of each component this request changed, before it did.
     originals: typing.Dict[str, typing.Any] = dataclasses.field(default_factory=dict)
     #: What the bridge wrote into each of them.
@@ -99,11 +109,11 @@ class PendingAdmission:
         return not self.terminal and (now - self.created_at) > protocol.PENDING_ADMISSION_SECONDS
 
     def settle(self, status: str, code: str, now: float) -> None:
-        """Make the record terminal. A queued record stays queued."""
+        """Make the record terminal. A queued or started record stays so."""
         if self.terminal:
             return
         if self.seen_queued:
-            status, code = protocol.QUEUE_QUEUED, ""
+            status, code = (self.seen_status or protocol.QUEUE_QUEUED), ""
         self.status = status
         self.code = code
         self.terminal_at = now
@@ -123,6 +133,11 @@ class PendingAdmission:
             "model": dict(self.model),
         }
         out.update(self.summary)
+        out["route"] = self.route
+        out["start"] = self.start_answer
+        out["generation_running"] = self.generation_running
+        if self.queue_depth is not None:
+            out["queue_depth"] = self.queue_depth
         if self.code:
             out["code"] = self.code
         if self.restored:
@@ -303,6 +318,32 @@ def matching_tasks(gen: typing.Any, request_id: str) -> int:
     return count
 
 
+def task_position(gen: typing.Any, request_id: str) -> typing.Optional[int]:
+    """Where the request's first task sits in the queue: 0 is the head. None
+    when it is not there, or the queue cannot be read."""
+    if not isinstance(gen, dict):
+        return None
+    queue = gen.get("queue")
+    if not isinstance(queue, (list, tuple)):
+        return None
+    for index, task in enumerate(queue):
+        if not isinstance(task, dict):
+            continue
+        params = task.get("params")
+        client = params.get("client_id") if isinstance(params, dict) else None
+        if client is None:
+            client = task.get("client_id")
+        if client == request_id:
+            return index
+    return None
+
+
+def generating(gen: typing.Any) -> bool:
+    """Whether this page's generation loop is running, as WanGP's own record
+    says (``gen["in_progress"]``, set at the top of ``process_tasks``)."""
+    return isinstance(gen, dict) and gen.get("in_progress") is True
+
+
 def refusal_evidence(gen: typing.Any, request_id: str) -> bool:
     """Whether WanGP recorded a rejection for exactly this request.
 
@@ -335,9 +376,11 @@ __all__ = [
     "RESTORE_GROUPS",
     "galleries_match",
     "gallery_digests",
+    "generating",
     "letters",
     "matching_tasks",
     "refusal_evidence",
     "restore_plan",
+    "task_position",
     "unchanged",
 ]

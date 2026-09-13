@@ -28,6 +28,10 @@ BRIDGE_COMPONENT_INCOMPATIBLE = "BRIDGE_COMPONENT_INCOMPATIBLE"
 
 # -- the child process ------------------------------------------------------
 PROCESS_START_FAILED = "PROCESS_START_FAILED"
+WANGP_ALREADY_MANAGED = "WANGP_ALREADY_MANAGED"
+WANGP_NOT_RUNNING = "WANGP_NOT_RUNNING"
+QUEUE_JOB_PENDING = "QUEUE_JOB_PENDING"
+QUEUE_JOB_UNKNOWN = "QUEUE_JOB_UNKNOWN"
 PROCESS_EXITED = "PROCESS_EXITED"
 PORT_IN_USE = "PORT_IN_USE"
 LOOPBACK_BIND_FAILED = "LOOPBACK_BIND_FAILED"
@@ -115,6 +119,10 @@ MESSAGES: dict[str, str] = {
     HANDOFF_TOO_LARGE: "The image is too large for the WanGP handoff.",
     HANDOFF_DIGEST_MISMATCH: "The prepared image changed on the way to WanGP.",
     WANGP_RESTARTED: "WanGP restarted while the image was on its way.",
+    WANGP_ALREADY_MANAGED: "Another Forge on this machine is already running WanGP through this extension; use that one, or stop it first.",
+    WANGP_NOT_RUNNING: "WanGP is not running. Open the WanGP tab and start it before adding to its queue.",
+    QUEUE_JOB_PENDING: "The request is waiting its turn in the queue outbox.",
+    QUEUE_JOB_UNKNOWN: "That queue job is no longer in the outbox.",
     INTERNAL_ERROR: "The WanGP integration hit an unexpected problem.",
     REQUEST_INVALID: "That queue request is not one this extension can carry.",
     REQUEST_ID_CONFLICT: "That request id was already used for a different request.",

@@ -364,3 +364,59 @@ supposed to be additive.
   `MiniPaint: the WanGP integration did not load (…); Mini Paint is unaffected.`, and the
   Mini Paint tab works normally. This is the invariant the whole feature is wrapped in;
   put the file back afterwards.
+
+---
+
+## Part 5 — protocol 4, the process, and the queue outbox
+
+Written, like the rest, without a WanGP to hand. Each row names what proves it and what
+to correct if it comes back different. None blocks the build; every one changes a
+constant or a candidate list, never the shape.
+
+* [ ] **`generate_trigger` resolves.** With the bridge loaded, the handshake in the WanGP
+  tab's console says `capabilities.start: true`. If it says `start_missing:
+  ["generate_trigger"]`, find the hidden `gr.Text` declared beside `add_to_queue_trigger`
+  in `wgp.py` and correct the candidate in `compatibility.COMPONENTS`. Until then every
+  request is staged and the answer says `start: "unknown"`; nothing is wrong, only slower.
+* [ ] **`is_generation_in_progress` is the flag `process_tasks` raises.** A hello answer
+  carries `generation_running: false` while WanGP is idle and `true` while it generates
+  (press Generate by hand in WanGP and ask again). `null` means the build injected
+  something that is not a function, and every request is then staged; the row to correct
+  is `compatibility.GLOBALS`.
+* [ ] **Idle starts, busy joins.** With WanGP idle, press Add to Queue in the Clipboard tab
+  once: WanGP starts generating by itself and the tab says *WanGP started generating it*.
+  Press again while it runs: the tab says *Added to WanGP queue* (with how many are ahead)
+  and the task joins the run - **a second run must never start**. If one does, the flag
+  above is not process-wide on that build and `_start_route` in `plugin.py` must fall back
+  to the queue route until it is.
+* [ ] **The overlay is what the task got.** After the press, open WanGP's queue: the task's
+  prompt is the Clipboard prompt and its start frame the Clipboard picture, and the WanGP
+  form shows its own prompt and pictures again once the tab reports. If the form keeps the
+  overlay, read the plugin's `restore skipped` line: it names the components whose value
+  the page had changed meanwhile, and a gallery there means Gradio's cache moved the
+  pixels more than `handoff.SIGNATURE_TOLERANCE` allows.
+* [ ] **`queue_errors` on this build.** Queue a prompt WanGP's validation rejects (an empty
+  one on a model that requires it). The tab must say *WanGP declined the queue request*
+  within a few seconds; *WanGP did not confirm…* means the build records the refusal in a
+  shape `admission.refusal_evidence` does not read - print `get_gen_info(state)["queue_errors"]`
+  once and add that shape.
+* [ ] **Two Forge servers, one WanGP.** Start a second Forge against the same data root
+  and open its WanGP tab: it must show `WANGP_ALREADY_MANAGED` and start nothing, and
+  `…/runtime/wangp.lock.json` must name the first Forge's pid. Stop the first Forge
+  without stopping WanGP through it (kill it): the second Forge's next start must remove
+  the stale lock and proceed. On Windows there is no start-time check, so a recycled pid
+  looks live until it exits; note it if you meet it.
+* [ ] **The emergency restart.** With a generation running, press *Restart WanGP now* in
+  Integration management. The report must list the tree's processes and their memory
+  before, say every process exited, and say how much came back; `nvidia-smi` afterwards
+  must show no process of the old tree on the card. If per-process memory reads `N/A`
+  (WSL, some Windows driver modes), the report says VRAM is unverified and the tree is
+  still verified by pid - record which driver mode you were in.
+* [ ] **Two browser pages, one line.** Open the Clipboard tab in two browsers, press in
+  both quickly: the Queue in each shows both jobs, one is *Sending* at a time, the order is
+  the order pressed, each browser's job runs against its own WanGP page. Close one browser
+  with a job waiting: the other shows it as *composed on another page* with *Run from this
+  page*, and never runs it by itself.
+* [ ] **Nothing polls with nothing to do.** With the Queue empty and the tab open, the
+  browser's network panel shows no request to `/minipaint-interop/outbox/claim`; after a
+  press, claims stop once the page's jobs are done.

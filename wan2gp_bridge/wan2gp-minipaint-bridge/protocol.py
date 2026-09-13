@@ -23,7 +23,7 @@ import unicodedata
 # wan2gp_bridge/wan2gp-minipaint-bridge/protocol.py. Change one, change both;
 # the test fails otherwise.
 
-PROTOCOL = 3
+PROTOCOL = 4
 
 #: postMessage types. Anything not in here is dropped without a reply.
 HELLO = "WANGP_BRIDGE_HELLO"
@@ -159,9 +159,32 @@ ADMISSIONS = (ADMISSION_REQUESTED, ADMISSION_DUPLICATE, ADMISSION_REFUSED)
 #: of time without proof either way; it is never reported as a refusal.
 QUEUE_PENDING = "pending"
 QUEUE_QUEUED = "queued"
+#: Protocol 4: the request's task is the one WanGP is generating now. A
+#: positive observation, like "queued", and as sticky.
+QUEUE_STARTED = "started"
 QUEUE_REFUSED = "refused"
 QUEUE_EXPIRED = "expired"
-QUEUE_STATUSES = (QUEUE_PENDING, QUEUE_QUEUED, QUEUE_REFUSED, QUEUE_EXPIRED)
+QUEUE_STATUSES = (QUEUE_PENDING, QUEUE_QUEUED, QUEUE_STARTED, QUEUE_REFUSED, QUEUE_EXPIRED)
+QUEUE_POSITIVE = (QUEUE_QUEUED, QUEUE_STARTED)
+
+#: Protocol 4: whether a request may start a generation. "auto" (the default
+#: when a caller says nothing) means "generating as soon as WanGP can" -
+#: starting a run when WanGP is idle, joining the running one otherwise;
+#: "never" stages the task only. The decision is the bridge's, made inside
+#: WanGP's process from WanGP's own process-wide flag, never the caller's
+#: and never a page's guess.
+START_AUTO = "auto"
+START_NEVER = "never"
+START_MODES = (START_AUTO, START_NEVER)
+#: What the answer says the bridge did about starting: the mode it honoured,
+#: or "unknown" when WanGP's flag could not be read and the request was
+#: staged rather than started - the fail-safe direction.
+START_UNKNOWN = "unknown"
+START_ANSWERS = (START_AUTO, START_NEVER, START_UNKNOWN)
+#: Which of WanGP's own triggers the bridge wrote to commit the task.
+ROUTE_GENERATE = "generate"
+ROUTE_QUEUE = "queue"
+ROUTES = (ROUTE_GENERATE, ROUTE_QUEUE)
 
 #: Timeouts for the two queue round trips, and the bounded confirmation
 #: schedule: one confirmation at once, then a short sequence, then nothing.
@@ -411,6 +434,13 @@ def normalize_queue_request(raw: typing.Any) -> typing.Tuple[dict, str]:
         if kept:
             request["reference_handoff_ids"] = kept
 
+    start = raw.get("start")
+    if start is None or start == "":
+        start = START_AUTO
+    if start not in START_MODES:
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    request["start"] = start
+
     return request, ""
 
 
@@ -441,6 +471,7 @@ def queue_payload_hash(request: typing.Mapping[str, typing.Any]) -> str:
         "start": request.get("start_handoff_id") or "",
         "end": request.get("end_handoff_id") or "",
         "references": list(request.get("reference_handoff_ids") or []),
+        "start_mode": request.get("start") or START_AUTO,
     }
     return hashlib.sha256(canonical_json(canonical).encode("utf-8")).hexdigest()
 
@@ -501,6 +532,18 @@ def _whole(value: typing.Any) -> int:
     return int(value) if value > 0 else 0
 
 
+def _tristate(value: typing.Any) -> typing.Optional[bool]:
+    """True, False, or "not known" - never a guess from a stray value."""
+    return value if isinstance(value, bool) else None
+
+
+def _depth(value: typing.Any) -> typing.Optional[int]:
+    """How many tasks sit ahead, when the bridge could count; else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value) if value >= 0 else None
+
+
 def normalize_queue_result(raw: typing.Any) -> dict:
     """The immediate answer to a queue request, as the parent will use it.
 
@@ -527,6 +570,11 @@ def normalize_queue_result(raw: typing.Any) -> dict:
             "label": str(model.get("label") or "")[:120],
             "family": str(model.get("family") or "")[:120],
         },
+        # Protocol 4: which trigger was written, what the request asked about
+        # starting, and whether WanGP was generating when the bridge decided.
+        "route": raw.get("route") if raw.get("route") in ROUTES else "",
+        "start": raw.get("start") if raw.get("start") in START_ANSWERS else "",
+        "generation_running": _tristate(raw.get("generation_running")),
     }
 
 
@@ -542,6 +590,9 @@ def normalize_queue_status(raw: typing.Any) -> dict:
         "status": status if ok else QUEUE_PENDING,
         "tasks_added": _whole(raw.get("tasks_added")) if ok else 0,
         "code": _code_or(raw.get("code"), "" if ok else QUEUE_CODE_UNCONFIRMED),
+        # Protocol 4: best-effort, and absent rather than estimated.
+        "queue_depth": _depth(raw.get("queue_depth")) if ok else None,
+        "route": raw.get("route") if raw.get("route") in ROUTES else "",
     }
 
 

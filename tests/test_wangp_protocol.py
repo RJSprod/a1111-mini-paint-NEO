@@ -1081,16 +1081,16 @@ new Function("window", "document", script)(window, document);
 scheduleFlush();
 const channel = "c".repeat(32);
 (listeners.message || []).forEach(function (fn) {
-  fn({ origin: ORIGIN, source: parent, data: { protocol: 3, type: "WANGP_BRIDGE_HELLO", channel_id: channel, request_id: "r1", payload: {} } });
+  fn({ origin: ORIGIN, source: parent, data: { protocol: 4, type: "WANGP_BRIDGE_HELLO", channel_id: channel, request_id: "r1", payload: {} } });
 });
 if (process.argv[5] === "refuse") {
   // After the hello: one send the page cannot act on (a handoff id that is
   // not one), and one on a channel this page was never bound to.
   setTimeout(function () {
     (listeners.message || []).forEach(function (fn) {
-      fn({ origin: ORIGIN, source: parent, data: { protocol: 3, type: "WANGP_RECEIVE_IMAGE", channel_id: channel, request_id: "r2",
+      fn({ origin: ORIGIN, source: parent, data: { protocol: 4, type: "WANGP_RECEIVE_IMAGE", channel_id: channel, request_id: "r2",
         payload: { handoff_id: "nope", receiver_id: "start_frame", state_revision: "abcdef12" } } });
-      fn({ origin: ORIGIN, source: parent, data: { protocol: 3, type: "WANGP_RECEIVE_IMAGE", channel_id: "d".repeat(32), request_id: "r3",
+      fn({ origin: ORIGIN, source: parent, data: { protocol: 4, type: "WANGP_RECEIVE_IMAGE", channel_id: "d".repeat(32), request_id: "r3",
         payload: { handoff_id: "e".repeat(32), receiver_id: "start_frame", state_revision: "abcdef12" } } });
     });
   }, 150);
@@ -1964,7 +1964,7 @@ def queue_request_checks(r: Results) -> None:
 
     r.check("a request id is 32 lowercase hex", protocol.valid_request_id(good) and not protocol.valid_request_id(good.upper()))
     request, code = protocol.normalize_queue_request({"request_id": good})
-    r.check("a request with nothing in it is valid", code == "" and request == {"request_id": good, "bridge_session": ""}, repr(request))
+    r.check("a request with nothing in it is valid, and means auto", code == "" and request == {"request_id": good, "bridge_session": "", "start": "auto"}, repr(request))
     r.check("and supplies nothing", protocol.queue_overrides(request) == [])
     for label, raw in (("null", None), ("empty", ""), ("whitespace", " \n\t ")):
         request, code = protocol.normalize_queue_request({"request_id": good, "prompt": raw, "start_handoff_id": None if raw is None else "",
@@ -1994,7 +1994,7 @@ def queue_request_checks(r: Results) -> None:
                                                       "reference_handoff_ids": [other, good], "prompt": "p",
                                                       "model": "t2v", "resolution": "1x1", "path": "/tmp/x", "kwargs": {"a": 1}})
     r.check("every override is carried and nothing unlisted is", set(request) == {"request_id", "bridge_session", "prompt", "start_handoff_id",
-            "end_handoff_id", "reference_handoff_ids"}, str(sorted(request)))
+            "end_handoff_id", "reference_handoff_ids", "start"}, str(sorted(request)))
     r.check("the overrides are named in field order", protocol.queue_overrides(request) == list(protocol.QUEUE_FIELDS))
 
     first = protocol.queue_payload_hash(protocol.normalize_queue_request({"request_id": good, "prompt": "a"})[0])
@@ -2016,7 +2016,7 @@ def queue_request_checks(r: Results) -> None:
             and protocol.normalize_queue_result({"ok": True, "admission": "queued"})["code"] == "QUEUE_REQUEST_REFUSED")
     r.check("a refusal keeps its code", protocol.normalize_queue_result({"ok": False, "code": "QUEUE_BUSY"})["code"] == "QUEUE_BUSY")
     status = protocol.normalize_queue_status({"ok": True, "status": "queued", "tasks_added": 3, "request_id": good})
-    r.check("a status normalises", status == {"ok": True, "request_id": good, "status": "queued", "tasks_added": 3, "code": ""}, repr(status))
+    r.check("a status normalises", status == {"ok": True, "request_id": good, "status": "queued", "tasks_added": 3, "code": "", "queue_depth": None, "route": ""}, repr(status))
     r.check("an unreadable status is pending with no tasks, never queued",
             protocol.normalize_queue_status({"ok": True, "status": "done", "tasks_added": 9})["status"] == "pending"
             and protocol.normalize_queue_status({"status": "queued"})["tasks_added"] == 0)

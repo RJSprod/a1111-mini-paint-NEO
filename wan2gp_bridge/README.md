@@ -17,12 +17,19 @@ two questions and performs two actions:
 * *here is one PNG; put it in the start frame / the end frame / the reference
   list, and prove that you did.*
 * *add this page to your queue as it is, with this prompt and these pictures
-  on top for that one task, and tell me whether you did* (protocol 3). The
-  overrides go into the form's own components as replacements, WanGP's
-  `client_id` and `add_to_queue_trigger` are written so that WanGP's own
-  add-to-queue chain runs, the task is looked for by its client id, and the
-  overrides are put back afterwards - each only where the page still holds
-  what the bridge wrote.
+  on top for that one task, start it if nothing is generating, and tell me
+  whether you did* (protocols 3 and 4). The overrides go into the form's
+  own components as replacements and WanGP's `client_id` is written; then,
+  when the request allows starting and Wan2GP's own process-wide flag
+  (`is_generation_in_progress()`, read live) says nothing is generating,
+  WanGP's `generate_trigger` is written, so WanGP's own generate chain runs
+  exactly as its Generate button would run it; otherwise
+  `add_to_queue_trigger` is written and the task joins the run. The task is
+  looked for by its client id (`started` at the head of a running loop,
+  `queued` otherwise, with how many are ahead), and the overrides are put
+  back afterwards - each only where the page still holds what the bridge
+  wrote. When in doubt - a build that cannot say whether it is generating,
+  or lacks the trigger - it never starts.
 
 It also carries a dark stylesheet, because the embedded WanGP is a separate
 document and nothing the Forge page wears reaches into it.
@@ -56,10 +63,12 @@ Forge, in the browser or in Mini Paint changes.
   looked about right.
 * It will not silently replace your reference images. A reference send reads
   the list, checks the capacity, appends, and verifies the count.
-* It will not generate, abort, or watch progress. A queue request adds to
-  WanGP's queue through WanGP's own chain and nothing else; `process_tasks`
-  is never called, and a request nobody confirmed is reported as
-  *unconfirmed*, never as queued and never as refused.
+* It will not start a second run, abort one, or watch progress. A request
+  starts a generation only through WanGP's own generate trigger and only
+  when WanGP's own flag says nothing is generating anywhere; `process_tasks`
+  is never called directly, a running WanGP is only ever joined, and a
+  request nobody confirmed is reported as *unconfirmed*, never as queued
+  and never as refused.
 * It will not clear a WanGP field on a caller's behalf. A field the caller
   leaves out is the page's own; a field it supplies overrides the page for
   that one task and is restored.
@@ -132,7 +141,12 @@ The queue operation needs six more of the form's variables - `prompt`,
 `get_unique_id` and `get_gen_info`. A build that lacks one keeps the image
 send exactly as it was; the handshake says `capabilities.queue: false` with
 the missing names, and a queue request is refused with
-`BRIDGE_COMPONENT_INCOMPATIBLE`.
+`BRIDGE_COMPONENT_INCOMPATIBLE`. Starting a run (bridge 1.3.0, protocol 4)
+needs one more variable, `generate_trigger`, and the module function
+`is_generation_in_progress`; a build that lacks the trigger says
+`capabilities.start: false` and every request is staged rather than
+started, and a build whose flag cannot be read answers `start: "unknown"`
+the same way.
 
 Adding a new receiver - a control image, a positioned reference - is three
 declarations and no new machinery: a row in `compatibility.COMPONENTS`, a row
@@ -164,6 +178,12 @@ once per WanGP revision:
    keyed by the client id, or a list of entries naming it, are both read;
    any other shape leaves the answer *unconfirmed* and is the row to fix in
    `admission.refusal_evidence`.
+5. With WanGP idle, press Add to Queue once: WanGP must start generating by
+   itself and the tab must say *WanGP started generating it*. Press again
+   while it runs: the tab must say *Added to WanGP queue* and the task must
+   join the run without a second run starting. If a second run ever starts,
+   `is_generation_in_progress` on that build is not the flag `process_tasks`
+   raises, and `compatibility.GLOBALS` is the row to correct.
 
 ## Licence
 

@@ -12,11 +12,14 @@ The composer is the whole product, and it is built around one rule. An
 empty prompt means "use the WanGP page's prompt"; an empty slot means "use
 the WanGP page's image for that input"; clearing a slot returns it to that,
 and never clears anything on the WanGP page. Add to Queue is always a
-button: an entirely empty composition asks the live WanGP page to queue
-itself exactly as it is, and a slot the current model cannot use is kept,
-badged, and reported - not a reason to refuse. The button asks through
-``window.minipaintInterop`` - the public API any extension may call - and
-never through a private shortcut.
+button while WanGP is running: an entirely empty composition asks the live
+WanGP page to queue itself exactly as it is, and a slot the current model
+cannot use is kept, badged, and reported - not a reason to refuse. A press
+appends a job to the server's queue outbox and returns at once; the page
+pumps its own jobs through ``window.minipaintInterop`` - the public API any
+extension may call - one at a time, in the order they were pressed across
+every browser, and the server re-renders the job list as they go. While
+WanGP is not running the button says so and is off.
 
 The tab is built once, inside the same guard the WanGP tab uses, and a tab
 that cannot be built is a tab that says so under the same label and id.
@@ -38,7 +41,7 @@ from ..canvas import host, imaging
 from ..canvas import ui as canvas_ui
 from ..wangp import errors, protocol
 from ..wangp.errors import IntegrationError
-from . import TAB_ID, TAB_LABEL, config, history, routes, store
+from . import TAB_ID, TAB_LABEL, config, history, outbox, routes, store
 
 PREFIX = "minipaint_clipboard"
 
@@ -57,7 +60,9 @@ THUMB_JS = f"(size) => {{ if ({_JS}) {_JS}.setThumbnailSize(size); }}"
 # The queue instruction box changes when the server has built a request;
 # the browser hands it to the public API and writes the result back.
 QUEUE_JS = f"(instruction) => {{ if ({_JS}) {_JS}.queue(instruction); }}"
-ARM_QUEUE_JS = f"(prompt, session) => {{ if ({_JS}) {_JS}.armQueue(); return [prompt, session]; }}"
+# The click hands the server this page's identity along with the prompt, so
+# the job is the page's to run; the watcher is armed in the same breath.
+ARM_QUEUE_JS = f"(prompt, page) => {{ const c = {_JS}; if (c) {{ c.armQueue(); }} return [prompt, c && c.pageId ? c.pageId() : page]; }}"
 SELECTED_JS = f"(grid, selected) => {{ if ({_JS}) {_JS}.afterRender(); }}"
 SWITCH_JS = "(target) => { if (window.minipaintCanvas && window.minipaintCanvas.switchTo) { window.minipaintCanvas.switchTo(target); } }"
 CAPABILITIES_JS = f"() => {{ if ({_JS}) {_JS}.refreshCapabilities(); }}"
@@ -77,9 +82,19 @@ FIELD_LABELS = {
     protocol.QUEUE_FIELD_REFERENCES: "The reference",
 }
 
-#: How many prepared requests one browser page may have in flight at once
-#: before the oldest recipe is forgotten. The FIFO makes one the norm.
-MAX_PENDING = 8
+#: What the job list calls each state, and what the button says.
+OUTBOX_LABELS = {
+    outbox.PENDING: "Waiting", outbox.SENDING: "Sending", outbox.QUEUED: "Queued", outbox.STARTED: "Generating",
+    outbox.FAILED: "Refused", outbox.UNCONFIRMED: "Unconfirmed", outbox.CANCELLED: "Cancelled",
+}
+QUEUE_BUTTON_LABEL = "Add to Queue"
+QUEUE_BUTTON_BLOCKED = "WanGP is not running"
+#: The page id a press carries when no browser script supplied one. Jobs
+#: under it are shown as waiting for a page that never pumps, with "Run
+#: from this page" offered.
+NO_PAGE = "00000000"
+#: How many jobs the list shows, newest first.
+OUTBOX_SHOWN = 40
 
 _LOG_PREFIX = "MiniPaint Clipboard:"
 
@@ -215,6 +230,76 @@ def history_html(records: typing.Sequence[dict], asset_of: typing.Callable[[str]
     return "".join(parts)
 
 
+def job_sentence(job: typing.Mapping[str, typing.Any]) -> str:
+    """How a job ended, in the words the rest of the extension uses."""
+    state = job.get("state")
+    result = job.get("result") or {}
+    error = job.get("error") or {}
+    if state == outbox.STARTED:
+        return "WanGP started generating it."
+    if state == outbox.QUEUED:
+        depth = result.get("queue_depth")
+        return "Added to WanGP queue." + (f" {depth} ahead of it." if isinstance(depth, int) and depth > 0 else "")
+    if state in (outbox.FAILED, outbox.UNCONFIRMED):
+        return str(error.get("message") or errors.message(error.get("code") or errors.QUEUE_REQUEST_REFUSED))
+    if state == outbox.CANCELLED:
+        return "Cancelled before it was sent."
+    if state == outbox.SENDING:
+        return "Being sent to WanGP…"
+    return "Waiting its turn."
+
+
+def outbox_html(jobs: typing.Sequence[dict], page: str) -> str:
+    """The queue: every job the server holds, newest first, with what a
+    person may still do about it. The prompt shown is the one typed here."""
+    if not jobs:
+        return '<div class="minipaint-clip-outbox minipaint-clip-empty"><p>No request has been sent from here yet.</p></div>'
+    parts = [f'<div class="minipaint-clip-outbox" data-count="{len(jobs)}">']
+    for job in list(reversed(list(jobs)))[:OUTBOX_SHOWN]:
+        state = job.get("state", outbox.PENDING)
+        mine = job.get("page") == page
+        summary = job.get("summary") or {}
+        supplied = [name for name, label in (("prompt", "prompt"), ("start", "first frame"), ("end", "last frame")) if summary.get(name)]
+        if summary.get("references"):
+            supplied.append(f"{summary['references']} reference{'s' if summary['references'] != 1 else ''}")
+        prompt = (job.get("request") or {}).get("prompt")
+        excerpt = (f'<div class="minipaint-clip-job-prompt" title="{_escape(prompt)}">{_escape(prompt[:90])}{"…" if len(prompt) > 90 else ""}</div>'
+                   if prompt else '<div class="minipaint-clip-job-prompt minipaint-clip-inherit-text">Prompt: Use WanGP</div>')
+        when = str(job.get("created_at") or "").replace("T", " ").replace("+00:00", " UTC")
+        actions = []
+        if state == outbox.PENDING:
+            actions.append(f'<button type="button" data-outbox-action="cancel:{_escape(job["job_id"])}">Cancel</button>')
+            if not mine:
+                actions.append(f'<button type="button" data-outbox-action="adopt:{_escape(job["job_id"])}">Run from this page</button>')
+        elif state in (outbox.FAILED, outbox.CANCELLED):
+            actions.append(f'<button type="button" data-outbox-action="retry:{_escape(job["job_id"])}">Retry</button>')
+        elif state == outbox.UNCONFIRMED:
+            actions.append(f'<button type="button" data-outbox-action="retry:{_escape(job["job_id"])}" title="WanGP may already hold this task; check its queue first">Retry anyway</button>')
+        badge = ""
+        if state == outbox.PENDING and not mine:
+            badge = '<span class="minipaint-clip-badge">composed on another page</span>'
+        elif job.get("origin") == outbox.ORIGIN_API:
+            badge = '<span class="minipaint-clip-badge">from another extension</span>'
+        parts.append(
+            f'<div class="minipaint-clip-job minipaint-clip-job-{_escape(state)}" data-job="{_escape(job["job_id"])}" data-mine="{"1" if mine else "0"}">'
+            f'<div class="minipaint-clip-job-head"><span class="minipaint-clip-job-state">{_escape(OUTBOX_LABELS.get(state, state))}</span>'
+            f'<span class="minipaint-clip-job-when">{_escape(when)}</span>{badge}</div>'
+            f"{excerpt}"
+            f'<div class="minipaint-clip-job-fields">{_escape(", ".join(supplied) if supplied else "the WanGP page as it is")}'
+            f'{" · start never" if summary.get("start_mode") == protocol.START_NEVER else ""}</div>'
+            f'<div class="minipaint-clip-job-outcome">{_escape(job_sentence(job))}</div>'
+            + (f'<div class="minipaint-clip-job-actions">{"".join(actions)}</div>' if actions else "")
+            + "</div>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _page_of(value: typing.Any) -> str:
+    text = str(value or "").strip()
+    return text if outbox.PAGE_RE.match(text) else NO_PAGE
+
+
 def _status(message: str, notes: typing.Sequence[str] = ()) -> str:
     parts = [message] if message else []
     parts.extend(f"<small>{note}</small>" for note in notes if note)
@@ -286,7 +371,23 @@ class ClipboardTab:
 
     def _refresh_outputs(self, message: str, selected: str = "", notes: typing.Sequence[str] = ()) -> tuple:
         cards = self._cards()
-        return (self._grid(selected), _status(message, notes), _hex(selected), self._menu_state(), *cards)
+        return (self._grid(selected), _status(message, notes), _hex(selected), self._menu_state(), *cards, self._queue_button())
+
+    # -- WanGP's state, as the button shows it -----------------------------
+
+    def _running(self) -> bool:
+        return outbox.wangp_running()
+
+    def _queue_button(self, running: typing.Optional[bool] = None):
+        """Add to Queue is a button while WanGP is running, and says why not otherwise."""
+        running = self._running() if running is None else bool(running)
+        return gr.update(interactive=running, value=QUEUE_BUTTON_LABEL if running else QUEUE_BUTTON_BLOCKED)
+
+    def _outbox(self, page: typing.Any = "") -> str:
+        try:
+            return outbox_html(outbox.jobs(), _page_of(page))
+        except Exception as error:
+            return f'<div class="minipaint-clip-outbox minipaint-clip-empty"><p>The queue could not be read ({_escape(type(error).__name__)}).</p></div>'
 
     def _clear_missing_slots(self) -> typing.List[str]:
         """Slots whose asset is no longer in the library go back to inherit."""
@@ -403,7 +504,7 @@ class ClipboardTab:
             return self._refresh_outputs(f"That file could not be imported ({type(error).__name__}).", selected)
         self.library.last_import = None
         draft, message = self._assign(slot, asset.asset_id)
-        return (self._grid(asset.asset_id), _status(message, ["imported into the folder first"]), asset.asset_id, self._menu_state(), *self._cards(draft))
+        return (self._grid(asset.asset_id), _status(message, ["imported into the folder first"]), asset.asset_id, self._menu_state(), *self._cards(draft), self._queue_button())
 
     def upload(self, files, selected):
         """Upload image(s): each validated, copied as it is, indexed."""
@@ -451,13 +552,16 @@ class ClipboardTab:
 
     # -- the queue ------------------------------------------------------------
 
-    def prepare_queue(self, prompt, session):
-        """Add to Queue: the draft as a public request, for the browser to send.
+    def prepare_queue(self, prompt, page):
+        """Add to Queue: the draft as a public request, into the server's outbox.
 
         Everything inherited is omitted from the request. A slot whose file
-        is gone fails here, before WanGP is asked, and keeps the draft.
+        is gone fails here, before anything is stored, and keeps the draft;
+        a WanGP that is not running refuses the press rather than storing it.
+        The instruction box then tells the browser a job exists, and the
+        page's pump does the rest.
         """
-        session = session if isinstance(session, dict) else {"pending": {}}
+        page_id = _page_of(page)
         draft = history.load_draft()
         draft["prompt_override"] = str(prompt or "")
         draft = history.save_draft(draft)
@@ -468,49 +572,98 @@ class ClipboardTab:
                 missing.append(slot)
         if missing:
             labels = ", ".join(title for name, title, _field in SLOTS if name in missing)
-            self._journal(f"queue clicked; refused before asking - {labels.lower()} missing from the folder")
+            self._journal(f"queue clicked; refused before storing - {labels.lower()} missing from the folder")
             return "", _status(f"{labels}: the image is no longer in the folder. Press Refresh, then try again.",
-                               ["nothing was asked of WanGP; the rest of the draft is kept"]), session
+                               ["nothing was asked of WanGP; the rest of the draft is kept"]), gr.skip(), self._queue_button()
         request = history.public_request(draft)
-        pending = session.setdefault("pending", {})
-        pending[request["request_id"]] = {"draft": draft}
-        while len(pending) > MAX_PENDING:
-            pending.pop(next(iter(pending)))
-        self._journal(f"queue clicked (request {request['request_id'][:8]}; overrides {', '.join(history.draft_overrides(draft)) or 'none'})")
-        instruction = json.dumps({"nonce": _nonce(), "request": request})
-        return instruction, _status("Asking WanGP to add the request to its queue…"), session
-
-    def queue_result(self, value, session):
-        """How the browser says it went: a history record on a confirmed
-        admission, a sentence otherwise. Nothing in the answer is trusted
-        beyond its shape; the prompt is never in it."""
-        session = session if isinstance(session, dict) else {"pending": {}}
+        request["start"] = protocol.START_AUTO
         try:
-            raw = json.loads(value) if isinstance(value, str) and value.strip() else {}
-        except ValueError:
-            raw = {}
-        raw = raw if isinstance(raw, dict) else {}
-        request_id = _hex(raw.get("request_id"))
-        status = raw.get("status") if raw.get("status") in ("queued", "refused", "unconfirmed") else "refused"
-        code = raw.get("code") if isinstance(raw.get("code"), str) and protocol.CODE_RE.match(raw.get("code")) else ""
-        pending = session.get("pending", {}).pop(request_id, None) if request_id else None
-        summary = protocol.queue_summary(raw.get("applied"), raw.get("inherited"), raw.get("ignored"))
-        model = raw.get("model") if isinstance(raw.get("model"), dict) else {}
-        tasks = raw.get("tasks_added") if isinstance(raw.get("tasks_added"), (int, float)) and not isinstance(raw.get("tasks_added"), bool) else 0
+            job = outbox.submit(request, page_id, outbox.ORIGIN_CLIPBOARD)
+        except IntegrationError as error:
+            self._journal(f"queue clicked; refused - {error.code}")
+            notes = ["nothing was stored; press it again once WanGP is running"] if error.code == errors.WANGP_NOT_RUNNING else []
+            return "", _status(errors.message(error.code), notes), self._outbox(page_id), self._queue_button()
+        pending = outbox.pending_count()
+        self._journal(f"queue clicked: job {job['job_id'][:8]} (overrides {', '.join(history.draft_overrides(draft)) or 'none'}); {pending} waiting")
+        notes = [f"{pending - 1} ahead of it" if pending > 1 else "it goes next"]
+        if page_id == NO_PAGE:
+            notes.append("this page did not identify itself, so the job waits for one that can run it")
+        instruction = json.dumps({"nonce": _nonce(), "job_id": job["job_id"]})
+        return instruction, _status("Queued for WanGP.", notes), self._outbox(page_id), self._queue_button()
 
-        if raw.get("ok") is True and status == "queued" and pending is not None:
-            record = history.make_record(pending["draft"], {
-                "request_id": request_id, "applied": summary["applied"], "inherited": summary["inherited"],
-                "ignored": summary["ignored"], "tasks_added": int(tasks), "model": model,
+    def _draft_from_request(self, request: typing.Mapping[str, typing.Any]) -> dict:
+        """A job's request as the draft it came from: Clipboard assets by id,
+        anything staged by another extension left to inherit."""
+        images = request.get("images") if isinstance(request.get("images"), dict) else {}
+
+        def asset_of(handle: typing.Any) -> str:
+            return handle["id"] if isinstance(handle, dict) and handle.get("kind") == "clipboard_asset" and _hex(handle.get("id")) else ""
+
+        return {
+            "prompt_override": str(request.get("prompt") or ""),
+            "first_asset_id": asset_of(images.get(protocol.QUEUE_FIELD_START)),
+            "last_asset_id": asset_of(images.get(protocol.QUEUE_FIELD_END)),
+            "reference_asset_ids": [asset_of(item) for item in images.get(protocol.QUEUE_FIELD_REFERENCES) or [] if asset_of(item)],
+        }
+
+    def _record_history(self) -> int:
+        """Queue Send History gains every Clipboard job confirmed since last asked. Idempotent."""
+        recorded = []
+        for job in outbox.unrecorded(outbox.ORIGIN_CLIPBOARD):
+            result = job.get("result") or {}
+            record = history.make_record(self._draft_from_request(job["request"]), {
+                "request_id": job["request"].get("request_id"), "applied": result.get("applied"), "inherited": result.get("inherited"),
+                "ignored": result.get("ignored"), "tasks_added": result.get("tasks_added"), "model": result.get("model"),
             })
             history.add_history(record)
-            notes = [f"{FIELD_LABELS.get(item['field'], item['field'])} was not used by the current model." for item in summary["ignored"]]
-            self._journal(f"queue {request_id[:8]} queued; {int(tasks)} task(s); history recorded")
-            return _status("Added to WanGP queue.", notes), self._history(), session
+            recorded.append(job["job_id"])
+            self._journal(f"job {job['job_id'][:8]} {job['state']}; history recorded")
+        outbox.mark_recorded(recorded)
+        return len(recorded)
 
-        code = code or (errors.ADMISSION_UNCONFIRMED if status == "unconfirmed" else errors.QUEUE_REQUEST_REFUSED)
-        self._journal(f"queue {request_id[:8] or '?'} {status} ({code})")
-        return _status(errors.message(code), ["no history was recorded"]), gr.skip(), session
+    def refresh_outbox(self, page):
+        """The browser says the queue moved: re-render it, record history,
+        and say how the latest of this page's jobs ended."""
+        page_id = _page_of(page)
+        self._record_history()
+        jobs = outbox.jobs()
+        mine = [job for job in jobs if job.get("page") == page_id]
+        settled = [job for job in mine if job.get("state") in outbox.TERMINAL]
+        latest = max(settled, key=lambda job: (float(job.get("updated") or 0.0), float(job.get("created") or 0.0)), default=None)
+        notes = []
+        waiting = sum(1 for job in mine if job.get("state") == outbox.PENDING)
+        sending = sum(1 for job in mine if job.get("state") == outbox.SENDING)
+        if sending:
+            notes.append("one is being sent")
+        if waiting:
+            notes.append(f"{waiting} waiting")
+        line = job_sentence(latest) if latest else ("" if not mine else "Waiting its turn.")
+        ignored = [item.get("field") for item in ((latest or {}).get("result") or {}).get("ignored") or []]
+        notes.extend(f"{FIELD_LABELS.get(field, field)} was not used by the current model." for field in ignored)
+        return self._outbox(page_id), (_status(line, notes) if line or notes else gr.skip()), self._history(), self._queue_button()
+
+    def outbox_action(self, value, page):
+        """A button on a job: ``cancel:<job>``, ``retry:<job>``, ``adopt:<job>``, with the page after."""
+        parts = str(value or "").split(":")
+        verb = parts[0] if parts else ""
+        job_id = parts[1] if len(parts) > 1 else ""
+        page_id = _page_of(parts[2]) if len(parts) > 2 and outbox.PAGE_RE.match(parts[2] or "") else _page_of(page)
+        try:
+            if verb == "cancel":
+                job = outbox.cancel(job_id)
+                message = "Cancelled." if job["state"] == outbox.CANCELLED else f"That job is {OUTBOX_LABELS.get(job['state'], job['state']).lower()}; nothing to cancel."
+            elif verb == "retry":
+                job = outbox.retry(job_id, page_id)
+                message = "Sent again as a new request."
+            elif verb == "adopt":
+                job = outbox.adopt(job_id, page_id)
+                message = "This page will run it, with this page's WanGP settings."
+            else:
+                return self._outbox(page_id), gr.skip()
+        except IntegrationError as error:
+            return self._outbox(page_id), _status(errors.message(error.code))
+        self._journal(f"job {job_id[:8]}: {verb} from the tab")
+        return self._outbox(page_id), _status(message)
 
     def _journal(self, message: str) -> None:
         try:
@@ -632,8 +785,8 @@ class ClipboardTab:
         draft = history.load_draft()
         cards = self._cards(draft)
 
+        running = self._running()
         with gr.Column(elem_id=_id("root"), elem_classes=["minipaint-clipboard"]):
-            session = gr.State({"pending": {}})
             with gr.Row(elem_id=_id("body"), elem_classes=["minipaint-clip-body"], equal_height=False):
                 # ---- the browser --------------------------------------------------
                 with gr.Column(scale=2, min_width=320, elem_id=_id("browser"), elem_classes=["minipaint-clip-browser"]):
@@ -720,17 +873,24 @@ class ClipboardTab:
                         draft["prompt_override"], lines=4, max_lines=12, label="Prompt", placeholder="Use current WanGP prompt",
                         elem_id=_id("prompt"), elem_classes=["minipaint-clip-prompt"],
                     )
-                    queue_btn = gr.Button("Add to Queue", variant="primary", elem_id=_id("queue"), elem_classes=["minipaint-clip-queue"])
+                    queue_btn = gr.Button(
+                        QUEUE_BUTTON_LABEL if running else QUEUE_BUTTON_BLOCKED, variant="primary", interactive=running,
+                        elem_id=_id("queue"), elem_classes=["minipaint-clip-queue"],
+                    )
                     queue_status = gr.Markdown("", elem_id=_id("queue_status"), elem_classes=["minipaint-clip-status"])
                     queue_instruction = gr.Textbox("", visible=False, elem_id=_id("queue_instruction"))
-                    queue_result = gr.Textbox("", visible=False, elem_id=_id("queue_result"))
+                    page_box = gr.Textbox("", visible=False, elem_id=_id("page_id"))
+                    outbox_action = gr.Textbox("", visible=False, elem_id=_id("outbox_action"))
+                    outbox_refresh = gr.Button("Refresh queue", visible=False, elem_id=_id("outbox_refresh"))
+                    gr.Markdown("**Queue** - every request sent from this Forge, newest first. One is sent at a time, in the order pressed.", elem_classes=["minipaint-clip-hint"])
+                    outbox_list = gr.HTML(self._outbox(), elem_id=_id("outbox_list"), elem_classes=["minipaint-clip-outbox-host"])
                     with gr.Column(visible=False, elem_id=_id("history_panel"), elem_classes=["minipaint-clip-panel"]) as history_panel:
                         gr.Markdown("**Queue Send History** - recipes confirmed queued from here. Load puts one back into the composer; it queues nothing.", elem_classes=["minipaint-clip-hint"])
                         history_list = gr.HTML(self._history(), elem_id=_id("history_list"), elem_classes=["minipaint-clip-history-host"])
                         history_close = gr.Button("Close", elem_id=_id("history_close"))
 
         self._wire(
-            session=session, grid=grid, status=status, selected_box=selected_box, menu_state=menu_state,
+            grid=grid, status=status, selected_box=selected_box, menu_state=menu_state,
             cards=(card_first, card_last, card_ref), menu_btn=menu_btn, roles=(to_first, to_last, to_ref),
             sort=sort, sort_request=sort_request, thumb=thumb, refresh_btn=refresh_btn, upload_btn=upload_btn,
             intercept_btn=intercept_btn, folder_open=folder_open, folder_panel=folder_panel, folder_text=folder_text,
@@ -739,7 +899,8 @@ class ClipboardTab:
             delete_open=delete_open, delete_panel=delete_panel, delete_ok=delete_ok, delete_cancel=delete_cancel,
             paste_open=paste_open, paste_panel=paste_panel, paste_image=paste_image, paste_close=paste_close,
             slot_action=slot_action, slot_uploads=slot_uploads, prompt=prompt, queue_btn=queue_btn, queue_status=queue_status,
-            queue_instruction=queue_instruction, queue_result=queue_result, history_open=history_open, history_panel=history_panel,
+            queue_instruction=queue_instruction, page_box=page_box, outbox_action=outbox_action, outbox_refresh=outbox_refresh,
+            outbox_list=outbox_list, history_open=history_open, history_panel=history_panel,
             history_list=history_list, history_close=history_close, history_action=history_action,
             send_request=send_request, switch_box=switch_box, payload_box=payload_box, to_canvas=to_canvas, mask_clear=mask_clear,
             wangp_line=wangp_line,
@@ -750,7 +911,7 @@ class ClipboardTab:
     def _wire(self, **p) -> None:
         quiet = {"show_progress": "hidden"}
         cards = list(p["cards"])
-        refresh_outputs = [p["grid"], p["status"], p["selected_box"], p["menu_state"], *cards]
+        refresh_outputs = [p["grid"], p["status"], p["selected_box"], p["menu_state"], *cards, p["queue_btn"]]
         cards_outputs = [*cards, p["status"]]
         selected = p["selected_box"]
 
@@ -795,13 +956,18 @@ class ClipboardTab:
             upload.upload(lambda file, selected_id, slot=slot: self.slot_upload(slot, file, selected_id), inputs=[upload, selected], outputs=refresh_outputs, **quiet)
         p["prompt"].blur(self.prompt_changed, inputs=[p["prompt"]], outputs=[], **quiet)
 
-        # -- Add to Queue: the server builds the public request, the browser
-        # sends it through window.minipaintInterop, the result comes back
-        # through the hidden box. The instruction box's change is the first
-        # route; the browser also watches the box briefly after the click.
-        p["queue_btn"].click(self.prepare_queue, inputs=[p["prompt"], p["session"]], outputs=[p["queue_instruction"], p["queue_status"], p["session"]], js=ARM_QUEUE_JS, **quiet)
+        # -- Add to Queue: the server builds the public request and appends
+        # it to its outbox as this page's job; the instruction box's change
+        # tells the browser to pump (the browser also watches the box briefly
+        # after the click); the pump reports to the server's routes, and the
+        # browser presses the hidden refresh so the list and the history are
+        # re-rendered from what the server holds.
+        p["queue_btn"].click(self.prepare_queue, inputs=[p["prompt"], p["page_box"]],
+                             outputs=[p["queue_instruction"], p["queue_status"], p["outbox_list"], p["queue_btn"]], js=ARM_QUEUE_JS, **quiet)
         p["queue_instruction"].change(None, js=QUEUE_JS, inputs=[p["queue_instruction"]])
-        p["queue_result"].input(self.queue_result, inputs=[p["queue_result"], p["session"]], outputs=[p["queue_status"], p["history_list"], p["session"]], **quiet)
+        p["outbox_refresh"].click(self.refresh_outbox, inputs=[p["page_box"]],
+                                  outputs=[p["outbox_list"], p["queue_status"], p["history_list"], p["queue_btn"]], **quiet)
+        p["outbox_action"].input(self.outbox_action, inputs=[p["outbox_action"], p["page_box"]], outputs=[p["outbox_list"], p["queue_status"]], **quiet)
 
         # -- history
         p["history_open"].click(self.show_history, inputs=[], outputs=[p["history_panel"], p["history_list"]], **quiet)

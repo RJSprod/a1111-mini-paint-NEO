@@ -40,8 +40,10 @@ SUITES = [
     # confirm, restore - then the public API that carries it and the
     # Clipboard tab that is its first client.
     "test_wangp_queue",
+    "test_wangp_start",
     "test_interop",
     "test_clipboard_store",
+    "test_clipboard_outbox",
     "test_clipboard_ui",
     "test_queue_e2e",
 ]

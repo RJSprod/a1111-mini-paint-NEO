@@ -9,16 +9,18 @@
  * clipboard and posts the bytes to the tab's own import route; a drop on a
  * slot card does the same and then assigns the imported picture.
  *
- * Add to Queue is the one thing that leaves the page. The server builds the
- * public request from the draft - inherited fields omitted - and writes it
- * into a hidden box; the box's change hands it to window.minipaintInterop,
- * the same API any extension uses, and the result comes back into another
- * hidden box for the server to record. Nothing here talks to the WanGP
- * iframe, knows a bridge session, or sees a file path.
+ * Add to Queue is the one thing that leaves the page, and even that only
+ * indirectly: the server builds the public request from the draft -
+ * inherited fields omitted - and appends it to its own queue outbox as a
+ * job; this file then asks window.minipaintInterop to pump, which is the
+ * same public API any extension uses, and the server re-renders the job
+ * list as the pump reports. Nothing here talks to the WanGP iframe, knows a
+ * bridge session, holds a queue, or sees a file path.
  *
  * Nothing polls. The one bounded watcher runs for a few seconds after the
  * Add to Queue click, in case the chained change never reaches this page,
- * and stops the moment the instruction is delivered either way.
+ * and stops the moment the instruction is delivered either way; the pump
+ * itself stops when this page has nothing left to send.
  */
 window.minipaintClipboard = (function () {
     "use strict";
@@ -40,7 +42,8 @@ window.minipaintClipboard = (function () {
         historyAction: "minipaint_clipboard_history_action",
         menuState: "minipaint_clipboard_menu_state",
         queueInstruction: "minipaint_clipboard_queue_instruction",
-        queueResult: "minipaint_clipboard_queue_result"
+        outboxAction: "minipaint_clipboard_outbox_action",
+        pageId: "minipaint_clipboard_page_id"
     };
     const PRESS = {
         refresh: "minipaint_clipboard_refresh",
@@ -50,7 +53,8 @@ window.minipaintClipboard = (function () {
         rename: "minipaint_clipboard_rename_open",
         remove: "minipaint_clipboard_delete_open",
         paste: "minipaint_clipboard_paste_open",
-        history: "minipaint_clipboard_history_open"
+        history: "minipaint_clipboard_history_open",
+        outboxRefresh: "minipaint_clipboard_outbox_refresh"
     };
     const ROLE_IDS = { first: "minipaint_clipboard_to_first", last: "minipaint_clipboard_to_last", ref: "minipaint_clipboard_to_ref" };
     const SLOT_UPLOAD_PREFIX = "minipaint_clipboard_slot_upload_";
@@ -58,6 +62,7 @@ window.minipaintClipboard = (function () {
     const QUEUE_WATCH_MS = 150;
     const QUEUE_WATCH_LIMIT_MS = 15000;
     const CAPABILITY_THROTTLE_MS = 2500;
+    const OUTBOX_REFRESH_THROTTLE_MS = 300;
 
     const S = {
         attached: false,
@@ -73,6 +78,8 @@ window.minipaintClipboard = (function () {
         capabilitiesAt: 0,
         capabilities: null,
         pasteListener: null,
+        outboxListener: null,
+        outboxRefreshTimer: null,
         toastTimer: null
     };
 
@@ -481,55 +488,78 @@ window.minipaintClipboard = (function () {
         }, QUEUE_WATCH_MS);
     }
 
-    function writeResult(nonce, request, result) {
-        sendInput(BOXES.queueResult, JSON.stringify({
-            nonce: nonce,
-            request_id: (result && result.request_id) || (request && request.request_id) || "",
-            ok: !!(result && result.ok),
-            status: (result && result.status) || "refused",
-            code: (result && result.code) || "",
-            tasks_added: (result && result.tasks_added) || 0,
-            applied: (result && result.applied) || {},
-            inherited: (result && result.inherited) || [],
-            ignored: (result && result.ignored) || [],
-            model: (result && result.model) || {},
-            t: Date.now()
-        }));
+    /** This page's identity for the outbox, the public API's own. */
+    function pageId() {
+        const api = interop();
+        if (api && api.wangp && typeof api.wangp.pageId === "function") { return api.wangp.pageId(); }
+        if (!S.fallbackPage) {
+            let text = "";
+            for (let k = 0; k < 32; k++) { text += Math.floor(Math.random() * 16).toString(16); }
+            S.fallbackPage = text;
+        }
+        return S.fallbackPage;
     }
 
-    /** The instruction box changed: hand the public request to the public API. */
-    async function queue(instruction, fromWatcher) {
+    /** Ask the public API to run this page's jobs. Idempotent; bounded there. */
+    function pump() {
+        const api = interop();
+        if (!api || !api.wangp || typeof api.wangp.pump !== "function") { return false; }
+        try { api.wangp.pump(); } catch (e) { return false; }
+        return true;
+    }
+
+    /** The instruction box changed: the server appended a job; start the pump. */
+    function queue(instruction, fromWatcher) {
         const text = String(instruction || "");
         if (!text || text === S.lastInstruction) { return; }
         let parsed = null;
         try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
-        if (!parsed || !parsed.nonce || !parsed.request) { return; }
+        if (!parsed || !parsed.nonce) { return; }
         if (S.queued[parsed.nonce]) { return; }
         S.queued[parsed.nonce] = true;
         S.lastInstruction = text;
         if (S.watch) { clearInterval(S.watch); S.watch = 0; }
-        const api = interop();
-        if (!api) {
-            note("queue: the public API is not on this page");
-            writeResult(parsed.nonce, parsed.request, { ok: false, status: "refused", code: "IFRAME_NOT_READY" });
+        if (!parsed.job_id) { return; }
+        note("queue: job " + String(parsed.job_id).slice(0, 8) + " appended by the server" + (fromWatcher ? " (read from the box)" : "") + "; pumping");
+        if (!pump()) {
             toast("WanGP is not available in this page.", true);
-            return;
         }
-        note("queue " + String(parsed.request.request_id || "").slice(0, 8) + ": handed to window.minipaintInterop" + (fromWatcher ? " (read from the box)" : ""));
-        let result;
-        try {
-            result = await api.wangp.enqueue(parsed.request);
-        } catch (error) {
-            result = { ok: false, status: "refused", code: "INTERNAL_ERROR", message: String(error && error.message || error).slice(0, 120) };
+    }
+
+    function outboxSentence(job) {
+        if (!job) { return ""; }
+        if (job.state === "started") { return "WanGP started generating it."; }
+        if (job.state === "queued") {
+            const depth = job.result && Number.isFinite(job.result.queue_depth) ? job.result.queue_depth : null;
+            return "Added to WanGP queue." + (depth ? " " + depth + " ahead of it." : "");
         }
-        writeResult(parsed.nonce, parsed.request, result);
-        if (result && result.ok) {
-            const ignored = (result.ignored || []).map(function (item) { return item.field; });
-            toast("Added to WanGP queue." + (ignored.length ? " " + ignored.map(function (f) { return f === "references" ? "Reference" : f === "start" ? "First frame" : f === "end" ? "Last frame" : "Prompt"; }).join(", ") + " was not used by the current model." : ""));
-        } else {
-            toast((result && result.message) || "The request was not queued.", true);
+        if (job.state === "unconfirmed") { return (job.error && job.error.message) || "WanGP did not confirm that the request was added to the queue."; }
+        if (job.state === "failed") { return (job.error && job.error.message) || "The request was not queued."; }
+        if (job.state === "cancelled") { return "The request was cancelled."; }
+        return "";
+    }
+
+    function refreshOutbox() {
+        if (S.outboxRefreshTimer) { return; }
+        S.outboxRefreshTimer = setTimeout(function () {
+            S.outboxRefreshTimer = null;
+            pressHidden(PRESS.outboxRefresh);
+        }, OUTBOX_REFRESH_THROTTLE_MS);
+    }
+
+    /** The public API says a job moved: show it, and let the server re-render the list. */
+    function onOutboxEvent(event) {
+        const detail = event && event.detail ? event.detail : {};
+        const job = detail.job || null;
+        if (detail.kind === "done" && job) {
+            const failed = job.state !== "queued" && job.state !== "started";
+            const ignored = (job.result && job.result.ignored || []).map(function (item) { return item.field; });
+            toast(outboxSentence(job) + (!failed && ignored.length ? " " + ignored.map(function (f) {
+                return f === "references" ? "Reference" : f === "start" ? "First frame" : f === "end" ? "Last frame" : "Prompt";
+            }).join(", ") + " was not used by the current model." : ""), failed);
+            refreshCapabilities(true);
         }
-        refreshCapabilities(true);
+        refreshOutbox();
     }
 
     /* ------------------------------------------------------------------ */
@@ -574,7 +604,9 @@ window.minipaintClipboard = (function () {
                 const takes = ["start", "end", "references"].filter(function (f) { return inputs[f] && inputs[f].supported; });
                 const label = (answer.model && (answer.model.label || answer.model.type)) || "model";
                 setLine("WanGP: " + label + " · takes " + (takes.length ? takes.map(function (f) { return f === "start" ? "first" : f === "end" ? "last" : "reference"; }).join(", ") : "no image")
-                    + (answer.queue === false ? " · queue not offered by this bridge" : ""), answer.queue === false ? "off" : "ready");
+                    + (answer.generation_running === true ? " · generating now, new requests join the run" : answer.start === true ? " · idle, the next request starts a run" : "")
+                    + (answer.queue === false ? " · queue not offered by this bridge" : answer.start === false ? " · this bridge queues but cannot start a run" : ""),
+                    answer.queue === false ? "off" : "ready");
             }
             refreshBadges();
         }, function () {
@@ -612,6 +644,14 @@ window.minipaintClipboard = (function () {
         if (action) {
             event.preventDefault();
             sendInput(BOXES.historyAction, action.dataset.historyAction + ":" + Date.now());
+            return;
+        }
+        const outbox = target.closest("[data-outbox-action]");
+        if (outbox) {
+            event.preventDefault();
+            const verb = String(outbox.dataset.outboxAction || "").split(":")[0];
+            sendInput(BOXES.outboxAction, outbox.dataset.outboxAction + ":" + pageId() + ":" + Date.now());
+            if (verb === "retry" || verb === "adopt") { setTimeout(pump, 400); }
         }
     }
 
@@ -649,14 +689,22 @@ window.minipaintClipboard = (function () {
             S.pasteListener = onDocumentPaste;
             document.addEventListener("paste", S.pasteListener);
         }
+        if (!S.outboxListener) {
+            S.outboxListener = onOutboxEvent;
+            document.addEventListener("minipaint:outbox", S.outboxListener);
+        }
+        // The page's identity, so a press submits under it; and the jobs this
+        // page composed before a reload resume without another press.
+        sendInput(BOXES.pageId, pageId());
         watchTab();
         afterRender();
         if (tabVisible()) { refreshCapabilities(false); }
+        setTimeout(pump, 250);
     }
 
     function debug() {
         return { attached: S.attached, selected: S.selected, menuOpen: !!(S.menu && !S.menu.hidden), menuSection: S.menuSection,
-                 capabilities: S.capabilities, watching: !!S.watch, lastInstruction: S.lastInstruction.slice(0, 40) };
+                 capabilities: S.capabilities, watching: !!S.watch, lastInstruction: S.lastInstruction.slice(0, 40), page: pageId() };
     }
 
     return {
@@ -669,6 +717,8 @@ window.minipaintClipboard = (function () {
         pasteFromClipboard: pasteFromClipboard,
         armQueue: armQueue,
         queue: queue,
+        pump: pump,
+        pageId: pageId,
         refreshCapabilities: refreshCapabilities,
         pressHidden: pressHidden,
         debug: debug

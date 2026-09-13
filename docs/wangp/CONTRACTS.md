@@ -114,6 +114,35 @@ are removed. Windows:
 kill-on-close when `pywin32`/`ctypes` allow it. POSIX: `start_new_session`
 and `killpg` on the tracked pgid only. Never a name-based kill.
 
+## `lock.py` / `vram.py` — one WanGP per machine, and what the card holds
+
+```python
+# lock.py  (<runtime dir>/wangp.lock.json: {"schema", "forge_pid", "forge_start", "created_at", "host"} and nothing else)
+def claim() -> dict            # raises IntegrationError(WANGP_ALREADY_MANAGED) when another *live* Forge holds it; a stale lock is removed
+def release() -> bool          # only when it is this Forge's
+def holder() -> Optional[dict] # the other live Forge, or None
+def sweep() -> bool            # at app start: drop a lock nobody live holds
+def pid_alive(pid) -> bool     # signal 0 / a query handle; never a signal that does anything
+def process_start(pid) -> str  # /proc start time where the platform has it: a recycled pid is not the Forge that took the lock
+def status() -> dict           # {"state": none|ours|other|stale, "summary"} for diagnostics
+
+# vram.py  (nvidia-smi, best effort, never raising; a process name is its last component only)
+def snapshot(uuid, runner=subprocess.run) -> {"available", "memory": {"used_mb", "total_mb"} | None, "processes": [{"pid", "used_mb", "name"}], "detail"}
+def parse_memory(text); def parse_compute_apps(text); def mib(value) -> str
+```
+
+`runtime.start` claims the lock after validation and before the spawn; `stop`, a
+crash and a failed launch release it. `Runtime.tree_pids()` names every pid in the
+child's process group (Linux, from `/proc`; the leader elsewhere), and
+`Runtime.emergency_restart(config, gpu_uuid, runner, start_async, ...) -> report`
+reads the card, stops, waits for the tree to be gone (escalating to exactly the pids
+proved ours), reads the card again, invalidates the sessions and the outbox's jobs in
+flight, and starts again - synchronously with the keywords, or through
+`start_async` (the tab passes `request_start`). The report is `{ok, steps, before,
+after, pids, remaining, freed_mb, verified, started}`; `ui.restart_report_markdown`
+renders it. A launch in progress is ended first (`_launching`), so the emergency
+restart works while a start is stuck.
+
 ## `proxy.py` — `/wan2gp/*` on the Forge origin
 
 ```python
@@ -291,19 +320,27 @@ none is pending or the file has been released; it presses again every
 `WANGP_FETCH_EVERY_MS`. A send whose answer never reaches the boxes ends with
 `deliver: gave up after N s` in the journal and a notice on the status line.
 
-Bridge 1.2.0 (protocol 3) adds the `queue` and `confirm` operations and `admission.py`:
+Bridge 1.2.0 (protocol 3) added the `queue` and `confirm` operations and `admission.py`:
 a queue request overlays the prompt and the image inputs on the live form *as
-replacements*, writes WanGP's `client_id` and `add_to_queue_trigger` so WanGP's own
-chain runs, keeps a per-session `PendingAdmission`, confirms through
-`get_gen_info(state)` (a task whose `params.client_id` is the request id), refuses
-only on a correlated `queue_errors` entry, expires to `ADMISSION_UNCONFIRMED`, and
-puts every override back where the page still holds what the bridge wrote. The
-full contract is in `docs/clipboard/CONTRACTS.md`.
+replacements*, writes WanGP's `client_id` and a trigger so WanGP's own chain runs,
+keeps a per-session `PendingAdmission`, confirms through `get_gen_info(state)` (a
+task whose `params.client_id` is the request id), refuses only on a correlated
+`queue_errors` entry, expires to `ADMISSION_UNCONFIRMED`, and puts every override
+back where the page still holds what the bridge wrote. Bridge 1.3.0 (protocol 4)
+adds the start decision: the request carries `start: auto | never`; the bridge asks
+Wan2GP's `is_generation_in_progress()` (requested as a global, read live) and writes
+`generate_trigger` only for `auto` on a definite "idle" with the trigger resolved,
+`add_to_queue_trigger` otherwise (`start: "unknown"` when the flag or the trigger is
+missing); `confirm` answers `started` when the request's task is at the head of a
+running loop (`gen["in_progress"]`), `queued` otherwise, with `queue_depth`; the
+handshake carries `capabilities.start` and a live `generation_running`. The full
+contract is in `docs/clipboard/CONTRACTS.md`.
 
 ## Tests
 
 `tests/test_wangp_*.py`, in the existing style: a `run()` returning
 `harness.Results`, no pytest, nothing that needs WanGP, Forge or a network.
-Add the new suites to `tests/run.py`. Protocol 3's own suites are `tests/test_wangp_queue.py`,
-`tests/test_interop.py`, `tests/test_clipboard_store.py`, `tests/test_clipboard_ui.py` and
-`tests/test_queue_e2e.py`.
+Add the new suites to `tests/run.py`. The queue's own suites are `tests/test_wangp_queue.py`,
+`tests/test_wangp_start.py`, `tests/test_interop.py`, `tests/test_clipboard_store.py`,
+`tests/test_clipboard_outbox.py`, `tests/test_clipboard_ui.py` and `tests/test_queue_e2e.py`;
+the lock, the GPU report and the emergency restart are in `tests/test_wangp_runtime.py`.

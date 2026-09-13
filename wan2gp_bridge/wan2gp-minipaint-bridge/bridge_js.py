@@ -108,6 +108,7 @@ def configuration(theme_css: str = "") -> dict:
         # request the page cannot carry is refused with a code at once.
         "promptMaxChars": protocol.PROMPT_MAX_CHARS,
         "maxQueueReferences": protocol.MAX_QUEUE_REFERENCES,
+        "startModes": list(protocol.START_MODES),
         # Classes, not ids: WanGP builds its form twice and the bridge places
         # one set of controls in each, so the script looks for "the set that
         # is on screen" rather than for one element.
@@ -649,6 +650,9 @@ __MINIPAINT_FRAME_WRAPPER__
       for (var at = 0; at < refs.length; at += 1) {
         if (!isHex32(refs[at])) { return ["REQUEST_INVALID", "a reference id is not a handoff id"]; }
       }
+    }
+    if (asked.start !== undefined && asked.start !== null && asked.start !== "" && CONFIG.startModes.indexOf(asked.start) === -1) {
+      return ["REQUEST_INVALID", "start is not auto or never"];
     }
     return null;
   }

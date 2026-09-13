@@ -39,7 +39,7 @@ from PIL import Image  # noqa: E402
 
 from minipaint_neo import interop  # noqa: E402
 from minipaint_neo.clipboard import config as clipboard_config  # noqa: E402
-from minipaint_neo.clipboard import history  # noqa: E402
+from minipaint_neo.clipboard import history, outbox  # noqa: E402
 from minipaint_neo.clipboard import store as clipboard_store  # noqa: E402
 from minipaint_neo.clipboard import ui as clipboard_ui  # noqa: E402
 from minipaint_neo.wangp import config as wangp_config  # noqa: E402
@@ -148,6 +148,12 @@ class _Wgp:
         self.inserts = []
         self.scripts = []
         self.unique = 0
+        #: Wan2GP's module-wide ``gen_in_progress``: set when a run starts,
+        #: cleared when it finishes, whichever page did either.
+        self.generating = False
+
+    def is_generation_in_progress(self):
+        return self.generating
 
     def request_component(self, elem_id):
         pass
@@ -217,6 +223,25 @@ def build_wangp(clock):
         })
         return state_value
 
+    def generate_task(*values):
+        """Wan2GP's generate chain in miniature: the same as add_task, then
+        prepare_generate_media / process_tasks - the run starts, the page's
+        loop is marked in progress, the process-wide flag goes up."""
+        state_value = add_task(*values)
+        gen = state_value.setdefault("gen", {})
+        if gen.get("queue"):
+            gen["in_progress"] = True
+            wgp.generating = True
+        return state_value
+
+    def finish_run(state_value):
+        """finalize_generation: the queue drained, the loop over, the flag down."""
+        gen = state_value.setdefault("gen", {})
+        gen["queue"] = []
+        gen["in_progress"] = False
+        wgp.generating = False
+        return state_value
+
     def set_model(choice, state_value):
         state_value["model_type"] = choice
         return state_value
@@ -245,9 +270,14 @@ def build_wangp(clock):
         wizard_prompt = gr.Textbox(value="", label="wizard prompt")
         wizard_prompt_activated_var = gr.Text(value="off", visible=False)
         client_id = gr.Textbox(value="", visible=False)
+        generate_trigger = gr.Text(value="", visible=False)
         add_to_queue_trigger = gr.Text(value="", visible=False)
         clear_button = gr.Button("clear queue")
-        add_to_queue_trigger.change(add_task, inputs=[prompt, wizard_prompt, wizard_prompt_activated_var, image_start, image_end, image_refs, client_id, state], outputs=[state])
+        finish_button = gr.Button("finish run")
+        form = [prompt, wizard_prompt, wizard_prompt_activated_var, image_start, image_end, image_refs, client_id, state]
+        add_to_queue_trigger.change(add_task, inputs=form, outputs=[state])
+        generate_trigger.change(generate_task, inputs=form, outputs=[state])
+        finish_button.click(finish_run, inputs=[state], outputs=[state])
         model_choice.change(set_model, inputs=[model_choice, state], outputs=[state])
         clear_button.click(clear_queue, inputs=[state], outputs=[state])
 
@@ -258,7 +288,7 @@ def build_wangp(clock):
             "video_prompt_type": video_prompt_type, "image_prompt_type_radio": image_prompt_type_radio,
             "image_prompt_type_endcheckbox": image_prompt_type_endcheckbox, "video_prompt_type_image_refs": video_prompt_type_image_refs,
             "prompt": prompt, "wizard_prompt": wizard_prompt, "wizard_prompt_activated_var": wizard_prompt_activated_var,
-            "client_id": client_id, "add_to_queue_trigger": add_to_queue_trigger,
+            "client_id": client_id, "add_to_queue_trigger": add_to_queue_trigger, "generate_trigger": generate_trigger,
         }
         plugin.setup_ui()
         plugin.post_ui_setup(handed)
@@ -268,9 +298,10 @@ def build_wangp(clock):
         "model_choice": "video", "image_mode": 0, "image_start": None, "image_end": None, "image_refs": None,
         "image_prompt_type": "T", "video_prompt_type": "", "image_prompt_type_radio": "T", "image_prompt_type_endcheckbox": False,
         "video_prompt_type_image_refs": "", "prompt": PAGE_PROMPT, "wizard_prompt": "", "wizard_prompt_activated_var": "off",
-        "client_id": "", "add_to_queue_trigger": "",
+        "client_id": "", "add_to_queue_trigger": "", "generate_trigger": "",
     }
-    return demo, plugin, wgp, handed, initial, {"trigger": add_to_queue_trigger, "model": model_choice, "clear": clear_button}
+    return demo, plugin, wgp, handed, initial, {"trigger": add_to_queue_trigger, "generate": generate_trigger, "model": model_choice,
+                                                "clear": clear_button, "finish": finish_button}
 
 
 class Page:
@@ -295,9 +326,12 @@ class Page:
         deps = config["dependencies"]
         self.bridge_dep = next(d for d in deps if [plugin.controls.trigger._id, "click"] in d["targets"])
         self.trigger_dep = next(d for d in deps if [controls["trigger"]._id, "change"] in d["targets"])
+        self.generate_dep = next(d for d in deps if [controls["generate"]._id, "change"] in d["targets"])
         self.model_dep = next(d for d in deps if [controls["model"]._id, "change"] in d["targets"])
         self.clear_dep = next(d for d in deps if [controls["clear"]._id, "click"] in d["targets"])
+        self.finish_dep = next(d for d in deps if [controls["finish"]._id, "click"] in d["targets"])
         self.fired = 0
+        self.generated = 0
         self.fire_trigger = True
 
     def value(self, name):
@@ -343,7 +377,13 @@ class Page:
         if self.ids["add_to_queue_trigger"] in changed and self.fire_trigger:
             self.fired += 1
             self._apply(self.trigger_dep, self._call(self.trigger_dep))
+        if self.ids["generate_trigger"] in changed and self.fire_trigger:
+            self.generated += 1
+            self._apply(self.generate_dep, self._call(self.generate_dep))
         return ack
+
+    def finish_run(self):
+        self._apply(self.finish_dep, self._call(self.finish_dep))
 
     def choose_model(self, name):
         self.set("model_choice", name)
@@ -420,7 +460,8 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
     plugin_session = hello.get("bridge_session")
     r.check("a hello through Gradio is ready and offers the queue",
             hello.get("ready") is True and hello.get("capabilities", {}).get("queue") is True and protocol.valid_handoff_id(plugin_session or ""), json.dumps(hello)[:200])
-    r.check("and speaks protocol 3", hello.get("protocol") == 3 and hello.get("bridge_version") == "1.2.0")
+    r.check("and speaks protocol 4", hello.get("protocol") == 4 and hello.get("bridge_version") == "1.3.0")
+    r.check("and offers start, with WanGP idle", hello.get("capabilities", {}).get("start") is True and hello.get("generation_running") is False, json.dumps(hello.get("capabilities")))
 
     def queue(request_id, **fields):
         body = {"request_id": request_id, "bridge_session": session_of()}
@@ -434,15 +475,19 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
     ack = queue(ID_A)
     r.check("an empty request is admitted", ack.get("ok") is True and ack.get("admission") == "requested", json.dumps(ack)[:200])
     r.check("every field is inherited, none applied", ack.get("inherited") == list(protocol.QUEUE_FIELDS) and not any(ack["applied"].values()), json.dumps(ack.get("applied")))
-    r.check("the bridge wrote the client id and the trigger, and WanGP's chain ran once", page.value("client_id") == ID_A and page.fired == 1, page.value("client_id"))
+    r.check("WanGP idle: the bridge took the generate route and wrote WanGP's generate trigger, whose chain ran once",
+            ack.get("route") == "generate" and ack.get("start") == "auto" and ack.get("generation_running") is False
+            and page.value("client_id") == ID_A and page.generated == 1 and page.fired == 0, json.dumps(ack)[:200])
     tasks = stand.tasks_for(ID_A)
-    r.check("WanGP queued one task carrying the request as its client id", len(tasks) == 1 and stand.tasks() == tasks)
+    r.check("WanGP queued one task carrying the request as its client id, and its loop is running", len(tasks) == 1 and stand.tasks() == tasks and stand.gen().get("in_progress") is True and wgp.generating)
     r.check("with the page's own prompt and no images", tasks and tasks[0]["params"]["prompt"] == PAGE_PROMPT and not _images(tasks[0], "image_start") and not _images(tasks[0], "image_refs"))
     r.check("the prompt box was never touched", page.value("prompt") == PAGE_PROMPT)
     status = confirm(ID_A)
-    r.check("confirmation finds the task and says queued", status.get("ok") is True and status.get("status") == "queued" and status.get("tasks_added") == 1, json.dumps(status)[:200])
+    r.check("confirmation finds the task at the head of a running loop and says started", status.get("ok") is True and status.get("status") == "started" and status.get("tasks_added") == 1 and status.get("queue_depth") == 0, json.dumps(status)[:200])
     r.check("and puts the client id back to what it was", page.value("client_id") == "" and "client_id" in (status.get("restored") or []), str(status.get("restored")))
     r.check("the answer names the model of the page", status.get("model", {}).get("label") == "A video model")
+    r.check("a receivers answer now says a generation is running", page.bridge({"op": "receivers", "request_id": "r1b", "channel_id": "c" * 32}).get("generation_running") is True)
+    page.finish_run()
 
     # -- 2. overrides through the public API's server half: a staged image, a Clipboard asset, a prompt
     library = clipboard_store.store()
@@ -459,7 +504,7 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
             protocol.valid_handoff_id(wire.get("start_handoff_id", "")) and len(wire.get("reference_handoff_ids", [])) == 1 and set(wire["handoff_ids"]) == {wire["start_handoff_id"], *wire["reference_handoff_ids"]}
             and all((handoff.handoff_root() / f"{item}.png").is_file() for item in wire["handoff_ids"]), json.dumps(wire))
     r.check("and the wire request carries ids and the prompt, never a path or a kind", "/" not in json.dumps(wire) and "clipboard_asset" not in json.dumps(wire))
-    before = page.fired
+    before = page.generated
     ack = queue(ID_B, prompt=wire["prompt"], start_handoff_id=wire["start_handoff_id"], reference_handoff_ids=wire["reference_handoff_ids"])
     r.check("the overlay is admitted", ack.get("ok") is True and ack.get("admission") == "requested", json.dumps(ack)[:200])
     r.check("applied: prompt, start, one reference; inherited: end",
@@ -469,7 +514,7 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
             page.value("prompt") == "an override prompt" and page.gallery_count("image_start") == 1 and page.gallery_count("image_refs") == 1 and page.gallery_count("image_end") == 0)
     r.check("with the selectors switched on the way a click would switch them",
             "S" in page.value("image_prompt_type") and page.value("image_prompt_type_radio") == "S" and "I" in page.value("video_prompt_type") and page.value("video_prompt_type_image_refs") == "I", f"{page.value('image_prompt_type')}/{page.value('video_prompt_type')}")
-    r.check("WanGP's chain ran once more", page.fired == before + 1)
+    r.check("WanGP was idle again, so the generate chain ran once more", page.generated == before + 1 and ack.get("route") == "generate")
     tasks = stand.tasks_for(ID_B)
     r.check("the queued task holds the override prompt", len(tasks) == 1 and tasks[0]["params"]["prompt"] == "an override prompt")
     r.check("the staged picture as its start frame and the Clipboard asset as its reference, by pixels",
@@ -477,7 +522,7 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
             and len(_images(tasks[0], "image_refs")) == 1 and _about(_images(tasks[0], "image_refs")[0], (30, 10, 200, 255)))
     r.check("and the end frame the page had: none", tasks and not _images(tasks[0], "image_end"))
     status = confirm(ID_B)
-    r.check("confirmed queued", status.get("status") == "queued" and status.get("tasks_added") == 1, json.dumps(status)[:200])
+    r.check("confirmed started", status.get("status") == "started" and status.get("tasks_added") == 1, json.dumps(status)[:200])
     r.check("the prompt, the galleries and the selectors are put back",
             page.value("prompt") == PAGE_PROMPT and page.gallery_count("image_start") == 0 and page.gallery_count("image_refs") == 0
             and page.value("image_prompt_type") == "T" and page.value("image_prompt_type_radio") == "T" and page.value("video_prompt_type") == "" and page.value("client_id") == "",
@@ -486,12 +531,13 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
     released = interop.release(wire["handoff_ids"])
     r.check("the handoffs are released once the bridge has them", released == 2 and not any((handoff.handoff_root() / f"{item}.png").exists() for item in wire["handoff_ids"]))
     r.check("the queued task keeps its pictures after the release", _about(_images(stand.tasks_for(ID_B)[0], "image_start")[0], (10, 200, 30, 255)))
+    page.finish_run()
 
     # -- 3. the same request again is a duplicate, and the same id for another payload a conflict
     count = len(stand.tasks())
     ack = queue(ID_B, prompt=wire["prompt"], start_handoff_id=wire["start_handoff_id"], reference_handoff_ids=wire["reference_handoff_ids"])
     r.check("a retry of an admitted request is answered from the record and queues nothing again",
-            ack.get("admission") == "duplicate" and ack.get("status") == "queued" and len(stand.tasks()) == count and page.value("client_id") == "", json.dumps(ack)[:200])
+            ack.get("admission") == "duplicate" and ack.get("status") == "started" and len(stand.tasks()) == count and page.value("client_id") == "", json.dumps(ack)[:200])
     ack = queue(ID_B, prompt="something else")
     r.check("the same id with another payload is REQUEST_ID_CONFLICT", ack.get("ok") is False and ack.get("code") == "REQUEST_ID_CONFLICT" and len(stand.tasks()) == count, json.dumps(ack)[:200])
 
@@ -509,9 +555,10 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
     r.check("WanGP queued it with the prompt and without the picture", len(tasks) == 1 and tasks[0]["params"]["prompt"] == "text only" and not _images(tasks[0], "image_start"))
     r.check("and the start gallery was never written", page.gallery_count("image_start") == 0 and "S" not in page.value("image_prompt_type"))
     status = confirm(ID_C)
-    r.check("confirmed, with the ignored field still in the answer", status.get("status") == "queued" and status.get("ignored") == [{"field": "start", "code": "RECEIVER_DISABLED"}])
+    r.check("confirmed, with the ignored field still in the answer", status.get("status") == "started" and status.get("ignored") == [{"field": "start", "code": "RECEIVER_DISABLED"}])
     interop.release(wire["handoff_ids"])
     page.choose_model("video")
+    page.finish_run()
 
     # -- 5. one request at a time per page: the form has an owner until it is confirmed
     ack_d = queue(ID_D, prompt="first of two")
@@ -520,23 +567,25 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
             ack_d.get("admission") == "requested" and ack_e.get("ok") is False and ack_e.get("code") == "QUEUE_BUSY" and page.value("client_id") == ID_D and page.value("prompt") == "first of two", json.dumps(ack_e)[:200])
     r.check("the busy answer still names the request it refused", ack_e.get("request_id") == "q-" + ID_E[:8] and ack_e.get("queue_request_id") == ID_E)
     status = confirm(ID_D)
-    r.check("once the first is confirmed", status.get("status") == "queued" and page.value("prompt") == PAGE_PROMPT)
+    r.check("once the first is confirmed - started, it found WanGP idle", status.get("status") == "started" and page.value("prompt") == PAGE_PROMPT)
     ack_e = queue(ID_E, prompt="second of two")
-    r.check("the second goes through", ack_e.get("admission") == "requested" and len(stand.tasks_for(ID_E)) == 1, json.dumps(ack_e)[:200])
+    r.check("the second goes through, joining the run through the add-to-queue trigger",
+            ack_e.get("admission") == "requested" and ack_e.get("route") == "queue" and ack_e.get("generation_running") is True and len(stand.tasks_for(ID_E)) == 1, json.dumps(ack_e)[:200])
     status = confirm(ID_E)
-    r.check("and is confirmed on its own", status.get("status") == "queued" and status.get("queue_request_id") == ID_E)
+    r.check("and is confirmed on its own, queued behind the running task", status.get("status") == "queued" and status.get("queue_request_id") == ID_E and status.get("queue_depth") == 1, json.dumps(status)[:200])
 
-    # -- 6. queued sticks: the queue emptying later does not change the answer
-    page.clear_queue()
-    r.check("(the stand-in's queue is empty now)", stand.tasks() == [])
+    # -- 6. queued sticks: the run ending later does not change the answer
+    page.finish_run()
+    r.check("(the run ended and the stand-in's queue is empty now)", stand.tasks() == [] and not wgp.generating)
     status = confirm(ID_E)
     r.check("a request once seen queued stays queued", status.get("status") == "queued" and status.get("tasks_added") == 1)
+    r.check("and one once seen started stays started", confirm(ID_D).get("status") == "started")
 
     # -- 7. a refusal is only a refusal on WanGP's own, correlated evidence
     ack = queue(ID_F, prompt="please REFUSE this one")
     status = confirm(ID_F)
-    r.check("a prompt WanGP's validation refuses is refused, with the code, and no task",
-            ack.get("admission") == "requested" and status.get("status") == "refused" and status.get("code") == "WANGP_VALIDATION_REFUSED" and not stand.tasks_for(ID_F), json.dumps(status)[:200])
+    r.check("a prompt WanGP's validation refuses is refused, with the code, and no task - and no run started",
+            ack.get("admission") == "requested" and status.get("status") == "refused" and status.get("code") == "WANGP_VALIDATION_REFUSED" and not stand.tasks_for(ID_F) and not wgp.generating, json.dumps(status)[:200])
     r.check("and the prompt box is put back all the same", page.value("prompt") == PAGE_PROMPT and page.value("client_id") == "")
 
     # -- 8. no task and no error is pending, then unconfirmed when the time is up
@@ -559,13 +608,14 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
     ack = queue(ID_H, prompt="to be edited", start_handoff_id=wire["start_handoff_id"])
     page.set("prompt", "the user typed over it")
     page.fire_trigger = True
-    page._apply(page.trigger_dep, page._call(page.trigger_dep))  # the chain runs late, on the edited form
+    page._apply(page.generate_dep, page._call(page.generate_dep))  # the chain runs late, on the edited form
     status = confirm(ID_H)
     r.check("a value the user changed after the write is not restored, the rest is",
-            status.get("status") == "queued" and page.value("prompt") == "the user typed over it" and page.gallery_count("image_start") == 0
+            status.get("status") == "started" and page.value("prompt") == "the user typed over it" and page.gallery_count("image_start") == 0
             and "prompt" in (status.get("restore_skipped") or []) and "start_image" in (status.get("restored") or []), json.dumps(status)[:200])
     interop.release(wire["handoff_ids"])
     page.set("prompt", PAGE_PROMPT)
+    page.finish_run()
 
     # -- 10. the prompt goes where generation reads it: the wizard box while the wizard is on
     page.set("wizard_prompt_activated_var", "on")
@@ -576,31 +626,54 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
     tasks = stand.tasks_for("77777777aaaaaaaabbbbbbbbcccccccc")
     r.check("and that is what WanGP queued", len(tasks) == 1 and tasks[0]["params"]["prompt"] == "through the wizard")
     status = confirm("77777777aaaaaaaabbbbbbbbcccccccc")
-    r.check("and what is put back afterwards", status.get("status") == "queued" and page.value("wizard_prompt") == "the wizard's own text")
+    r.check("and what is put back afterwards", status.get("status") == "started" and page.value("wizard_prompt") == "the wizard's own text")
     page.set("wizard_prompt_activated_var", "off")
+    page.finish_run()
 
-    # -- 11. the Clipboard composer at one end, its history at the other
+    # -- 10b. never: staged only, whatever WanGP is doing; and a start mode that is not one
+    generated_before = page.generated
+    ack = queue("88888888aaaaaaaabbbbbbbbcccccccc", prompt="stage me", start="never")
+    status = confirm("88888888aaaaaaaabbbbbbbbcccccccc")
+    r.check("start never takes the add-to-queue trigger on an idle WanGP: queued, and no run started",
+            ack.get("route") == "queue" and ack.get("start") == "never" and status.get("status") == "queued" and not wgp.generating and page.generated == generated_before,
+            f"{json.dumps(ack)[:160]} status={status.get('status')} generating={wgp.generating}")
+    page.clear_queue()
+    ack = queue("8888888899999999aaaaaaaabbbbbbbb", prompt="x", start="later")
+    r.check("a start mode that is not one is REQUEST_INVALID", ack.get("ok") is False and ack.get("code") == "REQUEST_INVALID")
+
+    # -- 11. the Clipboard composer at one end, the server's outbox in the middle, its history at the other
+    outbox.use_running(lambda: True)
     tab = clipboard_ui.ClipboardTab()
     first = library.import_bytes(_png((200, 30, 30, 255)), "first.png", "upload")
     tab.assign("first", first.asset_id)
-    session = {"pending": {}}
-    instruction, line, session = tab.prepare_queue("from the Clipboard tab", session)
-    request = json.loads(instruction)["request"]
-    r.check("the composer's request names its asset by id and carries the prompt", request["images"]["start"] == {"kind": "clipboard_asset", "id": first.asset_id} and request["prompt"] == "from the Clipboard tab")
+    page_id = "e" * 16
+    instruction, line, listing, button = tab.prepare_queue("from the Clipboard tab", page_id)
+    job = outbox.jobs()[-1]
+    request = job["request"]
+    r.check("the composer's press is a pending job whose request names its asset by id and carries the prompt",
+            json.loads(instruction)["job_id"] == job["job_id"] and job["state"] == "pending" and job["page"] == page_id
+            and request["images"]["start"] == {"kind": "clipboard_asset", "id": first.asset_id} and request["prompt"] == "from the Clipboard tab" and request["start"] == "auto")
+    claimed = outbox.claim(page_id)
+    r.check("the page claims it with a lease", claimed["job"]["job_id"] == job["job_id"] and claimed.get("lease"))
     wire = interop.prepare(interop.normalize_public_request(request))
-    ack = queue(request["request_id"], prompt=wire["prompt"], start_handoff_id=wire["start_handoff_id"])
+    ack = queue(request["request_id"], prompt=wire["prompt"], start_handoff_id=wire["start_handoff_id"], start=wire["start"])
+    outbox.report(job["job_id"], claimed["lease"], "sent")
     status = confirm(request["request_id"])
     tasks = stand.tasks_for(request["request_id"])
-    r.check("it queues on WanGP with the Clipboard picture as the start frame",
-            status.get("status") == "queued" and len(tasks) == 1 and _about(_images(tasks[0], "image_start")[0], (200, 30, 30, 255)) and tasks[0]["params"]["prompt"] == "from the Clipboard tab")
-    answer = {"request_id": request["request_id"], "ok": True, "status": "queued", "tasks_added": status.get("tasks_added"),
-              "applied": status.get("applied"), "inherited": status.get("inherited"), "ignored": status.get("ignored"), "model": status.get("model")}
-    text, listing, session = tab.queue_result(json.dumps(answer), session)
+    r.check("it starts on WanGP with the Clipboard picture as the start frame",
+            status.get("status") == "started" and len(tasks) == 1 and _about(_images(tasks[0], "image_start")[0], (200, 30, 30, 255)) and tasks[0]["params"]["prompt"] == "from the Clipboard tab")
+    reported = outbox.report(job["job_id"], claimed["lease"], "done", {
+        "ok": True, "status": status.get("status"), "request_id": request["request_id"], "tasks_added": status.get("tasks_added"), "queue_depth": status.get("queue_depth"),
+        "route": status.get("route"), "applied": status.get("applied"), "inherited": status.get("inherited"), "ignored": status.get("ignored"), "model": status.get("model")})
+    r.check("the server's job is started, with the result and without the prompt", reported["state"] == "started" and "Clipboard tab" not in json.dumps(reported["result"]))
+    listing, text, history_listing, button = tab.refresh_outbox(page_id)
     record = history.load_history()[0]
     r.check("and the tab's history records exactly that recipe",
-            text.startswith("Added to WanGP queue.") and record["request_id"] == request["request_id"] and record["first_mode"] == "override" and record["first_asset_id"] == first.asset_id
+            text.startswith("WanGP started generating it.") and record["request_id"] == request["request_id"] and record["first_mode"] == "override" and record["first_asset_id"] == first.asset_id
             and record["prompt_mode"] == "override" and record["last_mode"] == "inherit" and record["model_label"] == "A video model", json.dumps(record))
+    r.check("the queue list shows it generating", "Generating" in listing)
     interop.release(wire["handoff_ids"])
+    page.finish_run()
 
     # -- 12. another page is another owner
     other = Page(client, config, "page-two", plugin, handed, initial, controls)
@@ -613,6 +686,8 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
     ack_other = other.bridge({"op": "queue", "request_id": "q-other", "channel_id": "d" * 32,
                               "queue": {"request_id": "66666666777777778888888899999999", "bridge_session": other_hello["bridge_session"], "prompt": "on page two"}})
     r.check("page two is not blocked by page one's pending request", ack.get("admission") == "requested" and ack_other.get("admission") == "requested", json.dumps(ack_other)[:200])
+    r.check("and the process-wide flag is one flag: page two, arriving second, saw page one's route and joined rather than started",
+            ack.get("route") == "generate" or ack_other.get("route") == "queue", f"{ack.get('route')} / {ack_other.get('route')}")
     r.check("and page two's WanGP session has its own task", len(Stand(app, "page-two", handed).tasks()) == 1 and other.value("prompt") == "on page two")
     ack_wrong = queue("99999999888888887777777766666666", bridge_session=other_hello["bridge_session"], prompt="for the wrong page")
     r.check("a request prepared for another page's session is BRIDGE_SESSION_MISMATCH", ack_wrong.get("ok") is False and ack_wrong.get("code") == "BRIDGE_SESSION_MISMATCH")
@@ -635,9 +710,11 @@ def run() -> Results:
         clipboard_config.use_config_dir(base / "data")
         process_log.use_log_dir(base / "logs")
         clipboard_store.reset_for_tests()
+        outbox.reset_for_tests()
         try:
             run_checks(r, base)
         finally:
+            outbox.reset_for_tests()
             wangp_config.use_config_dir(None)
             clipboard_config.use_config_dir(None)
             process_log.use_log_dir(None)

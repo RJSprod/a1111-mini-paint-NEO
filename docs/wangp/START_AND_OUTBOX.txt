@@ -1,4 +1,42 @@
 ================================================================================
+DEPRECATED - IMPLEMENTED, WITH DIFFERENCES
+================================================================================
+
+This document was the design intent for protocol 4 / bridge 1.3.0. It has
+been implemented and is kept for the record only; the living descriptions
+are docs/clipboard/README.md (the operator's guide) and
+docs/clipboard/CONTRACTS.md and docs/wangp/CONTRACTS.md (the contracts).
+Where this file and the code disagree, the code and those documents are
+right. The implementation departs from sections 4, 6 and 11 on purpose:
+
+  * The start decision is made on the server, inside WanGP, by the bridge -
+    not by the page reading the Generate button. The bridge asks Wan2GP's
+    own process-wide flag (`is_generation_in_progress()`, requested as a
+    global and read live) and writes `generate_trigger` when nothing is
+    generating anywhere, `add_to_queue_trigger` otherwise. The page's
+    button visibility was per Gradio session and blind to a run started
+    from another WanGP page; the flag is one flag for the whole process.
+    The fail-safe direction of 4.3 is kept: a flag the build cannot read,
+    or a missing trigger, means the queue route and `start: "unknown"`.
+  * The outbox is server-authoritative rather than browser-claimed: the
+    server holds the jobs (clipboard-outbox.json), hands out one lease at a
+    time across every browser page in press order, decides whose turn it
+    is, and is told the outcome through routes under
+    /minipaint-interop/outbox. A page runs only the jobs it composed, so a
+    job inherits the WanGP settings its user is looking at; a job whose
+    page is gone waits, and a person may run it from another page.
+  * Add to Queue is not always a button. While the managed WanGP is not
+    running the button says so and is off, and a press - from the tab or
+    from window.minipaintInterop - is refused with WANGP_NOT_RUNNING rather
+    than stored.
+  * Two things this file did not ask for were built beside it: a
+    machine-wide lock so a second Forge server refuses to start a second
+    managed WanGP (WANGP_ALREADY_MANAGED), and an emergency Restart WanGP
+    in Integration management that ends the whole process tree, verifies
+    it is gone and reads the GPU's memory before and after.
+  * Section 9 stands: none of this fixes the model reloads.
+
+================================================================================
 DESIGN INTENT — STARTING A GENERATION, AND THE OUTBOX
 Protocol 4 / bridge 1.3.0
 ================================================================================

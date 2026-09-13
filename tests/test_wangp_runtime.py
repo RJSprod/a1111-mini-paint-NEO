@@ -28,6 +28,7 @@ import tempfile  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 
+from minipaint_neo.wangp import bridge, lock, vram  # noqa: E402
 from minipaint_neo.wangp import config as wangp_config  # noqa: E402
 from minipaint_neo.wangp import discovery, errors, runtime  # noqa: E402
 from minipaint_neo.wangp.errors import IntegrationError  # noqa: E402
@@ -324,6 +325,183 @@ def ownership_and_failure_checks(r: Results) -> None:
     runtime.reset_for_tests()
 
 
+def lock_checks(r: Results, base: str) -> None:
+    """One managed WanGP per machine: the lock names the Forge, and only the Forge."""
+    data = pathlib.Path(base) / "lock-data"
+    wangp_config.use_config_dir(data)
+    try:
+        r.check("no lock before anyone claims it", lock.read() is None and lock.holder() is None and lock.status()["state"] == "none")
+        record = lock.claim()
+        written = json.loads(lock.lock_path().read_text(encoding="utf-8"))
+        r.check("a claim writes the Forge pid and nothing that is never persisted",
+                set(written) <= lock.ALLOWED_KEYS and written["forge_pid"] == os.getpid()
+                and not any(key in written for key in ("pid", "port", "instance_id", "secret", "child_pid")), str(sorted(written)))
+        r.check("the lock is ours", lock.status()["state"] == "ours" and lock.holder() is None and record["forge_pid"] == os.getpid())
+        r.check("claiming again from the same Forge is fine", lock.claim()["forge_pid"] == os.getpid())
+
+        # Another live Forge: the test runner's parent process stands in for it.
+        other = os.getppid()
+        foreign = dict(written, forge_pid=other, forge_start=lock.process_start(other))
+        lock.lock_path().write_text(json.dumps(foreign), encoding="utf-8")
+        held = lock.holder()
+        code = failed(lock.claim)
+        r.check("a lock held by another live Forge is seen as held", held is not None and held["forge_pid"] == other, str(held))
+        r.check("and a claim is refused with WANGP_ALREADY_MANAGED", code == errors.WANGP_ALREADY_MANAGED, code)
+        r.check("the status says another Forge holds it", lock.status()["state"] == "other")
+        r.check("releasing somebody else's lock does nothing", lock.release() is False and lock.lock_path().is_file())
+
+        # A dead Forge: its pid is nobody's.
+        stale = dict(written, forge_pid=unused_pid(), forge_start="")
+        lock.lock_path().write_text(json.dumps(stale), encoding="utf-8")
+        r.check("a lock left by a dead Forge is stale", lock.status()["state"] == "stale")
+        r.check("and is removed by the next claim, which succeeds", lock.claim()["forge_pid"] == os.getpid() and lock.status()["state"] == "ours")
+        r.check("release removes ours", lock.release() is True and not lock.lock_path().exists())
+
+        # A recycled pid: alive, but not the process that took the lock.
+        recycled = dict(written, forge_pid=other, forge_start="1" if lock.process_start(other) != "1" else "2")
+        if lock.process_start(other):
+            lock.lock_path().write_text(json.dumps(recycled), encoding="utf-8")
+            r.check("a live pid with another start time is a recycled pid, so the lock is stale", lock.status()["state"] == "stale")
+        lock.lock_path().write_text("not json", encoding="utf-8")
+        r.check("an unreadable lock is dropped", lock.holder() is None and not lock.lock_path().exists())
+        lock.lock_path().write_text(json.dumps(stale), encoding="utf-8")
+        r.check("sweep removes a stale lock", lock.sweep() is True and not lock.lock_path().exists() and lock.sweep() is False)
+
+        # The runtime refuses to start a second managed WanGP on the machine.
+        lock.lock_path().write_text(json.dumps(foreign), encoding="utf-8")
+        blocked = runtime.Runtime()
+        spawns = Spawns()
+        code = failed(lambda: blocked.start(CONFIG_FOR_FAILURE, spawn=spawns, probe=healthy, gpus=GPUS_FOR_FAILURE, handoff_root=str(pathlib.Path(base) / "handoff"), timeout=1.0))
+        r.check("a start while another Forge holds the lock is WANGP_ALREADY_MANAGED before any spawn",
+                code == errors.WANGP_ALREADY_MANAGED and spawns.calls == [], f"{code} {spawns.calls}")
+        r.check("and the tab may offer Restart, not Reinitialize",
+                blocked.state == runtime.STOPPED and blocked.snapshot()["can_restart"] and not blocked.snapshot()["needs_setup"])
+        r.check("the other Forge's lock is left alone", json.loads(lock.lock_path().read_text(encoding="utf-8"))["forge_pid"] == other)
+        lock.lock_path().unlink()
+    finally:
+        with contextlib.suppress(Exception):
+            lock.release()
+        wangp_config.use_config_dir(None)
+
+
+def vram_checks(r: Results) -> None:
+    """The GPU report reads nvidia-smi's answers and never a path."""
+    r.check("memory used and total are read", vram.parse_memory("1234, 24564\n") == {"used_mb": 1234, "total_mb": 24564})
+    r.check("a missing answer is None", vram.parse_memory("") is None and vram.parse_memory("N/A, N/A") is None and vram.parse_memory(None) is None)
+    apps = vram.parse_compute_apps("4242, 11264, /home/someone/WanGP/venv/bin/python3\n4243, [N/A], C:\\Users\\me\\wan\\python.exe\n, 5, x\n")
+    r.check("compute apps carry pid, memory and the program's name only",
+            apps == [{"pid": 4242, "used_mb": 11264, "name": "python3"}, {"pid": 4243, "used_mb": None, "name": "python.exe"}], str(apps))
+    r.check("no path survives", "home" not in json.dumps(apps) and "Users" not in json.dumps(apps))
+    r.check("amounts render for a screen", vram.mib(512) == "512 MiB" and vram.mib(11264) == "11.0 GiB" and vram.mib(None) == "unknown")
+
+    class Completed:
+        def __init__(self, stdout, returncode=0):
+            self.stdout, self.returncode = stdout, returncode
+
+    calls = []
+
+    def runner(command, **keywords):
+        calls.append(list(command))
+        if "--query-gpu=memory.used,memory.total" in command:
+            return Completed("2048, 24564\n")
+        return Completed("7, 1536, /opt/wan/python\n")
+
+    saved = vram.shutil.which
+    vram.shutil.which = lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None
+    try:
+        picture = vram.snapshot(GPU_UUID, runner)
+        r.check("a snapshot asks nvidia-smi for the chosen device only",
+                picture["available"] and picture["memory"] == {"used_mb": 2048, "total_mb": 24564} and picture["processes"] == [{"pid": 7, "used_mb": 1536, "name": "python"}]
+                and all(GPU_UUID in command for command in calls), str(calls))
+        r.check("a device that is not configured is not asked about", vram.snapshot("", runner)["available"] is False)
+    finally:
+        vram.shutil.which = saved
+    without = vram.snapshot(GPU_UUID, runner)
+    r.check("without nvidia-smi the answer is honest", without["available"] is False and "nvidia-smi" in without["detail"])
+
+
+def emergency_restart_checks(r: Results, config, handoff) -> None:
+    """The emergency option: the tree ends, the card is read before and after, a fresh start follows."""
+    class Completed:
+        def __init__(self, stdout, returncode=0):
+            self.stdout, self.returncode = stdout, returncode
+
+    stage = {"phase": "before"}
+    asked = []
+
+    def runner(command, **keywords):
+        asked.append(stage["phase"])
+        if "--query-gpu=memory.used,memory.total" in command:
+            return Completed("11776, 24564\n" if stage["phase"] == "before" else "512, 24564\n")
+        if stage["phase"] == "before":
+            return Completed(f"{stage['pid']}, 11264, /opt/wan/venv/bin/python\n9999, 512, /usr/bin/other\n")
+        return Completed("9999, 512, /usr/bin/other\n")
+
+    listener = Listener()
+    current = runtime.Runtime()
+    spawns = Spawns()
+    saved_which = vram.shutil.which
+    vram.shutil.which = lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None
+    try:
+        with port_from(listener):
+            current.start(config, spawn=spawns, probe=healthy, gpus=[gpu()], handoff_root=handoff, timeout=20.0)
+        r.check("(a WanGP of ours is running)", current.state == runtime.READY and len(spawns.processes) == 1)
+        stage["pid"] = spawns.processes[0].pid
+        first_instance = current.instance_id
+        bridge.registry().hello("a" * 32, first_instance)
+        r.check("(a browser session is bound to it)", bridge.registry().snapshot()["sessions"] == 1)
+
+        def start_again(candidate):
+            stage["phase"] = "after"
+            with port_from(listener):
+                current.start(candidate, spawn=spawns, probe=healthy, gpus=[gpu()], handoff_root=handoff, timeout=20.0)
+
+        # The phase flips to "after" when the stop has happened: the stop is
+        # observed through the tracked process being terminated.
+        original_stop = current.stop
+
+        def stop_then_flip(timeout=runtime.STOP_TIMEOUT):
+            original_stop(timeout)
+            stage["phase"] = "after"
+
+        current.stop = stop_then_flip
+        report = current.emergency_restart(config, gpu_uuid=GPU_UUID, runner=runner, start_async=start_again)
+        current.stop = original_stop
+
+        r.check("the restart reports success", report["ok"] is True and report["verified"] is True, json.dumps(report["steps"]))
+        r.check("the old child was terminated", "terminate" in spawns.processes[0].calls)
+        r.check("the tree was named by pid and nothing of it remains", report["pids"] == [stage["pid"]] and report["remaining"] == [])
+        r.check("the GPU was read before and after", report["before"]["available"] and report["after"]["available"] and asked[0] == "before" and asked[-1] == "after")
+        r.check("the memory that came back is counted", report["freed_mb"] == 11776 - 512, str(report["freed_mb"]))
+        r.check("the report names our process on the card before the stop and not after",
+                [e["pid"] for e in report["before"]["processes"]] == [stage["pid"], 9999] and [e["pid"] for e in report["after"]["processes"]] == [9999])
+        r.check("the other process on the card is reported as not ours", any("does not own" in step for step in report["steps"]), json.dumps(report["steps"]))
+        r.check("a fresh WanGP was started", report["started"] == "requested" and len(spawns.processes) == 2 and current.state == runtime.READY
+                and current.instance_id not in ("", first_instance))
+        r.check("the browser sessions of the old run were invalidated", bridge.registry().snapshot()["sessions"] == 0)
+        r.check("no step names a path", not any("/opt" in step or "/usr" in step for step in report["steps"]), json.dumps(report["steps"]))
+
+        # Without nvidia-smi the tree is still verified and the report says what it could not see.
+        vram.shutil.which = lambda name: None
+        stage["phase"] = "before"
+        report = current.emergency_restart(config, gpu_uuid=GPU_UUID, runner=runner, start_async=start_again)
+        r.check("without nvidia-smi the restart still completes and says VRAM is unverified",
+                report["ok"] is True and report["freed_mb"] is None and any("unverified" in step for step in report["steps"]), json.dumps(report["steps"]))
+
+        # Nothing running: the report says so and still starts one.
+        current.stop()
+        stage["phase"] = "before"
+        report = current.emergency_restart(config, gpu_uuid=GPU_UUID, runner=runner, start_async=start_again)
+        r.check("with no WanGP running the restart says so and starts one", any("no WanGP of ours was running" in step for step in report["steps"]) and report["started"] == "requested")
+    finally:
+        vram.shutil.which = saved_which
+        with contextlib.suppress(Exception):
+            current.stop(timeout=2.0)
+        with contextlib.suppress(Exception):
+            bridge.registry().invalidate_instance("")
+        listener.close()
+
+
 def run() -> Results:
     r = Results("wangp runtime")
 
@@ -583,6 +761,9 @@ def run() -> Results:
         global CONFIG_FOR_FAILURE, GPUS_FOR_FAILURE
         CONFIG_FOR_FAILURE, GPUS_FOR_FAILURE = config, [gpu(uuid=GPU_UUID)]
         ownership_and_failure_checks(r)
+        lock_checks(r, base.name)
+        vram_checks(r)
+        emergency_restart_checks(r, config, handoff)
     finally:
         base.cleanup()
 

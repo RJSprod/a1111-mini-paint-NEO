@@ -452,6 +452,81 @@ window.minipaintWanGP = (function () {
         return true;
     }
 
+    /* ------------------------------------------------------------------ */
+    /* Deadlines that only spend the time this page was on screen            */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * A backgrounded tab is throttled, not stopped. It keeps running - it
+     * posts these very lines - but its turn of the event loop comes around
+     * seconds apart instead of milliseconds, and a reply that arrives in the
+     * message queue sits there until it does.
+     *
+     * That is fatal to a deadline measured on the wall clock. The bridge
+     * answers a receivers query in 0 ms and the page takes 23 seconds to
+     * notice; ten-second deadlines expire one after another while nothing is
+     * actually wrong, the admission goes unconfirmed, the prepared image is
+     * swept, and a queue that was working reports failures for work the user
+     * never saw fail. Every one of those is an artefact of measuring a
+     * throttled page against a clock that was not.
+     *
+     * So a deadline spends only the time the page was on screen. It is held
+     * when the page goes to the background and resumes with what it had left
+     * when the page comes back, plus a moment for the replies that queued up
+     * behind it to be delivered first. A request whose page is in somebody's
+     * pocket is not late; it is waiting, and it finishes when they look.
+     *
+     * This is the page's own timeout. Whatever WanGP does with the request is
+     * WanGP's business and is bounded on its side.
+     */
+    const DEADLINES = new Set();
+    //: What a resumed page is given to drain the replies that queued up while
+    //: it was away, before any deadline starts counting again.
+    const RESUME_GRACE_MS = 1500;
+
+    function onScreen() {
+        try { return document.visibilityState !== "hidden"; } catch (e) { return true; }
+    }
+
+    function startDeadline(entry) {
+        entry.startedAt = Date.now();
+        entry.timer = setTimeout(function () {
+            entry.timer = 0;
+            DEADLINES.delete(entry);
+            entry.fire();
+        }, entry.remaining);
+    }
+
+    /** A timeout that pauses with the page. Returns a handle with cancel(). */
+    function deadline(ms, fire) {
+        const entry = { remaining: Math.max(0, Number(ms) || 0), fire: fire, timer: 0, startedAt: 0 };
+        DEADLINES.add(entry);
+        if (onScreen()) { startDeadline(entry); }
+        return {
+            cancel: function () {
+                if (entry.timer) { clearTimeout(entry.timer); entry.timer = 0; }
+                DEADLINES.delete(entry);
+            }
+        };
+    }
+
+    function holdDeadlines() {
+        DEADLINES.forEach(function (entry) {
+            if (!entry.timer) { return; }
+            clearTimeout(entry.timer);
+            entry.timer = 0;
+            entry.remaining = Math.max(0, entry.remaining - (Date.now() - entry.startedAt));
+        });
+    }
+
+    function resumeDeadlines() {
+        DEADLINES.forEach(function (entry) {
+            if (entry.timer) { return; }
+            entry.remaining += RESUME_GRACE_MS;
+            startDeadline(entry);
+        });
+    }
+
     /** A request that expects one answer, with one deadline and no retry.
      * ``late``, when given, is called with an answer that arrives after the
      * deadline but inside the grace window - the promise has already resolved
@@ -468,22 +543,25 @@ window.minipaintWanGP = (function () {
                 resolve: resolve,
                 late: typeof late === "function" ? late : null,
                 expired: false,
-                timer: setTimeout(function () {
-                    say(kind + ": no answer within " + timeout + " ms (" + requestId.slice(0, 8) + ")");
-                    if (entry.late) {
-                        // Kept, marked, and dropped later: an answer in the
-                        // grace window is still this request's answer.
-                        entry.expired = true;
-                        entry.timer = setTimeout(function () { S.pending.delete(requestId); }, LATE_ANSWER_GRACE_MS);
-                    } else {
-                        S.pending.delete(requestId);
-                    }
-                    resolve(failure(RECEIVER_QUERY_TIMEOUT, kind));
-                }, timeout)
+                timer: 0,
+                deadline: null
             };
+            entry.deadline = deadline(timeout, function () {
+                say(kind + ": no answer within " + timeout + " ms on screen (" + requestId.slice(0, 8) + ")");
+                if (entry.late) {
+                    // Kept, marked, and dropped later: an answer in the
+                    // grace window is still this request's answer.
+                    entry.expired = true;
+                    entry.timer = setTimeout(function () { S.pending.delete(requestId); }, LATE_ANSWER_GRACE_MS);
+                } else {
+                    S.pending.delete(requestId);
+                }
+                resolve(failure(RECEIVER_QUERY_TIMEOUT, kind));
+            });
             S.pending.set(requestId, entry);
             if (!post(kind, requestId, payload)) {
-                clearTimeout(entry.timer);
+                entry.deadline.cancel();
+                if (entry.timer) { clearTimeout(entry.timer); }
                 S.pending.delete(requestId);
                 resolve(failure(IFRAME_NOT_READY, kind));
                 return;
@@ -495,7 +573,8 @@ window.minipaintWanGP = (function () {
     function settle(requestId, result) {
         const entry = S.pending.get(requestId);
         if (!entry) { return false; }
-        clearTimeout(entry.timer);
+        if (entry.deadline) { entry.deadline.cancel(); }
+        if (entry.timer) { clearTimeout(entry.timer); entry.timer = 0; }
         S.pending.delete(requestId);
         const waited = Date.now() - (entry.askedAt || Date.now());
         if (result && result.ok) {
@@ -752,10 +831,18 @@ window.minipaintWanGP = (function () {
     function watchLifecycle() {
         let awaySince = 0;
 
-        const gone = function (why) {
+        // "hidden" is throttled, not stopped - the page keeps running and
+        // keeps posting these lines, but its turn of the event loop comes
+        // around seconds apart. "frozen" is stopped. Saying the first as
+        // though it were the second was wrong and sent the last search in the
+        // wrong direction, so the two are named for what they are.
+        const gone = function (why, stopped) {
             if (awaySince) { return; }
             awaySince = Date.now();
-            say("lifecycle: the page stopped running (" + why + ")");
+            holdDeadlines();
+            say("lifecycle: the page went to the background (" + why + ")"
+                + (stopped ? " and is not running at all" : "; it is throttled, so replies queue up")
+                + " - deadlines are held until it is back");
             if (logFlush) { clearTimeout(logFlush); logFlush = 0; }
             flushLog();
         };
@@ -764,18 +851,19 @@ window.minipaintWanGP = (function () {
             if (!awaySince) { say("lifecycle: " + why); return; }
             const away = Math.round((Date.now() - awaySince) / 100) / 10;
             awaySince = 0;
-            say("lifecycle: the page is running again after " + away + "s (" + why + ")"
-                + "; anything this page owed was owed for that long");
+            resumeDeadlines();
+            say("lifecycle: back on screen after " + away + "s (" + why + ")"
+                + "; deadlines resume with what they had left");
         };
 
         try {
             document.addEventListener("visibilitychange", function () {
-                if (document.visibilityState === "hidden") { gone("hidden"); } else { back("visible"); }
+                if (document.visibilityState === "hidden") { gone("hidden", false); } else { back("visible"); }
             });
             // The Page Lifecycle events, where the engine has them. A frozen
             // page runs nothing at all - not even a timer - which is the state
             // a throttled one is usually mistaken for.
-            document.addEventListener("freeze", function () { gone("frozen"); });
+            document.addEventListener("freeze", function () { gone("frozen", true); });
             document.addEventListener("resume", function () { back("resumed"); });
             // A page restored from the back-forward cache was not reloaded and
             // kept its state, so its queue picks up rather than starting over.
@@ -1533,7 +1621,7 @@ window.minipaintWanGP = (function () {
                     S.pending.delete(requestId);
                     // Nothing came back, so nothing is proved: the send is a
                     // failure even though the image may in fact have landed.
-                    say(RECEIVE_IMAGE + ": no acknowledgement within " + RECEIVE_TIMEOUT_MS + " ms (" + requestId.slice(0, 8) + ")");
+                    say(RECEIVE_IMAGE + ": no acknowledgement within " + RECEIVE_TIMEOUT_MS + " ms on screen (" + requestId.slice(0, 8) + ")");
                     resolve(failure(RECEIVER_QUERY_TIMEOUT, "no acknowledgement"));
                 }, RECEIVE_TIMEOUT_MS)
             };

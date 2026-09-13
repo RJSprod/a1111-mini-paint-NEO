@@ -1,0 +1,422 @@
+MINIPAINT NEO - "PRESS ADD TO QUEUE AND WALK AWAY"
+WHERE THE PERFORMANCE SPECIFICATION DOES NOT ALIGN
+Repository target: RJSprod/a1111-mini-paint-NEO
+Reviews: PERFORMANCE_DESIGN_INTENT_2026-09-13_REVISED_WITH_REVIEW_RESPONSE.txt
+Code baseline: e472d9a (main, after PR #49) plus the branch work through 72c6957
+Revision date: 2026-09-13
+Status: Gap analysis. Not a specification, and not a change to one.
+
+================================================================================
+0. THE USE CASE, AS STATED
+================================================================================
+
+    "I need my request to complete in the background. When I press Add to
+     Queue I should be able to walk away and come back to a video."
+
+Read strictly, because the strict reading is the one that matters:
+
+    - the press is the last interaction
+    - the browser may be backgrounded, locked, or closed immediately afterwards
+    - the phone may sleep; the tab may be frozen or discarded
+    - the user returns at an arbitrary later time
+    - the video exists
+
+Nothing in that requires the page to be watching. That is the whole point of
+it, and it is the single assumption the specification does not make.
+
+================================================================================
+1. THE FINDING
+================================================================================
+
+The specification is not wrong. It is aimed at a different target.
+
+Every mechanism in it - the event spine, the cursor, the bounded replay, the
+authoritative sync, the liveness watchdog, the lifecycle rules - exists to
+make the browser's *view* of the server's state correct and current, and to
+make that view recover after an interruption. It is a specification about
+**knowing**.
+
+The walk-away case is not about knowing. It is about **doing**: work has to
+progress while nobody is looking. And in the current architecture the thing
+that does the work is the browser page, so when the page stops running, the
+work stops.
+
+That is not a gap in how the spec addresses hidden pages. The spec addresses
+them carefully and honestly. It is that the spec treats a hidden page's
+slowness as a latency problem to be tolerated, and the walk-away case treats
+it as the failure itself.
+
+Consequence, stated plainly:
+
+    Every phase of the specification could be implemented perfectly, to every
+    acceptance criterion in section 7, and pressing Add to Queue and walking
+    away would still not produce a video.
+
+================================================================================
+2. THE EVIDENCE
+================================================================================
+
+From the installed system's own logs, 2026-09-13, remote mobile browser.
+
+2.1 The failures are the hidden window
+---------------------------------------
+
+The page reported one background window: hidden from 17:43:58, back at
+17:51:19, away 440.9 s. Inside it:
+
+    17:47:00  QUEUE_CONFIRM   no answer within 10000 ms
+    17:47:23  QUEUE_CONFIRM   no answer within 10000 ms
+    17:47:34  outbox          lease expired after the overlay was written
+    17:47:39  QUEUE_CONFIRM   no answer within 10000 ms -> admission unconfirmed
+    17:47:49  GET_RECEIVERS   no answer within 10000 ms
+    17:48:06  outbox          job e4487194 FAILED (RECEIVER_QUERY_TIMEOUT)
+    17:48:10  QUEUE_REQUEST   no answer within 30000 ms
+    17:48:26  GET_RECEIVERS   no answer within 10000 ms
+    17:48:59  bridge          HANDOFF_NOT_FOUND - the prepared image is gone
+
+Eight for eight, plus the lease and the swept image. Nothing failed outside
+the window.
+
+2.2 The page was throttled, not stopped
+----------------------------------------
+
+    17:48:28  the bridge answered a receivers query in 0 ms
+    17:48:51  the page noticed
+
+Twenty-three seconds to take a reply out of its own message queue. The page
+kept running - it posted those lines - but its turn of the event loop came
+around seconds apart.
+
+2.3 What that establishes
+--------------------------
+
+CONFIRMED: a backgrounded page continues to execute, arbitrarily slowly, at
+the browser's discretion. The rate is not ours to set and is not bounded by
+anything we control.
+
+CONFIRMED: every deadline in the send path is shorter than the delay a
+backgrounded page routinely imposes, so the path does not merely slow down -
+it tears itself down.
+
+The deadlines are fixed on the branch (72c6957): they now spend only
+foreground time, so a backgrounded request waits rather than failing. That is
+a prerequisite for anything below and it is not sufficient for any of it. A
+request that waits for the user to come back is still a request that did not
+complete while they were away.
+
+================================================================================
+3. WHERE THE SPECIFICATION DOES NOT ALIGN
+================================================================================
+
+Each item: what the spec says, why it does not serve the use case, and what it
+would have to become.
+
+3.1 THE BROWSER IS THE EXECUTOR, AND THE SPEC NEVER REVISITS THAT
+-------------------------------------------------------------------
+Severity: fundamental. Everything else in this section follows from it.
+
+WHAT THE SPEC SAYS: nothing - which is the problem. Section 2.2 divides the
+world into "the server owns durable state; the browser owns presentation",
+and every later mechanism respects that division. But the browser does not
+only present. It *executes*: B1 has the server hand a page a lease and the
+page then drives the WanGP form itself. The outbox's own docstring is explicit
+that jobs "are run one at a time, in the order they were pressed, across every
+browser page on this Forge, by the page that composed each one".
+
+WHY IT DOES NOT ALIGN: section 2.2 is the principle the whole document is
+built on, and as written it is already untrue of the system it describes. The
+untruth is harmless while the page is watching. It is the entire failure when
+the page is in a pocket.
+
+WHAT IT WOULD HAVE TO BECOME: the principle restated honestly - the server
+owns durable state *and the execution of queued work*; the browser owns
+presentation and supplies the settings a job is composed from. That is a
+different system, not a tuning of this one.
+
+3.2 "A HIDDEN PAGE CONTINUES TO DRAIN ITS OWN WORK" IS NOT ACHIEVABLE
+-----------------------------------------------------------------------
+Severity: high. This is the rule that looks like it covers the use case.
+
+WHAT THE SPEC SAYS (6.10, 6.13, 7.7): a hidden page that owns non-terminal
+work keeps its transport open and "continues to drain/track the work it owns";
+"hidden is not inactivity if the page can still claim, run and report its own
+work"; "A hidden page must not stall work that only it can run."
+
+WHY IT DOES NOT ALIGN: the rule is correct as an intent and unachievable as a
+guarantee. "If the page can still claim, run and report" is doing all the
+work in that sentence, and section 2.2 of this document is the measurement:
+23 seconds for one message. A page in that state can technically claim, run
+and report; it cannot do so at a rate that finishes anything.
+
+This rule was added at my request, and it was the right fix for the problem it
+addressed - a desktop tab on another monitor, which really does keep draining.
+It does not survive contact with a phone.
+
+WHAT IT WOULD HAVE TO BECOME: an explicit statement that a hidden page is a
+best-effort executor, that no completion guarantee rests on it, and that any
+work which must finish unattended does not belong to it.
+
+3.3 THROTTLING IS ACCEPTED AS LATENCY
+--------------------------------------
+Severity: high. This is the clearest single line of misalignment.
+
+WHAT THE SPEC SAYS (7.7, HIDDEN WITH OWNED NON-TERMINAL WORK):
+
+    "background timer throttling may increase latency but must not corrupt
+     state"
+
+and (6.11, BACKGROUND-LIFECYCLE NOTE):
+
+    "A hidden page that owns work keeps the transport so push can continue
+     while the browser schedules it"
+
+WHY IT DOES NOT ALIGN: both sentences are true, and both accept unbounded
+latency as the price of correctness. For the walk-away case, unbounded latency
+*is* the defect. "While the browser schedules it" is a caveat that, on mobile,
+can mean "not until you come back" - at which point the work did not happen in
+the background, it happened when you returned.
+
+WHAT IT WOULD HAVE TO BECOME: a completion criterion, not a corruption
+criterion. Something of the shape: work admitted to the queue completes
+without the page that composed it being scheduled again.
+
+3.4 THE PRESENCE GRACE IS SIZED FOR A NETWORK HICCUP, NOT AN ABSENCE
+----------------------------------------------------------------------
+Severity: medium.
+
+WHAT THE SPEC SAYS (6.13): PAGE_ACTIVE_SECONDS, currently 15 s, so "a
+one-second Wi-Fi/VPN hiccup" does not reorder work.
+
+WHY IT DOES NOT ALIGN: the number is right for what it was chosen for and
+irrelevant to a phone in a pocket for seven minutes. Worse, the consequence is
+asymmetric: after the grace, other pages may skip ahead of the absent page's
+head job - but no other page can *run* that job, because a job belongs to the
+page that composed it. So the absent page's work does not get reassigned. It
+simply stops, and stays stopped until that page is scheduled again.
+
+WHAT IT WOULD HAVE TO BECOME: irrelevant, because ownership would no longer
+be per-page. As long as ownership is per-page, no value of this constant
+helps.
+
+3.5 THE SERVER-SIDE LEASE EXPIRES WHILE THE PAGE IS AWAY
+----------------------------------------------------------
+Severity: medium. Observed, not theoretical.
+
+WHAT THE SPEC SAYS (B1.1, 10): the durable claim/lease logic "remains
+authoritative under the outbox lock" and is explicitly unchanged; "expired
+lease rules remain honest" is a must-not-change.
+
+WHY IT DOES NOT ALIGN: LEASE_SECONDS is 90. A backgrounded page holds a lease
+it cannot service, the lease expires, and - correctly, by the existing rule -
+a job whose overlay was already written becomes unconfirmed rather than being
+retried. The log shows exactly this at 17:47:34. The rule is right; it is
+being applied to a situation it was not written for.
+
+WHAT IT WOULD HAVE TO BECOME: either the lease is held by something that does
+not go to sleep, or a lease held by a page known to be backgrounded is
+suspended rather than expired. The first is 3.1. The second is a patch on a
+design that has already lost.
+
+3.6 PREPARED IMAGES ARE SWEPT WHILE THE JOB WAITS
+---------------------------------------------------
+Severity: medium. Observed.
+
+WHAT THE SPEC SAYS: nothing. Handoff lifetime is not discussed.
+
+WHY IT DOES NOT ALIGN: HANDOFF_NOT_FOUND at 17:48:59 - the prepared image was
+gone by the time the request reached WanGP. Any design where a job may wait
+for a person to return must keep that job's inputs alive at least as long as
+the job. With deadlines now held while hidden (72c6957), a job can wait far
+longer than before, which makes this *more* likely, not less.
+
+WHAT IT WOULD HAVE TO BECOME: a stated lifetime rule - a handoff outlives the
+job that references it, and is swept on the job reaching a terminal state
+rather than on age alone.
+
+3.7 B2's SERVER-SIDE OPTION COVERS WATCHING, NOT DOING
+--------------------------------------------------------
+Severity: high. This is the item closest to the answer, and it stops short.
+
+WHAT THE SPEC SAYS (B2, Option 1): prove whether WanGP exposes queue/progress
+state to the Forge process independent of a browser session; if so, the server
+observes WanGP directly and the browser tracking loop is deleted.
+
+WHY IT DOES NOT ALIGN: it is scoped to *tracking* - knowing where a job is in
+WanGP's queue. The walk-away case needs *submission* - putting the job into
+that queue at all - to be server-side. Option 1 would delete the tracking loop
+and leave the submission path exactly as browser-bound as it is now.
+
+WHAT IT WOULD HAVE TO BECOME: the same question asked of submission. Can Forge
+drive WanGP's queue over loopback, with supplied settings, without a browser
+session? That is a strictly larger question than B2 asks, and it is the one
+that decides whether the use case is achievable at all.
+
+3.8 THE ACCEPTANCE CRITERIA CANNOT DETECT THE FAILURE
+-------------------------------------------------------
+Severity: high, and easy to miss.
+
+WHAT THE SPEC SAYS (7.1-7.7): p50/p95 on server publication, browser delivery
+local and remote, background traffic, canvas frames, and a remote-continuity
+list covering interruption, black-hole connections, Forge restart, ring
+overflow, hidden/visible, freeze/resume, discard/reload, and SSE-hostile
+proxies.
+
+WHY IT DOES NOT ALIGN: every criterion measures how quickly the browser learns
+something, or whether state stays correct across an interruption. Not one
+measures whether queued work finished. The lifecycle cases all end in
+recovery - "owned work resumes without manual page refresh", "first-load
+authoritative sync restores current state". Resumes and restores, not
+completes.
+
+A system can pass section 7 in full while the use case fails every time.
+
+WHAT IT WOULD HAVE TO BECOME: one more criterion, and it is the only one the
+user would recognise:
+
+    PRESS AND WALK AWAY
+        press Add to Queue, background the browser immediately, leave it
+        backgrounded (and separately: lock the phone; and separately: close
+        the tab). After the expected generation time, the video exists and the
+        job reads as finished. No interaction of any kind in between.
+
+3.9 THE PHASE ORDER SERVES A DIFFERENT GOAL
+---------------------------------------------
+Severity: planning, not correctness.
+
+WHAT THE SPEC SAYS (8): Phase 1 builds the hub and sync, Phase 2 the browser
+continuity machine, Phase 3 demotes the polls, Phase 4 removes them, Phase 5
+the structural work.
+
+WHY IT DOES NOT ALIGN: Phases 1 through 4 are, end to end, about notification
+and recovery. They make the extension quieter, cheaper and more correct after
+an interruption - all worth having, and none of it moves the walk-away case a
+single step. If walk-away is the priority, the first thing to build is the
+thing that is not in any phase.
+
+WHAT IT WOULD HAVE TO BECOME: server-side submission gets its own phase,
+ahead of Phase 2, gated on its prototype. The event spine is still worth
+building - a server that executes has more to report, not less - but it stops
+being the critical path.
+
+3.10 P4's PROTOTYPE IS SCOPED TOO NARROWLY
+--------------------------------------------
+Severity: blocks the decision.
+
+WHAT THE SPEC SAYS (8, Phase 0.5, P4): "WanGP queue state from server
+process. Determines B2 Option 1 vs Option 2."
+
+WHY IT DOES NOT ALIGN: it asks whether the server can *read* WanGP's queue. It
+does not ask whether the server can *write* to it. The second question is the
+one the use case turns on, and answering the first tells you very little about
+the second.
+
+WHAT IT WOULD HAVE TO BECOME: split in two. P4a, read - as written. P4b,
+write - can Forge submit a task to WanGP's queue over loopback, with a given
+prompt and given images, without any browser session, and have WanGP generate
+it? Until P4b is answered, the use case's feasibility is unknown, and no
+amount of work on anything else changes that.
+
+================================================================================
+4. WHAT THE SPECIFICATION GETS RIGHT AND SHOULD KEEP
+================================================================================
+
+This is a gap analysis, not a rejection. The following stand regardless of
+which way the use case is resolved, and most of them become more useful, not
+less, if execution moves server-side:
+
+    - Workstream A in full. Canvas rendering has nothing to do with any of
+      this, and A1/A2 are already merged and already worth it.
+
+    - The event spine (6.2-6.9). A server that executes work unattended has
+      more to report than one that does not, and a page returning after an
+      hour needs exactly the cursor-and-sync machinery this describes.
+
+    - The epoch-namespaced cursor and the bounded replay. A page returning
+      from a long absence is precisely the case these were designed for.
+
+    - The authoritative sync route. It becomes *more* important: a user who
+      walks away and returns needs one request to learn everything that
+      happened while they were gone.
+
+    - The lifecycle rules as recovery rules. They are correct about what to do
+      on return. They are only wrong about what happens while away.
+
+    - B7, B10 and the rest of the self-contained server work. Unaffected.
+
+    - The discipline: no new dependency, no permanent polling, nothing
+      document-wide, privacy on every writer, delete nothing until evidence
+      says so. All of it still applies.
+
+================================================================================
+5. WHAT IS MISSING - THE ITEM THAT IS NOT THERE
+================================================================================
+
+There is no item in the specification for this, so it needs one. Proposed as
+**B12, unattended completion**, stated as intent rather than design:
+
+    A job that has been admitted to the outbox completes without further
+    participation by the browser page that composed it. The page supplies the
+    settings a job is composed from and is told what happened; it is not
+    required to be running, scheduled, visible, or in existence for the job to
+    reach WanGP and be generated.
+
+The one design that satisfies that, given what the logs show:
+
+    On press, the browser captures the settings the job needs from the live
+    WanGP session - it can, the iframe is same-origin through this Forge's own
+    /wan2gp/ - and hands them to the server with the job. From that moment the
+    job is the server's: it submits to WanGP over loopback itself, tracks it
+    itself, and records the outcome. The browser is out of the path.
+
+What that costs, and it should be said before anyone likes the idea:
+
+    - The queue contract's central promise changes from "the settings you are
+      looking at, live" to "the settings you were looking at when you
+      pressed". That is a real reduction and users will notice it in the case
+      where they change a setting after pressing.
+
+    - The bridge's careful model-state gate - which refuses a send the live
+      model cannot take - runs at press time instead of at admission time. A
+      model changed in between would have to be detected and the job refused
+      honestly rather than queued against the wrong model.
+
+    - Section 10's "one lease at a time across every page" needs re-reading in
+      a world where the server is the only executor. It probably simplifies.
+      It does not survive unexamined.
+
+    - It is the largest single change in the whole effort, and it is not a
+      performance change. It belongs in its own design intent, not smuggled in
+      under this one.
+
+Feasibility is unknown until P4b (3.10) is answered. It should be answered
+before anything else is built.
+
+================================================================================
+6. RECOMMENDATION
+================================================================================
+
+    1. Run P4b first. Can Forge submit to WanGP's queue over loopback, with
+       supplied settings, with no browser session? Everything below depends on
+       the answer and nothing else should start until it is known.
+
+    2. If P4b succeeds: write server-side submission as its own design intent,
+       with B12 above as its statement of intent, and put it ahead of Phase 2.
+       Keep Phase 1 - the spine is still wanted and is already underway.
+
+    3. If P4b fails: say so in the specification explicitly, add the
+       press-and-walk-away criterion from 3.8 as a known limitation rather
+       than a target, and correct 3.2 and 3.3 so the document stops implying
+       a hidden page will finish the work. A limitation written down is worth
+       more than a guarantee that cannot be kept.
+
+    4. Either way, amend 3.5 and 3.6 now. The lease and the handoff sweep are
+       both observed failures, both cheap to fix, and both made more likely by
+       the deadline change already on the branch.
+
+    5. Add the criterion in 3.8 to section 7 whatever the outcome. It is the
+       only test in the document a user would recognise as the thing they
+       asked for.
+
+================================================================================
+END OF GAP ANALYSIS
+================================================================================

@@ -358,6 +358,42 @@ window.minipaintWanGP = (function () {
         return root ? root.querySelector("iframe") : null;
     }
 
+    /**
+     * What the bridge's frame timer is doing inside the iframe, as one line.
+     *
+     * Why this is worth reporting at all: Gradio schedules every event trigger
+     * inside requestAnimationFrame and gates it on a component-update flush
+     * that is itself scheduled the same way. A document the browser is not
+     * rendering - this iframe, whenever the WanGP tab is not the one on screen
+     * - is given no frames, so the flush never runs and every bridge request
+     * queues up behind it until somebody opens the tab. The bridge puts a
+     * timer behind each frame to keep that moving, but it only covers Gradio's
+     * own flush when it was installed in the page head, before Gradio captured
+     * requestAnimationFrame. When it lands late instead, the queue stalls
+     * exactly as described and nothing anywhere says why.
+     *
+     * The iframe is same-origin - it is served through this Forge's own
+     * /wan2gp/ - so the handle the timer leaves on its window can simply be
+     * read. A build where that is not true says so and costs nothing.
+     */
+    function frameTimerNote() {
+        try {
+            const frame = frameElement();
+            const view = frame && frame.contentWindow;
+            const handle = view && view.__minipaintFrames;
+            if (!handle) {
+                return "frames: no timer handle on the WanGP page - a hidden tab's requests may wait for the tab to be opened";
+            }
+            const where = handle.installed === "head"
+                ? "in the page head (Gradio's own flush is covered)"
+                : "installed late - Gradio's own flush is NOT covered, so a hidden tab's requests wait for the tab to be opened";
+            return "frames: timer " + where
+                + "; " + (handle.timedFrames || 0) + " run by timer, " + (handle.nativeFrames || 0) + " by the browser";
+        } catch (e) {
+            return "frames: the WanGP page's frame state could not be read (" + String(e && e.name || e).slice(0, 40) + ")";
+        }
+    }
+
     /** A hidden textbox of the WanGP tab, by id. Values, never URLs. */
     function box(elementId) {
         const scope = app();
@@ -843,6 +879,10 @@ window.minipaintWanGP = (function () {
         S.generationRunning = typeof payload.generation_running === "boolean" ? payload.generation_running : null;
         S.lastCode = declared ? "" : (failure || "BRIDGE_COMPONENT_INCOMPATIBLE");
         report(declared, S.lastCode);
+        // Into the page's own log, which the diagnostics report carries, so
+        // that "nothing happens until I open the WanGP tab" is a line somebody
+        // can read rather than a thing they have to notice.
+        say(frameTimerNote());
         recordSession(true);
         // Presentation only, and never a reason a picture cannot be sent.
         try { theme(S.theme || detectTheme()); } catch (e) { /* section 27.1 */ }
@@ -1534,6 +1574,7 @@ window.minipaintWanGP = (function () {
         send: send,
         focus: focus,
         state: state,
+        frameTimer: frameTimerNote,
         switchToWanGP: switchToWanGP,
         theme: theme,
         message: sentence,

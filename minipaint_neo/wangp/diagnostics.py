@@ -36,7 +36,7 @@ import typing
 
 from .. import paths
 from ..send_log import SEND_LOG_PATH
-from . import bridge, config, discovery, errors, lock, process_log, protocol, runtime
+from . import bridge, config, discovery, errors, journal, lock, process_log, protocol, runtime
 from .errors import AUTH_BOUNDARY_FAILED
 
 #: How much of the transfer log to carry. Enough for one failed send and the
@@ -48,6 +48,10 @@ LOG_TAIL_LINES = 40
 #: end of it - the whole file is beside the extension for anyone who needs
 #: more, and it is scrubbed there too, so pointing at it costs nothing.
 PROCESS_TAIL_LINES = 25
+
+#: How much of the page journal the report carries. The browser's own account
+#: of the handshake and of its frame timer, which nothing on disk records.
+JOURNAL_TAIL_LINES = 40
 
 #: What a field says when it could not be collected. One phrase, so a reader
 #: can tell "we did not look" from "we looked and there is nothing".
@@ -324,6 +328,18 @@ def report(full_paths: bool = False, probe_result: typing.Optional[dict] = None)
     lines.extend(f"  {line}" for line in process_tail)
     if not process_tail:
         lines.append("  (empty)")
+
+    # What the browser said about itself. The handshake, the sends and - the
+    # reason this section exists - the state of the bridge's frame timer, which
+    # decides whether a request made while the WanGP tab is not on screen is
+    # carried out or waits for somebody to open the tab. That fact lives only
+    # in the browser, so without this it reaches nobody who could act on it.
+    lines.append("")
+    lines.append("recent page journal (what the browser reported)")
+    page_tail = journal.lines()[-JOURNAL_TAIL_LINES:]
+    lines.extend(f"  {line}" for line in page_tail)
+    if not page_tail:
+        lines.append("  (empty - no page has reported to this Forge since it started)")
 
     lines.append("")
     lines.append(

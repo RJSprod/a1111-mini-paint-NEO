@@ -14,13 +14,18 @@
  * inherited fields omitted - and appends it to its own queue outbox as a
  * job; this file then asks window.minipaintInterop to pump, which is the
  * same public API any extension uses, and the server re-renders the job
- * list as the pump reports. Nothing here talks to the WanGP iframe, knows a
- * bridge session, holds a queue, or sees a file path.
+ * list as the pump reports. The one fact this file carries to the server
+ * is the WanGP model the page is on, as the public API's capabilities
+ * answer names it - a press with enhanced prompts on is written for that
+ * model - and it goes into a hidden box like everything else. Nothing here
+ * talks to the WanGP iframe, knows a bridge session, holds a queue, or
+ * sees a file path.
  *
  * Nothing polls. The one bounded watcher runs for a few seconds after the
  * Add to Queue click, in case the chained change never reaches this page,
  * and stops the moment the instruction is delivered either way; the pump
- * itself stops when this page has nothing left to send.
+ * itself stops when this page has nothing left to send, and the public
+ * API's own tracking of a queued job ends when its task leaves WanGP.
  */
 window.minipaintClipboard = (function () {
     "use strict";
@@ -43,7 +48,8 @@ window.minipaintClipboard = (function () {
         menuState: "minipaint_clipboard_menu_state",
         queueInstruction: "minipaint_clipboard_queue_instruction",
         outboxAction: "minipaint_clipboard_outbox_action",
-        pageId: "minipaint_clipboard_page_id"
+        pageId: "minipaint_clipboard_page_id",
+        model: "minipaint_clipboard_model"
     };
     const PRESS = {
         refresh: "minipaint_clipboard_refresh",
@@ -77,6 +83,7 @@ window.minipaintClipboard = (function () {
         lastInstruction: "",
         capabilitiesAt: 0,
         capabilities: null,
+        lastModel: "",
         pasteListener: null,
         outboxListener: null,
         outboxRefreshTimer: null,
@@ -528,15 +535,27 @@ window.minipaintClipboard = (function () {
 
     function outboxSentence(job) {
         if (!job) { return ""; }
-        if (job.state === "started") { return "WanGP started generating it."; }
+        const enhanced = job.enhance && job.enhance.state === "done" ? " (with the enhanced prompt)" : "";
+        if (job.state === "started") { return "WanGP started generating it" + enhanced + "."; }
         if (job.state === "queued") {
             const depth = job.result && Number.isFinite(job.result.queue_depth) ? job.result.queue_depth : null;
-            return "Added to WanGP queue." + (depth ? " " + depth + " ahead of it." : "");
+            return "Added to WanGP queue" + enhanced + "." + (depth ? " " + depth + " ahead of it." : "");
         }
+        if (job.state === "enhancing") { return "The prompt is being enhanced."; }
         if (job.state === "unconfirmed") { return (job.error && job.error.message) || "WanGP did not confirm that the request was added to the queue."; }
         if (job.state === "failed") { return (job.error && job.error.message) || "The request was not queued."; }
-        if (job.state === "cancelled") { return "The request was cancelled."; }
+        if (job.state === "cancelled") { return (job.error && job.error.message) || "The request was cancelled."; }
         return "";
+    }
+
+    /** The public API's cancel-all has run on the server; callers still
+     * waiting on those jobs get their answers, and the list is re-read. */
+    function afterCancelAll() {
+        const api = interop();
+        if (api && api.wangp && typeof api.wangp.refreshWaiters === "function") {
+            try { api.wangp.refreshWaiters(); } catch (e) { /* the callers' business */ }
+        }
+        refreshOutbox();
     }
 
     function refreshOutbox() {
@@ -559,6 +578,9 @@ window.minipaintClipboard = (function () {
             }).join(", ") + " was not used by the current model." : ""), failed);
             refreshCapabilities(true);
         }
+        // "waiting" arrives every few seconds while the line ahead is held -
+        // a prompt still being written, another page's turn - and "tracked"
+        // whenever a queued task moved in WanGP; both are news for the list.
         refreshOutbox();
     }
 
@@ -588,6 +610,23 @@ window.minipaintClipboard = (function () {
         }
     }
 
+    /** The model the page is on, as the capabilities answer named it, into
+     * the hidden model box - once per change, so the server's line about
+     * enhanced prompts follows the WanGP tab without a timer. */
+    function sendModel(answer) {
+        const raw = answer && answer.ok && answer.model && typeof answer.model === "object" ? answer.model : null;
+        const text = raw ? JSON.stringify({ type: String(raw.type || "").slice(0, 120), label: String(raw.label || "").slice(0, 120),
+                                             family: String(raw.family || "").slice(0, 120), architecture: String(raw.architecture || "").slice(0, 120) }) : "";
+        if (text === S.lastModel) { return; }
+        S.lastModel = text;
+        sendInput(BOXES.model, text);
+    }
+
+    /** The model JSON a press carries, so the server writes the prompt for it. */
+    function modelJson() {
+        return S.lastModel || boxValue(BOXES.model) || "";
+    }
+
     /** One bounded question to the public API, throttled, never on a timer. */
     function refreshCapabilities(force) {
         const api = interop();
@@ -597,6 +636,7 @@ window.minipaintClipboard = (function () {
         setLine("WanGP: checking…", "checking");
         api.wangp.capabilities().then(function (answer) {
             S.capabilities = answer;
+            sendModel(answer);
             if (!answer || !answer.ok) {
                 setLine("WanGP unavailable" + (answer && answer.code ? " (" + answer.code + ")" : "") + " — Add to Queue will ask anyway", "off");
             } else {
@@ -694,17 +734,25 @@ window.minipaintClipboard = (function () {
             document.addEventListener("minipaint:outbox", S.outboxListener);
         }
         // The page's identity, so a press submits under it; and the jobs this
-        // page composed before a reload resume without another press.
+        // page composed before a reload resume without another press - as
+        // does the tracking of the ones WanGP already took from this page.
         sendInput(BOXES.pageId, pageId());
         watchTab();
         afterRender();
         if (tabVisible()) { refreshCapabilities(false); }
         setTimeout(pump, 250);
+        setTimeout(function () {
+            const api = interop();
+            if (api && api.wangp && typeof api.wangp.resumeTracking === "function") {
+                try { api.wangp.resumeTracking(); } catch (e) { /* bounded there */ }
+            }
+        }, 1500);
     }
 
     function debug() {
         return { attached: S.attached, selected: S.selected, menuOpen: !!(S.menu && !S.menu.hidden), menuSection: S.menuSection,
-                 capabilities: S.capabilities, watching: !!S.watch, lastInstruction: S.lastInstruction.slice(0, 40), page: pageId() };
+                 capabilities: S.capabilities, watching: !!S.watch, lastInstruction: S.lastInstruction.slice(0, 40), page: pageId(),
+                 model: S.lastModel };
     }
 
     return {
@@ -719,6 +767,8 @@ window.minipaintClipboard = (function () {
         queue: queue,
         pump: pump,
         pageId: pageId,
+        modelJson: modelJson,
+        afterCancelAll: afterCancelAll,
         refreshCapabilities: refreshCapabilities,
         pressHidden: pressHidden,
         debug: debug

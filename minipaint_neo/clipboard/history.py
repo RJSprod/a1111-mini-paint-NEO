@@ -17,7 +17,10 @@ the record and nothing else.
 
 A record stores prompt text exactly when the user typed or pasted it into
 Clipboard as an override. That is product state the user asked to keep. It
-still never reaches a log.
+still never reaches a log. When the prompt was enhanced before it was sent,
+the record keeps both: the typed prompt is the recipe (Load puts it back,
+and a new press enhances it again), and the prompt the writer produced is
+shown beside it as what WanGP actually received.
 """
 
 from __future__ import annotations
@@ -136,6 +139,8 @@ def normalize_record(raw: typing.Any) -> typing.Optional[dict]:
         if isinstance(item, dict) and item.get("field") in protocol.QUEUE_FIELDS:
             ignored.append({"field": item["field"], "code": str(item.get("code") or "")[:60]})
     tasks = raw.get("tasks_added")
+    enhanced = raw.get("enhanced") is True
+    written = raw.get("enhanced_prompt") if enhanced and isinstance(raw.get("enhanced_prompt"), str) else ""
     return {
         "history_id": history_id[:32],
         "request_id": _asset_id(raw.get("request_id")),
@@ -144,6 +149,8 @@ def normalize_record(raw: typing.Any) -> typing.Optional[dict]:
         "model_label": str(raw.get("model_label") or "")[:120],
         "prompt_mode": prompt_mode,
         "prompt_override": prompt,
+        "enhanced": enhanced,
+        "enhanced_prompt": written[:protocol.PROMPT_MAX_CHARS],
         "first_mode": mode(raw.get("first_mode")),
         "first_asset_id": _asset_id(raw.get("first_asset_id")),
         "last_mode": mode(raw.get("last_mode")),
@@ -166,13 +173,14 @@ def _save(records: typing.List[dict]) -> None:
     config.write_document(config.HISTORY_NAME, records[:MAX_HISTORY])
 
 
-def make_record(draft: typing.Mapping[str, typing.Any], result: typing.Mapping[str, typing.Any]) -> dict:
+def make_record(draft: typing.Mapping[str, typing.Any], result: typing.Mapping[str, typing.Any], enhanced_prompt: str = "") -> dict:
     """A history record from the draft that was sent and the confirmed result.
 
     Each field's mode comes from the result: applied means override,
     reported ignored means ignored, anything else - including a slot that
     was empty - means inherit. The prompt text is stored only when it was an
-    override.
+    override. ``enhanced_prompt`` is what the writer made of it, when the
+    press was enhanced; the draft still holds the typed prompt.
     """
     draft = normalize_draft(draft)
     applied = result.get("applied") if isinstance(result.get("applied"), dict) else {}
@@ -197,6 +205,8 @@ def make_record(draft: typing.Mapping[str, typing.Any], result: typing.Mapping[s
         "model_label": str(model.get("label") or "")[:120],
         "prompt_mode": prompt_mode,
         "prompt_override": draft["prompt_override"] if prompt_mode == MODE_OVERRIDE else "",
+        "enhanced": bool(enhanced_prompt) and prompt_mode == MODE_OVERRIDE,
+        "enhanced_prompt": str(enhanced_prompt or "") if prompt_mode == MODE_OVERRIDE else "",
         "first_mode": mode_of(protocol.QUEUE_FIELD_START, bool(draft["first_asset_id"])),
         "first_asset_id": draft["first_asset_id"] if draft["first_asset_id"] else "",
         "last_mode": mode_of(protocol.QUEUE_FIELD_END, bool(draft["last_asset_id"])),

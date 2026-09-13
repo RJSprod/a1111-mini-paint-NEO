@@ -1376,3 +1376,39 @@
     cursor: not-allowed;
     opacity: 0.6;
 }
+
+/* -- Clipboard: prompt enhancement and the queue's two lives ------------- */
+#minipaint_clipboard_root .minipaint-clip-enhance-panel .minipaint-clip-hint { margin-bottom: 4px; }
+#minipaint_clipboard_root .minipaint-clip-enhance-line {
+  padding: 6px 8px;
+  border-radius: var(--radius-sm, 4px);
+  border: 1px solid var(--border-color-primary, currentColor);
+  background: var(--background-fill-secondary, transparent);
+  color: var(--body-text-color, inherit);
+  font-size: var(--text-sm, 0.85em);
+}
+#minipaint_clipboard_root .minipaint-clip-enhance-line[data-state="ready"] { border-color: var(--color-accent, #ff7c00); }
+#minipaint_clipboard_root .minipaint-clip-enhance-line[data-state="blocked"],
+#minipaint_clipboard_root .minipaint-clip-enhance-line[data-state="model"] { color: var(--body-text-color-subdued, inherit); }
+#minipaint_clipboard_root .minipaint-clip-system-prompt textarea { font-family: var(--font-mono, monospace); font-size: var(--text-sm, 0.85em); }
+#minipaint_clipboard_root .minipaint-clip-sp-state { color: var(--body-text-color-subdued, inherit); font-size: var(--text-sm, 0.85em); }
+#minipaint_clipboard_root .minipaint-clip-cancel-all { margin-top: 4px; }
+#minipaint_clipboard_root .minipaint-clip-job-enhancing { border-left-color: var(--border-color-accent-subdued, var(--color-accent, #ff7c00)); }
+#minipaint_clipboard_root .minipaint-clip-job-line {
+  margin-top: 2px;
+  color: var(--body-text-color-subdued, inherit);
+  font-size: var(--text-sm, 0.85em);
+}
+#minipaint_clipboard_root .minipaint-clip-job-line b { color: var(--body-text-color, inherit); font-weight: 600; }
+#minipaint_clipboard_root .minipaint-clip-job-line[data-live="generating"] b { color: var(--color-accent, #ff7c00); }
+#minipaint_clipboard_root .minipaint-clip-job-line[data-live="failed"] b { color: var(--error-text-color, inherit); }
+#minipaint_clipboard_root .minipaint-clip-job-prompt-typed { color: var(--body-text-color-subdued, inherit); text-decoration: line-through; }
+#minipaint_clipboard_root .minipaint-clip-job-prompt-enhanced { color: var(--body-text-color, inherit); }
+#minipaint_clipboard_root .minipaint-clip-history-enhanced {
+  margin-top: 2px;
+  color: var(--body-text-color-subdued, inherit);
+  font-size: var(--text-sm, 0.85em);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -46,6 +46,8 @@ RELEASE_ROUTE = ROUTE_PREFIX + "/release"
 CONTRACT_ROUTE = ROUTE_PREFIX + "/contract"
 #: Protocol 4: the queue outbox. A press or an enqueue() is a job the server
 #: owns; a page claims the next one it may run and reports how it went.
+#: Protocol 5 adds the enhancement stage, cancelling the whole line, and the
+#: page's report of where a queued task is in WanGP.
 OUTBOX_ROUTE = ROUTE_PREFIX + "/outbox"
 OUTBOX_SUBMIT_ROUTE = OUTBOX_ROUTE + "/submit"
 OUTBOX_CLAIM_ROUTE = OUTBOX_ROUTE + "/claim"
@@ -53,6 +55,13 @@ OUTBOX_REPORT_ROUTE = OUTBOX_ROUTE + "/report"
 OUTBOX_CANCEL_ROUTE = OUTBOX_ROUTE + "/cancel"
 OUTBOX_RETRY_ROUTE = OUTBOX_ROUTE + "/retry"
 OUTBOX_ADOPT_ROUTE = OUTBOX_ROUTE + "/adopt"
+#: Protocol 5: the whole line at once, and where a queued job's task is in
+#: WanGP as the page that queued it sees it.
+OUTBOX_CANCEL_ALL_ROUTE = OUTBOX_ROUTE + "/cancel_all"
+OUTBOX_TRACK_ROUTE = OUTBOX_ROUTE + "/track"
+#: Prompt enhancement through ModelSwitchRefiner: the switch, the LLM side
+#: and the slot rules, for a caller that wants to know before it asks.
+ENHANCE_ROUTE = ROUTE_PREFIX + "/enhance"
 
 #: The subfolder of the per-run runtime directory that holds staged images.
 #: Never configurable, for the reason the handoff root is not.
@@ -94,6 +103,8 @@ def contract() -> dict:
         "kinds": list(KINDS),
         "start_modes": list(protocol.START_MODES),
         "outbox": OUTBOX_ROUTE,
+        "enhance": ENHANCE_ROUTE,
+        "track_states": list(protocol.TRACK_STATES),
     }
 
 
@@ -341,8 +352,13 @@ def normalize_public_request(raw: typing.Any) -> dict:
 # ------------------------------------------------------------ preparation --
 
 
-def _open_handle(handle: typing.Mapping[str, typing.Any]) -> typing.Any:
-    """The picture behind a handle, as a PIL image. Never a path."""
+def open_handle(handle: typing.Mapping[str, typing.Any]) -> typing.Any:
+    """The picture behind a handle, as a PIL image. Never a path.
+
+    Public for the one other server-side caller - the prompt enhancer, which
+    hands the same picture to ModelSwitchRefiner as an object rather than a
+    file - so that a handle is resolved in exactly one place.
+    """
     from .canvas import imaging
 
     if handle["kind"] == KIND_STAGED:
@@ -357,6 +373,9 @@ def _open_handle(handle: typing.Mapping[str, typing.Any]) -> typing.Any:
     except Exception as error:
         raise IntegrationError(errors.CLIPBOARD_NOT_CONFIGURED, f"the Clipboard package is not available ({type(error).__name__})")
     return store.open_image(handle["id"])
+
+
+_open_handle = open_handle
 
 
 def prepare(request: typing.Mapping[str, typing.Any]) -> dict:
@@ -535,9 +554,9 @@ def _outbox_call(name: str, call: typing.Callable[[dict], typing.Any]):
         try:
             answer = call(raw)
         except IntegrationError as error:
-            if error.code not in (errors.WANGP_NOT_RUNNING, errors.QUEUE_BUSY):
+            if error.code not in _QUIET_CODES:
                 _journal(f"outbox {name}: refused - {error.code}")
-            status = 409 if error.code in (errors.WANGP_NOT_RUNNING, errors.QUEUE_BUSY) else 404 if error.code == errors.QUEUE_JOB_UNKNOWN else 400
+            status = 409 if error.code in _CONFLICT_CODES else 404 if error.code == errors.QUEUE_JOB_UNKNOWN else 400
             return _refused(error, status)
         except Exception as error:
             _journal(f"outbox {name}: failed - {type(error).__name__}")
@@ -548,9 +567,18 @@ def _outbox_call(name: str, call: typing.Callable[[dict], typing.Any]):
     return route
 
 
+#: Refusals that are the state of the world rather than a caller's mistake:
+#: answered 409, and not journalled - a page polls into them.
+_CONFLICT_CODES = frozenset({
+    errors.WANGP_NOT_RUNNING, errors.QUEUE_BUSY, errors.ENHANCE_UNAVAILABLE, errors.ENHANCE_QUEUE_FULL, errors.ENHANCE_MODEL_UNSUPPORTED,
+})
+_QUIET_CODES = frozenset({errors.WANGP_NOT_RUNNING, errors.QUEUE_BUSY})
+
+
 def _submit(raw: dict) -> dict:
     origin = raw.get("origin") if raw.get("origin") in ("clipboard", "api") else "api"
-    return {"job": _outbox().submit(raw.get("request"), raw.get("page"), origin)}
+    enhance = raw.get("enhance") if isinstance(raw.get("enhance"), bool) else None
+    return {"job": _outbox().submit(raw.get("request"), raw.get("page"), origin, enhance=enhance, model=raw.get("model"))}
 
 
 def _claim(raw: dict) -> dict:
@@ -576,6 +604,26 @@ def _adopt(raw: dict) -> dict:
     return {"job": _outbox().adopt(raw.get("job_id"), raw.get("page"))}
 
 
+def _cancel_all(_raw: dict) -> dict:
+    return _outbox().cancel_all()
+
+
+def _track(raw: dict) -> dict:
+    return {"job": _outbox().track(raw.get("job_id"), raw.get("page"), raw)}
+
+
+async def _enhance_route(request: typing.Any) -> typing.Any:
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    try:
+        from .clipboard import enhance
+
+        return _json(dict({"ok": True}, **enhance.describe()))
+    except Exception as error:
+        _journal(f"enhance: describe failed - {type(error).__name__}")
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+
+
 def install(app: typing.Any) -> None:
     """Put the routes on Forge's FastAPI app. Called from ``on_app_started``."""
     if getattr(app, _INSTALLED_FLAG, False):
@@ -595,6 +643,9 @@ def install(app: typing.Any) -> None:
             Route(OUTBOX_CANCEL_ROUTE, endpoint=_outbox_call("cancel", _cancel), methods=["POST"]),
             Route(OUTBOX_RETRY_ROUTE, endpoint=_outbox_call("retry", _retry), methods=["POST"]),
             Route(OUTBOX_ADOPT_ROUTE, endpoint=_outbox_call("adopt", _adopt), methods=["POST"]),
+            Route(OUTBOX_CANCEL_ALL_ROUTE, endpoint=_outbox_call("cancel_all", _cancel_all), methods=["POST"]),
+            Route(OUTBOX_TRACK_ROUTE, endpoint=_outbox_call("track", _track), methods=["POST"]),
+            Route(ENHANCE_ROUTE, endpoint=_enhance_route, methods=["GET"]),
         ]
         app.router.routes[0:0] = routes
         setattr(app, _INSTALLED_FLAG, True)
@@ -624,13 +675,16 @@ def register(script_callbacks: typing.Any) -> None:
 
 __all__ = [
     "CONTRACT_ROUTE",
+    "ENHANCE_ROUTE",
     "OUTBOX_ADOPT_ROUTE",
+    "OUTBOX_CANCEL_ALL_ROUTE",
     "OUTBOX_CANCEL_ROUTE",
     "OUTBOX_CLAIM_ROUTE",
     "OUTBOX_REPORT_ROUTE",
     "OUTBOX_RETRY_ROUTE",
     "OUTBOX_ROUTE",
     "OUTBOX_SUBMIT_ROUTE",
+    "OUTBOX_TRACK_ROUTE",
     "KINDS",
     "KIND_CLIPBOARD",
     "KIND_STAGED",
@@ -643,6 +697,7 @@ __all__ = [
     "install",
     "normalize_handle",
     "normalize_public_request",
+    "open_handle",
     "prepare",
     "register",
     "release",

@@ -399,7 +399,20 @@ WanGP's queue, with how many sit ahead of it; a refusal only when WanGP recorded
 exactly that request; otherwise *WanGP did not confirm…* — never a claim WanGP did not
 prove, and never a retry the machine decided on. Each confirmed recipe goes into **Queue
 Send History** (the prompt only if you typed one here), where *Load* puts it back into the
-composer without queueing anything.
+composer without queueing anything. Once WanGP has a job, the page that queued it keeps
+asking the bridge where its task is and the card says so: *In WanGP's queue, 2 ahead of
+it*, *WanGP is generating it*, *Left WanGP's queue*.
+
+**Enhanced prompts** (off by default). With the *SD-Neo-ModelSwitchRefiner* extension
+installed and its LLM Studio set up, the switch under the prompt sends the typed prompt -
+and the pictures the model reads - to its MiniMax H3 writer first, for whichever H3 model
+(FL2VA or Ref2VA) the WanGP page is on, and WanGP gets the written prompt. The job waits in
+the Queue as *Enhancing* with the writer's own progress, and goes to WanGP in press order
+once its prompt exists; a page on any other model is refused, not enhanced. The same panel
+shows the four system prompts the writer runs under (each variant, with and without a
+picture), takes an override that is kept across sessions, and restores the default.
+**Cancel everything** empties the whole line - the writer's requests and the pending jobs -
+in one press; jobs already being sent finish, and nothing in WanGP's own queue is touched.
 
 **The browser.** Menu → *Choose storage folder* first: Clipboard keeps its pictures in that
 folder on the machine running Forge and nowhere else, and never names it to the browser —
@@ -427,10 +440,13 @@ fields inherit, `start` defaults to `"auto"` (`"never"` stages only), the reques
 same server-owned queue as the tab's presses, ids are never paths, and the answer is
 `started`, `queued`, `refused` (with a code) or `unconfirmed`. `docs/clipboard/README.md`
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
-API. Bridge plugin 1.3.0 (protocol 4) carries the queue and start operations, so WanGP's
-bridge must be updated and WanGP restarted; a build lacking one of the six queue components
-keeps the image send and refuses the queue with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one
-lacking the generate trigger queues but never starts.
+API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 rewrite (the page's model
+travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
+and its place in WanGP. Bridge plugin 1.4.0 (protocol 5) carries the queue, start and track
+operations and refuses a request composed for a model the page has since left
+(`MODEL_CHANGED`), so WanGP's bridge must be updated and WanGP restarted; a build lacking one
+of the six queue components keeps the image send and refuses the queue with
+`BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking the generate trigger queues but never starts.
 
 ## Legacy editor (Old UI)
 
@@ -564,9 +580,10 @@ minipaint_neo/
         config.py                the folder, the intercept, the sort and the thumbnail size
         store.py                 the library: one folder, opaque ids, containment, import, refresh, rename, delete
         history.py               the composer's draft and Queue Send History
-        outbox.py                the queue outbox: every press a job the server owns, one lease at a time
+        outbox.py                the queue outbox: every press a job the server owns, one lease at a time, in press order; enhancing, then pending
+        enhance.py               enhanced prompts: ModelSwitchRefiner's MiniMax H3 writer (mc_llm_api), the switch, the four system prompts and their overrides
         routes.py                a picture by its id, and bytes in
-        ui.py                    the tab: the browser, the composer, Add to Queue through the public API
+        ui.py                    the tab: the browser, the composer, the enhancement panel, Add to Queue through the public API
     wangp/                       the WanGP tab, all of it (see docs/wangp/README.md)
         config.py                what survives a restart, and only that
         discovery.py             WanGP root, Conda/venv runtimes, GPUs, the bridge plugin
@@ -576,16 +593,16 @@ minipaint_neo/
         proxy.py                 /wan2gp/* on the Forge origin, streamed to that one port
         handoff.py               PNGs on their way out, as opaque ids under a fixed root
         bridge.py                which browser page is talking to which live WanGP session
-        protocol.py              the vocabulary all three sides share (protocol 4: the queue, and starting)
+        protocol.py              the vocabulary all three sides share (protocol 5: the queue, starting, tracking, the model a request insists on)
         errors.py                the failure codes and their sentences
         journal.py               the tab's console: the last 400 steps, in memory
         process_log.py           logs/wangp-log.txt: the same steps, on disk, bounded
         ui.py / settings.py / diagnostics.py    the tab, the one Settings entry, the report
 javascript/main.js               legacy bridge, parent-frame side (unchanged)
 javascript/minipaint_canvas.js   attaches the canvas; crop frame, touch gestures, tools, the rail's height, the layer list, waits, focus mode
-javascript/minipaint_wangp.js    the WanGP iframe: handshake, receiver query, verified send, queue and confirm
-javascript/minipaint_interop.js  window.minipaintInterop: the public queue API (v1, minipaint.wangp.queue/v1)
-javascript/minipaint_clipboard.js  the Clipboard tab's browser side: the grid, the menu, paste and drop, Add to Queue
+javascript/minipaint_wangp.js    the WanGP iframe: handshake, receiver query, verified send, queue, confirm and track
+javascript/minipaint_interop.js  window.minipaintInterop: the public queue API (v1, minipaint.wangp.queue/v1): enqueue, the pump, cancelAll, tracking
+javascript/minipaint_clipboard.js  the Clipboard tab's browser side: the grid, the menu, paste and drop, Add to Queue, the page's model
 wan2gp_bridge/                   the companion plugin, installed into your WanGP
 style.css                        legacy rules, rules scoped to the Canvas root, then to the Clipboard root (theme variables only)
 miniPaint/                       the legacy editor itself

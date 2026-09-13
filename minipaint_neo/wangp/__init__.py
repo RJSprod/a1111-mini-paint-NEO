@@ -27,7 +27,7 @@ installed into the user's own WanGP ``plugins`` folder. It is the only piece
 that knows WanGP component ids; MiniPaint never does.
 """
 
-PROTOCOL = 4
+PROTOCOL = 5
 
 _LOG_PREFIX = "MiniPaint WanGP:"
 

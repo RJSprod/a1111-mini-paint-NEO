@@ -118,8 +118,8 @@ put it back to Use WanGP.
 The prompt box's placeholder says what an empty box means: *Use current WanGP prompt*. Text
 in it overrides the page's prompt for that one task — the prompt WanGP's generation
 actually reads, so with WanGP's prompt wizard switched on it goes into the wizard's box.
-Control characters are dropped, it is trimmed, and 4000 characters is the ceiling
-(`PROMPT_TOO_LONG`).
+Control characters are dropped, it is trimmed, and 12000 characters is the ceiling
+(`PROMPT_TOO_LONG`; protocol 5 raised it from 4000 so that a written H3 prompt fits).
 
 The line above the cards says what the live WanGP page can take right now — the model, the
 inputs it takes, whether it is *generating now* (new requests join the run) or *idle* (the
@@ -167,14 +167,85 @@ A press does this, in order:
    named), or the sentence for the code; a toast says the same over the browser; the
    handoff files are released.
 
+## Enhanced prompts (ModelSwitchRefiner)
+
+Under the prompt box, a panel: **Prompt enhancement (ModelSwitchRefiner MiniMax H3)**. It
+is off by default and does nothing until three things are true, and its first line says
+which of them is not: the *SD-Neo-ModelSwitchRefiner* extension is installed in this Forge
+(its external LLM API, `mc_llm_api`, is imported straight from that extension's folder -
+there is no URL, port or token to configure), its **LLM Studio** is switched on with a
+language model set up, and the WanGP page is on a **MiniMax H3** model - `minimax_h3_fl2va`
+or `minimax_h3_ref2va`, or a finetune of one. The line follows the WanGP tab: switch the
+model there and it changes here.
+
+**What a press does with the switch on.** The prompt you typed - it is required; the WanGP
+page's own prompt is WanGP's and is not read from here - goes to LLM Studio's MiniMax H3
+writer at once, as the same request its own panel would make, for the variant the page is
+on. The job waits in the Queue as **Enhancing**, showing the writer's own progress (*waiting
+for the LLM (position 2)*, *Describing the image…*, *Writing the prompt…*), and the moment
+the prompt is written it becomes *Waiting* carrying it and goes to WanGP in press order.
+The card then shows both: the typed prompt struck through, the written one under it.
+
+**The pictures follow the model.** The writer describes one picture and writes the prompt
+about it; which one is the model's business, and a picture the model does not read is left
+out of the enhancement rather than described in the wrong role. It still goes to WanGP with
+the job; the card and the status line say what was left out.
+
+| WanGP model | described | left out of the enhancement |
+| --- | --- | --- |
+| FL2VA (`minimax_h3_fl2va`) | the **First Frame** (the Last Frame is sent too; the writer says which one it described) | the Reference |
+| Ref2VA (`minimax_h3_ref2va`) | the first **Reference** | the First and Last Frame (and any further reference) |
+
+A picture at all needs a language model that can see; one that cannot refuses the press
+(`ENHANCE_NO_VISION`), and the line says so beforehand.
+
+**The system prompt.** The writer runs under one of four instruction sets - each variant,
+with and without a picture - and the panel shows them: pick the variant and *Instructions
+used*, and the box holds the text with its provenance under it (*Default, as
+ModelSwitchRefiner ships it* or *Override saved*). Edit it and **Apply override** to replace
+that set for every enhanced press from then on, on every page, after a restart too
+(`clipboard-enhance.json`); **Restore default** forgets the override and shows the default
+again; **Reload** re-reads whichever is current. A blank override is refused, not saved.
+WanGP's own `@` and `@@` prompt dialect still applies on top, as the API documents.
+
+**The line is strict.** Requests reach WanGP in the order pressed. A job whose prompt is
+still being written holds every job behind it - a plain job pressed later, on any page,
+waits - because "in the order requested" is the promise, and the language model works one
+request at a time anyway. **Cancel everything** (below the queue heading) cancels every
+waiting job at once - the writer's requests by this extension's own origin, then the pending
+jobs; a job already being sent finishes, and nothing in WanGP's own queue is touched.
+
+**How it can end.** The writer's own failure ends the job as *Refused* with its sentence
+(`ENHANCE_FAILED`); a request cancelled from LLM Studio's own panel - it may be, at any time
+- ends it *Cancelled* (`ENHANCE_CANCELLED`); a record the API has forgotten (its retention
+ran out, or Forge restarted and its memory with it) is `ENHANCE_LOST`; a written prompt over
+the 12000-character ceiling is `PROMPT_TOO_LONG`; and a page that moved to another model
+between the press and the send is refused by the bridge with `MODEL_CHANGED`, because the
+prompt was written for the model it left. **Retry** on any of these starts again from the
+typed prompt and writes it again - except a prompt already written, which is carried over
+rather than asked for twice, unless the failure was `MODEL_CHANGED`. Nothing is retried by
+the machine.
+
+**For other extensions**, `enqueue(request, { enhance: true })` asks for the same rewrite
+(the page's model travels with the request; pass `{ model }` to name it yourself), and
+`GET /minipaint-interop/enhance` says whether the switch is on, whether the LLM side can
+take a request, and the slot rules.
+
 ## The Queue
 
-Under the button, every job the server holds, newest first: its state (*Waiting*,
-*Sending*, *Generating*, *Queued*, *Refused*, *Unconfirmed*, *Cancelled*), when it was
-pressed, the prompt typed for it (or *Prompt: Use WanGP*), which fields it supplies, and how
-it ended. And what a person may still do:
+Under the button, every job the server holds, newest first: its state (*Enhancing*,
+*Waiting*, *Sending*, *Generating*, *Queued*, *Refused*, *Unconfirmed*, *Cancelled*), when
+it was pressed, the prompt typed for it (or *Prompt: Use WanGP*; both prompts once it has
+been enhanced), which fields it supplies, how it ended, and - on two lines of their own -
+where its enhancement is (**LLM:**) and, once WanGP has it, where its task is inside WanGP
+(**WanGP:** *accepted*, *in WanGP's queue, 2 ahead of it*, *WanGP is generating it*, *left
+WanGP's queue (finished, or removed there)*, or *no longer tracked* when the page that
+queued it was reloaded - a new WanGP session cannot vouch for the old one's tasks). The
+page that queued a job asks the bridge every few seconds while its task is still in
+WanGP's queue, and stops when it has left. And what a person may still do:
 
-* **Cancel** — a waiting job. A job being sent is not ours to stop.
+* **Cancel** — a waiting job, its enhancement with it. A job being sent is not ours to stop.
+* **Cancel everything** — every waiting job at once, from every page (above).
 * **Retry** — a refused or cancelled job, sent again *as a new request* by the page that
   pressed Retry. The machine never retries anything by itself.
 * **Retry anyway** — an unconfirmed job. *Unconfirmed* means the bridge could not prove
@@ -197,8 +268,9 @@ not; a job in flight when WanGP restarts is marked unconfirmed (`WANGP_RESTARTED
 
 Every request **confirmed started or queued** from this tab is a record: when, on which
 model, how many tasks, the prompt *if you typed one here* (an inherited prompt is recorded
-as *Use WanGP*, never as WanGP's text), and each slot as Use WanGP, the picture, or
-*ignored*. The last 200 are kept. **Load** puts a recipe back into the composer — a slot
+as *Use WanGP*, never as WanGP's text) with the written prompt beside it when the press was
+enhanced (*Load* puts the typed one back, so a new press writes it again), and each slot as
+Use WanGP, the picture, or *ignored*. The last 200 are kept. **Load** puts a recipe back into the composer — a slot
 whose picture is gone becomes Use WanGP and says so — and queues nothing. **Delete**
 removes the record and touches no file. Nothing that was refused or unconfirmed is
 recorded, and a request from another extension is in the Queue but never in this history.
@@ -223,13 +295,14 @@ recorded, and a request from another extension is in the Queue but never in this
 | the folder, the intercept switch, the sort and the thumbnail size | `<Forge data_path>/a1111-mini-paint-NEO/clipboard.json` |
 | the index: id, filename, size, dimensions, digest, source per file | `…/clipboard-index.json` (rebuilt from the folder on Refresh) |
 | the composer's draft | `…/clipboard-draft.json` |
-| the queue outbox: every press as a job, with its request, its state and how it ended | `…/clipboard-outbox.json` (terminal jobs kept a week, the list capped) |
+| the queue outbox: every press as a job, with its request, its state, its enhancement and its place in WanGP | `…/clipboard-outbox.json` (schema 2; terminal jobs kept a week, the list capped) |
+| the enhanced-prompts switch and the system prompt overrides | `…/clipboard-enhance.json` |
 | Queue Send History | `…/clipboard-history.json` |
 | the pictures | the storage folder you chose, and only there |
 | thumbnails | in memory, rebuilt as needed; never on disk |
 | images staged through the public API | `…/runtime/staging/<32 hex>.png`, swept after 30 minutes |
 | images prepared for one queue request | `…/runtime/handoff/<32 hex>.png`, released when the request ends |
-| every step, scrubbed | `extensions/a1111-mini-paint-NEO/logs/wangp-log.txt` (`clipboard`, `outbox`, `interop`, `browser` and `wangp` columns) |
+| every step, scrubbed | `extensions/a1111-mini-paint-NEO/logs/wangp-log.txt` (`clipboard`, `outbox`, `enhance`, `interop`, `browser` and `wangp` columns) |
 
 A document that will not parse is moved aside as `<name>.broken-<stamp>.json` and started
 afresh, and the console says so; nothing is ever half-written (every write is atomic).
@@ -246,7 +319,12 @@ afresh, and the console says so; nothing is ever half-written (every write is at
 * The **draft** and the **history** hold a prompt only when you typed one into the tab. The
   **outbox** holds the prompt of a job because the job is a snapshot of the composer at
   press time and must survive the composer changing afterwards; it is shown in the Queue,
-  on your own screen, and nowhere else.
+  on your own screen, and nowhere else. A **written prompt** joins it there once the
+  writer is done, and the history keeps it beside the typed one.
+* A **system prompt override** is in `clipboard-enhance.json` and nowhere else; the journal
+  says an override was applied or went with a request, never its text. What the writer
+  itself keeps (its *Saved prompts*) is that extension's own, filed exactly as a run from
+  its panel would be, under the origin `minipaint-clipboard`.
 
 ## Reading a failure code
 
@@ -260,7 +338,7 @@ tab's own; the tab, the toast and the log say the same thing about the same fail
 | `CLIPBOARD_ASSET_UNKNOWN` | that id is not in the index — the file left the folder. Refresh. |
 | `CLIPBOARD_ASSET_OUTSIDE_ROOT` | the indexed entry no longer resolves inside the folder (a symlink, a move). Not used. |
 | `REQUEST_INVALID` | the request is not one the API carries: a bad id, a wrong kind, a start mode that is not `auto` or `never`, an unreadable shape. |
-| `PROMPT_TOO_LONG` | over 4000 characters after cleaning. |
+| `PROMPT_TOO_LONG` | over 12000 characters after cleaning - a typed prompt, or a written one. |
 | `IMAGE_STAGE_INVALID` / `IMAGE_STAGE_EXPIRED` | the bytes were not a PNG/JPEG/WebP within the ceilings, or the staged file was swept. |
 | `IFRAME_NOT_READY` | no live WanGP page in this Forge tab. The job waits; open the WanGP tab and choose a model. |
 | `BRIDGE_COMPONENT_INCOMPATIBLE` | the bridge inside this WanGP build lacks one of the six queue components; image send still works, the queue does not. |
@@ -273,6 +351,15 @@ tab's own; the tab, the toast and the log say the same thing about the same fail
 | `ADMISSION_UNCONFIRMED` | no task carrying the request appeared within the wait and WanGP recorded no error. It may still be queued: look at WanGP's queue before *Retry anyway*. |
 | `WANGP_RESTARTED` | WanGP restarted while the job was on its way; it is unconfirmed for the same reason. |
 | `BRIDGE_SESSION_MISMATCH` | the request was prepared for another WanGP page. |
+| `MODEL_CHANGED` | the request was composed - its prompt written - for a model the WanGP page has since left. Retry writes it again for the model the page is on. |
+| `ENHANCE_UNAVAILABLE` | ModelSwitchRefiner is not installed here, or its LLM Studio is switched off or has no model set up. The press is refused and nothing stored. |
+| `ENHANCE_MODEL_UNSUPPORTED` | the WanGP page is not on a MiniMax H3 model. Load FL2VA or Ref2VA there, or switch enhancement off. |
+| `ENHANCE_PROMPT_REQUIRED` | enhancement needs a prompt typed here; the page's own prompt is not read. |
+| `ENHANCE_NO_VISION` | a picture was to be described and the language model running cannot see. |
+| `ENHANCE_IMAGE_UNREADABLE` | a picture could not be read for the writer. |
+| `ENHANCE_QUEUE_FULL` | LLM Studio's own line is full (32). Try again in a moment. |
+| `ENHANCE_SYSTEM_PROMPT_EMPTY` | a blank override; Restore default instead. |
+| `ENHANCE_REFUSED` / `ENHANCE_FAILED` / `ENHANCE_CANCELLED` / `ENHANCE_LOST` | the writer refused the request, its run failed, it was cancelled (here, or in LLM Studio's panel), or its record was forgotten before the prompt was collected. Retry starts from the typed prompt. |
 
 ## Theming
 
@@ -293,7 +380,8 @@ the Clipboard tab uses it too, and its presses and a caller's requests share one
 ```js
 const api = window.minipaintInterop;              // { version: 1, contract, wangp: {...}, message(code) }
 
-const caps = await api.wangp.capabilities();      // advisory: { ok, ready, queue, start, generation_running, model, inputs: { start, end, references } }
+const caps = await api.wangp.capabilities();      // advisory: { ok, ready, queue, start, track, generation_running, model, inputs: { start, end, references } }
+const llm = await api.wangp.enhance();            // { ok, enabled, capabilities: { available, vision, model, reason }, variants, slots, overrides }
 
 const staged = await api.wangp.stageImage(blob);  // a Blob, File, ArrayBuffer, canvas or data: URL
 // -> { ok: true, image: { kind: "staged", id: "<32 hex>" }, width, height }  (the bytes never cross postMessage)
@@ -306,14 +394,16 @@ const result = await api.wangp.enqueue({
         // end omitted -> the page's own
     },
     start: "auto"                                 // the default: start WanGP if idle, join it if not; "never" stages only
-});
-// -> { ok: true,  status: "started" | "queued", request_id, job_id, tasks_added, queue_depth, route, model, applied, inherited, ignored }
+}, { enhance: true });                            // write the prompt with MiniMax H3 first (omit: the tab's switch decides); the page's model travels with it
+// -> { ok: true,  status: "started" | "queued", request_id, job_id, tasks_added, queue_depth, route, model, applied, inherited, ignored, enhanced, wangp }
 // -> { ok: false, status: "refused" | "unconfirmed" | "pending", request_id, job_id, code, message }
 
 const ticket = await api.wangp.enqueue(request, { wait: false });   // -> { ok: false, status: "pending", job_id, code: "QUEUE_JOB_PENDING" } at once
-const all = await api.wangp.jobs();                                // { ok, running, jobs: [...] }
+const all = await api.wangp.jobs();                                // { ok, running, jobs: [...] }  each job: state, enhance {state, stage, ...}, wangp {state, position}
 await api.wangp.cancel(jobId); await api.wangp.retry(jobId); await api.wangp.adopt(jobId);
+await api.wangp.cancelAll();                                       // every waiting job, from every page -> { ok, cancelled, enhancing, in_flight, jobs }
 api.wangp.pump();                                                  // run this page's waiting jobs now (idempotent)
+document.addEventListener("minipaint:outbox", e => e.detail);      // { kind: submitted|sending|done|changed|stopped|waiting|tracked, job, page }
 ```
 
 What the contract promises:
@@ -335,20 +425,29 @@ What the contract promises:
   on WanGP's correlated refusal or the bridge's own, `unconfirmed` otherwise; never a retry
   the machine decided on.
 * **Refused when WanGP is not running.** `WANGP_NOT_RUNNING`, and nothing stored.
-* **Not a generation API.** No abort, no progress, no model or setting; a request starts a
-  run only when WanGP is idle and only through WanGP's own generate trigger.
+* **Enhanced on request, refused when it cannot be.** `{ enhance: true }` is refused - and
+  nothing stored - with `ENHANCE_UNAVAILABLE`, `ENHANCE_MODEL_UNSUPPORTED`,
+  `ENHANCE_PROMPT_REQUIRED` or `ENHANCE_NO_VISION` rather than queued as typed. A job
+  composed for one model insists on it (`MODEL_CHANGED` otherwise).
+* **Tracked by the page that queued it.** After `queued` or `started`, this page asks the
+  bridge where the task is every few seconds until it has left WanGP's queue; `jobs()`
+  shows it under `wangp`, and a `tracked` event fires on each move.
+* **Not a generation API.** No abort, no progress bar, no model or setting; a request
+  starts a run only when WanGP is idle and only through WanGP's own generate trigger.
 
 The routes behind it (`/minipaint-interop/stage`, `/prepare`, `/release`, `/contract`,
-`/minipaint-interop/outbox` and its `/submit`, `/claim`, `/report`, `/cancel`, `/retry`,
-`/adopt`, `/minipaint-clipboard/image/…`, `/minipaint-clipboard/import`) sit behind the
-same sign-in gate as the WanGP proxy: when Forge has a login, a request without it is
-refused.
+`/enhance`, `/minipaint-interop/outbox` and its `/submit`, `/claim`, `/report`, `/cancel`,
+`/cancel_all`, `/retry`, `/adopt`, `/track`, `/minipaint-clipboard/image/…`,
+`/minipaint-clipboard/import`) sit behind the same sign-in gate as the WanGP proxy: when
+Forge has a login, a request without it is refused.
 
 From Python, the same halves are `minipaint_neo.interop.stage_image(pil)`,
 `stage_bytes(data, content_type)`, `normalize_public_request(raw)`, `prepare(request)` and
 `release(ids)`; the outbox is `minipaint_neo.clipboard.outbox` (`submit`, `claim`, `report`,
-`cancel`, `retry`, `adopt`, `jobs`); the Clipboard library is
-`minipaint_neo.clipboard.store.store()`.
+`track`, `cancel`, `cancel_all`, `retry`, `adopt`, `jobs`); the enhancer is
+`minipaint_neo.clipboard.enhance` (`enabled`, `set_enabled`, `capabilities`,
+`variant_for_model`, `plan`, `override`, `set_override`, `clear_override`); the Clipboard
+library is `minipaint_neo.clipboard.store.store()`.
 
 ## Known limits
 
@@ -375,4 +474,17 @@ From Python, the same halves are `minipaint_neo.interop.stage_image(pil)`,
   tolerance, not by exact pixels; a picture you swapped meanwhile is still recognised as
   yours.
 * **Playwright.** The browser smoke test (`tests/browser_smoke.py`) does not yet cover the
-  Clipboard tab or the pump.
+  Clipboard tab, the pump or the tracking loop.
+* **ModelSwitchRefiner's API is written to its document, not yet run against it.** The
+  enhancer follows `docs/21-external-llm-api.md` of that repository (`submit_minimax`,
+  `status`, `cancel`, `cancel_all` by origin, `capabilities`, the four system prompts) and
+  is exercised here against a fake shaped like it; the H3 model types it recognises
+  (`minimax_h3_fl2va`, `minimax_h3_ref2va`, or a finetune whose architecture names one) are
+  the names that extension itself documents. `docs/wangp/PHASE0.md` Part 6 has the checks.
+* **Tracking is the page's.** Only the page that queued a job can ask WanGP where its task
+  is, because the task lives in that page's WanGP session; reload the page and the job is
+  *no longer tracked*, honestly, rather than reported from a session that never saw it.
+  WanGP does not say whether a task that left its queue finished or was removed, so
+  neither does the card.
+* **An enhancement holds the line.** By design: a plain job pressed after an enhanced one
+  waits for it, on every page, so that requests reach WanGP in the order pressed.

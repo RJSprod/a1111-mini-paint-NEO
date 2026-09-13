@@ -21,6 +21,17 @@ extension may call - one at a time, in the order they were pressed across
 every browser, and the server re-renders the job list as they go. While
 WanGP is not running the button says so and is off.
 
+Prompt enhancement sits under the prompt, off by default. Switched on, a
+press first hands the typed prompt - and the pictures the model reads - to
+ModelSwitchRefiner's MiniMax H3 writer, for the H3 variant the WanGP page
+is on; the job waits in the queue as *enhancing* and goes to WanGP, in
+press order, once the prompt is written. The same panel shows and edits the
+four system prompts the writer uses (with and without a picture, for each
+variant): the default is read from the other extension, an override is
+kept on disk across sessions, and Restore default forgets it. Each job in
+the list says where its enhancement is and, once WanGP has it, where its
+task is in WanGP's queue; Cancel everything empties the line at once.
+
 The tab is built once, inside the same guard the WanGP tab uses, and a tab
 that cannot be built is a tab that says so under the same label and id.
 """
@@ -41,7 +52,7 @@ from ..canvas import host, imaging
 from ..canvas import ui as canvas_ui
 from ..wangp import errors, protocol
 from ..wangp.errors import IntegrationError
-from . import TAB_ID, TAB_LABEL, config, history, outbox, routes, store
+from . import TAB_ID, TAB_LABEL, config, enhance, history, outbox, routes, store
 
 PREFIX = "minipaint_clipboard"
 
@@ -62,7 +73,11 @@ THUMB_JS = f"(size) => {{ if ({_JS}) {_JS}.setThumbnailSize(size); }}"
 QUEUE_JS = f"(instruction) => {{ if ({_JS}) {_JS}.queue(instruction); }}"
 # The click hands the server this page's identity along with the prompt, so
 # the job is the page's to run; the watcher is armed in the same breath.
-ARM_QUEUE_JS = f"(prompt, page) => {{ const c = {_JS}; if (c) {{ c.armQueue(); }} return [prompt, c && c.pageId ? c.pageId() : page]; }}"
+ARM_QUEUE_JS = (f"(prompt, page, model) => {{ const c = {_JS}; if (c) {{ c.armQueue(); }} "
+                f"return [prompt, c && c.pageId ? c.pageId() : page, c && c.modelJson ? c.modelJson() : model]; }}")
+# After the server has cancelled the line: callers of the public API still
+# waiting on those jobs are answered, and the list is re-read.
+AFTER_CANCEL_JS = f"() => {{ if ({_JS} && {_JS}.afterCancelAll) {_JS}.afterCancelAll(); }}"
 SELECTED_JS = f"(grid, selected) => {{ if ({_JS}) {_JS}.afterRender(); }}"
 SWITCH_JS = "(target) => { if (window.minipaintCanvas && window.minipaintCanvas.switchTo) { window.minipaintCanvas.switchTo(target); } }"
 CAPABILITIES_JS = f"() => {{ if ({_JS}) {_JS}.refreshCapabilities(); }}"
@@ -84,9 +99,21 @@ FIELD_LABELS = {
 
 #: What the job list calls each state, and what the button says.
 OUTBOX_LABELS = {
-    outbox.PENDING: "Waiting", outbox.SENDING: "Sending", outbox.QUEUED: "Queued", outbox.STARTED: "Generating",
+    outbox.ENHANCING: "Enhancing", outbox.PENDING: "Waiting", outbox.SENDING: "Sending", outbox.QUEUED: "Queued", outbox.STARTED: "Generating",
     outbox.FAILED: "Refused", outbox.UNCONFIRMED: "Unconfirmed", outbox.CANCELLED: "Cancelled",
 }
+#: What the list says of a job's enhancement, by the LLM side's state.
+ENHANCE_LABELS = {
+    enhance.LLM_QUEUED: "waiting for the LLM", enhance.LLM_RUNNING: "being written", enhance.LLM_DONE: "enhanced",
+    enhance.LLM_FAILED: "failed", enhance.LLM_CANCELLED: "cancelled", "lost": "lost",
+}
+#: What the list says of a queued job's task inside WanGP.
+WANGP_LABELS = {
+    outbox.WANGP_ACCEPTED: "accepted by WanGP", outbox.WANGP_WAITING: "in WanGP's queue", outbox.WANGP_GENERATING: "WanGP is generating it",
+    outbox.WANGP_FINISHED: "left WanGP's queue (finished, or removed there)", outbox.WANGP_UNKNOWN: "no longer tracked (the WanGP page changed)",
+}
+SP_VARIANT_CHOICES = [(enhance.VARIANT_LABELS[variant], variant) for variant in enhance.VARIANTS]
+SP_MODE_CHOICES = [(enhance.MODE_LABELS[mode], mode) for mode in enhance.MODES]
 QUEUE_BUTTON_LABEL = "Add to Queue"
 QUEUE_BUTTON_BLOCKED = "WanGP is not running"
 #: The page id a press carries when no browser script supplied one. Jobs
@@ -194,6 +221,10 @@ def history_html(records: typing.Sequence[dict], asset_of: typing.Callable[[str]
         model = record.get("model_label") or record.get("model_type") or "WanGP"
         if record.get("prompt_mode") == history.MODE_OVERRIDE:
             prompt = f'<div class="minipaint-clip-history-prompt" title="{_escape(record.get("prompt_override"))}">{_escape(record.get("prompt_override"))}</div>'
+            if record.get("enhanced") and record.get("enhanced_prompt"):
+                written = record["enhanced_prompt"]
+                prompt += (f'<div class="minipaint-clip-history-enhanced" title="{_escape(written)}">enhanced: {_escape(written[:160])}'
+                           f'{"…" if len(written) > 160 else ""}</div>')
         else:
             prompt = '<div class="minipaint-clip-history-prompt minipaint-clip-inherit-text">Prompt: Use WanGP</div>'
         thumbs = []
@@ -243,10 +274,74 @@ def job_sentence(job: typing.Mapping[str, typing.Any]) -> str:
     if state in (outbox.FAILED, outbox.UNCONFIRMED):
         return str(error.get("message") or errors.message(error.get("code") or errors.QUEUE_REQUEST_REFUSED))
     if state == outbox.CANCELLED:
-        return "Cancelled before it was sent."
+        return str(error.get("message") or "Cancelled before it was sent.")
     if state == outbox.SENDING:
         return "Being sent to WanGP…"
+    if state == outbox.ENHANCING:
+        return "Waiting for the enhanced prompt."
     return "Waiting its turn."
+
+
+def enhance_sentence(job: typing.Mapping[str, typing.Any]) -> str:
+    """Where a job's enhancement is, or was: the LLM side's own words, never the prompt."""
+    record = job.get("enhance") or {}
+    if not record:
+        return ""
+    variant = enhance.VARIANT_LABELS.get(record.get("variant"), str(record.get("variant") or ""))
+    state = record.get("state")
+    if state == enhance.LLM_QUEUED:
+        position = record.get("position") or 0
+        where = f" (position {position})" if position else ""
+        return f"Enhancement as {variant}: waiting for the LLM{where}."
+    if state == enhance.LLM_RUNNING:
+        stage = record.get("stage") or "being written"
+        return f"Enhancement as {variant}: {stage}"
+    if state == enhance.LLM_DONE:
+        seconds = record.get("elapsed") or 0.0
+        parts = [f"Enhanced as {variant} in {seconds:.0f} s"]
+        if record.get("image_used"):
+            parts.append(f"described {enhance.SLOT_LABELS.get(record['image_used'], record['image_used'])}")
+        ignored = [enhance.SLOT_LABELS.get(item, item) for item in record.get("image_ignored") or []]
+        if ignored:
+            parts.append(f"{', '.join(ignored)} not described")
+        dropped = [FIELD_LABELS.get(item, item).lower() for item in record.get("dropped") or []]
+        if dropped:
+            parts.append(f"{', '.join(dropped)} left out of the enhancement")
+        if record.get("system_override"):
+            parts.append("with your system prompt")
+        if record.get("reused_from"):
+            parts.append("carried over from the earlier attempt")
+        return "; ".join(parts) + "."
+    if state == enhance.LLM_FAILED:
+        return f"Enhancement failed: {record.get('error') or errors.message(errors.ENHANCE_FAILED)}"
+    if state == enhance.LLM_CANCELLED:
+        return f"Enhancement cancelled: {record.get('error') or errors.message(errors.ENHANCE_CANCELLED)}"
+    if state == "lost":
+        return errors.message(errors.ENHANCE_LOST)
+    return ""
+
+
+def wangp_sentence(job: typing.Mapping[str, typing.Any]) -> str:
+    """Where a queued job's task is inside WanGP, as the page last saw it."""
+    if job.get("state") not in outbox.POSITIVE:
+        return ""
+    seen = job.get("wangp") or {}
+    state = seen.get("state") or outbox.WANGP_ACCEPTED
+    if state == outbox.WANGP_WAITING:
+        position = seen.get("position")
+        return f"In WanGP's queue, {position} ahead of it." if isinstance(position, int) and position > 0 else "In WanGP's queue, next to run."
+    if state == outbox.WANGP_GENERATING:
+        return "WanGP is generating it."
+    label = WANGP_LABELS.get(state, state)
+    return label[:1].upper() + label[1:] + "."
+
+
+def enhance_line_html(availability: typing.Mapping[str, typing.Any], enabled: bool) -> str:
+    """The sentence above the switch, with its state for the stylesheet."""
+    state = str(availability.get("state") or "unknown")
+    head = "Enhanced prompts are on." if enabled else "Enhanced prompts are off."
+    return (f'<div class="minipaint-clip-enhance-line" data-state="{_escape(state)}" data-enabled="{"1" if enabled else "0"}">'
+            f'<b>{head}</b> {_escape(availability.get("text") or "")}</div>')
 
 
 def outbox_html(jobs: typing.Sequence[dict], page: str) -> str:
@@ -263,23 +358,42 @@ def outbox_html(jobs: typing.Sequence[dict], page: str) -> str:
         if summary.get("references"):
             supplied.append(f"{summary['references']} reference{'s' if summary['references'] != 1 else ''}")
         prompt = (job.get("request") or {}).get("prompt")
-        excerpt = (f'<div class="minipaint-clip-job-prompt" title="{_escape(prompt)}">{_escape(prompt[:90])}{"…" if len(prompt) > 90 else ""}</div>'
-                   if prompt else '<div class="minipaint-clip-job-prompt minipaint-clip-inherit-text">Prompt: Use WanGP</div>')
+        record = job.get("enhance") or {}
+        typed = record.get("prompt_original") or ""
+        if prompt and typed and record.get("state") == enhance.LLM_DONE and typed != prompt:
+            excerpt = (f'<div class="minipaint-clip-job-prompt minipaint-clip-job-prompt-typed" title="{_escape(typed)}">{_escape(typed[:90])}{"…" if len(typed) > 90 else ""}</div>'
+                       f'<div class="minipaint-clip-job-prompt minipaint-clip-job-prompt-enhanced" title="{_escape(prompt)}">{_escape(prompt[:120])}{"…" if len(prompt) > 120 else ""}</div>')
+        elif prompt:
+            excerpt = f'<div class="minipaint-clip-job-prompt" title="{_escape(prompt)}">{_escape(prompt[:90])}{"…" if len(prompt) > 90 else ""}</div>'
+        else:
+            excerpt = '<div class="minipaint-clip-job-prompt minipaint-clip-inherit-text">Prompt: Use WanGP</div>'
         when = str(job.get("created_at") or "").replace("T", " ").replace("+00:00", " UTC")
         actions = []
-        if state == outbox.PENDING:
+        if state in outbox.WAITING:
             actions.append(f'<button type="button" data-outbox-action="cancel:{_escape(job["job_id"])}">Cancel</button>')
-            if not mine:
+            if not mine and state == outbox.PENDING:
                 actions.append(f'<button type="button" data-outbox-action="adopt:{_escape(job["job_id"])}">Run from this page</button>')
         elif state in (outbox.FAILED, outbox.CANCELLED):
             actions.append(f'<button type="button" data-outbox-action="retry:{_escape(job["job_id"])}">Retry</button>')
         elif state == outbox.UNCONFIRMED:
             actions.append(f'<button type="button" data-outbox-action="retry:{_escape(job["job_id"])}" title="WanGP may already hold this task; check its queue first">Retry anyway</button>')
         badge = ""
-        if state == outbox.PENDING and not mine:
+        if state in outbox.WAITING and not mine:
             badge = '<span class="minipaint-clip-badge">composed on another page</span>'
         elif job.get("origin") == outbox.ORIGIN_API:
             badge = '<span class="minipaint-clip-badge">from another extension</span>'
+        if job.get("enhance_requested"):
+            badge += '<span class="minipaint-clip-badge">enhanced prompt</span>'
+        lines = []
+        llm = enhance_sentence(job)
+        if llm:
+            live = "failed" if record.get("state") in (enhance.LLM_FAILED, "lost") else "generating" if record.get("state") == enhance.LLM_RUNNING else ""
+            lines.append(f'<div class="minipaint-clip-job-line" data-live="{live}"><b>LLM:</b> {_escape(llm)}</div>')
+        inside = wangp_sentence(job)
+        if inside:
+            seen = (job.get("wangp") or {}).get("state") or outbox.WANGP_ACCEPTED
+            live = "generating" if seen == outbox.WANGP_GENERATING else ""
+            lines.append(f'<div class="minipaint-clip-job-line" data-live="{live}" data-wangp="{_escape(seen)}"><b>WanGP:</b> {_escape(inside)}</div>')
         parts.append(
             f'<div class="minipaint-clip-job minipaint-clip-job-{_escape(state)}" data-job="{_escape(job["job_id"])}" data-mine="{"1" if mine else "0"}">'
             f'<div class="minipaint-clip-job-head"><span class="minipaint-clip-job-state">{_escape(OUTBOX_LABELS.get(state, state))}</span>'
@@ -288,6 +402,7 @@ def outbox_html(jobs: typing.Sequence[dict], page: str) -> str:
             f'<div class="minipaint-clip-job-fields">{_escape(", ".join(supplied) if supplied else "the WanGP page as it is")}'
             f'{" · start never" if summary.get("start_mode") == protocol.START_NEVER else ""}</div>'
             f'<div class="minipaint-clip-job-outcome">{_escape(job_sentence(job))}</div>'
+            + "".join(lines)
             + (f'<div class="minipaint-clip-job-actions">{"".join(actions)}</div>' if actions else "")
             + "</div>"
         )
@@ -298,6 +413,18 @@ def outbox_html(jobs: typing.Sequence[dict], page: str) -> str:
 def _page_of(value: typing.Any) -> str:
     text = str(value or "").strip()
     return text if outbox.PAGE_RE.match(text) else NO_PAGE
+
+
+def _model_of(value: typing.Any) -> dict:
+    """The WanGP model the page reported, from the hidden box's JSON; empty
+    strings when it has not said, or said something that is not a model."""
+    if isinstance(value, dict):
+        return enhance.model_block(value)
+    try:
+        parsed = json.loads(str(value or "") or "{}")
+    except ValueError:
+        parsed = {}
+    return enhance.model_block(parsed)
 
 
 def _status(message: str, notes: typing.Sequence[str] = ()) -> str:
@@ -405,6 +532,77 @@ class ClipboardTab:
         if cleared:
             history.save_draft(draft)
         return cleared
+
+    # -- prompt enhancement -----------------------------------------------------
+
+    def _enhance_line(self, model: typing.Any = None) -> str:
+        try:
+            return enhance_line_html(enhance.availability(_model_of(model)), enhance.enabled())
+        except Exception as error:
+            return enhance_line_html({"state": "blocked", "text": f"The enhancement settings could not be read ({type(error).__name__})."}, False)
+
+    def _system_prompt_view(self, variant, mode) -> typing.Tuple[typing.Any, str]:
+        """The box and the line under it for one of the four instruction sets."""
+        try:
+            text, source = enhance.effective_prompt(variant, mode)
+        except IntegrationError:
+            return gr.update(value=""), "Choose a variant and whether a picture is sent."
+        label = f"{enhance.VARIANT_LABELS.get(variant, variant)}, {enhance.MODE_LABELS.get(mode, mode)}"
+        if source == "override":
+            line = f"**Override saved** for {label}. Restore default forgets it."
+        elif source == "default":
+            line = f"**Default** for {label}, as ModelSwitchRefiner ships it. Edit and Apply override to replace it."
+        else:
+            line = f"No default for {label} could be read: ModelSwitchRefiner is not available in this Forge. An override can still be saved."
+        return gr.update(value=text), line
+
+    def toggle_enhance(self, flag, model):
+        wanted = enhance.set_enabled(bool(flag))
+        self._journal(f"enhanced prompts {'on' if wanted else 'off'} from the tab")
+        return self._enhance_line(model)
+
+    def model_changed(self, model):
+        """The browser says which WanGP model the page is on: the line follows."""
+        return self._enhance_line(model)
+
+    def system_prompt_selected(self, variant, mode):
+        box, line = self._system_prompt_view(variant, mode)
+        return box, line
+
+    def apply_override(self, variant, mode, text):
+        try:
+            enhance.set_override(variant, mode, text)
+        except IntegrationError as error:
+            _box, line = self._system_prompt_view(variant, mode)
+            return gr.skip(), line, _status(errors.message(error.code))
+        box, line = self._system_prompt_view(variant, mode)
+        self._journal(f"system prompt override applied for {variant} {mode}")
+        return box, line, _status("Override saved. Every enhanced press from now on uses it, on every page, after a restart too.")
+
+    def restore_default(self, variant, mode):
+        try:
+            had = enhance.clear_override(variant, mode)
+        except IntegrationError as error:
+            return gr.skip(), gr.skip(), _status(errors.message(error.code))
+        box, line = self._system_prompt_view(variant, mode)
+        return box, line, _status("Back to the default." if had else "There was no override; the default is shown.")
+
+    def cancel_all(self, page):
+        """Cancel everything: enhancing and pending jobs, from every page."""
+        page_id = _page_of(page)
+        try:
+            answer = outbox.cancel_all()
+        except Exception as error:
+            return self._outbox(page_id), _status(f"The queue could not be cancelled ({type(error).__name__}).")
+        count = answer.get("cancelled", 0)
+        notes = []
+        if answer.get("enhancing"):
+            notes.append(f"{answer['enhancing']} enhancement{'s' if answer['enhancing'] != 1 else ''} stopped")
+        if answer.get("in_flight"):
+            notes.append(f"{answer['in_flight']} already being sent to WanGP and left to finish")
+        notes.append("nothing already in WanGP's queue was touched")
+        self._journal(f"cancel all from the tab: {count} cancelled")
+        return self._outbox(page_id), _status(f"Cancelled {count} waiting request{'s' if count != 1 else ''}." if count else "Nothing was waiting.", notes)
 
     # -- the browser ----------------------------------------------------------
 
@@ -552,16 +750,21 @@ class ClipboardTab:
 
     # -- the queue ------------------------------------------------------------
 
-    def prepare_queue(self, prompt, page):
+    def prepare_queue(self, prompt, page, model=None):
         """Add to Queue: the draft as a public request, into the server's outbox.
 
         Everything inherited is omitted from the request. A slot whose file
         is gone fails here, before anything is stored, and keeps the draft;
         a WanGP that is not running refuses the press rather than storing it.
-        The instruction box then tells the browser a job exists, and the
-        page's pump does the rest.
+        With enhanced prompts on, the press is refused in the same way when
+        the LLM side cannot take it or the page's model (``model``, as the
+        browser reported it) is not an H3 one; otherwise the enhancement is
+        asked for at once and the job waits as enhancing. The instruction
+        box then tells the browser a job exists, and the page's pump does
+        the rest.
         """
         page_id = _page_of(page)
+        block = _model_of(model)
         draft = history.load_draft()
         draft["prompt_override"] = str(prompt or "")
         draft = history.save_draft(draft)
@@ -578,29 +781,43 @@ class ClipboardTab:
         request = history.public_request(draft)
         request["start"] = protocol.START_AUTO
         try:
-            job = outbox.submit(request, page_id, outbox.ORIGIN_CLIPBOARD)
+            job = outbox.submit(request, page_id, outbox.ORIGIN_CLIPBOARD, model=block)
         except IntegrationError as error:
             self._journal(f"queue clicked; refused - {error.code}")
             notes = ["nothing was stored; press it again once WanGP is running"] if error.code == errors.WANGP_NOT_RUNNING else []
+            if error.code.startswith("ENHANCE_"):
+                notes.append("nothing was stored; switch enhanced prompts off to queue the prompt as typed")
             return "", _status(errors.message(error.code), notes), self._outbox(page_id), self._queue_button()
         pending = outbox.pending_count()
-        self._journal(f"queue clicked: job {job['job_id'][:8]} (overrides {', '.join(history.draft_overrides(draft)) or 'none'}); {pending} waiting")
+        record = job.get("enhance") or {}
+        self._journal(f"queue clicked: job {job['job_id'][:8]} (overrides {', '.join(history.draft_overrides(draft)) or 'none'}"
+                      f"{'; enhancing as ' + record['variant'] if record else ''}); {pending} waiting")
         notes = [f"{pending - 1} ahead of it" if pending > 1 else "it goes next"]
+        if record:
+            dropped = [FIELD_LABELS.get(item, item).lower() for item in record.get("dropped") or []]
+            if dropped:
+                notes.append(f"{', '.join(dropped)}: not read by {enhance.VARIANT_LABELS.get(record['variant'], record['variant'])}, so left out of the enhancement (still sent to WanGP)")
+            if record.get("extra_references"):
+                notes.append("only the first reference is described to the writer")
         if page_id == NO_PAGE:
             notes.append("this page did not identify itself, so the job waits for one that can run it")
         instruction = json.dumps({"nonce": _nonce(), "job_id": job["job_id"]})
-        return instruction, _status("Queued for WanGP.", notes), self._outbox(page_id), self._queue_button()
+        line = f"Enhancing the prompt as {enhance.VARIANT_LABELS.get(record['variant'], record['variant'])}; WanGP gets it when it is written." if record else "Queued for WanGP."
+        return instruction, _status(line, notes), self._outbox(page_id), self._queue_button()
 
-    def _draft_from_request(self, request: typing.Mapping[str, typing.Any]) -> dict:
+    def _draft_from_request(self, request: typing.Mapping[str, typing.Any], job: typing.Optional[typing.Mapping[str, typing.Any]] = None) -> dict:
         """A job's request as the draft it came from: Clipboard assets by id,
-        anything staged by another extension left to inherit."""
+        anything staged by another extension left to inherit, and the prompt
+        as it was typed when the job was enhanced."""
         images = request.get("images") if isinstance(request.get("images"), dict) else {}
+        record = (job or {}).get("enhance") or {}
+        typed = record.get("prompt_original") if record.get("state") == enhance.LLM_DONE and record.get("prompt_original") else None
 
         def asset_of(handle: typing.Any) -> str:
             return handle["id"] if isinstance(handle, dict) and handle.get("kind") == "clipboard_asset" and _hex(handle.get("id")) else ""
 
         return {
-            "prompt_override": str(request.get("prompt") or ""),
+            "prompt_override": str(typed if typed is not None else request.get("prompt") or ""),
             "first_asset_id": asset_of(images.get(protocol.QUEUE_FIELD_START)),
             "last_asset_id": asset_of(images.get(protocol.QUEUE_FIELD_END)),
             "reference_asset_ids": [asset_of(item) for item in images.get(protocol.QUEUE_FIELD_REFERENCES) or [] if asset_of(item)],
@@ -611,10 +828,12 @@ class ClipboardTab:
         recorded = []
         for job in outbox.unrecorded(outbox.ORIGIN_CLIPBOARD):
             result = job.get("result") or {}
-            record = history.make_record(self._draft_from_request(job["request"]), {
+            written = job.get("enhance") or {}
+            enhanced = job["request"].get("prompt") if written.get("state") == enhance.LLM_DONE else ""
+            record = history.make_record(self._draft_from_request(job["request"], job), {
                 "request_id": job["request"].get("request_id"), "applied": result.get("applied"), "inherited": result.get("inherited"),
                 "ignored": result.get("ignored"), "tasks_added": result.get("tasks_added"), "model": result.get("model"),
-            })
+            }, enhanced_prompt=enhanced or "")
             history.add_history(record)
             recorded.append(job["job_id"])
             self._journal(f"job {job['job_id'][:8]} {job['state']}; history recorded")
@@ -632,9 +851,12 @@ class ClipboardTab:
         latest = max(settled, key=lambda job: (float(job.get("updated") or 0.0), float(job.get("created") or 0.0)), default=None)
         notes = []
         waiting = sum(1 for job in mine if job.get("state") == outbox.PENDING)
+        enhancing = sum(1 for job in mine if job.get("state") == outbox.ENHANCING)
         sending = sum(1 for job in mine if job.get("state") == outbox.SENDING)
         if sending:
             notes.append("one is being sent")
+        if enhancing:
+            notes.append(f"{enhancing} being enhanced")
         if waiting:
             notes.append(f"{waiting} waiting")
         line = job_sentence(latest) if latest else ("" if not mine else "Waiting its turn.")
@@ -652,6 +874,8 @@ class ClipboardTab:
             if verb == "cancel":
                 job = outbox.cancel(job_id)
                 message = "Cancelled." if job["state"] == outbox.CANCELLED else f"That job is {OUTBOX_LABELS.get(job['state'], job['state']).lower()}; nothing to cancel."
+                if job["state"] == outbox.CANCELLED and job.get("enhance"):
+                    message = "Cancelled, and its enhancement with it."
             elif verb == "retry":
                 job = outbox.retry(job_id, page_id)
                 message = "Sent again as a new request."
@@ -873,6 +1097,35 @@ class ClipboardTab:
                         draft["prompt_override"], lines=4, max_lines=12, label="Prompt", placeholder="Use current WanGP prompt",
                         elem_id=_id("prompt"), elem_classes=["minipaint-clip-prompt"],
                     )
+                    enhanced_on = enhance.enabled()
+                    with gr.Accordion("Prompt enhancement (ModelSwitchRefiner MiniMax H3)", open=enhanced_on, elem_id=_id("enhance_panel"),
+                                      elem_classes=["minipaint-clip-enhance-panel"]):
+                        enhance_line = gr.HTML(self._enhance_line(), elem_id=_id("enhance_line"))
+                        enhance_toggle = gr.Checkbox(
+                            value=enhanced_on, label="Enhance the prompt through MiniMax H3 before it reaches WanGP",
+                            elem_id=_id("enhance_toggle"), elem_classes=["minipaint-clip-enhance-toggle"],
+                        )
+                        gr.Markdown(
+                            "Off by default. On, a press sends the prompt typed here - and the pictures the model reads: first and last "
+                            "frame for FL2VA, the reference for Ref2VA - to LLM Studio first, and WanGP gets the written prompt. The "
+                            "variant is whichever MiniMax H3 model the WanGP page is on; a page on another model is refused, not enhanced.",
+                            elem_classes=["minipaint-clip-hint"],
+                        )
+                        gr.Markdown("**System prompt** - the instructions the writer runs under. Four sets: each variant, with and without a picture.",
+                                    elem_classes=["minipaint-clip-hint"])
+                        with gr.Row(elem_classes=["minipaint-clip-pair"]):
+                            sp_variant = gr.Dropdown(SP_VARIANT_CHOICES, value=enhance.FL2VA, label="Variant", elem_id=_id("sp_variant"), min_width=140)
+                            sp_mode = gr.Dropdown(SP_MODE_CHOICES, value=enhance.MODE_TEXT, label="Instructions used", elem_id=_id("sp_mode"), min_width=140)
+                        sp_box, sp_line = self._system_prompt_view(enhance.FL2VA, enhance.MODE_TEXT)
+                        system_prompt = gr.Textbox(
+                            sp_box.get("value", "") if isinstance(sp_box, dict) else "", lines=10, max_lines=40, label="System prompt",
+                            elem_id=_id("system_prompt"), elem_classes=["minipaint-clip-system-prompt"],
+                        )
+                        sp_state = gr.Markdown(sp_line, elem_id=_id("sp_state"), elem_classes=["minipaint-clip-sp-state"])
+                        with gr.Row(elem_classes=["minipaint-clip-pair"]):
+                            sp_apply = gr.Button("Apply override", variant="primary", elem_id=_id("sp_apply"))
+                            sp_restore = gr.Button("Restore default", elem_id=_id("sp_restore"))
+                            sp_reload = gr.Button("Reload", elem_id=_id("sp_reload"))
                     queue_btn = gr.Button(
                         QUEUE_BUTTON_LABEL if running else QUEUE_BUTTON_BLOCKED, variant="primary", interactive=running,
                         elem_id=_id("queue"), elem_classes=["minipaint-clip-queue"],
@@ -880,9 +1133,12 @@ class ClipboardTab:
                     queue_status = gr.Markdown("", elem_id=_id("queue_status"), elem_classes=["minipaint-clip-status"])
                     queue_instruction = gr.Textbox("", visible=False, elem_id=_id("queue_instruction"))
                     page_box = gr.Textbox("", visible=False, elem_id=_id("page_id"))
+                    model_box = gr.Textbox("", visible=False, elem_id=_id("model"))
                     outbox_action = gr.Textbox("", visible=False, elem_id=_id("outbox_action"))
                     outbox_refresh = gr.Button("Refresh queue", visible=False, elem_id=_id("outbox_refresh"))
-                    gr.Markdown("**Queue** - every request sent from this Forge, newest first. One is sent at a time, in the order pressed.", elem_classes=["minipaint-clip-hint"])
+                    gr.Markdown("**Queue** - every request sent from this Forge, newest first. One is sent at a time, in the order pressed; "
+                                "a prompt still being enhanced holds the line behind it.", elem_classes=["minipaint-clip-hint"])
+                    cancel_all_btn = gr.Button("Cancel everything", variant="stop", elem_id=_id("cancel_all"), elem_classes=["minipaint-clip-cancel-all"])
                     outbox_list = gr.HTML(self._outbox(), elem_id=_id("outbox_list"), elem_classes=["minipaint-clip-outbox-host"])
                     with gr.Column(visible=False, elem_id=_id("history_panel"), elem_classes=["minipaint-clip-panel"]) as history_panel:
                         gr.Markdown("**Queue Send History** - recipes confirmed queued from here. Load puts one back into the composer; it queues nothing.", elem_classes=["minipaint-clip-hint"])
@@ -899,8 +1155,10 @@ class ClipboardTab:
             delete_open=delete_open, delete_panel=delete_panel, delete_ok=delete_ok, delete_cancel=delete_cancel,
             paste_open=paste_open, paste_panel=paste_panel, paste_image=paste_image, paste_close=paste_close,
             slot_action=slot_action, slot_uploads=slot_uploads, prompt=prompt, queue_btn=queue_btn, queue_status=queue_status,
-            queue_instruction=queue_instruction, page_box=page_box, outbox_action=outbox_action, outbox_refresh=outbox_refresh,
-            outbox_list=outbox_list, history_open=history_open, history_panel=history_panel,
+            queue_instruction=queue_instruction, page_box=page_box, model_box=model_box, outbox_action=outbox_action, outbox_refresh=outbox_refresh,
+            outbox_list=outbox_list, cancel_all_btn=cancel_all_btn, history_open=history_open, history_panel=history_panel,
+            enhance_line=enhance_line, enhance_toggle=enhance_toggle, sp_variant=sp_variant, sp_mode=sp_mode, system_prompt=system_prompt,
+            sp_state=sp_state, sp_apply=sp_apply, sp_restore=sp_restore, sp_reload=sp_reload,
             history_list=history_list, history_close=history_close, history_action=history_action,
             send_request=send_request, switch_box=switch_box, payload_box=payload_box, to_canvas=to_canvas, mask_clear=mask_clear,
             wangp_line=wangp_line,
@@ -962,12 +1220,29 @@ class ClipboardTab:
         # after the click); the pump reports to the server's routes, and the
         # browser presses the hidden refresh so the list and the history are
         # re-rendered from what the server holds.
-        p["queue_btn"].click(self.prepare_queue, inputs=[p["prompt"], p["page_box"]],
+        p["queue_btn"].click(self.prepare_queue, inputs=[p["prompt"], p["page_box"], p["model_box"]],
                              outputs=[p["queue_instruction"], p["queue_status"], p["outbox_list"], p["queue_btn"]], js=ARM_QUEUE_JS, **quiet)
         p["queue_instruction"].change(None, js=QUEUE_JS, inputs=[p["queue_instruction"]])
         p["outbox_refresh"].click(self.refresh_outbox, inputs=[p["page_box"]],
                                   outputs=[p["outbox_list"], p["queue_status"], p["history_list"], p["queue_btn"]], **quiet)
         p["outbox_action"].input(self.outbox_action, inputs=[p["outbox_action"], p["page_box"]], outputs=[p["outbox_list"], p["queue_status"]], **quiet)
+        # Cancel everything: the server empties the line, then the browser
+        # answers any public-API caller still waiting on one of those jobs.
+        p["cancel_all_btn"].click(self.cancel_all, inputs=[p["page_box"]], outputs=[p["outbox_list"], p["queue_status"]], **quiet).then(
+            None, js=AFTER_CANCEL_JS, inputs=[], outputs=[])
+
+        # -- prompt enhancement: the switch and the four system prompts. The
+        # model box is written by the browser from the public API's answer,
+        # so the line above the switch follows the WanGP tab.
+        p["enhance_toggle"].input(self.toggle_enhance, inputs=[p["enhance_toggle"], p["model_box"]], outputs=[p["enhance_line"]], **quiet)
+        p["model_box"].input(self.model_changed, inputs=[p["model_box"]], outputs=[p["enhance_line"]], **quiet)
+        for selector in (p["sp_variant"], p["sp_mode"]):
+            selector.input(self.system_prompt_selected, inputs=[p["sp_variant"], p["sp_mode"]], outputs=[p["system_prompt"], p["sp_state"]], **quiet)
+        p["sp_reload"].click(self.system_prompt_selected, inputs=[p["sp_variant"], p["sp_mode"]], outputs=[p["system_prompt"], p["sp_state"]], **quiet)
+        p["sp_apply"].click(self.apply_override, inputs=[p["sp_variant"], p["sp_mode"], p["system_prompt"]],
+                            outputs=[p["system_prompt"], p["sp_state"], p["queue_status"]], **quiet)
+        p["sp_restore"].click(self.restore_default, inputs=[p["sp_variant"], p["sp_mode"]],
+                              outputs=[p["system_prompt"], p["sp_state"], p["queue_status"]], **quiet)
 
         # -- history
         p["history_open"].click(self.show_history, inputs=[], outputs=[p["history_panel"], p["history_list"]], **quiet)

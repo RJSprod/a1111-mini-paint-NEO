@@ -145,6 +145,9 @@ def page_checks(r: Results, base: pathlib.Path):
         "card_first", "card_last", "card_ref", "slot_upload_first", "slot_upload_last", "slot_upload_ref", "prompt",
         "queue", "queue_status", "queue_instruction", "page_id", "outbox_action", "outbox_refresh", "outbox_list",
         "history_panel", "history_list", "history_close",
+        # prompt enhancement, and the whole line's cancel
+        "enhance_panel", "enhance_line", "enhance_toggle", "sp_variant", "sp_mode", "system_prompt", "sp_state", "sp_apply", "sp_restore", "sp_reload",
+        "model", "cancel_all",
     ]
     missing = [name for name in needed if f"minipaint_clipboard_{name}" not in ids]
     r.check("every part of the tab is on the page", not missing, str(missing))
@@ -171,7 +174,7 @@ def page_checks(r: Results, base: pathlib.Path):
     r.check("and it is enabled before anything is composed, WanGP running", queue.get("interactive") is not False and queue.get("visible") is not False)
     r.check("the queue list is on the page, empty", "No request has been sent" in component_of(page, "minipaint_clipboard_outbox_list")["props"].get("value", ""))
     for name in ("selected", "sort_request", "slot_action", "send_request", "history_action", "menu_state", "switch", "payload",
-                 "to_canvas", "mask_clear", "queue_instruction", "page_id", "outbox_action", "outbox_refresh", "refresh", "upload", "intercept", "folder_open",
+                 "to_canvas", "mask_clear", "queue_instruction", "page_id", "model", "outbox_action", "outbox_refresh", "refresh", "upload", "intercept", "folder_open",
                  "rename_open", "delete_open", "paste_open", "history_open", "slot_upload_first", "slot_upload_last", "slot_upload_ref"):
         if component_of(page, f"minipaint_clipboard_{name}")["props"].get("visible") is not False:
             r.check(f"{name} is hidden - the menu and the cards are its face", False)
@@ -204,8 +207,8 @@ def page_checks(r: Results, base: pathlib.Path):
     click = targeting("queue", "click")
     r.check("Add to Queue is one backend event that arms the browser first",
             len(click) == 1 and click[0]["backend_fn"] and "armQueue" in (click[0].get("js") or ""), str(len(click)))
-    r.check("with the prompt and the page's identity as its inputs, and the instruction, the status, the queue list and the button as outputs",
-            click and click[0]["inputs"] == [cid("prompt"), cid("page_id")]
+    r.check("with the prompt, the page's identity and the page's WanGP model as its inputs, and the instruction, the status, the queue list and the button as outputs",
+            click and click[0]["inputs"] == [cid("prompt"), cid("page_id"), cid("model")]
             and click[0]["outputs"] == [cid("queue_instruction"), cid("queue_status"), cid("outbox_list"), cid("queue")], str(click[0]["outputs"] if click else None))
     handoff = targeting("queue_instruction", "change")
     r.check("the instruction's change hands it to the browser script and to nothing on the server",
@@ -677,6 +680,9 @@ def theming_checks(r: Results) -> None:
         "--border-color-primary", "--border-color-accent-subdued", "--body-text-color", "--body-text-color-subdued",
         "--color-accent", "--block-radius", "--button-secondary-background-fill", "--button-secondary-background-fill-hover",
         "--button-secondary-text-color", "--error-text-color", "--shadow-drop-lg",
+        # Gradio's typography and radius tokens, used by the enhancement panel
+        # and the job cards' lines; a theme sets all three.
+        "--font-mono", "--radius-sm", "--text-sm",
     }
     used = set(re.findall(r"var\((--[\w-]+)", block))
     r.check("every variable is Gradio's own theme variable or the tab's own size",

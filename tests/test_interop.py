@@ -130,7 +130,7 @@ def request_checks(r: Results) -> None:
     for label, raw, code in (
         ("a bad request id", {"request_id": "nope"}, errors.REQUEST_INVALID),
         ("a prompt that is not text", {"prompt": 5}, errors.REQUEST_INVALID),
-        ("a prompt over the ceiling", {"prompt": "x" * 4001}, errors.PROMPT_TOO_LONG),
+        ("a prompt over the ceiling", {"prompt": "x" * (interop.protocol.PROMPT_MAX_CHARS + 1)}, errors.PROMPT_TOO_LONG),
         ("an unknown image kind", {"images": {"start": {"kind": "path", "id": GOOD}}}, errors.REQUEST_INVALID),
         ("a path as an id", {"images": {"start": {"kind": "staged", "id": "/tmp/x.png"}}}, errors.REQUEST_INVALID),
         ("a bare string as a handle", {"images": {"start": GOOD}}, errors.REQUEST_INVALID),

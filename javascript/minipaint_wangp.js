@@ -44,7 +44,7 @@ window.minipaintWanGP = (function () {
     /* names, the ids and the ceilings are that file's, not this one's.       */
     /* -------------------------------------------------------------------- */
 
-    const PROTOCOL = 4;
+    const PROTOCOL = 5;
 
     const HELLO = "WANGP_BRIDGE_HELLO";
     const READY = "WANGP_BRIDGE_READY";
@@ -62,9 +62,12 @@ window.minipaintWanGP = (function () {
     const QUEUE_RESULT = "WANGP_QUEUE_RESULT";
     const QUEUE_CONFIRM = "WANGP_QUEUE_CONFIRM";
     const QUEUE_STATUS = "WANGP_QUEUE_STATUS";
+    // Protocol 5: where the tasks this page admitted are in WanGP's queue.
+    const QUEUE_TRACK = "WANGP_QUEUE_TRACK";
+    const QUEUE_TRACKED = "WANGP_QUEUE_TRACKED";
 
-    const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM];
-    const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS];
+    const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK];
+    const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED];
 
     const RECEIVER_IDS = ["start_frame", "end_frame", "reference", "control_image", "positioned_ref", "style_ref"];
     const ROLES = ["start", "end", "reference", "control", "positioned", "style"];
@@ -91,8 +94,9 @@ window.minipaintWanGP = (function () {
     // outlives the call that started it.
     const QUEUE_REQUEST_TIMEOUT_MS = 30000;
     const QUEUE_CONFIRM_TIMEOUT_MS = 10000;
+    const QUEUE_TRACK_TIMEOUT_MS = 10000;
     const QUEUE_CONFIRM_DELAYS_MS = [0, 100, 300, 700, 1500, 3000];
-    const PROMPT_MAX_CHARS = 4000;
+    const PROMPT_MAX_CHARS = 12000;
     const MAX_QUEUE_REFERENCES = 16;
     const QUEUE_FIELDS = ["prompt", "start", "end", "references"];
     const ADMISSIONS = ["requested", "duplicate", "refused"];
@@ -102,6 +106,10 @@ window.minipaintWanGP = (function () {
     const START_MODES = ["auto", "never"];
     const START_ANSWERS = ["auto", "never", "unknown"];
     const ROUTES = ["generate", "queue"];
+    // Protocol 5: what a track answer says of one request's task.
+    const TRACK_STATES = ["waiting", "generating", "finished", "unknown"];
+    const MAX_TRACKED_REQUESTS = 32;
+    const MODEL_TYPE_RE = /^[A-Za-z0-9][A-Za-z0-9_.:+-]{0,119}$/;
 
     // A handoff id and a channel id have one shape each, and a value that is
     // not exactly that shape is refused rather than repaired. See handoff.py.
@@ -134,6 +142,7 @@ window.minipaintWanGP = (function () {
     const QUEUE_REQUEST_REFUSED = "QUEUE_REQUEST_REFUSED";
     const ADMISSION_UNCONFIRMED = "ADMISSION_UNCONFIRMED";
     const WANGP_VALIDATION_REFUSED = "WANGP_VALIDATION_REFUSED";
+    const MODEL_CHANGED = "MODEL_CHANGED";
 
     // The few sentences this side needs before the server can supply one. The
     // wording is errors.py's, kept short enough for a menu line.
@@ -153,11 +162,12 @@ window.minipaintWanGP = (function () {
         BRIDGE_COMPONENT_INCOMPATIBLE: "This WanGP bridge needs to be reinstalled or updated.",
         REQUEST_INVALID: "That queue request is not one this extension can carry.",
         REQUEST_ID_CONFLICT: "That request id was already used for a different request.",
-        PROMPT_TOO_LONG: "The prompt is longer than WanGP queue requests allow (4000 characters).",
+        PROMPT_TOO_LONG: "The prompt is longer than WanGP queue requests allow (12000 characters).",
         QUEUE_BUSY: "WanGP is still taking the previous queue request; try again in a moment.",
         QUEUE_REQUEST_REFUSED: "WanGP did not take the queue request.",
         ADMISSION_UNCONFIRMED: "WanGP did not confirm that the request was added to the queue.",
-        WANGP_VALIDATION_REFUSED: "WanGP declined the queue request; check the WanGP page for details."
+        WANGP_VALIDATION_REFUSED: "WanGP declined the queue request; check the WanGP page for details.",
+        MODEL_CHANGED: "The WanGP page moved to another model after the prompt was enhanced for it; retry to enhance it for the current model."
     };
 
     /* The tab's own elements. The tab builds these once and only changes what
@@ -214,7 +224,9 @@ window.minipaintWanGP = (function () {
         // resolved), and whether WanGP was generating at the last answer -
         // true, false, or null for a build that cannot say.
         start: false,
-        generationRunning: null
+        generationRunning: null,
+        // Protocol 5: whether it can say where admitted tasks are in the queue.
+        track: false
     };
 
     /* ------------------------------------------------------------------ */
@@ -323,7 +335,7 @@ window.minipaintWanGP = (function () {
 
     function normaliseModel(raw) {
         if (!raw || typeof raw !== "object") { return null; }
-        return { label: text(raw.label, 120), type: text(raw.type, 120), family: text(raw.family, 60) };
+        return { label: text(raw.label, 120), type: text(raw.type, 120), family: text(raw.family, 60), architecture: text(raw.architecture, 120) };
     }
 
     /* ------------------------------------------------------------------ */
@@ -497,6 +509,7 @@ window.minipaintWanGP = (function () {
             S.ready = false;
             S.queue = false;
             S.start = false;
+            S.track = false;
             S.generationRunning = null;
             S.bridgeSession = "";
             S.receivers = [];
@@ -727,7 +740,8 @@ window.minipaintWanGP = (function () {
         if (message.type === RECEIVERS) { onReceivers(message.requestId, message.payload); return; }
         if (message.type === RECEIVE_RESULT) { onResult(message.requestId, message.payload); return; }
         if (message.type === QUEUE_RESULT) { onQueueResult(message.requestId, message.payload); return; }
-        if (message.type === QUEUE_STATUS) { onQueueStatus(message.requestId, message.payload); }
+        if (message.type === QUEUE_STATUS) { onQueueStatus(message.requestId, message.payload); return; }
+        if (message.type === QUEUE_TRACKED) { onQueueTracked(message.requestId, message.payload); }
     }
 
     /** Why an inbound message was dropped. Every rejection is silent by
@@ -789,6 +803,7 @@ window.minipaintWanGP = (function () {
         S.ready = declared;
         S.queue = declared && !!(payload.capabilities && payload.capabilities.queue === true);
         S.start = declared && !!(payload.capabilities && payload.capabilities.start === true);
+        S.track = declared && !!(payload.capabilities && payload.capabilities.track === true);
         S.generationRunning = typeof payload.generation_running === "boolean" ? payload.generation_running : null;
         S.lastCode = declared ? "" : (failure || "BRIDGE_COMPONENT_INCOMPATIBLE");
         report(declared, S.lastCode);
@@ -906,7 +921,7 @@ window.minipaintWanGP = (function () {
     }
 
     /* ------------------------------------------------------------------ */
-    /* The queue: minipaint.wangp.queue/v1 over protocol 4                  */
+    /* The queue: minipaint.wangp.queue/v1 over protocol 5                  */
     /* ------------------------------------------------------------------ */
 
     /** applied / inherited / ignored as the shared normaliser shapes them: a
@@ -992,6 +1007,56 @@ window.minipaintWanGP = (function () {
         settle(requestId, status);
     }
 
+    /** One track answer (protocol 5): per request, where its task is. An
+     * entry this side cannot read is "unknown", never "finished". */
+    function normaliseQueueTrack(raw) {
+        raw = raw && typeof raw === "object" ? raw : {};
+        const ok = raw.ok === true && raw.tracked && typeof raw.tracked === "object" && !Array.isArray(raw.tracked);
+        const tracked = {};
+        if (ok) {
+            for (const key in raw.tracked) {
+                if (!Object.prototype.hasOwnProperty.call(raw.tracked, key) || !HEX32.test(key)) { continue; }
+                const item = raw.tracked[key] && typeof raw.tracked[key] === "object" ? raw.tracked[key] : {};
+                tracked[key] = {
+                    state: TRACK_STATES.indexOf(item.state) === -1 ? "unknown" : item.state,
+                    position: Number.isFinite(item.position) && item.position >= 0 ? Math.trunc(item.position) : null,
+                    queue_depth: Number.isFinite(item.queue_depth) && item.queue_depth >= 0 ? Math.trunc(item.queue_depth) : null
+                };
+            }
+        }
+        return {
+            ok: ok,
+            tracked: tracked,
+            code: ok ? "" : (code(raw.code) || REQUEST_INVALID),
+            detail: text(raw.detail, 200),
+            generation_running: typeof raw.generation_running === "boolean" ? raw.generation_running : null
+        };
+    }
+
+    function onQueueTracked(requestId, payload) {
+        const entry = S.pending.get(requestId);
+        if (!entry || entry.type !== QUEUE_TRACKED) { return; }
+        const answer = normaliseQueueTrack(payload);
+        if (!answer.ok) {
+            settle(requestId, Object.assign(failure(answer.code, answer.detail), { tracked: {} }));
+            return;
+        }
+        settle(requestId, answer);
+    }
+
+    /**
+     * Where the tasks this page admitted are in WanGP's queue now (protocol
+     * 5): one bounded question about up to MAX_TRACKED_REQUESTS request ids,
+     * answered from WanGP's own record for this page and never written to.
+     */
+    function trackQueue(requestIds) {
+        const ids = Array.isArray(requestIds) ? requestIds.map(String).filter(function (item) { return HEX32.test(item); }) : [];
+        if (!ids.length || ids.length > MAX_TRACKED_REQUESTS) { return Promise.resolve(Object.assign(failure(REQUEST_INVALID, "one to " + MAX_TRACKED_REQUESTS + " request ids"), { tracked: {} })); }
+        if (!ensure() || !S.ready || !S.bridgeSession) { return Promise.resolve(Object.assign(failure(IFRAME_NOT_READY, "no bridge session in this page"), { tracked: {} })); }
+        if (!S.track) { return Promise.resolve(Object.assign(failure(BRIDGE_COMPONENT_INCOMPATIBLE, "this bridge does not offer tracking"), { tracked: {} })); }
+        return ask(QUEUE_TRACK, { request_ids: ids, bridge_session: S.bridgeSession }, QUEUE_TRACK_TIMEOUT_MS, QUEUE_TRACKED);
+    }
+
     function queueRefusal(failureCode, detail, requestId) {
         say("queue: refused before asking - " + failureCode + (detail ? " (" + text(detail, 120) + ")" : ""));
         return Promise.resolve(Object.assign(failure(failureCode, detail), { admission: "refused", request_id: requestId || "" }));
@@ -1042,13 +1107,19 @@ window.minipaintWanGP = (function () {
             if (START_MODES.indexOf(request.start) === -1) { return queueRefusal(REQUEST_INVALID, "start is not auto or never", requestId); }
             payload.start = request.start;
         }
+        if (request.model_type !== undefined && request.model_type !== null && request.model_type !== "") {
+            // Protocol 5: the model this request was composed for; the bridge
+            // refuses with MODEL_CHANGED when the page has moved to another.
+            if (typeof request.model_type !== "string" || !MODEL_TYPE_RE.test(request.model_type)) { return queueRefusal(REQUEST_INVALID, "model_type is not a model type", requestId); }
+            payload.model_type = request.model_type;
+        }
         const overrides = QUEUE_FIELDS.filter(function (field) {
             return field === "prompt" ? payload.prompt !== undefined
                 : field === "references" ? !!payload.reference_handoff_ids
                 : !!payload[field + "_handoff_id"];
         });
         say("queue " + requestId.slice(0, 8) + ": overrides " + (overrides.length ? overrides.join(", ") : "none (the live page as it is)")
-            + "; start " + (payload.start || "auto"));
+            + "; start " + (payload.start || "auto") + (payload.model_type ? "; for model " + payload.model_type : ""));
         return ask(QUEUE_REQUEST, payload, QUEUE_REQUEST_TIMEOUT_MS, QUEUE_RESULT).then(function (answer) {
             if (answer && answer.ok) { return answer; }
             return Object.assign({ admission: "refused", request_id: requestId }, answer);
@@ -1144,8 +1215,9 @@ window.minipaintWanGP = (function () {
                 ready: true,
                 queue: !!S.queue,
                 start: !!S.start,
+                track: !!S.track,
                 generation_running: S.generationRunning,
-                model: S.model ? Object.assign({}, S.model) : { type: "", label: "", family: "" },
+                model: S.model ? Object.assign({}, S.model) : { type: "", label: "", family: "", architecture: "" },
                 inputs: {
                     start: { supported: supported("start_frame") },
                     end: { supported: supported("end_frame") },
@@ -1241,6 +1313,7 @@ window.minipaintWanGP = (function () {
             pending: S.pending.size,
             queue: S.queue,
             start: S.start,
+            track: S.track,
             generation_running: S.generationRunning,
             code: S.lastCode
         };
@@ -1433,6 +1506,7 @@ window.minipaintWanGP = (function () {
         queue: queue,
         confirmQueue: confirmQueue,
         queueAndConfirm: queueAndConfirm,
+        trackQueue: trackQueue,
         capabilities: capabilities,
         // One line into the same journal the handshake and the queries write
         // to, for the Canvas's half of a send. Text only; nothing is parsed.

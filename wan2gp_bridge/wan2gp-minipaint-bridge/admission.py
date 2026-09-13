@@ -58,6 +58,14 @@ RESTORE_GROUPS: typing.Tuple[typing.Tuple[str, ...], ...] = (
 #: at most MAX_QUEUE_REFERENCES, so this is the same bound.
 MAX_COMPARED_ENTRIES = protocol.MAX_QUEUE_REFERENCES
 
+#: Protocol 5: how long, and how many, admitted request ids a session keeps
+#: for tracking after their admission records have been pruned. A video can
+#: wait in WanGP's queue far longer than an admission record lives, and a
+#: task that has left the queue is only "finished" for a request this page
+#: once saw in it.
+TRACKED_ADMISSION_SECONDS = 24 * 3600.0
+MAX_TRACKED_ADMISSIONS = 1024
+
 
 @dataclasses.dataclass
 class PendingAdmission:
@@ -157,6 +165,9 @@ class Ledger:
     def __init__(self, clock: typing.Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._sessions: typing.Dict[str, "collections.OrderedDict[str, PendingAdmission]"] = {}
+        #: Protocol 5: request ids each session has seen in WanGP's queue,
+        #: with when, kept longer than the admission records themselves.
+        self._admitted: typing.Dict[str, "collections.OrderedDict[str, float]"] = {}
 
     def now(self) -> float:
         return self._clock()
@@ -192,6 +203,24 @@ class Ledger:
 
     def pending(self, bridge_session: str) -> typing.List[PendingAdmission]:
         return [record for record in (self._sessions.get(bridge_session) or {}).values() if not record.terminal]
+
+    def remember_admitted(self, bridge_session: str, request_id: str) -> None:
+        """This session saw the request's task in WanGP's queue. Kept so a
+        later track can say "finished" rather than "unknown" once it is gone."""
+        now = self._clock()
+        seen = self._admitted.setdefault(bridge_session, collections.OrderedDict())
+        seen[request_id] = now
+        seen.move_to_end(request_id)
+        for key in [key for key, stamp in seen.items() if now - stamp > TRACKED_ADMISSION_SECONDS]:
+            seen.pop(key, None)
+        while len(seen) > MAX_TRACKED_ADMISSIONS:
+            seen.popitem(last=False)
+
+    def was_admitted(self, bridge_session: str, request_id: str) -> bool:
+        seen = self._admitted.get(bridge_session)
+        if not seen or request_id not in seen:
+            return False
+        return self._clock() - seen[request_id] <= TRACKED_ADMISSION_SECONDS
 
     def _prune(self, bridge_session: str, now: float) -> None:
         records = self._sessions.get(bridge_session)
@@ -344,6 +373,25 @@ def generating(gen: typing.Any) -> bool:
     return isinstance(gen, dict) and gen.get("in_progress") is True
 
 
+def queue_length(gen: typing.Any) -> typing.Optional[int]:
+    """How many tasks this page's queue holds, or None when it cannot be read."""
+    if not isinstance(gen, dict) or not isinstance(gen.get("queue"), (list, tuple)):
+        return None
+    return len(gen["queue"])
+
+
+def track_state(gen: typing.Any, request_id: str) -> typing.Optional[typing.Tuple[str, int]]:
+    """``(state, position)`` for a request whose task is in the queue now -
+    generating when it is at the head of a running loop, waiting otherwise -
+    or None when no task carries it (protocol 5)."""
+    position = task_position(gen, request_id)
+    if position is None:
+        return None
+    if position == 0 and generating(gen):
+        return protocol.TRACK_GENERATING, 0
+    return protocol.TRACK_WAITING, position
+
+
 def refusal_evidence(gen: typing.Any, request_id: str) -> bool:
     """Whether WanGP recorded a rejection for exactly this request.
 
@@ -379,8 +427,10 @@ __all__ = [
     "generating",
     "letters",
     "matching_tasks",
+    "queue_length",
     "refusal_evidence",
     "restore_plan",
     "task_position",
+    "track_state",
     "unchanged",
 ]

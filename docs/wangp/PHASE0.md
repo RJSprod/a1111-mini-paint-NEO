@@ -420,3 +420,49 @@ constant or a candidate list, never the shape.
 * [ ] **Nothing polls with nothing to do.** With the Queue empty and the tab open, the
   browser's network panel shows no request to `/minipaint-interop/outbox/claim`; after a
   press, claims stop once the page's jobs are done.
+
+## Part 6 — enhanced prompts and the queue's two lives
+
+Bridge 1.4.0 / protocol 5 with the *SD-Neo-ModelSwitchRefiner* extension installed in the
+same Forge. Everything below is written to that extension's `docs/21-external-llm-api.md`
+and exercised against a fake shaped like it; none of it has met the real `mc_llm_api` yet.
+
+* [ ] **The API is found.** With ModelSwitchRefiner installed and LLM Studio set up, open
+  the Clipboard tab: the panel under the prompt must say *LLM Studio ready (<model>)* and
+  name WanGP's model. The journal has one `mc_llm_api imported from the ModelSwitchRefiner
+  extension (API version 1)` line. If the panel says *not found*, note the two extensions'
+  folder names and whether ModelSwitchRefiner's tab loaded at all.
+* [ ] **The variant follows WanGP.** Load `minimax_h3_fl2va` in WanGP: the line says
+  *FL2VA*; load `minimax_h3_ref2va`: *Ref2VA*; load anything else: *not a MiniMax H3
+  model*, and a press with the switch on is refused with `ENHANCE_MODEL_UNSUPPORTED` and
+  stores nothing. If a real H3 model type is spelled otherwise, record it -
+  `enhance.variant_for_model` reads the type, the architecture, the family and the label.
+* [ ] **An enhanced press.** Switch on, type a prompt, put a picture in First Frame on FL2VA,
+  press. The Queue shows *Enhancing* with LLM Studio's own stage text; LLM Studio's MiniMax
+  panel shows the banner naming `minimax-clipboard`; when it finishes, the card shows the
+  typed prompt struck through and the written one, then *Sending*, then WanGP's task carries
+  the written prompt and the First Frame. *Saved prompts* in LLM Studio has the result.
+* [ ] **The pictures follow the model.** On FL2VA with only a Reference filled, the status
+  line must say the reference was left out of the enhancement and the card's LLM line must
+  not name a described picture; on Ref2VA the reverse. A model without vision must refuse a
+  press with a picture (`ENHANCE_NO_VISION`) before anything is stored.
+* [ ] **The system prompt.** Edit the FL2VA *with a picture* set, Apply override, press with
+  a picture: LLM Studio's run must use your text (its console says `system_override`).
+  Restart Forge: the override is still there. Restore default: the API's text is back.
+* [ ] **The line is strict.** Press an enhanced job, then a plain one from a second browser:
+  the plain one shows *Waiting* and does not reach WanGP until the first has. Its claim
+  answers `reason: enhancing`.
+* [ ] **Cancel everything.** With two enhancing and one pending job, press it: LLM Studio's
+  banner must clear, its queue must be empty of ours, and the three cards must read
+  *Cancelled*. A job that was *Sending* at that moment finishes.
+* [ ] **Cancelled from the other side.** Press *Cancel all queued* in LLM Studio's own banner
+  while a job is enhancing here: the card must read *Cancelled* with the reason naming LLM
+  Studio, within a couple of seconds, with no page pumping (the watcher thread).
+* [ ] **Tracking.** After a queued job, watch its card: *In WanGP's queue, N ahead of it*
+  counting down, *WanGP is generating it*, then *Left WanGP's queue*. Reload the Forge page
+  while a task is still waiting: the card must say *no longer tracked*, not *finished*.
+* [ ] **The model moved.** Enhance on FL2VA, then switch WanGP to another model before the
+  job is sent: the card must read `MODEL_CHANGED`, nothing must be written into the WanGP
+  form, and Retry must write the prompt again for the new model (or refuse it, if that
+  model is not an H3 one).
+

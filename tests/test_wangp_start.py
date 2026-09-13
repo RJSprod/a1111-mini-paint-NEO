@@ -88,7 +88,7 @@ def decision_checks(r: Results, root: str) -> None:
             hello.get("capabilities", {}).get("start") is True and hello.get("capabilities", {}).get("queue") is True, str(hello.get("capabilities")))
     r.check("and says, live, that nothing is generating", hello.get("generation_running") is False)
     r.check("the generate trigger is the last queue-only output", bridge.queue_keys[-1] == K.GENERATE_TRIGGER, str(bridge.queue_keys))
-    r.check("protocol 4 is what both halves speak", hello.get("protocol") == 4 == protocol.PROTOCOL and hello.get("bridge_version") == "1.3.0")
+    r.check("protocol 5 is what both halves speak", hello.get("protocol") == 5 == protocol.PROTOCOL and hello.get("bridge_version") == "1.4.0")
 
     # -- auto while idle: the generate route
     ack, writes = base._call(bridge, page, "queue", {"request_id": ID_A, "bridge_session": session, "prompt": "go"})

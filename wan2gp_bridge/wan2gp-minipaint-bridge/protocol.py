@@ -23,7 +23,7 @@ import unicodedata
 # wan2gp_bridge/wan2gp-minipaint-bridge/protocol.py. Change one, change both;
 # the test fails otherwise.
 
-PROTOCOL = 4
+PROTOCOL = 5
 
 #: postMessage types. Anything not in here is dropped without a reply.
 HELLO = "WANGP_BRIDGE_HELLO"
@@ -40,11 +40,14 @@ QUEUE_REQUEST = "WANGP_QUEUE_REQUEST"
 QUEUE_RESULT = "WANGP_QUEUE_RESULT"
 QUEUE_CONFIRM = "WANGP_QUEUE_CONFIRM"
 QUEUE_STATUS = "WANGP_QUEUE_STATUS"
+#: Protocol 5: where the tasks this page admitted are in WanGP's queue now.
+QUEUE_TRACK = "WANGP_QUEUE_TRACK"
+QUEUE_TRACKED = "WANGP_QUEUE_TRACKED"
 
 #: What the parent page may send into the iframe.
-TO_BRIDGE = frozenset({HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM})
+TO_BRIDGE = frozenset({HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK})
 #: What the iframe may send out to the parent page.
-TO_PARENT = frozenset({READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS})
+TO_PARENT = frozenset({READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED})
 
 #: Stable logical receiver ids. The bridge maps these onto whatever the
 #: installed WanGP calls them; MiniPaint only ever sees these.
@@ -93,9 +96,9 @@ MAX_HANDOFF_PIXELS = 64 * 1024 * 1024
 MAX_HANDOFF_SIDE = 16384
 
 #: A postMessage envelope this size or larger is dropped unread. A queue
-#: request is a prompt of at most PROMPT_MAX_CHARS characters - under 24 KiB
+#: request is a prompt of at most PROMPT_MAX_CHARS characters - under 72 KiB
 #: of JSON however it is escaped - plus a handful of 32-character ids, so the
-#: ceiling that was already here holds it ten times over and is not raised.
+#: ceiling that was already here holds it three times over and is not raised.
 #: Image bytes never cross postMessage.
 MAX_ENVELOPE_BYTES = 256 * 1024
 
@@ -140,7 +143,10 @@ QUEUE_FIELD_RECEIVERS = {
 
 #: Prompt ceiling, in characters. Longer is refused, never truncated: a
 #: prompt cut short is a different prompt, and nobody asked for that one.
-PROMPT_MAX_CHARS = 4000
+#: Protocol 5 raised it from 4000: a MiniMax H3 prompt written by an
+#: enhancer is several sections long, and a Ref2VA one runs to two thousand
+#: tokens. The postMessage ceiling below still holds it many times over.
+PROMPT_MAX_CHARS = 12000
 
 #: How many reference images one request may supply. A bound rather than a
 #: model fact; the live page decides what the model takes.
@@ -186,12 +192,32 @@ ROUTE_GENERATE = "generate"
 ROUTE_QUEUE = "queue"
 ROUTES = (ROUTE_GENERATE, ROUTE_QUEUE)
 
+#: Protocol 5: what a track answer says about one request's task. "waiting"
+#: and "generating" are read from WanGP's own queue for this page; "finished"
+#: means a task this page once saw queued is no longer there - finished, or
+#: removed in WanGP, which the bridge cannot tell apart; "unknown" means
+#: this page never admitted it (a reloaded page is a new session and cannot
+#: vouch for the old one's tasks). "finished" is never said of a request the
+#: page has no admission record for.
+TRACK_WAITING = "waiting"
+TRACK_GENERATING = "generating"
+TRACK_FINISHED = "finished"
+TRACK_UNKNOWN = "unknown"
+TRACK_STATES = (TRACK_WAITING, TRACK_GENERATING, TRACK_FINISHED, TRACK_UNKNOWN)
+#: How many requests one track message may ask about.
+MAX_TRACKED_REQUESTS = 32
+#: A WanGP model type, when a request insists on the one it was composed
+#: for: an enhanced prompt is written for one H3 model, and the bridge
+#: refuses with MODEL_CHANGED rather than send it to another.
+MODEL_TYPE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:+-]{0,119}\Z")
+
 #: Timeouts for the two queue round trips, and the bounded confirmation
 #: schedule: one confirmation at once, then a short sequence, then nothing.
 #: The parent never installs a permanent timer and never confirms past the
 #: end of the sequence.
 QUEUE_REQUEST_TIMEOUT_MS = 30000
 QUEUE_CONFIRM_TIMEOUT_MS = 10000
+QUEUE_TRACK_TIMEOUT_MS = 10000
 QUEUE_CONFIRM_DELAYS_MS = (0, 100, 300, 700, 1500, 3000)
 
 #: How long the bridge keeps an unconfirmed admission as the owner of the
@@ -213,6 +239,7 @@ QUEUE_CODE_BUSY = "QUEUE_BUSY"
 QUEUE_CODE_REFUSED = "QUEUE_REQUEST_REFUSED"
 QUEUE_CODE_UNCONFIRMED = "ADMISSION_UNCONFIRMED"
 QUEUE_CODE_VALIDATION_REFUSED = "WANGP_VALIDATION_REFUSED"
+QUEUE_CODE_MODEL_CHANGED = "MODEL_CHANGED"
 
 #: The shape of a failure code, so a bridge cannot hand the menu a sentence.
 CODE_RE = re.compile(r"\A[A-Z][A-Z0-9_]{2,59}\Z")
@@ -441,6 +468,13 @@ def normalize_queue_request(raw: typing.Any) -> typing.Tuple[dict, str]:
         return {}, QUEUE_CODE_REQUEST_INVALID
     request["start"] = start
 
+    # Protocol 5: the model the request was composed for, when it insists.
+    wanted = raw.get("model_type")
+    if wanted is not None and wanted != "":
+        if not isinstance(wanted, str) or not MODEL_TYPE_RE.match(wanted):
+            return {}, QUEUE_CODE_REQUEST_INVALID
+        request["model_type"] = wanted
+
     return request, ""
 
 
@@ -472,6 +506,7 @@ def queue_payload_hash(request: typing.Mapping[str, typing.Any]) -> str:
         "end": request.get("end_handoff_id") or "",
         "references": list(request.get("reference_handoff_ids") or []),
         "start_mode": request.get("start") or START_AUTO,
+        "model_type": request.get("model_type") or "",
     }
     return hashlib.sha256(canonical_json(canonical).encode("utf-8")).hexdigest()
 
@@ -544,6 +579,13 @@ def _depth(value: typing.Any) -> typing.Optional[int]:
     return int(value) if value >= 0 else None
 
 
+def model_block(raw: typing.Any) -> dict:
+    """The model a bridge answer names: four short strings, never more.
+    ``architecture`` (protocol 5) is the base model a finetune stands on."""
+    raw = raw if isinstance(raw, dict) else {}
+    return {key: str(raw.get(key) or "")[:120] for key in ("type", "label", "family", "architecture")}
+
+
 def normalize_queue_result(raw: typing.Any) -> dict:
     """The immediate answer to a queue request, as the parent will use it.
 
@@ -555,7 +597,7 @@ def normalize_queue_result(raw: typing.Any) -> dict:
     admission = raw.get("admission")
     ok = raw.get("ok") is True and admission in (ADMISSION_REQUESTED, ADMISSION_DUPLICATE)
     summary = queue_summary(raw.get("applied"), raw.get("inherited"), raw.get("ignored"))
-    model = raw.get("model") if isinstance(raw.get("model"), dict) else {}
+    model = raw.get("model")
     return {
         "ok": ok,
         "request_id": raw.get("request_id") if valid_request_id(raw.get("request_id")) else "",
@@ -565,11 +607,7 @@ def normalize_queue_result(raw: typing.Any) -> dict:
         "inherited": summary["inherited"],
         "ignored": summary["ignored"],
         "code": "" if ok else _code_or(raw.get("code"), QUEUE_CODE_REFUSED),
-        "model": {
-            "type": str(model.get("type") or "")[:120],
-            "label": str(model.get("label") or "")[:120],
-            "family": str(model.get("family") or "")[:120],
-        },
+        "model": model_block(model),
         # Protocol 4: which trigger was written, what the request asked about
         # starting, and whether WanGP was generating when the bridge decided.
         "route": raw.get("route") if raw.get("route") in ROUTES else "",
@@ -593,6 +631,30 @@ def normalize_queue_status(raw: typing.Any) -> dict:
         # Protocol 4: best-effort, and absent rather than estimated.
         "queue_depth": _depth(raw.get("queue_depth")) if ok else None,
         "route": raw.get("route") if raw.get("route") in ROUTES else "",
+    }
+
+
+def normalize_queue_track(raw: typing.Any) -> dict:
+    """One track answer (protocol 5): per request, where its task is now.
+
+    An entry the bridge could not describe is "unknown", never "finished",
+    and an answer that is not one is empty with a code: a page must not
+    show "finished" from a message it cannot read.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    ok = raw.get("ok") is True and isinstance(raw.get("tracked"), dict)
+    tracked: dict = {}
+    if ok:
+        for key, value in raw["tracked"].items():
+            if not valid_request_id(key) or not isinstance(value, dict):
+                continue
+            state = value.get("state") if value.get("state") in TRACK_STATES else TRACK_UNKNOWN
+            tracked[key] = {"state": state, "position": _depth(value.get("position")), "queue_depth": _depth(value.get("queue_depth"))}
+    return {
+        "ok": ok,
+        "tracked": tracked,
+        "code": "" if ok else _code_or(raw.get("code"), QUEUE_CODE_REQUEST_INVALID),
+        "generation_running": _tristate(raw.get("generation_running")),
     }
 
 

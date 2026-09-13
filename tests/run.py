@@ -44,6 +44,7 @@ SUITES = [
     "test_interop",
     "test_clipboard_store",
     "test_clipboard_outbox",
+    "test_clipboard_enhance",
     "test_clipboard_ui",
     "test_queue_e2e",
 ]

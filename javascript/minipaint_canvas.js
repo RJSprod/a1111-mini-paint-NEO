@@ -51,6 +51,9 @@ window.minipaintCanvas = (function () {
     const LOAD_TIMEOUT = 8000;
     const MIN_HEIGHT = 240;
     const BOTTOM_ROOM = 8;
+    // More fits than this in one second on a still layout means something the
+    // canvas sizes is also being observed. Development aid; warns once.
+    const FIT_WARN_PER_SECOND = 10;
     const LAYER_MOVE_ID = "minipaint_canvas_layer_move";
     const LAYER_TRANSFORM_ID = "minipaint_canvas_layer_transform";
     const STATUS_ID = "minipaint_canvas_status";
@@ -108,6 +111,11 @@ window.minipaintCanvas = (function () {
         baseHeight: 0,
         fit: true,
         fitTimer: null,
+        // A fit is running, or its own resize notifications are still
+        // arriving; and whether a real one arrived while that was true.
+        fitApplying: false,
+        fitAgain: false,
+        fitWindow: null,
         alpha: 75,
         contrast: false,
         loaded: 0,
@@ -166,6 +174,78 @@ window.minipaintCanvas = (function () {
 
     function tick(ms) {
         return new Promise(function (resolve) { setTimeout(resolve, ms || 0); });
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Pointer work, once per frame                                          */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * A pointer reports far more often than the screen redraws - 120 Hz to
+     * 1000 Hz against 60 Hz to 120 Hz - and every report used to repaint the
+     * canvas or move an overlay on the spot. Most of that work was discarded
+     * before anyone saw it, and all of it forced layout.
+     *
+     * So a handler records what it wants done and this runs it, at most once
+     * per frame per path. A second report in the same frame replaces the
+     * first: only the newest pointer position is worth drawing. Paths are
+     * kept apart so two that are live at once cannot swallow each other's
+     * work.
+     *
+     * A pointer that ends flushes its own path first: a drag ending between
+     * two frames has to land where the finger left, not where it was last
+     * drawn. A pointer that is cancelled drops its path instead, so nothing
+     * queued is applied to state that is about to be torn down.
+     */
+    const PENDING = new Map();
+    let pointerFrame = 0;
+
+    function runPending() {
+        pointerFrame = 0;
+        const due = Array.from(PENDING.values());
+        PENDING.clear();
+        for (const run of due) {
+            try { run(); } catch (e) { /* one path must not stop the others */ }
+        }
+    }
+
+    function onPointerFrame(path, run) {
+        PENDING.set(path, run);
+        if (!pointerFrame) { pointerFrame = requestAnimationFrame(runPending); }
+    }
+
+    function idlePointer() {
+        if (!PENDING.size && pointerFrame) { cancelAnimationFrame(pointerFrame); pointerFrame = 0; }
+    }
+
+    /** Apply this path's pending work now, for a pointer that has ended. */
+    function flushPointer(path) {
+        const run = PENDING.get(path);
+        if (run) {
+            PENDING.delete(path);
+            try { run(); } catch (e) { /* as above */ }
+        }
+        idlePointer();
+    }
+
+    /** Discard this path's pending work, for a pointer that was cancelled. */
+    function dropPointer(path) {
+        PENDING.delete(path);
+        idlePointer();
+    }
+
+    /** End a pointer the way its type asks for. */
+    function settlePointer(path, event) {
+        if (event && event.type === "pointercancel") { dropPointer(path); } else { flushPointer(path); }
+    }
+
+    /**
+     * What the deferred work needs from a pointer event. The event itself is
+     * not kept: its coordinates are read a frame later, and an event that has
+     * finished dispatching is not a safe thing to hold on to.
+     */
+    function pointerAt(event) {
+        return { clientX: event.clientX, clientY: event.clientY, pointerId: event.pointerId };
     }
 
     function clamp(n, lo, hi) {
@@ -289,6 +369,11 @@ window.minipaintCanvas = (function () {
         const rect = column.getBoundingClientRect();
         if (!rect.width) { return; }  // the tab is hidden; measured again when it shows
 
+        // Read phase. Every measurement this function needs is taken before
+        // anything is written. The rail's cap used to be measured inside
+        // sizeRail *after* the canvas had already been given its new height,
+        // which made each fit a read-write-read sandwich and forced a
+        // synchronous layout in the middle of it.
         const scroller = scrollParent(element);
         const viewport = scroller ? scroller.clientHeight : window.innerHeight;
         const scrolled = scroller ? scroller.scrollTop : (window.scrollY || 0);
@@ -308,17 +393,33 @@ window.minipaintCanvas = (function () {
         const padding = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
 
         const panels = rail();
+        const panelRect = panels ? panels.getBoundingClientRect() : null;
+        // A hidden rail measures zero; a rail whose top has passed the
+        // column's bottom has wrapped underneath it. Same test railBelow()
+        // makes, from the measurements already taken.
+        const shown = !!(panelRect && panelRect.width && panelRect.height);
+        const beside = shown && panelRect.top < rect.bottom - 1;
         let below = 0;
-        if (panels && railBelow(panels, column)) {
+        if (shown && !beside) {
             const rootStyle = getComputedStyle(element);
-            below = panels.getBoundingClientRect().height + (parseFloat(rootStyle.rowGap || rootStyle.gap) || 0);
+            below = panelRect.height + (parseFloat(rootStyle.rowGap || rootStyle.gap) || 0);
         }
+        const containerNow = Math.round(S.container.getBoundingClientRect().height);
 
+        // Decide. Integers throughout: a target compared against a fractional
+        // measurement can never reach equality, and two values that cannot
+        // settle are a resize loop that runs for as long as the tab is open.
         let height = viewport - top - others - below - gap * Math.max(0, rows - 1) - padding - BOTTOM_ROOM;
         height = Math.round(clamp(height, MIN_HEIGHT, Math.max(MIN_HEIGHT, viewport - BOTTOM_ROOM)));
-        const current = parseFloat(S.container.style.height) || 0;
-        if (Math.abs(height - current) > 1) { S.container.style.height = height + "px"; }
-        sizeRail(panels, column);
+        const current = Math.round(parseFloat(S.container.style.height) || 0);
+        // What the column will measure once the canvas has taken its new
+        // height: worked out from the read phase rather than measured, because
+        // measuring it would mean reading layout straight back after writing.
+        const columnAfter = Math.round(rect.height + (height - containerNow));
+
+        // Write phase.
+        if (height !== current) { S.container.style.height = height + "px"; }
+        sizeRail(panels, beside ? columnAfter : 0);
     }
 
     /** True when the rail has wrapped under the work column (a narrow window). */
@@ -329,16 +430,18 @@ window.minipaintCanvas = (function () {
     }
 
     /** Beside the canvas the rail is never taller than the work column; it
-     * scrolls inside that. Under the canvas it is as tall as the stylesheet
-     * lets it be. */
-    function sizeRail(panels, column) {
+     * scrolls inside that. Under the canvas, or with no cap to apply, it is as
+     * tall as the stylesheet lets it be.
+     *
+     * Write-only, and deliberately so: the height comes from fitHeight's read
+     * phase, so capping the rail costs no layout of its own. */
+    function sizeRail(panels, height) {
         if (!panels) { return; }
-        if (railBelow(panels, column)) {
+        if (!(height > 0)) {
             if (panels.style.maxHeight) { panels.style.maxHeight = ""; }
             return;
         }
-        const height = Math.round(column.getBoundingClientRect().height);
-        if (height > 0 && Math.abs(height - (parseFloat(panels.style.maxHeight) || 0)) > 1) {
+        if (height !== Math.round(parseFloat(panels.style.maxHeight) || 0)) {
             panels.style.maxHeight = height + "px";
         }
     }
@@ -360,9 +463,62 @@ window.minipaintCanvas = (function () {
         setRail(railHidden());
     }
 
+    /**
+     * Ask for a fit on the next frame.
+     *
+     * The canvas sits inside the very boxes the observers below watch, so the
+     * height fitHeight() writes is itself a resize that those observers
+     * report. Left alone that is a loop: write, observe, write again. It is
+     * damped by the integer comparisons in fitHeight(), not prevented by
+     * them.
+     *
+     * So a fit runs inside a window that swallows the notifications its own
+     * writes cause, and a request that arrives during that window is
+     * remembered rather than dropped - a real resize landing in the same
+     * frame as ours still gets its fit, one frame later. The second fit
+     * measures the settled layout, writes nothing, and the chain ends there.
+     */
     function scheduleFit() {
+        fitCount();
+        if (S.fitApplying) { S.fitAgain = true; return; }
         if (S.fitTimer) { return; }
-        S.fitTimer = requestAnimationFrame(function () { S.fitTimer = null; fitHeight(); });
+        S.fitTimer = requestAnimationFrame(runFit);
+    }
+
+    function runFit() {
+        S.fitTimer = null;
+        S.fitApplying = true;
+        S.fitAgain = false;
+        try {
+            fitHeight();
+        } finally {
+            // Resize notifications caused by the writes above are delivered
+            // before the next frame begins, so the window closes there.
+            requestAnimationFrame(function () {
+                S.fitApplying = false;
+                if (S.fitAgain) { S.fitAgain = false; scheduleFit(); }
+            });
+        }
+    }
+
+    /**
+     * A static layout must settle to no fits at all. It is the kind of
+     * regression a later layout change reintroduces silently and nobody
+     * notices except as a warm laptop, so it says so once.
+     */
+    function fitCount() {
+        if (!S.fitWindow) { S.fitWindow = { since: Date.now(), count: 0, said: false }; }
+        const w = S.fitWindow;
+        const now = Date.now();
+        if (now - w.since >= 1000) { w.since = now; w.count = 0; }
+        w.count += 1;
+        if (w.count > FIT_WARN_PER_SECOND && !w.said) {
+            w.said = true;
+            if (typeof console !== "undefined" && console.warn) {
+                console.warn("MiniPaint Canvas: the canvas refitted " + w.count + " times in a second. "
+                    + "Something it sizes is being observed as well; see scheduleFit().");
+            }
+        }
     }
 
     /** The other rows of the column change height when a line wraps; the
@@ -681,15 +837,29 @@ window.minipaintCanvas = (function () {
             if (S.frameDrag && event.pointerId === S.frameDrag.id) {
                 event.preventDefault();
                 event.stopPropagation();
-                moveFrame(event.clientX - S.frameDrag.x, event.clientY - S.frameDrag.y);
+                const at = pointerAt(event);
+                onPointerFrame("frame", function () {
+                    if (!S.frameDrag || S.frameDrag.id !== at.pointerId) { return; }
+                    moveFrame(at.clientX - S.frameDrag.x, at.clientY - S.frameDrag.y);
+                });
                 return;
             }
             if (!S.handleDrag || event.pointerId !== S.handleDrag.id) { return; }
             event.preventDefault();
             event.stopPropagation();
-            resizeFrame(S.handleDrag.corner, containerPoint(event));
+            const at = pointerAt(event);
+            onPointerFrame("frame", function () {
+                if (!S.handleDrag || S.handleDrag.id !== at.pointerId) { return; }
+                resizeFrame(S.handleDrag.corner, containerPoint(at));
+            });
         });
         function endHandle(event) {
+            // Before the drag state is cleared, so the frame lands on the
+            // last position reported rather than the last one drawn.
+            if ((S.frameDrag && S.frameDrag.id === event.pointerId) ||
+                (S.handleDrag && S.handleDrag.id === event.pointerId)) {
+                settlePointer("frame", event);
+            }
             if (S.frameDrag && event.pointerId === S.frameDrag.id) { S.frameDrag = null; }
             if (!S.handleDrag || event.pointerId !== S.handleDrag.id) { return; }
             S.handleDrag = null;
@@ -700,9 +870,17 @@ window.minipaintCanvas = (function () {
         // The canvas refits its image when its box changes size (the tab
         // opening, focus mode, a rotated tablet); the frame follows, a
         // frame later so the refit has happened.
+        //
+        // The frame and nothing else. This box is inside the element whose
+        // height fitHeight() sets, so refitting from here made the write its
+        // own trigger - the one loop in this file where the sizing path
+        // observed something it writes. What the frame is drawn over is
+        // absolutely positioned, so following it cannot resize this box
+        // back. The height itself belongs to watchLayout()'s observers,
+        // which watch boxes the canvas does not size.
         if (typeof ResizeObserver === "function") {
             new ResizeObserver(function () {
-                requestAnimationFrame(function () { fitHeight(); refreshFrame("refit"); });
+                requestAnimationFrame(function () { refreshFrame("refit"); });
             }).observe(S.imageContainer);
         }
     }
@@ -1801,13 +1979,19 @@ window.minipaintCanvas = (function () {
             if (!t || !t.drag || t.drag.id !== event.pointerId) { return; }
             event.preventDefault();
             event.stopPropagation();
-            const point = imagePoint(event);
-            if (t.drag.kind === "move") { moveTransform(t, point); } else { scaleTransform(t, point); }
-            positionOverlay();
+            const at = pointerAt(event);
+            onPointerFrame("transform", function () {
+                const live = S.transform;
+                if (!live || !live.drag || live.drag.id !== at.pointerId) { return; }
+                const point = imagePoint(at);
+                if (live.drag.kind === "move") { moveTransform(live, point); } else { scaleTransform(live, point); }
+                positionOverlay();
+            });
         });
         function end(event) {
             const t = S.transform;
             if (!t || !t.drag || t.drag.id !== event.pointerId) { return; }
+            settlePointer("transform", event);
             t.drag = null;
             try { box.releasePointerCapture(event.pointerId); } catch (e) { /* optional */ }
         }
@@ -2044,32 +2228,50 @@ window.minipaintCanvas = (function () {
 
         c.addEventListener("pointermove", function (event) {
             if (!S.pointers.has(event.pointerId)) { return; }
+            // The pointer map is what pinch measures from, so it is kept
+            // current as the reports arrive. Only the drawing waits.
             S.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
             if (S.selecting && S.selecting.id === event.pointerId) {
                 event.preventDefault();
-                drawSelection(containerPoint(event));
+                const at = pointerAt(event);
+                onPointerFrame("canvas", function () {
+                    if (!S.selecting || S.selecting.id !== at.pointerId) { return; }
+                    drawSelection(containerPoint(at));
+                });
                 return;
             }
             if (S.pinch) {
                 event.preventDefault();
-                updatePinch();
+                onPointerFrame("canvas", function () { if (S.pinch) { updatePinch(); } });
                 return;
             }
             if (S.layerDrag && !S.layerDrag.done && S.layerDrag.id === event.pointerId) {
                 event.preventDefault();
-                moveLayerDrag(event);
+                const at = pointerAt(event);
+                onPointerFrame("canvas", function () {
+                    if (!S.layerDrag || S.layerDrag.done || S.layerDrag.id !== at.pointerId) { return; }
+                    moveLayerDrag(at);
+                });
                 return;
             }
             if (S.pan && S.pan.id === event.pointerId) {
                 event.preventDefault();
-                S.instance.imgX = S.pan.imgX + (event.clientX - S.pan.x);
-                S.instance.imgY = S.pan.imgY + (event.clientY - S.pan.y);
-                S.instance.drawImage();
-                updateReadout();
+                const at = pointerAt(event);
+                onPointerFrame("canvas", function () {
+                    if (!S.pan || S.pan.id !== at.pointerId) { return; }
+                    S.instance.imgX = S.pan.imgX + (at.clientX - S.pan.x);
+                    S.instance.imgY = S.pan.imgY + (at.clientY - S.pan.y);
+                    S.instance.drawImage();
+                    updateReadout();
+                });
             }
         }, true);
 
         function end(event) {
+            // The selection, the layer and the view all land on the last
+            // position reported, which is why this comes before the state
+            // those pending steps read is taken apart.
+            settlePointer("canvas", event);
             S.pointers.delete(event.pointerId);
             if (S.selecting && S.selecting.id === event.pointerId) { finishSelection(); }
             if (S.pinch && S.pointers.size < 2) { S.pinch = null; }

@@ -57,6 +57,11 @@ def _on_app_started(_demo, app) -> None:
 
     proxy.install(app)
 
+    # B7: the browser's own diagnostic lines, on a plain route rather than
+    # through a Gradio event. Registered after the proxy so it shares the same
+    # sign-in boundary that is now in place.
+    ui.install_client_log(app)
+
     # Open the WanGP log at boot rather than at the first line of child output,
     # for the reason send_log.announce_send_log gives: an empty folder is a
     # useless answer to "where is the log?", and a missing file after a restart

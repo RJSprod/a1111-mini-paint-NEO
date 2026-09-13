@@ -954,6 +954,68 @@ def client_log_checks(r: Results) -> None:
         wangp_ui._client_log_seen.clear()
 
 
+def client_log_route_checks(r: Results) -> None:
+    """The browser's lines arrive on a plain route, behind the sign-in gate.
+
+    They used to arrive through a hidden Textbox's ``change`` event, which
+    meant a Gradio round trip for every batch of diagnostics - taken during
+    the send the diagnostics were describing. The payload and its sequence
+    rules are unchanged; what is checked here is that the route exists, that
+    it is gated, and that the numbering still holds across it.
+    """
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from minipaint_neo.wangp import ui as wangp_ui
+
+    app = FastAPI()
+    wangp_ui.install_client_log(app)
+    wangp_ui.install_client_log(app)
+    r.check("the route is installed once",
+            sum(1 for route in app.router.routes
+                if getattr(route, "path", "") == wangp_ui.CLIENT_LOG_ROUTE) == 1)
+
+    from minipaint_neo.wangp import proxy as wangp_proxy
+
+    recorded = []
+    original = wangp_ui.journal.note
+    allowed = {"ok": True}
+    wangp_ui.journal.note = lambda source, message: recorded.append((source, message))
+    # The gate itself, not a stand-in module: ``_client_log_allowed`` resolves
+    # ``proxy`` through the package, so a replacement in sys.modules would
+    # never be the one it reaches.
+    kept_gate = wangp_proxy.signed_in
+    wangp_proxy.signed_in = lambda _request: allowed["ok"]
+    try:
+        wangp_ui._client_log_seen.clear()
+        client = TestClient(app)
+
+        answer = client.post(wangp_ui.CLIENT_LOG_ROUTE,
+                             json={"p": "routed", "n": 2, "lines": [{"s": 1, "line": "one"}, {"s": 2, "line": "two"}]})
+        r.check("a POST is taken and journaled in order",
+                answer.status_code == 200 and [m for _, m in recorded] == ["one", "two"], str(recorded))
+
+        client.post(wangp_ui.CLIENT_LOG_ROUTE,
+                    json={"p": "routed", "n": 3, "lines": [{"s": 2, "line": "two"}, {"s": 3, "line": "three"}]})
+        r.check("a batch that repeats a line the server already has adds only the new one",
+                [m for _, m in recorded] == ["one", "two", "three"], str(recorded))
+
+        r.check("a body that is not JSON is refused without a traceback",
+                client.post(wangp_ui.CLIENT_LOG_ROUTE, content=b"not json").status_code == 200
+                and [m for _, m in recorded] == ["one", "two", "three"], str(recorded))
+
+        allowed["ok"] = False
+        blocked = client.post(wangp_ui.CLIENT_LOG_ROUTE, json={"p": "routed", "n": 9, "lines": [{"s": 9, "line": "nope"}]})
+        r.check("a caller who is not signed in is refused and journals nothing",
+                blocked.status_code == 401 and [m for _, m in recorded] == ["one", "two", "three"], str(recorded))
+
+        r.check("every line is still filed under the browser", all(source == "browser" for source, _ in recorded))
+    finally:
+        wangp_ui.journal.note = original
+        wangp_ui._client_log_seen.clear()
+        wangp_proxy.signed_in = kept_gate
+
+
 def session_record_checks(r: Results) -> None:
     """The Forge side is told a session exists, and the report can say so.
 
@@ -1387,6 +1449,7 @@ def run() -> Results:
         tab_checks(r)
         handoff_release_checks(r)
         client_log_checks(r)
+        client_log_route_checks(r)
         session_record_checks(r)
         wizard_checks(r)
         channel_reuse_checks(r)

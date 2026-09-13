@@ -589,7 +589,13 @@ window.minipaintWanGP = (function () {
         } catch (e) { /* a record is never worth an exception */ }
     }
 
-    const CLIENT_LOG_ELEM_ID = "wangp_client_log";
+    // Where the lines go. A plain route, not a Gradio event: a diagnostic
+    // line should not ride on the machinery it exists to describe, and the
+    // batch below used to be a full round trip through it.
+    const CLIENT_LOG_ROUTE = "/minipaint-wangp/client-log";
+    // Long enough that a burst of lines is one request, short enough that a
+    // person watching the log does not wait for them.
+    const LOG_FLUSH_MS = 1500;
     const AUTH_PROBE_PATH = "/wan2gp/__minipaint_auth_probe";
     let logSeq = 0;
 
@@ -612,10 +618,31 @@ window.minipaintWanGP = (function () {
     const logLines = [];
     let logFlush = 0;
 
+    /**
+     * Hand the batch to the server.
+     *
+     * The window and the sequence numbers are kept exactly as they were: the
+     * server still journals each number once per page, so a batch that is
+     * lost on the way is carried by the next one and a batch that arrives
+     * twice is dropped there. That property is why this can be a fire-and-
+     * forget POST with nothing watching the answer.
+     *
+     * ``keepalive`` so the last batch still leaves a page that is being
+     * closed, which is the batch most likely to say why.
+     */
     function flushLog() {
         logFlush = 0;
+        if (!logLines.length) { return; }
+        const body = JSON.stringify({ p: LOG_PAGE, n: logSeq, lines: logLines.slice(-LOG_WINDOW) });
         try {
-            writeBox(CLIENT_LOG_ELEM_ID, JSON.stringify({ p: LOG_PAGE, n: logSeq, lines: logLines.slice(-LOG_WINDOW) }));
+            fetch(CLIENT_LOG_ROUTE, {
+                method: "POST",
+                credentials: "same-origin",
+                cache: "no-store",
+                keepalive: true,
+                headers: { "Content-Type": "application/json" },
+                body: body
+            }).catch(function () { /* the next batch carries these lines */ });
         } catch (e) { /* a log line is never worth an exception */ }
     }
 
@@ -627,9 +654,18 @@ window.minipaintWanGP = (function () {
             }
             logLines.push({ s: logSeq, line: String(message).slice(0, 300) });
             if (logLines.length > LOG_WINDOW) { logLines.splice(0, logLines.length - LOG_WINDOW); }
-            if (!logFlush) { logFlush = setTimeout(flushLog, 0); }
+            if (!logFlush) { logFlush = setTimeout(flushLog, LOG_FLUSH_MS); }
         } catch (e) { /* a log line is never worth an exception */ }
     }
+
+    // Whatever is still waiting when the page goes away. pagehide is the one
+    // that fires on a mobile tab being put aside, which plain unload does not.
+    try {
+        window.addEventListener("pagehide", function () { if (logFlush) { clearTimeout(logFlush); } flushLog(); });
+        document.addEventListener("visibilitychange", function () {
+            if (document.visibilityState === "hidden") { if (logFlush) { clearTimeout(logFlush); } flushLog(); }
+        });
+    } catch (e) { /* an old browser keeps the timer and nothing else changes */ }
 
     function report(roundTrip, detail) {
         try {

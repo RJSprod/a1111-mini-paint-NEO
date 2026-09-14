@@ -657,6 +657,19 @@ async def forward(request: typing.Any) -> typing.Any:
     if "text/event-stream" in content_type.lower():
         _relax_read_timeout(upstream_request)
 
+    # The Deepy namespace, once, with what the child said about it. Its
+    # transport shows a permanent banner when its first request fails and
+    # says nothing about why, so the one place that can tell the two apart -
+    # "the route is not there" from "the route is there and answered 404" -
+    # is here.
+    decoded = raw_path.decode("latin-1", "ignore")
+    if decoded.startswith(DEEPY_PREFIX):
+        _log_once(
+            f"deepy-{response.status_code}",
+            f"{DEEPY_PREFIX} is being served; the first request answered {response.status_code}"
+            + ("." if response.status_code < 400 else " - the Deepy panel will show its own banner until this is 200."),
+        )
+
     proxied = StreamingResponse(
         _stream_response(response),
         status_code=response.status_code,

@@ -356,6 +356,56 @@ def card_checks(r: Results, clock) -> None:
         _restore(monkey)
 
 
+def stuck_card_checks(r: Results, clock) -> None:
+    """A WanGP that never stops reporting itself busy does not stop the queue.
+
+    THIS HAPPENED, AND IT STOPPED EVERYTHING.
+
+    ``generation_running`` is the service's live worker handle - the best
+    signal available, and still not a promise. After a generation was
+    cancelled mid-run it stayed true, and every job pressed afterwards sat in
+    ``waiting_for_card`` for ever: composed, ready, one step from submission,
+    and never taken.
+
+    The gate is a courtesy. Submitting while WanGP is generating appends to
+    its queue and pre-empts nothing - it is what pressing Add to Queue in the
+    WanGP tab does during a run - so a wait on it may be polite and must not
+    be load-bearing.
+    """
+    _setup(clock)
+    runtime = FakeRuntime()
+    runtime.state = FakeRuntime.READY
+    runtime.instance_id = "child-one"
+    child = FakeChild(clock)
+    child.busy = True  # and never stops being busy
+    monkey = []
+    _install(monkey, runtime)
+    try:
+        control.use_transport(child)
+        job = outbox.submit(_request(), PAGE)
+        for _ in range(6):
+            executor.step()
+        r.check("while the wait is young the job waits, and says why",
+                outbox.get(job["job_id"])["state"] == outbox.WAITING_FOR_CARD
+                and "busy" in outbox.get(job["job_id"])["stage"].lower(), outbox.get(job["job_id"])["stage"])
+        r.check("and nothing has been submitted on top of what the user can see", not child.submissions)
+
+        # Past the bound, with the card still claiming to be busy, the job
+        # goes into WanGP's queue anyway rather than waiting for ever.
+        clock.tick(executor.CARD_WAIT_MAX_SECONDS + 1.0)
+        for _ in range(4):
+            executor.step()
+        settled = outbox.get(job["job_id"])
+        r.check("past the bound it queues behind WanGP instead of stopping for good",
+                len(child.submissions) == 1 and settled["state"] in outbox.SERVER_SUBMITTED,
+                f"{settled['state']} {len(child.submissions)}")
+        r.check("and the card never stopped reporting itself busy, which is the whole point",
+                child.busy is True)
+    finally:
+        control.use_transport(None)
+        _restore(monkey)
+
+
 def input_lifetime_checks(r: Results, clock) -> None:
     """A waiting job's picture outlives every sweep there is."""
     _setup(clock)
@@ -1092,6 +1142,7 @@ def run() -> Results:
     admission_checks(r, clock)
     walkaway_checks(r, clock)
     card_checks(r, clock)
+    stuck_card_checks(r, clock)
     input_lifetime_checks(r, clock)
     write_discipline_checks(r, clock)
     recovery_checks(r, clock)

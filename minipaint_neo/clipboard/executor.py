@@ -98,6 +98,17 @@ RETRYABLE = frozenset({errors.ENHANCE_QUEUE_FULL, errors.QUEUE_BUSY})
 BACKOFF_START = 5.0
 BACKOFF_MAX = 120.0
 MAX_RETRYABLE_ATTEMPTS = 40
+#: How long a job is willing to wait for WanGP to stop being busy before it
+#: queues behind it anyway.
+#:
+#: Long enough that the ordinary case - the job before this one still
+#: finishing - still serialises neatly and the wait is reported as a wait.
+#: Bounded because the signal it waits on is somebody else's live worker
+#: handle, and a cancelled generation was observed leaving it set: without a
+#: bound the queue stopped for good. Submitting anyway is safe by the same
+#: reasoning the whole path rests on - the task is appended to WanGP's own
+#: queue, drained by the one worker, and pre-empts nothing.
+CARD_WAIT_MAX_SECONDS = 60.0
 
 _lock = threading.RLock()
 _wake = threading.Event()
@@ -541,6 +552,22 @@ def _stage_waiting_for_card(job: dict) -> bool:
     the gate WanGP already has - this stage only avoids adding to a queue
     whose worker is busy with something the user can see, so that the wait is
     reported rather than hidden inside a generation time.
+
+    AND BECAUSE IT IS A COURTESY, IT IS BOUNDED.
+
+    That paragraph says the quiet part: this gate is about *reporting*, not
+    about safety. Submitting while WanGP is generating appends to its queue
+    and pre-empts nothing - it is what pressing Add to Queue in the WanGP tab
+    does during a run. So waiting here can be polite, and must not be
+    load-bearing.
+
+    It was. ``generation_running`` is the service's live worker handle, which
+    is the best signal available and still not a promise: after a generation
+    was cancelled mid-run it stayed true, and every job pressed afterwards
+    waited on it for ever - composed, ready, and stuck one step from being
+    submitted. A queue that stops for good because a flag somewhere else did
+    not clear is worse than one that occasionally queues a job behind a run
+    the user can see.
     """
     from ..wangp import control
 
@@ -549,12 +576,18 @@ def _stage_waiting_for_card(job: dict) -> bool:
     except IntegrationError as error:
         return bool(outbox.fail(job["job_id"], error.code, error.detail))
     if answer["generation_running"]:
-        depth = answer["queue_depth"]
-        stage = "Waiting: WanGP is busy with its own work." + (f" {depth} in its queue." if depth else "")
-        if stage != job.get("stage"):
-            outbox.transition(job["job_id"], outbox.WAITING_FOR_CARD, expect_revision=job["revision"], stage=stage)
-        _pause(CARD_POLL_SECONDS)
-        return True
+        waited = max(0.0, _now() - float(job.get("updated") or 0.0))
+        if waited < CARD_WAIT_MAX_SECONDS:
+            depth = answer["queue_depth"]
+            stage = "Waiting: WanGP is busy with its own work." + (f" {depth} in its queue." if depth else "")
+            if stage != job.get("stage"):
+                outbox.transition(job["job_id"], outbox.WAITING_FOR_CARD, expect_revision=job["revision"], stage=stage)
+            _pause(CARD_POLL_SECONDS)
+            return True
+        _journal(
+            f"job {job['job_id'][:8]}: WanGP has reported itself busy for {int(waited)}s; "
+            "queuing behind it rather than waiting longer - a task appended to its queue pre-empts nothing"
+        )
     return bool(outbox.transition(job["job_id"], outbox.SUBMITTING_WANGP, expect_revision=job["revision"]))
 
 
@@ -819,7 +852,7 @@ def snapshot() -> dict:
 
 __all__ = [
     "BACKOFF_MAX", "BACKOFF_START", "CARD_POLL_SECONDS", "IDLE_SECONDS", "MAX_RETRYABLE_ATTEMPTS",
-    "POLL_SECONDS", "RETRYABLE", "SUBMIT_TIMEOUT", "WANGP_READY_TIMEOUT",
+    "CARD_WAIT_MAX_SECONDS", "POLL_SECONDS", "RETRYABLE", "SUBMIT_TIMEOUT", "WANGP_READY_TIMEOUT",
     "ensure_running", "reconcile", "recover", "reset_for_tests", "running", "snapshot", "step",
     "stop", "use_clock", "use_sleep", "use_thread", "wake",
 ]

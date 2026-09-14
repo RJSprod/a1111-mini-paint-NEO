@@ -941,6 +941,13 @@ window.minipaintInterop = (function () {
         stream.jobs.set(payload.job_id, payload);
         emit("server", null, { kind: "job", detail: payload });
         if (SERVER_TERMINAL.indexOf(String(payload.state)) !== -1) { settleFromServer(payload.job_id); }
+        // A job the server has given back. It was admitted as unattended, the
+        // server found it could not run it - this WanGP has no queue worker to
+        // submit into - and handed it to whoever is here. Nothing else starts
+        // the pump for it: the page decided to watch rather than pump when the
+        // submission was acknowledged, and without this it watches forever a
+        // job that is waiting for it.
+        else if (!serverRun(payload)) { setTimeout(pump, 0); }
     }
 
     /** A caller waiting on a server-executed job gets its answer from the

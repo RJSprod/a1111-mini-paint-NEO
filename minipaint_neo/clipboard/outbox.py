@@ -274,11 +274,33 @@ def unattended_enabled() -> bool:
 
 
 def chosen_executor() -> str:
-    """Which executor a new job gets, seam first and setting second."""
+    """Which executor a new job gets: seam, then what is possible, then setting.
+
+    The setting says what the user wants; it cannot say what this WanGP can
+    do. A build with no queue worker to submit into can never run an
+    unattended job, and admitting one as unattended anyway means a job that
+    goes to the server, waits, and is handed back to the page a moment later
+    - which works, but shows the user a job changing its mind. When the child
+    has already said it cannot, the press goes straight to the path that can.
+
+    Only a *known* refusal counts. Not knowing - no hello yet, WanGP stopped,
+    an older bridge that does not answer the question - still admits as
+    unattended, because cold start is exactly the case the unattended path
+    exists for and refusing it on silence would give that case away.
+    """
     forced = _seams.get("executor")
     if forced in EXECUTORS:
         return forced
-    return EXECUTOR_SERVER if unattended_enabled() else EXECUTOR_BROWSER
+    if not unattended_enabled():
+        return EXECUTOR_BROWSER
+    try:
+        from ..wangp import control
+
+        if control.last_hello() is not None and not control.executable_ever():
+            return EXECUTOR_BROWSER
+    except Exception:
+        pass
+    return EXECUTOR_SERVER
 
 
 def wangp_running() -> bool:

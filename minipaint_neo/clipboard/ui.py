@@ -917,6 +917,12 @@ class ClipboardTab:
         self._journal(f"queue clicked: job {job['job_id'][:8]} (overrides {', '.join(history.draft_overrides(draft)) or 'none'}"
                       f"{'; enhancing as ' + record['variant'] if record else ''}); {pending} waiting")
         notes = [f"{pending - 1} ahead of it" if pending > 1 else "it goes next"]
+        if job.get("executor") == outbox.EXECUTOR_BROWSER and outbox.unattended_enabled():
+            # The setting says unattended and the job is not. That is this
+            # WanGP saying it has no queue worker to submit into, and the
+            # difference matters to whoever is about to walk away: the job
+            # runs, but only while this page is open.
+            notes.append("this WanGP cannot run queued jobs on its own, so this one runs from this page - keep the tab open")
         if record:
             dropped = [FIELD_LABELS.get(item, item).lower() for item in record.get("dropped") or []]
             if dropped:

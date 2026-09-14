@@ -15,6 +15,9 @@ The split:
                 containment, import, refresh, rename, delete, thumbnails.
 ``history``     the composer's draft and the recipes confirmed queued.
 ``outbox``      the queue: every press a job the server owns, in press order.
+``executor``    the coordinator that advances those jobs with no browser
+                open - cold WanGP, the enhancer, the card, the generation.
+``job_inputs``  the pictures a queued job owns, pinned until it is done.
 ``enhance``     the prompt enhancer: ModelSwitchRefiner's MiniMax H3 writer,
                 the switch, the four system prompts and their overrides.
 ``routes``      a picture by its id, and bytes in.
@@ -62,9 +65,43 @@ def available() -> bool:
 
 
 def _on_app_started(_demo: typing.Any, app: typing.Any) -> None:
+    from .. import scrub
     from . import routes
 
     routes.install(app)
+
+    # RECOVERY BEFORE ANY SWEEP, AND THAT ORDER IS THE PROTECTION.
+    #
+    # A queued job owns its pictures through a pin the sweeper reads. The
+    # sweepers run at boot, and so does this; a sweep that ran first would
+    # already have deleted the thing the pin was about to protect. Both
+    # sweeps this competes with live in ``wangp`` and ``interop``, and both
+    # are registered before this one - so the registration order below is
+    # not incidental either.
+    try:
+        from . import executor
+
+        counted = executor.recover()
+        if counted.get("resumed") or counted.get("unknown") or counted.get("adopted"):
+            scrub.console(
+                f"queue recovery: {counted.get('resumed', 0)} job(s) resumed, "
+                f"{counted.get('adopted', 0)} result(s) adopted, "
+                f"{counted.get('unknown', 0)} left for a person to decide.",
+                _LOG_PREFIX,
+            )
+    except Exception as error:  # pragma: no cover - never a reason to lose the tab
+        scrub.console(f"the queue could not be recovered ({type(error).__name__}); nothing was resumed.", _LOG_PREFIX)
+
+    # Inputs whose jobs are long finished, after the recovery above has
+    # re-registered every pin that is still live.
+    try:
+        from . import job_inputs
+
+        dropped = job_inputs.sweep()
+        if dropped:
+            scrub.console(f"released {dropped} finished job input(s).", _LOG_PREFIX)
+    except Exception:
+        pass
 
 
 def register(script_callbacks: typing.Any) -> None:

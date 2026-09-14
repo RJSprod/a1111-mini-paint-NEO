@@ -46,6 +46,7 @@ import importlib
 import pathlib
 import sys
 import threading
+import time
 import typing
 
 from ..wangp import errors, protocol
@@ -103,6 +104,17 @@ LLM_TERMINAL = (LLM_DONE, LLM_FAILED, LLM_CANCELLED)
 
 #: An override longer than this is a mistake, not instructions.
 MAX_SYSTEM_PROMPT_CHARS = 20000
+
+#: How long one wait on the event feed lasts before the executor looks at
+#: the job again. Not a timeout on the enhancement - which may legitimately
+#: take minutes while a language model loads - but the granularity at which
+#: a cancel or a shutdown is noticed.
+FEED_WAIT_SECONDS = 5.0
+#: Feed events that carry written text. Never read: a re-subscribe from the
+#: start of a feed replays the whole enhanced prompt, and prompt text does
+#: not enter a log, an event or a diagnostic.
+FEED_CONTENT_EVENTS = frozenset({"chunk", "caption", "token", "delta", "prompt"})
+FEED_TERMINAL_EVENTS = frozenset({"done", "failed", "cancelled"})
 
 #: The API's refusal codes, as this extension reports them. A code it does
 #: not know is a refusal it cannot retry its way past, by the API's own rule.
@@ -532,10 +544,14 @@ def submit(prompt: str, planned: typing.Mapping[str, typing.Any]) -> dict:
     """
     module = api()
     if module is None:
-        raise IntegrationError(errors.ENHANCE_UNAVAILABLE, "mc_llm_api is not importable")
-    ready = capabilities()
-    if not ready["available"]:
-        raise IntegrationError(errors.ENHANCE_UNAVAILABLE, ready["reason"])
+        raise IntegrationError(errors.ENHANCE_EXTENSION_MISSING, "mc_llm_api is not importable")
+    # The four-way preflight rather than one "unavailable": a user who
+    # switched LLM Studio off is told that, and is not told the model is
+    # missing; a Forge with no model configured is told that, and is not
+    # told to turn something on that already is.
+    code, why = preflight(planned)
+    if code:
+        raise IntegrationError(code, why)
     variant = planned["variant"] if planned.get("variant") in VARIANTS else FL2VA
     keywords: typing.Dict[str, typing.Any] = {"variant": variant, "origin": ORIGIN, "remember": True}
     pictures = []
@@ -613,6 +629,190 @@ def status(llm_id: typing.Any) -> typing.Optional[dict]:
     return found
 
 
+# ------------------------------------------------------------- the feed --
+
+
+def preflight(planned: typing.Mapping[str, typing.Any]) -> typing.Tuple[str, str]:
+    """Is this enhancement startable? Returns ``(code, sentence)``; "" is yes.
+
+    A READ, NOT A START. The shipped API brings a cold runtime to readiness
+    as part of running a submitted job - submit enqueues, the worker obtains
+    a client, and a client is "a server for a ready server, started or
+    restarted as placement requires" - so there is nothing here to pre-warm
+    and no readiness seam to add. What this answers is whether the request is
+    startable at all, and it distinguishes four things that a single
+    "unavailable" used to flatten into one:
+
+        extension missing   the other extension is not installed here
+        switched off        it is, and LLM Studio is off in this WebUI's
+                            settings. A *policy* state and a user's own
+                            choice; a job fails saying so and nothing here
+                            turns it back on
+        not configured      no enhancement model is set up. Not guessed at,
+                            and nothing is downloaded silently
+        no vision           the configured model has no vision projector and
+                            this plan carries a picture
+
+    A cold runtime is none of those and is not a MiniPaint state at all: it
+    is stage text on a job that is already running.
+    """
+    ready = capabilities()
+    if not ready["found"]:
+        return errors.ENHANCE_EXTENSION_MISSING, ready["reason"]
+    if ready["api_version"] > API_VERSION_SUPPORTED:
+        return errors.ENHANCE_API_TOO_NEW, ready["reason"]
+    if not ready["enabled"]:
+        return errors.ENHANCE_SWITCHED_OFF, errors.message(errors.ENHANCE_SWITCHED_OFF)
+    if not ready["configured"]:
+        return errors.ENHANCE_NOT_CONFIGURED, errors.message(errors.ENHANCE_NOT_CONFIGURED)
+    if not ready["vision"] and (planned.get("slots") or {}):
+        # The owning extension's own check can also answer "unreadable"
+        # rather than false and defer the judgement to the run, so a refusal
+        # arriving at submit time is accepted as well as one arriving here.
+        return errors.ENHANCE_NO_VISION, errors.message(errors.ENHANCE_NO_VISION)
+    return "", ""
+
+
+def follow(llm_id: typing.Any, timeout: float = FEED_WAIT_SECONDS) -> dict:
+    """Wait on the API's own event feed for this request to move. Never raises.
+
+    The feed rather than a poll, because a poll's mean latency is half its
+    interval and this one used to be a two-second full-document read of the
+    whole outbox. Its events carry the runtime's own stage text - including
+    the cold-start wait - which is how a returning user finds out why an
+    enhancement has been running for two minutes.
+
+    Two things it deliberately does not do:
+
+    *   **It does not read content-bearing events.** A re-subscribe from the
+        start of a feed replays the whole written prompt, and prompt text
+        does not go into a log, an event or a diagnostic. Only the state and
+        the stage are taken.
+
+    *   **It does not treat an expired feed as a failure.** The subscription
+        has a TTL. A feed that ends or raises means "subscribe again and ask
+        status what actually happened", and nothing terminal is concluded
+        from the absence of a feed.
+
+    Returns what it saw: ``{"state", "stage", "position", "terminal"}``, or
+    an empty dict when this API has no feed and the caller should fall back
+    to ``status``.
+    """
+    module = api()
+    if module is None or not isinstance(llm_id, str) or not llm_id:
+        return {}
+    subscribe = getattr(module, "subscribe", None)
+    if not callable(subscribe):
+        return {}
+    seen: typing.Dict[str, typing.Any] = {"state": "", "stage": "", "position": 0, "terminal": False}
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    try:
+        feed = subscribe(llm_id)
+    except Exception:
+        return {}
+    try:
+        for event in _feed_events(feed, deadline):
+            kind = str(event.get("event") or event.get("type") or "")
+            if kind in FEED_CONTENT_EVENTS:
+                continue  # prompt text. Not read, not logged, not published.
+            if kind == "status":
+                seen["stage"] = str(event.get("stage") or "")[:160]
+            elif kind == "queued":
+                seen["state"] = LLM_QUEUED
+            elif kind == "position":
+                position = event.get("position")
+                seen["position"] = int(position) if isinstance(position, int) and not isinstance(position, bool) and position >= 0 else 0
+            elif kind == "started":
+                seen["state"] = LLM_RUNNING
+            elif kind in FEED_TERMINAL_EVENTS:
+                seen["state"] = {"done": LLM_DONE, "failed": LLM_FAILED, "cancelled": LLM_CANCELLED}.get(kind, LLM_RUNNING)
+                seen["terminal"] = True
+                break
+    except Exception:
+        # A feed that raised is a subscription that ended, not a job that
+        # failed. The caller reconciles against status().
+        return dict(seen, interrupted=True)
+    finally:
+        closer = getattr(feed, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
+    return seen
+
+
+def _feed_events(feed: typing.Any, deadline: float) -> typing.Iterator[dict]:
+    """Events off whatever shape of feed this API version publishes.
+
+    Three shapes are read - an iterator, a ``next(timeout)`` and a
+    ``poll()`` - because the contract names a Feed without fixing how it is
+    consumed, and a build whose feed cannot be read at all falls back to
+    ``status`` rather than failing a job.
+    """
+    reader = getattr(feed, "next", None) or getattr(feed, "get", None)
+    if callable(reader):
+        while time.monotonic() < deadline:
+            try:
+                event = reader(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
+            except TypeError:
+                event = reader()
+            if event is None:
+                continue
+            if isinstance(event, dict):
+                yield event
+        return
+    try:
+        iterator = iter(feed)
+    except TypeError:
+        return
+    for event in iterator:
+        if isinstance(event, dict):
+            yield event
+        if time.monotonic() >= deadline:
+            return
+
+
+def release_runtime() -> bool:
+    """Ask the enhancer to give its VRAM back. Returns whether it did.
+
+    Called at the boundary where an enhanced job has finished writing its
+    prompt and is about to want a video model on the same card. The two are
+    arbitrated by nothing in common, and the asymmetry decides whether this
+    matters: WanGP-then-enhancer is protected, because the enhancer sees a
+    reduced card and degrades down its own ladder; enhancer-then-WanGP is
+    not, because WanGP sizes itself against whatever the card reports free
+    and nothing will hand it the language model's bytes.
+
+    It is asked for through the owning extension's *public* surface and
+    nowhere else. That extension has a release mode internally - stopping
+    the server returns the memory while leaving the weights in the page
+    cache, so the next enhancement restarts from RAM rather than disk - but
+    reaching into another project's internals to trigger it is exactly what
+    this integration does not do. A build that does not export one answers
+    False here, and the ordering rule is then all there is: the enhancement
+    is terminal before WanGP starts, which is guaranteed anyway.
+    """
+    module = api()
+    if module is None:
+        return False
+    for name in ("release", "release_vram", "unload"):
+        seam = getattr(module, name, None)
+        if not callable(seam):
+            continue
+        try:
+            answer = seam()
+        except Exception as error:
+            _journal(f"the enhancer refused to release its memory ({type(error).__name__})")
+            return False
+        released = answer.get("released") if isinstance(answer, dict) else answer
+        if released is not False:
+            _journal("the enhancer released its VRAM before the WanGP stage")
+            return True
+        return False
+    return False
+
+
 def cancel(llm_id: typing.Any, reason: str = CANCEL_REASON) -> dict:
     """Stop one request, queued or running. Never raises."""
     module = api()
@@ -682,6 +882,7 @@ __all__ = [
     "LLM_QUEUED", "LLM_RUNNING", "LLM_STATES", "LLM_TERMINAL", "MAX_SYSTEM_PROMPT_CHARS", "MODES", "MODE_IMAGE", "MODE_LABELS", "MODE_TEXT",
     "ORIGIN", "REF2VA", "REJECTIONS", "SLOTS", "SLOTS_FOR", "SLOT_FIRST", "SLOT_LABELS", "SLOT_LAST", "SLOT_REFERENCE", "VARIANTS",
     "VARIANT_LABELS", "api", "availability", "cancel", "cancel_all", "capabilities", "clear_override", "default_prompt", "describe",
-    "effective_prompt", "enabled", "model_block", "override", "overrides", "plan", "reset_for_tests", "set_enabled", "set_override",
-    "status", "submit", "system_prompts", "use_api", "variant_for_model",
+    "effective_prompt", "enabled", "follow", "model_block", "override", "overrides", "plan", "preflight", "release_runtime",
+    "reset_for_tests", "set_enabled", "set_override", "status", "submit", "system_prompts", "use_api", "variant_for_model",
+    "FEED_CONTENT_EVENTS", "FEED_TERMINAL_EVENTS", "FEED_WAIT_SECONDS",
 ]

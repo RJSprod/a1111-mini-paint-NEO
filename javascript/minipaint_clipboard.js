@@ -65,9 +65,28 @@ window.minipaintClipboard = (function () {
     const ROLE_IDS = { first: "minipaint_clipboard_to_first", last: "minipaint_clipboard_to_last", ref: "minipaint_clipboard_to_ref" };
     const SLOT_UPLOAD_PREFIX = "minipaint_clipboard_slot_upload_";
     const SLOT_FIELDS = { first: "start", last: "end", ref: "references" };
-    const QUEUE_WATCH_MS = 150;
+    // The press acknowledgement. A Gradio chained callback writes the
+    // server's answer into a hidden box, and on some installed Gradio
+    // versions the change event that would tell us never fires - so there is
+    // a fallback that reads the value.
+    //
+    // It used to read it six times a second from the moment of the press.
+    // That is a busy loop on the main thread for a value that arrives once,
+    // and it ran whether or not anything was in flight. Now: an observer on
+    // the box first, because a mutation is the event the poll was standing
+    // in for, and the value read only starts after the delay below - long
+    // enough that a working install never reaches it - and only while a
+    // press is actually outstanding.
+    const QUEUE_ACK_DELAY_MS = 2000;
+    const QUEUE_WATCH_MS = 500;
     const QUEUE_WATCH_LIMIT_MS = 15000;
     const CAPABILITY_THROTTLE_MS = 2500;
+    // Job states the server runs. A page that sees one of these watches the
+    // event stream instead of pumping: the job continues whether or not this
+    // document exists.
+    const SERVER_STATES = ["admitted", "waiting_turn", "enhanced", "ensuring_wangp", "composing",
+        "waiting_for_card", "submitting_wangp", "wangp_waiting", "wangp_generating",
+        "completed", "execution_unknown"];
     const OUTBOX_REFRESH_THROTTLE_MS = 300;
 
     const S = {
@@ -81,6 +100,8 @@ window.minipaintClipboard = (function () {
         armedAt: 0,
         watch: 0,
         lastInstruction: "",
+        ackDelay: 0,
+        ackObserver: null,
         capabilitiesAt: 0,
         capabilities: null,
         lastModel: "",
@@ -478,21 +499,48 @@ window.minipaintClipboard = (function () {
         return api && api.wangp && typeof api.wangp.enqueue === "function" ? api : null;
     }
 
-    /** The click was made: watch the instruction box briefly in case the
-     * chained change never runs on this page. */
+    /** The click was made: notice the server's answer, however it arrives.
+     *
+     * Three ways, in the order they cost anything: the chained callback's own
+     * change event (free, and what happens on a healthy install), a mutation
+     * observer on the box (free, and what catches a Gradio that writes the
+     * value without dispatching), and only then a value read on a timer that
+     * starts two seconds late and stops the moment the answer lands or the
+     * press gives up. A page sitting idle runs none of them. */
     function armQueue() {
         S.armedAt = Date.now();
-        if (S.watch) { clearInterval(S.watch); S.watch = 0; }
+        disarmQueue();
         const started = Date.now();
-        S.watch = setInterval(function () {
+        const box = textarea(BOXES.queueInstruction);
+
+        function settle(from) {
             const value = boxValue(BOXES.queueInstruction);
-            if (value && value !== S.lastInstruction) {
-                clearInterval(S.watch); S.watch = 0;
-                queue(value, true);
-                return;
-            }
-            if (Date.now() - started > QUEUE_WATCH_LIMIT_MS) { clearInterval(S.watch); S.watch = 0; }
-        }, QUEUE_WATCH_MS);
+            if (!value || value === S.lastInstruction) { return false; }
+            disarmQueue();
+            queue(value, from);
+            return true;
+        }
+
+        if (box && typeof MutationObserver === "function") {
+            S.ackObserver = new MutationObserver(function () { settle("observer"); });
+            try {
+                S.ackObserver.observe(box, { attributes: true, attributeFilter: ["value"], childList: true, characterData: true, subtree: true });
+            } catch (e) { S.ackObserver = null; }
+        }
+        S.ackDelay = setTimeout(function () {
+            S.ackDelay = 0;
+            if (settle("value")) { return; }
+            S.watch = setInterval(function () {
+                if (settle("value")) { return; }
+                if (Date.now() - started > QUEUE_WATCH_LIMIT_MS) { disarmQueue(); }
+            }, QUEUE_WATCH_MS);
+        }, QUEUE_ACK_DELAY_MS);
+    }
+
+    function disarmQueue() {
+        if (S.watch) { clearInterval(S.watch); S.watch = 0; }
+        if (S.ackDelay) { clearTimeout(S.ackDelay); S.ackDelay = 0; }
+        if (S.ackObserver) { try { S.ackObserver.disconnect(); } catch (e) { /* already gone */ } S.ackObserver = null; }
     }
 
     /** This page's identity for the outbox, the public API's own. */
@@ -525,12 +573,29 @@ window.minipaintClipboard = (function () {
         if (S.queued[parsed.nonce]) { return; }
         S.queued[parsed.nonce] = true;
         S.lastInstruction = text;
-        if (S.watch) { clearInterval(S.watch); S.watch = 0; }
+        disarmQueue();
         if (!parsed.job_id) { return; }
-        note("queue: job " + String(parsed.job_id).slice(0, 8) + " appended by the server" + (fromWatcher ? " (read from the box)" : "") + "; pumping");
+        const how = fromWatcher ? " (" + fromWatcher + ")" : "";
+        // Admitted, durably, and the press is over. A job the server runs
+        // needs nothing from this page from here: it is watched, not pumped,
+        // and the page may be closed the moment this line is written.
+        if (parsed.executor === "server" || (parsed.state && SERVER_STATES.indexOf(String(parsed.state)) !== -1)) {
+            note("queue: job " + String(parsed.job_id).slice(0, 8) + " admitted by the server" + how + "; watching");
+            watch();
+            return;
+        }
+        note("queue: job " + String(parsed.job_id).slice(0, 8) + " appended by the server" + how + "; pumping");
         if (!pump()) {
             toast("WanGP is not available in this page.", true);
         }
+    }
+
+    /** Ask the public API to keep this page's view fresh. Idempotent. */
+    function watch() {
+        const api = interop();
+        if (!api || !api.wangp || typeof api.wangp.watch !== "function") { return false; }
+        try { api.wangp.watch(); } catch (e) { return false; }
+        return true;
     }
 
     function outboxSentence(job) {

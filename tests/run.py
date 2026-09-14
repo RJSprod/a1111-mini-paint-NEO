@@ -21,6 +21,9 @@ setup_path()
 
 SUITES = [
     "test_imaging",
+    # The picture the canvas draws, as bytes behind an opaque id: the store,
+    # the fixed grammar, the route in front of it and the lifetime rules.
+    "test_canvas_display",
     "test_frontends",
     "test_workflow",
     # What every writer in the extension is allowed to put on a screen or in a

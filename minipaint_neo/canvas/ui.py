@@ -37,7 +37,7 @@ import gradio as gr
 
 from .. import settings
 from ..send_log import announce_send_log, log_quietly
-from . import document, host, imaging, outpaint, surface
+from . import display, document, host, imaging, outpaint, surface
 
 MODES = ("crop", "mask", "expand", "layers")
 MODE_LABELS = {"crop": "Crop", "mask": "Mask", "expand": "Expand", "layers": "Layers"}
@@ -554,12 +554,30 @@ class TouchCanvas:
         # The canvas gets a copy to show (JPEG, or WebP when see-through), not
         # the pixels: those stay here, and a PNG of them is what made every
         # step slow.
-        background = imaging.display_data_url(doc.image) if doc.image is not None else None
+        background = self._display(doc.image) if doc.image is not None else None
         return (
             background,
             self.pending_mask(doc),
             *self._info(doc, mode, message, notes, sides=sides, reset_aspect=reset_aspect, wait=doc.has_mask),
         )
+
+    def _display(self, image) -> str:
+        """The copy the canvas draws: a link where that is proven, else bytes.
+
+        Same picture, same encoding, two wrappers. The link is a third
+        smaller than the base64, is decoded off the main thread, is cached by
+        the browser and is not retained in the Gradio session - and whether
+        the host's canvas takes one is a question about somebody else's
+        JavaScript that only a real install can answer, which is why it is a
+        setting and why the answer here falls back rather than fails.
+        """
+        if display.enabled():
+            try:
+                display_id, _content_type = display.write_image(image)
+                return display.url_for(display_id)
+            except Exception as error:
+                log_quietly(f"a display object could not be written ({type(error).__name__}); the copy is embedded instead")
+        return imaging.display_data_url(image)
 
     def pending_mask(self, doc: document.Document) -> str:
         """The mask layer for the picture this reply is sending, as one value.

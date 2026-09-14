@@ -396,22 +396,41 @@ DISPLAY_QUALITY = 90
 PREVIEW_SIDE = 1024
 
 
-def display_data_url(image: Image.Image, quality: int = DISPLAY_QUALITY) -> str:
-    """A copy for the browser to show, not to keep.
+def display_bytes(image: Image.Image, quality: int = DISPLAY_QUALITY) -> typing.Tuple[bytes, str]:
+    """A copy for the browser to show, not to keep: ``(bytes, content type)``.
 
     The document keeps the pixels; the canvas only draws them, so what it is
     given can be lossy: JPEG when the picture is opaque, WebP (lossy, the
     alpha kept) when it is see-through. Either is a fraction of the PNG's
     size and of its encoding time, and that time is what every step waits
     on. Sends and saves still go out as PNG (``to_data_url``).
+
+    The bytes rather than the data URL, because there are now two things
+    that want them: the textbox that carries base64, and the display object
+    that carries the bytes themselves. Encoding once and choosing the
+    wrapper afterwards is what keeps the two from drifting.
     """
     rgba = to_rgba(image)
     if has_alpha_content(rgba):
         try:
-            return _data_url(rgba, "WEBP", "image/webp", quality=quality, method=0)
+            return _encoded(rgba, "WEBP", quality=quality, method=0), "image/webp"
         except Exception:  # a Pillow built without WebP
-            return to_data_url(rgba)
-    return _data_url(rgba.convert("RGB"), "JPEG", "image/jpeg", quality=quality)
+            return to_png_bytes(rgba), "image/png"
+    return _encoded(rgba.convert("RGB"), "JPEG", quality=quality), "image/jpeg"
+
+
+def _encoded(image: Image.Image, fmt: str, **options) -> bytes:
+    buffer = io.BytesIO()
+    image.save(buffer, format=fmt, **options)
+    return buffer.getvalue()
+
+
+def display_data_url(image: Image.Image, quality: int = DISPLAY_QUALITY) -> str:
+    """``display_bytes`` as the data URL a hidden image textbox carries."""
+    import base64
+
+    data, content_type = display_bytes(image, quality)
+    return f"data:{content_type};base64," + base64.b64encode(data).decode("ascii")
 
 
 def preview_data_url(image: Image.Image, max_side: int = PREVIEW_SIDE) -> str:

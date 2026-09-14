@@ -95,6 +95,19 @@ def canvas_image_class():
                         return imaging.from_data_url(payload)
                     except Exception:
                         return None
+                # A display object's URL, if the page was given one. Resolved
+                # through the store's own id grammar and never as a path -
+                # this is a value arriving from a browser, and the fact that
+                # this extension is what put it there a moment ago is not a
+                # reason to treat the string as trusted.
+                #
+                # Not gated behind the setting, deliberately: a page loaded
+                # while URLs were on can still send one after they are turned
+                # off, and a read-back that could not understand it would
+                # lose the picture rather than the optimisation.
+                resolved = _display_object(payload)
+                if resolved is not None:
+                    return resolved
                 return super().preprocess(payload)
 
             def get_block_name(self):
@@ -102,6 +115,27 @@ def canvas_image_class():
 
         _image_class = CanvasImage
     return _image_class
+
+
+def _display_object(payload: typing.Any) -> typing.Any:
+    """The picture behind one of our display URLs, or None for anything else.
+
+    "Anything else" includes a URL shaped like ours that does not resolve:
+    the store answers with its own refusals and none of them is a reason to
+    go looking somewhere else.
+    """
+    if not isinstance(payload, str) or not payload:
+        return None
+    from . import display
+
+    found = display.id_in_url(payload)
+    if not found:
+        return None
+    try:
+        path, _content_type = display.resolve(found)
+        return imaging.open_file(str(path))
+    except Exception:
+        return None
 
 
 def host_mask_style() -> typing.Dict[str, typing.Any]:

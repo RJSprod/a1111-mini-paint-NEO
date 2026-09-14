@@ -34,6 +34,12 @@ SEND_FILL = "minipaint_send_transparency"
 #: button runs the job, so closing it stops the queue - and it is kept as a
 #: way back, not as a default.
 UNATTENDED_QUEUE = "minipaint_unattended_queue"
+#: Whether the canvas is handed a same-origin URL for its display copy
+#: rather than a base64 data URL. Off until somebody has proved on a real
+#: install that Forge's own ForgeCanvas takes one: that is a question about
+#: somebody else's JavaScript and reading it is not an answer. Everything on
+#: this side is built and tested; this is the switch.
+DISPLAY_OBJECTS = "minipaint_display_objects"
 
 SNAP_CHOICES = ["Off", "8", "16", "32", "64"]
 KEEP_TRANSPARENT = "Keep transparent"
@@ -47,6 +53,7 @@ DEFAULTS: dict[str, typing.Any] = {
     EXPAND_SNAP: "8",
     SEND_FILL: KEEP_TRANSPARENT,
     UNATTENDED_QUEUE: True,
+    DISPLAY_OBJECTS: False,
 }
 
 # The setting is the way to switch editors - but it lives in a UI, and the one
@@ -109,6 +116,16 @@ def unattended_queue() -> bool:
     checkbox moved.
     """
     return bool(get(UNATTENDED_QUEUE, True))
+
+
+def display_objects() -> bool:
+    """Whether a display copy travels as a URL rather than as base64.
+
+    See DISPLAY_OBJECTS. The server side understands both whatever this
+    says, because a page loaded while it was on can still hand a URL back
+    after it is turned off.
+    """
+    return bool(get(DISPLAY_OBJECTS, False))
 
 
 def _category(name: str):
@@ -224,6 +241,21 @@ def on_ui_settings() -> None:
             "generating in the WanGP tab, and tracks the generation to a result with no browser open. "
             "Off means the page that pressed the button runs the job, so closing it stops the queue"
         ),
+    )
+
+    _add(
+        DISPLAY_OBJECTS,
+        OptionInfo(
+            DEFAULTS[DISPLAY_OBJECTS],
+            "Canvas: send display copies as links instead of embedding them",
+            section=SECTION,
+            category_id=category,
+        ).info(
+            "the picture the canvas draws is fetched from this extension rather than embedded in the "
+            "page update - about a third smaller, decoded off the main thread and cached by the browser. "
+            "Off by default until it has been proven against the Forge you are running: if the canvas "
+            "goes blank after an edit, turn it back off and say so"
+        ).needs_reload_ui(),
     )
 
     _add(

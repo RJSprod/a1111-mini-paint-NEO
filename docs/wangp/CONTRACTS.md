@@ -343,6 +343,32 @@ remembers admitted ids for a day, past its admission records), read from
 block's `architecture` (`get_base_model_type`), `capabilities.track`, and a prompt
 ceiling of 12000 characters. The full contract is in `docs/clipboard/CONTRACTS.md`.
 
+## `control.py` — Forge's half of the control plane (protocol 6)
+
+```python
+LOOPBACK = "127.0.0.1"; CONNECT_TIMEOUT = 5.0; CALL_TIMEOUT = 30.0; COMPOSE_TIMEOUT = 60.0
+def use_transport(fn | None); def reset_for_tests()          # seam: answer control calls without a socket
+def hello(timeout=CALL_TIMEOUT) -> dict                      # what the child is, and whether it can take a job
+def compose(model_type="", session_hash="", timeout=COMPOSE_TIMEOUT) -> dict
+def submit(execution_id, settings, prompt=None, media=None, model_type="", priority=False) -> record
+def status(execution_ids) -> {id: record}; def cancel(execution_id) -> record; def forget(execution_ids) -> int
+def available() -> (bool, code)                              # never raises; for a status line and the executor's gate
+```
+
+The destination comes off the runtime object and nowhere else — the host and scheme are
+literals here, the port is the one this process kept before it launched that child, and
+nothing a caller passes reaches the URL. Both the port and the secret come off that object
+*together*: a port from one run and a secret from another would produce a 401 that looked
+like a configuration problem rather than the restart it is.
+
+`urllib`, not the proxy's httpx client: this is not an async path and must never borrow a
+client that belongs to another event loop. Every caller is the executor thread; no route
+calls any of this.
+
+READY is **not** an admission fact. It says a process is alive and answered an HTTP request.
+Whether the bridge is on the page, the generation service resolved and a settings base can be
+read are the child's to answer, and `hello` is where it does.
+
 ## Tests
 
 `tests/test_wangp_*.py`, in the existing style: a `run()` returning

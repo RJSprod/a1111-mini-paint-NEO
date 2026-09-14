@@ -124,6 +124,35 @@ through `minipaintWanGP.note` under `browser` (`run <id8>: prompt, start;
 start auto (N image(s) prepared); for model <type>`, `pump: stopped - CODE`,
 `cancel all: N cancelled, M in flight`).
 
+## The event spine — `/minipaint-interop/events` and `/sync`
+
+```
+GET /minipaint-interop/events?page=<id>[&cursor=<epoch>:<revision>]    text/event-stream
+GET /minipaint-interop/sync?page=<id>                                  the authoritative snapshot
+```
+
+Events are **advisory**; the snapshot is authoritative. An event says something about job X
+changed and carries enough to update a screen; it is never a second copy of the truth. A
+page with any reason to doubt what it holds asks for a snapshot instead, and that is an
+ordinary thing to do rather than a failure.
+
+A cursor is `<epoch>:<revision>`. The epoch is minted once per Forge process, so a cursor
+from another run is not stale — it is meaningless, and says so. A cursor this process never
+issued, or one older than the bounded replay ring, produces one `reset` frame and one sync.
+A `hello` and a `heartbeat` carry no id, because resuming from a liveness frame would hand a
+page a cursor that names nothing.
+
+The heartbeat is an application-visible frame (≈15 s) because an SSE comment cannot be read
+from JavaScript, and a silent connection and a dead one look identical to a remote browser.
+A stream is rotated after 30 minutes, because a proxy that quietly drops a long-lived
+connection makes a page look connected while it is not.
+
+**Losing the spine makes a screen stale and can never stop a job.** That is what lets the
+browser's own timers be removed rather than merely lengthened.
+
+Nothing private crosses: no prompt, no enhanced prompt, no caption, no path — `generated_files`
+included, of which only the count goes.
+
 ## `minipaint_neo/interop.py` — the API's server half
 
 ```python
@@ -168,8 +197,19 @@ WanGP is not running, which is what stops a page's pump.
 ## `minipaint_neo/clipboard/outbox.py` — the queue outbox
 
 ```python
-OUTBOX_NAME = "clipboard-outbox.json"           # {"schema": 2, "jobs": [...]}, atomic, quarantined when broken
-ENHANCING, PENDING, SENDING, QUEUED, STARTED, FAILED, UNCONFIRMED, CANCELLED; TERMINAL; POSITIVE = (QUEUED, STARTED); WAITING = (ENHANCING, PENDING)
+OUTBOX_NAME = "clipboard-outbox.json"           # {"schema": 3, "jobs": [...]}, atomic, quarantined when broken
+# The browser-executed vocabulary, kept so an already-loaded page keeps working and an old
+# document is read as what it was. A schema-2 document needs no migration: every state it
+# can carry is still a state.
+ENHANCING, PENDING, SENDING, QUEUED, STARTED, FAILED, UNCONFIRMED, CANCELLED; LEGACY_TERMINAL; WAITING = (ENHANCING, PENDING)
+# The server-executed vocabulary: what a job is waiting for, rather than where it is in a
+# handshake. A job carries `executor` = "browser" | "server"; a document with neither is a
+# legacy one, because that is all there used to be.
+ADMITTED, WAITING_TURN, ENHANCED, ENSURING_WANGP, COMPOSING, WAITING_FOR_CARD,
+SUBMITTING_WANGP, GENERATION_WAITING, GENERATION_RUNNING, COMPLETED, EXECUTION_UNKNOWN
+SERVER_ACTIVE; SERVER_TERMINAL; SERVER_SUBMITTED   # SERVER_SUBMITTED is what a restart may never simply resume
+TERMINAL = LEGACY_TERMINAL + (COMPLETED, EXECUTION_UNKNOWN); POSITIVE = (QUEUED, STARTED, COMPLETED)
+STAGE_TEXT                                          # what each stage says to a screen when the job has nothing more specific
 WANGP_ACCEPTED, WANGP_WAITING, WANGP_GENERATING, WANGP_FINISHED, WANGP_UNKNOWN; WANGP_STATES      # a queued job's place inside WanGP
 ORIGIN_CLIPBOARD = "clipboard"; ORIGIN_API = "api"
 LEASE_SECONDS = 90.0; PAGE_ACTIVE_SECONDS = 15.0; WAIT_BUSY_MS = 400; WAIT_TURN_MS = 250; WAIT_ENHANCE_MS = 1000; WATCH_SECONDS = 2.0
@@ -192,7 +232,29 @@ def on_wangp_restart() -> int                                      # sending -> 
 def jobs() -> [Job]; def get(job_id); def counts(); def pending_count(page=None)   # pending_count counts WAITING
 def unrecorded(origin="clipboard") -> [Job]; def mark_recorded(job_ids)   # the tab's history bookkeeping, once
 def sanitize_result(raw) -> dict; def sanitize_track(raw) -> dict; def summary_of(request) -> dict; def public(job) -> Job
+
+# -- the server executor's half -------------------------------------------------------
+def use_executor(name | None); def chosen_executor() -> str; def unattended_enabled() -> bool
+def transition(job_id, state, expect_revision=None, stage=None, **fields) -> Job | None
+    # re-reads under the lock and writes only this job's fields; a write prepared against a
+    # revision somebody has moved past does nothing and answers None. The only persistence
+    # primitive is a whole-document overwrite, so a stage that held a job across four
+    # minutes of model loading would otherwise undo a cancel that landed during it.
+def next_executable(now=None) -> Job | None        # one at a time; anything in flight before anything new
+def server_jobs(states=None) -> [Job]; def submitted_jobs() -> [Job]
+def record_snapshot(job_id, snapshot, expect_revision=None) -> Job | None   # frozen once; never re-composed
+def record_execution(job_id, record, state=None, expect_revision=None, child_instance="") -> Job | None
+def fail(job_id, code, message="", expect_revision=None, state=FAILED) -> Job | None
+def attempt(job_id) -> Job | None
+def recover(child_instance="") -> counts           # before any sweeper; pre-submission resumes, post-submission reconciles
+def input_ids(job) -> [str]                        # every durable input a job holds
 ```
+
+A server-executed job's document also carries: `executor`, `revision` (bumped by every
+durable transition), `stage`, `execution_id`, `execution` (the child's last word),
+`snapshot` (the frozen settings — `public()` sends the source and the count, never the
+settings themselves), `inputs` (slot → pinned id), `generated_files` (kept for a later
+viewer; `public()` sends only `generated_count`), `child_instance` and `inputs_released`.
 
 The rules: one lease at a time across every page; the line keeps press
 order - its head is the oldest job not yet handed out, and while that head
@@ -214,6 +276,40 @@ one in `enhance.prompt_original`), never a lease token in what a page is
 shown, never a path. `runtime.emergency_restart` calls `on_wangp_restart`
 through a contained import.
 
+## `minipaint_neo/clipboard/executor.py` — the coordinator
+
+```python
+IDLE_SECONDS = 30.0; POLL_SECONDS = 2.0; CARD_POLL_SECONDS = 3.0; WANGP_READY_TIMEOUT = 20 min
+RETRYABLE = {ENHANCE_QUEUE_FULL, QUEUE_BUSY}; BACKOFF_START = 5.0; BACKOFF_MAX = 120.0; MAX_RETRYABLE_ATTEMPTS = 40
+def use_clock(fn); def use_sleep(fn); def use_thread(bool); def reset_for_tests()     # seams
+def wake(); def ensure_running(); def stop(); def running() -> bool
+def step() -> bool                     # one stage. Everything the coordinator does; the thread only decides when
+def recover() -> counts; def reconcile() -> {"adopted", "reattached", "unknown"}
+def snapshot() -> dict                 # for a status line
+```
+
+One coordinator per Forge process, woken by a condition rather than a timer, sleeping for
+nothing when the queue is empty. Four rules it does not bend: the outbox lock is never held
+for anything slow; no route ever runs a stage; one job advances at a time (two would be two
+things competing for one card); and nothing is ever resubmitted across an ambiguity.
+
+## `minipaint_neo/clipboard/job_inputs.py` — the pictures a job owns
+
+```python
+PINS_NAME = "clipboard-job-inputs.json"; RETENTION_SECONDS = 24h; ORPHAN_SECONDS = 1h
+def adopt(handle, job_id="", slot="") -> record     # resolved once, copied under the handoff root, pinned
+def assign(input_ids, job_id) -> int                # the pins exist before the job document does
+def release(input_ids, now=None) -> int             # starts the retention clock; does not delete
+def resolve(input_id) -> Path                       # JOB_INPUT_MISSING rather than a generic refusal
+def pinned_ids(include_released=False) -> {str}     # what handoff.sweep will not touch
+def sweep(now=None) -> int; def counts() -> dict; def for_job(job_id) -> [record]; def describe(id)
+```
+
+A pin is written **before** the job document and released **after** the job is terminal. An
+input pinned for a job that was never stored is an orphan the sweeper takes in an hour; an
+input released for a job still waiting is the failure this file exists to prevent, and the
+asymmetry is deliberate. Recovery registers pins before any sweeper runs.
+
 ## `minipaint_neo/clipboard/enhance.py` — the prompt enhancer
 
 ```python
@@ -233,6 +329,21 @@ def capabilities() -> {found, available, api_version, enabled, configured, visio
 def variant_for_model(model) -> "fl2va" | "ref2va" | ""          # from type, architecture, family, label; "minimax" required; neither variant -> ""
 def model_block(raw) -> {type, label, family, architecture}
 def plan(request, model) -> {variant, slots: {slot: handle}, dropped: [field], extra_references, has_image, model}   # ENHANCE_MODEL_UNSUPPORTED, ENHANCE_PROMPT_REQUIRED
+def preflight(planned) -> (code, sentence)       # "" is yes. A READ, not a start: the shipped API brings a cold runtime
+                                                # to readiness as part of running the job, so there is nothing to pre-warm.
+                                                # Four things one "unavailable" used to flatten: ENHANCE_EXTENSION_MISSING,
+                                                # ENHANCE_SWITCHED_OFF (a user's own choice; nothing here turns it back on),
+                                                # ENHANCE_NOT_CONFIGURED, ENHANCE_NO_VISION. A cold runtime is none of them
+                                                # and is not a state at all - it is stage text on a job already running.
+def follow(llm_id, timeout=FEED_WAIT_SECONDS) -> {state, stage, position, terminal} | {}
+                                                # the API's own feed. Content-bearing events (FEED_CONTENT_EVENTS) are
+                                                # discarded unread: a re-subscribe replays the whole written prompt. A feed
+                                                # that expires or raises is a subscription that ended, not a job that failed;
+                                                # the caller reconciles against status(). {} means this build has no feed.
+def release_runtime() -> bool                   # the public VRAM seam, if the owning extension exports one. Called at the
+                                                # ENHANCED -> ENSURING_WANGP boundary: enhancer-then-WanGP is the unprotected
+                                                # direction, because WanGP sizes itself against the card with no ladder.
+                                                # Never mc_llm_runtime internals; a build without a seam answers False.
 def enabled() -> bool; def set_enabled(flag) -> bool               # read from disk on every call; off by default
 def override(variant, mode) -> str; def set_override(variant, mode, text) -> str; def clear_override(variant, mode) -> bool; def overrides() -> {variant: {mode: bool}}
 def default_prompt(variant, mode) -> str; def effective_prompt(variant, mode) -> (text, "override"|"default"|"unavailable"); def system_prompts() -> dict
@@ -246,6 +357,31 @@ def describe() -> {enabled, origin, variants, slots, overrides, capabilities}   
 
 Nothing here logs a prompt, an override, a caption or a picture; the journal
 (`enhance` column) sees ids, variants, states and seconds.
+
+## `minipaint_neo/wangp/protocol.py` — protocol 6, the control plane
+
+Added to the same SHARED block, and **versioned separately from `PROTOCOL`**: that number is
+the postMessage envelope a browser and an iframe filter on, bumping it makes every
+already-loaded page stop answering, and nothing about what those two say to each other
+changed here.
+
+```python
+CONTROL_PREFIX = "/minipaint-bridge"; CONTROL_VERSION = 1; CONTROL_SECRET_HEADER = "x-minipaint-bridge-secret"
+CONTROL_HELLO, CONTROL_COMPOSE, CONTROL_SUBMIT, CONTROL_STATUS, CONTROL_CANCEL, CONTROL_FORGET; CONTROL_OPERATIONS
+EXECUTION_ID_RE = HANDOFF_ID_RE                 # the ledger key, and what the bridge writes into WanGP's own client_id
+EXEC_ACCEPTED, EXEC_QUEUED, EXEC_RUNNING, EXEC_DONE, EXEC_FAILED, EXEC_CANCELLED, EXEC_UNKNOWN
+EXEC_STATES; EXEC_TERMINAL; EXEC_OPEN
+BASE_RECORDED, BASE_SESSION, BASE_FACTORY; BASE_SOURCES      # where a composed settings base came from
+EXEC_SLOT_START, EXEC_SLOT_END, EXEC_SLOT_REFERENCES; EXEC_SLOTS
+CONTROL_UNAUTHORISED, CONTROL_UNAVAILABLE, CONTROL_VERSION_MISMATCH, EXECUTION_ID_CONFLICT,
+EXECUTION_REFUSED, EXECUTION_UNKNOWN, SERVICE_UNAVAILABLE, COMPOSE_UNAVAILABLE, MODEL_UNAVAILABLE
+def valid_execution_id(value) -> bool
+def normalize_compose_request(raw) -> (request, code); def normalize_compose_answer(raw) -> dict
+def normalize_media_map(raw) -> (map, code)      # handoff ids only; a path never crosses in either direction
+def normalize_execution_request(raw) -> (request, code)   # the settings dict passes through: it is WanGP's shape
+def normalize_execution_record(raw) -> dict      # an unreadable record is `unknown`, never `done`
+def normalize_control_hello(raw) -> dict
+```
 
 ## `minipaint_neo/wangp/protocol.py` — protocol 5
 
@@ -296,7 +432,22 @@ minipaintWanGP.state().queue / .start / .track / .generation_running
 `onAdmitted` is called once the bridge has admitted the request - the moment
 the overlay is on the form - which is when the outbox is told `sent`.
 
-## `wan2gp_bridge/wan2gp-minipaint-bridge/` — bridge 1.4.0
+## `wan2gp_bridge/wan2gp-minipaint-bridge/` — bridge 1.5.0
+
+**The control surface (protocol 6).** `control.py` binds a loopback port Forge kept before
+it launched the child and exported, compares the per-launch credential on every request
+*before reading the body*, and answers the six operations above. No credential, no port, no
+ledger root: no listener. `ledger.py` keeps the durable execution record — written and
+flushed **before** the submission, never after, because that order is the only thing that
+makes a repeated submission safe against an API with no idempotency key.
+`compose.py` reads the settings a job runs at from Wan2GP's process-wide record of the last
+committed form per model (no session, no mutation, works when no page has ever been open).
+`execution.py` submits into WanGP's **own** queue and asks the one process-wide service to
+look, which is what makes "at most one generation, whoever started it" true in both arrival
+orders without a new lock or a new flag — see `docs/wangp/SERVER_EXECUTION.md` section 3 for
+why the obvious adapter is the thing that causes the hazard.
+`compatibility.WAN2GP_EXECUTION_REVISION` pins the Wan2GP revision this was proven against,
+beside the element ids, under the same rule.
 
 `OPERATIONS = ("hello", "receivers", "receive", "queue", "confirm", "track")`.
 The one event's outputs are the acknowledgement, the receivers, the switch

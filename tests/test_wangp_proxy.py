@@ -349,6 +349,47 @@ def sync_checks(r: Results) -> None:
     anonymous = proxy.forwarded_headers(FakeRequest({"Host": "forge.example.test", "X-Forwarded-For": "10.1.1.1"}, peer=""))
     r.check("no peer means no invented chain entry", anonymous["x-forwarded-for"] == "10.1.1.1")
 
+    # ---- http or https, decided once
+    #
+    # Three things downstream read this answer - what the child is told, the
+    # port assumed when none is named, and whether an https Origin belongs to
+    # this Forge - and a round was lost to two of them reaching different
+    # ones. So it is one function, and this is what it says.
+    for label, request, expected, stated in (
+        ("a plain page", FakeRequest({}, url=FakeUrl(scheme="http")), "http", ""),
+        ("a TLS page", FakeRequest({}, url=FakeUrl(scheme="https")), "https", ""),
+        ("its socket", FakeRequest({}, url=FakeUrl(scheme="ws")), "http", ""),
+        ("its TLS socket", FakeRequest({}, url=FakeUrl(scheme="wss")), "https", ""),
+        ("a terminator in front",
+         FakeRequest({"X-Forwarded-Proto": "https"}, url=FakeUrl(scheme="http")), "https", "https"),
+        ("a terminator in front of a socket",
+         FakeRequest({"X-Forwarded-Proto": "https"}, url=FakeUrl(scheme="ws")), "https", "https"),
+        ("a chain, nearest the browser first",
+         FakeRequest({"X-Forwarded-Proto": "https, http"}, url=FakeUrl(scheme="http")), "https", "https"),
+        ("something that is not a transport",
+         FakeRequest({"X-Forwarded-Proto": "gopher"}, url=FakeUrl(scheme="https")), "https", ""),
+    ):
+        r.check(f"{label} is {expected}", proxy.public_scheme(request) == expected, proxy.public_scheme(request))
+        r.check(f"{label}: stated by a proxy in front is {'yes' if stated else 'no'}",
+                proxy.declared_scheme(request) == stated, proxy.declared_scheme(request))
+
+    r.check("a named port is the browser's own", proxy.public_port(FakeRequest({}, url=FakeUrl(port=7860))) == 7860)
+    r.check("an unnamed one is the default for the transport this session is on",
+            proxy.public_port(FakeRequest({}, url=FakeUrl(scheme="https", port=None))) == 443
+            and proxy.public_port(FakeRequest({}, url=FakeUrl(scheme="ws", port=None))) == 80)
+
+    # The invariant that would have caught the 403: what the child is told is
+    # what this side decided, on every shape of request.
+    for label, request in (
+        ("a plain page", FakeRequest({"Host": "h"}, url=FakeUrl(scheme="http"))),
+        ("a TLS page", FakeRequest({"Host": "h"}, url=FakeUrl(scheme="https"))),
+        ("a socket", FakeRequest({"Host": "h"}, url=FakeUrl(scheme="wss"))),
+        ("one behind a terminator", FakeRequest({"Host": "h", "X-Forwarded-Proto": "https"}, url=FakeUrl(scheme="ws"))),
+    ):
+        told = proxy.forwarded_headers(request)["x-forwarded-proto"]
+        r.check(f"the child is told the same transport this side read, for {label}",
+                told == proxy.public_scheme(request), f"{told} vs {proxy.public_scheme(request)}")
+
     # ---- and the other direction
     cleaned = dict(
         proxy.response_headers(
@@ -938,9 +979,27 @@ async def websocket_origin_checks(r: Results) -> None:
     """
     r.check("an absent origin is allowed, exactly as the child's own rule has it",
             proxy.origin_allowed("", "forge.example.test:7860") is True)
-    r.check("this Forge's own origin is allowed over either transport",
+    r.check("with no reading of the transport, either is accepted rather than guessed",
             proxy.origin_allowed("http://forge.example.test:7860", "forge.example.test:7860")
             and proxy.origin_allowed("https://forge.example.test:7860", "forge.example.test:7860"))
+
+    # With a reading, it is used. The one uncertain answer in the set is an
+    # inferred http: a TLS terminator in front leaves this hop plain and says
+    # nothing, so the page can honestly report https for the same host.
+    here = "forge.example.test:7860"
+    r.check("a session read as https accepts its own origin",
+            proxy.origin_allowed(f"https://{here}", here, "https"))
+    r.check("and refuses an http one - no arrangement produces that honestly",
+            not proxy.origin_allowed(f"http://{here}", here, "https"))
+    r.check("an inferred http accepts https for the same host: a terminator in front says nothing",
+            proxy.origin_allowed(f"https://{here}", here, "http"))
+    r.check("but once a proxy in front has stated http, https is refused",
+            not proxy.origin_allowed(f"https://{here}", here, "http", True))
+    r.check("a stated http still accepts its own",
+            proxy.origin_allowed(f"http://{here}", here, "http", True))
+    r.check("and none of that lets another host through",
+            not proxy.origin_allowed("https://evil.test", here, "https")
+            and not proxy.origin_allowed("https://evil.test", here, "http"))
     r.check("another site's is not, whatever it looks like",
             not proxy.origin_allowed("http://evil.test", "forge.example.test:7860")
             and not proxy.origin_allowed("http://forge.example.test:7860.evil.test", "forge.example.test:7860")

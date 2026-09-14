@@ -277,7 +277,12 @@ def deepy_other_form(form: typing.Any = None) -> str:
     return DEEPY_BARE if str(form or DEEPY_ROOTED) == DEEPY_ROOTED else DEEPY_ROOTED
 
 
-def origin_allowed(origin: typing.Any, netloc: typing.Any) -> bool:
+def origin_allowed(
+    origin: typing.Any,
+    netloc: typing.Any,
+    scheme: typing.Any = "",
+    declared: bool = False,
+) -> bool:
     """Is this WebSocket's ``Origin`` this Forge's own?
 
     THE CHECK MOVES HERE BECAUSE HERE IS WHERE IT MEANS ANYTHING.
@@ -320,9 +325,17 @@ def origin_allowed(origin: typing.Any, netloc: typing.Any) -> bool:
 
     An absent origin passes, exactly as the child's own rule has it: that is
     a client that is not a browser, and the sign-in gate is the one that
-    decides for those. Either transport is accepted for a matching host,
-    because a TLS-terminating proxy in front of Forge changes the scheme the
-    browser sees and does not change the host.
+    decides for those.
+
+    ``scheme`` is this Forge's public transport as ``public_scheme`` reads
+    it, and ``declared`` says whether something in front stated it rather
+    than it being inferred from this hop. The two together decide how exact
+    this can afford to be. An inferred ``http`` is the one uncertain answer
+    in the set: a TLS terminator in front of Forge leaves this hop on plain
+    HTTP while the browser is on HTTPS, and says nothing, so an ``https``
+    origin for the right host is accepted there. Every other combination is
+    compared exactly - there is no arrangement in which this Forge is on
+    HTTPS and a legitimate page reports an ``http`` origin for it.
     """
     text = str(origin or "").strip()
     if not text:
@@ -330,7 +343,17 @@ def origin_allowed(origin: typing.Any, netloc: typing.Any) -> bool:
     host = str(netloc or "").strip()
     if not host:
         return False
-    return text.lower() in {f"http://{host}".lower(), f"https://{host}".lower()}
+    known = str(scheme or "").lower()
+    if known not in ("http", "https"):
+        # No reading at all: accept either rather than guess. Nothing calls it
+        # this way today; it is here so a caller that cannot tell is not
+        # forced to invent an answer.
+        allowed = {f"http://{host}", f"https://{host}"}
+    else:
+        allowed = {f"{known}://{host}"}
+        if known == "http" and not declared:
+            allowed.add(f"https://{host}")
+    return text.lower() in {value.lower() for value in allowed}
 
 
 def stream_shaped(path: typing.Any, accept: typing.Any = "") -> bool:
@@ -373,6 +396,66 @@ def _header_items(request: typing.Any) -> typing.List[typing.Tuple[str, str]]:
     return pairs
 
 
+#: What a transport can be called on the way in, and what it means publicly.
+#: A WebSocket's own scheme describes the socket; ``X-Forwarded-Proto``
+#: describes the page, and Wan2GP's auth compares against the second.
+_PUBLIC_SCHEMES = {"http": "http", "https": "https", "ws": "http", "wss": "https"}
+
+
+def declared_scheme(request: typing.Any) -> str:
+    """The public transport as an earlier proxy stated it, or "".
+
+    A Forge behind an external reverse proxy - a TLS terminator, a tunnel -
+    is told the public transport in ``X-Forwarded-Proto`` and our own view is
+    only of the hop from that proxy, so the header wins where it exists.
+    Empty means nobody said, and the only evidence left is this connection.
+    """
+    for name, value in _header_items(request):
+        if name != "x-forwarded-proto":
+            continue
+        # A chain appends; the first entry is the one nearest the browser.
+        first = str(value or "").split(",")[0].strip().lower()
+        if first in _PUBLIC_SCHEMES:
+            return _PUBLIC_SCHEMES[first]
+    return ""
+
+
+def public_scheme(request: typing.Any) -> str:
+    """``http`` or ``https``: the transport the *browser* is on.
+
+    THE ONE PLACE THIS IS DECIDED, BECAUSE TWO PLACES DISAGREED ONCE.
+
+    Three things downstream depend on this answer and none of them may be
+    allowed to reach a different one: the ``X-Forwarded-Proto`` the child is
+    told, which is what Gradio builds its URLs from; the port assumed when
+    the connection names none; and whether an ``Origin`` naming ``https``
+    belongs to this Forge.
+
+    It is not the scheme of this hop. A Forge behind a TLS terminator is on
+    plain HTTP here and on HTTPS for the browser, and a WebSocket is on
+    ``ws``/``wss`` here while the page that opened it is on ``http``/
+    ``https``. Both of those are ordinary, and both are answered by mapping
+    the socket's scheme to the page's and letting a stated one win.
+    """
+    declared = declared_scheme(request)
+    if declared:
+        return declared
+    own = str(getattr(getattr(request, "url", None), "scheme", "") or "http").lower()
+    return _PUBLIC_SCHEMES.get(own, "http")
+
+
+def public_port(request: typing.Any, scheme: str = "") -> int:
+    """The port the browser used, or the default for its transport."""
+    port = getattr(getattr(request, "url", None), "port", None)
+    try:
+        port = int(port or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if port > 0:
+        return port
+    return 443 if (scheme or public_scheme(request)) == "https" else 80
+
+
 def hop_by_hop_names(pairs: typing.Iterable[typing.Tuple[str, str]]) -> typing.Set[str]:
     """The fixed list plus whatever this connection's ``Connection`` header names."""
     names = set(HOP_BY_HOP)
@@ -407,15 +490,12 @@ def forwarded_headers(request: typing.Any) -> dict:
         headers[name] = value
 
     url = getattr(request, "url", None)
-    scheme = str(getattr(url, "scheme", "") or "http")
-    # A WebSocket's scheme is ws/wss, but X-Forwarded-Proto describes the
-    # public *transport* the page was loaded over, and that is what Gradio
-    # builds its URLs from.
-    scheme = {"ws": "http", "wss": "https"}.get(scheme, scheme)
+    # One answer, from one place: see ``public_scheme``. A WebSocket's own
+    # scheme is ws/wss, but X-Forwarded-Proto describes the public transport
+    # the page was loaded over, and that is what Gradio builds its URLs from.
+    scheme = public_scheme(request)
     host = headers.get("host") or str(getattr(url, "netloc", "") or getattr(url, "hostname", "") or "")
-    port = getattr(url, "port", None)
-    if not port:
-        port = 443 if scheme == "https" else 80
+    port = public_port(request, scheme)
 
     # Host is forwarded verbatim so Gradio builds its URLs for the origin the
     # browser is actually on. httpx keeps a Host we set rather than deriving
@@ -1068,8 +1148,13 @@ async def _websocket_endpoint(websocket: typing.Any) -> None:
     # this is the hop that knows both.
     kind = "Deepy" if path.startswith(DEEPY_PREFIX) or path.startswith(PROXY_PATH + DEEPY_PREFIX) else "WanGP"
     public = str(getattr(getattr(websocket, "url", None), "netloc", "") or "")
-    if not origin_allowed(headers.get("origin", ""), public):
-        _log_once("ws-cross-origin", "a WebSocket was refused: its Origin is not this Forge's own.")
+    stated = declared_scheme(websocket)
+    if not origin_allowed(headers.get("origin", ""), public, public_scheme(websocket), bool(stated)):
+        _log_once(
+            "ws-cross-origin",
+            f"a WebSocket was refused: its Origin is not this Forge's own (this session is "
+            f"{public_scheme(websocket)}{', as stated by the proxy in front' if stated else ''}).",
+        )
         await websocket.close(code=1008)
         return
     headers.pop("origin", None)

@@ -186,6 +186,23 @@ async function main() {
     report({ answer: answer });
 }
 
+async function handback() {
+    // Admitted as a server job, then given back: this WanGP has no queue
+    // worker to submit into, so the server hands it to whoever is here. The
+    // page decided to WATCH when the submission was acknowledged, and unless
+    // it notices, it watches forever a job that is waiting for it.
+    await api.enqueue({ prompt: "x" }, { wait: false });
+    const before = calls.filter(function (c) { return c.url.indexOf("/outbox/claim") !== -1; }).length;
+    JOBS.list = [{ job_id: "1111222233334444", state: "pending", executor: "browser", revision: 5,
+                   request: { request_id: "a".repeat(32) }, result: null, error: null, summary: {}, wangp: null }];
+    for (const s of streams) {
+        s.fire("job", { job_id: "1111222233334444", state: "pending", executor: "browser", revision: 5 }, EPOCH + ":5");
+    }
+    await new Promise(function (r) { setTimeout(r, 40); });
+    const after = calls.filter(function (c) { return c.url.indexOf("/outbox/claim") !== -1; }).length;
+    report({ claimsBefore: before, claimsAfter: after });
+}
+
 async function resets() {
     await api.enqueue({ prompt: "x" }, { wait: false });
     const before = calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length;
@@ -199,7 +216,7 @@ async function resets() {
     report({ syncsOnReset: after - before, syncsOnEpochChange: afterEpoch - after });
 }
 
-(MODE === "reset" ? resets() : main()).catch(function (e) {
+(MODE === "reset" ? resets() : MODE === "handback" ? handback() : main()).catch(function (e) {
     console.log(JSON.stringify({ error: String(e && e.stack || e) }));
 });
 """
@@ -286,6 +303,12 @@ def run() -> Results:
         r.check("and it opens no stream for one", browser["streams"] == [], str(browser["streams"]))
         r.check("nor does it wait to commit WanGP's form: its own Add to Queue chain does that",
                 (browser.get("flushes") or []) == [], str(browser.get("flushes")))
+
+    handback = _run("handback")
+    r.check("the harness drove the hand-back case", handback is not None and "error" not in handback, str(handback)[:300])
+    if handback and "error" not in handback:
+        r.check("a server job handed back to the page starts the page pumping it, rather than being watched forever",
+                handback.get("claimsBefore") == 0 and handback.get("claimsAfter", 0) >= 1, str(handback))
 
     reset = _run("reset")
     r.check("the harness drove the reset cases", reset is not None and "error" not in reset, str(reset)[:300])

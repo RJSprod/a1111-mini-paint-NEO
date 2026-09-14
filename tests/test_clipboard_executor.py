@@ -109,6 +109,9 @@ class FakeChild:
         self.busy = False
         self.available = True
         self.can_compose = True
+        #: Whether this build could EVER run an unattended job. False is a
+        #: permanent fact about the install, not a stage of its startup.
+        self.can_execute_ever = True
         self.instance = "child-one"
         self.form = {"steps": 30, "image_prompt_type": "", "video_prompt_type": "", "image_start": None, "image_end": None, "image_refs": []}
         self.source = wire.BASE_RECORDED
@@ -119,7 +122,9 @@ class FakeChild:
             if not self.available:
                 return 409, {"ok": False, "code": wire.SERVICE_UNAVAILABLE, "message": "no service"}
             return 200, {"ok": True, "control_version": wire.CONTROL_VERSION, "protocol": wire.PROTOCOL,
-                         "can_execute": True, "can_compose": self.can_compose, "service": True,
+                         "can_execute": self.can_execute_ever, "can_compose": self.can_compose,
+                         "service": self.can_execute_ever, "service_possible": self.can_execute_ever,
+                         "code": "" if self.can_execute_ever else wire.SERVICE_UNAVAILABLE,
                          "generation_running": self.busy, "queue_depth": 2 if self.busy else 0,
                          "instance": self.instance}
         if operation == wire.CONTROL_COMPOSE:
@@ -478,6 +483,74 @@ def recovery_checks(r: Results, clock) -> None:
                 and len(child.submissions) == 2, outbox.get(fresh["job_id"])["state"])
     finally:
         control.use_transport(None)
+        _restore(monkey)
+
+
+def incapable_build_checks(r: Results, clock) -> None:
+    """A WanGP that cannot run unattended jobs still runs them.
+
+    Not every Wan2GP carries the queue worker the unattended path submits
+    into, and on one that does not there is nothing to wait for. The design
+    refuses to invent a second execution path beside the arbiter - that is
+    two generations on one card - so what is left is the path that was always
+    there: the page drives the live form and presses WanGP's own button.
+
+    The press must reach that path *by itself*. A job that is admitted as
+    unattended, waits, and is handed over a moment later works, but a job
+    that is never admitted as unattended in the first place is the one that
+    does not show the user a queue changing its mind.
+    """
+    _setup(clock)
+    runtime = FakeRuntime()
+    runtime.state = FakeRuntime.READY
+    runtime.instance_id = "child-one"
+    child = FakeChild(clock)
+    child.can_execute_ever = False
+    monkey = []
+    _install(monkey, runtime)
+    outbox.use_executor(None)
+    outbox.use_running(lambda: True)
+    try:
+        control.use_transport(child)
+
+        # Before anything has asked the child, a press is still unattended:
+        # cold start is the case the unattended path exists for, and refusing
+        # it on silence would give that case away.
+        control.reset_for_tests()
+        control.use_transport(child)
+        r.check("with nothing known about the child a press is still admitted as unattended",
+                outbox.chosen_executor() == outbox.EXECUTOR_SERVER)
+
+        # Once the child has said it never can, the press goes straight to the
+        # page rather than round the houses.
+        control.hello()
+        r.check("a child that says it never can sends the next press straight to the page",
+                outbox.chosen_executor() == outbox.EXECUTOR_BROWSER)
+        job = outbox.submit(_request(), PAGE)
+        r.check("and that press is a browser job from the start, not one that changes its mind",
+                job["executor"] == outbox.EXECUTOR_BROWSER and job["state"] == outbox.PENDING,
+                f"{job['executor']} {job['state']}")
+        r.check("which the page can claim at once",
+                outbox.claim(PAGE).get("job", {}).get("job_id") == job["job_id"], str(outbox.claim(PAGE))[:120])
+
+        # And a job already in flight when the answer arrives is handed over
+        # rather than left waiting for something that will never come.
+        outbox.reset_for_tests()
+        outbox.use_clock(clock)
+        outbox.use_executor(outbox.EXECUTOR_SERVER)
+        outbox.use_running(lambda: True)
+        stranded = outbox.submit(_request("already admitted"), PAGE)
+        executor.step()
+        executor.step()
+        settled = outbox.get(stranded["job_id"])
+        r.check("a job already admitted is handed to the page rather than waiting for what will never come",
+                settled["executor"] == outbox.EXECUTOR_BROWSER and settled["state"] == outbox.PENDING,
+                f"{settled['executor']} {settled['state']}")
+        r.check("nothing was submitted to a child that cannot take it", not child.submissions, str(child.submissions))
+    finally:
+        control.use_transport(None)
+        control.reset_for_tests()
+        outbox.use_executor(outbox.EXECUTOR_SERVER)
         _restore(monkey)
 
 
@@ -984,6 +1057,7 @@ def run() -> Results:
     recovery_checks(r, clock)
     retention_checks(r, clock)
     session_switch_checks(r, clock)
+    incapable_build_checks(r, clock)
     failure_checks(r, clock)
     cancellation_checks(r, clock)
     event_checks(r, clock)

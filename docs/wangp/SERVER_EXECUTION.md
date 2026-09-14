@@ -374,6 +374,29 @@ inference and is now a citation:
 
 ---
 
+## 8b. What unattended execution requires of Wan2GP
+
+One thing, and it is recent: **`shared/deepy/hybrid.py`**, which carries the
+`HybridService` whose worker drains the one queue everything submits into.
+Upstream added it on **2026-09-11** (`87d0eeb`). A Wan2GP from before that
+date has no such worker, and there is nothing for an unattended job to submit
+into.
+
+The bridge answers this in `hello` as `service_possible`, and a press on such
+a build goes straight to the browser-driven path instead — the page drives the
+live form and presses WanGP's own button, exactly as it did before unattended
+jobs existed. The tab has to stay open, so it is not walking away, but it
+generates. The Clipboard tab says so on the press rather than leaving it to
+the log.
+
+What is **not** done on such a build is the obvious shortcut: running a
+generation from the bridge's own thread. That is a second execution path
+beside WanGP's arbiter, invisible to every per-state guard in the
+application — two generations on one card. It is refused here for the same
+reason the review refused B7.
+
+---
+
 ## 9. What is deliberately not promised
 
 * **Survival of a Forge restart.** Durability means browser-independent

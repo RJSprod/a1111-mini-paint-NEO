@@ -458,15 +458,18 @@ async def no_open_proxy(r: Results) -> None:
 
 
 class DeepyClient:
-    """An upstream that serves the Deepy API without the /deepy prefix.
+    """A child whose Deepy app answers at exactly one of the two addresses.
 
-    Which is the arrangement that was actually found: the page asks at
-    ``/deepy/deepy_api/state`` and this build answers at ``/deepy_api/state``.
+    ``rooted`` is what a child launched the way we launch one actually has:
+    Gradio under ``GRADIO_ROOT_PATH=/wan2gp``, with the Deepy app mounted on
+    it, which Starlette can only reach at ``/wan2gp/deepy/...``. ``bare`` is
+    the same app with no root path. ``neither`` is a build that has no Deepy
+    app at all, where the banner is the child's own and nothing here helps.
     """
 
-    def __init__(self, prefixed_ok=False, broken=False):
+    def __init__(self, serves=proxy.DEEPY_ROOTED, broken=False):
         self.paths = []
-        self.prefixed_ok = prefixed_ok
+        self.serves = serves
         self.broken = broken
 
     def build_request(self, method, url, headers=None, content=None, timeout=None):
@@ -477,28 +480,100 @@ class DeepyClient:
         path = str(request.url.raw_path.decode("latin-1")).split("?")[0]
         if self.broken:
             return httpx.Response(500, headers=[("content-type", "text/plain")], content=b"inside")
-        served = path.startswith("/deepy/") if self.prefixed_ok else not path.startswith("/deepy/")
+        if self.serves == proxy.DEEPY_ROOTED:
+            served = path.startswith(proxy.PROXY_PATH + proxy.DEEPY_PREFIX)
+        elif self.serves == proxy.DEEPY_BARE:
+            served = path.startswith(proxy.DEEPY_PREFIX)
+        else:
+            served = False
         if served:
             return httpx.Response(200, headers=[("content-type", "application/json")], content=b"{}")
         return httpx.Response(404, headers=[("content-type", "text/plain")], content=b"no")
 
 
+async def asgi_status(app, path, root_path=""):
+    """One GET through the raw ASGI interface, for its status code alone."""
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.1"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode("latin-1"),
+        "query_string": b"",
+        "root_path": root_path,
+        "headers": [(b"host", b"testserver")],
+        "client": ("127.0.0.1", 1),
+        "server": ("testserver", 80),
+    }
+    seen = {}
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(event):
+        if event["type"] == "http.response.start":
+            seen["status"] = event["status"]
+
+    await app(scope, receive, send)
+    return seen.get("status")
+
+
+async def deepy_address_checks(r: Results) -> None:
+    """Why a mounted sub-application needs back the prefix we strip.
+
+    This is the fact the whole Deepy path in ``proxy`` exists to accommodate,
+    and it is a fact about Starlette rather than about us - so it is asserted
+    against Starlette, with the same two moving parts the child has: an app
+    with a root path, and an app mounted on it. Reasoning about it from the
+    call graph is what produced three wrong fixes; running it produced one.
+    """
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+
+    child = Starlette(routes=[Route("/deepy_api/state", lambda request: PlainTextResponse("deepy"))])
+    parent = Starlette(routes=[Route("/config", lambda request: PlainTextResponse("gradio"))])
+    parent.mount(proxy.DEEPY_PATH, child)  # exactly what shared/deepy/hybrid.py does
+
+    r.check("with no root path, a mounted Deepy app answers where the page asks",
+            await asgi_status(parent, "/deepy/deepy_api/state") == 200)
+    r.check("under a root path it does not - which is the 404 that would not go away",
+            await asgi_status(parent, "/deepy/deepy_api/state", proxy.PROXY_PATH) == 404)
+    r.check("under a root path it answers with the prefix left on",
+            await asgi_status(parent, "/wan2gp/deepy/deepy_api/state", proxy.PROXY_PATH) == 200)
+    r.check("while the app's own routes answer either way, which is why nothing else broke",
+            await asgi_status(parent, "/config", proxy.PROXY_PATH) == 200
+            and await asgi_status(parent, "/config") == 200)
+
+    # And the pure function that encodes it.
+    r.check("a Deepy path is addressed with our prefix on by default",
+            proxy.deepy_upstream_path("/deepy/deepy_api/state") == "/wan2gp/deepy/deepy_api/state")
+    r.check("and without it for a child that wants it off",
+            proxy.deepy_upstream_path("/deepy/deepy_api/state", proxy.DEEPY_BARE) == "/deepy/deepy_api/state")
+    r.check("anything outside the Deepy namespace is left exactly as it is",
+            all(proxy.deepy_upstream_path(path) == path
+                for path in ("/", "/config", "/wan2gp/config", "/deepyish/x", "")))
+    r.check("there are two addresses, so there is exactly one other one",
+            proxy.deepy_other_form(proxy.DEEPY_ROOTED) == proxy.DEEPY_BARE
+            and proxy.deepy_other_form(proxy.DEEPY_BARE) == proxy.DEEPY_ROOTED
+            and proxy.deepy_other_form(None) == proxy.DEEPY_BARE)
+
+
 async def deepy_checks(r: Results) -> None:
-    """The Deepy API is asked for at the other place when the first 404s.
+    """The Deepy API is reached, and asked for twice at most.
 
     THE BANNER THAT WOULD NOT CLEAR.
 
     Wan2GP mounts its Deepy app as a sub-application, so its API is at
     ``/deepy/deepy_api/...`` and that is where the page asks - its marker is
-    a root-relative ``/deepy/`` and the transport resolves against it. On the
-    install this was found on, that answers 404 and the panel shows
-    "Connection to server lost" for ever while every other part of the page
-    works, because its transport has no fallback and marks the notice
-    persistent.
-
-    Which of the two places a given build answers at is not knowable from
-    here, so it is asked once and remembered.
+    a root-relative ``/deepy/`` and the transport resolves against it. Sent
+    upstream at that address it answers 404 (see ``deepy_address_checks``)
+    and the panel shows "Connection to server lost" for ever while every
+    other part of the page works, because its transport has no fallback and
+    marks the notice persistent.
     """
+    # The ordinary child. One request, at the address it answers at.
     proxy._state["deepy_form"] = None
     proxy._state["deepy"] = set()
     proxy._state["logged"] = set()
@@ -507,30 +582,53 @@ async def deepy_checks(r: Results) -> None:
     try:
         as_ready(PRETEND_PORT)
         answer = await forwarded(request_for("GET", "/deepy/deepy_api/state"))
-        r.check("a Deepy request that 404s under the prefix is answered from the other place",
-                answer.status_code == 200, str(answer.status_code))
-        r.check("which took exactly two upstream requests, not a search",
-                spy.paths == ["/deepy/deepy_api/state", "/deepy_api/state"], str(spy.paths))
-
-        # Learnt. The next request goes straight there.
-        before = len(spy.paths)
-        answer = await forwarded(request_for("GET", "/deepy/deepy_api/settings"))
-        r.check("and the next one goes straight there, having learnt it once",
-                answer.status_code == 200 and spy.paths[before:] == ["/deepy_api/settings"], str(spy.paths[before:]))
+        r.check("a Deepy request reaches the child's mounted app, first try",
+                answer.status_code == 200 and spy.paths == ["/wan2gp/deepy/deepy_api/state"],
+                f"{answer.status_code} {spy.paths}")
+        r.check("and that address is now known, so nothing is asked twice",
+                proxy._state["deepy_form"] == proxy.DEEPY_ROOTED)
     finally:
         proxy.use_client(None)
         proxy._state["deepy_form"] = None
 
-    # A build that answers where the page asks never pays for any of this.
+    # A child with no root path answers at the other address. Asked, once.
     proxy._state["deepy_form"] = None
+    proxy._state["deepy"] = set()
     proxy._state["logged"] = set()
-    spy = DeepyClient(prefixed_ok=True)
+    spy = DeepyClient(serves=proxy.DEEPY_BARE)
     proxy.use_client(spy)
     try:
         as_ready(PRETEND_PORT)
         answer = await forwarded(request_for("GET", "/deepy/deepy_api/state"))
-        r.check("a build that answers where the page asks is left alone, with one request",
-                answer.status_code == 200 and spy.paths == ["/deepy/deepy_api/state"], str(spy.paths))
+        r.check("a child that answers at the site root is found there",
+                answer.status_code == 200, str(answer.status_code))
+        r.check("which took exactly two upstream requests, not a search",
+                spy.paths == ["/wan2gp/deepy/deepy_api/state", "/deepy/deepy_api/state"], str(spy.paths))
+
+        before = len(spy.paths)
+        answer = await forwarded(request_for("GET", "/deepy/deepy_api/settings"))
+        r.check("and the next one goes straight there, having learnt it once",
+                answer.status_code == 200 and spy.paths[before:] == ["/deepy/deepy_api/settings"],
+                str(spy.paths[before:]))
+    finally:
+        proxy.use_client(None)
+        proxy._state["deepy_form"] = None
+
+    # Neither address answers: say so once and stop asking.
+    proxy._state["deepy_form"] = None
+    proxy._state["deepy"] = set()
+    proxy._state["logged"] = set()
+    spy = DeepyClient(serves="neither")
+    proxy.use_client(spy)
+    try:
+        as_ready(PRETEND_PORT)
+        answer = await forwarded(request_for("GET", "/deepy/deepy_api/state"))
+        r.check("a build with no Deepy app is asked both ways and then left alone",
+                answer.status_code == 404 and len(spy.paths) == 2, f"{answer.status_code} {spy.paths}")
+        before = len(spy.paths)
+        await forwarded(request_for("GET", "/deepy/deepy_api/state"))
+        r.check("and is not asked both ways again for every request after it",
+                len(spy.paths) - before == 1, str(spy.paths[before:]))
     finally:
         proxy.use_client(None)
         proxy._state["deepy_form"] = None
@@ -538,6 +636,7 @@ async def deepy_checks(r: Results) -> None:
     # 500 is the app saying something went wrong inside it. Asking a different
     # way would be papering over that, so it is not retried.
     proxy._state["deepy_form"] = None
+    proxy._state["deepy"] = set()
     proxy._state["logged"] = set()
     spy = DeepyClient(broken=True)
     proxy.use_client(spy)
@@ -853,6 +952,7 @@ def run() -> Results:
         enforced_auth_checks(r)
         asyncio.run(async_checks(r))
         asyncio.run(auth_gate_checks(r))
+        asyncio.run(deepy_address_checks(r))
         asyncio.run(deepy_checks(r))
     finally:
         proxy.use_client(None)

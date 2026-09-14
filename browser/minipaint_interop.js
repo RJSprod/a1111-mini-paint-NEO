@@ -853,8 +853,27 @@ window.minipaintInterop = (function () {
         // null until a snapshot says. Whether this Forge runs the queue
         // unattended decides whether a press needs to commit WanGP's live
         // form first; see flushSettings.
-        unattended: null
+        unattended: null,
+        // And whether jobs are built from the WanGP page's settings at all.
+        // Off, the recorded form is read by nobody and committing it would
+        // be work bought for no one; on, the WanGP tab keeps it current
+        // ahead of any press. See tellBridge.
+        inherit: null
     };
+
+    /** Pass the settings the bridge cannot ask for itself.
+     *
+     * The WanGP tab's script owns the flush and knows when the page is worth
+     * flushing; what it does not have is the server's answer to whether
+     * anything reads the result. That arrives here, in the snapshot every
+     * page already takes, so it costs no route and no request.
+     */
+    function tellBridge() {
+        const bridge = window.minipaintWanGP;
+        if (!bridge || typeof bridge.inheritSettings !== "function") { return; }
+        if (typeof stream.inherit !== "boolean") { return; }
+        try { bridge.inheritSettings(stream.inherit && stream.unattended !== false); } catch (e) { /* never load-bearing */ }
+    }
 
     /** Open the one stream this page has, or do nothing if it already has it.
      *
@@ -988,6 +1007,8 @@ window.minipaintInterop = (function () {
                 // to know whether the job it is about to make will be run by
                 // the server, and the snapshot already says.
                 if (typeof payload.unattended === "boolean") { stream.unattended = payload.unattended; }
+                if (typeof payload.inherit_settings === "boolean") { stream.inherit = payload.inherit_settings; }
+                tellBridge();
                 stream.jobs.clear();
                 for (const job of Array.isArray(payload.jobs) ? payload.jobs : []) {
                     stream.jobs.set(job.job_id, { job_id: job.job_id, state: job.state, stage: job.stage || "", revision: job.revision || 0 });

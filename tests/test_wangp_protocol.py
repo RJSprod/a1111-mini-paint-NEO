@@ -1231,6 +1231,202 @@ _PAGE_TEMPLATE = (
 )
 
 
+#: The parent page, its iframe, and just enough browser to see when a flush
+#: happens and when it does not. The iframe is answered the way the real
+#: bridge answers - a hello gets a READY, a flush request gets the recorded
+#: form's fingerprint, and a probe gets one that has moved - so what is being
+#: driven here is the real message round trip, not a mock of it.
+_PROACTIVE_HARNESS = r"""
+const fs = require("fs");
+
+const MODE = process.argv[3] || "on";
+const listeners = {};
+const posted = [];
+const observers = [];
+let channelId = "";
+
+function fire(kind, event) { for (const fn of listeners[kind] || []) { fn(event); } }
+
+const contentWindow = {
+  postMessage: function (message, target) {
+    posted.push(message);
+    if (message.type === "WANGP_BRIDGE_HELLO") {
+      channelId = message.channel_id;
+      reply("WANGP_BRIDGE_READY", message.request_id, {
+        bridge_session: "abcdef0123456789abcdef0123456789", instance_id: "inst-1", version: "1.6.4",
+        ready: true, receivers: [], state_revision: "r1", capabilities: { queue: true, start: true, track: true }
+      });
+      return;
+    }
+    if (message.type === "WANGP_FORM_FLUSH") {
+      const probe = !!(message.payload && message.payload.probe);
+      // A real flush moves the fingerprint; a probe reads it.
+      if (!probe) { flushCalls += 1; }
+      reply("WANGP_FORM_FLUSHED", message.request_id, probe
+        ? { ok: true, flush: "requested", fingerprint: "fp" + flushCalls }
+        : { ok: true, flush: "requested", fingerprint: "fp" + (flushCalls - 1) });
+    }
+  }
+};
+let flushCalls = 0;
+
+function reply(type, requestId, payload) {
+  setTimeout(function () {
+    fire("message", {
+      origin: "http://forge.test", source: contentWindow,
+      data: { protocol: 5, type: type, channel_id: channelId, request_id: requestId, payload: payload }
+    });
+  }, 0);
+}
+
+const frame = {
+  tagName: "IFRAME", isConnected: true, dataset: {}, contentWindow: contentWindow,
+  getAttribute: function (n) { return n === "src" ? "/wan2gp/" : null; },
+  setAttribute: function () {}, addEventListener: function () {}
+};
+const root = { querySelector: function () { return frame; } };
+
+const doc = {
+  readyState: "complete", visibilityState: "visible",
+  addEventListener: function (k, f) { (listeners[k] = listeners[k] || []).push(f); },
+  getElementById: function (id) { return id === "wangp_iframe" ? frame : null; },
+  querySelector: function (sel) { return sel === "#wangp_iframe_root" ? root : null; },
+  querySelectorAll: function () { return []; },
+  createElement: function () { return { style: {}, setAttribute() {}, appendChild() {}, addEventListener() {} }; },
+  documentElement: { classList: { contains: () => false }, style: {}, getAttribute: () => null },
+  body: { classList: { contains: () => false } }, head: { appendChild() {} }
+};
+const win = {
+  location: { href: "http://forge.test/", origin: "http://forge.test" },
+  addEventListener: function (k, f) { (listeners[k] = listeners[k] || []).push(f); },
+  setTimeout, clearTimeout, setInterval, clearInterval, document: doc,
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  MutationObserver: class { observe() {} disconnect() {} },
+  IntersectionObserver: class { constructor(fn) { this.fn = fn; observers.push(this); } observe() {} disconnect() {} },
+  requestAnimationFrame: (f) => setTimeout(f, 0),
+  crypto: { getRandomValues: (b) => { for (let i = 0; i < b.length; i++) b[i] = (i * 13 + 5) % 256; return b; } }
+};
+global.window = win; global.document = doc;
+global.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}), text: () => Promise.resolve("") });
+
+new Function("window", "document", "fetch", fs.readFileSync(process.argv[2], "utf8"))(win, doc, global.fetch);
+
+const api = win.minipaintWanGP;
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+function screen(showing) { for (const o of observers) { o.fn([{ isIntersecting: showing }]); } }
+
+async function main() {
+  // "preset": the server's answer arrives before the WanGP page is ready,
+  // which is the ordinary order - the Clipboard tab syncs long before
+  // anybody opens the WanGP tab.
+  if (MODE === "preset") { api.inheritSettings(true); }
+
+  api.attach(null);
+  await wait(300);                      // hello -> ready -> any ready flush
+  const afterReady = flushCalls;
+
+  if (MODE === "on" || MODE === "off") { api.inheritSettings(MODE === "on"); }
+  await wait(300);
+  const afterSetting = flushCalls;
+
+  screen(true);                         // the WanGP tab is on screen
+  await wait(1700);                     // and past the throttle
+  const afterOnScreen = flushCalls;
+
+  screen(false);                        // the user goes to the Clipboard tab
+  await wait(300);
+  const afterLeft = flushCalls;
+
+  screen(false);                        // the same edge again
+  await wait(1700);
+  const afterRepeat = flushCalls;
+
+  console.log(JSON.stringify({
+    afterReady, afterSetting, afterOnScreen, afterLeft, afterRepeat,
+    pending: api.state().pending, ready: api.state().ready,
+    observers: observers.length
+  }));
+  process.exit(0);
+}
+main();
+"""
+
+
+def proactive_flush_checks(r: Results) -> None:
+    """Inheritance without generating once first, and without a press waiting.
+
+    WHAT THIS EXISTS TO CATCH.
+
+    A queued job is built from the form Wan2GP recorded for the model, and
+    Wan2GP writes that only when the user commits the form - Generate, its
+    own Add to Queue, a LoRA set applied, a model switched. A page set up but
+    not generated from has no recorded form at all, so a job composed from
+    the Clipboard tab fell through to the settings Wan2GP loads from disk:
+    close, often identical, and not what was on screen.
+
+    The commit therefore happens ahead of any press, at the moments where it
+    is free and certain to be wanted, and the order those moments arrive in
+    is not fixed: the Clipboard tab syncs the setting long before anybody
+    opens the WanGP tab, but a user who turns the setting on has a page that
+    is already ready. Both are asserted, because only one of them was
+    implemented the first time.
+
+    Driven through Node against a stubbed window for the same reason the
+    frame-timer checks are: the logic under test is this file's, and the
+    round trip it depends on is the one thing a static read of the source
+    could not have told us was broken - the acknowledgement was accepted,
+    and then dropped, so every flush waited out its own timeout and reported
+    that the bridge had not answered.
+    """
+    import json as _json
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        r.check("node is available for the proactive flush checks (skipped)", True)
+        return
+
+    answers = {}
+    with tempfile.TemporaryDirectory(prefix="minipaint-wangp-flush-") as scratch:
+        root = pathlib.Path(scratch)
+        (root / "harness.js").write_text(_PROACTIVE_HARNESS, encoding="utf-8")
+        for mode in ("on", "off", "preset"):
+            try:
+                run = subprocess.run([node, str(root / "harness.js"), str(BROWSER_COPY), mode],
+                                     capture_output=True, text=True, timeout=60, check=False)
+                answers[mode] = (_json.loads(run.stdout.strip().splitlines()[-1]) if run.stdout.strip()
+                                 else {"error": run.stderr[-300:]})
+            except Exception as error:
+                answers[mode] = {"error": str(error)[:300]}
+
+    on = answers.get("on", {})
+    r.check("nothing is committed before the server says anything reads it",
+            on.get("afterReady") == 0, repr(on))
+    r.check("turning inheritance on commits the live form at once - no generation first",
+            on.get("afterSetting") == 1, repr(on))
+    r.check("and the acknowledgement is matched, so nothing is left waiting on a timeout",
+            on.get("pending") == 0, repr(on))
+    r.check("coming on screen commits nothing; there is nothing new to carry",
+            on.get("afterOnScreen") == 1, repr(on))
+    r.check("leaving the screen does - the last instant an uncommitted slider exists, "
+            "and the instant before a press in the other tab",
+            on.get("afterLeft") == 2, repr(on))
+    r.check("and the same edge again does not, so a flurry of visibility events costs one commit",
+            on.get("afterRepeat") == 2, repr(on))
+
+    off = answers.get("off", {})
+    r.check("with inheritance off nothing is ever committed - no job reads it, so it is work for nobody",
+            off.get("afterReady") == 0 and off.get("afterSetting") == 0 and off.get("afterLeft") == 0, repr(off))
+
+    preset = answers.get("preset", {})
+    r.check("a setting already known when the page becomes ready commits it there instead",
+            preset.get("afterReady") == 1, repr(preset))
+    r.check("and that page then behaves exactly like the other one",
+            preset.get("afterLeft") == 2 and preset.get("afterRepeat") == 2, repr(preset))
+
+
 def page_head_checks(r: Results) -> None:
     """The frame timer goes into the page head, before Gradio's module.
 
@@ -2042,6 +2238,7 @@ def run() -> Results:
     allowance_checks(r)
     switch_apply_checks(r)
     frame_fallback_checks(r)
+    proactive_flush_checks(r)
     page_head_checks(r)
     session_isolation_checks(r)
     loader_checks(r)

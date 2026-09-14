@@ -252,6 +252,22 @@ window.minipaintWanGP = (function () {
         track: false
     };
 
+    //: The proactive flush's own state, declared here rather than beside the
+    //: functions that use it because those run from events - a ready
+    //: acknowledgement, a visibility change - and nothing guarantees this
+    //: file has finished loading when one arrives. See flushProactively.
+    const PROACTIVE_GAP_MS = 1500;
+
+    const P = {
+        //: null until the server says. Never assumed: committing a form that
+        //: nothing reads is work done on the user's card for nobody.
+        wanted: null,
+        running: false,
+        lastAt: 0,
+        onScreen: null,
+        observer: null
+    };
+
     /* ------------------------------------------------------------------ */
     /* Shapes                                                                */
     /* ------------------------------------------------------------------ */
@@ -868,6 +884,9 @@ window.minipaintWanGP = (function () {
                 + " - deadlines are held until it is back");
             if (logFlush) { clearTimeout(logFlush); logFlush = 0; }
             flushLog();
+            // Last chance to carry an uncommitted form across; throttled or
+            // frozen it may not land, which is why nothing waits for it.
+            flushProactively("the page went to the background");
         };
 
         const back = function (why) {
@@ -1008,7 +1027,8 @@ window.minipaintWanGP = (function () {
         if (message.type === RECEIVE_RESULT) { onResult(message.requestId, message.payload); return; }
         if (message.type === QUEUE_RESULT) { onQueueResult(message.requestId, message.payload); return; }
         if (message.type === QUEUE_STATUS) { onQueueStatus(message.requestId, message.payload); return; }
-        if (message.type === QUEUE_TRACKED) { onQueueTracked(message.requestId, message.payload); }
+        if (message.type === QUEUE_TRACKED) { onQueueTracked(message.requestId, message.payload); return; }
+        if (message.type === FORM_FLUSHED) { onFormFlushed(message.requestId, message.payload); }
     }
 
     /** Why an inbound message was dropped. Every rejection is silent by
@@ -1079,6 +1099,10 @@ window.minipaintWanGP = (function () {
         // can read rather than a thing they have to notice.
         say(frameTimerNote());
         recordSession(true);
+        // The one that removes "generate once first": a page that has just
+        // said it is ready has a live form and no recorded one, and this is
+        // the first moment it can be asked to commit it.
+        if (declared) { flushProactively("the WanGP page became ready"); }
         // Presentation only, and never a reason a picture cannot be sent.
         try { theme(S.theme || detectTheme()); } catch (e) { /* section 27.1 */ }
     }
@@ -1316,6 +1340,31 @@ window.minipaintWanGP = (function () {
     }
 
     /**
+     * The bridge's answer to a flush: what it did about the request, and the
+     * fingerprint of the recorded form as it stood *before* it did it.
+     *
+     * Without this the answer arrived, passed every check in ``acceptable``
+     * and was then dropped on the floor: the request stayed pending until its
+     * call timeout, so every flush cost eight seconds and reported that the
+     * bridge had not answered - when it had, immediately. A press waited for
+     * it and inherited the previous settings anyway, which is exactly the
+     * symptom the flush was written to remove.
+     */
+    function onFormFlushed(requestId, payload) {
+        const entry = S.pending.get(requestId);
+        if (!entry || entry.type !== FORM_FLUSHED) { return; }
+        if (payload.ok === false) {
+            settle(requestId, failure(code(payload.code) || INTERNAL_ERROR, text(payload.detail, 200)));
+            return;
+        }
+        settle(requestId, {
+            ok: true,
+            flush: text(payload.flush, 40),
+            fingerprint: text(payload.fingerprint, 128)
+        });
+    }
+
+    /**
      * Where the tasks this page admitted are in WanGP's queue now (protocol
      * 5): one bounded question about up to MAX_TRACKED_REQUESTS request ids,
      * answered from WanGP's own record for this page and never written to.
@@ -1354,8 +1403,15 @@ window.minipaintWanGP = (function () {
         const settings = options || {};
         const budget = Number(settings.timeoutMs) > 0 ? Number(settings.timeoutMs) : FLUSH_BUDGET_MS;
         const started = Date.now();
+        const why = settings.reason ? " [" + text(settings.reason, 60) + "]" : "";
         const give = function (outcome, detail) {
-            say("flush: " + outcome + (detail ? " (" + text(detail, 120) + ")" : ""));
+            // A press says what it got either way. A flush nobody asked for
+            // says so only when it carried something, because a line every
+            // time the user changes tab is noise in the one log that has to
+            // stay readable.
+            if (!settings.quiet || outcome === FLUSH_COMMITTED) {
+                say("flush: " + outcome + why + (detail ? " (" + text(detail, 120) + ")" : ""));
+            }
             return { ok: true, flush: outcome };
         };
 
@@ -1391,6 +1447,108 @@ window.minipaintWanGP = (function () {
         // Either there was nothing to commit, or the page never got to it.
         // The two are indistinguishable from here and have the same answer.
         return give(FLUSH_UNCHANGED, "the recorded form did not move within " + budget + " ms");
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Proactive inheritance: the recorded form, kept current                */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * WHY A FLUSH HAPPENS WHEN NOBODY PRESSED ANYTHING.
+     *
+     * With inheritance on, a queued job is built from the form Wan2GP
+     * recorded for the model - and Wan2GP records that only when the user
+     * *commits* it: Generate, its own Add to Queue, applying a LoRA set,
+     * switching model. Nothing else writes it. So on a fresh start, with a
+     * page the user has set up but not generated from, there is no recorded
+     * form at all, and a job composed from the Clipboard tab falls through
+     * to the settings Wan2GP loads for that model from disk. Close, often
+     * identical, and not what the user is looking at.
+     *
+     * The fix that suggests itself - flush at the press - cannot be had from
+     * the Clipboard tab: its button is a server-side Gradio event, and by
+     * the time the server is composing, the moment to ask the browser for
+     * anything has passed. Making the press wait on a round trip through a
+     * second tab's iframe would put a page in the critical path of a queue
+     * whose whole point is that pages are not in it.
+     *
+     * So the commit happens *before* any press, at the moments when it is
+     * both free and certain to be needed:
+     *
+     *   - when the WanGP page becomes ready and inheritance is on, which is
+     *     the one that removes "generate once first" entirely;
+     *   - when the WanGP tab stops being the tab on screen, which is the
+     *     last instant an uncommitted slider still exists and also, for
+     *     anyone about to press Add to Queue in the Clipboard tab, the
+     *     instant immediately before they do;
+     *   - when the page goes to the background.
+     *
+     * Every one of them is advisory. A flush that does not happen leaves
+     * exactly the behaviour there was before this existed, which is why none
+     * of it is allowed to block, retry or report a failure.
+     */
+    /**
+     * The server's answer to "is anything going to read this form". Pushed in
+     * by the public API from the snapshot it already takes; see tellBridge.
+     * Turning it on with a page already ready flushes once, so that switching
+     * the setting on is enough - there is nothing else to do and nothing to
+     * generate first.
+     */
+    function inheritSettings(on) {
+        const wanted = on === true;
+        const changed = P.wanted !== wanted;
+        P.wanted = wanted;
+        if (changed) { say("settings inheritance is " + (wanted ? "on; WanGP's live form is committed ahead of a press" : "off; WanGP's form is left alone")); }
+        if (wanted && changed) { flushProactively("inheritance turned on"); }
+        return wanted;
+    }
+
+    /**
+     * One commit, at most one at a time, and never more often than the gap.
+     * Returns nothing: no caller of this is waiting on it, by design.
+     */
+    function flushProactively(why) {
+        if (P.wanted !== true) { return; }
+        if (P.running) { return; }
+        if (!S.ready || !S.bridgeSession) { return; }
+        const now = Date.now();
+        if (P.lastAt && now - P.lastAt < PROACTIVE_GAP_MS) { return; }
+        P.lastAt = now;
+        P.running = true;
+        let done;
+        try {
+            done = flushForm({ reason: why, quiet: true });
+        } catch (e) {
+            P.running = false;
+            return;
+        }
+        Promise.resolve(done).then(function () { P.running = false; }, function () { P.running = false; });
+    }
+
+    /**
+     * The WanGP tab leaving the screen. Forge switches tabs by hiding the
+     * panel rather than by navigating, so there is no unload to hang this
+     * on - but an iframe in a hidden panel stops intersecting, which is the
+     * same fact stated in a way the browser will tell us.
+     */
+    function watchOnScreen(frame) {
+        if (!frame || typeof window.IntersectionObserver !== "function") { return; }
+        try {
+            if (P.observer) { P.observer.disconnect(); }
+            P.onScreen = null;
+            P.observer = new window.IntersectionObserver(function (entries) {
+                for (const entry of entries) {
+                    const showing = !!(entry && entry.isIntersecting);
+                    const was = P.onScreen;
+                    P.onScreen = showing;
+                    // Only the leaving edge, and only once it has been seen
+                    // on screen: a panel that was hidden all along has no
+                    // uncommitted anything to carry.
+                    if (was === true && !showing) { flushProactively("the WanGP tab left the screen"); }
+                }
+            });
+            P.observer.observe(frame);
+        } catch (e) { /* an engine without it loses the trigger, nothing else */ }
     }
 
     function queueRefusal(failureCode, detail, requestId) {
@@ -1589,6 +1747,7 @@ window.minipaintWanGP = (function () {
             return true;
         }
         S.frame = frame;
+        watchOnScreen(frame);
         if (!frame.dataset.minipaintWangp) {
             frame.dataset.minipaintWangp = "1";
             // The element's own load event, not the document's: a reload of
@@ -1847,6 +2006,7 @@ window.minipaintWanGP = (function () {
         queueAndConfirm: queueAndConfirm,
         trackQueue: trackQueue,
         flushForm: flushForm,
+        inheritSettings: inheritSettings,
         capabilities: capabilities,
         // One line into the same journal the handshake and the queries write
         // to, for the Canvas's half of a send. Text only; nothing is parsed.

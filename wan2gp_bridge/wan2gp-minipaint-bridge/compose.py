@@ -35,10 +35,21 @@ and reading it needs no session, mutates nothing, and works when no page has
 ever been open.
 
 So the order is: the process-wide recorded form, then the live session when
-one happens to exist and was asked for, then factory defaults. The third is
-a real fallback and is never silent: the job records that its base came from
-there and the queue says so, because a job that quietly ran at settings
-nobody chose is the failure this whole file exists to prevent.
+one happens to exist and was asked for, then the settings Wan2GP itself
+loads for the model. The third is a real fallback and is never silent: the
+job records that its base came from there and the queue says so, because a
+job that quietly ran at settings nobody chose is the failure this whole file
+exists to prevent.
+
+That third one is closer to the user's own settings than its name suggests
+- ``get_default_settings`` reads the model's saved settings file, which is
+what Wan2GP loads into the page when you switch to that model - but it is
+still not what is *on screen*, and a weight dragged since is not in it. The
+page closes that gap from the other side, ahead of any press, by committing
+its live form whenever inheritance is on; see the browser bridge's
+``flushProactively``. This end of it does not depend on that having
+happened, which is why it still works from a phone that has never opened
+the WanGP tab.
 """
 
 from __future__ import annotations
@@ -113,8 +124,8 @@ class Composer:
 
         if source == protocol.BASE_FACTORY and inherit:
             self._note(
-                f"compose {chosen[:40]}: no committed form for this model; composed from factory defaults. "
-                "The job records it and the queue says so."
+                f"compose {chosen[:40]}: nothing committed for this model yet; composed from the settings "
+                "WanGP itself loads for it. The job records it and the queue says so."
             )
         return {
             "ok": True,

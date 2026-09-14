@@ -715,10 +715,17 @@ def snapshot(page: str = "") -> dict:
         payload["jobs"] = outbox.jobs()
         payload["counts"] = outbox.counts()
         payload["unattended"] = outbox.unattended_enabled()
+        # Read here for the same reason ``unattended`` is: the page has to
+        # know whether the settings it is looking at are going to be the base
+        # of a job before anybody presses anything. See the WanGP bridge's
+        # proactive flush - it is the answer to "why did I have to generate
+        # once before my LoRA came through".
+        payload["inherit_settings"] = outbox.inherit_settings()
     except Exception:
         payload["jobs"] = []
         payload["counts"] = {}
         payload["unattended"] = False
+        payload["inherit_settings"] = False
     try:
         from .clipboard import executor
 

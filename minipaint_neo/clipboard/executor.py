@@ -529,8 +529,8 @@ def _stage_composing(job: dict) -> bool:
         return True
     if answer["source"] == wire.BASE_FACTORY:
         _journal(
-            f"job {job['job_id'][:8]}: no committed WanGP form for {answer['model_type'][:40]}; "
-            "composed from factory defaults and the job says so"
+            f"job {job['job_id'][:8]}: nothing committed in WanGP for {answer['model_type'][:40]}; "
+            "composed from the settings WanGP itself loads for that model, and the job says so"
         )
     return bool(outbox.transition(job["job_id"], outbox.WAITING_FOR_CARD, expect_revision=moved["revision"],
                                  model=answer["model"]))

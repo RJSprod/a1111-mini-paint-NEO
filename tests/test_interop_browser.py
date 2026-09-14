@@ -66,6 +66,12 @@ class FakeEventSource {
 }
 
 const JOBS = { list: [] };
+const flushes = [];
+
+// The WanGP side of the browser, with just enough of it to see the order a
+// press happens in. FLUSH_MODE is what this run's WanGP tab can manage.
+let FLUSH_MODE = "committed";
+global.window = global.window || {};
 
 global.window = {
     crypto: { getRandomValues: function (bytes) { for (let i = 0; i < bytes.length; i++) { bytes[i] = (i * 7 + 3) % 256; } return bytes; } },
@@ -76,6 +82,12 @@ global.window = {
     EventSource: FakeEventSource
 };
 global.EventSource = FakeEventSource;
+window.minipaintWanGP = {
+    flushForm: function () {
+        flushes.push({ at: calls.length });
+        return Promise.resolve(FLUSH_MODE === "absent" ? { ok: false } : { ok: true, flush: FLUSH_MODE });
+    }
+};
 global.document = {
     visibilityState: "visible",
     addEventListener: function (kind, fn) { (listeners[kind] = listeners[kind] || []).push(fn); },
@@ -103,7 +115,7 @@ global.fetch = function (url, options) {
     } else if (text.indexOf("/outbox/claim") !== -1) {
         payload = { ok: true, empty: true, pending: 0 };
     } else if (text.indexOf("/sync") !== -1) {
-        payload = { ok: true, server_epoch: EPOCH, revision: SYNC_REVISION, cursor: EPOCH + ":" + SYNC_REVISION, jobs: JOBS.list };
+        payload = { ok: true, server_epoch: EPOCH, revision: SYNC_REVISION, cursor: EPOCH + ":" + SYNC_REVISION, jobs: JOBS.list, unattended: UNATTENDED };
     } else if (text.indexOf("/outbox") !== -1) {
         payload = { ok: true, jobs: JOBS.list, running: true, counts: {} };
     }
@@ -118,6 +130,7 @@ const EPOCH = "abcdef0123456789";
 let SYNC_REVISION = 4;
 let SUBMIT_STATE = "admitted";
 let SUBMIT_EXECUTOR = "server";
+let UNATTENDED = true;
 
 new Function("window", "document", "fetch", "EventSource", "CustomEvent", "localStorage",
     fs.readFileSync(process.argv[2], "utf8"))(window, document, fetch, FakeEventSource, CustomEvent, localStorage);
@@ -130,6 +143,8 @@ function report(extra) {
     console.log(JSON.stringify(Object.assign({
         calls: calls.map(function (c) { return c.url.split("?")[0]; }),
         streams: streams.map(function (s) { return s.url.split("?")[0]; }),
+        flushes: flushes.slice(),
+        submitBodies: calls.filter(function (c) { return c.url.indexOf("/outbox/submit") !== -1; }).map(function (c) { return c.body; }),
         cursors: streams.map(function (s) { const at = s.url.indexOf("cursor="); return at === -1 ? "" : s.url.slice(at + 7); }),
         state: api.streamState()
     }, extra || {})));
@@ -139,12 +154,26 @@ function report(extra) {
 const MODE = process.argv[3] || "server";
 
 async function main() {
-    if (MODE === "browser") { SUBMIT_EXECUTOR = "browser"; SUBMIT_STATE = "pending"; }
+    if (MODE === "browser") { SUBMIT_EXECUTOR = "browser"; SUBMIT_STATE = "pending"; UNATTENDED = false; }
+    if (MODE === "noflush") { FLUSH_MODE = "absent"; }
+    // A press decides whether to flush from what the last snapshot said, so
+    // the browser-path run has to have taken one first - which is what a
+    // real page does long before anybody presses anything.
+    if (MODE === "browser") { await api.sync(); }
     const answer = await api.enqueue({ prompt: "a lighthouse" }, { wait: false });
 
     if (MODE === "server") {
         // Terminal frame -> the waiter is settled from the record.
         const waited = api.enqueue({ prompt: "another" }, { wait: true, timeoutMs: 2000 });
+        // A press now commits WanGP's live form before it submits, so the
+        // submission is no longer synchronous with the call. Wait for it:
+        // an event about a job cannot arrive before the job exists, and a
+        // test that fired one first would be asserting something that never
+        // happens.
+        const submits = function () { return calls.filter(function (c) { return c.url.indexOf("/outbox/submit") !== -1; }).length; };
+        for (let spin = 0; spin < 200 && submits() < 2; spin += 1) {
+            await new Promise(function (r) { setTimeout(r, 5); });
+        }
         JOBS.list = [{ job_id: "1111222233334444", state: "completed", executor: "server", revision: 3,
                        request: { request_id: "a".repeat(32) }, result: null, error: null, summary: {}, wangp: null }];
         for (const s of streams) { s.fire("job", { job_id: "1111222233334444", state: "completed", revision: 3 }, EPOCH + ":3"); }
@@ -223,6 +252,31 @@ def run() -> Results:
     r.check("the submission itself was one request and one acknowledgement",
             len([url for url in server["calls"] if url.endswith("/outbox/submit")]) == 2, str(server["calls"]))
 
+    # The settings flush. A job composes on the server from the form Wan2GP
+    # recorded, and that record is only written when the user commits the
+    # form - so a weight dragged and left alone is in the browser and nowhere
+    # else. The press closes that gap, and the order is the whole of it:
+    # committing after the submission would be committing after the compose
+    # it was meant to feed.
+    flushes = server.get("flushes") or []
+    bodies = [body for body in (server.get("submitBodies") or []) if body]
+    # "at" is how many fetches had happened when the flush was asked for.
+    # Zero means it came before the first submission, which is the ordering
+    # the whole feature depends on.
+    r.check("a press commits WanGP's live form before it submits, not after",
+            len(flushes) >= 1 and flushes[0]["at"] == 0, str(flushes))
+    r.check("and tells the server what it managed, so the base can be attributed",
+            bool(bodies) and bodies[0].get("settings_flush") == "committed", str(bodies[:1]))
+
+    absent = _run("noflush")
+    r.check("the harness drove a page whose WanGP cannot flush", absent is not None and "error" not in absent, str(absent)[:300])
+    if absent and "error" not in absent:
+        bodies = [body for body in (absent.get("submitBodies") or []) if body]
+        r.check("a WanGP that cannot flush does not stop the press: it is an optimisation, never a rule",
+                absent["answer"]["status"] == "pending" and absent["answer"]["job_id"], str(absent["answer"]))
+        r.check("and the job records that nothing was carried, rather than implying it was",
+                bool(bodies) and bodies[0].get("settings_flush") == "unavailable", str(bodies[:1]))
+
     browser = _run("browser")
     r.check("the harness drove the legacy path too", browser is not None and "error" not in browser, str(browser)[:300])
     if browser and "error" not in browser:
@@ -230,6 +284,8 @@ def run() -> Results:
         r.check("a browser-executed job is still claimed, because an already-loaded page must keep working",
                 len(claims) >= 1, str(browser["calls"]))
         r.check("and it opens no stream for one", browser["streams"] == [], str(browser["streams"]))
+        r.check("nor does it wait to commit WanGP's form: its own Add to Queue chain does that",
+                (browser.get("flushes") or []) == [], str(browser.get("flushes")))
 
     reset = _run("reset")
     r.check("the harness drove the reset cases", reset is not None and "error" not in reset, str(reset)[:300])

@@ -63,6 +63,25 @@ def _modules():
     return compatibility, compose, control, execution, ledger, protocol
 
 
+def _bridge_class():
+    """``plugin.MiniPaintBridge``, imported the way ``_modules`` imports the rest.
+
+    Separate because ``plugin`` reaches the receiver modules on import and
+    only the flush checks need it; everything else here works against the
+    control surface and the executor directly.
+    """
+    added = str(BRIDGE_DIR) not in sys.path
+    if added:
+        sys.path.insert(0, str(BRIDGE_DIR))
+    try:
+        import plugin
+
+        return plugin.MiniPaintBridge
+    finally:
+        if added and str(BRIDGE_DIR) in sys.path:
+            sys.path.remove(str(BRIDGE_DIR))
+
+
 # --------------------------------------------------------------- the stub --
 
 
@@ -146,6 +165,20 @@ class FakeService:
 
     def record_model_form(self, model_type, values):
         self.forms[model_type] = dict(values)
+
+
+class _Component:
+    """As much of a Gradio component as ``Host.is_component`` looks at.
+
+    It checks for ``_id`` and ``get_config`` and nothing else, on purpose: a
+    value that is merely *named* like a component takes WanGP's whole UI
+    build into safe mode when it reaches an event.
+    """
+
+    _id = 4242
+
+    def get_config(self):
+        return {}
 
 
 class FakeHost:
@@ -644,6 +677,68 @@ def unavailable_checks(r: Results) -> None:
             refused == protocol.SERVICE_UNAVAILABLE, refused)
 
 
+def flush_checks(r: Results) -> None:
+    """Committing the page's live form: a write, and never a silent one.
+
+    A job composes from the form Wan2GP recorded process-wide, and that is
+    only written when the user commits one - Generate, Add to Queue in WanGP
+    itself, a LoRA set applied, a model switched. A weight dragged and then
+    left alone is in the browser and nowhere else, so the flush exists to let
+    a page hand those values over before it walks away.
+
+    What is asserted is the two things that make it safe rather than the fact
+    that it writes: that a probe does not write (or every poll would restart
+    the wait it exists to end), and that a page mid settings-load is refused
+    rather than flushed - ``ignore_save_form`` is a one-shot suppression that
+    a settings load sets so the model switch behind it cannot clobber what was
+    just loaded, and a flush that popped it would hand that clobber to the
+    user as their own press.
+    """
+    compatibility, _compose, _control, _execution, _ledger, protocol = _modules()
+    scratch = tempfile.mkdtemp(prefix="minipaint-flush-")
+    environ = _environ(scratch)
+    gen = {"queue": [], "in_progress": False}
+    service = FakeService(gen)
+    service.forms["t2v"] = {"steps": 30, "loras_multipliers": "0.5"}
+    gen["model_type"] = "t2v"
+    host = compatibility.Host(FakeHost({"service_for": lambda *_a: service, "get_gen_info": lambda state: state["gen"]}))
+    compat = compatibility.Compatibility(host=host, environ=environ)
+    compat.declare_globals()
+    # The bridge object itself, with its components resolved the way a real
+    # page resolves them: ``save_form_trigger`` is handed over by variable
+    # name like every other one, which is the whole reason it needs no elem_id.
+    bridge = _bridge_class()(host=host, environ=environ)
+    bridge.declare()
+    bridge.compat.host.accept_components({"save_form_trigger": _Component()})
+    bridge.resolve()
+
+    before = compat.recorded_fingerprint(service, "t2v")
+    r.check("a recorded form has a fingerprint, so a flush can be observed rather than assumed", len(before) == 32, before)
+    service.forms["t2v"] = {"steps": 30, "loras_multipliers": "0.9"}
+    r.check("and the fingerprint moves when the recorded form does",
+            compat.recorded_fingerprint(service, "t2v") != before)
+    r.check("a model with nothing recorded has no fingerprint rather than a made-up one",
+            compat.recorded_fingerprint(service, "nothing-recorded") == "")
+
+    answer, writes = bridge.flush({}, {compatibility.SESSION_STATE: {"gen": gen}})
+    r.check("a press asks WanGP to commit its own form",
+            answer["flush"] == protocol.FLUSH_REQUESTED and compatibility.SAVE_FORM_TRIGGER in (writes or {}), str(answer))
+    r.check("by writing the trigger WanGP already wires to save_inputs, not by reading ninety components",
+            list((writes or {}).keys()) == [compatibility.SAVE_FORM_TRIGGER], str(writes))
+
+    answer, writes = bridge.flush({"probe": True}, {compatibility.SESSION_STATE: {"gen": gen}})
+    r.check("a probe writes nothing, so polling cannot restart the wait it is ending",
+            writes is None, str(writes))
+
+    live = {compatibility.SESSION_STATE: {"gen": gen, "ignore_save_form": True}}
+    suppressed, writes = bridge.flush({}, live)
+    r.check("a page mid settings-load is refused rather than flushed",
+            suppressed["flush"] == protocol.FLUSH_SUPPRESSED and writes is None, str(suppressed))
+    r.check("and the suppression is left for WanGP's own save to consume, not eaten by the refusal",
+            live[compatibility.SESSION_STATE].get("ignore_save_form") is True,
+            str(live[compatibility.SESSION_STATE]))
+
+
 def run() -> Results:
     r = Results("wangp control")
     identity_checks(r)
@@ -655,6 +750,7 @@ def run() -> Results:
     model_checks(r)
     cancellation_checks(r)
     unavailable_checks(r)
+    flush_checks(r)
     return r
 
 

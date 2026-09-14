@@ -254,7 +254,18 @@ A server-executed job's document also carries: `executor`, `revision` (bumped by
 durable transition), `stage`, `execution_id`, `execution` (the child's last word),
 `snapshot` (the frozen settings — `public()` sends the source and the count, never the
 settings themselves), `inputs` (slot → pinned id), `generated_files` (kept for a later
-viewer; `public()` sends only `generated_count`), `child_instance` and `inputs_released`.
+viewer; `public()` sends only `generated_count`), `child_instance`, `inputs_released` and
+`settings_flush`.
+
+`settings_flush` is what the pressing page managed to do about WanGP's live form before
+submitting — one of `committed`, `unchanged`, `suppressed`, `unavailable`, or empty for a
+press that never tried. It is provenance, not permission: it changes nothing about how the
+job runs, and it crosses to a screen because it is one of five fixed words. Together with
+the snapshot's `source` it answers the only question a reader of the queue can otherwise
+not ask — whether the base this job ran at is the one its owner was looking at. A base
+composed from the record after a successful flush is recorded as `flushed_form` rather than
+`recorded_form`; both came out of `load_model_form`, and nothing downstream could tell them
+apart otherwise.
 
 The rules: one lease at a time across every page; the line keeps press
 order - its head is the oldest job not yet handed out, and while that head

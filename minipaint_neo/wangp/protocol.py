@@ -52,11 +52,16 @@ QUEUE_STATUS = "WANGP_QUEUE_STATUS"
 #: Protocol 5: where the tasks this page admitted are in WanGP's queue now.
 QUEUE_TRACK = "WANGP_QUEUE_TRACK"
 QUEUE_TRACKED = "WANGP_QUEUE_TRACKED"
+#: Protocol 6: commit this page's live form so a job composed later - on the
+#: server, with this page closed - runs at the settings that were on screen
+#: when the button was pressed. See the FLUSH_* outcomes below.
+FORM_FLUSH = "WANGP_FORM_FLUSH"
+FORM_FLUSHED = "WANGP_FORM_FLUSHED"
 
 #: What the parent page may send into the iframe.
-TO_BRIDGE = frozenset({HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK})
+TO_BRIDGE = frozenset({HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH})
 #: What the iframe may send out to the parent page.
-TO_PARENT = frozenset({READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED})
+TO_PARENT = frozenset({READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED})
 
 #: Stable logical receiver ids. The bridge maps these onto whatever the
 #: installed WanGP calls them; MiniPaint only ever sees these.
@@ -741,13 +746,57 @@ EXEC_TERMINAL = (EXEC_DONE, EXEC_FAILED, EXEC_CANCELLED, EXEC_UNKNOWN)
 EXEC_OPEN = (EXEC_ACCEPTED, EXEC_QUEUED, EXEC_RUNNING)
 
 #: Where a composed settings base came from. Recorded on the job and shown,
-#: because a job that silently ran at factory settings when the user had
+#: because a job that silently ran at settings nobody chose when the user had
 #: configured something else is the failure the whole compose exists to
 #: prevent.
 BASE_RECORDED = "recorded_form"
 BASE_SESSION = "session"
 BASE_FACTORY = "factory_defaults"
-BASE_SOURCES = (BASE_RECORDED, BASE_SESSION, BASE_FACTORY)
+#: Protocol 6: a recorded form the composing page committed on purpose, at the
+#: moment of the press, rather than whenever it last happened to commit one.
+#: Same seam as BASE_RECORDED - it is still ``load_model_form`` that is read -
+#: and a separate source only because the job can then say which it got, and a
+#: reader of the queue can tell "the settings you were looking at" from "the
+#: settings WanGP had lying around".
+BASE_FLUSHED = "flushed_form"
+BASE_SOURCES = (BASE_RECORDED, BASE_FLUSHED, BASE_SESSION, BASE_FACTORY)
+
+#: Flushing: how a page hands its live, uncommitted settings to a job that
+#: will run with no page at all.
+#:
+#: Wan2GP records a per-model snapshot of the committed form process-wide, and
+#: that is what a server-side compose reads. It is only written when the user
+#: does something that commits the form - pressing Generate, adding to the
+#: queue in WanGP itself, applying a LoRA set, switching model. A slider moved
+#: and then left alone is in the browser and nowhere else, so a job composed
+#: from the record would quietly run at the previous value.
+#:
+#: A flush closes that gap from the only place the live values exist: the page.
+#: It asks WanGP to commit its own form - WanGP's own chain, WanGP's own full
+#: input list - and then waits for the recorded form to settle. It is an
+#: optimisation and never a rule: no page, no WanGP, or a flush that times out
+#: all fall through to the recorded form exactly as before.
+FLUSH_REQUESTED = "requested"
+#: The record moved: the page had uncommitted values and now the job will get
+#: them.
+FLUSH_COMMITTED = "committed"
+#: The record did not move within the wait, which is the ordinary answer when
+#: the live form already matched it. Composing proceeds; there was nothing to
+#: carry.
+FLUSH_UNCHANGED = "unchanged"
+#: No page, no trigger on this build, or WanGP is not up. Composing proceeds
+#: from the recorded form, which is what it did before flushing existed.
+FLUSH_UNAVAILABLE = "unavailable"
+#: The page declined to flush because WanGP had asked for the next commit to
+#: be skipped. See ``ignore_save_form``: it is a one-shot suppression that a
+#: settings load sets so the model switch behind it cannot clobber what was
+#: just loaded, and a flush that consumed it would hand that clobber to the
+#: user as their own press.
+FLUSH_SUPPRESSED = "suppressed"
+FLUSH_OUTCOMES = (FLUSH_REQUESTED, FLUSH_COMMITTED, FLUSH_UNCHANGED,
+                  FLUSH_UNAVAILABLE, FLUSH_SUPPRESSED)
+#: The outcomes that mean the recorded form is the page's current one.
+FLUSH_FRESH = (FLUSH_COMMITTED, FLUSH_UNCHANGED)
 
 #: The media slots a submission may fill, and the settings keys each one
 #: lands in. The keys are WanGP's; they are named in compatibility.py on the

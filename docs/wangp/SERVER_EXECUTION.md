@@ -136,10 +136,78 @@ across sessions. It is not factory defaults — it is what the user last
 committed — and reading it needs no session, mutates nothing, and works when
 no page has ever been open.
 
-Order: **recorded form → a named live session (optimisation only) → factory
-defaults**. The third is recorded on the job and shown in the queue with a
-"factory settings" badge, because a job that silently ran at settings nobody
-chose is the failure this whole path exists to prevent.
+Order: **recorded form → a named live session (optimisation only) → the
+model's defaults**. The third is recorded on the job and shown in the queue
+with a "default settings" badge, because a job that silently ran at settings
+nobody chose is the failure this whole path exists to prevent.
+
+That third source is *not* factory values in the usual case, and the badge
+used to overstate it. `get_default_settings` reads the model's own
+`<model_type>_settings.json` — the file WanGP's **Save Settings** button
+writes — and only synthesises factory values when no such file exists. So a
+job that falls all the way through still runs at the user's saved defaults
+for that model, which is also why a genuinely cold child (Forge just started,
+the WanGP tab never opened, nothing recorded) is far less bad than it sounds.
+
+### Flushing: the settings that were on screen
+
+The recorded form is only written when the user *commits* one. Wan2GP fires
+`save_inputs(target="state")` — which ends in
+`service.record_model_form(...)` — from pressing Generate, from Add to Queue
+inside WanGP, from applying or saving a LoRA set, from switching model, from
+switching image-mode tab, from loading a settings file, and from a handful of
+other actions. It does **not** fire on an ordinary widget change; the one
+blanket auto-save on tab-switch is commented out in `wgp.py`.
+
+So a LoRA weight dragged and then left alone lives in the browser and nowhere
+else, and a press from the Clipboard tab would quietly compose at the previous
+value. The only place those values exist is the page, so that is where the gap
+is closed — but by **writing, not reading**:
+
+```
+browser              bridge                     Wan2GP
+  │  flush ─────────▶ writes save_form_trigger
+  │                                        └─▶ validate_wizard_prompt
+  │                                            save_inputs(target="state")
+  │                                            service.record_model_form(...)
+  │  probe ─────────▶ fingerprint of load_model_form(model_type)
+  │  …until it moves, or the budget runs out
+  │  submit ────────▶ outbox
+                       └─▶ compose reads the record, now current
+```
+
+The alternative — put the whole form on the bridge event's inputs and read the
+values back — works and is the worse trade. It is about ninety components in
+`save_inputs`' signature order, this bridge would then own a copy of that
+contract, and one insertion upstream would have it reading the reference list
+as the prompt type with nothing looking wrong. That is the hazard
+`state_components` already warns about at eighteen. Writing one trigger is one
+component of coupling, and WanGP commits its own form with its own full input
+list.
+
+Two things make it safe rather than merely clever:
+
+* **A probe never writes.** The commit happens after the call that asked for
+  it returns, so a flush cannot observe its own result; the caller polls a
+  fingerprint of the recorded form instead. A poll that wrote would restart
+  the wait it exists to end.
+* **`ignore_save_form` is left alone.** It is a one-shot suppression a
+  settings load sets so the model switch behind it cannot clobber what was
+  just loaded, and `save_inputs` pops it. A flush that popped it first would
+  let that clobber happen and make it look like the user's own press did it,
+  so a page carrying the flag is refused (`suppressed`) rather than flushed.
+
+It is an **optimisation and never a rule**. No WanGP tab, a bridge without the
+trigger, a page mid settings-load, or a wait that runs out all mean the job
+composes from the recorded form — which is exactly what it did before any of
+this existed. The job records what the page managed (`settings_flush`) and
+compose turns that into the base's `source`, so `flushed_form` and
+`recorded_form` can be told apart by a reader of the queue even though both
+came out of `load_model_form`.
+
+The one thing it cannot do is work with no page at all: a truly cold start has
+no Gradio session, so there is no live form to commit and the saved defaults
+above are what the job gets.
 
 Two things the job owns and the base does not: the prompt, and `client_id`.
 The base carries the *composing page's* client id, WanGP routes a
@@ -277,11 +345,28 @@ recomputation, `client_id` substitution, restart reconciliation in all three
 outcomes, input pinning across every sweep, and the write discipline that
 stops a long stage clobbering a cancel.
 
+**Read at source afterwards, against `deepbeepmeep/Wan2GP` at `3bd5e0b7`**,
+when the compose path was questioned directly. Each of these had been an
+inference and is now a citation:
+
+| claim | where |
+| --- | --- |
+| `save_inputs(target="state")` ends in `service.record_model_form(model_type, cleaned_inputs)` | `wgp.py:10625-10629` |
+| the reader is `load_model_form`, deep-copied under a lock, needing no session | `shared/deepy/hybrid.py:68-76` |
+| `prepare_inputs_dict(target="state")` keeps `activated_loras` and `loras_multipliers` | `wgp.py:9673-9693` |
+| the session path is dead on this build — `session_states` does not exist | zero occurrences in `wgp.py` |
+| plugins are handed components **by Python variable name**, from the generator tab's entire local scope | `wgp.py:13563,13568` → `shared/utils/plugins.py:1620-1631` |
+| `save_form_trigger` is in that scope and its `.change` runs the save chain | `wgp.py:12824`, `wgp.py:13166-13176` |
+| writing a trigger component as an event *output* fires its `.change` | WanGP does it itself at `wgp.py:13230-13232` |
+| `ignore_save_form` is a one-shot flag set only by settings loads that switch model | `wgp.py:9521,10177,10393`, popped at `10601` |
+| the third compose source is the model's **saved** settings file, not factory values | `wgp.py:3243-3252` |
+
 **Still inferences, and what would settle each:**
 
 | claim | how to settle it |
 | --- | --- |
 | the process-wide service is reachable from a server-side entry point with no browser session | one hour inside the child: obtain the service without a request, enqueue one task, watch one worker run it. **This is the load-bearing unknown** — everything in section 3 depends on it, and `hello` reports `service: false` and refuses server execution if it is not. |
+| a flush lands within its budget on a loaded page | press with a WanGP tab open and a slider moved; the job should record `settings_flush: committed` and a `flushed_form` base. The budget is 2.5 s and a miss is not a failure — it composes from the record — so this is a tuning question, not a correctness one. |
 | alternating between the shared-queue path and ordinary WebUI use leaves `wgp`'s module state good | alternate several times on a real install, not once |
 | `preload_model_policy = "U"` does not fire on this path | check it on the target install; if it does, residency is defeated and the setting is the fix |
 | the enhancer/WanGP VRAM handover is needed at all | measure a cold enhanced chain with GPU memory sampled at each stage boundary. WanGP-then-enhancer is the protected direction; enhancer-then-WanGP is not, and that is the boundary `enhance.release_runtime()` targets |

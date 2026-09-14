@@ -102,6 +102,8 @@ def configuration(theme_css: str = "") -> dict:
             "queueStatus": protocol.QUEUE_STATUS,
             "queueTrack": protocol.QUEUE_TRACK,
             "queueTracked": protocol.QUEUE_TRACKED,
+            "formFlush": protocol.FORM_FLUSH,
+            "formFlushed": protocol.FORM_FLUSHED,
         },
         "inbound": sorted(protocol.TO_BRIDGE),
         "receiverIds": list(protocol.RECEIVER_IDS),
@@ -537,6 +539,7 @@ __MINIPAINT_FRAME_WRAPPER__
     if (operation === "queue") { return CONFIG.types.queueResult; }
     if (operation === "confirm") { return CONFIG.types.queueStatus; }
     if (operation === "track") { return CONFIG.types.queueTracked; }
+    if (operation === "flush") { return CONFIG.types.formFlushed; }
     return "";
   }
 
@@ -784,6 +787,18 @@ __MINIPAINT_FRAME_WRAPPER__
       submit({
         op: "confirm", request_id: message.request_id, channel_id: channelId,
         queue: { request_id: wantedId, bridge_session: isToken(message.payload.bridge_session) ? message.payload.bridge_session : "" }
+      });
+      return;
+    }
+
+    if (message.type === CONFIG.types.formFlush) {
+      // Two shapes, one operation. A press asks WanGP to commit the live
+      // form; a probe only asks where the recorded form is now. The probe
+      // must not write, or each poll would restart the wait it exists to
+      // end - so the flag is passed through rather than inferred.
+      submit({
+        op: "flush", request_id: message.request_id, channel_id: channelId,
+        probe: !!(message.payload && message.payload.probe)
       });
       return;
     }

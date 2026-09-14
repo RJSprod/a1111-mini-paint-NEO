@@ -602,8 +602,16 @@ def _submit(raw: dict) -> dict:
     # browser-driven behaviour, or one that wants the job run whether or not
     # anybody is looking - and otherwise the setting decides.
     executor = raw.get("executor") if raw.get("executor") in _outbox().EXECUTORS else None
+    # Provenance, not permission: what the page managed to do about WanGP's
+    # live form before it got here. Filtered against the known outcomes so a
+    # caller cannot write a sentence of its own into the job's record, and
+    # believed rather than checked because there is nothing here that could
+    # check it - the fact it reports happened in another process.
+    flushed = raw.get("settings_flush")
+    flushed = flushed if flushed in protocol.FLUSH_OUTCOMES else ""
     return {"job": _outbox().submit(raw.get("request"), raw.get("page"), origin, enhance=enhance,
-                                    model=raw.get("model"), executor=executor)}
+                                    model=raw.get("model"), executor=executor,
+                                    settings_flush=flushed)}
 
 
 def _claim(raw: dict) -> dict:

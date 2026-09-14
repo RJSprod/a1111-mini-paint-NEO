@@ -675,6 +675,54 @@ def event_loop_checks(r: Results, clock) -> None:
         _restore(monkey)
 
 
+def flush_attribution_checks(r: Results, clock) -> None:
+    """"What you were looking at" and "what WanGP had recorded" are different.
+
+    Both come out of ``load_model_form``, so nothing downstream can tell them
+    apart by inspection - the difference is whether the page committed its
+    live form on purpose before it pressed. The job carries what the page
+    managed, and compose turns that into the source it records, so a reader
+    of the queue can tell a job that ran at the settings on screen from one
+    that ran at whatever WanGP happened to have kept.
+    """
+    _setup(clock)
+    runtime = FakeRuntime()
+    runtime.state = FakeRuntime.READY
+    runtime.instance_id = "child-one"
+    child = FakeChild(clock)
+    monkey = []
+    _install(monkey, runtime)
+    def source_for(prompt, flush):
+        """One press, driven to a generated file. Returns its recorded base."""
+        job = outbox.submit(_request(prompt=prompt), PAGE, settings_flush=flush)
+        _run(child, runtime)
+        child.finish(job["execution_id"])
+        _run(child, runtime)
+        return outbox.get(job["job_id"])["snapshot"]["source"]
+
+    try:
+        control.use_transport(child)
+        r.check("a job whose page committed its live form composes from a flushed base",
+                source_for(PROMPT, wire.FLUSH_COMMITTED) == wire.BASE_FLUSHED)
+        r.check("one whose page never got to still composes, from the recorded form, saying so",
+                source_for("another", "") == wire.BASE_RECORDED)
+        r.check("a flush WanGP refused is not dressed up as one that happened",
+                source_for("a third", wire.FLUSH_SUPPRESSED) == wire.BASE_RECORDED)
+        r.check("nor is one that ran out of time without the record moving",
+                source_for("a fourth", wire.FLUSH_UNAVAILABLE) == wire.BASE_RECORDED)
+        r.check("every one of them reached WanGP regardless - a flush is an optimisation, never a gate",
+                len(child.submissions) == 4, str(len(child.submissions)))
+
+        # Factory is still factory. A press that flushed against a WanGP with
+        # nothing recorded has carried nothing, and must not claim otherwise.
+        child.source = wire.BASE_FACTORY
+        r.check("a flush against a WanGP with nothing recorded is still factory, not a flushed base",
+                source_for("a fifth", wire.FLUSH_COMMITTED) == wire.BASE_FACTORY)
+    finally:
+        control.use_transport(None)
+        _restore(monkey)
+
+
 def privacy_checks(r: Results, clock) -> None:
     """Nothing this path writes down carries a prompt or a path."""
     scratch = _setup(clock)
@@ -856,6 +904,7 @@ def run() -> Results:
     cancellation_checks(r, clock)
     event_checks(r, clock)
     event_loop_checks(r, clock)
+    flush_attribution_checks(r, clock)
     privacy_checks(r, clock)
     migration_checks(r, clock)
     enhanced_checks(r, clock)

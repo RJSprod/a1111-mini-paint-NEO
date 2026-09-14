@@ -576,6 +576,12 @@ def _normalize(raw: typing.Any) -> typing.Optional[dict]:
         #: re-attaching and admitting that nobody can say.
         "child_instance": str(raw.get("child_instance") or "")[:64],
         "inputs_released": bool(raw.get("inputs_released")),
+        #: What the pressing page managed to do about WanGP's live form. Not
+        #: an instruction and not a state - only the provenance of the base
+        #: this job will compose at, kept so the queue can tell "the settings
+        #: you were looking at" from "the settings WanGP had recorded".
+        "settings_flush": (str(raw.get("settings_flush") or "")
+                           if raw.get("settings_flush") in protocol.FLUSH_OUTCOMES else ""),
     }
 
 
@@ -636,6 +642,11 @@ def public(job: typing.Mapping[str, typing.Any]) -> dict:
         # The count crosses; the paths do not. Section 6.4's rule holds for a
         # job document read over a route exactly as it does for an event.
         "generated_count": len(job.get("generated_files") or []),
+        # One of five fixed words, so it carries nothing of the user's and
+        # crosses freely. It is the other half of the snapshot's ``source``:
+        # together they say whether the base this job ran at is the one its
+        # owner was looking at when they pressed.
+        "settings_flush": job.get("settings_flush", ""),
     }
 
 
@@ -688,6 +699,7 @@ def _blank(job_id: str, now: float) -> dict:
         "generated_files": [],
         "child_instance": "",
         "inputs_released": False,
+        "settings_flush": "",
     }
 
 
@@ -907,6 +919,7 @@ def submit(
     enhance: typing.Optional[bool] = None,
     model: typing.Any = None,
     executor: typing.Optional[str] = None,
+    settings_flush: str = "",
 ) -> dict:
     """Append a job. The request is normalised here, so a bad one is refused
     before it is stored.
@@ -934,6 +947,13 @@ def submit(
         pinned at admission, because the handles it was composed from - a
         staging token, an asset the user may rename - belong to somebody
         else's lifetime and this job may outlive both.
+
+    ``settings_flush`` is what the pressing page managed to do about WanGP's
+    live form before it got here - see ``protocol.FLUSH_*``. It changes
+    nothing about how the job runs; it is recorded so that the base the job
+    composes at can be attributed honestly. "The settings you were looking
+    at" and "the settings WanGP had recorded" are different promises, and a
+    queue that cannot tell them apart cannot keep either.
     """
     from .. import interop
 
@@ -960,6 +980,7 @@ def submit(
     try:
         return _store(
             normalised, page_id, origin, who, block, wanted, planned, owned, enhancer,
+            settings_flush if settings_flush in protocol.FLUSH_OUTCOMES else "",
         )
     except Exception:
         if owned:
@@ -1013,6 +1034,7 @@ def _store(
     planned: typing.Optional[dict],
     owned: typing.Dict[str, typing.Any],
     enhancer: typing.Any,
+    settings_flush: str = "",
 ) -> dict:
     """The stored half of ``submit``: the document, under the lock."""
     server = who == EXECUTOR_SERVER
@@ -1034,6 +1056,7 @@ def _store(
             "execution_id": secrets.token_hex(16) if server else "",
             "inputs": _normalize_inputs(owned),
             "stage": STAGE_TEXT[ADMITTED] if server else "",
+            "settings_flush": settings_flush,
         })
         if planned is not None:
             asked = enhancer.submit(normalised["prompt"], planned)

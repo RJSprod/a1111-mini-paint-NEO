@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
+import json
 import os
 import typing
 
@@ -148,6 +150,15 @@ ADD_TO_QUEUE_TRIGGER = "add_to_queue_trigger"
 #: Protocol 4: the hidden text whose change runs WanGP's generate chain.
 GENERATE_TRIGGER = "generate_trigger"
 GALLERY_TAB = "gallery_tab"
+#: Protocol 6: the hidden text whose change makes WanGP commit its own live
+#: form. Wan2GP wires it in ``generate_media_tab`` as
+#: ``set_save_form_event(save_form_trigger.change)``, which runs
+#: ``validate_wizard_prompt`` and then ``save_inputs(target="state")`` over the
+#: *whole* form - and ``save_inputs`` ends in
+#: ``service.record_model_form(model_type, cleaned_inputs)``, the process-wide
+#: snapshot a server-side compose reads. Writing it is therefore how a page
+#: hands its live settings to a job that will run with no page at all.
+SAVE_FORM_TRIGGER = "save_form_trigger"
 
 # VERIFY ON A REAL INSTALL (section 49.1): every elem_id below was taken from
 # WanGP's documented media-input naming and from the receiver example in
@@ -288,6 +299,13 @@ COMPONENTS: typing.Tuple[ComponentSpec, ...] = (
                   known_for="Wan2GP: hidden gr.Text declared beside add_to_queue_trigger; its change generates"),
     ComponentSpec(key=GALLERY_TAB, candidates=("current_gallery_tab",), kind="state", mandatory=False,
                   known_for="Wan2GP: which output gallery is showing; read by process_prompt_and_add_tasks"),
+    # It carries no elem_id, and does not need one: a plugin is handed the
+    # generator tab's whole local scope by variable name
+    # (``app.run_component_insertion(locals_dict)``), and this is written as a
+    # Gradio event *output* rather than through the DOM - the same way WanGP's
+    # own post-processing buttons write ``generate_trigger`` to start a run.
+    ComponentSpec(key=SAVE_FORM_TRIGGER, candidates=("save_form_trigger",), kind="text", mandatory=False,
+                  known_for="Wan2GP: hidden gr.Text; its change commits the live form process-wide"),
 )
 
 COMPONENTS_BY_KEY = {spec.key: spec for spec in COMPONENTS}
@@ -1000,13 +1018,20 @@ class Compatibility:
         return [(key, self.resolution.component(key)) for key in keys if self.resolution.component(key) is not None]
 
     def queue_components(self) -> typing.List[typing.Tuple[str, typing.Any]]:
-        """The components only a queue request writes, as (key, component).
+        """The components a receiver never writes but an operation does.
 
         The tail of the bridge event's outputs, after the receivers and the
         switch components, in this fixed order. Only the ones this build
         resolved, for the reason ``switch_components`` gives.
+
+        ``SAVE_FORM_TRIGGER`` is last and is not a queue component: a flush
+        writes it and nothing else does. It lives here because this is the
+        block of the event's outputs that exists to be written by name, and
+        giving it a fourth block of its own would buy nothing but another
+        ordering to keep in step.
         """
-        keys = (PROMPT, WIZARD_PROMPT, CLIENT_ID, ADD_TO_QUEUE_TRIGGER, GENERATE_TRIGGER)
+        keys = (PROMPT, WIZARD_PROMPT, CLIENT_ID, ADD_TO_QUEUE_TRIGGER, GENERATE_TRIGGER,
+                SAVE_FORM_TRIGGER)
         return [(key, self.resolution.component(key)) for key in keys if self.resolution.component(key) is not None]
 
     def queue_missing(self) -> typing.List[str]:
@@ -1625,6 +1650,31 @@ class Compatibility:
             if isinstance(found, dict) and found:
                 return copy.deepcopy(found)
         return None
+
+    def recorded_fingerprint(self, service: typing.Any, model_type: str) -> str:
+        """A short, stable digest of the recorded form, or "" if there is none.
+
+        THE ONLY WAY A FLUSH CAN BE OBSERVED RATHER THAN ASSUMED.
+
+        Writing ``save_form_trigger`` starts a Gradio chain that runs *after*
+        the event which wrote it has returned, so no single call can both ask
+        for the commit and see its result. Nothing in Wan2GP counts these
+        commits either - ``record_model_form`` just replaces a dict - so the
+        observable has to be built here, out of the recorded form itself.
+
+        Hashed rather than compared field by field because the caller only
+        ever asks one question ("has it changed since I asked you to flush"),
+        and because a digest cannot accidentally carry a prompt or a path back
+        to a browser the way a settings diff could.
+        """
+        recorded = self.recorded_form(service, model_type)
+        if not recorded:
+            return ""
+        try:
+            canonical = json.dumps(recorded, sort_keys=True, default=repr)
+        except Exception:
+            return ""
+        return hashlib.sha256(canonical.encode("utf-8", "replace")).hexdigest()[:32]
 
     def current_model_type(self, service: typing.Any = None) -> str:
         """The model this child is on, with no page to ask.

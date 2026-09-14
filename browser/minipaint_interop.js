@@ -602,6 +602,44 @@ window.minipaintInterop = (function () {
     }
 
     /**
+     * Hand WanGP's live settings to a job before the server composes it.
+     *
+     * The job's base is the form Wan2GP recorded for the model, and that is
+     * only written when the user *commits* the form - Generate, Add to Queue
+     * inside WanGP, applying a LoRA set, switching model. A weight dragged
+     * and then left alone lives in the browser and nowhere else, so a press
+     * from this tab would quietly compose at the previous value.
+     *
+     * The only place those values exist is the page, so this is the only
+     * place the gap can be closed - and it is closed by asking WanGP to
+     * commit its own form rather than by reading it. Awaited before the
+     * submission because the server composes from the record, so the record
+     * has to be current first.
+     *
+     * Never load-bearing, in any of its outcomes: no WanGP tab, a bridge that
+     * does not offer it, a page mid settings-load, or a wait that runs out
+     * all mean the job composes from the recorded form, which is what it did
+     * before flushing existed.
+     */
+    async function flushSettings() {
+        const bridge = window.minipaintWanGP;
+        // The legacy path pays nothing for this. A browser-executed job is
+        // run by driving the live form and pressing WanGP's own Add to
+        // Queue, whose chain commits the form itself - so flushing first
+        // would buy a wait and nothing else. Unknown means flush: the
+        // unattended queue is the default, and latency is the cheaper wrong
+        // guess of the two.
+        if (stream.unattended === false) { return ""; }
+        if (!bridge || typeof bridge.flushForm !== "function") { return "unavailable"; }
+        try {
+            const answer = await bridge.flushForm();
+            return (answer && answer.flush) || "unavailable";
+        } catch (e) {
+            return "unavailable";
+        }
+    }
+
+    /**
      * Add the live WanGP page - with these overrides, if any - to its queue.
      * The request becomes a job in the server's outbox at once; this page
      * runs it when the server says it is its turn; the promise resolves when
@@ -616,15 +654,21 @@ window.minipaintInterop = (function () {
      * switch decides. The model the page is on travels with the request so
      * the server can choose the H3 variant; pass {model} to say it yourself.
      */
-    function enqueue(request, options) {
+    async function enqueue(request, options) {
         const normalised = normaliseRequest(request);
-        if (!normalised.ok) { return Promise.resolve(normalised); }
+        if (!normalised.ok) { return normalised; }
         const wait = !(options && options.wait === false);
         const timeoutMs = options && Number.isFinite(options.timeoutMs) ? options.timeoutMs : ENQUEUE_WAIT_MS;
         const body = { request: normalised.request, page: pageId(), origin: "api" };
         if (options && typeof options.enhance === "boolean") { body.enhance = options.enhance; }
         const known = options && options.model && typeof options.model === "object" ? model({ model: options.model }) : liveModel();
         if (known) { body.model = known; }
+        // Before the submission, not after: the server composes from the
+        // recorded form and the whole point is that it be current when it
+        // does. ``false`` is how a caller that has already flushed - or one
+        // that means to compose against the recorded form deliberately -
+        // opts out.
+        body.settings_flush = (options && options.flush === false) ? "" : await flushSettings();
         return post(OUTBOX_SUBMIT_ROUTE, JSON.stringify(body)).then(function (answer) {
             if (!answer.ok || !answer.job) { return refusal(code(answer.code) || "REQUEST_INVALID", normalised.request.request_id, answer.message); }
             const job = answer.job;
@@ -800,7 +844,11 @@ window.minipaintInterop = (function () {
 
     const stream = {
         source: null, cursor: "", epoch: "", lastFrameAt: 0, watchdog: 0, lifecycle: false,
-        retry: STREAM_RETRY_MS, wanted: false, syncing: null, buffered: [], jobs: new Map()
+        retry: STREAM_RETRY_MS, wanted: false, syncing: null, buffered: [], jobs: new Map(),
+        // null until a snapshot says. Whether this Forge runs the queue
+        // unattended decides whether a press needs to commit WanGP's live
+        // form first; see flushSettings.
+        unattended: null
     };
 
     /** Open the one stream this page has, or do nothing if it already has it.
@@ -924,6 +972,10 @@ window.minipaintInterop = (function () {
                 if (!payload || payload.ok !== true) { return payload || { ok: false }; }
                 stream.epoch = String(payload.server_epoch || "");
                 stream.cursor = String(payload.cursor || "");
+                // Read here rather than asked for separately: a press needs
+                // to know whether the job it is about to make will be run by
+                // the server, and the snapshot already says.
+                if (typeof payload.unattended === "boolean") { stream.unattended = payload.unattended; }
                 stream.jobs.clear();
                 for (const job of Array.isArray(payload.jobs) ? payload.jobs : []) {
                     stream.jobs.set(job.job_id, { job_id: job.job_id, state: job.state, stage: job.stage || "", revision: job.revision || 0 });

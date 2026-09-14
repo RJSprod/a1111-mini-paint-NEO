@@ -447,12 +447,19 @@ def outbox_html(jobs: typing.Sequence[dict], page: str) -> str:
         snapshot = job.get("snapshot") or {}
         if snapshot.get("source") == protocol.BASE_FACTORY:
             # The one thing about a snapshot that must never be silent. A job
-            # that ran at factory settings when its owner had configured
-            # something else is the failure compose exists to prevent, and if
-            # it happens anyway it is said out loud rather than looking like
-            # a job that ran at the settings they chose.
+            # that ran at settings nobody chose for it, when its owner had
+            # configured something else, is the failure compose exists to
+            # prevent, and if it happens anyway it is said out loud rather
+            # than looking like a job that ran at the settings they chose.
+            #
+            # "default settings" rather than "factory settings" because that
+            # is what it actually is: Wan2GP's ``get_default_settings`` reads
+            # the model's own saved settings file - what Save Settings writes
+            # - and only synthesises true factory values when no such file
+            # exists. Calling the common case "factory" overstated it.
             badge += ('<span class="minipaint-clip-badge minipaint-clip-badge-warn" '
-                      'title="WanGP had no saved form for this model, so it ran at that model\'s defaults">factory settings</span>')
+                      'title="WanGP had no form recorded for this model, so this ran at that '
+                      'model\'s saved defaults rather than at what was on screen">default settings</span>')
         lines = []
         llm = enhance_sentence(job)
         if llm:

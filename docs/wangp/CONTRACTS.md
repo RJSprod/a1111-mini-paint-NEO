@@ -245,6 +245,19 @@ Protocol 3 adds `queue(request)`, `confirmQueue(requestId)`, `queueAndConfirm(re
 and `capabilities()`, and `state().queue` from the handshake's `capabilities.queue`;
 the shapes are in `docs/clipboard/CONTRACTS.md`.
 
+Protocol 6 adds `flushForm({timeoutMs})`: ask WanGP to commit this page's live
+settings form so a job composed later — on the server, with this page shut —
+runs at what was on screen. It writes one hidden trigger
+(`save_form_trigger`, which WanGP already wires to
+`save_inputs(target="state")`) rather than reading the form back, then polls a
+fingerprint of the recorded form until it moves or a 2.5 s budget runs out.
+Resolves — never rejects — with one of `committed`, `unchanged`,
+`suppressed`, `unavailable`; every one of them is a fine outcome, because a
+job composes from the recorded form when a flush cannot happen. A probe never
+writes, and a page carrying `ignore_save_form` is refused rather than
+flushed. `minipaintInterop.enqueue` calls it before submitting and passes the
+outcome as `settings_flush`; pass `{flush: false}` to opt out.
+
 ## `wan2gp_bridge/wan2gp-minipaint-bridge/` — the WanGP-side plugin
 
 Standalone; imports nothing of ours. Ships its own `protocol.py` copy whose

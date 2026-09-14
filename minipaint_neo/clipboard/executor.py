@@ -427,11 +427,19 @@ def _stage_composing(job: dict) -> bool:
         return bool(outbox.fail(job["job_id"], error.code, error.detail))
     if not answer["ok"]:
         return bool(outbox.fail(job["job_id"], answer["code"] or errors.COMPOSE_UNAVAILABLE, answer["message"]))
+    source = answer["source"]
+    if source == wire.BASE_RECORDED and job.get("settings_flush") in wire.FLUSH_FRESH:
+        # Same seam, different promise. The page committed its live form on
+        # purpose before it pressed, so this base is what was on screen -
+        # not whatever WanGP happened to have recorded last. The job says
+        # which, because those are answers to different questions and a
+        # reader of the queue is entitled to tell them apart.
+        source = wire.BASE_FLUSHED
     snapshot = {
         "schema": 1,
         "model_type": answer["model_type"],
         "settings": answer["settings"],
-        "source": answer["source"],
+        "source": source,
         "captured_at": _now(),
         "wan2gp_version": answer["wan2gp_version"],
         "residency_key": answer["residency_key"],

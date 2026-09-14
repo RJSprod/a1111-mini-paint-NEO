@@ -188,8 +188,16 @@ PAGE_ACTIVE_SECONDS = 15.0
 WAIT_BUSY_MS = 400
 WAIT_TURN_MS = 250
 WAIT_ENHANCE_MS = 1000
-#: How often the server looks at the LLM side on its own while a job is
-#: enhancing, so a finished prompt is collected even when no page is asking.
+#: How often the server looks at the LLM side on its own while a
+#: browser-executed job is enhancing, so a finished prompt is collected even
+#: when no page is asking.
+#:
+#: THIS IS THE LEGACY PATH'S ONLY BACKGROUND DRIVER, and it is not the thing
+#: the performance work set out to delete. A server-executed job never enters
+#: it - its enhancement is followed on the owning extension's own event feed,
+#: by the executor, with no full-document read at all - and what is left here
+#: drives expired leases and the enhancement of jobs a page still owns. It
+#: goes when the browser-executed path does.
 WATCH_SECONDS = 2.0
 #: Bounds. Terminal jobs are kept a week for the list; waiting ones are
 #: capped so a runaway caller cannot fill the disk with requests.
@@ -1709,7 +1717,7 @@ def recover(child_instance: str = "") -> dict:
     *   A legacy browser-executed job is left exactly as it was. Its page
         may still be open, and its rules are the old ones.
     """
-    counted = {"resumed": 0, "reconciled": 0, "unknown": 0, "pinned": 0, "legacy": 0}
+    counted = {"resumed": 0, "reconciled": 0, "unknown": 0, "pinned": 0, "legacy": 0, "legacy_enhancing": 0}
     with _lock:
         listed = _load()
         now = _now()
@@ -1733,7 +1741,17 @@ def recover(child_instance: str = "") -> dict:
                 job["updated_at"] = now
             counted["resumed"] += 1
         counted["pinned"] = len(pins)
+        counted["legacy_enhancing"] = sum(
+            1 for job in listed if job.get("executor") != EXECUTOR_SERVER and job["state"] == ENHANCING
+        )
         _save(listed)
+    if counted["legacy_enhancing"]:
+        # The legacy watcher is what drives a browser-executed job's
+        # enhancement to a finished prompt and settles an expired lease, and
+        # nothing has ever started it at boot - it was only ever started by a
+        # press. A Forge that restarts with one of those mid-enhancement used
+        # to leave it there until somebody pressed something else.
+        _ensure_watcher()
     if counted["resumed"] or counted["reconciled"]:
         _journal(
             f"recovery: {counted['resumed']} job(s) resumed, {counted['reconciled']} awaiting reconciliation, "

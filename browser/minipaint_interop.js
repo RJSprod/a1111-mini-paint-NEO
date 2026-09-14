@@ -100,6 +100,10 @@ window.minipaintInterop = (function () {
     const SERVER_STATES = ["admitted", "waiting_turn", "enhanced", "ensuring_wangp", "composing",
         "waiting_for_card", "submitting_wangp", "wangp_waiting", "wangp_generating"];
     const SERVER_TERMINAL = ["completed", "failed", "cancelled", "execution_unknown"];
+    //: The answers that mean "this worked". A browser-executed job could
+    //: only ever reach the first two; a server-executed one ends on the
+    //: third, because it is followed all the way to a generated file.
+    const POSITIVE = ["queued", "started", "completed"];
 
     // The sentences a caller may show. The server's errors.py owns the
     // wording; these are the ones this side needs before it can ask.
@@ -131,10 +135,22 @@ window.minipaintInterop = (function () {
         ENHANCE_CANCELLED: "The prompt enhancement was cancelled.",
         ENHANCE_LOST: "The enhancement's record was gone before its result was collected; retry to enhance again.",
         MODEL_CHANGED: "The WanGP page moved to another model after the prompt was enhanced for it; retry to enhance it for the current model.",
+        EXECUTION_UNKNOWN: "Whether WanGP ran this generation could not be proved, so it was not sent again. Check WanGP's outputs and retry if it did not run.",
+        CONTROL_UNAVAILABLE: "The MiniPaint bridge inside WanGP is not answering, so unattended jobs cannot be run.",
+        SERVICE_UNAVAILABLE: "This WanGP build does not expose the generation service the unattended queue submits through.",
+        COMPOSE_UNAVAILABLE: "WanGP's settings for that model could not be read, so nothing was queued at settings nobody chose.",
+        MODEL_UNAVAILABLE: "The model this job was composed for is not available in WanGP any more.",
+        JOB_INPUT_MISSING: "An image this job owns is no longer on disk.",
         AUTH_BOUNDARY_FAILED: "Sign in to Forge first.",
         INTERNAL_ERROR: "The WanGP integration hit an unexpected problem."
     };
     const ENHANCING_MESSAGE = "The prompt is being enhanced before it is queued.";
+
+    /** What the server says this job is waiting for, if it said anything. */
+    function stageOf(job) {
+        const text = job && typeof job.stage === "string" ? job.stage : "";
+        return text || "The request is waiting its turn in the queue outbox.";
+    }
 
     function bridge() {
         const api = window.minipaintWanGP;
@@ -334,13 +350,19 @@ window.minipaintInterop = (function () {
         const three = summary(result);
         const base = { request_id: requestId || "", job_id: jobId || "" };
         if (job && job.enhance_requested) { base.enhanced = !!(job.enhance && job.enhance.state === "done"); }
-        if (result && result.ok && (result.status === "queued" || result.status === "started")) {
+        // "queued" and "started" are as far as a browser-executed job ever
+        // got - WanGP had taken it, and that was all a page could see.
+        // "completed" is the one a server-executed job ends on, and it means
+        // the generation finished: the count of what it produced comes with
+        // it, and the paths do not.
+        if (result && result.ok && POSITIVE.indexOf(result.status) !== -1) {
             return Object.assign(base, {
                 ok: true, status: result.status, tasks_added: Math.max(1, Math.trunc(result.tasks_added || 1)),
                 queue_depth: Number.isFinite(result.queue_depth) && result.queue_depth >= 0 ? Math.trunc(result.queue_depth) : null,
                 route: ROUTES.indexOf(result.route) === -1 ? "" : result.route,
                 model: model(result), applied: three.applied, inherited: three.inherited, ignored: three.ignored,
-                wangp: wangpOf(job)
+                wangp: wangpOf(job),
+                generated_count: job && Number.isFinite(job.generated_count) ? job.generated_count : null
             });
         }
         const status = result && result.status === "unconfirmed" ? "unconfirmed" : result && result.status === "pending" ? "pending" : "refused";
@@ -355,11 +377,28 @@ window.minipaintInterop = (function () {
         if (job.state === "queued" || job.state === "started") {
             return publicResult(Object.assign({ ok: true }, job.result || {}, { status: job.state }), requestId, job.job_id, job);
         }
+        // A server-executed job ends when the generation does, not when
+        // WanGP accepts it: "completed" is the success a caller waits for.
+        if (job.state === "completed") {
+            return publicResult(Object.assign({ ok: true }, job.result || {}, { status: "completed" }), requestId, job.job_id, job);
+        }
         if (job.state === "enhancing") {
             return publicResult({ ok: false, status: "pending", code: "QUEUE_JOB_PENDING", message: ENHANCING_MESSAGE }, requestId, job.job_id, job);
         }
-        if (job.state === "pending" || job.state === "sending") {
-            return publicResult({ ok: false, status: "pending", code: "QUEUE_JOB_PENDING" }, requestId, job.job_id, job);
+        // Every stage before the generation is *pending*, not refused. Each
+        // of these is a job that is going to run; falling through to the
+        // refusal below would report a queued job as a failed one, which is
+        // both wrong and the kind of wrong a caller acts on.
+        if (job.state === "pending" || job.state === "sending" || SERVER_STATES.indexOf(String(job.state)) !== -1) {
+            return publicResult({ ok: false, status: "pending", code: "QUEUE_JOB_PENDING", message: stageOf(job) }, requestId, job.job_id, job);
+        }
+        // "Whether WanGP ran this could not be proved" is its own answer and
+        // is never a refusal: a caller that treats it as one retries, and a
+        // retry is the second generation the whole design refuses to make.
+        if (job.state === "execution_unknown") {
+            const unknown = job.error || {};
+            return publicResult({ ok: false, status: "unconfirmed", code: unknown.code || "EXECUTION_UNKNOWN",
+                                  message: unknown.message || sentence("EXECUTION_UNKNOWN") }, requestId, job.job_id, job);
         }
         if (job.state === "cancelled") {
             const error = job.error || {};

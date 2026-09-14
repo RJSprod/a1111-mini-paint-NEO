@@ -53,6 +53,9 @@ SUITES = [
     # "at most one generation, whoever started it" is actually established.
     "test_wangp_control",
     "test_interop",
+    # The browser half of walking away: a page that is told rather than
+    # asking, and that can be closed without the job noticing.
+    "test_interop_browser",
     "test_clipboard_store",
     "test_clipboard_outbox",
     "test_clipboard_enhance",

@@ -991,6 +991,12 @@ def normalize_control_hello(raw: typing.Any) -> dict:
         #: queue cannot be reached and server execution is off for this run -
         #: never a reason to fall back to a path that runs beside it.
         "service": raw.get("service") is True,
+        #: Whether this build could ever have one. False is a permanent fact
+        #: about the installed Wan2GP, not a stage of its startup, and it is
+        #: the difference between a job worth waiting for and one that will
+        #: wait forever. Absent from an older bridge, which is why it defaults
+        #: to True: waiting costs seconds, refusing costs the feature.
+        "service_possible": raw.get("service_possible") is not False,
         "generation_running": _tristate(raw.get("generation_running")),
         "queue_depth": _depth(raw.get("queue_depth")),
         "model_type": str(raw.get("model_type") or "")[:200],

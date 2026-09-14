@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.5.1"
+BRIDGE_VERSION = "1.5.2"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -898,6 +898,9 @@ class Compatibility:
         self.resolution = EMPTY_RESOLUTION
         self.wan2gp_version = ""
         self.notes: typing.List[str] = []
+        #: What a live page has taught this process that a control-plane
+        #: thread cannot work out for itself. See ``remember_service``.
+        self._learned: typing.Dict[str, typing.Any] = {}
 
     # -- phase one ----------------------------------------------------------
 
@@ -1059,6 +1062,49 @@ class Compatibility:
 
     # -- protocol 6: the one arbiter -----------------------------------------
 
+    def remember_service(self, state: typing.Any) -> typing.Any:
+        """Learn the service from a live page, and keep it for the control plane.
+
+        THE SUPPORTED SEAM, AND THE ONE THAT ACTUALLY WORKS.
+
+        ``service_for(state)`` is how Wan2GP itself gets the service, and it
+        needs a session state - which a browser request has and a control-plane
+        thread never does. Everything else this class tries is archaeology
+        around that fact: a global that is injected as a snapshot before the
+        service exists, a module attribute whose name and module differ
+        between revisions.
+
+        So the bridge stops guessing and takes the answer from the one caller
+        that has it. Every request from a page carries its state; the first
+        one resolves the service and it is kept for the life of the process,
+        because it is a process-wide singleton and the control plane needs the
+        same object the page would have got.
+
+        Keeping a reference is safe in a way that keeping a *state* would not
+        be: the service outlives any one page by construction - it is what the
+        pages share - whereas a session state belongs to a browser tab that
+        may already be gone.
+        """
+        found = self._call_factory(self.host.read_global(SERVICE_FACTORY), state)
+        if found is None:
+            found = self._gen_state_service(state)
+        if found is not None:
+            self._learned["service"] = found
+        return found
+
+    def _gen_state_service(self, state: typing.Any) -> typing.Any:
+        """``state.service``, when the factory is not among the globals we got.
+
+        ``service_for`` is one line and reads exactly this attribute. A build
+        that did not hand the function over still hands over the state, and
+        the attribute is the same attribute.
+        """
+        try:
+            candidate = getattr(state, "service", None)
+        except Exception:
+            candidate = None
+        return candidate if self.is_service(candidate) else None
+
     def service(self, state: typing.Any = None) -> typing.Any:
         """Wan2GP's one process-wide generation service, or None.
 
@@ -1093,6 +1139,16 @@ class Compatibility:
         found = self._call_factory(factory, state)
         if found is not None:
             return found
+        if state is not None:
+            found = self._gen_state_service(state)
+            if found is not None:
+                return found
+        # What a page told us, if one has. This is the answer on every build
+        # where the module-level archaeology below does not apply, which is
+        # every build where the service is reached the documented way.
+        learned = self._learned.get("service")
+        if self.is_service(learned):
+            return learned
         # The factory again, off the module this time - a build that did not
         # hand it over as a global may still have it. Its absence is not fatal
         # and must not end the search: the singleton below is the route that
@@ -1172,6 +1228,32 @@ class Compatibility:
                     return value
         return None
 
+    def service_possible(self) -> bool:
+        """Whether this Wan2GP could EVER run a server-side job.
+
+        "Not yet" and "never" need opposite answers from a caller, and until
+        this existed they were the same code. A job on a build that has the
+        service waits a few seconds while the UI finishes; a job on a build
+        that does not wait forever and then fails, having held up the queue
+        the whole time, which is what happened.
+
+        The test is whether the module that defines the service is *findable*
+        at all. ``find_spec`` asks the import system where the module would
+        come from without executing it, so a build carrying it that simply
+        has not imported it yet still answers True - which is the safe way
+        round, because True only costs a wait and False costs the feature.
+        """
+        if self.service() is not None:
+            return True
+        try:
+            import importlib.util
+
+            return importlib.util.find_spec(SERVICE_MODULE) is not None
+        except Exception:
+            # An import system that will not answer is not evidence of
+            # absence, and refusing the feature on it would be a guess.
+            return True
+
     def service_diagnosis(self) -> str:
         """Why there is no service, in the words of what was actually looked at.
 
@@ -1189,6 +1271,23 @@ class Compatibility:
         parts: typing.List[str] = []
         factory = self.host.read_global(SERVICE_FACTORY)
         parts.append(f"{SERVICE_FACTORY}={'callable' if callable(factory) else 'absent'}")
+        parts.append("learned from a page=no")
+        # Which file is actually running, and whether the service module could
+        # be imported at all. Together these say whether this is an install
+        # without the service or a lookup that cannot see one that is there -
+        # and those had been indistinguishable for two rounds of reports.
+        try:
+            main = sys.modules.get("__main__")
+            parts.append("__main__ file=" + str(getattr(main, "__file__", "?")).replace("\\", "/").rsplit("/", 1)[-1])
+        except Exception:
+            pass
+        try:
+            import importlib.util
+
+            parts.append(f"{SERVICE_MODULE} importable="
+                         + ("yes" if importlib.util.find_spec(SERVICE_MODULE) is not None else "no"))
+        except Exception:
+            parts.append(f"{SERVICE_MODULE} importable=cannot tell")
         for name in SERVICE_HOLDERS:
             module = sys.modules.get(name)
             if module is None:

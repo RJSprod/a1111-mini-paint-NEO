@@ -289,6 +289,17 @@ def available() -> typing.Tuple[bool, str]:
     return True, ""
 
 
+def executable_ever() -> bool:
+    """Whether the child could ever run a server-side job, as it last said.
+
+    False is a permanent fact about the installed Wan2GP - it does not carry
+    the generation service - and is the difference between a job worth
+    waiting for and one that would wait forever.
+    """
+    answer = last_hello()
+    return bool((answer or {}).get("service_possible", True))
+
+
 def why_not() -> str:
     """The child's own account of why it cannot execute, or "".
 
@@ -302,5 +313,5 @@ def why_not() -> str:
 __all__ = [
     "CALL_TIMEOUT", "COMPOSE_TIMEOUT", "CONNECT_TIMEOUT", "LOOPBACK",
     "HELLO_TTL", "available", "call", "cancel", "compose", "forget", "hello", "last_hello", "reset_for_tests",
-    "status", "submit", "use_transport", "why_not",
+    "executable_ever", "status", "submit", "use_transport", "why_not",
 ]

@@ -893,6 +893,60 @@ def diagnosis_checks(r: Results) -> None:
             nothing is None, str(nothing))
 
 
+def learned_service_checks(r: Results) -> None:
+    """The service is taken from a page, because that is where it can be had.
+
+    THIS IS THE ONE THAT MATTERS, AND IT IS THE DOCUMENTED SEAM.
+
+    ``service_for(state)`` is how Wan2GP itself reaches the service, and it
+    needs a session state. A control-plane thread has none and never will, so
+    every other route this class knows is archaeology around that fact: a
+    global injected as a snapshot before the service exists, a module
+    attribute whose name and module move between revisions. Two rounds of
+    field reports were spent on that archaeology being wrong.
+
+    Every request from a page carries a state. The first one resolves the
+    service and the process keeps it, which is safe because it is a
+    process-wide singleton - the thing the pages share - rather than anything
+    belonging to the tab that happened to hand it over.
+    """
+    compatibility, _compose, _control, _execution, _ledger, _protocol = _modules()
+    gen = {"queue": [], "in_progress": False}
+    service = FakeService(gen)
+
+    class SharedState(dict):
+        service = None
+
+    def service_for(state):
+        return state.service if isinstance(state, SharedState) else None
+
+    state = SharedState()
+    state["gen"] = gen
+    state.service = service
+
+    compat = _compat({"service_for": service_for, "get_gen_info": lambda s: s["gen"]})
+    r.check("a control-plane thread cannot find it on its own, which is the whole problem",
+            compat.service() is None)
+    compat.remember_service(state)
+    r.check("a page hands it over, and the control plane has it from then on",
+            compat.service() is service, str(compat.service()))
+    r.check("and can reach the shared queue through it, with no state of its own",
+            compat.shared_gen() is gen, str(compat.shared_gen()))
+
+    # A build that hands over the state but not the factory: the attribute is
+    # the attribute, and service_for is one line that reads it.
+    bare = _compat({"get_gen_info": lambda s: s["gen"]})
+    bare.remember_service(state)
+    r.check("a build that did not hand over service_for still yields the service from the state",
+            bare.service() is service)
+
+    # And nothing is learned from a state that has none, rather than a stale
+    # or wrong object being kept.
+    empty = _compat({"service_for": service_for})
+    empty.remember_service(SharedState())
+    r.check("a page whose state carries no service teaches nothing", empty.service() is None)
+
+
 def manifest_checks(r: Results) -> None:
     """The version the operator is shown is the version that is running.
 
@@ -930,6 +984,7 @@ def run() -> Results:
     service_lookup_checks(r)
     manifest_checks(r)
     diagnosis_checks(r)
+    learned_service_checks(r)
     return r
 
 

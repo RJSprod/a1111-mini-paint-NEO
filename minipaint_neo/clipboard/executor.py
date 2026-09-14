@@ -416,8 +416,32 @@ def _stage_ensuring_wangp(job: dict) -> bool:
 
 
 def _wait_for_service(job: dict, code: str) -> bool:
-    """Hold a job while WanGP finishes coming up. Bounded, and honest while it waits."""
+    """Hold a job while WanGP finishes coming up - unless it never will.
+
+    "Not yet" and "never" look identical from here and need opposite
+    answers. A build that carries the generation service has it moments after
+    READY, so waiting costs seconds; a build without it never will, and a job
+    that waits for it waits forever while holding the queue open behind it.
+    The child answers which, and a "never" is not waited on.
+    """
     from ..wangp import control
+
+    if code == errors.SERVICE_UNAVAILABLE and not control.executable_ever():
+        # This Wan2GP has no queue worker to submit into, and inventing a
+        # second execution path beside its arbiter is the one thing this
+        # design refuses - that is two generations on one card. What is left
+        # is the path that was always there: the page drives the live form
+        # and presses WanGP's own button. It needs the tab open, so it is not
+        # walking away; it is generating, which is what was asked for.
+        handed = outbox.hand_to_browser(
+            job["job_id"], "this WanGP has no generation service for unattended jobs")
+        if handed is not None:
+            _journal(
+                f"job {job['job_id'][:8]}: this WanGP cannot run unattended jobs "
+                f"({control.why_not()[:200]}); it will run from the page instead"
+            )
+            return True
+        return bool(outbox.fail(job["job_id"], code, "this WanGP has no generation service"))
 
     counted = outbox.attempt(job["job_id"])
     attempts = int((counted or job).get("attempts") or 0)
@@ -430,6 +454,14 @@ def _wait_for_service(job: dict, code: str) -> bool:
         if why:
             _journal(f"job {job['job_id'][:8]}: waiting for WanGP's generation service - {why[:300]}")
     if attempts > MAX_RETRYABLE_ATTEMPTS:
+        # Waited long enough. The page can still run this - that is the path
+        # that existed before unattended jobs did - so it goes there rather
+        # than being thrown away, and only becomes a failure if there is no
+        # page to take it either.
+        handed = outbox.hand_to_browser(job["job_id"], f"unattended execution never became available ({code})")
+        if handed is not None:
+            _journal(f"job {job['job_id'][:8]}: gave up waiting for unattended execution; it will run from the page instead")
+            return True
         return bool(outbox.fail(job["job_id"], code, f"still not ready after {attempts} attempts"))
     delay = min(BACKOFF_MAX, BACKOFF_START * (2 ** min(6, attempts - 1)))
     outbox.transition(job["job_id"], outbox.ENSURING_WANGP,

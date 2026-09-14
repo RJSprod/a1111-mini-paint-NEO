@@ -1,0 +1,643 @@
+MINIPAINT NEO - CANVAS RECOVERY AND PERFORMANCE PRESERVATION
+REVIEW RESPONSE: CORRECTNESS OF THE DIAGNOSIS
+
+Repository target: RJSprod/a1111-mini-paint-NEO
+Code baseline:     009bad0b215a7074391a9beca36f3488a76f9826 (main, 2026-09-14)
+Reviews:           MINIPAINT_NEO_CANVAS_RECOVERY_PERFORMANCE_DESIGN_INTENT_2026-09-14.txt
+Revision date:     2026-09-14
+Status:            Review response. Superseded in part by the implementation -
+                   see section 8, which records what was built, what the
+                   open question turned out to be, and what is left.
+
+================================================================================
+0. VERDICT
+================================================================================
+
+Adopt the specification. Every factual claim it makes about this codebase is
+true, and each one was checked against the baseline rather than accepted.
+
+The document is also, in one respect, too kind to the code. It describes the
+Canvas startup defect as a race that leaves attach() "not guaranteed" to run.
+It is not a race. On a cold page attach() is never called, on any machine, at
+any network speed. The specification's own Phase 0 is therefore not a
+reliability improvement to a flaky feature; it is the repair of a feature that
+does not currently work at all.
+
+Three corrections are required before Phase 0 is implemented. The first is
+disqualifying as the specification is written:
+
+    The fix proposed in section 12 does not work, because load() does not
+    return what section 3.2 assumes it returns.
+
+    Section 12 guards on `if (!ok || !window.minipaintCanvas) { return false; }`.
+    `ok` is the resolved value of window.minipaintAssets.load(), which is
+    Promise.all(...) - an ARRAY (javascript/main.js:120-123). A failed load
+    resolves to `[false]`, and `[false]` is truthy. The guard passes. Section
+    3.2 requires load() to be Promise<boolean>; nothing in section 12 makes it
+    one, and an implementer following section 12 literally ships a guard that
+    is decorative. Traced at section 2.1 below.
+
+    This matters more than its size suggests: the whole point of Phase 0 is to
+    replace an implicit timing assumption with a checked contract, and the
+    proposed check is the one part that would not have checked anything.
+
+The other two are in sections 2.2 and 2.3: attach() cannot report success to
+the readiness primitive section 2.1 asks for, and the test suite that would
+police all of this does not run in any automated place.
+
+Sections 5 (UI) and 6 (performance to keep) need no change. The performance
+work the specification protects is real, is present, and is worth protecting.
+
+================================================================================
+1. CLAIMS CHECKED AGAINST THE BASELINE
+================================================================================
+
+Each claim below was verified in the code at 009bad0b. None was taken on trust.
+
+1.1 "loader_js() does not return the Promise" - section 1.1. CONFIRMED.
+
+    minipaint_neo/assets.py:157 emits, verbatim:
+
+        () => { const w = window.minipaintAssets;
+                if (w && w.load) { w.load([...]); } }
+
+    There is no `return`. The wrapper evaluates to undefined.
+
+1.2 "surface.py awaits it as if it were awaitable" - section 1.1. CONFIRMED.
+
+    minipaint_neo/canvas/surface.py:229-236:
+
+        bundles = assets.loader_js(["canvas", "wangp"])
+        Context.root_block.load(None, js=(
+            "async () => { "
+            f"await ({bundles})(); "
+            f"if (window.minipaintCanvas) {{ {attach_js}(...); }} "
+            "}"))
+
+    Both halves of the defect are on adjacent lines of one file.
+
+1.3 "Canvas startup is coupled to WanGP" - section 1.2. CONFIRMED.
+    surface.py:229 requests ["canvas", "wangp"] in a single load() call, so
+    section 3.2's "true only when every required URL succeeded" would make a
+    WanGP 404 a Canvas failure the moment the Promise bug is fixed alone. The
+    specification is right that the minimal patch is not merely insufficient
+    but actively harmful: fixing the return without splitting the dependency
+    converts a silent failure into a reproducible one.
+
+1.4 "A failed script element is left behind and later treated as success"
+    - section 3.3. CONFIRMED, and worse than described.
+
+    javascript/main.js:46-47:
+
+        const existing = document.querySelector('script[data-minipaint-bundle="' + key + '"]');
+        if (existing) { resolve(true); return; }
+
+    javascript/main.js:54-61, the error path, deletes the cache entry but not
+    the element:
+
+        delete loaded[key];
+        resolve(false);
+
+    So the second attempt finds the corpse of the first and resolves TRUE. A
+    retry does not merely fail to retry - it converts a hard 404 into a
+    reported success. Measured, section 2.4.
+
+    The comment sitting on those lines claims the opposite: "Forgotten, so a
+    later tab activation may try again." The comment describes the intended
+    design; the code defeats it two lines above. Whoever fixes this should fix
+    the comment, because it is the reason the bug is not obvious on reading.
+
+1.5 "Every external entry point assumes the global happens to exist"
+    - section 2.4. CONFIRMED, and one case is worse than "does not work".
+
+    minipaint_neo/canvas/ui.py:83 sets _JS = "window.minipaintCanvas", and
+    fourteen call sites guard on bare existence with a silent no-op. The
+    Send-to path, ui.py:129-132, does not no-op:
+
+        PICK_JS = (
+            "(gallery, state, mode) => { if (W) W.mark(); "
+            "return [W ? W.pickGalleryImage(gallery) : null, state, mode]; }")
+
+    When the adapter is absent this returns null AS THE IMAGE and proceeds to
+    call the backend. The user's picture is not delayed or refused; it is
+    discarded, and the server is told the user chose nothing. Section 2.4 of
+    the specification should name this case explicitly, because "must await
+    the same readiness Promise" reads like a latency fix and this is data loss.
+
+1.6 "A visible shell with no controller is the failure state" - section 4.
+    CONFIRMED. attach() is called from exactly one place in the repository
+    (surface.py:235). There is no self-attach on bundle execution, no
+    MutationObserver retry, and no timeout fallback. When the single call site
+    declines to call, nothing else ever will.
+
+1.7 "The toolbar carries a permanent right offset" - section 5.1. CONFIRMED.
+    style.css:245-250 is `left: auto; right: 52px;`, exactly the displacement
+    section 5.2 rules out.
+
+1.8 "The browser test pre-inlines the bundle it claims to load dynamically"
+    - sections 8.1 and 11.3. CONFIRMED, and the harness says so itself.
+
+    tests/browser_smoke.py:62-65:
+
+        # ... this harness has no route to fetch them from, so it inlines the
+        # one the canvas needs, in the order a page would end up with them.
+        for name, folder in (("main.js", "javascript"), ("minipaint_canvas.js", "browser")):
+            parts.append("<script>" + (ROOT / folder / name).read_text(...) + "</script>")
+
+    window.minipaintCanvas therefore exists before any load event fires, the
+    broken wrapper's undefined return is harmless in the harness, and attach()
+    always succeeds. The suite reproduces the OLD synchronous availability
+    model - the exact substitution section 11.3 tells a reviewer to reject.
+
+1.9 Performance work the specification protects - section 6. CONFIRMED PRESENT.
+    Pointer work is rAF-coalesced with a synchronous flush on pointerup and a
+    drop on pointercancel (minipaint_canvas.js:224, 245, 966-967, 2097-2098);
+    fit work is scheduled rather than run per notification (536-537); the
+    integration bundles drive their timing from visibilitychange rather than
+    rAF (minipaint_wangp.js:841, 902; minipaint_interop.js:1056); and the
+    control plane documents cached reads for async routes precisely so Forge's
+    event loop is not blocked (wangp/control.py:71-74, 319). Section 6's
+    instruction to keep all of this is correct and costs the recovery nothing:
+    none of it is on the startup path being repaired.
+
+================================================================================
+2. REQUIRED CORRECTIONS TO THE SPECIFICATION
+================================================================================
+
+2.1 load() returns an array, so section 12's guard cannot work
+
+    This is the disqualifying item from section 0.
+
+    javascript/main.js:120-123:
+
+        function load(urls) {
+            const wanted = Array.isArray(urls) ? urls : [urls];
+            return Promise.all(wanted.map(one));
+        }
+
+    Promise.all resolves to an array of the individual results. Measured in a
+    real browser against this baseline:
+
+        typeof = object    value = [true]     truthy = true
+        (failed load)      value = [false]    truthy = true
+
+    Section 3.2 states the intended contract - Promise<boolean>, true only when
+    every URL succeeded - and it is the right contract. But section 12, the
+    part an implementer will copy, never reduces the array. Its guard
+
+        const ok = await (CANVAS_LOADER)();
+        if (!ok || !window.minipaintCanvas) { return false; }
+
+    is load-bearing only through its second clause. `!ok` is false for every
+    outcome including total failure.
+
+    Required: fold the reduction into load() itself, so the boolean contract
+    holds for every caller rather than at each call site -
+
+        function load(urls) {
+            const wanted = Array.isArray(urls) ? urls : [urls];
+            return Promise.all(wanted.map(one)).then(function (results) {
+                return results.every(Boolean);
+            });
+        }
+
+    Both existing callers already treat the result as a truth value, so this
+    narrows behaviour rather than changing an interface anyone depends on.
+    Note that loadOnTab (main.js:91-118) forwards load()'s result, so it
+    inherits the fix; the Clipboard tab (clipboard/ui.py:90) is its only
+    caller and gains a meaningful return it currently ignores.
+
+2.2 attach() cannot report what section 2.1's readiness primitive needs
+
+    Section 2.1 requires a Promise whose success "means window.minipaintCanvas
+    exists" and that "attach() is then invoked exactly once". Section 12's
+    sketch has attach() returning true/false and calling markReady(uuid).
+
+    Today attach() returns undefined on all four of its paths
+    (minipaint_canvas.js:288-297): the already-attached early return, the
+    missing-ForgeCanvas return, the missing-container return, and the success
+    path. Two of those are failures and one is a success, and the caller cannot
+    tell them apart.
+
+    The missing-container path matters most and the specification does not
+    mention it. attach() looks up `document.getElementById("container_" + uuid)`
+    and returns silently when it is absent. That is a second, independent way
+    to reach "tab rendered, Canvas not ready" - one that survives a correct
+    loader - and any ready/failed state built only on bundle loading will
+    report ready while this path has quietly failed.
+
+    Required: attach() returns a boolean, and the readiness state is derived
+    from that return rather than from the bundle Promise alone. Section 4's
+    three states should be reachable from a container that never appeared, not
+    only from a bundle that never loaded.
+
+    Already satisfied, and worth not breaking: attach() is idempotent by
+    `if (S.instance) { return; }` (line 289), so section 2.1's "repeated calls
+    are idempotent" needs no work.
+
+2.3 Phase 1 has nowhere to run, and "all tests pass" currently means very little
+
+    Section 11.10 treats "all tests pass while the production path is absent
+    from those tests" as a reviewer's warning sign. On this baseline it is the
+    status quo, and by a wider margin than the document assumes:
+
+    - There is no CI. The repository contains no .github/workflows directory.
+      Nothing runs any test on any push.
+
+    - tests/run.py's SUITES list does not include browser_smoke. Its docstring
+      is explicit: "The browser smoke test is separate." The only suite that
+      opens a browser is outside the only entry point that runs suites.
+
+    - browser_smoke.py requires FORGE_ROOT to point at a full Forge Neo
+      checkout (browser_smoke.py:45-51) and raises SystemExit without one, so
+      it cannot run unattended even if it were listed.
+
+    - The Promise contract of loader_js has no test at all. The one loader that
+      IS tested is tab_loader_js (test_canvas_display.py:261) - the one that
+      correctly returns its Promise (assets.py:140-143). The tested loader is
+      the working loader; the untested one shipped broken. That asymmetry is
+      the whole story of this regression in one line.
+
+    Measured on this baseline: `python3 tests/run.py` exits 0 with 16 of 23
+    suites skipped for missing optional dependencies (gradio, PIL, httpx). A
+    green run here is compatible with two thirds of the suite never executing.
+
+    Required: Phase 1 gains a CI job, and run.py's skip-on-missing-dependency
+    behaviour is made to fail rather than pass when the dependencies are
+    expected to be present. Otherwise Phase 1 produces tests that would have
+    caught this regression and still does not catch the next one, because
+    nothing runs them. The specification asks for the right tests; it does not
+    ask for anywhere to run them.
+
+================================================================================
+3. WHY THE FAILURE IS DETERMINISTIC, NOT A RACE
+================================================================================
+
+Section 1.1 describes the failure as an ordering hazard: the await "completes
+before the dynamically inserted Canvas script is guaranteed to have loaded".
+That phrasing implies a fast cache or a warm connection might win the race.
+None can.
+
+`await undefined` resumes on the microtask queue, which drains before the
+current task yields. Fetching, parsing and executing a <script> element is a
+new task, and cannot run before the microtask queue is empty. The check at
+surface.py:235 therefore runs strictly before any dynamically inserted script
+executes - a cached bundle, a local file and a 200ms network all lose by the
+same rule.
+
+Reproduced against this baseline, driving the real javascript/main.js loader
+and the real string emitted by assets.loader_js(["canvas", "wangp"]), with the
+bundle served over HTTP behind a 300ms delay:
+
+    at the instant the bootstrap's await resolved
+        window.minipaintCanvas defined : False
+        attach() calls                 : 0
+
+    1.2s later, bundle arrived and executed
+        window.minipaintCanvas defined : True
+        attach() calls                 : 0     <- nobody retried
+
+    a 404 bundle, then a retry
+        first attempt resolved      : [false]
+        failed <script> left in DOM : yes
+        second attempt resolved     : [true]   <- the 404 now reports success
+
+This is worth stating plainly in the specification because it changes how the
+work is justified. Phase 0 is not hardening. Mini Paint's Canvas tab is
+inoperative on this baseline, and section 15's first checkbox - "Mini Paint
+opens with an attached Canvas controller" - is currently false for every user.
+
+================================================================================
+4. WHERE THE SPECIFICATION IS MORE PESSIMISTIC THAN THE CODE
+================================================================================
+
+4.1 Re-centring the toolbar removes one collision rather than creating one
+
+    Section 5.2 treats the crop-handle collision as a cost to be paid for
+    re-centring. The CSS comment at style.css:242-244 names two obstacles, not
+    one:
+
+        "a fitted image's top-left crop handle lives there, and the frame's
+         grip sits at the top centre."
+
+    The toolbar was displaced to the right to clear BOTH. Moving it from the
+    top-left corner to the centre resolves the first outright: the top-left
+    corner handle and a centred toolbar cannot overlap. Only the second
+    obstacle survives re-centring, so section 5.2's list of permitted fixes has
+    one target, not two.
+
+    That target is also narrower than it reads. The grip is positioned against
+    the FRAME, not the canvas (style.css:326-330: `left: 50%; top: -16px;
+    transform: translateX(-50%)`). It can only reach a centred toolbar when the
+    crop frame is both near the top edge of the work area and close to
+    horizontally centred. The collision is conditional, transient and
+    detectable from geometry the frame code already has - which is precisely
+    the case section 5.2 makes for solving it at the grip.
+
+4.2 Section 2.4 done properly is Phase 3's prerequisite, already paid for
+
+    Section 2.3 keeps Canvas loading after mount because Send-to can fire
+    before the tab is opened, and defers on-demand Canvas to Phase 3, which
+    "requires teaching every external Send-to entry point to await
+    ensureCanvasReady()".
+
+    But section 2.4 already requires exactly that, in Phase 0: every entry
+    point that can arrive before attach() "must await the same readiness
+    Promise". Once that holds, the justification in section 2.3 for loading on
+    page load has expired - the entry points no longer need the bundle to be
+    there in advance, because they wait for it.
+
+    This is not a contradiction and Phase 0 should still keep after-mount
+    loading; changing both the readiness contract and the load trigger in one
+    patch is the coupling section 11.8 rejects. It is worth recording that
+    Phase 3 is smaller than it looks: Phase 0 pays its entire cost, and Phase 3
+    becomes the one-line change of where the fetch is triggered, plus its
+    proof.
+
+================================================================================
+5. IMPLEMENTATION CONSTRAINT THE SPECIFICATION DOES NOT ADDRESS
+================================================================================
+
+The entry points in section 2.4 are not free functions. They are Gradio `js=`
+input transforms, and most return a value the backend then consumes - PICK_JS
+returns [image, state, mode] (canvas/ui.py:129-132), CROP_JS returns
+[fg, state, mode, box] (119-122), CANVAS_INPUT_JS returns a four-element list
+(136-138).
+
+Making these await a readiness Promise means making them async, which changes
+what Gradio receives from a value to a Promise. Whether the mounted Gradio
+version awaits a js= transform's return before invoking the backend, and
+whether it preserves list destructuring across that await, decides the shape
+of the entire section 2.4 change. If it does not await, the readiness wait has
+to move behind the value - the transform returning a marker the backend
+tolerates, or the Send-to chain gaining an explicit pre-step - which is a
+larger change than section 2.4 implies.
+
+RESOLVED, MEASURED. Gradio 4.40.0 - the pinned version - does await an async
+``js=`` transform and passes its resolved value to the backend step. Driven in
+a real browser against a real Blocks app: a transform that awaited a 250ms
+delay and returned a rewritten input list produced a backend call carrying the
+rewritten value, not a Promise and not the original.
+
+So section 2.4 is implementable in the shape it describes, at no structural
+cost, and it was implemented - see section 8.3. This was the one item in the
+specification whose cost was unknown; it is not unknown any more, and nothing
+about it needs to be deferred.
+
+================================================================================
+6. RECOMMENDED PHASE 0 ORDER
+================================================================================
+
+The specification's Phase 0 lists six items without order. Two of them carry
+the others, and one of the six should move.
+
+    1. load() returns a boolean (section 2.1 above).
+       Everything else that guards on a load result is decorative until this
+       lands. Do it first, not as part of the section 12 patch.
+
+    2. loader_js() returns its Promise (assets.py:157).
+       Make it the shape tab_loader_js already has three functions above it.
+
+    3. Split canvas from wangp (surface.py:229).
+       Two load() calls: one awaited and required, one fired and ignored.
+       After 1 and 2, this is the difference between a Canvas that works and a
+       Canvas that a WanGP 404 disables.
+
+    4. Remove the failed element, or mark it (main.js:46-47, 54-61).
+       Until this lands, every retry path in the recovery - including the one
+       section 4 offers the user - can report success on a bundle that 404s.
+       Correct the comment that claims this already works.
+
+    5. attach() returns a boolean; ready/failed state derives from it
+       (section 2.2 above), including the missing-container path.
+
+    6. Toolbar re-centring and the grip (section 4.1 above).
+       Genuinely independent of 1-5 and separately testable, which is what
+       section 11.8 asks for. It can land in either order, but it should be
+       its own commit.
+
+Items 1-5 are one behavioural change - "startup has a checked contract" - and
+should be one reviewable commit with the delayed-load browser test from
+section 8.2 attached. Item 6 is a UI change and should carry the geometry
+assertion from section 8.8. Nothing in Phase 0 needs to touch section 6's
+performance work, and nothing in Phase 0 should.
+
+================================================================================
+7. SUMMARY
+================================================================================
+
+The specification's diagnosis is correct, its evidence is accurate, and its
+instruction to keep the performance work while repairing the startup contract
+is the right call - the two are not in tension, because none of the retained
+optimisations sit on the path that is broken.
+
+Three things must change before it is implemented:
+
+    load() must return a boolean, or section 12's guard checks nothing.
+
+    attach() must report success, or section 4's ready state cannot see a
+    Canvas that failed for the other reason - a container that never appeared.
+
+    Phase 1 must land somewhere that runs, or it repeats the exact failure it
+    exists to prevent.
+
+And one thing should be said more strongly than the document says it: this is
+not a degraded Canvas. On 009bad0b the Canvas tab has no controller attached,
+deterministically, for everyone.
+
+
+================================================================================
+8. WHAT WAS BUILT
+================================================================================
+
+Added after the review, on branch ``claude/friendly-euler-lcvc4v``. This
+section is the record of what the corrective change set actually contains, and
+supersedes the recommendations above wherever the two differ.
+
+8.1 The open question closed first
+
+Section 5's Gradio question was settled before anything was scheduled around
+it, because the answer decided the shape of section 2.4. It was measured, not
+reasoned about: Gradio 4.40 awaits an async ``js=`` and hands the backend the
+resolved value. Section 2.4 was therefore built as written.
+
+8.2 Phase 0, in the order section 6 recommended
+
+    load() returns a boolean.
+        ``Promise.all(...).then(r => r.every(Boolean))``. Every caller reads
+        the result as a truth value and one of them decides whether the
+        Canvas attaches; an array decided nothing.
+
+    A script element carries its own state.
+        ``data-minipaint-state`` is loading, loaded or failed. Only "loaded"
+        is reused, a still-loading element is joined rather than duplicated,
+        and a failed one is removed from the document so the next attempt
+        makes a real request instead of finding a corpse and reporting
+        success. The comment that claimed this already worked was corrected.
+
+    loader_js() returns its promise, in every branch.
+        The shape ``tab_loader_js`` already had three functions above it.
+
+    Canvas and WanGP are loaded separately.
+        The Canvas load is awaited and decides readiness; the WanGP load is
+        started afterwards and its answer is never consulted.
+
+    attach() reports, and can re-attach.
+        It returns a boolean on all four paths, including the missing
+        container the specification did not mention. It also now stands down
+        a previous attachment rather than silently refusing a second surface:
+        Reload UI builds one with a NEW uuid, and ``if (S.instance) return``
+        meant the rebuilt Canvas never attached at all. ``detach`` takes down
+        the window listeners, the ResizeObserver, the menu and escape
+        handlers and any pending frame, so nothing is registered twice.
+
+    The toolbar is centred; the grip gives way.
+        ``left: 50%; right: auto; transform: translateX(-50%)``. The grip's
+        position is a CSS variable the script sets from ``gripFraction``,
+        which returns the midpoint unless the toolbar is genuinely in the
+        way and otherwise the nearer free side of the frame's own top edge.
+
+8.3 Section 2.4, and one thing it did not say
+
+Send to Mini Paint, and both tab switches, await readiness. The specification
+describes this as a timing fix; on this codebase it was also a data-loss fix,
+which section 1.5 of this document raised and which the implementation
+confirms: ``PICK_JS`` returned null AS THE IMAGE when the adapter was absent,
+so the backend was told the user had picked nothing.
+
+The in-editor transforms (crop, tool, brush, mode, menu) were deliberately
+left synchronous. They cannot run before attach - the user has to be
+interacting with an attached editor to reach them - and making every
+interaction await a promise buys nothing and costs a frame.
+
+8.4 A failure found by building it
+
+The readiness primitive first shipped with ``attach`` called inside a
+``.then`` whose rejection handler sat on the promise before it. A throw inside
+a fulfilment handler is not caught by that handler's own pair, so an adapter
+that threw left ``ensure()`` neither resolved nor rejected.
+
+That is worse than the bug being fixed. Every entry point now waits on this
+promise, so a hang there means Send to Mini Paint does nothing, for ever, with
+no failure shown and no retry offered - where the original bug at least failed
+immediately. It was found by running ``browser_smoke.py`` against a host whose
+ForgeCanvas is a different version, which is the sort of thing only a real
+page does. ``attach`` is now called inside a ``try``, the chain ends in a
+``catch``, and a throw is a failed startup. There is a test for it.
+
+8.5 What a review of the change set found
+
+Six things, all fixed before the change was proposed. Three are worth
+recording because they are the same class of mistake as the one being
+repaired - work that looks finished and is not connected to anything.
+
+    The CI workflow would have failed on every push. The browser suite looked
+    for Chromium only where THIS sandbox keeps it, so on a runner - where
+    ``playwright install`` puts it in the user's cache - it found nothing and
+    refused to run. A test that only runs on the machine it was written on is
+    not CI. It now lets Playwright resolve its own browser and takes an
+    explicit path only when one is really there.
+
+    A missing Playwright aborted the whole run instead of skipping one suite,
+    which made the skip machinery added in the same change dead code.
+
+    The failure notice was inserted beside the status line - inside a nowrap
+    flex row it shares with the tool buttons - so the notice and its Retry
+    button were squeezed in among them rather than getting their own line. It
+    now goes below the row, and there is a test that measures it.
+
+The other three: ``detach`` did not take down two observers or an armed WanGP
+poll, despite saying it did, so a send armed before Reload UI would keep
+reading the rebuilt page's boxes by their stable ids; ``ensure()`` returned a
+settled "true" when the surface it referred to was gone; and ``configure()``
+reset the state without going through ``moveTo``, so a stale failure notice
+could survive the reset.
+
+8.6 Tests, and somewhere to run them
+
+``tests/browser_loading.py`` is new: 77 checks over the real asset route with
+nothing inlined, covering 8.2 (delay), 8.3 (WanGP 404), 8.4 (retry), 8.7
+(Reload UI), 8.8 (geometry), 8.9 (resize settling), the boolean contract, the
+idempotency of ``ensure``, the throw case above, and Send-to-before-ready.
+
+Each was checked against the bug it exists to catch, by reintroducing the bug
+and watching it fail:
+
+    load() returning Promise.all's array again   -> 4 checks fail
+    a failed element treated as success again    -> 10 checks fail
+    the toolbar displaced to right: 52px again   -> 4 checks fail
+
+``browser_smoke.py`` no longer inlines the Canvas bundle. It mounts the real
+route on the demo's own app, waits for readiness rather than for three
+seconds, and asserts that the bundle was fetched and that the Canvas reports
+ready - "tab rendered" is not "Canvas ready", and it now says which it means.
+
+``.github/workflows/tests.yml`` is new, because there was no CI at all. It
+runs every suite on every push with ``MINIPAINT_REQUIRE_ALL_SUITES=1``, which
+turns a skipped suite into a failure. ``run.py`` now lists the browser suite
+and reports how much of itself ran.
+
+``tests/requirements.txt`` pins ``fastapi`` and ``pydantic``. Gradio 4.40
+declares both without an upper bound and both have moved past it: a fresh
+install today produces an environment where every page render 500s and
+Gradio's own launch reports "localhost is not accessible". Section 2.3 of this
+document said Phase 1 needed somewhere to run; it also needed an environment
+that works, and did not have one.
+
+================================================================================
+9. V2 - WHAT WAS NOT BUILT, AND WHY
+================================================================================
+
+Three items. None is blocked on a decision; each is blocked on something that
+cannot be obtained from a patch.
+
+9.1 Phase 3: making the Canvas load on demand
+
+Not built, on the specification's own instruction (2.3: "do not attempt
+perfect laziness for Canvas in the same corrective patch"; 3: "do not combine
+it with the recovery patch"), and that instruction is right - changing the
+readiness contract and the moment of the fetch together would leave a
+regression in either indistinguishable from the other.
+
+It is now cheap. Section 4.2 of this document argued that section 2.4 pays
+Phase 3's whole cost, and that has happened: every external entry point awaits
+``ensure()``, so moving the fetch from the page-load event to first use is a
+change to where ``configure``/``ensure`` is called and nothing else. What it
+still needs is its own proof - a trace showing hydration actually improved,
+which is 9.2.
+
+9.2 Phase 2: the before-and-after performance traces
+
+Not run. Section 9.1 of the specification asks for a browser performance trace
+of a cold Forge page before and after, and section 9.6 asks every future
+performance change to carry a measurement matching what it claims.
+
+This needs a real Forge Neo install with models and an extension folder, on
+hardware the numbers mean something on. A trace taken in a container against a
+stand-in host would be a number with no relationship to the thing being
+claimed, which is the failure mode section 9.6 exists to prevent.
+
+What can be said without it: nothing in this change set moves work into
+hydration. ``javascript/`` still holds only ``main.js``, the readiness
+primitive is a few hundred bytes added to it, and the four large bundles are
+still fetched after mount over the same immutable content-hashed URLs. The
+resize-settling check in ``browser_loading.py`` asserts idle quiet directly
+rather than inferring it.
+
+9.3 browser_smoke.py against a real Forge Neo
+
+Run here against upstream Forge, which is not the target: its ForgeCanvas has
+no ``loadImage``, ``updateBackgroundImageData`` or ``loadDrawing``, so
+``hookInstance`` throws and the editor flow cannot proceed. That run was still
+worth doing - it proved the asset route works mounted on the demo's own app,
+proved the bundle is fetched rather than inlined, proved the Canvas/WanGP
+split, and found the hang in 8.4 - but it is not a pass.
+
+The editor suite needs one run against a Forge Neo checkout before this is
+called done. It is the only item here that could change the diff: if the
+geometry check finds the toolbar off centre against the real ``canvas.css``,
+section 5's CSS needs another pass. The arithmetic says it will not - the
+override sets ``left``, ``right`` and ``transform`` on an absolutely
+positioned element whose containing block is the work area, and
+``browser_loading.py`` measures exactly that against Forge's own positioning
+rules, quoted - but "the arithmetic says so" is not a browser saying so.

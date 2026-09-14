@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import base64
 import io
+import json
 import os
 import pathlib
 import re
@@ -57,14 +58,38 @@ def head_html() -> str:
         parts.append("<script>" + (root / name).read_text(encoding="utf-8") + "</script>")
     parts.append("<style>" + (root / "modules_forge" / "forge_canvas" / "canvas.css").read_text(encoding="utf-8") + "</style>")
     # The WebUI loads every file in an extension's javascript folder, whichever
-    # frontend is mounted - which is main.js and nothing else now. The tab
-    # bundles live in browser/ and are fetched by the loader in main.js; this
-    # harness has no route to fetch them from, so it inlines the one the
-    # canvas needs, in the order a page would end up with them.
-    for name, folder in (("main.js", "javascript"), ("minipaint_canvas.js", "browser")):
-        parts.append("<script>" + (ROOT / folder / name).read_text(encoding="utf-8") + "</script>")
+    # frontend is mounted - which is main.js and nothing else now.
+    #
+    # ONLY main.js. THE CANVAS BUNDLE IS NOT INLINED HERE.
+    #
+    # It used to be, because this harness had no route to fetch it from, and
+    # that one convenience is what let the startup regression through: with
+    # the bundle already in the document, window.minipaintCanvas existed
+    # before any load event fired, so a bootstrap that awaited nothing and
+    # attached nothing still found an adapter sitting there. Every check
+    # below passed over a Canvas tab that had no editor behind it.
+    #
+    # The route is mounted on the demo's own FastAPI app instead (see
+    # ``mount_assets``), so the bundle arrives the way it arrives in Forge:
+    # over HTTP, after the page, on a promise somebody has to wait for.
+    parts.append("<script>" + (ROOT / "javascript" / "main.js").read_text(encoding="utf-8") + "</script>")
     parts.append("<style>" + (ROOT / "style.css").read_text(encoding="utf-8") + "</style>")
     return "\n".join(parts)
+
+
+def mount_assets(demo):
+    """Put the extension's real bundle route on the demo's app.
+
+    ``on_app_started`` does this in Forge; Gradio builds the app inside
+    ``launch``, so this is called with the same app once it exists.
+    """
+    from minipaint_neo import assets
+
+    app = getattr(demo, "app", None)
+    if app is None:
+        raise SystemExit("the demo has no FastAPI app to mount the bundle route on")
+    assets.install(app)
+    return app
 
 
 def sample_image(width=640, height=480):
@@ -775,6 +800,52 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     check_tabs(r, page, f"{label} after use")
 
 
+#: Section 5.1's tolerance for "centred", in CSS pixels.
+CENTRE_TOLERANCE = 4.0
+
+GEOMETRY_JS = """() => {
+    const bar = document.querySelector('#minipaint_canvas_surface .forge-toolbar-static');
+    const work = document.querySelector('#minipaint_canvas_surface .forge-image-container')
+              || document.querySelector('#minipaint_canvas_surface .forge-container');
+    if (!bar || !work) { return null; }
+    const b = bar.getBoundingClientRect(), w = work.getBoundingClientRect();
+    if (!b.width || !w.width) { return null; }
+    return {barCentre: b.left + b.width / 2, workCentre: w.left + w.width / 2,
+            barLeft: b.left, barRight: b.right, workLeft: w.left, workRight: w.right,
+            barWidth: b.width, workWidth: w.width};
+}"""
+
+
+def check_toolbar_geometry(r, page, label):
+    """8.8 - the toolbar is centred over the work area, at several widths.
+
+    Measured against the Canvas work area, not the page: the page includes
+    the side tool rail, and centring on that would put the toolbar off the
+    picture. Run here rather than in browser_loading.py because the toolbar's
+    size and position come from Forge's own canvas.css, which only a real
+    checkout has.
+    """
+    original = page.viewport_size
+    try:
+        for width, height, name in ((1920, 1080, "wide"), (1440, 900, "desktop"),
+                                    (1280, 900, "small desktop"), (860, 1180, "narrow")):
+            page.set_viewport_size({"width": width, "height": height})
+            time.sleep(0.6)
+            g = page.evaluate(GEOMETRY_JS)
+            if g is None:
+                r.check(f"{label}: geometry {name}: toolbar and work area are measurable", False, "not measurable")
+                continue
+            error = abs(g["barCentre"] - g["workCentre"])
+            r.check(f"{label}: geometry {name} ({width}px): the toolbar is centred on the work area",
+                    error <= CENTRE_TOLERANCE, f"off by {error:.2f}px; {json.dumps(g)}")
+            r.check(f"{label}: geometry {name} ({width}px): and it stays within it",
+                    g["barLeft"] >= g["workLeft"] - 1 and g["barRight"] <= g["workRight"] + 1, json.dumps(g))
+    finally:
+        if original:
+            page.set_viewport_size(original)
+            time.sleep(0.5)
+
+
 def open_page(p, port, chromium, args, keep=False, touch=True):
     browser = p.chromium.launch(executable_path=chromium, headless=not keep, args=args)
     context = browser.new_context(viewport={"width": 1280, "height": 900}, has_touch=touch)
@@ -794,7 +865,19 @@ def open_page(p, port, chromium, args, keep=False, touch=True):
     page.on("pageerror", note_error)
     page.goto(f"http://127.0.0.1:{port}/", wait_until="load")
     page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
-    time.sleep(3)
+    # The bundle is fetched over HTTP now, so the adapter is not there the
+    # moment the markup is. Wait for the readiness primitive to settle rather
+    # than for a fixed number of seconds - but only on a page that has a
+    # Canvas to wait for: the legacy frontend mounts the iframe and nothing
+    # else, and waiting there would just spend the timeout.
+    if page.query_selector("#minipaint_canvas_surface"):
+        try:
+            page.wait_for_function(
+                "() => window.minipaintCanvasReady && window.minipaintCanvasReady.state() === 'ready'",
+                timeout=30000)
+        except Exception:
+            pass  # asserted by the caller, which can name the check that failed
+    time.sleep(1)
     return browser, page, errors
 
 
@@ -805,12 +888,26 @@ def run_new_ui(r: Results, port: int, chromium: str, keep: bool) -> None:
     uuid = page_uuid = None
     demo.queue().launch(server_name="127.0.0.1", server_port=port, prevent_thread_lock=True, quiet=True,
                         allowed_paths=[str(ROOT)])
+    mount_assets(demo)
     try:
         with sync_playwright() as p:
             # ---- 1. an ordinary browser ----
             browser, page, errors = open_page(p, port, chromium, [], keep=keep)
             uuid = page.evaluate("() => { const t = document.querySelector('#minipaint_canvas_surface .forge-container'); return t ? t.id.replace('container_', '') : null; }")
             r.check("the surface is on the page", bool(uuid))
+            # The startup contract, asserted rather than assumed. A rendered
+            # tab is not a ready Canvas, and telling them apart is the whole
+            # reason these three checks exist.
+            r.check("the canvas bundle was fetched over the route, not inlined into the page",
+                    page.evaluate("() => Array.from(document.querySelectorAll('script[data-minipaint-bundle]'))"
+                                  ".some(s => (s.getAttribute('data-minipaint-bundle') || '').indexOf('canvas') >= 0)"),
+                    "no dynamically added canvas script element")
+            r.check("and the canvas reports ready, not merely rendered",
+                    page.evaluate("() => window.minipaintCanvasReady.state()") == "ready",
+                    str(page.evaluate("() => window.minipaintCanvasReady.state()")))
+            r.check("with a live editor attached to this surface",
+                    bool(uuid) and page.evaluate("u => !!(window.minipaintCanvas && window.minipaintCanvas.attachedTo(u))", uuid))
+            check_toolbar_geometry(r, page, "webgl")
             r.check("webgl: the browser has WebGL", page.evaluate("() => { try { const c = document.createElement('canvas'); return !!(c.getContext('webgl') || c.getContext('experimental-webgl')); } catch (e) { return false; } }"))
             run_flow(r, page, refs, uuid, "webgl", with_upload=True)
             r.check("webgl: no page errors", not errors, "; ".join(e[:160] for e in errors[:3]))
@@ -834,6 +931,7 @@ def run_legacy(r: Results, port: int, chromium: str) -> None:
     demo, _ = build(old_ui=True)
     demo.queue().launch(server_name="127.0.0.1", server_port=port, prevent_thread_lock=True, quiet=True,
                         allowed_paths=[str(ROOT)])
+    mount_assets(demo)
     try:
         with sync_playwright() as p:
             browser, page, errors = open_page(p, port, chromium, [], touch=False)

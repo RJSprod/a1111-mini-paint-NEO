@@ -1,0 +1,1123 @@
+MINIPAINT NEO - CANVAS RECOVERY AND PERFORMANCE PRESERVATION
+DESIGN INTENT / IMPLEMENTATION SPECIFICATION
+
+Repository:
+    RJSprod/a1111-mini-paint-NEO
+
+Reviewed main revision:
+    009bad0b215a7074391a9beca36f3488a76f9826
+    2026-09-14
+
+Status:
+    Implementation-grade recommendation for the next corrective change set.
+
+Purpose:
+    Restore the Mini Paint / Canvas user experience and reliability that existed
+    before the recent performance work, while KEEPING the performance improvements
+    that are technically sound.
+
+    This is not a request to roll back the performance effort. It is a request to
+    separate correctness, user experience, optional integrations, and performance
+    so that an optimization can never make the editor fail to initialize.
+
+PRIMARY PRODUCT REQUIREMENT
+
+    MINI PAINT MUST FEEL LIKE THE OLD UI, BUT RUN LIKE THE NEW PERFORMANCE WORK
+    INTENDED IT TO RUN.
+
+    Specifically:
+
+    1. The Canvas opens and is immediately usable.
+    2. Open / upload, drag-and-drop, paste, and "Send to Mini Paint" all work.
+    3. The Forge toolbar is visually centered over the Canvas as it was before.
+    4. WanGP, Clipboard, interop, or any other optional integration may fail
+       independently without disabling or delaying the Canvas editor.
+    5. Performance improvements must be invisible to normal user interaction.
+    6. No performance PR may intentionally change the visible editor layout unless
+       the change has a separate product/UI requirement and a screenshot or
+       geometry test proving the desired result.
+
+================================================================================
+0. EXECUTIVE DECISION
+================================================================================
+
+KEEP the following performance ideas:
+
+    - fix Canvas resize feedback loops;
+    - batch layout reads before layout writes;
+    - coalesce pointer rendering to requestAnimationFrame;
+    - flush the final pointer position on pointer-up;
+    - send the picture and its already-computed mask in one response;
+    - wake browser waits from real events rather than fast polling;
+    - scope MutationObserver to the smallest useful subtree and disconnect it;
+    - keep diagnostics off expensive Gradio round trips;
+    - avoid blocking child-process/control-plane socket calls from Forge async
+      request handlers;
+    - use the server-side event/snapshot architecture for long-running WanGP /
+      Clipboard work;
+    - keep content-hashed browser bundles outside Forge's globally auto-loaded
+      javascript/ directory;
+    - cache immutable bundles by content hash.
+
+CHANGE the following recent decisions:
+
+    - Canvas startup must NOT await the WanGP bundle.
+    - The dynamic asset loader must have an explicit, tested Promise contract.
+    - Failed script loads must be genuinely retryable.
+    - The real dynamic-loading path must be exercised by browser tests.
+    - The toolbar must return to the centered position used by the previous UI.
+    - Crop-frame controls must adapt around the toolbar; the toolbar must not be
+      permanently moved to solve a possible crop-handle collision.
+    - A visible Canvas shell with no attached controller is a startup failure,
+      not an acceptable degraded state.
+
+DO NOT:
+
+    - revert all recent performance commits;
+    - reintroduce high-frequency polling as the default;
+    - put all four large browser bundles back into javascript/;
+    - make the Canvas depend on WanGP readiness;
+    - fix the current race only by adding "return" while still awaiting
+      ["canvas", "wangp"] together;
+    - hide failures behind passing unit/string tests that never execute the real
+      browser loading sequence.
+
+================================================================================
+1. CURRENT FAILURE THAT MUST BE CORRECTED FIRST
+================================================================================
+
+1.1 The asynchronous loader contract is broken
+
+Current shape:
+
+    minipaint_neo/assets.py::loader_js()
+
+generates JavaScript equivalent to:
+
+    () => {
+        const w = window.minipaintAssets;
+        if (w && w.load) {
+            w.load([...]);
+        }
+    }
+
+The wrapper does not return the Promise from w.load(...).
+
+But:
+
+    minipaint_neo/canvas/surface.py
+
+uses it as if it were awaitable:
+
+    await (loaderFunction)();
+
+and then immediately checks:
+
+    if (window.minipaintCanvas) {
+        window.minipaintCanvas.attach(...);
+    }
+
+Because the wrapper returns undefined, the await completes before the dynamically
+inserted Canvas script is guaranteed to have loaded and executed.
+
+The failure mode is therefore:
+
+    Gradio tab/UI exists
+        ->
+    browser starts fetching minipaint_canvas.js
+        ->
+    await completes immediately
+        ->
+    window.minipaintCanvas is still undefined
+        ->
+    attach() is skipped
+        ->
+    bundle eventually arrives
+        ->
+    nobody retries attach()
+        ->
+    user sees a Canvas-looking tab whose interactive controller is absent.
+
+This explains a tab that opens while Open/upload/drop/paste/send-to behavior is
+dead.
+
+1.2 A minimal "return the Promise" patch is necessary but NOT sufficient
+
+Changing loader_js() to return w.load(...) fixes the immediate Promise violation,
+but the current Canvas bootstrap asks for both:
+
+    ["canvas", "wangp"]
+
+before attach().
+
+After the Promise bug is fixed, that means Canvas initialization becomes
+correctly blocked on BOTH bundles.
+
+That violates the repository's own intended isolation rule:
+
+    optional WanGP integration must not stop the Canvas from loading.
+
+Therefore the repair must change BOTH the Promise contract AND the dependency
+boundary.
+
+================================================================================
+2. REQUIRED STARTUP ARCHITECTURE
+================================================================================
+
+2.1 Establish one explicit Canvas readiness primitive
+
+There should be exactly one authoritative browser-side operation that means:
+
+    "The Canvas adapter is loaded and the requested Canvas surface is attached."
+
+Recommended conceptual API:
+
+    window.minipaintAssets.ensure("canvas")
+    window.minipaintCanvas.attach(uuid, options)
+
+or a higher-level wrapper:
+
+    window.minipaintCanvasBootstrap.ensureAttached(uuid, options)
+
+The exact name is not important. The contract is.
+
+Required properties:
+
+    - returns a Promise;
+    - Promise settles only after the Canvas bundle load has settled;
+    - success means window.minipaintCanvas exists;
+    - attach() is then invoked exactly once for the surface;
+    - repeated calls are idempotent;
+    - Reload UI is safe;
+    - one failed attempt can be retried;
+    - optional integrations are not part of the Promise.
+
+2.2 Canvas is mandatory; WanGP is optional
+
+Correct ordering:
+
+    await load Canvas
+    verify Canvas API exists
+    attach Canvas
+    mark Canvas ready
+
+Then, separately:
+
+    request/preload WanGP if useful
+    do not await it for Canvas readiness
+    do not let it change Canvas ready/error state
+
+Conceptually:
+
+    const canvasOK = await assets.load([canvasUrl]);
+
+    if (!canvasOK || !window.minipaintCanvas) {
+        showCanvasStartupError();
+        return false;
+    }
+
+    window.minipaintCanvas.attach(uuid, options);
+
+    // Optional. It may succeed, fail, or retry later.
+    assets.load([wangpUrl]);
+
+    return true;
+
+A WanGP 404, timeout, syntax error, incompatible version, or disabled integration
+must not affect Open, paste, drop, crop, mask, layers, or local send destinations.
+
+2.3 Keep Canvas after-hydration loading for now
+
+There is a valid reason Canvas currently loads on the page-level Gradio load event
+rather than only when the Mini Paint tab is opened:
+
+    "Send to Mini Paint" can be invoked from txt2img/img2img/Extras before the
+    user has selected the Mini Paint tab.
+
+For the corrective release, retain this behavior:
+
+    - main.js remains the small globally loaded bootstrap;
+    - the Canvas bundle is fetched after the application has mounted;
+    - the Canvas bundle is NOT parsed in Forge's global extension hydration set;
+    - WanGP / Clipboard / interop remain separately lazy where possible.
+
+Do not attempt "perfect laziness" for Canvas in the same corrective patch.
+
+A future change may make Send-to entry points await Canvas on demand, but that is
+a separate optimization and requires its own real-browser proof.
+
+2.4 Every external Canvas entry point must share the same readiness rule
+
+The following must never assume that a global happens to exist:
+
+    - Send to Mini Paint from txt2img;
+    - Send to Mini Paint from img2img;
+    - Send to Mini Paint from Extras;
+    - Clipboard -> Canvas;
+    - direct tab open;
+    - direct file Open;
+    - drag/drop;
+    - paste;
+    - Reload UI reconstruction.
+
+If an operation can arrive before attach(), it must await the same readiness
+Promise rather than implement its own polling or timing delay.
+
+================================================================================
+3. DYNAMIC SCRIPT LOADER CONTRACT
+================================================================================
+
+3.1 loader_js() must return its Promise
+
+The generated wrapper must return a Promise in every branch.
+
+Conceptual result:
+
+    () => {
+        const w = window.minipaintAssets;
+        return (w && w.load)
+            ? w.load(urls)
+            : Promise.resolve(false);
+    }
+
+Do not leave an implicit undefined return in an async contract.
+
+3.2 Define success and failure explicitly
+
+Recommended contract for one(url):
+
+    Promise<boolean>
+
+    true:
+        the requested script loaded successfully OR an already-loaded successful
+        copy is known to exist.
+
+    false:
+        the script failed to load.
+
+Recommended contract for load(urls):
+
+    Promise<boolean>
+
+    true only when every required URL in that invocation succeeded.
+
+For optional bundles, call load() separately so one optional false does not become
+a required false.
+
+3.3 A failed script element must be removed
+
+Current intent says a failed load can be retried, but a failed
+<script data-minipaint-bundle="..."> element remains in the document.
+
+A later attempt can therefore find the stale element and incorrectly treat its
+existence as success.
+
+Required behavior on error:
+
+    - remove the failed script element from the DOM, or mark it explicitly as
+      failed and never treat that element as loaded;
+    - delete the failed Promise/cache entry;
+    - return false for that attempt;
+    - allow a later call to create a new script element and make a real request.
+
+Do not use "script element exists" as proof of successful execution.
+
+If element reuse is retained, it needs an explicit state:
+
+    data-minipaint-state="loading|loaded|failed"
+
+Only "loaded" is success.
+
+3.4 Preserve idempotency for successful scripts
+
+For a successfully loaded content-hashed URL:
+
+    - do not append it again during Reload UI;
+    - do not re-register listeners;
+    - do not execute the bundle twice;
+    - reuse the fulfilled Promise or explicit loaded state.
+
+This is a good part of the existing design and should remain.
+
+3.5 Keep content-hashed immutable asset URLs
+
+Retain:
+
+    /minipaint-assets/js/<bundle>.js?v=<content hash>
+
+and long-lived immutable caching.
+
+This moves parse work away from Forge hydration and lets the browser reuse an
+unchanged bundle without re-fetching it.
+
+The asset route should remain a fixed allowlist of known bundle names. Do not turn
+it into a generic file-serving path.
+
+================================================================================
+4. CANVAS STARTUP FAILURE MUST BE VISIBLE AND RECOVERABLE
+================================================================================
+
+The current failure is especially confusing because the static Gradio shell looks
+healthy even when no Canvas controller is attached.
+
+Required startup state:
+
+    loading
+    ready
+    failed
+
+Recommended behavior:
+
+    loading:
+        Canvas surface may render, but interactions that require the adapter
+        should not silently execute.
+
+    ready:
+        attach completed and debug/ready state confirms a live instance.
+
+    failed:
+        show a compact status message in the existing status area, for example:
+            "Mini Paint failed to initialize. Retry."
+        Retry should attempt only the Canvas bundle/bootstrap again.
+
+Do not redesign the tab around this state. This is a diagnostic/recovery path,
+not a new user experience.
+
+Required invariant:
+
+    "Tab rendered" is not equivalent to "Canvas ready."
+
+A browser test must explicitly assert ready/attached.
+
+================================================================================
+5. RESTORE THE PREVIOUS UI GEOMETRY
+================================================================================
+
+5.1 The Forge toolbar returns to center
+
+The permanent right offset introduced to avoid the crop-frame grip should be
+removed.
+
+Desired desktop geometry:
+
+    toolbar_center_x == canvas_visual_center_x
+
+with a small rounding tolerance.
+
+Suggested CSS intent:
+
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+
+The reference center is the Canvas/image work area, NOT the full page including
+the right tool rail.
+
+Acceptance tolerance:
+
+    absolute horizontal center error <= 4 CSS pixels
+
+at representative desktop sizes.
+
+5.2 Do not move a permanent control to solve a temporary collision
+
+The centered toolbar is part of the old visual language and should remain stable.
+
+If a crop-frame move grip can collide with the toolbar, solve the crop grip, not
+the toolbar.
+
+Permitted approaches:
+
+    - place the frame grip off the exact midpoint of the frame's top edge;
+    - dynamically move the grip to the nearest free segment of the frame edge;
+    - choose left/right grip placement based on overlap;
+    - suppress/reposition only the grip when the frame is directly under the
+      toolbar.
+
+Not permitted:
+
+    - a permanent right: 52px (or similar) toolbar displacement;
+    - moving the whole toolbar because a transient crop selection might overlap.
+
+5.3 Preserve the old visual hierarchy
+
+Performance work must not change:
+
+    - toolbar centering;
+    - Menu placement;
+    - checkerboard Canvas presentation;
+    - status-line height behavior;
+    - side tool rail concept;
+    - basic Crop / Mask / Expand / Layers workflow;
+    - old spacing unless a measured layout bug requires a local correction.
+
+When a performance change needs a layout adjustment, submit it separately or add
+a specific screenshot/geometry acceptance test explaining why it is necessary.
+
+================================================================================
+6. PERFORMANCE WORK TO KEEP
+================================================================================
+
+6.1 Resize-loop correction
+
+Keep the recent Canvas sizing work that:
+
+    - avoids observing boxes the sizing path itself repeatedly changes;
+    - reads layout measurements before writing layout styles;
+    - avoids read -> write -> read forced-layout sandwiches;
+    - rounds dimensions before equality comparison so fractional values can
+      settle;
+    - coalesces fit work to animation frames;
+    - prevents self-generated ResizeObserver notifications from becoming an
+      endless feedback loop.
+
+This follows established browser performance practice: layout reads should be
+batched before geometric writes, and forced synchronous layout / layout thrashing
+should be avoided.
+
+Do not revert this to the old resize behavior just to restore the old appearance.
+
+6.2 Pointer-event coalescing
+
+Keep requestAnimationFrame coalescing for high-frequency pointer work.
+
+Required semantics:
+
+    - at most one visual update per animation frame per interaction path;
+    - latest pointer position wins inside a frame;
+    - pointer-up flushes that path synchronously so the final position is not
+      lost;
+    - pointer-cancel drops pending work;
+    - separate simultaneous paths cannot overwrite each other's pending action.
+
+Do not use requestAnimationFrame for execution that must continue while a page is
+hidden. Browsers commonly pause rAF callbacks in hidden tabs.
+
+6.3 Picture + mask in one structural response
+
+Keep the optimization that removes the unnecessary second network trip for a
+mask already computed by the server.
+
+Required invariant:
+
+    mask N may only apply to picture N.
+
+A newer structural result replaces an older pending mask. Do not queue stale masks
+behind newer pictures.
+
+6.4 Event-driven image waits
+
+Keep the direct load-hook wakeup for Canvas image readiness.
+
+A condition produced inside minipaint_canvas.js should be signaled by that
+producer rather than discovered by a 25 Hz timer.
+
+Keep bounded timeout fallback for genuine failure.
+
+6.5 Scoped DOM observation
+
+Keep:
+
+    - check for required elements first;
+    - if observation is necessary, observe the narrowest stable parent;
+    - use one observer when one can serve multiple targets;
+    - disconnect once the targets are found.
+
+Do not return to multiple whole-document subtree observers during Forge hydration.
+
+6.6 Async-route isolation
+
+Keep the change that prevents Forge async request handlers from making blocking
+child-control socket reads.
+
+The async route should read state the executor/control thread has already cached.
+A stale cache should report "unknown" rather than block Forge's event loop to
+obtain a fresh answer.
+
+6.7 Server event spine / snapshot model
+
+Keep the architectural direction in which:
+
+    - long-running work is server-owned;
+    - browser state is updated from events;
+    - reconnect/visibility recovery uses one authoritative snapshot;
+    - continuous browser polling is not the primary execution mechanism.
+
+This is particularly important for unattended WanGP generation.
+
+Do not mix this server-side execution architecture into the basic Canvas startup
+dependency graph.
+
+================================================================================
+7. PAGE-WEIGHT POLICY
+================================================================================
+
+7.1 Global JavaScript budget
+
+Only the bootstrap/loader and code genuinely needed on every Forge page belongs
+in javascript/.
+
+Do not move Canvas, WanGP, Clipboard, or interop bundles back into the global
+folder simply to fix startup.
+
+Current direction is correct:
+
+    javascript/main.js
+        global bootstrap
+
+    browser/minipaint_canvas.js
+    browser/minipaint_wangp.js
+    browser/minipaint_clipboard.js
+    browser/minipaint_interop.js
+        served on demand / after mount as appropriate
+
+7.2 Do not couple large optional bundles
+
+Canvas and WanGP are separate products from the perspective of page startup.
+
+Canvas readiness must not wait for the WanGP browser bundle.
+
+Similarly:
+
+    Clipboard readiness must not become a prerequisite for Canvas readiness.
+    Interop readiness must not become a prerequisite for Canvas readiness.
+
+Integration code may become available later and extend a ready Canvas.
+
+7.3 Minification is optional, not a correctness requirement
+
+Do not add a new build system merely to claim a smaller file if that introduces
+installation or maintenance risk.
+
+First priorities:
+
+    - load less code during hydration;
+    - avoid loading optional code until needed;
+    - guarantee correct asynchronous startup;
+    - cache immutable content.
+
+Minification may be evaluated later as a separate build/tooling decision.
+
+================================================================================
+8. REAL-BROWSER TEST REQUIREMENTS
+================================================================================
+
+This corrective work is not complete when unit tests pass.
+
+The failure being corrected exists specifically in the timing between:
+
+    Gradio load callback
+    ->
+    dynamic script element
+    ->
+    HTTP asset route
+    ->
+    browser script execution
+    ->
+    attach()
+
+Therefore the test must execute that path.
+
+8.1 Mandatory browser harness
+
+The browser test must serve browser/minipaint_canvas.js through the same dynamic
+asset mechanism used in production.
+
+For this test, DO NOT inline the Canvas bundle into the HTML before bootstrap.
+
+Inlining makes window.minipaintCanvas exist too early and recreates the old timing
+model instead of testing the production loader.
+
+8.2 Required delayed-load test
+
+Artificially delay the Canvas bundle response, for example 250-500 ms.
+
+Assert:
+
+    before response resolves:
+        window.minipaintCanvas may be absent
+        Canvas is not reported ready
+        attach has not been called
+
+    after response executes:
+        window.minipaintCanvas exists
+        attach is called exactly once
+        Canvas ready state becomes true
+
+This test would have caught the present regression.
+
+8.3 Required optional-failure test
+
+Return 404 for the WanGP bundle.
+
+Assert all of the following still work:
+
+    Canvas attaches;
+    file Open works;
+    drop works;
+    paste works;
+    Crop can activate;
+    toolbar is centered;
+    Canvas can send to local destinations.
+
+WanGP may show its own degraded state. It must not poison the Canvas.
+
+8.4 Required retry test
+
+First Canvas bundle request fails.
+Second attempt succeeds.
+
+Assert:
+
+    second attempt creates/makes a real request;
+    stale failed script element is not treated as success;
+    attach occurs once after the successful response.
+
+8.5 Required "Send to Mini Paint before tab open" test
+
+Without selecting the Mini Paint tab:
+
+    - provide a gallery result;
+    - press Send to Mini Paint;
+    - ensure Canvas readiness is awaited;
+    - image appears in Mini Paint;
+    - UI switches to the tab only after the handoff is valid.
+
+This protects the reason Canvas is currently loaded after mount rather than purely
+on tab activation.
+
+8.6 Required direct-input tests
+
+On an attached Canvas:
+
+    - Open image through Menu -> Open;
+    - drop an image file;
+    - paste an image;
+    - verify the document obtains non-zero image dimensions;
+    - verify the expected image is visible.
+
+Do not merely test that a hidden Gradio input value changed.
+
+8.7 Reload UI idempotency test
+
+Simulate/reproduce Forge Reload UI without a full document reload.
+
+Assert:
+
+    - successful bundle is not executed twice;
+    - no duplicate Menu listeners;
+    - no duplicate pointer handlers;
+    - attach for the rebuilt surface succeeds;
+    - one user action causes one action, not two.
+
+8.8 Toolbar geometry test
+
+At representative desktop widths:
+
+    - calculate Canvas visual center;
+    - calculate toolbar bounding-box center;
+    - difference <= 4 CSS pixels.
+
+Also test a narrow responsive layout so the toolbar remains centered relative to
+the work area after the side rail wraps below.
+
+8.9 Resize settling test
+
+With a still page:
+
+    - resize once;
+    - allow the layout to settle;
+    - assert fit activity reaches zero rather than continuing indefinitely.
+
+The existing development warning may remain, but the browser test must prove the
+steady-state behavior.
+
+================================================================================
+9. PERFORMANCE ACCEPTANCE CRITERIA
+================================================================================
+
+The objective is not to maximize cleverness. It is to prevent the original
+sluggishness without damaging the editor.
+
+9.1 Cold page / hydration
+
+On a fresh Forge page with Mini Paint installed:
+
+    - only main.js is part of the extension's globally auto-loaded JavaScript;
+    - Canvas parsing happens after app mount, not in the global hydration burst;
+    - WanGP / Clipboard / interop are not pulled into Canvas readiness;
+    - no duplicate browser bundles execute.
+
+Record a browser performance trace before and after the corrective patch.
+
+The corrective patch must not move the four large bundles back into initial
+hydration.
+
+9.2 Idle behavior
+
+After the page and Canvas settle, with no active job:
+
+    - no resize feedback loop;
+    - no continuous Canvas polling loop;
+    - no repeated server request caused solely by an idle editor;
+    - no repeated layout-fit work on an unchanged viewport.
+
+Event-stream heartbeats required for an explicitly active integration are
+separate from Canvas idle work and must not trigger Canvas layout.
+
+9.3 Pointer interaction
+
+During pan, crop-frame movement, layer movement, or similar pointer interaction:
+
+    - visual work is frame-coalesced;
+    - no path performs multiple expensive layout/paint updates for every raw
+      pointer report;
+    - final pointer-up result exactly matches the release position.
+
+9.4 Structural Canvas operations
+
+For a server-side structural operation that returns a new picture and mask:
+
+    - do not perform a second server request merely to fetch the already-computed
+      mask;
+    - apply the mask after the corresponding picture is ready;
+    - never apply a stale mask to a newer picture.
+
+9.5 Forge event loop
+
+No async FastAPI/Starlette route in this extension may directly perform a
+blocking child-control socket call.
+
+If fresh state requires blocking I/O:
+
+    background/executor thread obtains it
+        ->
+    route reads cached result
+
+or the blocking operation must explicitly run outside the event loop.
+
+9.6 Measure changes rather than infer them
+
+For any future performance PR, include at least one measurement matching the
+thing being optimized:
+
+    startup:
+        browser Performance trace / scripting / long tasks
+
+    Canvas interaction:
+        frame trace / layout / paint / forced reflow
+
+    network:
+        request count and transferred bytes
+
+    polling:
+        request count over a fixed idle/active interval
+
+    bundle change:
+        parsed bytes during hydration and at first feature use
+
+Do not treat line count, component count, or theoretical byte size alone as proof
+of user-visible performance.
+
+================================================================================
+10. CHANGE SEQUENCING
+================================================================================
+
+PHASE 0 - CORRECTNESS AND OLD UI RESTORATION
+
+    Scope:
+        - Promise return fix;
+        - Canvas/WanGP dependency split;
+        - genuine failed-script retry;
+        - reliable Canvas ready/error state;
+        - centered toolbar;
+        - crop grip local collision resolution.
+
+    Requirement:
+        no new feature work.
+
+    Exit:
+        Open, drop, paste and Send-to work;
+        toolbar looks like old UI;
+        WanGP failure cannot break Canvas.
+
+PHASE 1 - PRODUCTION-PATH BROWSER TESTS
+
+    Add:
+        delayed asset route;
+        404/retry;
+        Send-to-before-tab-open;
+        Reload UI;
+        geometry;
+        direct input tests.
+
+    Exit:
+        test suite demonstrably reproduces the asynchronous production ordering.
+
+PHASE 2 - PERFORMANCE VERIFICATION
+
+    Run traces and compare:
+
+        - hydration scripting;
+        - Canvas idle CPU;
+        - resize settling;
+        - pointer interaction;
+        - structural edit request count;
+        - network requests while integrations are inactive.
+
+    Correct only regressions demonstrated by measurement.
+
+PHASE 3 - OPTIONAL FURTHER LAZY LOADING
+
+    Only after Phases 0-2 are stable:
+
+        consider making Canvas itself truly on-demand by teaching every external
+        Send-to entry point to await ensureCanvasReady().
+
+    This is optional.
+
+    Do not combine it with the recovery patch.
+
+================================================================================
+11. CODE REVIEW RULES FOR THIS AREA
+================================================================================
+
+A reviewer should reject a change when any of these are true:
+
+    1. A Promise-returning operation is invoked inside an async flow but the
+       wrapper does not return/await that Promise.
+
+    2. Canvas initialization depends on an optional integration.
+
+    3. A test "proves" dynamic loading while pre-inlining the dynamically loaded
+       bundle.
+
+    4. A failed script is considered loaded because its DOM element exists.
+
+    5. A performance fix permanently changes visible UI geometry without a
+       separate UI requirement and geometry/screenshot test.
+
+    6. A server-known event is replaced with fast polling without a documented
+       reason.
+
+    7. An async Forge route performs blocking control-plane I/O.
+
+    8. A performance PR changes execution architecture and UI design in the same
+       patch without independently testable commits.
+
+    9. A large optional browser bundle is added to the Canvas critical path.
+
+    10. "All tests pass" is used as evidence while the relevant production path
+        is absent from those tests.
+
+================================================================================
+12. RECOMMENDED IMPLEMENTATION SHAPE
+================================================================================
+
+This section is illustrative, not a demand for exact naming.
+
+Python side:
+
+    def loader_js(names):
+        ...
+        return (
+            "() => { "
+            "const w = window.minipaintAssets; "
+            "return (w && w.load) ? w.load(URLS) : Promise.resolve(false); "
+            "}"
+        )
+
+Canvas Surface startup:
+
+    canvas_loader = assets.loader_js(["canvas"])
+
+    Context.root_block.load(
+        None,
+        js=(
+            "async () => { "
+            "const ok = await (CANVAS_LOADER)(); "
+            "if (!ok || !window.minipaintCanvas) { return false; } "
+            "window.minipaintCanvas.attach(UUID, OPTIONS); "
+            "const a = window.minipaintAssets; "
+            "if (a && a.load) { a.load([WANGP_URL]); } "
+            "return true; "
+            "}"
+        )
+    )
+
+Browser asset loader error path:
+
+    element.addEventListener("error", function () {
+        delete loaded[key];
+        try { element.remove(); } catch (_) {}
+        resolve(false);
+    });
+
+Better still, track state explicitly so an existing element is not automatically
+equated with success.
+
+Canvas attach:
+
+    function attach(uuid, options) {
+        if (alreadyAttachedTo(uuid)) {
+            return true;
+        }
+
+        if (typeof ForgeCanvas !== "function") {
+            return false;
+        }
+
+        ...
+
+        markReady(uuid);
+        return true;
+    }
+
+The exact code can differ. The behavior may not.
+
+================================================================================
+13. UI REFERENCE RULE
+================================================================================
+
+For this corrective effort, the old Mini Paint UI is the visual reference.
+
+Use the last known-good centered-toolbar behavior as the source of truth for:
+
+    - toolbar alignment;
+    - overall Canvas visual balance;
+    - familiar placement of stable controls.
+
+The performance implementation may optimize HOW the same UI updates.
+
+It should not redefine WHERE the UI lives.
+
+A crop-frame handle, diagnostic overlay, or new integration affordance must adapt
+to that established layout rather than moving established controls out of its
+way.
+
+================================================================================
+14. WHY THESE CHOICES
+================================================================================
+
+The recent performance work correctly identified real browser costs:
+
+    - layout feedback and layout thrashing;
+    - raw pointer work occurring faster than a display can paint;
+    - duplicated transport steps;
+    - DOM observation broader than necessary;
+    - browser polling for facts already known by a producer/server;
+    - blocking work entering an async server path;
+    - unnecessary JavaScript parse work during Forge hydration.
+
+Those are legitimate targets.
+
+The regression came from a different class of problem:
+
+    ASYNCHRONOUS INITIALIZATION BECAME AN IMPLICIT TIMING ASSUMPTION.
+
+Moving code from "already executed globally" to "dynamically loaded later" changes
+a synchronous availability assumption into a Promise/lifecycle problem.
+
+That boundary requires:
+
+    - an explicit readiness contract;
+    - dependency isolation;
+    - failure/retry semantics;
+    - tests that preserve real network timing.
+
+Without those, a page can look complete while its controller has not started.
+
+The correct response is therefore not "undo performance."
+
+It is:
+
+    KEEP THE MEASURED PERFORMANCE IMPROVEMENTS,
+    RESTORE THE ESTABLISHED UI,
+    AND MAKE ASYNCHRONOUS STARTUP A FIRST-CLASS, TESTED CONTRACT.
+
+================================================================================
+15. DEFINITION OF DONE
+================================================================================
+
+This effort is done only when all of the following are true:
+
+    [ ] Mini Paint opens with an attached Canvas controller.
+
+    [ ] Menu -> Open accepts an image.
+
+    [ ] Drag-and-drop accepts an image.
+
+    [ ] Paste accepts an image.
+
+    [ ] Send to Mini Paint works before the Mini Paint tab was manually opened.
+
+    [ ] WanGP bundle failure does not stop any basic Canvas operation.
+
+    [ ] Canvas bundle failure produces a clear degraded state and a genuine retry
+        can recover without a full browser reload.
+
+    [ ] Forge toolbar is centered relative to the Canvas work area.
+
+    [ ] Crop grip no longer requires a permanent toolbar displacement.
+
+    [ ] Resize behavior settles with no continuous loop.
+
+    [ ] Pointer work remains requestAnimationFrame-coalesced.
+
+    [ ] Picture + mask structural edits remain one server response.
+
+    [ ] Startup observer remains scoped and disconnects.
+
+    [ ] Async Forge routes do not block on child-control socket reads.
+
+    [ ] Global Forge hydration does not regain the four large browser bundles.
+
+    [ ] Reload UI does not duplicate scripts or event listeners.
+
+    [ ] Browser tests use the real dynamic asset route and include an artificial
+        delayed response.
+
+    [ ] Browser tests include a Canvas delay, Canvas failure/retry, and WanGP
+        failure while Canvas succeeds.
+
+    [ ] Performance trace shows no regression significant enough to justify
+        changing the restored UI.
+
+================================================================================
+16. REFERENCES
+================================================================================
+
+Repository:
+    https://github.com/RJSprod/a1111-mini-paint-NEO
+
+Reviewed main commit:
+    https://github.com/RJSprod/a1111-mini-paint-NEO/commit/009bad0b215a7074391a9beca36f3488a76f9826
+
+Relevant repository areas:
+    minipaint_neo/assets.py
+    javascript/main.js
+    browser/minipaint_canvas.js
+    minipaint_neo/canvas/surface.py
+    minipaint_neo/canvas/ui.py
+    tests/browser_smoke.py
+    docs/PERFORMANCE_DESIGN_INTENT_2026-09-13.txt
+    docs/PERFORMANCE_DESIGN_INTENT_2026-09-13_WALKAWAY_VERIFIED_1.txt
+
+Browser-performance references:
+
+    MDN - requestAnimationFrame
+    https://developer.mozilla.org/en-US/docs/Web/API/Window/requestAnimationFrame
+
+    MDN - MutationObserver.observe
+    https://developer.mozilla.org/en-US/docs/Web/API/MutationObserver/observe
+
+    MDN - Page Visibility API
+    https://developer.mozilla.org/en-US/docs/Web/API/Page_Visibility_API
+
+    web.dev - Avoid large, complex layouts and layout thrashing
+    https://web.dev/articles/avoid-large-complex-layouts-and-layout-thrashing
+
+    web.dev - Core Web Vitals performance guidance / code splitting and unused JS
+    https://web.dev/articles/top-cwv
+
+END OF SPECIFICATION

@@ -15,6 +15,26 @@ gradio==4.40.0
 gradio-client==1.2.0
 # 4.40 imports a name later releases removed.
 huggingface_hub==0.24.6
+# Pinning Gradio is not enough on its own: it declares ``fastapi`` and
+# ``pydantic`` with no upper bound, and both have since moved past what it
+# can work with. A fresh install of this file with those two left free
+# produces an environment where nothing browser-facing runs at all, and the
+# failures do not name the cause:
+#
+#   fastapi >= 0.113 brings starlette >= 0.39, whose Jinja2Templates passes a
+#   dict where the template cache wants a hashable key - every page render
+#   500s, and Gradio's own launch() then reports "localhost is not
+#   accessible" because it probes itself and gets the error page.
+#
+#   pydantic >= 2.9 emits ``additionalProperties: true`` where gradio-client
+#   1.2.0 expects a schema object, so building the API info raises
+#   "argument of type 'bool' is not iterable" during launch().
+#
+# Both are pinned to the last release that works with 4.40.
+fastapi==0.112.2
+pydantic==2.8.2
 pillow
 httpx
-fastapi
+# The browser suites drive a real page; tests/run.py skips them when this is
+# missing rather than failing, because the rest of the suite does not need it.
+playwright

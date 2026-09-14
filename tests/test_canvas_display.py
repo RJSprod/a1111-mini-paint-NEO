@@ -35,7 +35,8 @@ setup_path()
 
 import io  # noqa: E402
 import os  # noqa: E402
-import pathlib  # noqa: E402
+import pathlib
+import re  # noqa: E402
 import tempfile  # noqa: E402
 
 from PIL import Image  # noqa: E402
@@ -261,6 +262,35 @@ def bundle_checks(r: Results) -> None:
     loader = assets.tab_loader_js("minipaint_clipboard", ["clipboard"])
     r.check("a tab loader names its panel and its bundles and nothing else",
             "loadOnTab" in loader and "minipaint_clipboard" in loader and assets.url_for("clipboard") in loader, loader[:120])
+
+    # The regression this file did not catch. Both loaders are used inside an
+    # ``await``, and a wrapper that returns nothing makes that await resolve
+    # on the microtask queue - before any script it just asked for can run,
+    # which is a task. Every branch returns a promise or the caller is not
+    # actually waiting for anything.
+    for name, made in (("page", assets.loader_js(["canvas"])),
+                       ("tab", assets.tab_loader_js("minipaint_clipboard", ["clipboard"]))):
+        r.check(f"the {name} loader returns its promise on the loaded path",
+                "return" in made.split("?")[0] or "return w" in made, made[:140])
+        r.check(f"and the {name} loader returns one when the page has no loader either",
+                "Promise.resolve(false)" in made, made[:140])
+    r.check("no loader drops its promise on the floor",
+            not any(re.search(r"\{\s*w\.load\(", made) for made in
+                    (assets.loader_js(["canvas"]), assets.tab_loader_js("p", ["canvas"]))))
+
+    # Canvas readiness is a boolean contract in the browser, and the bootstrap
+    # in main.js is what has to honour it. Promise.all resolves to an array,
+    # and an array is truthy whatever is in it.
+    bootstrap = (assets.root().parent / "javascript" / "main.js").read_text(encoding="utf-8")
+    r.check("load() reduces its results to one boolean",
+            "results.every(Boolean)" in bootstrap)
+    r.check("a script element carries its own state, so a failed one is not read as loaded",
+            'data-minipaint-state' in bootstrap and '"loaded"' in bootstrap)
+    r.check("and a failed script is taken out of the document so a retry makes a real request",
+            "element.remove()" in bootstrap and "delete loaded[key]" in bootstrap)
+    r.check("the readiness primitive is in the bootstrap, not in the bundle it loads",
+            "minipaintCanvasReady" in bootstrap
+            and "minipaintCanvasReady" not in (assets.path_for("canvas")).read_text(encoding="utf-8"))
 
 
 def _refused_key(call):

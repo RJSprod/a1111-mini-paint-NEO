@@ -19,7 +19,7 @@ import forge_like  # noqa: E402  (first: it applies Forge's metaclass patches be
 from modules import script_callbacks, shared  # noqa: E402
 from modules_forge.forge_canvas import canvas as forge_canvas  # noqa: E402
 from PIL import Image  # noqa: E402
-from minipaint_neo import router, settings  # noqa: E402
+from minipaint_neo import assets, router, settings  # noqa: E402
 from minipaint_neo.canvas import host, surface  # noqa: E402
 
 
@@ -433,8 +433,35 @@ def run() -> Results:
     r.check("the panel's Add image button only presses it, in the browser", len(add_press) == 1 and not add_press[0]["backend_fn"] and "pressHidden('minipaint_canvas_layer_add')" in add_press[0]["js"])
     r.check("Reselect in Crop and in Layers is browser-only", all(len(d) == 1 and not d[0]["backend_fn"] and "reselect()" in d[0]["js"] for d in (by_elem("minipaint_canvas_crop_reselect", "click"), by_elem("minipaint_canvas_layer_reselect", "click"))))
     r.check("entering and leaving transform mode are browser-only", all(len(d) == 1 and not d[0]["backend_fn"] and word in d[0]["js"] for d, word in ((by_elem("minipaint_canvas_layer_transform_start", "click"), "startTransform"), (by_elem("minipaint_canvas_layer_transform_done", "click"), "finishTransform"))))
-    r.check("no javascript runs at startup apart from attaching the canvases",
-            all("ForgeCanvas" in (d.get("js") or "") or "attach" in (d.get("js") or "") for d in deps if any(t[1] == "load" for t in d["targets"])))
+    starts = [d for d in deps if any(t[1] == "load" for t in d["targets"])]
+    r.check("no javascript runs at startup apart from bringing the canvases up",
+            all("ForgeCanvas" in (d.get("js") or "") or "attach" in (d.get("js") or "")
+                or "minipaintCanvasReady" in (d.get("js") or "") for d in starts))
+
+    # The startup contract. These are the two halves of the regression that
+    # made a Canvas tab open with no editor behind it: a loader whose promise
+    # was dropped, and a required load that carried an optional bundle.
+    boot = [d for d in starts if "minipaintCanvasReady" in (d.get("js") or "")]
+    r.check("the canvas is brought up by exactly one load event", len(boot) == 1, str(len(boot)))
+    boot_js = boot[0]["js"] if boot else ""
+    r.check("which awaits readiness rather than assuming it",
+            "await" in boot_js and "ensure()" in boot_js, boot_js[:200])
+    canvas_url, wangp_url = assets.url_for("canvas"), assets.url_for("wangp")
+    r.check("the canvas bundle is the one it waits for", canvas_url in boot_js, boot_js[:200])
+    r.check("and WanGP is asked for separately, after it, never awaited",
+            wangp_url in boot_js and boot_js.index(canvas_url) < boot_js.index(wangp_url)
+            and "await" not in boot_js.split(wangp_url)[0].rsplit(";", 2)[-1], boot_js[:400])
+    r.check("no startup load asks for the canvas and WanGP in one call",
+            not any(canvas_url in (d.get("js") or "") and wangp_url in (d.get("js") or "")
+                    and f'"{canvas_url}", "{wangp_url}"' in (d.get("js") or "") for d in starts))
+
+    # Send to Mini Paint can be pressed before the tab has ever been opened,
+    # which is the whole reason the bundle is fetched on page load. Without
+    # the wait it returned null as the image and the picture was discarded.
+    picks = [d for d in deps if "pickGalleryImage" in (d.get("js") or "")]
+    r.check("every Send to Mini Paint waits for the canvas before picking",
+            picks and all(j.startswith("async") and "ensure()" in j and j.index("ensure()") < j.index("pickGalleryImage")
+                          for j in (d["js"] for d in picks)), str(len(picks)))
 
     # ---- the whole page, legacy UI ----
     shared.opts.data[settings.USE_OLD_UI] = True

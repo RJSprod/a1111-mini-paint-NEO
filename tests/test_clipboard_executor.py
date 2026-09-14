@@ -612,6 +612,69 @@ def event_checks(r: Results, clock) -> None:
             "generated_files" not in blob and "generated_count" in blob, blob[:160])
 
 
+def event_loop_checks(r: Results, clock) -> None:
+    """The snapshot route asks nobody: it reads what the executor left.
+
+    Every call in ``wangp/control.py`` is a blocking socket read, and the
+    sync route is an async handler on Forge's own event loop. One such call
+    from there stalls every page on this Forge - every tab, every other
+    extension - for as long as the child takes to answer, which is exactly
+    the shape B19 forbids on this side of the wire. The rule is therefore
+    not "keep it quick", it is "do not ask at all", and that is what is
+    asserted: a snapshot makes zero control calls, reports what the last
+    hello said, and reports "not known" once that answer is too old rather
+    than presenting a stale card state as current.
+    """
+    _setup(clock)
+    control.reset_for_tests()
+    runtime = FakeRuntime()
+    runtime.state = FakeRuntime.READY
+    runtime.instance_id = "child-one"
+    child = FakeChild(clock)
+    asked = []
+    monkey = []
+    _install(monkey, runtime)
+
+    def counted(operation, payload):
+        asked.append(operation)
+        return child(operation, payload)
+
+    try:
+        control.use_transport(counted)
+        before = len(asked)
+        summary = interop.snapshot(PAGE)["runtime"]
+        r.check("a snapshot with nothing cached asks the child nothing at all",
+                len(asked) == before, str(asked))
+        r.check("and says it does not know what the card is doing, rather than guessing",
+                summary["card_busy"] is None and summary["queue_depth"] is None, str(summary))
+        r.check("while still answering what this process itself knows",
+                summary["running"] is True and summary["state"] == FakeRuntime.READY, str(summary))
+
+        # The executor thread is what keeps it fresh. One pass, then the
+        # route reads the answer that pass left behind.
+        child.busy = True
+        control.hello()
+        before = len(asked)
+        summary = interop.snapshot(PAGE)["runtime"]
+        r.check("once the executor has asked, the route reports the answer it left",
+                summary["card_busy"] is True and summary["queue_depth"] == 2, str(summary))
+        r.check("and still asked nothing itself", len(asked) == before, str(asked[before:]))
+
+        # Age the cached answer rather than the clock: what makes it stale is
+        # that the executor has not asked lately, and that is a fact about
+        # this module's own state.
+        control._last["at"] = control._last["at"] - control.HELLO_TTL - 1.0
+        before = len(asked)
+        summary = interop.snapshot(PAGE)["runtime"]
+        r.check("an answer too old to mean anything reads as not known, not as the old one",
+                summary["card_busy"] is None and summary["queue_depth"] is None, str(summary))
+        r.check("and even then the route does not go and ask", len(asked) == before, str(asked[before:]))
+    finally:
+        control.use_transport(None)
+        control.reset_for_tests()
+        _restore(monkey)
+
+
 def privacy_checks(r: Results, clock) -> None:
     """Nothing this path writes down carries a prompt or a path."""
     scratch = _setup(clock)
@@ -792,6 +855,7 @@ def run() -> Results:
     failure_checks(r, clock)
     cancellation_checks(r, clock)
     event_checks(r, clock)
+    event_loop_checks(r, clock)
     privacy_checks(r, clock)
     migration_checks(r, clock)
     enhanced_checks(r, clock)

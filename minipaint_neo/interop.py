@@ -760,10 +760,17 @@ def _runtime_summary() -> dict:
     try:
         from .wangp import control
 
-        hello = control.hello(timeout=control.CONNECT_TIMEOUT)
-        out["card_busy"] = hello["generation_running"]
-        out["queue_depth"] = hello["queue_depth"]
-        out["can_execute"] = hello["can_execute"]
+        # The CACHED answer, never a fresh one. This runs on the event loop,
+        # and every call into the child is a blocking socket read: asking
+        # here would stall every page on this Forge for as long as the child
+        # took. The executor thread keeps it fresh while the queue moves, and
+        # a value too old to mean anything reads as "not known" - which is
+        # the honest answer and is what the fields default to.
+        hello = control.last_hello()
+        if hello is not None:
+            out["card_busy"] = hello["generation_running"]
+            out["queue_depth"] = hello["queue_depth"]
+            out["can_execute"] = hello["can_execute"]
     except Exception:
         pass
     return out

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import typing
 import urllib.error
 import urllib.request
@@ -65,6 +66,15 @@ _lock = threading.RLock()
 #: Test seam: a callable taking (operation, payload) and returning (status,
 #: body), standing in for the socket. Nothing in the extension sets it.
 _seams: typing.Dict[str, typing.Any] = {"transport": None}
+#: The last answer to ``hello``, and when. Read by anything that wants to
+#: know what the child is doing *without* asking it - which is every async
+#: route, because every call in this module is a blocking socket read and an
+#: async route that made one would stall the whole of Forge for its timeout.
+_last: typing.Dict[str, typing.Any] = {"at": 0.0, "hello": None}
+#: How old a cached answer may be before it is reported as not known. Longer
+#: than the executor's own poll, so a queue that is moving keeps it fresh;
+#: short enough that a stale card state is never presented as current.
+HELLO_TTL = 15.0
 
 
 def use_transport(transport: typing.Optional[typing.Callable[..., typing.Tuple[int, dict]]]) -> None:
@@ -75,6 +85,9 @@ def use_transport(transport: typing.Optional[typing.Callable[..., typing.Tuple[i
 
 def reset_for_tests() -> None:
     use_transport(None)
+    with _lock:
+        _last["at"] = 0.0
+        _last["hello"] = None
 
 
 # ---------------------------------------------------------------- the wire --
@@ -162,7 +175,29 @@ def hello(timeout: float = CALL_TIMEOUT) -> dict:
     generation service resolved, or that a settings base can be read. Those
     are the child's to answer and this is where it does.
     """
-    return protocol.normalize_control_hello(call(protocol.CONTROL_HELLO, {}, timeout))
+    answer = protocol.normalize_control_hello(call(protocol.CONTROL_HELLO, {}, timeout))
+    with _lock:
+        _last["at"] = time.time()
+        _last["hello"] = answer
+    return answer
+
+
+def last_hello(max_age: float = HELLO_TTL) -> typing.Optional[dict]:
+    """The most recent ``hello``, if it is recent enough to mean anything.
+
+    THE ONLY THING AN ASYNC ROUTE MAY ASK. Every call in this module is a
+    blocking socket read with a finite but real timeout; one made from a
+    route would stall Forge's event loop - every page, every tab, every
+    other extension - for as long as the child took to answer. The executor
+    thread is what keeps this fresh, and a value older than ``max_age`` is
+    reported as "not known" rather than presented as current.
+    """
+    with _lock:
+        answer = _last.get("hello")
+        at = float(_last.get("at") or 0.0)
+    if answer is None or (time.time() - at) > max(0.0, float(max_age)):
+        return None
+    return dict(answer)
 
 
 def compose(model_type: str = "", session_hash: str = "", timeout: float = COMPOSE_TIMEOUT) -> dict:
@@ -256,6 +291,6 @@ def available() -> typing.Tuple[bool, str]:
 
 __all__ = [
     "CALL_TIMEOUT", "COMPOSE_TIMEOUT", "CONNECT_TIMEOUT", "LOOPBACK",
-    "available", "call", "cancel", "compose", "forget", "hello", "reset_for_tests",
+    "HELLO_TTL", "available", "call", "cancel", "compose", "forget", "hello", "last_hello", "reset_for_tests",
     "status", "submit", "use_transport",
 ]

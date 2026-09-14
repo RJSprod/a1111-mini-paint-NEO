@@ -486,6 +486,46 @@ def recovery_checks(r: Results, clock) -> None:
         _restore(monkey)
 
 
+def inheritance_toggle_checks(r: Results, clock) -> None:
+    """The choice is the job's, frozen at the press."""
+    _setup(clock)
+    runtime = FakeRuntime()
+    runtime.state = FakeRuntime.READY
+    runtime.instance_id = "child-one"
+    child = FakeChild(clock)
+    monkey = []
+    _install(monkey, runtime)
+    try:
+        control.use_transport(child)
+
+        outbox.use_inherit(False)
+        job = outbox.submit(_request(), PAGE)
+        r.check("a press with inheritance off records that it was off",
+                outbox.get(job["job_id"])["inherit_settings"] is False)
+        _run(child, runtime)
+        r.check("and the child was asked not to read the user's form",
+                child.composes and child.composes[-1].get("inherit") is False, str(child.composes[-1:]))
+        child.finish(outbox.get(job["job_id"])["execution_id"])
+        _run(child, runtime)
+
+        outbox.use_inherit(True)
+        job = outbox.submit(_request("with settings"), PAGE)
+        r.check("a press with it on records that too",
+                outbox.get(job["job_id"])["inherit_settings"] is True)
+        _run(child, runtime)
+        r.check("and the child was asked to",
+                child.composes[-1].get("inherit") is True, str(child.composes[-1:]))
+
+        # The setting moving does not reach back into a job already pressed.
+        outbox.use_inherit(False)
+        r.check("a job already pressed keeps the choice it was pressed with",
+                outbox.get(job["job_id"])["inherit_settings"] is True)
+    finally:
+        outbox.use_inherit(None)
+        control.use_transport(None)
+        _restore(monkey)
+
+
 def incapable_build_checks(r: Results, clock) -> None:
     """A WanGP that cannot run unattended jobs still runs them.
 
@@ -1058,6 +1098,7 @@ def run() -> Results:
     retention_checks(r, clock)
     session_switch_checks(r, clock)
     incapable_build_checks(r, clock)
+    inheritance_toggle_checks(r, clock)
     failure_checks(r, clock)
     cancellation_checks(r, clock)
     event_checks(r, clock)

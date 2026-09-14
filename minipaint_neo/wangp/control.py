@@ -200,9 +200,22 @@ def last_hello(max_age: float = HELLO_TTL) -> typing.Optional[dict]:
     return dict(answer)
 
 
-def compose(model_type: str = "", session_hash: str = "", timeout: float = COMPOSE_TIMEOUT) -> dict:
-    """The settings base a job will run at, and where it came from."""
-    answer = call(protocol.CONTROL_COMPOSE, {"model_type": model_type, "session_hash": session_hash}, timeout)
+def compose(
+    model_type: str = "",
+    session_hash: str = "",
+    inherit: bool = True,
+    timeout: float = COMPOSE_TIMEOUT,
+) -> dict:
+    """The settings base a job will run at, and where it came from.
+
+    ``inherit`` False asks the child not to read the user's committed form at
+    all, so WanGP fills the job in from that model's own saved defaults.
+    """
+    answer = call(
+        protocol.CONTROL_COMPOSE,
+        {"model_type": model_type, "session_hash": session_hash, "inherit": bool(inherit)},
+        timeout,
+    )
     return protocol.normalize_compose_answer(answer)
 
 

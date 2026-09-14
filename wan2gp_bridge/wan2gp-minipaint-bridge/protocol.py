@@ -831,7 +831,14 @@ def normalize_compose_request(raw: typing.Any) -> typing.Tuple[dict, str]:
     session = raw.get("session_hash")
     if session is not None and not isinstance(session, str):
         return {}, QUEUE_CODE_REQUEST_INVALID
-    return {"model_type": str(model_type or "")[:200], "session_hash": str(session or "")[:200]}, ""
+    # ``inherit`` absent means yes, because every caller that predates the
+    # setting expects the recorded form. A caller that wants WanGP's own
+    # defaults says so explicitly.
+    return {
+        "model_type": str(model_type or "")[:200],
+        "session_hash": str(session or "")[:200],
+        "inherit": raw.get("inherit") is not False,
+    }, ""
 
 
 def normalize_media_map(raw: typing.Any) -> typing.Tuple[dict, str]:

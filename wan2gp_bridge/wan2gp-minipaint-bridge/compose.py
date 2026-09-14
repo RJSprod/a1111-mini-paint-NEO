@@ -81,7 +81,7 @@ class Composer:
             self.compat.host.read_global("get_factory_settings")
         )
 
-    def compose(self, model_type: str = "", session_hash: str = "") -> dict:
+    def compose(self, model_type: str = "", session_hash: str = "", inherit: bool = True) -> dict:
         """The base for one model, and where it came from.
 
         ``model_type`` empty means the model this child is on, which is the
@@ -96,7 +96,7 @@ class Composer:
             raise ComposeError(protocol.COMPOSE_UNAVAILABLE, "this WanGP is on no model and the job named none")
         self._require_model(chosen)
 
-        settings, source = self._base(service, chosen, session_hash)
+        settings, source = self._base(service, chosen, session_hash, inherit)
         if not settings:
             raise ComposeError(protocol.COMPOSE_UNAVAILABLE, f"no settings could be read for {chosen[:60]}")
 
@@ -111,7 +111,7 @@ class Composer:
         # boundary. Nothing composed here may carry one.
         settings.pop("state", None)
 
-        if source == protocol.BASE_FACTORY:
+        if source == protocol.BASE_FACTORY and inherit:
             self._note(
                 f"compose {chosen[:40]}: no committed form for this model; composed from factory defaults. "
                 "The job records it and the queue says so."
@@ -128,13 +128,29 @@ class Composer:
 
     # -- the three sources ---------------------------------------------------
 
-    def _base(self, service: typing.Any, model_type: str, session_hash: str) -> typing.Tuple[typing.Optional[dict], str]:
-        recorded = self.compat.recorded_form(service, model_type)
-        if recorded:
-            return recorded, protocol.BASE_RECORDED
-        live = self._session_form(model_type, session_hash) if session_hash else None
-        if live:
-            return live, protocol.BASE_SESSION
+    def _base(
+        self,
+        service: typing.Any,
+        model_type: str,
+        session_hash: str,
+        inherit: bool = True,
+    ) -> typing.Tuple[typing.Optional[dict], str]:
+        """The settings to start from, and where they came from.
+
+        ``inherit`` False is not a fallback and not a failure: it is somebody
+        saying they want WanGP to fill the job in from that model's own saved
+        defaults rather than from whatever the page is set to. So the
+        recorded form is not read at all - not preferred-then-skipped, not
+        read-and-discarded - and the job records ``factory_defaults`` because
+        that is honestly where its settings came from.
+        """
+        if inherit:
+            recorded = self.compat.recorded_form(service, model_type)
+            if recorded:
+                return recorded, protocol.BASE_RECORDED
+            live = self._session_form(model_type, session_hash) if session_hash else None
+            if live:
+                return live, protocol.BASE_SESSION
         factory = self.compat.factory_settings(model_type)
         if factory:
             return factory, protocol.BASE_FACTORY

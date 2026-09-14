@@ -54,6 +54,26 @@ from .errors import (
 PROXY_PATH = "/wan2gp"
 PROXY_PREFIX = PROXY_PATH + "/"
 
+#: The child's *other* namespace, served here for the same reason the first
+#: one is: because the page cannot reach it otherwise.
+#:
+#: Wan2GP's Deepy web app hard-codes a root-relative base - the marker says
+#: ``data-deepy-hybrid="/deepy/"`` - and its transport resolves that against
+#: ``location.href``. Under a reverse proxy with a path prefix it therefore
+#: lands on ``<forge>/deepy/``, outside ours: the transport's first request
+#: 404s against Forge and its notice ("Connection to server lost.
+#: Reconnecting…") latches on and never clears. Every other part of the page
+#: keeps working, which is what makes that banner so hard to place.
+#:
+#: Rewriting the marker from our injected script would also work, and would
+#: depend on winning a race against the transport's own observer for an
+#: attribute it reads exactly once. This does not: whatever base the page
+#: resolves, the path is served. ``upstream_path`` already passes anything
+#: outside our own prefix through unchanged, so the child sees ``/deepy/...``
+#: exactly as it would with no proxy in the way.
+DEEPY_PATH = "/deepy"
+DEEPY_PREFIX = DEEPY_PATH + "/"
+
 #: A route under our own prefix that answers nothing and proves everything.
 #: Section 12.6 says route registration is not authentication coverage and
 #: 49.4 makes proving it a release blocker - but the check it asks for, an
@@ -99,7 +119,10 @@ POOL_TIMEOUT = 30.0
 #: Path shapes that mean "this is a stream, do not apply the ordinary read
 #: timeout". Gradio's SSE queue lives under /queue/, its heartbeat is a
 #: long-lived GET, and other releases have used /stream and /sse.
-STREAM_PATH_MARKERS = ("/queue/", "/stream", "/sse", "/heartbeat")
+#: ``/deepy_api/events`` is Deepy's event stream: a WebSocket normally, and a
+#: long-lived GET where one cannot be had. Without it here that GET would be
+#: cut at the ordinary response timeout and reconnect for ever.
+STREAM_PATH_MARKERS = ("/queue/", "/stream", "/sse", "/heartbeat", "/deepy_api/events")
 
 #: Hop-by-hop headers are properties of one connection and are meaningless on
 #: the next one. Stripped in both directions; names listed in an incoming
@@ -775,11 +798,13 @@ async def _websocket_endpoint(websocket: typing.Any) -> None:
     # open without ever fetching the page, so refusing only in ``forward``
     # would leave the door it was meant to close.
     if not signed_in(websocket) or not serving_allowed():
+        _log_once("ws-refused", "a /wan2gp/ WebSocket was refused before it was opened (sign-in or serving gate).")
         await websocket.close(code=1011)
         return
 
     target = upstream()
     if not target:
+        _log_once("ws-no-upstream", "a /wan2gp/ WebSocket arrived with no upstream to carry it to.")
         await websocket.close(code=1011)
         return
 
@@ -797,6 +822,11 @@ async def _websocket_endpoint(websocket: typing.Any) -> None:
     try:
         async with _connect_upstream(url, headers, requested) as socket:
             if socket is None:
+                # Said out loud. Three different causes used to close the
+                # socket with the same code and no line at all, which left a
+                # page showing a permanent "connection lost" banner and
+                # nothing anywhere to say which of them it was.
+                _log_once("ws-no-client", "a /wan2gp/ WebSocket could not be opened upstream (no usable client library).")
                 await websocket.close(code=1011)
                 return
             await websocket.accept(subprotocol=socket.subprotocol)
@@ -1170,6 +1200,12 @@ def install(app: typing.Any) -> None:
             Route(PROXY_PATH, endpoint=_redirect_to_prefix, methods=["GET", "HEAD"]),
             Route(PROXY_PREFIX + "{path:path}", endpoint=forward, methods=list(METHODS)),
             WebSocketRoute(PROXY_PREFIX + "{path:path}", endpoint=_websocket_endpoint),
+            # The child's Deepy namespace, under the same gate. See
+            # DEEPY_PREFIX: the page asks for these at the site root whatever
+            # prefix it is served under, so they are answered there or not at
+            # all - and "not at all" is a banner that never clears.
+            Route(DEEPY_PREFIX + "{path:path}", endpoint=forward, methods=list(METHODS)),
+            WebSocketRoute(DEEPY_PREFIX + "{path:path}", endpoint=_websocket_endpoint),
         ]
         app.router.routes[0:0] = routes
         setattr(app, _INSTALLED_FLAG, True)

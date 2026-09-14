@@ -149,6 +149,24 @@ job that falls all the way through still runs at the user's saved defaults
 for that model, which is also why a genuinely cold child (Forge just started,
 the WanGP tab never opened, nothing recorded) is far less bad than it sounds.
 
+### Inheriting, or not: `minipaint_inherit_wangp_settings`
+
+Two answers somebody chooses between, not a preference and a fallback:
+
+* **On** — the press commits the WanGP page's live form and the job composes
+  from it, so it runs at the LoRAs, steps, guidance and profile that were on
+  screen. More promise, more moving parts.
+* **Off** (the default) — nothing is read and nothing is carried. `compose`
+  does not ask for the recorded form *at all*, and WanGP fills the job in from
+  that model's own saved settings. For somebody whose saved defaults are
+  already what they want, that is the same result with nothing in the way.
+
+Off does not mean "read it and discard it". A base that was read and thrown
+away is still a base that was read, and the job would then record
+`recorded_form` about settings it never used. The choice is frozen onto the
+job at the press, so moving the checkbox afterwards does not reach back into
+work already queued.
+
 ### Flushing: the settings that were on screen
 
 The recorded form is only written when the user *commits* one. Wan2GP fires

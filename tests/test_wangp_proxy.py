@@ -866,21 +866,109 @@ async def auth_gate_checks(r: Results) -> None:
 
 
 class _Socket:
-    """Just enough WebSocket for the endpoint to refuse one."""
+    """Just enough WebSocket for the endpoint to refuse one, or open one."""
 
-    def __init__(self, path: str) -> None:
-        self.url = FakeUrl(path=path)
-        self.headers = {"host": "forge.example.test"}
+    def __init__(self, path: str, origin: str = "") -> None:
+        self.url = FakeUrl(scheme="ws", path=path)
+        self.headers = {"host": "forge.example.test:7860"}
+        if origin:
+            self.headers["origin"] = origin
         self.client = None
         self.scope = {"query_string": b"", "subprotocols": []}
         self.accepted = False
         self.closed = None
+        self.sent = []
+
+    async def receive_text(self):
+        raise RuntimeError("the browser went away")
+
+    async def send_text(self, value) -> None:
+        self.sent.append(value)
 
     async def accept(self, *args, **keywords) -> None:
         self.accepted = True
 
     async def close(self, code: int = 1000) -> None:
         self.closed = code
+
+
+async def websocket_origin_checks(r: Results) -> None:
+    """The upgrade's Origin, judged here and restated for the child.
+
+    THE OTHER HALF OF THE BANNER THAT WOULD NOT CLEAR.
+
+    Wan2GP's auth middleware calls every WebSocket an unsafe request and
+    requires its ``Origin`` to name the host it was asked on. An ordinary
+    request is forwarded with the browser's ``Host`` intact, so the child
+    computes the public host and the browser's origin matches it - which is
+    why POSTs have always worked and nobody noticed. An upgrade has its
+    ``Host`` taken off, because the handshake is the client library's to
+    negotiate, so the child sees its own loopback address while the origin
+    still names Forge. They can never agree; the middleware closes the socket
+    before accepting it and uvicorn answers 403; the Deepy panel's transport
+    reads that as a dead server and latches its banner.
+
+    So the check happens at the hop that knows both hosts, and the upgrade is
+    then presented to the child with an origin it recognises as its own.
+    """
+    r.check("an absent origin is allowed, exactly as the child's own rule has it",
+            proxy.origin_allowed("", "forge.example.test:7860") is True)
+    r.check("this Forge's own origin is allowed over either transport",
+            proxy.origin_allowed("http://forge.example.test:7860", "forge.example.test:7860")
+            and proxy.origin_allowed("https://forge.example.test:7860", "forge.example.test:7860"))
+    r.check("another site's is not, whatever it looks like",
+            not proxy.origin_allowed("http://evil.test", "forge.example.test:7860")
+            and not proxy.origin_allowed("http://forge.example.test:7860.evil.test", "forge.example.test:7860")
+            and not proxy.origin_allowed("http://forge.example.test:7861", "forge.example.test:7860"))
+    r.check("and an origin with no host to compare against is refused rather than guessed",
+            proxy.origin_allowed("http://forge.example.test:7860", "") is False)
+
+    remembered = proxy._boundary
+    proxy._boundary = {"ok": True, "coverage": "covered", "mechanisms": ["asgi_middleware"]}
+    opened = []
+
+    @contextlib.asynccontextmanager
+    async def _pretend(url, headers, subprotocols=None):
+        opened.append({"url": str(url), "headers": dict(headers)})
+        yield None  # the endpoint's own "no client library" path ends the call
+
+    real = proxy._connect_upstream
+    proxy._connect_upstream = _pretend
+    try:
+        as_ready(PRETEND_PORT)
+        socket = _Socket("/deepy/deepy_api/events", origin="http://evil.test")
+        await proxy._websocket_endpoint(socket)
+        r.check("a WebSocket from another site is refused before anything is dialled",
+                socket.closed == 1008 and not socket.accepted and opened == [], str(opened))
+
+        socket = _Socket("/deepy/deepy_api/events", origin="http://forge.example.test:7860")
+        await proxy._websocket_endpoint(socket)
+        r.check("one from this Forge is carried upstream", len(opened) == 1, str(opened))
+        if opened:
+            sent = opened[0]
+            r.check("to the child's Deepy app at the address its mount answers on",
+                    sent["url"] == f"ws://127.0.0.1:{PRETEND_PORT}/wan2gp/deepy/deepy_api/events", sent["url"])
+            r.check("with an origin the child will recognise as its own - "
+                    "the browser's could never have matched a host it is not told",
+                    sent["headers"].get("origin") == f"http://127.0.0.1:{PRETEND_PORT}",
+                    str(sent["headers"].get("origin")))
+            r.check("and none of the headers that describe the hop it came in on",
+                    not any(name in sent["headers"] for name in
+                            ("host", "sec-websocket-key", "sec-websocket-version", "sec-websocket-extensions")),
+                    str(sorted(sent["headers"])))
+
+        # A client that is not a browser sends no origin, and the sign-in gate
+        # is the one that decides for those.
+        opened.clear()
+        socket = _Socket("/wan2gp/queue/join")
+        await proxy._websocket_endpoint(socket)
+        r.check("a client with no origin is carried, and still told the child's own",
+                len(opened) == 1 and opened[0]["headers"].get("origin") == f"http://127.0.0.1:{PRETEND_PORT}",
+                str(opened))
+    finally:
+        proxy._connect_upstream = real
+        proxy._boundary = remembered
+        runtime.reset_for_tests()
 
 
 def enforced_auth_checks(r: Results) -> None:
@@ -952,6 +1040,7 @@ def run() -> Results:
         enforced_auth_checks(r)
         asyncio.run(async_checks(r))
         asyncio.run(auth_gate_checks(r))
+        asyncio.run(websocket_origin_checks(r))
         asyncio.run(deepy_address_checks(r))
         asyncio.run(deepy_checks(r))
     finally:

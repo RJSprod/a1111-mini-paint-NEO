@@ -1,0 +1,1330 @@
+MINIPAINT NEO - UNATTENDED GENERATION, PERFORMANCE, AND REMOTE CONTINUITY
+REVIEW RESPONSE: FEASIBILITY
+Repository target: RJSprod/a1111-mini-paint-NEO
+Code baseline: 2ca4bdcf778ba7fd0cf3e45c28854403d36f6c63 (main, 2026-09-13)
+Reviews: PERFORMANCE_DESIGN_INTENT_2026-09-13_WALKAWAY_VERIFIED_1.txt
+Dependencies read at: deepbeepmeep/Wan2GP cd832e9d676907f0c055f3fafba472f2f61a4c91
+                      (2026-09-13), RJSprod/SD-Neo-ModelSwitchRefiner
+                      c2ed41747d9ee3ba73ec93dfc20d6a52e351295e (2026-09-13)
+Revision date: 2026-09-14
+Status: Review response. Not itself a specification.
+
+================================================================================
+0. VERDICT
+================================================================================
+
+Feasible. Adopt the architecture. Do not build B7 as decided.
+
+The primary requirement - press Add to Queue and walk away - is achievable
+against these three codebases, and the authority inversion this document rests
+on is the only design that delivers it. Nothing in section 1 or section 2 needs
+to change.
+
+One architectural defect is disqualifying as written, and it is not a gap in the
+specification's coverage - it is a contradiction between two of its own
+requirements:
+
+    B7 chooses an execution adapter that makes B7A's exclusion unbuildable.
+
+    The adapter is a headless WanGPSession constructed with no webui_state. That
+    constructor allocates a private `gen` dict (shared/api.py:866-890,
+    _create_headless_state). The process's only working generation arbiter -
+    HybridService.start_generation, shared/deepy/hybrid.py:188-194 - arbitrates
+    by way of that dict. A session with its own dict is outside the arbiter by
+    construction, and that single choice, not the missing atomic check B7A
+    describes, is the entire cause of the two-generations hazard.
+
+    Principle 2.12 ("at most one generation... whoever started it, by whichever
+    path") cannot be satisfied by B7A's mechanism. B7A makes the bridge check
+    before MiniPaint submits, which closes only the order where MiniPaint
+    arrives second. In the other order nothing between the user's Generate press
+    and generate_media consults anything a bridge plugin can own. Traced in full
+    at section 2.2.
+
+The correction is smaller than the requirement it replaces. Submit through the
+WebUI's existing single worker instead of beside it, and B7A rules 1, 3, 5 and 6
+become vacuous rather than implemented: no new lock, no new flag, no upstream
+Wan2GP change, and no new arbiter to keep correct. Section 2.3 gives the design.
+
+Two further blockers must be resolved before Phase 3, both of which are also
+internal contradictions rather than omissions:
+
+    B1 rule 2 requires a live Gradio session inside the WanGP child at compose
+    time. Acceptance tests 7.3 and 7.4 require admitting a job with the managed
+    WanGP child STOPPED. Both cannot hold. Section 3.
+
+    B7 describes the Forge-to-child transport it runs over as existing. It does
+    not exist, in either direction, and the bridge plugin contains no HTTP or
+    socket code at all. Section 4. This is the largest unbudgeted item in the
+    document.
+
+Eight of the specification's factual claims need correcting, one of them in the
+one place the document most wants to be airtight. Section 6. None of the eight
+overturns a conclusion; five change the stated mechanism behind a conclusion,
+which matters because implementers build mechanisms.
+
+One of the specification's own open items is closed by this review rather than
+deferred: the test suite is green. 19 suites, 2891 checks, exit 0, nothing
+skipped, deterministic across runs, after a two-minute dependency install that
+pulls no torch. Section 9, item 14.8.
+
+The specification's judgement in section 14 is sound and this review endorses it
+with one reversal: 14.1 says build B7A before B7. Build the transport before
+either, because B7A-as-corrected is not a separate deliverable at all, and B7
+cannot be exercised end-to-end until Forge can reach the child.
+
+================================================================================
+1. METHOD
+================================================================================
+
+This review was performed differently from the one recorded in
+PERFORMANCE_DESIGN_INTENT_REVIEW_RESPONSE_2026-09-13.txt, because this
+specification's claims are mostly about two repositories that are not this one.
+
+Both dependencies are public and both were read at a HEAD committed on
+2026-09-13, the specification's own revision date - so the source read here is
+effectively the source the specification was written against, not a later
+version of it:
+
+    deepbeepmeep/Wan2GP            cd832e9  2026-09-13 20:37 +0200
+    RJSprod/SD-Neo-ModelSwitchRefiner  c2ed417  2026-09-13 10:08 -0400
+
+Every CONFIRMED and CORRECTED claim in section 0.3 was checked against that
+source. Every load-bearing assertion in B1, B4, B5, B7, B7A, B7B, B8, B9, B11,
+B12 and B22 was checked. Findings were then put to adversarial verification -
+each one handed to a separate reader whose instruction was to refute it from
+source and to default to refuting. That layer did real work: it removed five of
+the first twelve findings outright and reduced the severity of six more. What is
+recorded below is what survived it.
+
+The specification's section 14.3 asks a reader to verify three claims before
+building on them, and warns that an earlier revision got one wrong "by reasoning
+from call graphs instead of reading the session". That instruction was followed,
+and it was worth following in both directions: all three of the named claims are
+correct (section 5), and the same error the warning describes appears once more
+in this revision, in B12 (section 6, R4).
+
+The MiniPaint test suite was run. It is green (section 9, 14.8).
+
+================================================================================
+2. BLOCKER 1 - B7 DEFEATS B7A
+================================================================================
+Severity: blocking. Architectural. Affects B7, B7A, B7B, section 12, Q9, 7.9,
+1.4, B9, 14.1, 14.7.
+
+2.1 What the specification requires
+-----------------------------------
+
+Principle 2.12 is unambiguous and correct as a requirement:
+
+    "At most one generation may run against the configured GPU at any moment,
+    whoever started it, by whichever path."
+
+B7 then decides the adapter: "one headless WanGPSession - constructed with no
+webui_state, so it creates its own state". B7A then specifies the exclusion:
+"the bridge reads is_generation_in_progress() and acquires its own exclusion in
+one operation", and rule 3 forbids MiniPaint from writing wgp.gen_in_progress.
+
+Section 12 reinforces the adapter choice - "Use the current shared/api.py public
+surface from inside the WanGP process" and "a new execution module: headless
+WanGPSession ownership (one per child, B7B)" - and asks for "a new exclusion
+module".
+
+2.2 What the code shows
+-----------------------
+
+B7A's diagnosis of the hazard is correct. Its mechanism cannot fix it.
+
+CONFIRMED, and this half of B7A is right. A headless submission arriving during
+a WebUI generation proceeds concurrently. run_cli_job takes _GENERATION_LOCK and
+calls _prepare_state_for_run without reading gen_in_progress
+(shared/api_cli.py:27-32); wgp.py never references _GENERATION_LOCK, importing
+only three unrelated helpers from shared.api (wgp.py:139); repo-wide grep for
+_GENERATION_LOCK returns four hits, all in shared/api.py and shared/api_cli.py.
+
+WHAT B7A CANNOT COVER. With an unattended generation running, a user pressing
+Generate in their own WanGP tab is stopped by nothing. Every guard between the
+click and model execution was traced:
+
+    wgp.py:13411   generate_btn.click(fn=init_generate, ...)
+                   The button is live. Nothing on the headless path touches
+                   WebUI components.
+
+    wgp.py:9729    init_generate early-returns for a service-backed state and
+                   performs no generation-state check of any kind.
+
+    wgp.py:8600    prepare_generate_media branches only on
+                   state.get("validate_success", 0).
+
+    wgp.py:8680    _process_tasks calls set_main_generation_running(state, True)
+                   then acquire_main_GPU_ressources(state). This one CAN wait -
+                   but it reads state["gen"]["process_status"], the browser's
+                   dict. The headless run wrote "process:main" into its OWN dict
+                   (shared/api.py:1085, over the dict built at api.py:867), so
+                   the browser's dict still reads None and
+                   shared/utils/process_locks.py:117 breaks out of the wait loop
+                   on the first iteration.
+
+    wgp.py:8696    gen_in_progress = True, unconditionally, no nesting count.
+
+    wgp.py:8755    generate_media(...), which declares
+                   `global wan_model, offloadobj, reload_needed, loaded_config`
+                   (wgp.py:6932) and at wgp.py:7020-7021 may call
+                   release_model() and load_models() on exactly those globals
+                   while the headless run's own generate_media is using them.
+
+So the outcome is not merely two generations on one card. It is two generations
+sharing one model cache, either of which may free the other's model mid-inference.
+
+WHY gen_in_progress CANNOT BE THE SIGNAL. Four unconditional writers, no owner,
+no count: shared/api.py:1095 and :1108 (headless set/clear), wgp.py:8696 (WebUI
+set), wgp.py:4641 (WebUI clear, in _finalize_generation, a different Gradio
+chain step from the set). Because the headless clear runs in a `finally` that
+sits OUTSIDE the `with _GENERATION_LOCK` block (shared/api_cli.py:111-117 versus
+:29-94), the flag under-reports even for two purely headless runs: run B can
+take the lock and set True before run A's finally sets False. The flag is unfit
+to gate admission in any direction.
+
+THE ARBITER THAT DOES WORK, AND THAT THE SPECIFICATION NEVER MENTIONS.
+shared/deepy/hybrid.py:188-194:
+
+    def start_generation(self):
+        with self._mutation_lock:
+            if self._queue_worker is None and self._state['gen']['queue']:
+                self._queue_updates = (None, None, None)
+                self._queue_worker = threading.Thread(
+                    target=self._run_generation,
+                    name='WanGP generation service', daemon=True)
+                self._queue_worker.start()
+            return self._queue_worker
+
+One real threading.RLock, one worker thread, one gate. The service is
+process-wide and unconditional for the generate tab (wgp.py:12797-12798), and
+every browser's state SHARES the `gen` dict by reference, not by copy
+(hybrid.py:16-27, SharedState.shared_keys). Every WebUI generation and every
+Deepy generation already funnels through it. It is already bidirectional. It
+cannot start a second worker.
+
+The bridge is outside it for exactly one reason: the adapter B7 chose allocates
+its own `gen` dict.
+
+A NOTE ON process_locks.py, BECAUSE IT IS THE OBVIOUS WRONG ANSWER.
+shared/utils/process_locks.py looks like the arbiter and is not. When
+acquire_main_GPU_ressources finds process_status already at "process:main" it
+does not wait - it re-takes it and returns (process_locks.py:110-126). It
+arbitrates main-versus-plugin (MatAnyone, the prompt enhancer, Deepy voice), not
+main-versus-main, and it holds no module-level registry: gen_lock
+(process_locks.py:5) is a mutex over the critical sections and carries no owner,
+no count and no cross-state visibility. Do not make it the main-versus-main
+arbiter, and do not gate MiniPaint's progress on its flags - gen["main_process_
+running"] is set one line before a call that can raise (wgp.py:8680-8681) and is
+cleared only at wgp.py:8822/8875, so any exception in between leaks it True for
+the life of the process, and every wait loop in that file is a 100 ms spin with
+no deadline. Gating on it converts an upstream corruption into a permanent,
+unrecoverable WAITING_FOR_CARD.
+
+2.3 The corrected design
+------------------------
+Classification: REQUIRED ARCHITECTURE, replacing B7's adapter decision and
+B7A's mechanism. Touches wan2gp_bridge/wan2gp-minipaint-bridge/* only. No
+upstream Wan2GP change.
+
+STEP 0. Do not construct a headless WanGPSession for work that runs on the card.
+Keep it, if at all, for read-only metadata (list_model_defs,
+get_default_settings) which touches no `gen` dict.
+
+STEP 1. Obtain the arbiter. From a bridge entry point holding the live state:
+
+    from shared.deepy.hybrid import service_for
+    service = service_for(state)
+
+This is the one process-wide HybridService. If it is None on some build, refuse
+the server-execution route and report BRIDGE_COMPONENT_INCOMPATIBLE, exactly as
+B1 rule 1 already prescribes for a missing global.
+
+STEP 2. Submit with the primitive Deepy itself uses
+(shared/deepy/engine.py:2778-2780):
+
+    gen = get_gen_info(state)
+    gen["inline_queue"] = {"id": 0, "params": snapshot_params}
+    service.command("load_queue_trigger", {"client_id": execution_id})
+
+service.command returns immediately - DeepyService.command
+(shared/deepy/service.py:215-220) starts a detached worker
+(service.py:140-143) - so no bridge handler blocks, which is what B19 requires.
+That worker runs under service._generation_lock (service.py:37, :191-193), which
+serialises MiniPaint's own submissions for free. It then reaches
+HybridService._process_inline_queue (hybrid.py:235-239), which merges the task
+into the one shared gen["queue"] and calls start_generation().
+
+STEP 3. That is the whole exclusion, in both orders.
+
+    User first, MiniPaint second: _queue_worker is not None, so no second worker
+    starts, and the running worker drains our task from the same list
+    (wgp.py:8710, `while len(queue) > 0`).
+
+    MiniPaint first, user second: the user's process_tasks reaches
+    service.gradio_generation() -> start_generation(), which returns the
+    existing worker and observes it. This is the direction B7A structurally
+    cannot cover, and it is covered here for free.
+
+STEP 4. Defend against the one real race, which pre-exists MiniPaint. In
+_run_generation's finally the order is _finalize_queue (which clears
+gen_in_progress), then sync_latest_generated, then _unload (which can call
+release_model() and take seconds), and only then _queue_worker = None
+(hybrid.py:213-220). In that window start_generation() returns a dying worker
+whose `while len(queue) > 0` loop has already exited. A task landing there is
+merged into the queue and stranded. Handle it in the bridge with a bounded,
+idempotent re-trigger: poll every 500 ms for a few seconds, and if the
+execution_id is still in gen["queue"] while service.generation_running is False
+and gen.get("in_progress") is falsy, re-issue
+service.command("load_queue_trigger", ...) WITHOUT setting gen["inline_queue"] -
+load_queue_action with inline_queue absent leaves a non-empty queue untouched
+(wgp.py:2130-2150) and start_generation() then starts a fresh worker on it. Cap
+the retries and publish a distinct terminal state if they are exhausted, so a
+stranded job is reported rather than silently pending forever.
+
+STEP 5. Append, never splice. Do not reach this through
+GradioWanGPSession.for_plugin (shared/api_webui.py:746): that wrapper forces
+priority=True and splices at index 1, ahead of everything the user has queued,
+which satisfies the letter of B7A rules 2 and 5 while inverting their intent.
+Use the raw primitive and set priority explicitly - omitted for unattended jobs
+(wgp.py:2208, .extend), set only for a job the user is actively waiting on
+(wgp.py:2207).
+
+STEP 6. Read only signals that cannot go stale. To know whether the card is
+busy, the bridge reads (i) whether the execution_id is in gen["queue"], (ii)
+service.generation_running (hybrid.py:184-186, which is `self._queue_worker is
+not None` - a thread handle, not a flag), and (iii) gen.get("in_progress").
+Never gen["main_process_running"], never process_status, never
+any_GPU_process_running. Publish a diagnostic if main_process_running is True
+while generation_running is False for more than a few seconds, and do not pop
+the key from a plugin.
+
+2.4 What this changes elsewhere in the document
+-----------------------------------------------
+
+B7A rules 1, 3, 5 and 6 become vacuous. There is no separate exclusion to
+acquire, nothing to release on cancel, and no flag to avoid double-writing
+because the bridge never touches one. Keep rule 2 (never pre-empt the user) and
+rule 4 (the wait is honest and visible); WAITING_FOR_CARD remains a real state,
+but it now means "our task is in the shared queue behind something", which is
+observable rather than inferred.
+
+Section 12's "a new exclusion module" bullet should be deleted, and its "Use the
+current shared/api.py public surface" sentence must name which surface, because
+read as written it resolves to the headless one - the single choice that causes
+the hazard.
+
+1.4 and B9 INVERT, in the product's favour. "This revision does not make a
+server-executed job visible in the WanGP tab's own queue" was a consequence of
+the headless adapter. Submitting into the shared queue makes an unattended job
+visible in the WanGP tab, cancellable there, and reported by its progress
+display. The UI honesty requirement in 14.7's first bullet disappears, and
+B9's "VISIBILITY, STATED PLAINLY" paragraph needs rewriting rather than
+softening.
+
+B7B survives and gets simpler. Residency was never a property of holding one
+session; it is a property of the wgp-level residency key being unchanged
+(section 6, R6). One shared worker draining one queue gives the same single
+model load, and rule 2's "never call close()" stops being a hazard because there
+is no session to close.
+
+Q9 stays "not blocking", for a stronger reason than it gives: overlap is
+prevented by one queue and one worker gate, not by a flag.
+
+7.9's acceptance list must be replaced. It tests flag truthfulness and UI
+routing, neither of which can observe the failure 2.12 exists to prevent, and
+its nearest existing test is a disjunction satisfied by two simultaneous
+generations (tests/test_queue_e2e.py:758-760, `ack.get("route") == "generate" or
+ack_other.get("route") == "queue"`). The stub it runs against has no queue, no
+worker and no service (test_queue_e2e.py:144-157). The property to assert is
+IDENTITY: exactly one HybridService._queue_worker Thread object and exactly one
+entry into _process_queue, across both submission paths in both arrival orders.
+A real HybridService is constructible in-process with no GPU -
+HybridService(deps, SharedState({...}), process_queue=fake, finalize_queue=noop,
+unload=noop) with fake blocking on a threading.Event - so these are ordinary
+unit tests, not integration tests. Six of them are specified in section 7.7 of this response.
+
+2.5 The same root cause reaches further than generation
+-------------------------------------------------------
+Severity: major. New requirement, and a second dividend of 2.3.
+
+Exclusion prevents a second GENERATION. It does not stop a user tearing the model
+out from under a running one, and the reason generalises the whole of blocker 1:
+
+    A headless session's private `gen` dict makes an unattended run invisible to
+    EVERY per-state guard in Wan2GP, not only to the generation arbiter.
+
+The concrete, reachable case. Configuration's "Force Unload Models from RAM"
+button (plugins/configuration/plugin.py:392, bound at :837) calls
+release_ram_and_notify -> unload_models_from_ram
+(shared/gradio/model_selector_toolbar.py:191). That function IS guarded:
+
+    if any_GPU_process_running(state, "configuration"):
+        gr.Info(f"Unable to unload {unload_targets} while GPU resources are allocated.")
+        return
+
+But any_GPU_process_running reads get_gen_info(state) - the per-state dict
+(shared/utils/process_locks.py). During an unattended headless run the browser's
+dict has process_status None, because the headless run wrote "process:main" into
+its own dict (shared/api.py:1085 over the dict built at :867) and called
+set_main_generation_running on its own state (api.py:1084). The guard therefore
+evaluates False, passes, and release_model() fires mid-inference on the shared
+globals the unattended generation is using.
+
+So the hazard is not an unguarded control. It is a guard that cannot see the
+unattended run - the same blindness that lets the Generate button through.
+
+WHAT 2.3 FIXES FOR FREE. Submitting into the WebUI's shared queue means the task
+runs under _process_tasks(state) on the SHARED gen dict, which calls
+set_main_generation_running(state, True) and acquire_main_GPU_ressources(state)
+on it (wgp.py:8680-8681). any_GPU_process_running then returns True and
+force-unload correctly refuses. The guard starts working with no new code. This
+is a second, independent reason to prefer 2.3 over B7 as written, and it
+generalises: any Wan2GP guard keyed on the shared gen dict begins protecting
+unattended work the moment the work lives in that dict.
+
+ONE SPECIFICATION CLAIM TO CORRECT WHILE HERE. 0.3 cites release_RAM
+(wgp.py:4240-4245) as the sole consumer of gen_in_progress, and it is indeed
+guarded by it - but release_RAM has no caller. The live button calls
+release_ram_and_notify instead, which is guarded by any_GPU_process_running, not
+by gen_in_progress. So gen_in_progress gates nothing a user can press, and the
+one guard that does protect the card is per-state. Both halves matter: the flag
+is even less useful than 0.3 suggests, and the real protection is exactly the
+mechanism 2.3 opts into.
+
+THREE CANDIDATES THAT ARE SAFE, recorded so they are not re-investigated:
+clear_queue_action is guarded (wgp.py:2263-2269); abort_generation is guarded and
+is a deliberate user action (wgp.py:4443-4447); and remove_task's unguarded
+interrupt is unreachable because the queue HTML never renders a Remove button for
+queue[0] (wgp.py:2429-2431) - with a residual minor upstream bug only, an
+AttributeError on None if that row becomes the running task between render and
+click. Note also that configuration changes are NOT blocked during a generation:
+the refusal at plugins/configuration/plugin.py:842 is commented out, and the flag
+read at :841 only selects a success message at :1159.
+
+REQUIRED:
+    - Delete B7A's sentence "Wan2GP's own UI needs no change for the
+      MiniPaint-is-running case." It is true only of the Generate button, and
+      only under 2.3.
+    - Add to section 10's invariants, as the mirror of the one already there: an
+      unattended generation in progress is never torn down, interrupted, or
+      model-switched out from under by a WanGP tab control.
+    - Add one acceptance test to the list in section 7.7 of this response: with an unattended generation
+      running, Force Unload Models from RAM refuses.
+    - State the general rule in 2.12's corollaries: an unattended job must be
+      visible to Wan2GP's own per-state guards, which means running inside the
+      state they key on.
+
+================================================================================
+3. BLOCKER 2 - COMPOSE CANNOT RUN WHEN THE DOCUMENT'S OWN TESTS REQUIRE IT
+================================================================================
+Severity: blocking. Internal contradiction. Affects B1, 7.3, 7.4, 1.3.
+
+3.1 The contradiction
+---------------------
+
+B1 rule 2 makes a live Gradio session inside the WanGP child a hard precondition
+for composing a job:
+
+    "It runs in the user's own session. The compose call is a Gradio handler like
+    the bridge's existing ones, so it has the session_hash and therefore the
+    state of the page the user is actually looking at. This is the one moment the
+    browser is required."
+
+and B1's provenance note forecloses the obvious escape: "it cannot be cached
+across presses... Compose on every press."
+
+Acceptance test 7.3 requires: "Start with managed WanGP STOPPED. Submit ordinary
+job and close browser after ack." 7.4 repeats it for the enhanced case. With no
+child process there is no Gradio app, no session and no `state`, so rule 2's
+compose is unexecutable - and every cold-start rule in the document fires AFTER
+admission, at the WanGP stage (1.3 at "when an admitted job reaches its WanGP
+stage"; B6's "STOPPED: start managed child server-side"; and explicitly,
+"Browser pages do not start WanGP for queued execution. The executor does").
+Nothing starts the child before compose.
+
+This is not a likelihood argument. It is two requirements that cannot both hold.
+
+3.2 It is also the common case, not the edge case
+-------------------------------------------------
+
+The WanGP UI reaches the user as an iframe on /wan2gp/ through the Forge-side
+proxy (minipaint_neo/wangp/ui.py:332-352), and that iframe is what creates the
+child-side session. Its markup is emitted only when the view is IFRAME at
+UI-BUILD time:
+
+    shell["iframe"] = gr.HTML(iframe_html() if view["view"] == VIEW_IFRAME else "")
+                                                          (wangp/ui.py:1336)
+
+decide_view returns VIEW_IFRAME only for state == runtime.READY
+(wangp/ui.py:274-275), and Forge boots with the child stopped - "startup is lazy,
+and a Forge that boots is a Forge with no WanGP process" (wangp/__init__.py:41).
+Gradio freezes the built config at launch, so a page loaded before the child was
+READY has no iframe and will not grow one. Verified that nothing repaints it
+automatically: a repo-wide grep for the hidden open/refresh button ids returns
+only wangp/ui.py itself.
+
+So on a fresh Forge, or a fresh page, or a phone that has only ever opened
+Clipboard, there is no session to compose from.
+
+3.3 Why the stated fallbacks do not close it
+--------------------------------------------
+
+B1's FALLBACK (get_default_settings, recorded and shown) is contradicted by B1's
+own preamble - "Not factory defaults" - and by 14.5, which calls running at
+settings nobody chose "the worse error of the two". It is an honest failure
+report, not a working compose.
+
+B1 rule 6's server-side route does not help either, and the reason is worth
+recording because it looks like it should. A Forge-side call carries a different
+session_hash and therefore a different `state`. A fresh session's dict
+(wgp.py:11501-11511) has no all_settings key, so get_model_settings returns None
+(wgp.py:10063-10065); get_current_model_settings then falls back to factory
+defaults, and collect_current_model_settings - the variant B1 prefers - does
+settings["state"] = state on that None (wgp.py:10076-10077) and raises
+TypeError. The preferred compose seam does not merely return the wrong answer on
+a fresh session; it raises.
+
+3.4 Resolution
+--------------
+IMPLEMENTATION RECOMMENDATION, and it removes the contradiction rather than
+documenting it.
+
+Wan2GP already keeps a process-wide, cross-session record of the last committed
+form per model, and the specification never mentions it. save_inputs writes both
+the session copy and a process-wide snapshot -
+service.record_model_form(model_type, cleaned_inputs), wgp.py:10624-10627 - read
+back by HybridService.load_model_form (shared/deepy/hybrid.py:73-77), which is
+shared across sessions for the same reason the `gen` dict is.
+
+That is a browser-independent source for exactly what B1 wants: not factory
+defaults, but the settings the user last committed for that model. It makes
+compose a server-side operation with no session, which removes the contradiction
+with 7.3/7.4, removes the TypeError, removes the mutation hazard B1 flags as
+SPECIAL ATTENTION (there is no per-session stored dict to mutate), and removes
+the multi-hop browser round trip that 2.11 and 6.11 are trying to keep out of
+the admission path.
+
+Required changes to B1:
+
+    1. Replace rule 2. Compose runs server-side inside the child against the
+       process-wide recorded form, after B6's existing STOPPED/STARTING rules
+       have made the child READY. The browser is not required at any point.
+       Principle 2.2 is strengthened by this, not weakened: the browser becomes
+       purely a composer of prompt and images.
+
+    2. State the ordering consequence plainly. Admission now needs the child
+       READY, which 7.3 currently forbids. Either admit first and compose at the
+       WanGP stage (preferred - it keeps admission fast and keeps 7.3 as
+       written), or state that admission starts the child. Admitting first is
+       better and is what principle 2.3's snapshot semantics can still support,
+       provided the job records that its base was captured at execution time
+       rather than at press, and the UI says so.
+
+    3. Keep the per-session path as an optimisation only, for the case where a
+       live session does exist and the user wants the settings they are looking
+       at rather than the ones they last committed. If it is kept, keep B1's
+       deep-copy requirement with it (section 6, R4).
+
+    4. Drop rule 6's PREFERRED/FALLBACK split. With a server-side base there is
+       nothing for the page to relay: the admission POST carries the prompt,
+       the input ids and a model identifier, and P7's keepalive measurement
+       becomes trivial rather than a gate.
+
+================================================================================
+4. BLOCKER 3 - THE TRANSPORT B7 CALLS EXISTING DOES NOT EXIST
+================================================================================
+Severity: blocking. Unbudgeted work. Affects B7, B1 rule 6, B8, B9, B12,
+section 12, P5, 14.1.
+
+4.1 The claim and the code
+--------------------------
+
+B7 says the adapter "exposes generation over the bridge's existing private
+authenticated loopback surface" and that "it is reached only over the bridge's
+authenticated loopback surface".
+
+No such surface exists, and all three words are wrong.
+
+NO INBOUND SURFACE. Across all twelve modules of
+wan2gp_bridge/wan2gp-minipaint-bridge/, a grep for fastapi, FastAPI, APIRouter,
+add_api_route, app.post, app.get, mount(, uvicorn, http.server,
+BaseHTTPRequestHandler, socketserver and flask returns ZERO matches.
+
+NO OUTBOUND CLIENT. The same grep for requests., urllib, urlopen, httpx, aiohttp
+and socket. returns ZERO matches.
+
+NO AUTONOMOUS EXECUTION. No server-side thread, timer or asyncio anywhere. This
+is the module's stated design, not an oversight - plugin.py:8-10: "After that it
+does nothing at all until a browser asks it something."
+
+THE ONLY INPUT SURFACE IS A BROWSER-ACTIVATED GRADIO EVENT, and the bridge
+explains why at bridge_ui.py:3-9: "A postMessage cannot change a Gradio session.
+Only a Gradio event can, and an event needs components... something whose
+activation the browser can cause." The wire protocol is postMessage, not HTTP.
+
+NO AUTHENTICATION ON ANY LOOPBACK LEG. The only real auth check in the path is
+signed_in() (wangp/proxy.py:1093-1118), a browser cookie check on Forge's
+INBOUND edge. It needs a Starlette request bearing a browser cookie; a
+Forge-internal caller has none.
+
+4.2 What is genuinely in place, and should not be re-derived
+-----------------------------------------------------------
+
+Three pieces exist and are worth crediting, because they make the gap smaller
+than "build a transport from nothing":
+
+    Forge already has an httpx client and a settled loopback destination
+    (wangp/proxy.py:402-421), and proxy.probe (proxy.py:863) already proves the
+    Forge-to-child direction works with no browser.
+
+    The credential is already minted, already delivered to the child, and
+    completely unused. bridge.py:215-223 mints it with a docstring that names
+    the missing path exactly - "A server-only value, for a control path no
+    browser participates in" - it is held per launch (runtime.py:677-679),
+    exported to the child (runtime.py:256) and named on the child side
+    (compatibility.py:417, ENV_BRIDGE_SECRET). A grep for that env var across
+    both repositories returns five hits: two constants, one export, two privacy
+    tests. No comparison, no header, no consumer. So "authenticated" describes
+    an intent recorded in a docstring.
+
+    The handoff area is real, and is one-directional by design: Forge writes
+    (wangp/handoff.py:219-243), the child's module has no writer and no deleter
+    at all - its entire public surface is handoff_root, path_for, resolve,
+    pixel_digest, loose_signature, signatures_match, load.
+
+4.3 What must be built
+----------------------
+
+Child side: a way to accept a request at all - and Wan2GP's plugin API offers no
+hook at which the FastAPI app exists, so this is either an HTTP route mounted
+from inside the child or a filesystem/socket request queue plus the first
+background thread the plugin has ever had, against a module whose stated design
+is that it has none. Then a secret comparison, from zero. Then a request/response
+vocabulary in protocol.py - which today defines only postMessage types and must
+stay byte-identical across two copies held together by
+tests/test_wangp_protocol.py, so every addition lands twice.
+
+Forge side: a client for it, and a place to call it from that is not a request
+handler (B19).
+
+Required changes:
+
+    1. Strike "existing" and "authenticated" from B7. Section 12 is already
+       right - it lists "plugin.py / protocol.py: the private authenticated
+       loopback surface for the above" among the things to BUILD. B7 and section
+       12 contradict each other; section 12 wins.
+
+    2. Sequence it first. 14.1's advice to build B7A before B7 was correct
+       against the specification as written, but B7A-as-corrected is not a
+       separate deliverable, and B7 cannot be exercised end-to-end - nor can
+       P5(a) run, nor checklist item "P5(a) browser-independent WanGP submission
+       proven" be closed - until Forge can reach the child. The transport is the
+       first thing to build and the cheapest thing to prove.
+
+    3. Make the secret comparison mandatory, and say why. Today the child's
+       unauthenticated loopback socket is defensible because everything behind it
+       is either a Gradio page requiring a session_hash or a readiness GET. The
+       moment a route on that socket can start a generation with no session, port
+       plus loopback stops being sufficient.
+
+    4. B1 rule 6's PREFERRED option depends on the same missing transport in the
+       reverse direction. Section 3.4 removes the need for it.
+
+================================================================================
+5. CHECKED AND FOUND SOUND - NO ACTION
+================================================================================
+
+Recorded so review effort is not spent on these again. Each was read at the
+dependency revision named in the header.
+
+    The three claims section 14.3 asks a reader to verify are all CORRECT.
+    (a) The WebUI path does not take _GENERATION_LOCK and the headless path does
+    not check gen_in_progress before starting - confirmed, shared/api_cli.py:
+    27-32 and wgp.py:139. (b) submit_minimax starts a cold runtime as part of
+    running the job - confirmed through the whole chain: jobs.submit ->
+    mc_llm_jobs._run -> mc_llm_sessions.minimax -> mc_llm_runtime.client(),
+    documented as "A client for a ready server, started or restarted as
+    placement requires". (c) No idempotency key exists - confirmed with one
+    refinement (section 6, R2). C3's deletion of the cross-repository readiness
+    seam is correct and the work is genuinely unnecessary.
+
+    The WebUI-backed session is correctly disqualified (C2). api_webui.py raises
+    without an active Gradio callback context and without a live request bearing
+    a session hash, and the browser-focus suspension is real. Ranking it above a
+    headless session would have sent an implementer down a path the same
+    document forbids. Note that this verdict is about the SUBMISSION TRIGGER,
+    not about the WebUI's queue and worker, which are process-wide and are what
+    section 2.3 uses - the two must not be conflated.
+
+    WanGPSession is constructible with no Gradio object, and submit_task is
+    non-blocking (a daemon thread named "wangp-session-job", returning a
+    SessionJob immediately). GenerationResult carries generated_files, success,
+    a cancelled property and artifacts, as described.
+
+    Model residency behaves as B7B claims. The reload branch at wgp.py:7020
+    fires only on model_type, profile, config or reload_needed; prompt, images,
+    seed and LoRA selection are absent from it, and LoRAs are applied per
+    generation onto the resident transformer afterwards. B7B rule 5's wider
+    residency key is right, and rule 6's caution about preload_model_policy "U"
+    was worth stating: _unload_model_if_needed is NOT guarded by
+    gen_in_progress, though on the shipped wiring it is reached only from the
+    service's own finally, and the default policy is empty (wgp.py:2641).
+
+    B7B rules 1 and 2 are not optimisations and must be honoured on day one.
+    close() takes _GENERATION_LOCK (shared/api.py:848-853), so calling it from a
+    request handler blocks for a whole generation; and a second submit on one
+    session raises RuntimeError("WanGP session already has a generation in
+    progress") (api.py:896) rather than queueing.
+
+    ModelSwitchRefiner's public surface is as described. capabilities() returns
+    the keys B5 needs; subscribe() exists and carries the event vocabulary
+    claimed; `disabled` is a policy state distinct from cold and is correctly
+    refused rather than worked around (Q2 stays closed); queue_full is retryable
+    and no_vision is terminal, including the subtlety that the vision check can
+    answer "unreadable" and defer to the run.
+
+    C5 is right that no public VRAM release seam exists in mc_llm_api, and right
+    that mc_llm_runtime has release() and a RELEASE_STOP mode that is not
+    exported. B22's preference order is sound subject to R7 below.
+
+    The event hub at minipaint_neo/events.py implements what 0.3 credits it with
+    - epoch:revision cursors, a bounded replay ring, targeted advisory events
+    that carry no revision and stay out of the ring, publication that never
+    writes a socket on the calling thread, and subscriber overflow detection.
+    Preserving and adapting it is the right call.
+
+    The managed runtime's state vocabulary and platform lifetime are as claimed:
+    start_new_session=True on POSIX, a job object carrying
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE on Windows, and B11's platform-dependent
+    recovery semantics follow correctly from that. B11's refusal to "fix"
+    Windows by orphaning the child is correct.
+
+    The atomic write primitive underneath the outbox is correct and needs no
+    change; B2's "all state transitions are persisted before publication" is
+    reachable on it, because every mutation already funnels through one _save.
+
+    0.5's scope decision, 2.1 through 2.11, section 10's invariants (with the
+    two additions named in 2.5 and 6), 7.1's measurement discipline, and the
+    whole of section 14's judgement are endorsed. 14.6 is particularly worth
+    following: Phase 2 is genuinely independent now.
+
+================================================================================
+6. CORRECTIONS TO STATED FACTS
+================================================================================
+
+None of these overturns a conclusion. Five change the stated mechanism behind a
+conclusion, which matters because an implementer builds the mechanism, and a
+reviewer who checks a wrong mechanism loses confidence in the rest.
+
+R1. "VALIDATE_TASK ... WITHOUT MERGING MODEL DEFAULTS" IS FALSE.
+    Affects 0.3, B1, B8, 14.5. Conclusion survives; every stated reason for it
+    is wrong.
+
+    0.3 says submit_task "normalizes shape only", wgp.validate_task "copies
+    params and validates them without merging model defaults", and an omitted key
+    "falls back to that function's own Python default, not to anything
+    appropriate for the model".
+
+    Read at source: validate_task DOES merge model defaults. wgp.py:8945-8946
+    `inputs = params.copy()` then `clean_settings(model_type, inputs)`, and
+    clean_settings (wgp.py:1795-1803) does `merged = get_factory_settings(
+    model_type)`, updates it from the caller's params, clears and repopulates.
+    get_factory_settings (wgp.py:3220-3234) is full model-appropriate defaults:
+    primary_settings, plus the model handler's update_default_settings, plus
+    model_def["settings"]. The WebUI queue loop back-fills a second time
+    explicitly (wgp.py:8741-8747). And submit_task does more than shape: it
+    applies apply_video_length_duration and apply_media_flag_defaults
+    (shared/api.py:1198, :1201).
+
+    Consequences:
+      - A partial dict does not produce nondeterministic garbage from Python
+        defaults. It produces deterministic FACTORY settings. The requirement to
+        send a complete dict survives entirely, but on the product ground the
+        document already gives - factory settings are not what the user
+        configured - not on a mechanical one.
+      - 14.5's rejection of "factory defaults plus deltas" cannot be justified
+        mechanically. That design would work. Reject it on the product ground
+        only. Do not cite a Python-default hazard in the specification; a
+        reviewer who checks will find generate_media has no such defaults.
+      - One real trap this reveals, which the document does not mention: a key
+        sent as explicit None is DROPPED by clean_settings' filter and refilled
+        from factory. None is not a way to say "unset".
+
+R2. "NO CALLER-SUPPLIED KEY" IS TOO ABSOLUTE, AND THE CORRECTION IMPROVES B8.
+    Affects 0.3, C4, B8, Q4.
+
+    settings["client_id"] IS accepted and honoured verbatim -
+    _ensure_task_client_ids (shared/api.py:929-944) mints one only when absent.
+    It is not a dedup key: nothing compares it against anything already
+    submitted, so submitting the same client_id twice starts two generations. Its
+    function is routing returned media out of the artifact dict
+    (shared/api.py:340, consumed at :1121 and :1132-1141).
+
+    So C4's conclusion - the ledger is mandatory - stands, and is better
+    grounded than stated: there is no dedup AND the headless path returns no
+    identifier of its own, so even a "did my submission land" probe is
+    impossible from the API alone.
+
+    Required addition to B8: the bridge WRITES the MiniPaint execution id into
+    settings["client_id"] before submitting. That makes the ledger key and
+    WanGP's artifact-routing key the same string and makes returned artifacts
+    self-identifying (shared/api.py:210, :226). It is also a correctness fix
+    independent of the ledger: the composed base carries the USER'S PAGE
+    client_id, so an adapter that does not overwrite it will misattribute
+    artifacts. The document never mentions client_id.
+
+R3. THE gen_in_progress READER THE DOCUMENT CITES HAS NO CALLER.
+    Affects 0.3, B7A. Detailed in 2.5.
+
+    0.3 says the flag "is read in exactly one place, release_RAM()". Literally
+    there are two reads in wgp.py (:4193, the accessor, and :4241). More
+    importantly release_RAM has no caller: the live "Force Unload Models from
+    RAM" button calls release_ram_and_notify instead
+    (plugins/configuration/plugin.py:825, :837), which is guarded by
+    any_GPU_process_running rather than by gen_in_progress. The substantive point
+    0.3 makes - nothing in WanGP's UI refuses a generation because of this flag -
+    is correct and stronger than stated. The consequence, developed in 2.5, is
+    that the card's real protection is per-state and therefore blind to a
+    headless run.
+
+R4. THE B1 MUTATION HAZARD IS REAL AND ITS BLAST RADIUS IS UNDERSTATED.
+    Affects B1 SPECIAL ATTENTION, 9.2.
+
+    Confirmed as described: collect_current_model_settings takes the session's
+    stored settings by reference, sets ["state"] on it, and hands it to
+    prepare_inputs_dict, which pops keys, rewrites activated_loras and inserts
+    custom_settings (wgp.py:10074-10081, 9665-9691). Composing mutates what the
+    user's own WanGP tab will generate.
+
+    Two additions. It is worse than a mutation: on a session with no stored
+    settings for the model it RAISES TypeError, because settings["state"] = state
+    is applied to the None returned by get_model_settings (wgp.py:10063-10065).
+    And the deep-copy remedy B1 prescribes is not fully implementable from the
+    caller's side, because the function reaches the stored dict itself rather
+    than accepting one.
+
+    Section 3.4's server-side compose removes this hazard entirely - there is no
+    per-session stored dict in the path. If the per-session path is kept as an
+    optimisation, keep the deep-copy requirement and add the TypeError case to
+    9.2's test list.
+
+R5. B12 AND THE SPECIFICATION'S 7.7 NAME THE WRONG SWEEPER, THE WRONG
+    CONSTANT AND THE WRONG ERROR.
+    Affects B12, the specification's 7.7, 2.8, 9.3. Spec-text correction; the requirement survives
+    and is unchanged in substance.
+
+    B12 says "the handoff root is swept by age alone (DEFAULT_MAX_AGE_SECONDS =
+    6 * 3600, handoff.py:75, sweep at handoff.py:445-477) and knows nothing about
+    queued work", and attributes the observed HANDOFF_NOT_FOUND to it.
+
+    Three things are wrong:
+
+      (a) That sweep is not age-alone. handoff.py:465 and :469-470 exempt any id
+          still in _manifests (`live = set(_manifests)`), and the docstring at
+          :450-452 says so. This is the same call-graph-not-source error that
+          14.3 warns about, in the one claim the document most wants airtight.
+
+      (b) A queued job holds no handoff id. outbox.submit stores the normalised
+          public request (clipboard/outbox.py:621, :633), which carries image
+          HANDLES - kind "staged" or "clipboard_asset" (interop.py:83-85, :295).
+          Handoffs are created only by prepare(), reached only from the /prepare
+          route, called only from the browser's post-claim execute(), and
+          released in the same function's finally
+          (javascript/minipaint_interop.js:380-408). They live seconds. The
+          6-hour sweep cannot be what invalidates a waiting job's input.
+
+      (c) The sweeper that genuinely holds a waiting job's input with no pin hook
+          is interop.sweep_staging at STAGE_MAX_AGE_SECONDS = 30 * 60
+          (interop.py:75, :252-277) - thirty minutes.
+
+    But the hazard is smaller than (c) suggests, and this correction cuts both
+    ways. sweep_staging has no timer: its only non-test caller is
+    _on_app_started (interop.py:661). The handoff sweep is likewise boot-only
+    (wangp/__init__.py:84). Nothing deletes an image input while Forge keeps
+    running, so "a job that waits longer than thirty minutes loses its inputs" is
+    false. The reachable failure is a Forge RESTART with a durable pending job
+    whose staged input is older than the sweep age. Furthermore the Clipboard
+    press path - the walk-away path this document exists to serve - uses
+    clipboard_asset handles into the user's own library folder
+    (clipboard/history.py:108-112, clipboard/ui.py:782-785), which has no age or
+    count eviction at all.
+
+    Required: rewrite B12's diagnosis to name the staged handle, the 30-minute
+    constant and the restart trigger, and keep the handoff constant as the
+    forward-looking mechanism for job-owned durable inputs rather than as the
+    observed cause. B12's requirement (pin an active job's inputs; never sweep by
+    age while a job is non-terminal) is unchanged and remains correct. Keep 7.7
+    but change its method: the test must restart Forge, not merely wait.
+
+    Note for B2/B12 implementation: the boot sweep is a real hazard for a durable
+    queue in a way it was not for a browser-executed one, because before this
+    change a pending job could not outlive the page. Order the startup so
+    recovery registers pins before any sweep runs.
+
+R6. B7B's submit_manifest RATIONALE IS WRONG; ITS RECOMMENDATION SURVIVES.
+    Affects B7B IMPLEMENTATION RECOMMENDATION, 7.9A.
+
+    The claim is "the lock is taken once and the model-load branch is evaluated
+    once". The reload branch is evaluated N times, once per task. What saves the
+    intended outcome is that for tasks sharing the residency key the condition at
+    wgp.py:7020 is False on iterations 2..N, so one load occurs - the acceptance
+    criterion holds for a homogeneous manifest.
+
+    The wrong mechanism licenses a wrong inference: batching gives NO protection
+    against reloads in a heterogeneous manifest, which reloads per task exactly
+    as N separate submits would. Conversely, residency across N jobs is available
+    to N separate submit calls on one long-lived worker just as much as to a
+    manifest - so B7B rule 3 (do not reorder to group by model) is not in tension
+    with batching, and the measurable win from a manifest is one lock
+    acquisition and one prepare/reset cycle, not a skipped reload check. Note
+    also that reload_needed is a wgp MODULE-LEVEL global (wgp.py:201, :3399), not
+    manifest-scoped state.
+
+R7. THE VRAM BROKER DOES SEE WANGP'S BYTES, AND THE TWO ORDERINGS ARE NOT
+    SYMMETRIC.
+    Affects C5, B22, P6, Q5.
+
+    C5 says MiniPaint's managed WanGP is "a separate OS process it does not know
+    about". The broker reads TOTAL GPU free memory for every placement figure
+    (torch.cuda.mem_get_info with an nvidia-smi fallback) and computes an
+    "unaccounted" residual it attributes in prose to another program on the same
+    GPU. A WanGP process already holding VRAM is therefore fully visible to the
+    enhancer's negotiation, which will shrink context, spill experts, drop blocks
+    or fall back to system RAM against it. What it does not know is whose memory
+    it is, that more is about to be demanded, and any way to make it go away -
+    WanGP is not a family, has no reclaimer and appears in no victim order.
+
+    This sharpens P6 rather than breaking B22. State the asymmetry in B22:
+    WanGP-then-enhancer is the PROTECTED direction, because the enhancer sees the
+    reduced card and degrades gracefully down its own ladder, reporting each
+    reduction. Enhancer-then-WanGP is the UNPROTECTED direction, because WanGP
+    sizes itself against the card with no ladder and nothing will hand it the
+    language model's bytes. That is exactly the ENHANCED -> ENSURING_WANGP
+    boundary option A targets, so the requirement survives - and it means
+    option B ("order the stages, document the headroom") is weaker than B22
+    implies, because ordering is already guaranteed by B4 STEP 5 and is not what
+    frees the memory.
+
+R8. B6's READY DOES NOT PROVE THE CHILD CAN ACCEPT A JOB.
+    Affects B6, B7, P5.
+
+    Runtime READY is a liveness and transport fact, not an admission fact. What
+    the executor can reuse browser-free is real and worth naming: Runtime.health()
+    (wangp/runtime.py:705-733), which is OS-reconciled and deliberately
+    non-blocking so it still answers during a minutes-long start; the crash edge
+    via Runtime._watch (runtime.py:977-988); proxy.probe (proxy.py:863) as a
+    deeper transport check; and wangp/vram.snapshot() for GPU occupancy. There is
+    no heartbeat in the ownership sense - the only interval timers in the tree are
+    browser-side.
+
+    Consequence: B7's adapter must supply its own "can accept a job" answer
+    (bridge protocol version, model availability, queue state), and the executor
+    must not treat READY as admission. Today that answer arrives only by browser
+    relay, so it is part of the transport in section 4.
+
+R9. THE INVENTORY OF WAN2GP STATE THE BRIDGE WRITES IS INCOMPLETE.
+    Affects 0.3's closing summary, section 12, B7A rule 3, 9.5.
+
+    Section 12 and the document's summary both assert "The one Wan2GP-owned value
+    the bridge writes is gen_in_progress". A headless run writes more, and
+    nothing restores it. _configure_runtime (shared/api.py:1064-1073), called
+    from run_cli_job's first act inside the lock, sets
+    server_config["notification_sound_enabled"] = 0 unconditionally, and if the
+    session was constructed with output_dir it also overwrites
+    server_config["save_path"], ["image_save_path"], ["audio_save_path"] and the
+    three matching wgp module globals. Because the runtime resolves the module
+    with importlib.import_module("wgp") (api.py:1345), inside the managed child
+    this is the WebUI's own module and its own server_config dict.
+
+    Nothing restores either. The finally calls only _reset_state_after_run, which
+    touches the gen dict and the flag; close() only releases the model. And
+    ordinary WebUI actions then PERSIST the mutation to wgp_config.json, because
+    they write the whole live dict - a model change (wgp.py:10710), the
+    advanced-mode toggle, a resolution change, a workspace pick, a plugin
+    enable/disable, any configuration-tab save.
+
+    Blast radius, stated exactly: notification_sound_enabled is not in the
+    factory dict and is read with default 1 (wgp.py:8866), so for an unconfigured
+    user one unattended run silences the end-of-queue sound in their own WanGP
+    tab, and the next model change writes the 0 to disk. It does not self-heal
+    via the configuration tab. If output_dir is passed the damage is worse: the
+    WebUI's own generation writes through the module global (wgp.py:7447, :8432,
+    :6783) and its gallery scans it (wgp.py:7228), so the user's own outputs
+    would land in MiniPaint's directory.
+
+    Required: correct the inventory; add "a server-executed job does not change
+    any setting of the user's own WanGP tab" to section 10's invariants and to
+    9.5's adapter tests; and if a headless session is retained for anything,
+    snapshot and restore server_config around it. Section 2.3's design avoids
+    _configure_runtime entirely, which removes this as a side effect - one more
+    reason to prefer it.
+
+R10. C2's COMPONENT COUNT IS INFLATED, AND WAS "CORRECTED" IN THE WRONG
+    DIRECTION.
+    Affects C2. Cosmetic, but C2's target is expressed against the number.
+
+    The real figure is 69 hidden components on a normal (canvas) page and 40 on
+    the legacy page. The 84 figure counts 16 gr.update(visible=False) callback
+    RETURNS as if they were component declarations, and sums the two mutually
+    exclusive frontends. canvas/ui.py 28, canvas/surface.py 2 and legacy_ui.py 1
+    are right; clipboard/ui.py is 30 instantiated (28 source sites), not 41, and
+    wangp/ui.py is 9, not 12 - of which two are gr.Column containers that are
+    legitimate view-switching state, not message channels. C2's direction is
+    unaffected; restate its target against 69.
+
+================================================================================
+7. FURTHER FINDINGS
+================================================================================
+Each verified against source and survived adversarial refutation. None is
+architectural.
+
+7.1 B3 IS LARGER THAN IT READS, BECAUSE "ACCEPTED" IS TERMINAL TODAY.
+    outbox.py:80 defines TERMINAL = (QUEUED, STARTED, FAILED, UNCONFIRMED,
+    CANCELLED) - "WanGP accepted it" is currently a terminal state. Every
+    partition consumer moves with the state machine (clipboard/ui.py:326, :850,
+    outbox.unrecorded at :975 filtering on POSITIVE). Add a read-side schema
+    migration to B3's requirements; a durable job document written by the old
+    scheme must not be misread by the new one.
+
+7.2 B2 IS SMALLER THAN IT READS, BECAUSE A BROWSER-INDEPENDENT EXECUTOR ALREADY
+    EXISTS. outbox.py:525-556 ships a daemon watcher (_ensure_watcher /
+    _watch_loop) that persists and drives ENHANCING to PENDING with every page
+    closed. Phase 2's headline property is largely one the code already has.
+    Two consequences: B15's instruction to delete the 2-second watcher must not
+    delete the only background driver of lease expiry and outbox reconciliation
+    along with it; and nothing starts that watcher at Forge startup -
+    _ensure_watcher is called only from submit() - which B11's recovery must fix
+    regardless.
+
+7.3 THE EXECUTOR LOOP AS WRITTEN CAN LOSE CONCURRENT WRITES. The only
+    persistence primitive is a whole-document read-modify-overwrite through
+    _save. B2's recommended loop holds a job across a released lock and then
+    persists, which clobbers a cancel, a retry or another stage that landed in
+    between. retry() already demonstrates the pattern (it drops the lock between
+    its eligibility check and the new job). Required: state in B2 that a stage
+    transition re-reads under the lock and writes only its own job's fields, or
+    carries a per-job revision that the write checks. Also note MAX_JOBS = 500
+    (outbox.py:115) with json.dumps(indent=2) on every transition.
+
+7.4 THERE IS NO NAMED LIFECYCLE HOME FOR THE EXECUTOR, AND NO CROSS-PROCESS
+    GUARD. The outbox lock is an in-process threading lock, so "one coordinator
+    per Forge process" does not prevent two coordinators over one data
+    directory. Either document a single-Forge-per-data-dir invariant or add a
+    cross-process guard. Separately, B2 must name the startup hook it lives on
+    and state what happens on Forge's Reload UI, including that a running
+    unattended generation must survive it.
+
+7.5 MEDIA FLAGS AND SUBSTITUTED MEDIA ARE NOT RECONCILED. B1 rule 5 discards the
+    page's media values and substitutes MiniPaint's inputs, but the captured
+    settings carry image_prompt_type / video_prompt_type flag strings describing
+    which slots are in use. Nothing in B1 reconciles them, and
+    apply_media_flag_defaults (shared/api.py:74-84) only ADDS flags implied by
+    present media - it does not remove flags whose media is gone. Required: B1
+    gains a rule that the flags are recomputed from the substituted media, and
+    9.2 gains a case for each slot combination the product supports.
+
+7.6 THE FEED CONTRACT NEEDS TWO SMALL CORRECTIONS. B4 STEP 4 should say to
+    discard content-bearing events (chunk/caption) rather than only naming the
+    terminal ones, because a re-subscribe from cursor 0 replays the entire
+    enhanced prompt - which is prompt text, and 9.9 forbids it in logs and
+    events. And B5 needs a state for "ModelSwitchRefiner speaks a newer major API
+    version", which enhance.py already implements and which B4 STEP 2's
+    preflight would otherwise mis-report.
+
+7.7 SIX TESTS TO REPLACE THE SPECIFICATION'S 7.9, all constructible in-process with no GPU against a
+    real HybridService whose process_queue blocks on a threading.Event:
+      (1) Worker identity, user first: drive process_tasks, then submit through
+          the bridge path; assert service._queue_worker is the same Thread object
+          both times and the queue callable was entered exactly once.
+      (2) Worker identity, MiniPaint first - the direction B7A cannot cover.
+          Same assertions. This is the release gate.
+      (3) No flag on the execution path: assert the injected
+          is_generation_in_progress getter's call count is 0 across a bridge
+          submission, and the execution id appears in gen["queue"].
+      (4) Stranded-task window, deterministic: make unload block, submit while
+          the worker sits in its finally, release; assert the task still runs.
+      (5) Stuck-flag immunity: set gen["main_process_running"] = True with no
+          worker; assert a bridge job still admits and completes.
+      (6) Ordering: with two user tasks queued, assert an unattended job lands
+          last and a priority job lands at index 1.
+    Keep 7.9's last bullet as a cheap grep. Demote its is_generation_in_progress
+    bullets to what they are - regression tests of protocol 4's UI routing -
+    and say so, because passing them is fully compatible with a double start.
+
+================================================================================
+8. ALTERNATIVE CONSIDERED - WAN2GP'S OWN MCP SERVER
+================================================================================
+Classification: the specification's omission is a justification gap, not an
+architecture error. B7's decision survives.
+
+shared/mcp_server.py (1804 lines) is a real, documented, versioned,
+browser-independent WanGP submission surface: announced in Wan2GP's README,
+specified in its docs/API.md and docs/CLI.md, with its SDK pinned in
+requirements.txt, exposing wangp_generate / wangp_get_job / wangp_cancel_job.
+The specification never mentions it. In a document that devotes a SPECIAL
+ATTENTION note to justifying a departure from Wan2GP's published plugin
+guidance, that silence is a real gap - a reader who finds it will reasonably ask
+why the undocumented path was chosen over the documented one.
+
+It is not a better foundation, and the reasons are worth recording so this is
+not reopened:
+
+    It is the same seam. build_server calls shared.api.init(...) with no
+    webui_state (mcp_server.py:1721-1740), so _use_webui_queue is False
+    (api.py:584), _run_job routes to run_cli_job (api.py:960-965), and
+    api_cli.py:29 takes _GENERATION_LOCK. That is B7's adapter with a JSON-RPC
+    shell on it - and it therefore inherits blocker 1 verbatim. Grep confirms the
+    MCP path never reads gen_in_progress and performs the same blind write and
+    unconditional clear.
+
+    Its supported launch mode deletes the WebUI this product ships. --mcp is
+    documented as "Start WanGP as an MCP server without launching the web UI",
+    and wgp.py:13991-13995 makes it an early sys.exit before the app is built.
+    MiniPaint launches the child as the Gradio WebUI (runtime.py:288-299) and
+    proxies and iframes it. A --mcp child has no /wan2gp/* to proxy.
+
+    The second-process workaround is strictly worse, not merely inelegant. Every
+    GPU lock in Wan2GP is an in-process threading primitive - _GENERATION_LOCK is
+    a threading.RLock (api.py:31), process_locks.gen_lock a threading.Lock
+    (process_locks.py:5), the runtime singleton per-process - and there is no
+    flock, filelock or OS semaphore anywhere in shared/. Two WanGP processes on
+    one GPU have zero arbitration and two full model copies. B7's Forbidden
+    bullet should widen from "starting a second standalone WanGP process per job"
+    to "running a second WanGP process against the same GPU at all, per-job or
+    persistent".
+
+    It adds no durability. The job store is an in-memory dict of uuid4 hex
+    (mcp_server.py:1197-1217) and raises KeyError for anything it does not hold,
+    so after a restart no outstanding id is resolvable. No idempotency key
+    either. B8's ledger is required regardless of seam.
+
+    Its default contract blocks. MCP v2 pins wait to the constant True and
+    rejects wait=false unless launched with --mcp-async (off by default), then
+    blocks on job.result with an unbounded default timeout - violating B7's
+    "Forge never holds a socket open". Adopting it would mean depending on a
+    non-default flag or the deprecated v1 contract, which forfeits most of the
+    stability argument for choosing a documented surface.
+
+    The in-process variant is browser-bound. build_inprocess_server is built on
+    WanGPSession(webui_state=state) (prime_tools.py:192) and needs the browser to
+    fire its trigger. It is draft option B with a JSON-RPC wrapper, and should be
+    named as such in B7 so a future reader does not mistake it for the missing
+    supported path.
+
+In fairness, it does ship one thing the bridge plugin lacks: a transport
+(streamable HTTP or SSE over uvicorn, with optional OAuth). That is section 4's
+gap, and it is worth noting that even adopting MCP would not have handed the
+transport over for free in the configuration this product needs.
+
+Required: add a fourth bullet to B7's "Why this and not the alternatives",
+covering the above in three or four lines, and record the pinned Wan2GP revision
+for it in compatibility.py alongside the rest.
+
+================================================================================
+9. THE DOCUMENT'S OPEN QUESTIONS
+================================================================================
+
+Q1. CLOSED, and correctly. Verified through the whole chain.
+
+Q2. CLOSED, and correctly. `disabled` is a user preference and must stay one.
+
+Q3. ANSWERED, BUT THE ANSWER CHANGES. The browser-independent adapter is not a
+    headless WanGPSession. It is submission into the WebUI's own process-wide
+    queue and worker, from inside the child. See section 2.3. P5(a) should be
+    re-scoped to prove that, and its "no active Gradio session needed" item
+    becomes "no browser session needed", which is a different and provable
+    claim.
+
+Q4. CLOSED, and correctly, with R2's refinement: write the execution id into
+    client_id.
+
+Q5. STILL OPEN; P6 still decides; R7 sharpens it. Test the two orderings
+    separately and expect them to differ.
+
+Q6. STILL OPEN; P1 still decides. Unaffected by this review. Note that section
+    6/Phase 4 is genuinely optional for the primary requirement - events.py is
+    imported by nothing today (a grep for `events.` across minipaint_neo finds
+    only two unrelated docstrings), the browser already renders job state from
+    the existing outbox-list route, and public() passes state through verbatim so
+    new states appear with no new route.
+
+Q7. STILL OPEN; unrelated to unattended generation, as the document says.
+
+Q8. STILL OPEN; P8 still decides, and P8 remains well-aimed.
+
+Q9. STAYS "NOT BLOCKING", for a stronger reason than given: overlap is prevented
+    by one queue and one worker gate, not by a flag. gen_in_progress remains a
+    two-writer boolean unfit to gate anything, and an upstream owner token would
+    still help wgp.py:4241 - but nothing downstream needs it. Two small upstream
+    fixes are worth offering regardless, and neither blocks: swap
+    wgp.py:8680-8681 so the acquire precedes the flag set and wrap _process_tasks
+    from there to its end in try/finally: release_gen(), which removes an
+    unrecoverable process-wide hang; and guard the unprotected dict index at
+    process_locks.py:123.
+
+14.8's FOUR ADMITTED GUESSES.
+
+    Shared module state. Partly settled, and it is worse than the document
+    feared in one way and better in another. Worse: a headless run mutates
+    server_config and is never restored (R9). Better: section 2.3's design does
+    not create a headless state at all, which removes most of the category. The
+    alternation test P5(a) asks for is still worth running, but against the
+    corrected design it is testing one queue and one worker rather than two
+    coexisting state dicts.
+
+    Whether B22 is needed. Still open; R7 sharpens the measurement.
+
+    Whether the exclusion wait is tolerable. Now partly observable rather than
+    speculative: with the corrected design an unattended job sits in the WanGP
+    tab's own queue, so the user can see it and reorder it.
+
+    The test suite. SETTLED: GREEN. 19 suites, 2891 checks, exit 0, nothing
+    skipped, two consecutive runs byte-identical in per-suite counts. The
+    dependency install is `pip install gradio pillow httpx fastapi` and takes
+    under two minutes, pulling no torch - the blocker was never heavy.
+
+    One harness defect found while settling it, which should be fixed in Phase
+    0.5 because it hides more than it reports. tests/run.py's skip logic only
+    covers IMPORT-TIME failure (run.py:79-91), but test_wangp_protocol.py imports
+    gradio lazily inside a check function at :1606. So the ModuleNotFoundError
+    escapes module.run() and aborts the whole run, silently suppressing 11 of the
+    19 suites rather than skipping one. Two-line fix: import gradio at module
+    level there (and in test_wangp_proxy.py), or wrap run.py:89 in the same
+    optional-dependency test. This is also why the specification's own reading of
+    the failure was reasonable and incomplete.
+
+    Also worth recording: there is no requirements.txt and no CI configuration in
+    the repository, so nothing tells a newcomer which four packages the suite
+    needs. tests/README.md names a Gradio pin but not the set.
+
+    There is no WanGP test seam. 9.5's "Against WanGP test seam / representative
+    installed API" cannot be taken literally: Wan2GP has no test directory, and
+    shared/api.py cannot be imported in a MiniPaint test environment at all
+    because it reaches torch transitively. Reword to "against a fake WanGP
+    session module built for this purpose, plus a separate on-target run against
+    the installed API", and note that the fake must cover WanGPSession's real
+    surface plus SessionJob's - or, under the corrected design, HybridService's,
+    which is materially smaller and is constructible for real.
+
+================================================================================
+10. SCOPE - THE SHORTEST PATH TO PRESS-AND-WALK-AWAY
+================================================================================
+Not a defect. Delivery-risk control, offered for the implementing engineer's
+judgement, in the same spirit as section 4 of the previous review response.
+
+The primary requirement is narrower than the document, and the document already
+knows it: Phase 3 is "the first phase that satisfies press-and-walk-away
+end-to-end" and Phase 4 "is not required for server job progress". Both claims
+were tested against the code and both hold.
+
+LOAD-BEARING for "submit a prompt with optional images, close the browser, the
+generation completes":
+
+    the transport            section 4. Build first. Nothing else can be proven
+                             end-to-end without it.
+    B1 snapshot              with section 3.4's server-side base.
+    B2 executor              smaller than it reads (7.2), but needs 7.3's
+                             write discipline and 7.4's lifecycle answer.
+    B3 state machine         larger than it reads (7.1).
+    B6 ensure managed WanGP  small; the states exist.
+    B7 adapter               as corrected in 2.3 - submission into the shared
+                             queue, not a headless session.
+    B7A                      collapses into B7. Keep rules 2 and 4, and add
+                             2.5's model-teardown requirement.
+    B8 ledger                only the restart-safety half. Persisting submitted_at
+                             plus the child's instance id on the job, and treating
+                             a mismatch after restart as EXECUTION_UNKNOWN, buys
+                             the never-double-generate property in about thirty
+                             lines. The full in-child ledger buys POSIX
+                             re-attach, which is a convenience.
+    B9 tracking              to COMPLETED with generated_files persisted.
+    B12 input pinning        small, and not deferrable (R5's restart case).
+
+GENUINELY OPTIONAL for that goal, and safe to defer: all of workstream A beyond
+what is merged, all of workstream C, section 6 and Phase 4 entirely, B15, B4
+STEP 4's feed consumption (status() is an in-process dict read; a 2-second poll
+of it costs nothing and already carries the runtime's stage text), B5's four-way
+preflight (submit_minimax already refuses with distinct codes, so a job fails
+honestly without it - better messages, not new capability), B7B's residency work,
+B22, B13 and B10.
+
+TRAPS - look optional, are not:
+
+    B7B rules 1 and 2. close() blocks for a whole generation and a second submit
+    on one session raises rather than queues. Both bite on day one.
+    B12. The boot sweep eats a queued job's staged input (R5).
+    client_id. Not mentioned in the document at all; artifacts are misattributed
+    without it (R2).
+    The read-side schema migration in 7.1.
+
+SEQUENCING. One change to Phase 0.5 and one to the phase boundaries:
+
+    Build the transport before P5, and re-scope P5(a) to the corrected adapter.
+    P5(b) largely disappears; what replaces it is the six tests in section 7.7 of this response, which are
+    cheap unit tests rather than a prototype.
+
+    Phases 1 and 2 as scoped deliver little that is new, because the enhancement
+    executor already runs with the browser closed, while Phase 3 carries compose,
+    transport, adapter, exclusion, ledger and tracking. Move compose and the
+    transport into Phase 1 so that Phase 1 ends with a server-composed,
+    server-admitted job that stops short of execution - which is a real,
+    demonstrable milestone and de-risks everything after it.
+
+HIGHEST-RISK UNKNOWN, and the cheap experiment that settles it. Not P5 as
+written. It is whether the bridge can reach the process-wide HybridService and
+the shared gen dict from a server-side entry point with no browser session -
+because section 2.3's design depends on it, and section 3's blocker means a
+session cannot be assumed. Both the service (wgp.py:12797-12798) and the gen dict
+(hybrid.py:16-27) are process-wide, so the answer is very likely yes, but it is
+the load-bearing unknown and it is a one-hour experiment inside the child: obtain
+the service without a request, enqueue one task, watch one worker run it. Do that
+before anything else in Phase 0.5.
+
+================================================================================
+11. RECOMMENDED DISPOSITION
+================================================================================
+
+    1. Adopt the specification, with sections 2, 3 and 4 of this response
+       applied. The architecture, the authority inversion, the scope decision
+       and the judgement in section 14 all stand.
+
+    2. Rewrite B7 and B7A together, per section 2.3. This is the one change that
+       must land before any adapter code is written, because the current text
+       directs an implementer to build the thing that causes the hazard. Update
+       section 12, 1.4, B9, Q3, Q9 and 7.9 for consequence, and add 2.5's
+       model-teardown requirement.
+
+    3. Resolve the compose contradiction, per section 3.4, before Phase 1. It is
+       a change to B1 and to 7.3/7.4's ordering, and it makes the design simpler
+       rather than more complex.
+
+    4. Correct B7's "existing private authenticated loopback surface" to match
+       section 12, and budget the transport as Phase 1 work. Make the secret
+       comparison mandatory when the route can start a generation.
+
+    5. Apply corrections R1 through R10. R1, R2, R5 and R9 change what an
+       implementer builds; the rest change text.
+
+    6. Record in the repository, alongside the Phase 0.5 prototype outcomes: the
+       dependency revisions read for this review, the verifications in section 5,
+       and the green test-suite result with the run.py defect from section 9.
+       Add a requirements or CI file naming the four test dependencies, so the
+       next reader does not rediscover 14.8.
+
+    7. Fix tests/run.py's skip logic first. It costs two lines and it is
+       currently hiding eleven of nineteen suites from anyone without gradio
+       installed.
+
+No other changes to the specification are recommended. The document is unusually
+good: it was right about the hazard, right to make exclusion a release gate,
+right to delete the cross-repository work, right to disqualify the WebUI-backed
+session, and right to distrust its own inferences. It chose the wrong adapter,
+and that choice is the only thing standing between it and the requirement on its
+first page.
+
+================================================================================
+END OF REVIEW RESPONSE
+================================================================================

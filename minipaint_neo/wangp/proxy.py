@@ -664,10 +664,17 @@ async def forward(request: typing.Any) -> typing.Any:
     # is here.
     decoded = raw_path.decode("latin-1", "ignore")
     if decoded.startswith(DEEPY_PREFIX):
+        # With the path. Which path 404s is the whole question - the child
+        # mounts its Deepy app at /deepy, so a 404 there means either the
+        # mount is not where it says or the request is not arriving as the
+        # child expects, and those are different problems with the same
+        # status code. The path is the child's own route namespace; it
+        # carries nothing of the user's.
         _log_once(
             f"deepy-{response.status_code}",
-            f"{DEEPY_PREFIX} is being served; the first request answered {response.status_code}"
-            + ("." if response.status_code < 400 else " - the Deepy panel will show its own banner until this is 200."),
+            f"{decoded} answered {response.status_code}"
+            + ("." if response.status_code < 400 else
+               " - the Deepy panel shows its own banner until this is 200; the child mounts it at /deepy."),
         )
 
     proxied = StreamingResponse(

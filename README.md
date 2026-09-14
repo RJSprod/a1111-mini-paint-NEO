@@ -442,11 +442,23 @@ same server-owned queue as the tab's presses, ids are never paths, and the answe
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
 API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 rewrite (the page's model
 travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
-and its place in WanGP. Bridge plugin 1.4.0 (protocol 5) carries the queue, start and track
-operations and refuses a request composed for a model the page has since left
-(`MODEL_CHANGED`), so WanGP's bridge must be updated and WanGP restarted; a build lacking one
-of the six queue components keeps the image send and refuses the queue with
-`BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking the generate trigger queues but never starts.
+and its place in WanGP. Bridge plugin 1.5.0 carries the queue, start and track operations
+(protocol 5) and the control plane server-owned execution runs on (protocol 6), and refuses
+a request composed for a model the page has since left (`MODEL_CHANGED`), so WanGP's bridge
+must be updated and WanGP restarted; a build lacking one of the six queue components keeps
+the image send and refuses the queue with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking
+the generate trigger queues but never starts.
+
+**Press it and walk away.** With *WanGP queue: run queued jobs on the server* on — which is
+the default — Forge runs the job itself. It starts WanGP if it is cold, waits if you are
+generating in the WanGP tab (and says so, and never interrupts you), writes the enhanced
+prompt if you asked for one, submits into WanGP's own queue and follows the generation to a
+file. The browser may be hidden, frozen, closed or on a phone that has gone to sleep; come
+back on any device and one sync shows you where it got to. Three things worth knowing: the
+job **is** in the WanGP tab's queue and can be cancelled there; it may wait for the card
+because of your own work; and on Windows a Forge crash loses a generation that was in flight,
+which is reported as "could not be proved" rather than retried. `docs/wangp/SERVER_EXECUTION.md`
+is the whole of it, including what is still an inference waiting for a real install.
 
 ## Legacy editor (Old UI)
 
@@ -575,12 +587,17 @@ minipaint_neo/
     canvas/imaging.py            mask, crop and fill maths (Pillow only)
     canvas/outpaint.py           expansion with automatic mask
     canvas/document.py           layers on a canvas (the picture over a white Background), the composite, the mask, and the history of structural steps
+    canvas/display.py            display copies as bytes behind an opaque id, and the lifetime rules that keep the live one
+    canvas/routes.py             /minipaint-canvas/display/<id>: those bytes, signed in, immutable, no path anywhere in the URL
+    assets.py                    the browser bundles, fetched per tab from /minipaint-assets/js/ rather than parsed into every page
     interop.py                   the public queue API's server half: staging, preparing handoffs, the outbox routes, /minipaint-interop/*
     clipboard/                   the Clipboard tab (see docs/clipboard/README.md)
         config.py                the folder, the intercept, the sort and the thumbnail size
         store.py                 the library: one folder, opaque ids, containment, import, refresh, rename, delete
         history.py               the composer's draft and Queue Send History
-        outbox.py                the queue outbox: every press a job the server owns, one lease at a time, in press order; enhancing, then pending
+        outbox.py                the queue outbox: every press a job the server owns, in press order; what each job is waiting for, said out loud
+        executor.py              the coordinator that advances those jobs with nobody watching: cold WanGP, the enhancer, the card, the generation
+        job_inputs.py            the pictures a queued job owns, pinned until it is done and no sweeper's to take
         enhance.py               enhanced prompts: ModelSwitchRefiner's MiniMax H3 writer (mc_llm_api), the switch, the four system prompts and their overrides
         routes.py                a picture by its id, and bytes in
         ui.py                    the tab: the browser, the composer, the enhancement panel, Add to Queue through the public API
@@ -593,20 +610,24 @@ minipaint_neo/
         proxy.py                 /wan2gp/* on the Forge origin, streamed to that one port
         handoff.py               PNGs on their way out, as opaque ids under a fixed root
         bridge.py                which browser page is talking to which live WanGP session
-        protocol.py              the vocabulary all three sides share (protocol 5: the queue, starting, tracking, the model a request insists on)
+        protocol.py              the vocabulary all three sides share (protocol 5: the queue, starting, tracking, the model a request insists on;
+                                 protocol 6: the control plane between Forge and the child, which no browser is part of)
+        control.py               Forge's half of that control plane: compose, submit, status, cancel, over authenticated loopback
         errors.py                the failure codes and their sentences
         journal.py               the tab's console: the last 400 steps, in memory
         process_log.py           logs/wangp-log.txt: the same steps, on disk, bounded
         ui.py / settings.py / diagnostics.py    the tab, the one Settings entry, the report
-javascript/main.js               legacy bridge, parent-frame side (unchanged)
-javascript/minipaint_canvas.js   attaches the canvas; crop frame, touch gestures, tools, the rail's height, the layer list, waits, focus mode
-javascript/minipaint_wangp.js    the WanGP iframe: handshake, receiver query, verified send, queue, confirm and track
-javascript/minipaint_interop.js  window.minipaintInterop: the public queue API (v1, minipaint.wangp.queue/v1): enqueue, the pump, cancelAll, tracking
-javascript/minipaint_clipboard.js  the Clipboard tab's browser side: the grid, the menu, paste and drop, Add to Queue, the page's model
+javascript/main.js               legacy bridge, parent-frame side, and the loader for everything below
+browser/minipaint_canvas.js      attaches the canvas; crop frame, touch gestures, tools, the rail's height, the layer list, the held mask, focus mode
+browser/minipaint_wangp.js       the WanGP iframe: handshake, receiver query, verified send, queue, confirm and track
+browser/minipaint_interop.js     window.minipaintInterop: the public queue API (v1, minipaint.wangp.queue/v1): enqueue, the event stream, sync, cancelAll
+browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid, the menu, paste and drop, Add to Queue, the page's model
+                                 (browser/ is not auto-loaded: each tab fetches its own bundle from /minipaint-assets/js/, cached by content)
 wan2gp_bridge/                   the companion plugin, installed into your WanGP
 style.css                        legacy rules, rules scoped to the Canvas root, then to the Clipboard root (theme variables only)
 miniPaint/                       the legacy editor itself
-docs/wangp/                      the WanGP operator's guide, the Phase 0 checklist, the module contracts
+docs/wangp/                      the WanGP operator's guide, the Phase 0 checklist, the module contracts,
+                                 and SERVER_EXECUTION.md: press Add to Queue and walk away, what it rests on, what is still inferred
 docs/clipboard/                  the Clipboard tab and the public queue API: the guide and the contracts
 tests/                           see tests/README.md
 ```

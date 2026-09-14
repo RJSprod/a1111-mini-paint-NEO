@@ -21,6 +21,9 @@ setup_path()
 
 SUITES = [
     "test_imaging",
+    # The picture the canvas draws, as bytes behind an opaque id: the store,
+    # the fixed grammar, the route in front of it and the lifetime rules.
+    "test_canvas_display",
     "test_frontends",
     "test_workflow",
     # What every writer in the extension is allowed to put on a screen or in a
@@ -45,10 +48,20 @@ SUITES = [
     # Clipboard tab that is its first client.
     "test_wangp_queue",
     "test_wangp_start",
+    # Protocol 6: the control plane between Forge and the WanGP child, and
+    # the one worker both submission paths funnel through - which is where
+    # "at most one generation, whoever started it" is actually established.
+    "test_wangp_control",
     "test_interop",
+    # The browser half of walking away: a page that is told rather than
+    # asking, and that can be closed without the job noticing.
+    "test_interop_browser",
     "test_clipboard_store",
     "test_clipboard_outbox",
     "test_clipboard_enhance",
+    # The server executor: press, walk away, come back to a generated file.
+    # Ahead of the tab, because the tab is one of its screens.
+    "test_clipboard_executor",
     "test_clipboard_ui",
     "test_queue_e2e",
 ]
@@ -86,7 +99,23 @@ def main() -> int:
             print(f"{name}: FAILED TO IMPORT ({error})")
             ok = False
             continue
-        ok = module.run().report() and ok
+        try:
+            report = module.run()
+        except ImportError as error:
+            # A suite that imports an optional dependency *inside* a check
+            # rather than at the top of the file. The skip above cannot see
+            # one of those, and before this branch existed the exception
+            # escaped the whole loop: one suite reaching for Gradio at line
+            # 1606 aborted the run and silently took eleven later suites with
+            # it, which is worse than either skipping or failing, because the
+            # output still looked like a finished run.
+            if _is_optional(error):
+                print(f"{name}: skipped ({error})")
+                continue
+            print(f"{name}: FAILED ({error})")
+            ok = False
+            continue
+        ok = report.report() and ok
     return 0 if ok else 1
 
 

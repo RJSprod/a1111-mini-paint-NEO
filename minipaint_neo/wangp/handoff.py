@@ -442,16 +442,38 @@ def _sweepable_id(name: str) -> typing.Optional[str]:
     return None
 
 
+def _pinned() -> typing.Set[str]:
+    """Handoffs a queued job owns, as the durable pin registry says.
+
+    Imported here rather than at the top because this module is the lower
+    layer: the Clipboard package reads handoffs, not the other way round, and
+    a sweeper that could not run because the queue was not importable would
+    be a worse failure than one that swept a little too eagerly. A registry
+    that cannot be read returns nothing, and the age rule then applies - so
+    the import is wrapped and the failure is visible in the count.
+    """
+    try:
+        from ..clipboard import job_inputs
+
+        return job_inputs.pinned_ids(include_released=True)
+    except Exception:
+        return set()
+
+
 def sweep(max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS, now: typing.Optional[float] = None) -> int:
     """Remove stale handoff files under the root, and count them.
 
     Runs at startup, where "stale" means "written by a Forge that is no longer
-    running". Two things it will not do. It will not touch a handoff this
+    running". Three things it will not do. It will not touch a handoff this
     process still has a manifest for, however old the clock says it is - an
     in-flight send owns its file until it discards it, and a slow generation
-    is not an abandoned one. And it will not follow anything out of the root:
-    entries are examined without following links, non-files are skipped, and
-    unlinking a symlink removes the link and not whatever it pointed at.
+    is not an abandoned one. It will not touch one a queued job has pinned,
+    which is the half the manifest cannot cover: manifests live in memory,
+    and the case that matters is precisely a restart, where a job admitted
+    yesterday still owns the picture it was composed with. And it will not
+    follow anything out of the root: entries are examined without following
+    links, non-files are skipped, and unlinking a symlink removes the link
+    and not whatever it pointed at.
     """
     root = handoff_root()
     moment = time.time() if now is None else now
@@ -464,6 +486,7 @@ def sweep(max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS, now: typing.Optional[f
 
     with _lock:
         live = set(_manifests)
+    live |= _pinned()
 
     for entry in entries:
         handoff_id = _sweepable_id(entry.name)

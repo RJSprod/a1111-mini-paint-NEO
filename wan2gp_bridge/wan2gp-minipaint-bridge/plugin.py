@@ -53,13 +53,14 @@ import time
 import typing
 
 try:
-    from . import admission, bridge_js, bridge_ui, compatibility, handoff, page_head, protocol
+    from . import admission, bridge_js, bridge_ui, compatibility, control, handoff, page_head, protocol
     from . import receiver_adapters, receiver_state, scrub
 except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import admission  # type: ignore[no-redef]
     import bridge_js  # type: ignore[no-redef]
     import bridge_ui  # type: ignore[no-redef]
     import compatibility  # type: ignore[no-redef]
+    import control  # type: ignore[no-redef]
     import handoff  # type: ignore[no-redef]
     import page_head  # type: ignore[no-redef]
     import protocol  # type: ignore[no-redef]
@@ -79,7 +80,7 @@ THEME_FILE = "theme.css"
 #: The operations the hidden trigger understands. A request naming anything
 #: else is answered with a refusal rather than ignored, so that a parent stuck
 #: on an older protocol gets a code instead of a timeout.
-OPERATIONS = ("hello", "receivers", "receive", "queue", "confirm", "track")
+OPERATIONS = ("hello", "receivers", "receive", "queue", "confirm", "track", "flush")
 
 #: What the answer to a queue operation is keyed by in the request box: the
 #: queue payload sits under its own key so its ``request_id`` - the public
@@ -569,6 +570,71 @@ class MiniPaintBridge:
             writes = self._settle(record, protocol.QUEUE_EXPIRED, compatibility.ADMISSION_UNCONFIRMED, live, now)
         return record.answer(), writes
 
+    def flush(
+        self,
+        request: typing.Mapping[str, typing.Any],
+        live: typing.Mapping[str, typing.Any],
+    ) -> typing.Tuple[dict, typing.Any]:
+        """Ask WanGP to commit this page's live form, so a job can read it.
+
+        WHY THIS IS A WRITE AND NOT A READ.
+
+        The obvious shape is "hand me the settings": add the whole form to
+        this event's inputs and return the values. It works, and it is the
+        wrong trade. The form is about ninety components whose order is the
+        order of ``save_inputs``' signature, this bridge would then own a copy
+        of that contract, and a single insertion upstream would have it
+        reading the reference list as the prompt type with nothing looking
+        wrong - the same hazard ``state_components`` already warns about at
+        eighteen.
+
+        So nothing is read. ``save_form_trigger`` is written instead, and
+        WanGP's own chain does the work: ``validate_wizard_prompt``, then
+        ``save_inputs(target="state")`` over WanGP's own full input list,
+        ending in ``service.record_model_form(...)``. One component of
+        coupling instead of ninety, and the values land exactly where a
+        server-side compose already looks.
+
+        Two things this must not do:
+
+        *   **Consume somebody else's suppression.** ``ignore_save_form`` is a
+            one-shot flag a settings load sets so the model switch behind it
+            cannot clobber what was just loaded. ``save_inputs`` pops it. A
+            flush that popped it first would let that clobber happen and look
+            like the user's own press did it, so a page carrying the flag is
+            refused rather than flushed.
+
+        *   **Claim it worked.** The chain runs after this event returns, so
+            this call cannot see its own result. What it returns is the
+            fingerprint of the recorded form *before* the write; the caller
+            asks again until it moves, and gives up on a bounded wait. A flush
+            that never lands is not an error - it is the recorded form, which
+            is what composing used before any of this existed.
+        """
+        service = self.compat.service()
+        trigger = self.compat.resolution.component(compatibility.SAVE_FORM_TRIGGER)
+        model_type = self.compat.current_model_type(service)
+        before = self.compat.recorded_fingerprint(service, model_type)
+        answer = {"flush": protocol.FLUSH_UNAVAILABLE, "fingerprint": before, "model_type": model_type}
+
+        if bool(request.get("probe")):
+            # The poll, not the press: say where the record is and write
+            # nothing. A probe that wrote would restart the wait it is meant
+            # to end.
+            answer["flush"] = protocol.FLUSH_REQUESTED if before else protocol.FLUSH_UNAVAILABLE
+            return answer, None
+
+        if service is None or trigger is None or not model_type:
+            return answer, None
+
+        state = live.get(compatibility.SESSION_STATE)
+        if isinstance(state, dict) and state.get("ignore_save_form"):
+            answer["flush"] = protocol.FLUSH_SUPPRESSED
+            return answer, None
+
+        answer["flush"] = protocol.FLUSH_REQUESTED
+        return answer, {compatibility.SAVE_FORM_TRIGGER: self._unique_id()}
+
     def track(
         self,
         raw: typing.Any,
@@ -690,6 +756,10 @@ class MiniPaintBridge:
                 answer, result = self.track(request.get(QUEUE_KEY), session, self.live_values(values))
                 ack.update(answer)
                 ack["ok"] = True
+            elif operation == "flush":
+                answer, result = self.flush(request, self.live_values(values))
+                ack.update(answer)
+                ack["ok"] = True
             else:
                 answer, result = self.confirm(request.get(QUEUE_KEY), session, self.live_values(values))
                 ack.update(answer)
@@ -788,6 +858,11 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         #: Whether the browser half has been handed to WanGP. Once only: the
         #: UI is built more than once on some pages.
         self.injected = False
+        #: Protocol 6: the way in that is not a browser. Built here and
+        #: started in post_ui_setup, once the globals it needs have been
+        #: injected and the resolution is known; silent on a WanGP that
+        #: somebody started by hand, or that an older Forge launched.
+        self.control = control.ControlSurface(self.bridge.compat, environ=self.bridge.environ, note=_note)
 
     # -- hooks ----------------------------------------------------------------
 
@@ -866,7 +941,37 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
                 print(scrub.block(traceback.format_exc()))
             except Exception:
                 pass
+
+        # The control surface last, and separately: it is how Forge runs jobs
+        # with no browser, and it must not be taken down by a failure to
+        # place the browser-facing controls - nor take them down with it.
+        # The order matters the other way too: it is started here rather than
+        # in setup_ui because the globals it reads are injected before
+        # setup_ui and the resolution it reports is known only now.
+        try:
+            self._start_control()
+        except Exception as error:
+            _note(f"the control surface could not be started ({type(error).__name__}: {error}); unattended jobs stay off")
         return result
+
+    def _start_control(self) -> None:
+        """Open the loopback control surface, or say why it stays shut.
+
+        Two notes rather than one silence: a WanGP started by hand should not
+        be told it is missing anything, and a WanGP the integration launched
+        that cannot open the surface is a Forge whose queue will sit still,
+        which is worth a line in the child's own log where somebody
+        diagnosing it will look.
+        """
+        if not compatibility.server_execution_available(self.bridge.environ):
+            if compatibility.managed(self.bridge.environ):
+                _note("unattended execution is off for this run: this WanGP was launched without a control port")
+            return
+        if self.control.start():
+            can, why = (self.control.executor.available() if self.control.executor is not None else (False, ""))
+            if not can:
+                _note(f"the control surface is listening but cannot execute yet ({why or 'unknown'})")
+        return
 
     def _place(self, handed: typing.Mapping[str, typing.Any]) -> None:
         """Ask WanGP to put the controls on the page, wired. See ``post_ui_setup``.

@@ -95,6 +95,19 @@ def canvas_image_class():
                         return imaging.from_data_url(payload)
                     except Exception:
                         return None
+                # A display object's URL, if the page was given one. Resolved
+                # through the store's own id grammar and never as a path -
+                # this is a value arriving from a browser, and the fact that
+                # this extension is what put it there a moment ago is not a
+                # reason to treat the string as trusted.
+                #
+                # Not gated behind the setting, deliberately: a page loaded
+                # while URLs were on can still send one after they are turned
+                # off, and a read-back that could not understand it would
+                # lose the picture rather than the optimisation.
+                resolved = _display_object(payload)
+                if resolved is not None:
+                    return resolved
                 return super().preprocess(payload)
 
             def get_block_name(self):
@@ -102,6 +115,27 @@ def canvas_image_class():
 
         _image_class = CanvasImage
     return _image_class
+
+
+def _display_object(payload: typing.Any) -> typing.Any:
+    """The picture behind one of our display URLs, or None for anything else.
+
+    "Anything else" includes a URL shaped like ours that does not resolve:
+    the store answers with its own refusals and none of them is a reason to
+    go looking somewhere else.
+    """
+    if not isinstance(payload, str) or not payload:
+        return None
+    from . import display
+
+    found = display.id_in_url(payload)
+    if not found:
+        return None
+    try:
+        path, _content_type = display.resolve(found)
+        return imaging.open_file(str(path))
+    except Exception:
+        return None
 
 
 def host_mask_style() -> typing.Dict[str, typing.Any]:
@@ -176,8 +210,29 @@ class Surface:
         from gradio.context import Context
 
         # The same kind of load event the host registers for each of its own
-        # canvases; ours calls the adapter, which keeps the instance.
+        # canvases; ours fetches the adapter and then calls it.
+        #
+        # WHY THIS ONE IS ON PAGE LOAD RATHER THAN ON TAB ACTIVATION.
+        #
+        # The Canvas adapter is reached from outside its own tab: "Send to
+        # Mini Paint" on the txt2img output row runs ``pickGalleryImage`` in
+        # the browser, before the Canvas tab has ever been selected, and the
+        # same chain ends by switching to it. So the bundle has to be there
+        # for a user who has not opened the tab. Making it genuinely lazy
+        # means teaching those entry points to await it first, which is a
+        # change to the receive chain and wants a browser to prove - see
+        # ``assets.py``. What is already won is that it is fetched once,
+        # cached immutably, and parsed after the app has mounted rather than
+        # during hydration with everything else.
+        from .. import assets
+
+        bundles = assets.loader_js(["canvas", "wangp"])
         Context.root_block.load(
             None,
-            js=f"() => {attach_js}({json.dumps(self.uuid)}, {json.dumps(self.options)})",
+            js=(
+                "async () => { "
+                f"await ({bundles})(); "
+                f"if (window.minipaintCanvas) {{ {attach_js}({json.dumps(self.uuid)}, {json.dumps(self.options)}); }} "
+                "}"
+            ),
         )

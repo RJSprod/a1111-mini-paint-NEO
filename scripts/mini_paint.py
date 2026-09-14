@@ -20,11 +20,26 @@ if str(_root) not in sys.path:
 
 from modules import script_callbacks  # noqa: E402
 
-from minipaint_neo import router, send_log, settings  # noqa: E402
+from minipaint_neo import assets, router, send_log, settings  # noqa: E402
 
 script_callbacks.on_ui_settings(settings.on_ui_settings)
 script_callbacks.on_ui_tabs(router.on_ui_tabs)
 script_callbacks.on_app_started(send_log.on_app_started)
+# The route the tabs fetch their browser halves from. Registered first
+# because everything else's page-load hook asks for one.
+script_callbacks.on_app_started(lambda _demo, app: assets.install(app))
+
+# The Canvas's own route: a display copy by its opaque id. Contained like
+# every other registration - the canvas keeps sending embedded copies if it
+# cannot be added, which is what it did before the route existed.
+try:
+    from minipaint_neo.canvas import routes as _canvas_routes  # noqa: E402
+
+    script_callbacks.on_app_started(lambda _demo, app: _canvas_routes.install(app))
+except Exception as _canvas_routes_error:  # pragma: no cover - depends on the host
+    from minipaint_neo import scrub  # noqa: E402
+
+    scrub.console(f"the canvas display route did not load ({_canvas_routes_error}); display copies stay embedded.")
 
 # The WanGP tab is a second, independent integration: its own tab, its own
 # settings entry, its own routes, registered alongside the ones above rather

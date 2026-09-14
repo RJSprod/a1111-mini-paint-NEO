@@ -1,0 +1,20 @@
+# What `python tests/run.py` needs, and nothing else.
+#
+# There is no torch here and there never should be: every suite in this
+# folder runs against stubs, fakes and real Gradio, and the whole install
+# takes under two minutes. A newcomer who did not know the set discovered it
+# by watching suites skip themselves, which is how eleven of nineteen suites
+# once hid behind one missing package.
+#
+# Gradio is pinned to the version the target Forge ships. Its event graph
+# behaves differently across major versions and a page that assembles
+# cleanly on one can have a button that does nothing on another, so a change
+# verified against whatever happened to be installed is verified against the
+# wrong thing. See tests/README.md for checking a second version in a venv.
+gradio==4.40.0
+gradio-client==1.2.0
+# 4.40 imports a name later releases removed.
+huggingface_hub==0.24.6
+pillow
+httpx
+fastapi

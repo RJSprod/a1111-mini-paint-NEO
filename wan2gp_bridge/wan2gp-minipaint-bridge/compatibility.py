@@ -27,7 +27,10 @@ are willing to put their picture into.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
+import hashlib
+import json
 import os
 import typing
 
@@ -37,7 +40,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.4.0"
+BRIDGE_VERSION = "1.5.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -147,6 +150,15 @@ ADD_TO_QUEUE_TRIGGER = "add_to_queue_trigger"
 #: Protocol 4: the hidden text whose change runs WanGP's generate chain.
 GENERATE_TRIGGER = "generate_trigger"
 GALLERY_TAB = "gallery_tab"
+#: Protocol 6: the hidden text whose change makes WanGP commit its own live
+#: form. Wan2GP wires it in ``generate_media_tab`` as
+#: ``set_save_form_event(save_form_trigger.change)``, which runs
+#: ``validate_wizard_prompt`` and then ``save_inputs(target="state")`` over the
+#: *whole* form - and ``save_inputs`` ends in
+#: ``service.record_model_form(model_type, cleaned_inputs)``, the process-wide
+#: snapshot a server-side compose reads. Writing it is therefore how a page
+#: hands its live settings to a job that will run with no page at all.
+SAVE_FORM_TRIGGER = "save_form_trigger"
 
 # VERIFY ON A REAL INSTALL (section 49.1): every elem_id below was taken from
 # WanGP's documented media-input naming and from the receiver example in
@@ -287,6 +299,13 @@ COMPONENTS: typing.Tuple[ComponentSpec, ...] = (
                   known_for="Wan2GP: hidden gr.Text declared beside add_to_queue_trigger; its change generates"),
     ComponentSpec(key=GALLERY_TAB, candidates=("current_gallery_tab",), kind="state", mandatory=False,
                   known_for="Wan2GP: which output gallery is showing; read by process_prompt_and_add_tasks"),
+    # It carries no elem_id, and does not need one: a plugin is handed the
+    # generator tab's whole local scope by variable name
+    # (``app.run_component_insertion(locals_dict)``), and this is written as a
+    # Gradio event *output* rather than through the DOM - the same way WanGP's
+    # own post-processing buttons write ``generate_trigger`` to start a run.
+    ComponentSpec(key=SAVE_FORM_TRIGGER, candidates=("save_form_trigger",), kind="text", mandatory=False,
+                  known_for="Wan2GP: hidden gr.Text; its change commits the live form process-wide"),
 )
 
 COMPONENTS_BY_KEY = {spec.key: spec for spec in COMPONENTS}
@@ -311,7 +330,65 @@ GLOBALS: typing.Tuple[str, ...] = (
     # Protocol 5: the base model a finetune stands on, for the model block -
     # an H3 finetune is still an H3 model to a prompt written for one.
     "get_base_model_type",
+    # Protocol 6, compose: the settings a submission runs at. The first two
+    # are the session path and are an optimisation only - a server-side
+    # compose has no session - and the last two are the browser-independent
+    # ones: the factory floor, and the shape validate_task merges onto it.
+    "get_current_model_settings", "collect_current_model_settings",
+    "get_default_settings", "get_factory_settings", "get_model_settings",
+    # Protocol 6, residency: what decides whether a submission reloads the
+    # video model. Read for diagnostics, never written. B7B rule 5's key is
+    # (model_type, profile, config, VAE upsampling), and the profile is
+    # derived per output type rather than per model.
+    "get_profile_type_for_model", "get_model_name",
+    # Protocol 6, execution: the one process-wide generation arbiter. Asked
+    # for here in case a build re-exports it from wgp's namespace; when it
+    # does not, ``service_access`` imports it from shared.deepy.hybrid, which
+    # is the only module import this whole plugin makes into Wan2GP and is
+    # confined to this file on purpose.
+    "service_for",
 )
+
+#: The exact Wan2GP revision the protocol-6 control plane was proven against.
+#: Pinned here, beside the element ids, under the same rule: when a Wan2GP
+#: release moves the service, the queue dict or the compose seams, this is
+#: the one file to correct.
+#:
+#: The API surface has no published stability guarantee, and this design uses
+#: it in a combination Wan2GP's own plugin documentation does not describe -
+#: submitting into the WebUI's own queue and worker from a plugin, with no
+#: browser. That is deliberate: the documented alternative injects a
+#: WebUI-backed session that refuses without a live Gradio request, and the
+#: headless session that would work runs *beside* the arbiter rather than
+#: inside it. See docs/wangp/SERVER_EXECUTION.md.
+WAN2GP_EXECUTION_REVISION = "cd832e9d676907f0c055f3fafba472f2f61a4c91"
+WAN2GP_EXECUTION_REVISION_DATE = "2026-09-13"
+
+#: Where the arbiter lives, in the order the bridge looks for it. A module
+#: import rather than a requested global is a departure from this file's own
+#: rule, so it is written down rather than buried: Wan2GP hands plugins the
+#: wgp namespace, and the service is not in it on the proven revision.
+SERVICE_MODULE = "shared.deepy.hybrid"
+SERVICE_FACTORY = "service_for"
+#: Names a build might keep the one service under, when the factory needs a
+#: state this caller does not have. Tried in order, and each is only accepted
+#: when it looks like a service - has a ``start_generation`` and a state.
+SERVICE_SINGLETONS: typing.Tuple[str, ...] = ("_service", "service", "SERVICE", "_hybrid_service", "current_service")
+
+#: The key an inline submission is left under for ``load_queue_action`` to
+#: pick up, and the command that makes the service look. Both are Wan2GP's
+#: own - it is exactly what Deepy does - so this is a use of the primitive,
+#: not a re-implementation of the chain around it.
+INLINE_QUEUE_KEY = "inline_queue"
+LOAD_QUEUE_COMMAND = "load_queue_trigger"
+#: The shared generation record, and the three fields of it that may be read
+#: without going stale. ``main_process_running`` and ``process_status`` are
+#: deliberately absent: the first is set one line before a call that can
+#: raise and is cleared two branches later, so an exception leaks it True for
+#: the life of the process, and gating on it would turn an upstream slip into
+#: a permanent unrecoverable wait.
+GEN_QUEUE_KEY = "queue"
+GEN_IN_PROGRESS_KEY = "in_progress"
 
 #: What the queue operation cannot do without. The image send keeps working
 #: on a build that lacks any of these; a queue request is refused with
@@ -395,6 +472,33 @@ RECEIVER_COMPONENTS: typing.Mapping[str, str] = {
 #: is incompatible; anything else is merely unavailable.
 V1_RECEIVERS: typing.Tuple[str, ...] = (protocol.START_FRAME, protocol.END_FRAME, protocol.REFERENCE)
 
+#: Which protocol-6 media slot fills which logical receiver. The slot names
+#: are the control plane's; the receiver ids are this file's; the settings
+#: key each one lands in is whatever ``settings_key`` resolves.
+_SLOT_FOR_RECEIVER: typing.Mapping[str, str] = {
+    protocol.START_FRAME: protocol.EXEC_SLOT_START,
+    protocol.END_FRAME: protocol.EXEC_SLOT_END,
+    protocol.REFERENCE: protocol.EXEC_SLOT_REFERENCES,
+}
+
+#: The only switch updates that belong in a settings dict: the two letter
+#: strings generation itself reads. Everything else a switch touches is a
+#: control on a page.
+SETTINGS_FLAG_COMPONENTS: typing.Tuple[str, ...] = (IMAGE_PROMPT_TYPE, VIDEO_PROMPT_TYPE)
+
+#: Which flag string each receiver lives in, and the letters that mean "this
+#: slot is in use". Struck out for a slot a submission does not fill, so a
+#: composed base cannot describe pictures this job does not have.
+#:
+#: VERIFY ON A REAL INSTALL: the letters, like every other WanGP identifier
+#: in this file. K/F/I are the reference choices a model publishes; a model
+#: that names its own filter widens this, and these are the fallback.
+_FLAG_LETTERS: typing.Mapping[str, typing.Tuple[str, str]] = {
+    protocol.START_FRAME: (IMAGE_PROMPT_TYPE, "S"),
+    protocol.END_FRAME: (IMAGE_PROMPT_TYPE, "E"),
+    protocol.REFERENCE: (VIDEO_PROMPT_TYPE, "KFI"),
+}
+
 #: A ceiling used only when WanGP does not state one. Section 16.5 forbids
 #: MiniPaint from knowing a model's reference limit; it does not forbid the
 #: bridge from refusing to append forever into a list nobody bounded.
@@ -415,6 +519,12 @@ CAPACITY_PATHS: typing.Mapping[str, typing.Tuple[typing.Tuple[str, ...], ...]] =
 ENV_INSTANCE_ID = "MINIPAINT_WANGP_INSTANCE_ID"
 ENV_HANDOFF_ROOT = "MINIPAINT_WANGP_HANDOFF_ROOT"
 ENV_BRIDGE_SECRET = "MINIPAINT_WANGP_BRIDGE_SECRET"
+#: Protocol 6: the loopback port Forge kept for the control surface before it
+#: launched this child, and the directory both processes use for the durable
+#: execution ledger. Absent means server-owned execution is off for this run -
+#: an older Forge, or a WanGP somebody started by hand.
+ENV_CONTROL_PORT = "MINIPAINT_WANGP_CONTROL_PORT"
+ENV_LEDGER_ROOT = "MINIPAINT_WANGP_LEDGER_ROOT"
 
 
 def instance_id(environ: typing.Optional[typing.Mapping[str, str]] = None) -> str:
@@ -432,6 +542,50 @@ def managed(environ: typing.Optional[typing.Mapping[str, str]] = None) -> bool:
     """Whether this process was started by the Mini Paint integration."""
     source = os.environ if environ is None else environ
     return bool(instance_id(source)) and bool(str(source.get(ENV_HANDOFF_ROOT) or "").strip())
+
+
+def bridge_secret(environ: typing.Optional[typing.Mapping[str, str]] = None) -> str:
+    """The per-launch credential the control surface compares.
+
+    Read here and compared in ``control.py``; it appears in no answer, no log
+    line and no diagnostics report. An empty value means Forge did not mint
+    one for this run, and the control surface then refuses to open at all
+    rather than listening without a check.
+    """
+    source = os.environ if environ is None else environ
+    return str(source.get(ENV_BRIDGE_SECRET) or "").strip()
+
+
+def control_port(environ: typing.Optional[typing.Mapping[str, str]] = None) -> int:
+    """The loopback port Forge kept for the control surface, or 0.
+
+    Forge chooses it before the launch and exports it, the same way it
+    chooses the Gradio port: the child never picks a number and never tells
+    anybody one, so there is no discovery step to get wrong and no file for a
+    stale port to sit in.
+    """
+    source = os.environ if environ is None else environ
+    try:
+        port = int(str(source.get(ENV_CONTROL_PORT) or "0").strip())
+    except ValueError:
+        return 0
+    return port if 0 < port < 65536 else 0
+
+
+def ledger_root(environ: typing.Optional[typing.Mapping[str, str]] = None) -> str:
+    """Where the durable execution ledger lives, or "".
+
+    Forge's own runtime directory, handed over rather than derived: the child
+    has no idea where Forge keeps its data and must not go looking.
+    """
+    source = os.environ if environ is None else environ
+    return str(source.get(ENV_LEDGER_ROOT) or "").strip()
+
+
+def server_execution_available(environ: typing.Optional[typing.Mapping[str, str]] = None) -> bool:
+    """Whether this run was launched with everything the control plane needs."""
+    source = os.environ if environ is None else environ
+    return bool(managed(source)) and bool(bridge_secret(source)) and control_port(source) > 0 and bool(ledger_root(source))
 
 
 # --------------------------------------------------------------- versions --
@@ -864,13 +1018,20 @@ class Compatibility:
         return [(key, self.resolution.component(key)) for key in keys if self.resolution.component(key) is not None]
 
     def queue_components(self) -> typing.List[typing.Tuple[str, typing.Any]]:
-        """The components only a queue request writes, as (key, component).
+        """The components a receiver never writes but an operation does.
 
         The tail of the bridge event's outputs, after the receivers and the
         switch components, in this fixed order. Only the ones this build
         resolved, for the reason ``switch_components`` gives.
+
+        ``SAVE_FORM_TRIGGER`` is last and is not a queue component: a flush
+        writes it and nothing else does. It lives here because this is the
+        block of the event's outputs that exists to be written by name, and
+        giving it a fourth block of its own would buy nothing but another
+        ordering to keep in step.
         """
-        keys = (PROMPT, WIZARD_PROMPT, CLIENT_ID, ADD_TO_QUEUE_TRIGGER, GENERATE_TRIGGER)
+        keys = (PROMPT, WIZARD_PROMPT, CLIENT_ID, ADD_TO_QUEUE_TRIGGER, GENERATE_TRIGGER,
+                SAVE_FORM_TRIGGER)
         return [(key, self.resolution.component(key)) for key in keys if self.resolution.component(key) is not None]
 
     def queue_missing(self) -> typing.List[str]:
@@ -881,6 +1042,144 @@ class Compatibility:
         """What the generate route needs and this build did not hand over."""
         return [key for key in START_CRITICAL if self.resolution.component(key) is None]
 
+    # -- protocol 6: the one arbiter -----------------------------------------
+
+    def service(self, state: typing.Any = None) -> typing.Any:
+        """Wan2GP's one process-wide generation service, or None.
+
+        THIS IS THE WHOLE OF THE EXCLUSION, AND IT IS NOT A MECHANISM.
+
+        Wan2GP has two generation paths and they exclude each other in one
+        direction only: a headless submission takes a module lock the WebUI
+        never takes, and the WebUI's Generate button consults nothing a
+        plugin can own. An adapter that runs beside that - one constructed
+        with its own ``gen`` dict - is outside every per-state guard in the
+        application, not merely outside the queue: the guard on Force Unload
+        Models from RAM reads the browser's dict, sees no generation, and
+        frees the model out from under an unattended run mid-inference.
+
+        So the bridge does not build an exclusion. It submits into the one
+        queue the one worker drains, which is what the WebUI itself does,
+        which means both arrival orders are covered by the gate that is
+        already there: ``start_generation`` holds a mutation lock and returns
+        the existing worker rather than starting a second one. There is no
+        new lock to get right, no flag to write, and nothing to release on
+        cancel - and an unattended job becomes visible to WanGP's own queue,
+        progress display and guards for free.
+
+        Reached by module import rather than through ``request_global``,
+        which is the one place this plugin departs from its own rule. The
+        proven revision is pinned above; a build that has moved it answers
+        None here and the control surface then reports SERVICE_UNAVAILABLE
+        and refuses server execution, which is the correct failure. It is
+        never a reason to fall back to a path that runs beside the arbiter.
+        """
+        factory = self.host.read_global(SERVICE_FACTORY)
+        found = self._call_factory(factory, state)
+        if found is not None:
+            return found
+        try:
+            import importlib
+
+            module = importlib.import_module(SERVICE_MODULE)
+        except Exception:
+            return None
+        found = self._call_factory(getattr(module, SERVICE_FACTORY, None), state)
+        if found is not None:
+            return found
+        # A server-side caller has no session state, so a factory that needs
+        # one cannot answer. The service is a process-wide singleton by the
+        # same design that shares the ``gen`` dict across every browser
+        # state, so the module is asked for it directly.
+        for name in SERVICE_SINGLETONS:
+            candidate = getattr(module, name, None)
+            if self.is_service(candidate):
+                return candidate
+        return None
+
+    def _call_factory(self, factory: typing.Any, state: typing.Any) -> typing.Any:
+        """``service_for`` with a state if we have one, without if we do not."""
+        if not callable(factory):
+            return None
+        for arguments in ((state,), ()) if state is not None else ((), (None,)):
+            try:
+                found = factory(*arguments)
+            except Exception:
+                continue
+            if self.is_service(found):
+                return found
+        return None
+
+    @staticmethod
+    def is_service(value: typing.Any) -> bool:
+        """Whether this is really the arbiter and not something named like it.
+
+        Two attributes rather than a type check, for the reason every other
+        shape check in this file gives: the class lives in somebody else's
+        package and may be renamed, but a thing that cannot start a
+        generation is not the thing the submission needs, whatever it is
+        called.
+        """
+        return value is not None and callable(getattr(value, "start_generation", None)) and callable(getattr(value, "command", None))
+
+    def shared_gen(self, service: typing.Any = None, state: typing.Any = None) -> typing.Any:
+        """The one generation record every page shares, or None.
+
+        Shared by reference rather than copied, which is why a submission
+        placed in it is a submission the running worker will drain and why a
+        guard keyed on it starts protecting unattended work the moment the
+        work lives there.
+        """
+        if state is not None:
+            found = self._gen_of_state(state)
+            if found is not None:
+                return found
+        if service is None:
+            service = self.service(state)
+        if service is None:
+            return None
+        for attribute in ("_state", "state", "shared_state"):
+            found = self._gen_of_state(getattr(service, attribute, None))
+            if found is not None:
+                return found
+        return None
+
+    def _gen_of_state(self, state: typing.Any) -> typing.Any:
+        if state is None:
+            return None
+        getter = self.host.read_global("get_gen_info")
+        if callable(getter):
+            try:
+                found = getter(state)
+                if isinstance(found, dict):
+                    return found
+            except Exception:
+                pass
+        try:
+            found = state["gen"]
+        except Exception:
+            return None
+        return found if isinstance(found, dict) else None
+
+    def service_generation_running(self, service: typing.Any) -> typing.Optional[bool]:
+        """Whether the one worker exists, from the thread handle rather than a flag.
+
+        ``generation_running`` on the service is ``self._queue_worker is not
+        None``: a live object, not a boolean somebody remembered to clear. It
+        is the one signal here that cannot go stale, which is why the bridge
+        reads it and never reads ``main_process_running`` or
+        ``process_status``.
+        """
+        if service is None:
+            return None
+        try:
+            found = getattr(service, "generation_running", None)
+            if callable(found):
+                found = found()
+            return None if found is None else bool(found)
+        except Exception:
+            return None
+
     def generation_running(self) -> typing.Optional[bool]:
         """WanGP's own process-wide flag, read live, or None when it cannot be.
 
@@ -889,6 +1188,13 @@ class Compatibility:
         same name would be the flag as it was at injection, which is not an
         answer, and None is what makes the start decision fall back to the
         queue route rather than guess.
+
+        READ, NEVER WRITTEN. The flag has four unconditional writers already
+        and no owner or nesting count, and the headless clear sits outside
+        the lock that guards the run, so it under-reports even for two runs
+        of the same kind. Nothing in this plugin assigns it; where the bridge
+        needs to know whether the card is busy it asks the service, whose
+        answer is a thread handle.
         """
         getter = self.host.read_global("is_generation_in_progress")
         if not callable(getter):
@@ -1155,6 +1461,236 @@ class Compatibility:
             return Switch(SWITCH_TOKENS[receiver_id], updates)
 
         return Switch()
+
+    # -- protocol 6: the settings dict ---------------------------------------
+
+    def settings_key(self, component_key: str) -> str:
+        """What this build's settings dict calls a component's value.
+
+        A WanGP settings dict is keyed by the parameter names its own form
+        components carry, so the elem_id that resolved *is* the key. The
+        first candidate is the fallback for a component this build did not
+        hand over, because a settings key can be right even when the widget
+        behind it was never given to the plugin.
+        """
+        found = self.resolution.elem_id(component_key)
+        if found:
+            return found
+        spec = COMPONENTS_BY_KEY.get(component_key)
+        return spec.candidates[0] if spec is not None and spec.candidates else ""
+
+    def settings_as_values(self, settings: typing.Mapping[str, typing.Any]) -> typing.Dict[str, typing.Any]:
+        """A settings dict read back as the component values it describes.
+
+        The selection rules, the switch computation and the model read are
+        all written against live component values, and a composed settings
+        dict carries the same facts under its own names. Translating once
+        here is what lets the flags be recomputed by exactly the code a
+        person clicking the control would have run.
+        """
+        values: typing.Dict[str, typing.Any] = {}
+        for key in COMPONENTS_BY_KEY:
+            name = self.settings_key(key)
+            if name and name in settings:
+                values[key] = settings[name]
+        return values
+
+    def apply_media_to_settings(
+        self,
+        settings: typing.Dict[str, typing.Any],
+        media: typing.Mapping[str, typing.Any],
+    ) -> typing.List[str]:
+        """Put the job's own media into a composed base, flags and all.
+
+        Returns the receiver ids that were switched on, for the record.
+
+        THE FLAGS ARE RECOMPUTED, NOT INHERITED. A composed base carries the
+        letter strings describing which slots the *user's page* had in use,
+        and this job's media are not those. Wan2GP's own back-fill only adds
+        flags implied by media that is present - it never removes a flag
+        whose media is gone - so a base that said "start and end frame" and a
+        job that supplies only a start frame would otherwise reach
+        ``generate_media`` claiming a last frame it does not have. So: every
+        slot this submission does not fill is cleared first, and each slot it
+        does fill is switched on through the same computation a click makes.
+        """
+        switched: typing.List[str] = []
+        for receiver_id in V1_RECEIVERS:
+            name = self.settings_key(RECEIVER_COMPONENTS[receiver_id])
+            if not name:
+                continue
+            slot = _SLOT_FOR_RECEIVER.get(receiver_id, "")
+            supplied = media.get(slot) if slot else None
+            if not supplied:
+                # Cleared rather than left: see the docstring. A slot with no
+                # media must not be described by a flag that says it has some.
+                settings[name] = [] if receiver_id == protocol.REFERENCE else None
+                continue
+            settings[name] = list(supplied) if receiver_id == protocol.REFERENCE else supplied[0]
+        # The flags for the slots this job does not fill, struck out. This is
+        # the half that is easy to leave out and that a base composed from
+        # somebody else's configuration makes necessary: WanGP's own
+        # back-fill only ADDS flags implied by media that is present, so a
+        # base whose letters said "start and end frame" would still say so
+        # after the end frame was cleared, and generation would go looking
+        # for a picture that is not there. The switch below then puts back
+        # exactly the letters this job's own media earns.
+        for receiver_id in V1_RECEIVERS:
+            slot = _SLOT_FOR_RECEIVER.get(receiver_id, "")
+            if slot and media.get(slot):
+                continue
+            flag_key, letters = _FLAG_LETTERS.get(receiver_id, ("", ""))
+            name = self.settings_key(flag_key) if flag_key else ""
+            if name and name in settings:
+                settings[name] = _del_letters(settings[name], letters)
+        # The flags, after every value is in place, so a switch computed for
+        # one slot sees the others as they will be.
+        for receiver_id in V1_RECEIVERS:
+            slot = _SLOT_FOR_RECEIVER.get(receiver_id, "")
+            if not slot or not media.get(slot):
+                continue
+            switch = self.switch_for(receiver_id, self.settings_as_values(settings))
+            for component_key, change in switch.updates.items():
+                # Only the letter strings. The radio, the checkbox and the
+                # dropdown are controls a person operates to produce them;
+                # a settings dict carries the result, not the widget, and a
+                # key WanGP's own schema does not have would be dropped by
+                # ``clean_settings`` anyway - or worse, kept.
+                if component_key not in SETTINGS_FLAG_COMPONENTS:
+                    continue
+                name = self.settings_key(component_key)
+                if name:
+                    settings[name] = change
+            if switch.token:
+                switched.append(receiver_id)
+        return switched
+
+    def residency_key(self, settings: typing.Mapping[str, typing.Any], model_type: str = "") -> str:
+        """B7B rule 5's key, as far as this build will say.
+
+        Not ``model_type`` alone. The reload branch fires on model_type,
+        profile, config or ``reload_needed``, and the profile is derived per
+        output type rather than per model - so switching one model between
+        image and video output changes it - while a change of spatial
+        upsampling can change the VAE-upsampling requirement and set
+        ``reload_needed`` on its own. A job that forces a reload records
+        which of these moved, which is the only way to catch a setting that
+        is quietly defeating residency.
+        """
+        chosen = str(model_type or settings.get(self.settings_key(MODEL_SELECTOR)) or settings.get("model_type") or "")
+        image_mode = settings.get(self.settings_key(IMAGE_MODE))
+        profile = ""
+        getter = self.host.read_global("get_profile_type_for_model")
+        if callable(getter) and chosen:
+            try:
+                profile = str(getter(chosen, image_mode))
+            except Exception:
+                profile = ""
+        upsampling = settings.get("spatial_upsampling")
+        return "|".join(
+            [
+                chosen,
+                profile,
+                str(image_mode if image_mode is not None else ""),
+                str(upsampling if upsampling is not None else ""),
+            ]
+        )[:200]
+
+    def factory_settings(self, model_type: str) -> typing.Optional[dict]:
+        """The model's own defaults, through whichever seam this build has.
+
+        The fallback of last resort and never the preferred base: a job that
+        silently runs at settings nobody chose is the failure compose exists
+        to prevent, so a base that came from here is recorded as such and
+        said out loud on the job.
+        """
+        for name in ("get_default_settings", "get_factory_settings"):
+            getter = self.host.read_global(name)
+            if not callable(getter):
+                continue
+            try:
+                found = getter(model_type)
+            except Exception:
+                continue
+            if isinstance(found, dict) and found:
+                return dict(found)
+        return None
+
+    def recorded_form(self, service: typing.Any, model_type: str) -> typing.Optional[dict]:
+        """The settings the user last committed for this model, process-wide.
+
+        THE BROWSER-INDEPENDENT BASE, AND THE REASON COMPOSE CAN RUN AT ALL.
+
+        The obvious seam - the session's own stored settings - cannot be used
+        by a server-side caller, and not merely because the answer would be
+        wrong. A fresh session's dict has no settings for the model, so the
+        getter returns None, and the preferred variant then assigns a key on
+        that None and raises. It also mutates what it reads: it takes the
+        session's stored dict by reference, sets a key on it and hands it to
+        a normaliser that pops keys and rewrites the LoRA list, so composing
+        would change what the user's own tab will generate next.
+
+        Wan2GP already keeps what is wanted instead: ``save_inputs`` records
+        a process-wide snapshot of the committed form per model beside the
+        session copy, shared across sessions for the same reason the ``gen``
+        dict is. It is not factory defaults - it is what the user last
+        committed - and reading it needs no session, mutates nothing, and
+        works when no page has ever been open.
+        """
+        if service is None or not model_type:
+            return None
+        for name in ("load_model_form", "get_model_form", "model_form"):
+            loader = getattr(service, name, None)
+            if not callable(loader):
+                continue
+            try:
+                found = loader(model_type)
+            except Exception:
+                continue
+            if isinstance(found, dict) and found:
+                return copy.deepcopy(found)
+        return None
+
+    def recorded_fingerprint(self, service: typing.Any, model_type: str) -> str:
+        """A short, stable digest of the recorded form, or "" if there is none.
+
+        THE ONLY WAY A FLUSH CAN BE OBSERVED RATHER THAN ASSUMED.
+
+        Writing ``save_form_trigger`` starts a Gradio chain that runs *after*
+        the event which wrote it has returned, so no single call can both ask
+        for the commit and see its result. Nothing in Wan2GP counts these
+        commits either - ``record_model_form`` just replaces a dict - so the
+        observable has to be built here, out of the recorded form itself.
+
+        Hashed rather than compared field by field because the caller only
+        ever asks one question ("has it changed since I asked you to flush"),
+        and because a digest cannot accidentally carry a prompt or a path back
+        to a browser the way a settings diff could.
+        """
+        recorded = self.recorded_form(service, model_type)
+        if not recorded:
+            return ""
+        try:
+            canonical = json.dumps(recorded, sort_keys=True, default=repr)
+        except Exception:
+            return ""
+        return hashlib.sha256(canonical.encode("utf-8", "replace")).hexdigest()[:32]
+
+    def current_model_type(self, service: typing.Any = None) -> str:
+        """The model this child is on, with no page to ask.
+
+        Read off the shared state where there is one, then off the injected
+        global. Empty is a real answer - a child nobody has chosen a model in
+        - and the caller composes for the model the job named instead.
+        """
+        gen = self.shared_gen(service)
+        if isinstance(gen, dict):
+            for key in ("model_type", "last_model_type"):
+                found = gen.get(key)
+                if isinstance(found, str) and found:
+                    return found
+        found = self.host.read_global("model_type")
+        return found if isinstance(found, str) else ""
 
     # -- the handshake -------------------------------------------------------
 

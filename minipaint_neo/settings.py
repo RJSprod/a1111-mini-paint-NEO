@@ -27,6 +27,19 @@ EXPAND_SNAP = "minipaint_expand_snap"
 # applied, so a saved gray kept overriding the transparency later rounds
 # meant to send. A value saved under the old key is simply not read.
 SEND_FILL = "minipaint_send_transparency"
+#: Whether Forge runs queued WanGP jobs itself. On is the feature: press Add
+#: to Queue and walk away, and the server starts a cold WanGP, waits for the
+#: card if the user is using it, submits and tracks the generation to a
+#: result. Off is what this extension used to do - the page that pressed the
+#: button runs the job, so closing it stops the queue - and it is kept as a
+#: way back, not as a default.
+UNATTENDED_QUEUE = "minipaint_unattended_queue"
+#: Whether the canvas is handed a same-origin URL for its display copy
+#: rather than a base64 data URL. Off until somebody has proved on a real
+#: install that Forge's own ForgeCanvas takes one: that is a question about
+#: somebody else's JavaScript and reading it is not an answer. Everything on
+#: this side is built and tested; this is the switch.
+DISPLAY_OBJECTS = "minipaint_display_objects"
 
 SNAP_CHOICES = ["Off", "8", "16", "32", "64"]
 KEEP_TRANSPARENT = "Keep transparent"
@@ -39,6 +52,8 @@ DEFAULTS: dict[str, typing.Any] = {
     BRUSH_SIZE: 25,
     EXPAND_SNAP: "8",
     SEND_FILL: KEEP_TRANSPARENT,
+    UNATTENDED_QUEUE: True,
+    DISPLAY_OBJECTS: False,
 }
 
 # The setting is the way to switch editors - but it lives in a UI, and the one
@@ -89,6 +104,28 @@ def brush_width() -> int:
     except (TypeError, ValueError):
         width = 25
     return max(1, min(100, width))
+
+
+def unattended_queue() -> bool:
+    """Whether the server advances queued jobs with no browser.
+
+    Read on every press rather than cached: turning it off should stop new
+    jobs being admitted to the server executor, and it should not need a
+    Reload UI to do it. Jobs already admitted keep their own executor - a
+    job halfway through a generation does not change hands because a
+    checkbox moved.
+    """
+    return bool(get(UNATTENDED_QUEUE, True))
+
+
+def display_objects() -> bool:
+    """Whether a display copy travels as a URL rather than as base64.
+
+    See DISPLAY_OBJECTS. The server side understands both whatever this
+    says, because a page loaded while it was on can still hand a URL back
+    after it is turned off.
+    """
+    return bool(get(DISPLAY_OBJECTS, False))
 
 
 def _category(name: str):
@@ -189,6 +226,35 @@ def on_ui_settings() -> None:
             {"choices": SNAP_CHOICES},
             section=SECTION,
             category_id=category,
+        ).needs_reload_ui(),
+    )
+
+    _add(
+        UNATTENDED_QUEUE,
+        OptionInfo(
+            DEFAULTS[UNATTENDED_QUEUE],
+            "WanGP queue: run queued jobs on the server",
+            section=SECTION,
+            category_id=category,
+        ).info(
+            "press Add to Queue and walk away - Forge starts WanGP if it is cold, waits if you are "
+            "generating in the WanGP tab, and tracks the generation to a result with no browser open. "
+            "Off means the page that pressed the button runs the job, so closing it stops the queue"
+        ),
+    )
+
+    _add(
+        DISPLAY_OBJECTS,
+        OptionInfo(
+            DEFAULTS[DISPLAY_OBJECTS],
+            "Canvas: send display copies as links instead of embedding them",
+            section=SECTION,
+            category_id=category,
+        ).info(
+            "the picture the canvas draws is fetched from this extension rather than embedded in the "
+            "page update - about a third smaller, decoded off the main thread and cached by the browser. "
+            "Off by default until it has been proven against the Forge you are running: if the canvas "
+            "goes blank after an edit, turn it back off and say so"
         ).needs_reload_ui(),
     )
 

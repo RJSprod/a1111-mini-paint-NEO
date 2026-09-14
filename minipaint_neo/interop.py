@@ -62,6 +62,26 @@ OUTBOX_TRACK_ROUTE = OUTBOX_ROUTE + "/track"
 #: Prompt enhancement through ModelSwitchRefiner: the switch, the LLM side
 #: and the slot rules, for a caller that wants to know before it asks.
 ENHANCE_ROUTE = ROUTE_PREFIX + "/enhance"
+#: Protocol 6: the event spine. One long-lived stream per page saying what
+#: the server is doing, and one authoritative snapshot that repairs a view
+#: however badly it has drifted.
+#:
+#: These are for *observation*, and the distinction is the whole of principle
+#: 2.9: losing the stream makes a screen stale and can never stop a job. That
+#: is what lets the browser's own timers be removed rather than merely slowed
+#: down - there is no longer server work hidden behind a page that has to be
+#: prodded every few hundred milliseconds to make it happen.
+EVENTS_ROUTE = ROUTE_PREFIX + "/events"
+SYNC_ROUTE = ROUTE_PREFIX + "/sync"
+
+#: How often a silent stream says it is alive. SSE comments are invisible to
+#: JavaScript, so this is an application-visible frame a page can time
+#: against; a page that sees none for a few of these reconnects and syncs.
+HEARTBEAT_SECONDS = 15.0
+#: How long one stream is held before the page is asked to reconnect. A
+#: bounded connection survives a proxy that quietly drops long-lived ones,
+#: and reconnecting costs one replay from the cursor.
+STREAM_MAX_SECONDS = 30 * 60.0
 
 #: The subfolder of the per-run runtime directory that holds staged images.
 #: Never configurable, for the reason the handoff root is not.
@@ -578,7 +598,20 @@ _QUIET_CODES = frozenset({errors.WANGP_NOT_RUNNING, errors.QUEUE_BUSY})
 def _submit(raw: dict) -> dict:
     origin = raw.get("origin") if raw.get("origin") in ("clipboard", "api") else "api"
     enhance = raw.get("enhance") if isinstance(raw.get("enhance"), bool) else None
-    return {"job": _outbox().submit(raw.get("request"), raw.get("page"), origin, enhance=enhance, model=raw.get("model"))}
+    # A caller may insist on one executor - a script that wants the old
+    # browser-driven behaviour, or one that wants the job run whether or not
+    # anybody is looking - and otherwise the setting decides.
+    executor = raw.get("executor") if raw.get("executor") in _outbox().EXECUTORS else None
+    # Provenance, not permission: what the page managed to do about WanGP's
+    # live form before it got here. Filtered against the known outcomes so a
+    # caller cannot write a sentence of its own into the job's record, and
+    # believed rather than checked because there is nothing here that could
+    # check it - the fact it reports happened in another process.
+    flushed = raw.get("settings_flush")
+    flushed = flushed if flushed in protocol.FLUSH_OUTCOMES else ""
+    return {"job": _outbox().submit(raw.get("request"), raw.get("page"), origin, enhance=enhance,
+                                    model=raw.get("model"), executor=executor,
+                                    settings_flush=flushed)}
 
 
 def _claim(raw: dict) -> dict:
@@ -624,6 +657,220 @@ async def _enhance_route(request: typing.Any) -> typing.Any:
         return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
 
 
+# ------------------------------------------------------- the event spine --
+
+
+def _events():
+    from . import events
+
+    return events
+
+
+def _sse(record: typing.Mapping[str, typing.Any]) -> str:
+    """One record as an SSE frame.
+
+    A durable broadcast carries its ``id:`` - ``<epoch>:<revision>`` - which
+    is what a browser resumes from. A heartbeat and a targeted advisory carry
+    none, deliberately: resuming from a liveness frame would hand a page a
+    cursor that names nothing, and replaying an advisory would re-offer an
+    opportunity that has certainly been taken.
+    """
+    lines = []
+    revision = record.get("revision")
+    if revision:
+        lines.append(f"id: {_events().cursor(revision)}")
+    lines.append(f"event: {record.get('kind') or 'message'}")
+    lines.append("data: " + json.dumps(record.get("payload") or {}, separators=(",", ":")))
+    return "\n".join(lines) + "\n\n"
+
+
+def snapshot(page: str = "") -> dict:
+    """Everything a returning page needs, at one revision. The authority.
+
+    A sync wins over anything a page is holding, however it got there, and
+    taking one is an ordinary thing to do rather than a failure: a page that
+    has been asleep, has changed device, or has simply lost confidence asks
+    for this and is correct again in one request.
+
+    The revision is read *first*, before the jobs, so a page that applies
+    this snapshot and then replays buffered events from that revision cannot
+    miss a transition that happened while the snapshot was being built.
+    """
+    events = _events()
+    revision = events.revision()
+    payload: typing.Dict[str, typing.Any] = {
+        "ok": True,
+        "server_epoch": events.epoch(),
+        "revision": revision,
+        "cursor": events.cursor(revision),
+        "heartbeat_seconds": HEARTBEAT_SECONDS,
+        "protocol": protocol.PROTOCOL,
+        "contract": protocol.QUEUE_CONTRACT,
+    }
+    try:
+        from .clipboard import outbox
+
+        payload["jobs"] = outbox.jobs()
+        payload["counts"] = outbox.counts()
+        payload["unattended"] = outbox.unattended_enabled()
+    except Exception:
+        payload["jobs"] = []
+        payload["counts"] = {}
+        payload["unattended"] = False
+    try:
+        from .clipboard import executor
+
+        payload["executor"] = executor.snapshot()
+    except Exception:
+        payload["executor"] = {}
+    payload["runtime"] = _runtime_summary()
+    try:
+        from .clipboard import enhance
+
+        ready = enhance.capabilities()
+        # A dependency summary, scrubbed: what it can do and why not, never
+        # a model path, a token or anybody's prompt.
+        payload["enhancer"] = {
+            "found": ready["found"], "available": ready["available"], "enabled": ready["enabled"],
+            "configured": ready["configured"], "vision": ready["vision"], "model": ready["model"],
+        }
+    except Exception:
+        payload["enhancer"] = {}
+    try:
+        from .clipboard import job_inputs
+
+        payload["inputs"] = job_inputs.counts()
+    except Exception:
+        payload["inputs"] = {}
+    if page:
+        payload["page"] = page
+    return payload
+
+
+def _runtime_summary() -> dict:
+    """The managed WanGP, coarsely, plus whether the card is busy.
+
+    Whether WanGP's own work holds the card is a legitimate thing for a
+    returning user to see - it is why their job has been waiting - and it is
+    expressed as a busy/free fact and nothing more. No port, no pid, no path.
+    """
+    out = {"state": "", "running": False, "card_busy": None, "queue_depth": None}
+    try:
+        from .wangp import runtime
+
+        current = runtime.current()
+        out["state"] = current.state
+        out["running"] = current.state == runtime.READY
+    except Exception:
+        return out
+    if not out["running"]:
+        return out
+    try:
+        from .wangp import control
+
+        # The CACHED answer, never a fresh one. This runs on the event loop,
+        # and every call into the child is a blocking socket read: asking
+        # here would stall every page on this Forge for as long as the child
+        # took. The executor thread keeps it fresh while the queue moves, and
+        # a value too old to mean anything reads as "not known" - which is
+        # the honest answer and is what the fields default to.
+        hello = control.last_hello()
+        if hello is not None:
+            out["card_busy"] = hello["generation_running"]
+            out["queue_depth"] = hello["queue_depth"]
+            out["can_execute"] = hello["can_execute"]
+    except Exception:
+        pass
+    return out
+
+
+async def _sync_route(request: typing.Any) -> typing.Any:
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    page = str(request.query_params.get("page") or "")[:32]
+    try:
+        return _json(snapshot(page))
+    except Exception as error:
+        _journal(f"sync: failed - {type(error).__name__}")
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+
+
+async def _events_route(request: typing.Any) -> typing.Any:
+    """One page's live feed of what the server is doing.
+
+    Server-Sent Events over the connection the page already has: no new
+    runtime dependency, no second transport, and one stream per page rather
+    than one timer per thing a page is interested in.
+
+    The cursor comes from the query string or from ``Last-Event-ID``, which
+    is what a browser resends by itself after a dropped connection. A cursor
+    this process cannot honour - another epoch, a revision it never issued,
+    or one older than the replay ring still holds - is not an error: it is a
+    page that needs a snapshot, and it is told so in one frame.
+    """
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    from starlette.responses import StreamingResponse
+
+    events = _events()
+    page = str(request.query_params.get("page") or "")[:32]
+    cursor = request.query_params.get("cursor") or request.headers.get("last-event-id") or ""
+
+    async def stream() -> typing.AsyncIterator[str]:
+        import asyncio
+
+        started = time.monotonic()
+        with events.subscribe(page) as feed:
+            missed, reset = events.replay(cursor)
+            yield _sse({"kind": "hello", "revision": None, "payload": {
+                "server_epoch": events.epoch(),
+                "revision": events.revision(),
+                "cursor": events.cursor(),
+                "heartbeat_seconds": HEARTBEAT_SECONDS,
+                "resumed": bool(cursor) and not reset,
+            }})
+            if reset:
+                yield _sse({"kind": events.RESET, "revision": None, "payload": {"reason": "cursor" if cursor else "new"}})
+            for record in missed:
+                yield _sse(record)
+            while True:
+                if time.monotonic() - started > STREAM_MAX_SECONDS:
+                    # Bounded on purpose: a proxy that quietly drops a
+                    # long-lived connection makes a page look connected while
+                    # it is not, and reconnecting costs one replay.
+                    yield _sse({"kind": events.RESET, "revision": None, "payload": {"reason": "rotate"}})
+                    return
+                try:
+                    record = await feed.next(timeout=HEARTBEAT_SECONDS)
+                except asyncio.CancelledError:
+                    return
+                if feed.overflowed:
+                    # This subscriber fell far enough behind that its queue
+                    # was given up on. Telling it to resync is honest;
+                    # replaying an unbounded backlog into it is not.
+                    yield _sse({"kind": events.RESET, "revision": None, "payload": {"reason": "overflow"}})
+                    return
+                if record is None:
+                    # An application-visible frame, because an SSE comment is
+                    # invisible to JavaScript and a silent connection and a
+                    # dead one look identical to a remote browser.
+                    yield _sse({"kind": events.HEARTBEAT, "revision": None, "payload": {"at": int(time.time())}})
+                    continue
+                yield _sse(record)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store, no-transform",
+            "Connection": "keep-alive",
+            # Nginx buffers text/event-stream by default and a buffered
+            # stream is a stream that arrives in one lump when it closes.
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 def install(app: typing.Any) -> None:
     """Put the routes on Forge's FastAPI app. Called from ``on_app_started``."""
     if getattr(app, _INSTALLED_FLAG, False):
@@ -646,6 +893,8 @@ def install(app: typing.Any) -> None:
             Route(OUTBOX_CANCEL_ALL_ROUTE, endpoint=_outbox_call("cancel_all", _cancel_all), methods=["POST"]),
             Route(OUTBOX_TRACK_ROUTE, endpoint=_outbox_call("track", _track), methods=["POST"]),
             Route(ENHANCE_ROUTE, endpoint=_enhance_route, methods=["GET"]),
+            Route(EVENTS_ROUTE, endpoint=_events_route, methods=["GET"]),
+            Route(SYNC_ROUTE, endpoint=_sync_route, methods=["GET"]),
         ]
         app.router.routes[0:0] = routes
         setattr(app, _INSTALLED_FLAG, True)
@@ -676,6 +925,11 @@ def register(script_callbacks: typing.Any) -> None:
 __all__ = [
     "CONTRACT_ROUTE",
     "ENHANCE_ROUTE",
+    "EVENTS_ROUTE",
+    "HEARTBEAT_SECONDS",
+    "STREAM_MAX_SECONDS",
+    "SYNC_ROUTE",
+    "snapshot",
     "OUTBOX_ADOPT_ROUTE",
     "OUTBOX_CANCEL_ALL_ROUTE",
     "OUTBOX_CANCEL_ROUTE",

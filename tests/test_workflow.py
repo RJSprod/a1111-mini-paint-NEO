@@ -40,6 +40,24 @@ def skipped(value) -> bool:
     return isinstance(value, dict) and "value" not in value and value.get("__type__") == "update"
 
 
+def held_after_load(payload):
+    """Whether the browser is to wait for the picture before applying it."""
+    return json.loads(payload)["after_load"]
+
+
+def held_mask(payload):
+    """The mask layer out of a pending-mask value, or "" for "clear them".
+
+    A nonce travels with it so that two identical layers in a row still
+    reach the browser: a Gradio textbox whose value did not change fires
+    nothing, and the same mask after another edit is an ordinary thing to
+    send.
+    """
+    parsed = json.loads(payload)
+    assert parsed["nonce"]
+    return parsed["mask"]
+
+
 def run() -> Results:
     r = Results("workflow")
 
@@ -78,13 +96,20 @@ def run() -> Results:
 
     # commit-shaped replies (see TouchCanvas._commit / _info / _mode_updates);
     # replies that start with the mask layer instead of the image are one shorter
-    BG, FG, STATE, STATUS, PREVIEW, ASPECT, ORIGINAL, WAIT, SUGGEST, MODE = range(10)
+    # Slot 1 is no longer the canvas's foreground: a structural step sends
+    # the mask layer as a value the browser holds and applies after the
+    # picture has loaded, so the ordering invariant is kept without the
+    # second round trip that used to enforce it.
+    # The wait flag was a hidden textbox written on every structural step
+    # whose only reader was the second step that no longer exists. What it
+    # said now travels in the pending mask's own payload.
+    BG, PENDING, STATE, STATUS, PREVIEW, ASPECT, ORIGINAL, SUGGEST, MODE = range(9)
     # after the mode: 4 rail panels, the tool, then the layer list, the size,
     # the opacity, the name, the drag preview and underlay
     TOOL = MODE + 5
     LAYER_LIST, LAYER_SCALE, LAYER_OPACITY, LAYER_NAME, LAYER_PREVIEW, LAYER_UNDERLAY = range(MODE + 6, MODE + 12)
     COMMIT_LEN = 2 + canvas.INFO_COUNT
-    r.check("the commit shape is the two canvas values plus the information", COMMIT_LEN == 21 and canvas.MODE_COUNT == 12)
+    r.check("the commit shape is the two canvas values plus the information", COMMIT_LEN == 20 and canvas.MODE_COUNT == 12)
 
     # ---- receive from txt2img ----
     photo = Image.new("RGB", (640, 480), (20, 120, 220))
@@ -93,7 +118,8 @@ def run() -> Results:
     r.check("reply has the commit shape", len(out) == COMMIT_LEN)
     r.check("received image becomes the document", doc.size == (640, 480) and doc.origin == "txt2img")
     r.check("receive writes a display copy of the image to the canvas (JPEG: it is opaque)", isinstance(out[BG], str) and out[BG].startswith("data:image/jpeg;base64,") and decode_data_url(out[BG]).size == (640, 480))
-    r.check("receive clears the mask layer", out[FG] is None and out[WAIT] == "")
+    r.check("receive clears the mask layer, in the same reply as the picture",
+            held_mask(out[PENDING]) == "" and held_after_load(out[PENDING]) is True)
     r.check("receive selects crop mode", out[MODE] == "crop")
     r.check("the picture is Layer 1 over a white Background", doc.layer_names() == ["Background", "Layer 1"] and doc.active == 1 and doc.layers[0].image.getpixel((0, 0)) == (255, 255, 255, 255))
     r.check("the layer list is sent, with both layers, the picture on top and selected", isinstance(out[LAYER_LIST], str) and out[LAYER_LIST].count('role="listitem"') == 2
@@ -103,7 +129,7 @@ def run() -> Results:
     r.check("a plain picture suggests img2img", out[SUGGEST] == "img2img")
     r.check("a second receive says the first is one undo away", "one Undo away" in canvas.receive([(photo, None)], doc, "crop", "img2img")[STATUS])
     unchanged = canvas.receive(None, doc, "crop", "txt2img")
-    r.check("nothing to receive is reported without touching the canvas", "Pick an image" in unchanged[STATUS] and skipped(unchanged[BG]) and skipped(unchanged[FG]))
+    r.check("nothing to receive is reported without touching the canvas", "Pick an image" in unchanged[STATUS] and skipped(unchanged[BG]) and skipped(unchanged[PENDING]))
 
     # ---- the canvas echoes what it was sent: nothing happens ----
     bg = imaging.to_rgba(doc.image)
@@ -149,20 +175,31 @@ def run() -> Results:
     doc = out[STATE]
     r.check("crop with a mask keeps the mask", doc.size == (200, 120) and doc.has_mask and doc.mask.getpixel((40, 40)) == 255 and doc.mask.getpixel((5, 5)) == 0)
     r.check("a mask suggests Inpaint", out[SUGGEST] == "inpaint")
-    r.check("the mask layer waits for the image", skipped(out[FG]) and out[WAIT] == "wait")
-    fg = canvas.commit_foreground(doc, out[WAIT])
-    r.check("the mask layer is written afterwards, at the new size", isinstance(fg, Image.Image) and fg.size == (200, 120) and fg.getchannel("A").getpixel((40, 40)) == 255)
+    # THE ORDERING INVARIANT, WHICH IS THE POINT AND HAS NOT MOVED: the mask
+    # belongs to the picture in this same reply and must not reach the canvas
+    # before it. What changed is who enforces that - the browser's own load
+    # hook, rather than a second request - so what is checked is that the
+    # layer travels with the picture and is correct for it, not that three
+    # transport steps happened.
+    fg = decode_data_url(held_mask(out[PENDING]))
+    r.check("the mask layer travels with the picture it belongs to, at the new size",
+            fg.size == (200, 120) and fg.getchannel("A").getpixel((40, 40)) == 255)
     r.check("the mask layer uses the Inpaint tab's checkerboard", fg.getpixel((40, 40))[:3] in ((0, 0, 0), (255, 255, 255)))
-    r.check("no mask means no layer step", skipped(canvas.commit_foreground(canvas.receive([(photo, None)], None, "crop", "txt2img")[STATE], "wait")))
-    r.check("a step that left the canvas alone leaves the strokes alone too", skipped(canvas.commit_foreground(doc, "")))
+    r.check("it is a PNG: a display copy may be lossy, coverage may not", held_mask(out[PENDING]).startswith("data:image/png;base64,"))
+    r.check("and the payload says to wait for the picture before applying it",
+            held_after_load(out[PENDING]) is True)
+    r.check("no mask means an empty layer, which clears the strokes",
+            held_mask(canvas.receive([(photo, None)], None, "crop", "txt2img")[PENDING]) == "")
+    r.check("a step that left the canvas alone sends no layer at all, so live strokes survive it",
+            skipped(canvas._unchanged(doc, "crop", "")[PENDING]))
 
     # ---- undo / redo of structural steps ----
     out = canvas.undo(doc, "crop")
     doc = out[STATE]
-    r.check("undo restores the earlier crop, strokes included", doc.size == (320, 240) and "Undid crop" in out[STATUS] and doc.has_mask and out[WAIT] == "wait")
+    r.check("undo restores the earlier crop, strokes included", doc.size == (320, 240) and "Undid crop" in out[STATUS] and doc.has_mask and held_after_load(out[PENDING]) is True)
     out = canvas.redo(doc, "crop")
     doc = out[STATE]
-    r.check("redo reapplies it, mask included", doc.size == (200, 120) and doc.has_mask and "Redid crop" in out[STATUS] and out[WAIT] == "wait")
+    r.check("redo reapplies it, mask included", doc.size == (200, 120) and doc.has_mask and "Redid crop" in out[STATUS] and held_after_load(out[PENDING]) is True)
     out = canvas.redo(doc, "crop")
     r.check("nothing to redo is a message, not a reload", "Nothing to redo" in out[STATUS] and skipped(out[BG]))
 
@@ -196,7 +233,7 @@ def run() -> Results:
     doc = out[STATE]
     r.check("a selection becomes a layer above the active one", doc.layer_names() == ["Background", "Layer 1", "Layer 2"] and doc.active == 2)
     r.check("it holds the pixels where they were", doc.active_layer.size == (100, 60) and (doc.active_layer.x, doc.active_layer.y) == (20, 10))
-    r.check("the canvas is left alone: nothing changed on it", skipped(out[BG]) and skipped(out[FG]) and out[WAIT] == "")
+    r.check("the canvas is left alone: nothing changed on it", skipped(out[BG]) and skipped(out[PENDING]))
     r.check("the status names the new layer", "Layer 2 holds the selection" in out[STATUS] and "3 layers" in out[STATUS])
     listing = out[LAYER_LIST]
     r.check("the layer list follows, top layer first, the new one selected and primary",
@@ -217,7 +254,7 @@ def run() -> Results:
 
     out = act("pick", "Background", doc)
     doc = out[STATE]
-    r.check("tapping a layer selects it alone, without a reload", doc.selected_names() == ["Background"] and "Background is the active layer" in out[STATUS] and skipped(out[BG]) and out[WAIT] == "")
+    r.check("tapping a layer selects it alone, without a reload", doc.selected_names() == ["Background"] and "Background is the active layer" in out[STATUS] and skipped(out[BG]) and skipped(out[PENDING]))
     r.check("the preview follows the selection", isinstance(out[LAYER_PREVIEW], str) and '"name": "Background"' in out[LAYER_PREVIEW])
     out = act("toggle", "Layer 2", doc)
     doc = out[STATE]
@@ -455,9 +492,10 @@ def run() -> Results:
     r.check("the new area is masked", doc.mask.getpixel((300, 90)) == 255 and doc.mask.getpixel((100, 100)) == 0)
     r.check("the old stroke is carried", doc.mask.getpixel((40, 40)) == 255)
     r.check("an expansion suggests Inpaint, and says so", out[SUGGEST] == "inpaint expansion")
-    r.check("expand writes the image and waits for it before the mask", isinstance(out[BG], str) and decode_data_url(out[BG]).size == (328, 184) and out[WAIT] == "wait")
+    r.check("expand writes the image and the mask that belongs to it, and says a load is coming",
+            isinstance(out[BG], str) and decode_data_url(out[BG]).size == (328, 184) and held_after_load(out[PENDING]) is True)
     r.check("the overlap is explained", "16px back" in out[STATUS])
-    r.check("a mask layer follows at the new size", canvas.commit_foreground(doc).size == (328, 184))
+    r.check("the mask layer is at the new size", decode_data_url(held_mask(out[PENDING])).size == (328, 184))
 
     bg = imaging.to_rgba(doc.image)
     out = canvas.send(layer(doc.mask, doc.size), doc, "mask", "", "Off")
@@ -470,7 +508,7 @@ def run() -> Results:
     shared.opts.data[settings.SEND_FILL] = settings.KEEP_TRANSPARENT
     r.check("mask matches the image size", decode_data_url(canvas.send_mask(doc, out[-2])).size == sent.size)
     out = canvas.apply_expand(layer(doc.mask, doc.size), doc, "mask", 0, 0, 0, 0, 0, "Transparent", "8")
-    r.check("expanding nothing is refused without touching the canvas", skipped(out[BG]) and skipped(out[FG]) and out[STATE].has_mask)
+    r.check("expanding nothing is refused without touching the canvas", skipped(out[BG]) and skipped(out[PENDING]) and out[STATE].has_mask)
     # the canvas is the truth: strokes that are not on it are not in the document either
     out = canvas.apply_expand(None, doc, "mask", 0, 0, 0, 0, 0, "Transparent", "8")
     r.check("a canvas without strokes means no mask", not out[STATE].has_mask)

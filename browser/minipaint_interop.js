@@ -59,6 +59,8 @@ window.minipaintInterop = (function () {
     const OUTBOX_RETRY_ROUTE = OUTBOX_ROUTE + "/retry";
     const OUTBOX_ADOPT_ROUTE = OUTBOX_ROUTE + "/adopt";
     const OUTBOX_TRACK_ROUTE = OUTBOX_ROUTE + "/track";
+    const EVENTS_ROUTE = "/minipaint-interop/events";
+    const SYNC_ROUTE = "/minipaint-interop/sync";
     const HEX32 = /^[0-9a-f]{32}$/;
     const CODE_RE = /^[A-Z][A-Z0-9_]{2,59}$/;
     const PROMPT_MAX_CHARS = 12000;
@@ -81,6 +83,27 @@ window.minipaintInterop = (function () {
     const TRACK_MS = 3000;
     const TRACK_MAX_MS = 6 * 60 * 60 * 1000;
     const PAGE_KEY = "minipaint.interop.page";
+    // The event spine. A page that is told what changed makes no request at
+    // all while nothing does, which is what lets the timers above be removed
+    // for server-executed jobs rather than merely lengthened - the mean
+    // latency of a poll is half its interval, and lengthening one trades
+    // requests for staleness in both directions.
+    //
+    // STREAM_DEAD_MS is deliberately more than twice the server's heartbeat:
+    // a watchdog that fires on one missed frame turns an ordinary scheduling
+    // hiccup into a reconnect storm.
+    const STREAM_DEAD_MS = 40000;
+    const STREAM_RETRY_MS = 2000;
+    const STREAM_RETRY_MAX_MS = 30000;
+    // Jobs the server runs. A page neither claims nor tracks one of these:
+    // it watches, and what it is watching continues whether or not it does.
+    const SERVER_STATES = ["admitted", "waiting_turn", "enhanced", "ensuring_wangp", "composing",
+        "waiting_for_card", "submitting_wangp", "wangp_waiting", "wangp_generating"];
+    const SERVER_TERMINAL = ["completed", "failed", "cancelled", "execution_unknown"];
+    //: The answers that mean "this worked". A browser-executed job could
+    //: only ever reach the first two; a server-executed one ends on the
+    //: third, because it is followed all the way to a generated file.
+    const POSITIVE = ["queued", "started", "completed"];
 
     // The sentences a caller may show. The server's errors.py owns the
     // wording; these are the ones this side needs before it can ask.
@@ -112,10 +135,22 @@ window.minipaintInterop = (function () {
         ENHANCE_CANCELLED: "The prompt enhancement was cancelled.",
         ENHANCE_LOST: "The enhancement's record was gone before its result was collected; retry to enhance again.",
         MODEL_CHANGED: "The WanGP page moved to another model after the prompt was enhanced for it; retry to enhance it for the current model.",
+        EXECUTION_UNKNOWN: "Whether WanGP ran this generation could not be proved, so it was not sent again. Check WanGP's outputs and retry if it did not run.",
+        CONTROL_UNAVAILABLE: "The MiniPaint bridge inside WanGP is not answering, so unattended jobs cannot be run.",
+        SERVICE_UNAVAILABLE: "This WanGP build does not expose the generation service the unattended queue submits through.",
+        COMPOSE_UNAVAILABLE: "WanGP's settings for that model could not be read, so nothing was queued at settings nobody chose.",
+        MODEL_UNAVAILABLE: "The model this job was composed for is not available in WanGP any more.",
+        JOB_INPUT_MISSING: "An image this job owns is no longer on disk.",
         AUTH_BOUNDARY_FAILED: "Sign in to Forge first.",
         INTERNAL_ERROR: "The WanGP integration hit an unexpected problem."
     };
     const ENHANCING_MESSAGE = "The prompt is being enhanced before it is queued.";
+
+    /** What the server says this job is waiting for, if it said anything. */
+    function stageOf(job) {
+        const text = job && typeof job.stage === "string" ? job.stage : "";
+        return text || "The request is waiting its turn in the queue outbox.";
+    }
 
     function bridge() {
         const api = window.minipaintWanGP;
@@ -315,13 +350,19 @@ window.minipaintInterop = (function () {
         const three = summary(result);
         const base = { request_id: requestId || "", job_id: jobId || "" };
         if (job && job.enhance_requested) { base.enhanced = !!(job.enhance && job.enhance.state === "done"); }
-        if (result && result.ok && (result.status === "queued" || result.status === "started")) {
+        // "queued" and "started" are as far as a browser-executed job ever
+        // got - WanGP had taken it, and that was all a page could see.
+        // "completed" is the one a server-executed job ends on, and it means
+        // the generation finished: the count of what it produced comes with
+        // it, and the paths do not.
+        if (result && result.ok && POSITIVE.indexOf(result.status) !== -1) {
             return Object.assign(base, {
                 ok: true, status: result.status, tasks_added: Math.max(1, Math.trunc(result.tasks_added || 1)),
                 queue_depth: Number.isFinite(result.queue_depth) && result.queue_depth >= 0 ? Math.trunc(result.queue_depth) : null,
                 route: ROUTES.indexOf(result.route) === -1 ? "" : result.route,
                 model: model(result), applied: three.applied, inherited: three.inherited, ignored: three.ignored,
-                wangp: wangpOf(job)
+                wangp: wangpOf(job),
+                generated_count: job && Number.isFinite(job.generated_count) ? job.generated_count : null
             });
         }
         const status = result && result.status === "unconfirmed" ? "unconfirmed" : result && result.status === "pending" ? "pending" : "refused";
@@ -336,11 +377,28 @@ window.minipaintInterop = (function () {
         if (job.state === "queued" || job.state === "started") {
             return publicResult(Object.assign({ ok: true }, job.result || {}, { status: job.state }), requestId, job.job_id, job);
         }
+        // A server-executed job ends when the generation does, not when
+        // WanGP accepts it: "completed" is the success a caller waits for.
+        if (job.state === "completed") {
+            return publicResult(Object.assign({ ok: true }, job.result || {}, { status: "completed" }), requestId, job.job_id, job);
+        }
         if (job.state === "enhancing") {
             return publicResult({ ok: false, status: "pending", code: "QUEUE_JOB_PENDING", message: ENHANCING_MESSAGE }, requestId, job.job_id, job);
         }
-        if (job.state === "pending" || job.state === "sending") {
-            return publicResult({ ok: false, status: "pending", code: "QUEUE_JOB_PENDING" }, requestId, job.job_id, job);
+        // Every stage before the generation is *pending*, not refused. Each
+        // of these is a job that is going to run; falling through to the
+        // refusal below would report a queued job as a failed one, which is
+        // both wrong and the kind of wrong a caller acts on.
+        if (job.state === "pending" || job.state === "sending" || SERVER_STATES.indexOf(String(job.state)) !== -1) {
+            return publicResult({ ok: false, status: "pending", code: "QUEUE_JOB_PENDING", message: stageOf(job) }, requestId, job.job_id, job);
+        }
+        // "Whether WanGP ran this could not be proved" is its own answer and
+        // is never a refusal: a caller that treats it as one retries, and a
+        // retry is the second generation the whole design refuses to make.
+        if (job.state === "execution_unknown") {
+            const unknown = job.error || {};
+            return publicResult({ ok: false, status: "unconfirmed", code: unknown.code || "EXECUTION_UNKNOWN",
+                                  message: unknown.message || sentence("EXECUTION_UNKNOWN") }, requestId, job.job_id, job);
         }
         if (job.state === "cancelled") {
             const error = job.error || {};
@@ -482,6 +540,13 @@ window.minipaintInterop = (function () {
                 let answer;
                 try { answer = await post(OUTBOX_CLAIM_ROUTE, JSON.stringify({ page: pageId() })); } catch (e) { answer = { ok: false, code: "INTERNAL_ERROR" }; }
                 if (!answer.ok) { note("pump: stopped - " + (code(answer.code) || "INTERNAL_ERROR")); emit("stopped", null, { code: code(answer.code) }); break; }
+                if (answer.job && serverRun(answer.job)) {
+                    // Cannot happen - the outbox does not offer these - and
+                    // is checked anyway, because running one here would mean
+                    // two things driving one job.
+                    note("pump: the server owns job " + String(answer.job.job_id).slice(0, 8) + "; not running it here");
+                    break;
+                }
                 if (answer.job) { waitingSince = 0; await runJob(answer.job, answer.lease); continue; }
                 if (answer.wait && answer.pending > 0) {
                     const now = Date.now();
@@ -537,6 +602,44 @@ window.minipaintInterop = (function () {
     }
 
     /**
+     * Hand WanGP's live settings to a job before the server composes it.
+     *
+     * The job's base is the form Wan2GP recorded for the model, and that is
+     * only written when the user *commits* the form - Generate, Add to Queue
+     * inside WanGP, applying a LoRA set, switching model. A weight dragged
+     * and then left alone lives in the browser and nowhere else, so a press
+     * from this tab would quietly compose at the previous value.
+     *
+     * The only place those values exist is the page, so this is the only
+     * place the gap can be closed - and it is closed by asking WanGP to
+     * commit its own form rather than by reading it. Awaited before the
+     * submission because the server composes from the record, so the record
+     * has to be current first.
+     *
+     * Never load-bearing, in any of its outcomes: no WanGP tab, a bridge that
+     * does not offer it, a page mid settings-load, or a wait that runs out
+     * all mean the job composes from the recorded form, which is what it did
+     * before flushing existed.
+     */
+    async function flushSettings() {
+        const bridge = window.minipaintWanGP;
+        // The legacy path pays nothing for this. A browser-executed job is
+        // run by driving the live form and pressing WanGP's own Add to
+        // Queue, whose chain commits the form itself - so flushing first
+        // would buy a wait and nothing else. Unknown means flush: the
+        // unattended queue is the default, and latency is the cheaper wrong
+        // guess of the two.
+        if (stream.unattended === false) { return ""; }
+        if (!bridge || typeof bridge.flushForm !== "function") { return "unavailable"; }
+        try {
+            const answer = await bridge.flushForm();
+            return (answer && answer.flush) || "unavailable";
+        } catch (e) {
+            return "unavailable";
+        }
+    }
+
+    /**
      * Add the live WanGP page - with these overrides, if any - to its queue.
      * The request becomes a job in the server's outbox at once; this page
      * runs it when the server says it is its turn; the promise resolves when
@@ -551,22 +654,35 @@ window.minipaintInterop = (function () {
      * switch decides. The model the page is on travels with the request so
      * the server can choose the H3 variant; pass {model} to say it yourself.
      */
-    function enqueue(request, options) {
+    async function enqueue(request, options) {
         const normalised = normaliseRequest(request);
-        if (!normalised.ok) { return Promise.resolve(normalised); }
+        if (!normalised.ok) { return normalised; }
         const wait = !(options && options.wait === false);
         const timeoutMs = options && Number.isFinite(options.timeoutMs) ? options.timeoutMs : ENQUEUE_WAIT_MS;
         const body = { request: normalised.request, page: pageId(), origin: "api" };
         if (options && typeof options.enhance === "boolean") { body.enhance = options.enhance; }
         const known = options && options.model && typeof options.model === "object" ? model({ model: options.model }) : liveModel();
         if (known) { body.model = known; }
+        // Before the submission, not after: the server composes from the
+        // recorded form and the whole point is that it be current when it
+        // does. ``false`` is how a caller that has already flushed - or one
+        // that means to compose against the recorded form deliberately -
+        // opts out.
+        body.settings_flush = (options && options.flush === false) ? "" : await flushSettings();
         return post(OUTBOX_SUBMIT_ROUTE, JSON.stringify(body)).then(function (answer) {
             if (!answer.ok || !answer.job) { return refusal(code(answer.code) || "REQUEST_INVALID", normalised.request.request_id, answer.message); }
             const job = answer.job;
             note("enqueue " + job.job_id.slice(0, 8) + ": submitted (start " + (normalised.request.start || "auto") + (job.state === "enhancing" ? ", enhancing" : "") + ")");
             const promised = wait ? awaitJob(job.job_id, timeoutMs) : Promise.resolve(resultOfJob(job));
             emit("submitted", job);
-            setTimeout(pump, 0);
+            if (serverRun(job)) {
+                // Admitted. From here the server owns it, and this page may
+                // be closed, frozen, discarded or thrown in a river without
+                // the job noticing. All this does is watch.
+                openStream();
+            } else {
+                setTimeout(pump, 0);
+            }
             return promised;
         }, function () {
             return refusal("INTERNAL_ERROR", normalised.request.request_id, "The queue outbox could not be reached.");
@@ -645,6 +761,11 @@ window.minipaintInterop = (function () {
      * answers for the session that admitted them. */
     function startTracking(job) {
         if (!job || !job.job_id || !job.request || !HEX32.test(String(job.request.request_id || ""))) { return false; }
+        // A server-executed job is followed by the server, which owns the
+        // WanGP side of it and publishes what it sees once for every page.
+        // Asking the bridge where it is would be a second, worse answer -
+        // and one that stops the moment this page does.
+        if (serverRun(job)) { return false; }
         if (job.page && job.page !== pageId()) { return false; }
         const seen = wangpOf(job);
         if (seen && WANGP_OPEN.indexOf(seen.state) === -1) { return false; }
@@ -702,7 +823,9 @@ window.minipaintInterop = (function () {
     async function resumeTracking() {
         const answer = await jobs();
         let count = 0;
+        if (((answer && answer.jobs) || []).some(serverRun)) { openStream(); }
         for (const job of (answer && answer.jobs) || []) {
+            if (serverRun(job)) { continue; }
             if ((job.state === "queued" || job.state === "started") && job.page === pageId()) {
                 const seen = wangpOf(job);
                 if (!seen || WANGP_OPEN.indexOf(seen.state) !== -1) {
@@ -713,6 +836,213 @@ window.minipaintInterop = (function () {
             }
         }
         return count;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* The event spine: told, rather than asking                             */
+    /* ------------------------------------------------------------------ */
+
+    const stream = {
+        source: null, cursor: "", epoch: "", lastFrameAt: 0, watchdog: 0, lifecycle: false,
+        retry: STREAM_RETRY_MS, wanted: false, syncing: null, buffered: [], jobs: new Map(),
+        // null until a snapshot says. Whether this Forge runs the queue
+        // unattended decides whether a press needs to commit WanGP's live
+        // form first; see flushSettings.
+        unattended: null
+    };
+
+    /** Open the one stream this page has, or do nothing if it already has it.
+     *
+     * One transport per page, shared by everything that wants to know what
+     * the server is doing. It is an observer and nothing else: losing it
+     * makes this page stale and cannot stop a job, which is exactly why the
+     * server-executed path can drop the pump and the tracking timers instead
+     * of slowing them down. */
+    function openStream() {
+        if (stream.source || typeof EventSource !== "function") { return false; }
+        stream.wanted = true;
+        installLifecycle();
+        let url = EVENTS_ROUTE + "?page=" + encodeURIComponent(pageId());
+        if (stream.cursor) { url += "&cursor=" + encodeURIComponent(stream.cursor); }
+        let source;
+        try { source = new EventSource(url, { withCredentials: true }); } catch (e) { return false; }
+        stream.source = source;
+        stream.lastFrameAt = Date.now();
+        source.addEventListener("open", function () { stream.retry = STREAM_RETRY_MS; });
+        for (const kind of ["hello", "job", "enhance", "handoff", "runtime", "wangp", "reset", "heartbeat", "claim_ready"]) {
+            source.addEventListener(kind, function (event) { onFrame(kind, event); });
+        }
+        source.addEventListener("error", function () { reopenStream(); });
+        armWatchdog();
+        return true;
+    }
+
+    function closeStream() {
+        stream.wanted = false;
+        if (stream.watchdog) { clearTimeout(stream.watchdog); stream.watchdog = 0; }
+        if (stream.source) { try { stream.source.close(); } catch (e) { /* already gone */ } stream.source = null; }
+    }
+
+    function reopenStream() {
+        if (stream.source) { try { stream.source.close(); } catch (e) { /* already gone */ } stream.source = null; }
+        if (!stream.wanted) { return; }
+        const delay = stream.retry;
+        stream.retry = Math.min(STREAM_RETRY_MAX_MS, Math.round(stream.retry * 1.8));
+        setTimeout(function () { if (stream.wanted) { openStream(); } }, delay);
+    }
+
+    /** A cheap local timer against the last frame seen. It makes no request
+     * while frames arrive, which is the point: a healthy page that is being
+     * told things asks for nothing at all. */
+    function armWatchdog() {
+        if (stream.watchdog) { clearTimeout(stream.watchdog); }
+        stream.watchdog = setTimeout(function () {
+            stream.watchdog = 0;
+            if (!stream.wanted) { return; }
+            if (Date.now() - stream.lastFrameAt < STREAM_DEAD_MS) { armWatchdog(); return; }
+            note("stream: no frame for " + Math.round((Date.now() - stream.lastFrameAt) / 1000) + "s; reconnecting");
+            sync().then(function () { reopenStream(); }, function () { reopenStream(); });
+        }, STREAM_DEAD_MS);
+    }
+
+    function onFrame(kind, event) {
+        stream.lastFrameAt = Date.now();
+        armWatchdog();
+        let payload = {};
+        try { payload = JSON.parse(event.data || "{}") || {}; } catch (e) { payload = {}; }
+        if (event.lastEventId) { stream.cursor = event.lastEventId; }
+        if (kind === "hello") {
+            if (stream.epoch && payload.server_epoch && payload.server_epoch !== stream.epoch) {
+                // A different run of Forge. Nothing this page holds means
+                // anything against it, so it takes a snapshot rather than
+                // trying to reconcile two epochs.
+                stream.cursor = "";
+                sync();
+            }
+            stream.epoch = String(payload.server_epoch || "");
+            if (!stream.cursor && payload.cursor) { stream.cursor = String(payload.cursor); }
+            return;
+        }
+        if (kind === "heartbeat") { return; }
+        if (kind === "reset") {
+            stream.cursor = "";
+            sync();
+            return;
+        }
+        if (kind === "claim_ready") { setTimeout(pump, 0); return; }
+        if (stream.syncing) { stream.buffered.push({ kind: kind, payload: payload, cursor: stream.cursor }); return; }
+        applyFrame(kind, payload);
+    }
+
+    function applyFrame(kind, payload) {
+        if (kind !== "job" || !payload || !payload.job_id) { emit("server", null, { kind: kind, detail: payload }); return; }
+        const known = stream.jobs.get(payload.job_id) || {};
+        if (Number(payload.revision || 0) < Number(known.revision || 0)) { return; }
+        stream.jobs.set(payload.job_id, payload);
+        emit("server", null, { kind: "job", detail: payload });
+        if (SERVER_TERMINAL.indexOf(String(payload.state)) !== -1) { settleFromServer(payload.job_id); }
+    }
+
+    /** A caller waiting on a server-executed job gets its answer from the
+     * authoritative record, not from the event: the event is a description
+     * and the snapshot is the truth. */
+    function settleFromServer(jobId) {
+        if (!waiters[jobId]) { return; }
+        jobs().then(function (answer) {
+            const found = (answer && answer.jobs || []).filter(function (item) { return item.job_id === jobId; })[0];
+            if (found) { settleWaiters(found); emit("done", found); }
+        }, function () { /* the next sync will settle it */ });
+    }
+
+    /**
+     * One authoritative snapshot. What a page does on return, on reconnect,
+     * and whenever it has any reason to doubt what it holds.
+     *
+     * Events that arrive while this is in flight are buffered and applied
+     * after it, in order, discarding anything at or below the snapshot's own
+     * revision - so a transition that happened during the request is neither
+     * lost nor applied twice.
+     */
+    function sync() {
+        if (stream.syncing) { return stream.syncing; }
+        stream.buffered = [];
+        stream.syncing = fetch(SYNC_ROUTE + "?page=" + encodeURIComponent(pageId()), { credentials: "same-origin", cache: "no-store" })
+            .then(function (response) { return response.json(); })
+            .then(function (payload) {
+                if (!payload || payload.ok !== true) { return payload || { ok: false }; }
+                stream.epoch = String(payload.server_epoch || "");
+                stream.cursor = String(payload.cursor || "");
+                // Read here rather than asked for separately: a press needs
+                // to know whether the job it is about to make will be run by
+                // the server, and the snapshot already says.
+                if (typeof payload.unattended === "boolean") { stream.unattended = payload.unattended; }
+                stream.jobs.clear();
+                for (const job of Array.isArray(payload.jobs) ? payload.jobs : []) {
+                    stream.jobs.set(job.job_id, { job_id: job.job_id, state: job.state, stage: job.stage || "", revision: job.revision || 0 });
+                    if (SERVER_TERMINAL.indexOf(String(job.state)) !== -1 && waiters[job.job_id]) { settleWaiters(job); }
+                }
+                emit("synced", null, { revision: payload.revision, jobs: (payload.jobs || []).length, runtime: payload.runtime || {} });
+                return payload;
+            }, function () { return { ok: false, code: "INTERNAL_ERROR" }; })
+            .then(function (payload) {
+                const at = Number((payload && payload.revision) || 0);
+                const buffered = stream.buffered;
+                stream.buffered = [];
+                stream.syncing = null;
+                for (const item of buffered) {
+                    const revision = Number((item.payload && item.payload.revision) || 0);
+                    if (revision && revision <= at) { continue; }
+                    applyFrame(item.kind, item.payload);
+                }
+                return payload;
+            });
+        return stream.syncing;
+    }
+
+    /**
+     * The page lifecycle, which server-owned execution makes simple.
+     *
+     * There used to be a rule that a hidden page holding work had to keep
+     * running it - which is a promise the browser does not let anybody keep.
+     * Timer throttling, freezing, discard, app switching and network loss are
+     * browser policy, and no amount of care here changes any of them. Now no
+     * page owns executable work, so the whole lifecycle is about one thing:
+     * whether this page's *view* is worth keeping fresh.
+     *
+     *   hidden    let the transport go if the browser wants it; the job is
+     *             unaffected either way, and there is nothing to drain
+     *   frozen    abandon it, and mark what we hold as uncertain
+     *   visible   reopen, sync once, render the truth
+     *   pageshow  the same, including a restore from the back/forward cache
+     *   closed    nothing at all is required
+     */
+    function installLifecycle() {
+        if (stream.lifecycle) { return; }
+        stream.lifecycle = true;
+        try {
+            document.addEventListener("visibilitychange", function () {
+                if (document.visibilityState === "visible") {
+                    if (stream.wanted || stream.jobs.size) { openStream(); sync(); }
+                }
+            });
+            window.addEventListener("pageshow", function (event) {
+                if (event && event.persisted) { stream.cursor = ""; }
+                if (stream.wanted || stream.jobs.size) { openStream(); sync(); }
+            });
+            window.addEventListener("freeze", function () { closeStream(); stream.wanted = true; });
+            window.addEventListener("resume", function () { if (stream.wanted) { openStream(); sync(); } });
+            window.addEventListener("pagehide", function () {
+                if (stream.source) { try { stream.source.close(); } catch (e) { /* going away */ } stream.source = null; }
+            });
+        } catch (e) { /* an older environment without one of these keeps the stream as it is */ }
+    }
+
+    /** Whether a job is one the server runs. A page watches these; it never
+     * claims one, and it never asks WanGP where one is. */
+    function serverRun(job) {
+        if (!job) { return false; }
+        if (job.executor === "server") { return true; }
+        return SERVER_STATES.indexOf(String(job.state)) !== -1;
     }
 
     /* ------------------------------------------------------------------ */
@@ -782,7 +1112,20 @@ window.minipaintInterop = (function () {
             track: startTracking,
             resumeTracking: resumeTracking,
             refreshWaiters: refreshWaiters,
-            pageId: pageId
+            pageId: pageId,
+            // The event spine. ``watch`` opens the one stream this page has;
+            // ``sync`` is the authoritative snapshot that repairs a view
+            // however badly it drifted, and is what a page does on return.
+            watch: openStream,
+            unwatch: closeStream,
+            sync: sync,
+            serverRun: serverRun,
+            streamState: function () {
+                return {
+                    open: !!stream.source, epoch: stream.epoch, cursor: stream.cursor,
+                    lastFrameAt: stream.lastFrameAt, jobs: stream.jobs.size
+                };
+            }
         },
         // The sentence for a code, for a caller that wants the same words.
         message: function (failureCode) { return sentence(failureCode); }

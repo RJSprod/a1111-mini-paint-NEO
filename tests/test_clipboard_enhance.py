@@ -398,8 +398,17 @@ def pipeline_checks(r: Results, fake: FakeApi, clock: _Clock, base: pathlib.Path
     r.check("a press without a typed prompt is refused: the page's prompt cannot be enhanced from here",
             _refused(outbox.submit, {"images": {"start": start}}, PAGE_A, model=FL2VA_MODEL) == errors.ENHANCE_PROMPT_REQUIRED and not fake.submissions)
     fake.enabled = False
-    r.check("LLM Studio off is ENHANCE_UNAVAILABLE, before anything is stored",
-            _refused(outbox.submit, _request("x"), PAGE_A, model=FL2VA_MODEL) == errors.ENHANCE_UNAVAILABLE and len(outbox.jobs()) == 1)
+    # A policy state with its own sentence, not a flattened "unavailable":
+    # a user who switched LLM Studio off is told that, and nothing here
+    # turns it back on for them.
+    r.check("LLM Studio off is ENHANCE_SWITCHED_OFF, before anything is stored",
+            _refused(outbox.submit, _request("x"), PAGE_A, model=FL2VA_MODEL) == errors.ENHANCE_SWITCHED_OFF and len(outbox.jobs()) == 1)
+    fake.enabled = True
+    fake.configured = False
+    r.check("no configured model is ENHANCE_NOT_CONFIGURED, and nothing is downloaded silently",
+            _refused(outbox.submit, _request("x"), PAGE_A, model=FL2VA_MODEL) == errors.ENHANCE_NOT_CONFIGURED and len(outbox.jobs()) == 1)
+    fake.configured = True
+    fake.enabled = False
     fake.enabled = True
     fake.vision = False
     r.check("a picture for a model that cannot see is ENHANCE_NO_VISION, from the API's own refusal",
@@ -537,7 +546,8 @@ def pipeline_checks(r: Results, fake: FakeApi, clock: _Clock, base: pathlib.Path
 
     # -- the document and the log
     stored = json.loads((config.config_dir() / outbox.OUTBOX_NAME).read_text(encoding="utf-8"))
-    r.check("the outbox document is schema 2 with the enhancement records inside the jobs", stored["schema"] == 2 and any(item.get("enhance") for item in stored["jobs"]))
+    r.check("the outbox document is at the current schema with the enhancement records inside the jobs",
+            stored["schema"] == outbox.SCHEMA and any(item.get("enhance") for item in stored["jobs"]))
     log = process_log.path()
     text = pathlib.Path(log).read_text(encoding="utf-8") if os.path.isfile(log) else ""
     r.check("nothing written to the log is a prompt, typed or written, or an override",

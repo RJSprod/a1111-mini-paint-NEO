@@ -248,6 +248,33 @@ def refresh_checks(r: Results, base: pathlib.Path) -> None:
     (root / "renamed-by-hand.png").write_bytes(_png(colour=(6, 7, 8, 255)))
     changed = next(a for a in library.refresh() if a.filename == "renamed-by-hand.png")
     r.check("a file edited in place keeps its id and updates its facts", changed.asset_id == dropped.asset_id and changed.sha256 != dropped.sha256)
+
+    # B21: a refresh does not re-read a file whose metadata proves it
+    # unchanged. A folder of large stills would otherwise be hashed in full
+    # on every press of Refresh, which is the whole cost of the operation.
+    reads = {"count": 0}
+    original = store.inspect_bytes
+
+    def counting(data):
+        reads["count"] += 1
+        return original(data)
+
+    store.inspect_bytes = counting
+    try:
+        listed = library.refresh()
+    finally:
+        store.inspect_bytes = original
+    r.check("a refresh that changes nothing reads no file at all",
+            reads["count"] == 0 and len(listed) == len(again), f"{reads['count']} file(s) read")
+
+    os.utime(root / "renamed-by-hand.png", None)
+    reads["count"] = 0
+    store.inspect_bytes = counting
+    try:
+        library.refresh()
+    finally:
+        store.inspect_bytes = original
+    r.check("and exactly one when one file's metadata moved", reads["count"] == 1, str(reads["count"]))
     os.unlink(root / "renamed-by-hand.png")
     r.check("a file removed by hand leaves the index", dropped.asset_id not in {a.asset_id for a in library.refresh()})
     (root / "notes.txt").unlink()

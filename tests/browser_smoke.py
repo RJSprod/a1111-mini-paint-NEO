@@ -56,9 +56,13 @@ def head_html() -> str:
     for name in ("script.js", "javascript/ui.js", "modules_forge/forge_canvas/canvas.js"):
         parts.append("<script>" + (root / name).read_text(encoding="utf-8") + "</script>")
     parts.append("<style>" + (root / "modules_forge" / "forge_canvas" / "canvas.css").read_text(encoding="utf-8") + "</style>")
-    # The WebUI loads every file in an extension's javascript folder, whichever frontend is mounted.
-    for name in ("main.js", "minipaint_canvas.js"):
-        parts.append("<script>" + (ROOT / "javascript" / name).read_text(encoding="utf-8") + "</script>")
+    # The WebUI loads every file in an extension's javascript folder, whichever
+    # frontend is mounted - which is main.js and nothing else now. The tab
+    # bundles live in browser/ and are fetched by the loader in main.js; this
+    # harness has no route to fetch them from, so it inlines the one the
+    # canvas needs, in the order a page would end up with them.
+    for name, folder in (("main.js", "javascript"), ("minipaint_canvas.js", "browser")):
+        parts.append("<script>" + (ROOT / folder / name).read_text(encoding="utf-8") + "</script>")
     parts.append("<style>" + (ROOT / "style.css").read_text(encoding="utf-8") + "</style>")
     return "\n".join(parts)
 

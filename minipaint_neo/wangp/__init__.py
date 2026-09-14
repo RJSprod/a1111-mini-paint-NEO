@@ -87,6 +87,18 @@ def _on_app_started(_demo, app) -> None:
     except Exception as error:  # pragma: no cover - a cleanup is never fatal
         scrub.console(f"the handoff folder could not be swept ({error}).", _LOG_PREFIX)
 
+    # The Canvas's display copies from a previous run, for the same reason:
+    # they are pictures of a document that went away with the process that
+    # held it, and nothing will ever ask for them again.
+    try:
+        from ..canvas import display
+
+        removed = display.sweep()
+        if removed:
+            scrub.console(f"cleared {removed} stale display copy/copies.", _LOG_PREFIX)
+    except Exception as error:  # pragma: no cover - a cleanup is never fatal
+        scrub.console(f"the display folder could not be swept ({error}).", _LOG_PREFIX)
+
 
 def register(script_callbacks) -> None:
     """Add the WanGP tab, its settings entry and its routes to the host.

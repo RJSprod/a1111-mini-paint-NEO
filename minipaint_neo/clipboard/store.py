@@ -359,6 +359,14 @@ class Store:
         #: The most recent import, so the tab can select it when it next
         #: refreshes: the asset id and when. In memory only.
         self.last_import: typing.Optional[typing.Tuple[str, float]] = None
+        #: Files that were read once and turned out not to be pictures this
+        #: library can hold, keyed by (name, size, mtime). A folder with a
+        #: large ``.png`` that is not a PNG - a truncated download, something
+        #: another tool wrote - would otherwise be read in full on every
+        #: press of Refresh, forever, and never become anything. Keyed on the
+        #: metadata so a file that is *replaced* is read again; in memory,
+        #: bounded, and never a reason to hide a file that has changed.
+        self._rejected: "collections.OrderedDict[tuple, bool]" = collections.OrderedDict()
 
     # -- the index --------------------------------------------------------
 
@@ -556,10 +564,16 @@ class Store:
                     continue
                 existing = by_name.get(name)
                 if existing is not None and existing.mtime_ns == info.st_mtime_ns and existing.size_bytes == info.st_size:
+                    # Metadata proves it unchanged: no read, no hash. This is
+                    # the whole cost of a refresh on a folder of large stills.
                     seen[existing.asset_id] = existing
+                    continue
+                stamp = (name, int(info.st_size), int(info.st_mtime_ns))
+                if stamp in self._rejected:
                     continue
                 facts = self._inspect_file(pathlib.Path(entry.path), info)
                 if facts is None:
+                    self._remember_rejected(stamp)
                     continue
                 if existing is not None:
                     updated = dataclasses.replace(existing, **facts)
@@ -581,6 +595,16 @@ class Store:
             self._load_index()[root_id] = seen
             self._save_index()
             return sort_assets(seen.values(), config.load().sort)
+
+    #: How many rejections are remembered. Generous for a folder somebody
+    #: keeps working files in, finite because this is memory.
+    MAX_REJECTED = 256
+
+    def _remember_rejected(self, stamp: tuple) -> None:
+        self._rejected[stamp] = True
+        self._rejected.move_to_end(stamp)
+        while len(self._rejected) > self.MAX_REJECTED:
+            self._rejected.popitem(last=False)
 
     def _inspect_file(self, path: pathlib.Path, info: os.stat_result) -> typing.Optional[dict]:
         """Size, digest and dimensions of one file, or None when it is not an image."""

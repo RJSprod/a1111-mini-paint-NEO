@@ -66,6 +66,34 @@ def _id(name: str) -> str:
 # event, and none of them runs on a timer for longer than one bounded wait.
 _JS = "window.minipaintClipboard"
 ATTACH_JS = f"() => {{ if ({_JS}) {_JS}.attach(); }}"
+
+
+def _attach_with_bundles_js() -> str:
+    """Fetch this tab's browser half when it is first opened, then attach it.
+
+    THE ONLY BUNDLE IN THIS EXTENSION THAT CAN BE TRULY LAZY, and it is worth
+    saying why the others cannot. The Canvas adapter is reached from outside
+    its tab - "Send to Mini Paint" on the txt2img output row runs in the
+    browser before the Canvas has ever been opened - and the WanGP bridge is
+    reached from the Canvas. Nothing outside this tab addresses this one, so
+    a session that never opens Clipboard never parses it.
+
+    It brings the queue API and the WanGP bridge with it, because it calls
+    both; they are idempotent by URL, so a page that already has them from
+    the Canvas pays a dictionary lookup.
+    """
+    from .. import assets
+    from . import TAB_ID
+
+    return (
+        "async () => { "
+        f"await ({assets.tab_loader_js(TAB_ID, ['wangp', 'interop', 'clipboard'])})(); "
+        f"if ({_JS}) {_JS}.attach(); "
+        "}"
+    )
+
+
+ATTACH_WITH_BUNDLES_JS = _attach_with_bundles_js()
 MENU_JS = f"() => {{ if ({_JS}) {_JS}.toggleMenu(); }}"
 THUMB_JS = f"(size) => {{ if ({_JS}) {_JS}.setThumbnailSize(size); }}"
 # The queue instruction box changes when the server has built a request;
@@ -101,6 +129,14 @@ FIELD_LABELS = {
 OUTBOX_LABELS = {
     outbox.ENHANCING: "Enhancing", outbox.PENDING: "Waiting", outbox.SENDING: "Sending", outbox.QUEUED: "Queued", outbox.STARTED: "Generating",
     outbox.FAILED: "Refused", outbox.UNCONFIRMED: "Unconfirmed", outbox.CANCELLED: "Cancelled",
+    # The server-executed stages. Each names what the job is waiting for
+    # rather than where it is in a handshake, because that is the only thing
+    # somebody who walked away and came back can usefully be told.
+    outbox.ADMITTED: "Queued", outbox.WAITING_TURN: "Waiting", outbox.ENHANCED: "Enhanced",
+    outbox.ENSURING_WANGP: "Starting WanGP", outbox.COMPOSING: "Reading settings",
+    outbox.WAITING_FOR_CARD: "Waiting for the card", outbox.SUBMITTING_WANGP: "Submitting",
+    outbox.GENERATION_WAITING: "In WanGP's queue", outbox.GENERATION_RUNNING: "Generating",
+    outbox.COMPLETED: "Done", outbox.EXECUTION_UNKNOWN: "Unknown",
 }
 #: What the list says of a job's enhancement, by the LLM side's state.
 ENHANCE_LABELS = {
@@ -277,6 +313,18 @@ def job_sentence(job: typing.Mapping[str, typing.Any]) -> str:
         return str(error.get("message") or "Cancelled before it was sent.")
     if state == outbox.SENDING:
         return "Being sent to WanGP…"
+    if state == outbox.COMPLETED:
+        count = int(job.get("generated_count") or 0)
+        return f"Done: {count} file{'s' if count != 1 else ''} in WanGP's output folder." if count else "Done."
+    if state == outbox.EXECUTION_UNKNOWN:
+        return str(error.get("message") or errors.message(errors.EXECUTION_UNKNOWN))
+    if job.get("executor") == outbox.EXECUTOR_SERVER and state in outbox.SERVER_ACTIVE:
+        # The stage the executor wrote, which is the live one - "Waiting:
+        # WanGP is busy with its own work", the enhancer's own progress text,
+        # "Starting WanGP. This can take a few minutes from cold." A person
+        # who comes back to a job that has been going for ten minutes is
+        # owed the reason, and the reason is here rather than inferred.
+        return str(job.get("stage") or outbox.STAGE_TEXT.get(state, "Waiting its turn."))
     if state == outbox.ENHANCING:
         return "Waiting for the enhanced prompt."
     return "Waiting its turn."
@@ -369,10 +417,20 @@ def outbox_html(jobs: typing.Sequence[dict], page: str) -> str:
             excerpt = '<div class="minipaint-clip-job-prompt minipaint-clip-inherit-text">Prompt: Use WanGP</div>'
         when = str(job.get("created_at") or "").replace("T", " ").replace("+00:00", " UTC")
         actions = []
-        if state in outbox.WAITING:
+        server = job.get("executor") == outbox.EXECUTOR_SERVER
+        if server and state in outbox.SERVER_ACTIVE:
+            # Cancellable at every stage, from any page, because the server
+            # owns it: there is no lease to be holding and no page whose turn
+            # it is. "Run from this page" is not offered and would mean
+            # nothing - no page runs it.
+            actions.append(f'<button type="button" data-outbox-action="cancel:{_escape(job["job_id"])}">Cancel</button>')
+        elif state in outbox.WAITING:
             actions.append(f'<button type="button" data-outbox-action="cancel:{_escape(job["job_id"])}">Cancel</button>')
             if not mine and state == outbox.PENDING:
                 actions.append(f'<button type="button" data-outbox-action="adopt:{_escape(job["job_id"])}">Run from this page</button>')
+        elif state == outbox.EXECUTION_UNKNOWN:
+            actions.append(f'<button type="button" data-outbox-action="retry:{_escape(job["job_id"])}" '
+                           'title="WanGP may already have generated this; check its output folder first">Retry anyway</button>')
         elif state in (outbox.FAILED, outbox.CANCELLED):
             actions.append(f'<button type="button" data-outbox-action="retry:{_escape(job["job_id"])}">Retry</button>')
         elif state == outbox.UNCONFIRMED:
@@ -384,6 +442,24 @@ def outbox_html(jobs: typing.Sequence[dict], page: str) -> str:
             badge = '<span class="minipaint-clip-badge">from another extension</span>'
         if job.get("enhance_requested"):
             badge += '<span class="minipaint-clip-badge">enhanced prompt</span>'
+        if server:
+            badge += '<span class="minipaint-clip-badge" title="This job runs on the server. You can close this page.">unattended</span>'
+        snapshot = job.get("snapshot") or {}
+        if snapshot.get("source") == protocol.BASE_FACTORY:
+            # The one thing about a snapshot that must never be silent. A job
+            # that ran at settings nobody chose for it, when its owner had
+            # configured something else, is the failure compose exists to
+            # prevent, and if it happens anyway it is said out loud rather
+            # than looking like a job that ran at the settings they chose.
+            #
+            # "default settings" rather than "factory settings" because that
+            # is what it actually is: Wan2GP's ``get_default_settings`` reads
+            # the model's own saved settings file - what Save Settings writes
+            # - and only synthesises true factory values when no such file
+            # exists. Calling the common case "factory" overstated it.
+            badge += ('<span class="minipaint-clip-badge minipaint-clip-badge-warn" '
+                      'title="WanGP had no form recorded for this model, so this ran at that '
+                      'model\'s saved defaults rather than at what was on screen">default settings</span>')
         lines = []
         llm = enhance_sentence(job)
         if llm:
@@ -506,7 +582,21 @@ class ClipboardTab:
         return outbox.wangp_running()
 
     def _queue_button(self, running: typing.Optional[bool] = None):
-        """Add to Queue is a button while WanGP is running, and says why not otherwise."""
+        """Add to Queue, and when it is not one.
+
+        The old rule - a button only while WanGP is already running - was
+        correct for a browser-executed press: there was nothing for a page to
+        drive, so storing the job would have been storing it for a process
+        that might never come.
+
+        It is exactly wrong for an unattended one. Starting a cold WanGP is
+        a stage the server performs *after* admission, and refusing the press
+        because the thing the server is about to start is not started yet
+        would make the cold case - the one the whole feature exists for -
+        the one case that does not work.
+        """
+        if outbox.chosen_executor() == outbox.EXECUTOR_SERVER:
+            return gr.update(interactive=True, value=QUEUE_BUTTON_LABEL)
         running = self._running() if running is None else bool(running)
         return gr.update(interactive=running, value=QUEUE_BUTTON_LABEL if running else QUEUE_BUTTON_BLOCKED)
 
@@ -801,8 +891,28 @@ class ClipboardTab:
                 notes.append("only the first reference is described to the writer")
         if page_id == NO_PAGE:
             notes.append("this page did not identify itself, so the job waits for one that can run it")
-        instruction = json.dumps({"nonce": _nonce(), "job_id": job["job_id"]})
-        line = f"Enhancing the prompt as {enhance.VARIANT_LABELS.get(record['variant'], record['variant'])}; WanGP gets it when it is written." if record else "Queued for WanGP."
+        # The executor travels with the acknowledgement, because it decides
+        # what the page does next: a server job is *watched*, and the page
+        # may be closed the moment this lands; a browser job is pumped, and
+        # closing the page stops it.
+        instruction = json.dumps({
+            "nonce": _nonce(), "job_id": job["job_id"],
+            "executor": job.get("executor", outbox.EXECUTOR_BROWSER), "state": job.get("state", ""),
+        })
+        if job.get("executor") == outbox.EXECUTOR_SERVER:
+            line = "Queued on the server."
+            # The three things about walking away that are invisible unless
+            # the UI says them. The first two are ordinary status; the third
+            # is a note rather than a dialog, because it is true only of a
+            # crash and only on one platform.
+            notes.append("you can close this page - Forge runs it, starting WanGP if it is not already running")
+            if record:
+                line = "Queued on the server; the prompt is being enhanced first."
+            notes.append("it may wait if you are generating in the WanGP tab; it will never interrupt that")
+        else:
+            line = (f"Enhancing the prompt as {enhance.VARIANT_LABELS.get(record['variant'], record['variant'])}; "
+                    "WanGP gets it when it is written.") if record else "Queued for WanGP."
+            notes.append("keep this page open until it is queued")
         return instruction, _status(line, notes), self._outbox(page_id), self._queue_button()
 
     def _draft_from_request(self, request: typing.Mapping[str, typing.Any], job: typing.Optional[typing.Mapping[str, typing.Any]] = None) -> dict:
@@ -1178,7 +1288,17 @@ class ClipboardTab:
         with contextlib.suppress(Exception):
             from gradio.context import Context
 
-            Context.root_block.load(None, js=ATTACH_JS)
+            # The only bundle in this extension nothing outside its own tab
+            # addresses, and therefore the only one that can be left until
+            # somebody opens that tab. It brings the public queue API and
+            # the WanGP bridge with it, because it calls both.
+            #
+            # Registered on page load, but what it registers is a listener
+            # on this tab's own nav button: the host builds the tab around
+            # this block and an extension has no Gradio handle on it, so the
+            # activation hook is in the browser. A panel that is already on
+            # screen - a reload with this tab selected - loads at once.
+            Context.root_block.load(None, js=ATTACH_WITH_BUNDLES_JS)
         p["menu_btn"].click(None, js=MENU_JS)
         p["grid"].change(None, js=SELECTED_JS, inputs=[p["grid"], selected])
 

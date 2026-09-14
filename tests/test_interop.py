@@ -222,6 +222,104 @@ def route_checks(r: Results, folder: pathlib.Path) -> None:
     r.check("the host catch-all still answers everything else", client.get("/elsewhere").json() == {"caught": "elsewhere"})
 
 
+def spine_checks(r: Results) -> None:
+    """The two routes that let a page be told rather than ask.
+
+    The stream itself is driven directly rather than through a test client:
+    what matters is which frames it produces, in what order, with which ids -
+    and a client that buffers a text/event-stream would hide exactly that.
+    """
+    import asyncio
+
+    from minipaint_neo import events
+
+    events.reset_for_tests()
+
+    class Request:
+        def __init__(self, cursor=""):
+            self.query_params = {"page": "a" * 16, "cursor": cursor}
+            self.headers = {}
+            self.cookies = {}
+
+    def frames(cursor="", count=2):
+        async def read():
+            response = await interop._events_route(Request(cursor))
+            iterator = response.body_iterator
+            out = []
+            try:
+                for _ in range(count):
+                    out.append(await asyncio.wait_for(iterator.__anext__(), timeout=5))
+            except (StopAsyncIteration, asyncio.TimeoutError):
+                pass
+            finally:
+                await iterator.aclose()
+            return out
+
+        return asyncio.run(read())
+
+    def parsed(frame):
+        kind = ""
+        identifier = ""
+        payload = {}
+        for line in frame.strip().splitlines():
+            if line.startswith("event: "):
+                kind = line[7:]
+            elif line.startswith("id: "):
+                identifier = line[4:]
+            elif line.startswith("data: "):
+                payload = json.loads(line[6:])
+        return kind, identifier, payload
+
+    events.publish(events.JOB, {"job_id": "j1", "state": "admitted"})
+    cursor = events.cursor()
+    events.publish(events.JOB, {"job_id": "j1", "state": "ensuring_wangp"})
+
+    seen = [parsed(frame) for frame in frames()]
+    r.check("a page with no cursor is greeted and told to take a snapshot",
+            [kind for kind, _id, _payload in seen] == ["hello", "reset"], str(seen)[:160])
+    r.check("and the greeting carries this process's epoch and where the stream is now",
+            seen[0][2]["server_epoch"] == events.epoch() and seen[0][2]["cursor"] == events.cursor(), str(seen[0]))
+    r.check("a hello carries no id, so a page cannot resume from a greeting", seen[0][1] == "")
+
+    seen = [parsed(frame) for frame in frames(cursor)]
+    r.check("a page holding a cursor is resumed rather than reset",
+            seen[0][0] == "hello" and seen[0][2]["resumed"] is True, str(seen[0]))
+    r.check("and replayed exactly what it missed, with the id to resume from next time",
+            len(seen) > 1 and seen[1][0] == "job" and seen[1][2]["state"] == "ensuring_wangp"
+            and seen[1][1] == events.cursor(), str(seen)[:200])
+
+    stale = f"{events.epoch()}:99999"
+    seen = [parsed(frame) for frame in frames(stale)]
+    r.check("a cursor this process never issued is a reset, not an error",
+            [kind for kind, _id, _payload in seen] == ["hello", "reset"], str(seen)[:160])
+    seen = [parsed(frame) for frame in frames("somebodyelse:1")]
+    r.check("and so is one from another run of Forge, which is meaningless rather than stale",
+            [kind for kind, _id, _payload in seen] == ["hello", "reset"], str(seen)[:160])
+
+    # A silent connection and a dead one look identical to a remote browser,
+    # so the stream says it is alive in a frame JavaScript can see - an SSE
+    # comment cannot be read from a page.
+    original = interop.HEARTBEAT_SECONDS
+    interop.HEARTBEAT_SECONDS = 0.05
+    try:
+        seen = [parsed(frame) for frame in frames(events.cursor(), count=3)]
+    finally:
+        interop.HEARTBEAT_SECONDS = original
+    r.check("a quiet stream sends a heartbeat a page can time against",
+            any(kind == "heartbeat" for kind, _id, _payload in seen), str(seen)[:160])
+    r.check("and it advances nothing: a heartbeat carries no id and no revision",
+            all(identifier == "" for kind, identifier, _payload in seen if kind == "heartbeat"), str(seen)[:160])
+
+    snapshot = interop.snapshot("a" * 16)
+    r.check("the snapshot is authoritative: an epoch, a revision and a cursor",
+            snapshot["ok"] and snapshot["server_epoch"] == events.epoch() and snapshot["cursor"] == events.cursor(), str(snapshot)[:160])
+    r.check("it says what the runtime is doing without saying where it is",
+            "state" in snapshot["runtime"] and "port" not in json.dumps(snapshot["runtime"]), str(snapshot["runtime"]))
+    r.check("and what the enhancer can do without naming a model path",
+            "found" in snapshot["enhancer"] and "/" not in json.dumps(snapshot["enhancer"]), str(snapshot["enhancer"]))
+    events.reset_for_tests()
+
+
 def run() -> Results:
     r = Results("interop")
     with tempfile.TemporaryDirectory(prefix="minipaint-interop-") as scratch:
@@ -234,6 +332,7 @@ def run() -> Results:
             request_checks(r)
             prepare_checks(r, base / "library")
             route_checks(r, base / "library")
+            spine_checks(r)
         finally:
             wangp_config.use_config_dir(None)
             clipboard_config.use_config_dir(None)

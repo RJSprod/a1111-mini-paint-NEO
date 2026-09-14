@@ -65,9 +65,32 @@ window.minipaintWanGP = (function () {
     // Protocol 5: where the tasks this page admitted are in WanGP's queue.
     const QUEUE_TRACK = "WANGP_QUEUE_TRACK";
     const QUEUE_TRACKED = "WANGP_QUEUE_TRACKED";
+    // Protocol 6: commit the live form so a server-composed job runs at it.
+    const FORM_FLUSH = "WANGP_FORM_FLUSH";
+    const FORM_FLUSHED = "WANGP_FORM_FLUSHED";
 
-    const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK];
-    const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED];
+    const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH];
+    const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED];
+
+    // The flush outcomes, as protocol.py names them.
+    const FLUSH_REQUESTED = "requested";
+    const FLUSH_COMMITTED = "committed";
+    const FLUSH_UNCHANGED = "unchanged";
+    const FLUSH_UNAVAILABLE = "unavailable";
+    const FLUSH_SUPPRESSED = "suppressed";
+    // Long enough for a Gradio round trip on a loaded page, short enough that
+    // a press never feels like it hung.
+    //
+    // It is deliberately not generous, because the case that spends the whole
+    // budget is the ORDINARY one: a user who changed nothing since the last
+    // commit produces an identical form, so the recorded fingerprint never
+    // moves however long anyone waits. That answer is ``unchanged``, and
+    // ``unchanged`` is a success - the record already matches the live form,
+    // which is all the job needed. Waiting longer only taxes the common press
+    // to shorten a race that is already bounded and already harmless.
+    const FLUSH_BUDGET_MS = 900;
+    const FLUSH_POLL_MS = 75;
+    const FLUSH_CALL_TIMEOUT_MS = 8000;
 
     const RECEIVER_IDS = ["start_frame", "end_frame", "reference", "control_image", "positioned_ref", "style_ref"];
     const ROLES = ["start", "end", "reference", "control", "positioned", "style"];
@@ -1305,6 +1328,71 @@ window.minipaintWanGP = (function () {
         return ask(QUEUE_TRACK, { request_ids: ids, bridge_session: S.bridgeSession }, QUEUE_TRACK_TIMEOUT_MS, QUEUE_TRACKED);
     }
 
+    /**
+     * Protocol 6: make WanGP commit this page's live form, so that a job
+     * composed later - on the server, with this page shut - runs at the
+     * settings that were on screen when the button was pressed.
+     *
+     * WHY THIS WAITS INSTEAD OF JUST ASKING.
+     *
+     * The bridge does not read the form and hand it back. It writes one
+     * hidden trigger, and WanGP's own chain commits its own form - which is
+     * one component of coupling rather than the ninety a read would need.
+     * The cost is that the commit happens *after* the call that asked for it
+     * returns, so "it worked" cannot be part of that answer. What comes back
+     * is the fingerprint of the recorded form before the write; this polls
+     * until it moves.
+     *
+     * A poll that never moves is not a failure. The ordinary reason for it
+     * is that the live form already matched what was recorded - nothing to
+     * carry - and the ordinary reason for a timeout is a page that is slow
+     * or gone. Both resolve rather than reject, because composing from the
+     * recorded form is exactly what happened before any of this existed. A
+     * flush is an optimisation and must never become a thing a press needs.
+     */
+    async function flushForm(options) {
+        const settings = options || {};
+        const budget = Number(settings.timeoutMs) > 0 ? Number(settings.timeoutMs) : FLUSH_BUDGET_MS;
+        const started = Date.now();
+        const give = function (outcome, detail) {
+            say("flush: " + outcome + (detail ? " (" + text(detail, 120) + ")" : ""));
+            return { ok: true, flush: outcome };
+        };
+
+        if (!ensure() || !S.ready || !S.bridgeSession) { return give(FLUSH_UNAVAILABLE, "no bridge session in this page"); }
+
+        let first;
+        try {
+            first = await ask(FORM_FLUSH, {}, FLUSH_CALL_TIMEOUT_MS, FORM_FLUSHED);
+        } catch (error) {
+            return give(FLUSH_UNAVAILABLE, "the bridge did not answer");
+        }
+        if (!first || first.ok === false) { return give(FLUSH_UNAVAILABLE, first && first.code); }
+        if (first.flush === FLUSH_SUPPRESSED) {
+            // WanGP asked for the next commit to be skipped, and consuming
+            // that one-shot here would let the model switch behind it clobber
+            // settings the user just loaded. Their press is not worth that.
+            return give(FLUSH_SUPPRESSED, "WanGP is mid settings-load");
+        }
+        if (first.flush !== FLUSH_REQUESTED) { return give(FLUSH_UNAVAILABLE, first.flush); }
+
+        const before = String(first.fingerprint || "");
+        while (Date.now() - started < budget) {
+            await new Promise(function (resume) { window.setTimeout(resume, FLUSH_POLL_MS); });
+            let probe;
+            try {
+                probe = await ask(FORM_FLUSH, { probe: true }, FLUSH_CALL_TIMEOUT_MS, FORM_FLUSHED);
+            } catch (error) {
+                return give(FLUSH_UNAVAILABLE, "the bridge stopped answering mid-flush");
+            }
+            if (!probe || probe.ok === false) { return give(FLUSH_UNAVAILABLE, probe && probe.code); }
+            if (String(probe.fingerprint || "") !== before) { return give(FLUSH_COMMITTED); }
+        }
+        // Either there was nothing to commit, or the page never got to it.
+        // The two are indistinguishable from here and have the same answer.
+        return give(FLUSH_UNCHANGED, "the recorded form did not move within " + budget + " ms");
+    }
+
     function queueRefusal(failureCode, detail, requestId) {
         say("queue: refused before asking - " + failureCode + (detail ? " (" + text(detail, 120) + ")" : ""));
         return Promise.resolve(Object.assign(failure(failureCode, detail), { admission: "refused", request_id: requestId || "" }));
@@ -1758,6 +1846,7 @@ window.minipaintWanGP = (function () {
         confirmQueue: confirmQueue,
         queueAndConfirm: queueAndConfirm,
         trackQueue: trackQueue,
+        flushForm: flushForm,
         capabilities: capabilities,
         // One line into the same journal the handshake and the queries write
         // to, for the Canvas's half of a send. Text only; nothing is parsed.

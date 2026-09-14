@@ -512,53 +512,6 @@ def _shorten(raw: str) -> str:
     return "/".join(parts)
 
 
-#: URL routes this extension serves itself, which a log may name in full.
-#:
-#: THIS IS THE ONE EXCEPTION, AND IT IS NARROW ON PURPOSE.
-#:
-#: A route and a filesystem path are the same shape and nothing here can tell
-#: them apart, so ``/deepy/deepy_api/state`` was redacted to ``<path>`` - and
-#: a diagnostic written to say *which* route answered 404 said nothing at
-#: all. The route is a constant of somebody's published HTTP surface; it
-#: names a mount point, never a file, and never anything of the user's.
-#:
-#: What is deliberately NOT in here is ``/wan2gp/``. Gradio serves user files
-#: under it - ``/wan2gp/file=/home/someone/a photo.png`` is an ordinary
-#: request - so exempting that prefix would hand over exactly what this
-#: module exists to keep back. A prefix belongs here only when every path
-#: under it is a route name, and that has to be true of the *namespace*,
-#: not of the one string somebody happened to be logging.
-_SAFE_ROUTE_PREFIXES: typing.List[str] = []
-
-#: What may follow a registered prefix and still count as a route: letters,
-#: digits and the three separators a path segment uses. No ``=`` (that is how
-#: a filename is passed), no ``:`` (drive letters), no backslash, no ``..``,
-#: no spaces - and bounded, because an unbounded exception is not one.
-_ROUTE_TAIL = re.compile(r"[A-Za-z0-9_.\-/]{0,120}\Z")
-
-
-def allow_route_prefix(prefix: typing.Any) -> None:
-    """Declare that every path under ``prefix`` is a route name, not a file.
-
-    Called by the module that owns the prefix, with a literal of its own.
-    Nothing reads this from configuration and nothing a request can influence
-    reaches it: an exception that a caller could widen at run time is not an
-    exception, it is an off switch with a longer name.
-    """
-    text = str(prefix or "")
-    if text.startswith("/") and text.endswith("/") and text not in _SAFE_ROUTE_PREFIXES:
-        _SAFE_ROUTE_PREFIXES.append(text)
-
-
-def is_own_route(value: typing.Any) -> bool:
-    """Whether this is a route under a declared prefix, and shaped like one."""
-    text = str(value or "")
-    for prefix in _SAFE_ROUTE_PREFIXES:
-        if text.startswith(prefix) and ".." not in text:
-            return bool(_ROUTE_TAIL.match(text[len(prefix):]))
-    return False
-
-
 def _replace_path(match: "re.Match[str]") -> str:
     raw = match.group(0)
     trailing = ""
@@ -567,8 +520,6 @@ def _replace_path(match: "re.Match[str]") -> str:
         raw = raw[:-1]
     if not raw:
         return trailing
-    if is_own_route(raw):
-        return raw + trailing
     return _shorten(raw) + trailing
 
 

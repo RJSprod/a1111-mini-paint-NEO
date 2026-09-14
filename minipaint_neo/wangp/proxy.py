@@ -71,20 +71,12 @@ PROXY_PREFIX = PROXY_PATH + "/"
 #: resolves, the path is served. ``upstream_path`` already passes anything
 #: outside our own prefix through unchanged, so the child sees ``/deepy/...``
 #: exactly as it would with no proxy in the way.
-#: How many distinct Deepy paths get a line before the log stops saying. The
-#: page asks for a handful and then repeats them; this is enough to tell a
-#: missing mount from a missing route, and few enough to be a diagnostic
-#: rather than a request log.
+#: How many distinct Deepy paths get a line before the log stops saying.
 DEEPY_NOTED_MAX = 8
 
 DEEPY_PATH = "/deepy"
 DEEPY_PREFIX = DEEPY_PATH + "/"
 
-#: Every path under it is one of the child's own route names, so a log may say
-#: which one answered. ``PROXY_PREFIX`` is deliberately not declared: Gradio
-#: serves user files under it (``/wan2gp/file=/home/someone/a photo.png``),
-#: and that is exactly what the scrubber is for.
-scrub.allow_route_prefix(DEEPY_PREFIX)
 
 #: A route under our own prefix that answers nothing and proves everything.
 #: Section 12.6 says route registration is not authentication coverage and
@@ -164,7 +156,7 @@ _ASSET_RE = re.compile(
 
 #: Module state: the shared client, the loop it belongs to, and the keys of
 #: one-shot log lines. None of it is persisted, and none of it is a secret.
-_state: typing.Dict[str, typing.Any] = {"client": None, "loop": None, "injected": None, "logged": set(), "deepy": set()}
+_state: typing.Dict[str, typing.Any] = {"client": None, "loop": None, "injected": None, "logged": set(), "deepy": set(), "deepy_form": None}
 
 
 def _log(text: str) -> None:
@@ -593,6 +585,91 @@ def _relax_read_timeout(request_object: typing.Any) -> None:
             extensions["timeout"]["read"] = STREAM_IDLE_TIMEOUT
 
 
+def _proxied(request: typing.Any, response: httpx.Response) -> typing.Any:
+    """One upstream response, streamed back with its headers kept.
+
+    Extracted so the Deepy retry can hand back its own answer through exactly
+    the same path the first one would have taken - a second response built a
+    second way is a second set of header rules to get wrong.
+    """
+    from starlette.background import BackgroundTask
+    from starlette.responses import StreamingResponse
+
+    proxied = StreamingResponse(
+        _stream_response(response),
+        status_code=response.status_code,
+        background=BackgroundTask(response.aclose),
+    )
+    # Set after construction so duplicate headers survive - Set-Cookie arrives
+    # more than once and a dict would keep only the last one.
+    proxied.raw_headers = [
+        (name.encode("latin-1"), value.encode("latin-1"))
+        for name, value in response_headers(response.headers.multi_items(), upstream() or "")
+    ]
+    return proxied
+
+
+async def _retry_deepy(
+    request: typing.Any,
+    first: httpx.Response,
+    raw_path: bytes,
+    raw_query: bytes,
+    headers: typing.Mapping[str, str],
+    method: str,
+) -> typing.Any:
+    """Ask for the same Deepy resource at the other place it can live.
+
+    THE PAGE ASKS AT ONE PLACE; SOME BUILDS ANSWER AT THE OTHER.
+
+    Wan2GP mounts its Deepy app as a sub-application - ``app.mount('/deepy',
+    create_app(...))`` - so its API is at ``/deepy/deepy_api/...``. That is
+    where the page asks, because its marker is a root-relative ``/deepy/``
+    and the transport resolves ``deepy_api/state`` against it.
+
+    On the install this was found on, that path answers 404 and the panel
+    shows "Connection to server lost" for ever while every other part of the
+    page works. The same routes exist unprefixed on the main app in other
+    arrangements of this code, and from outside the two are indistinguishable
+    until one of them is asked.
+
+    So one of them is asked. A 404 under the Deepy prefix is retried once
+    without it, and whichever form answers is remembered for the life of the
+    process: after the first request there is no second one, and a build
+    where the prefixed form is right never pays for this at all. Only 404 is
+    retried - a 500 is the app saying something went wrong inside it, and
+    asking a different way would be papering over that.
+    """
+    stripped = raw_path[len(DEEPY_PATH):] or b"/"
+    if not stripped.startswith(b"/"):
+        return None
+    target = upstream()
+    if not target:
+        return None
+    url = httpx.URL(target).copy_with(raw_path=stripped + (b"?" + raw_query if raw_query else b""))
+    try:
+        second = await _client().send(
+            _client().build_request(
+                method, url, headers=dict(headers), content=None,
+                timeout=timeout_for(stripped.decode("latin-1", "ignore"), headers.get("accept", "")),
+            ),
+            stream=True,
+            follow_redirects=False,
+        )
+    except httpx.HTTPError:
+        return None
+    if second.status_code == 404:
+        _state["deepy_form"] = "prefixed"
+        _log_once("deepy-form", "the Deepy panel's API answers at neither place; its banner is the child's own.")
+        with contextlib.suppress(Exception):
+            await second.aclose()
+        return None
+    _state["deepy_form"] = "unprefixed"
+    _log_once("deepy-form", "this Wan2GP serves its Deepy API without the /deepy prefix; requests are sent that way now.")
+    with contextlib.suppress(Exception):
+        await first.aclose()
+    return _proxied(request, second)
+
+
 async def _stream_response(response: httpx.Response) -> typing.AsyncIterator[bytes]:
     """The body, raw and unbuffered. Nothing here holds more than a chunk."""
     if getattr(response, "is_stream_consumed", False):
@@ -628,9 +705,6 @@ async def _auth_probe(request: typing.Any) -> typing.Any:
 
 async def forward(request: typing.Any) -> typing.Any:
     """One browser request, streamed to the backend and streamed back."""
-    from starlette.background import BackgroundTask
-    from starlette.responses import StreamingResponse
-
     # The same sign-in the rest of Forge asks for, asked here. This is what
     # makes the route covered rather than merely believed to be.
     if not signed_in(request):
@@ -648,6 +722,9 @@ async def forward(request: typing.Any) -> typing.Any:
     # value is consulted here, and none may be added later.
     raw_query = _raw_query(request)
     raw_path = _raw_target(request)
+    if _state["deepy_form"] == "unprefixed" and raw_path.startswith(DEEPY_PREFIX.encode("latin-1")):
+        # Learnt once, applied from then on. See ``_retry_deepy``.
+        raw_path = raw_path[len(DEEPY_PATH):] or b"/"
     url = httpx.URL(target).copy_with(raw_path=raw_path + (b"?" + raw_query if raw_query else b""))
 
     method = str(getattr(request, "method", "GET") or "GET").upper()
@@ -676,38 +753,18 @@ async def forward(request: typing.Any) -> typing.Any:
     # is here.
     decoded = raw_path.decode("latin-1", "ignore")
     if decoded.startswith(DEEPY_PREFIX):
-        # With the path. Which path 404s is the whole question - the child
-        # mounts its Deepy app at /deepy, so a 404 there means either the
-        # mount is not where it says or the request is not arriving as the
-        # child expects, and those are different problems with the same
-        # status code. The path is the child's own route namespace; it
-        # carries nothing of the user's.
-        # Per path, not per status, and bounded. Which of these answers what
-        # is the whole question: an index that answers 200 while its API
-        # answers 404 is a mount that is there and a route that is not, and
-        # everything answering 404 is a mount that is not reachable at all.
-        # Those need opposite fixes and one line cannot tell them apart.
+        if response.status_code == 404 and _state["deepy_form"] is None:
+            # See DEEPY_PREFIX. The page asks at one place and this build
+            # answers at the other; which one is not knowable from here, so
+            # it is asked rather than assumed - once, and the answer is kept.
+            retried = await _retry_deepy(request, response, raw_path, raw_query, headers, method)
+            if retried is not None:
+                return retried
         if len(_state["deepy"]) < DEEPY_NOTED_MAX:
             _state["deepy"].add(decoded)
-            _log_once(
-                f"deepy {decoded}",
-                f"{decoded} answered {response.status_code}"
-                + ("." if response.status_code < 400 else
-                   " - the child mounts its Deepy app at /deepy/ and this is what it said."),
-            )
+            _log_once(f"deepy {decoded}", f"a Deepy request answered {response.status_code}.")
 
-    proxied = StreamingResponse(
-        _stream_response(response),
-        status_code=response.status_code,
-        background=BackgroundTask(response.aclose),
-    )
-    # Set after construction so duplicate headers survive - Set-Cookie arrives
-    # more than once and a dict would keep only the last one.
-    proxied.raw_headers = [
-        (name.encode("latin-1"), value.encode("latin-1"))
-        for name, value in response_headers(response.headers.multi_items(), target)
-    ]
-    return proxied
+    return _proxied(request, response)
 
 
 async def _redirect_to_prefix(request: typing.Any) -> typing.Any:

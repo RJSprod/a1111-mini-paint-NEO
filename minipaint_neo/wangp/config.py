@@ -125,7 +125,7 @@ _LOG_PREFIX = "MiniPaint WanGP:"
 #: Where config_dir() settled, and whether the fallback line has been printed.
 #: Resolution is cached because config_dir() is called on every path lookup and
 #: the answer cannot change inside one process.
-_state: typing.Dict[str, typing.Any] = {"dir": None, "announced": False}
+_state: typing.Dict[str, typing.Any] = {"dir": None, "announced": False, "said_where": False}
 
 
 # --------------------------------------------------------------- location --
@@ -194,6 +194,7 @@ def use_config_dir(directory: typing.Optional[typing.Any]) -> None:
     """
     _state["dir"] = pathlib.Path(str(directory)) if directory is not None else None
     _state["announced"] = False
+    _state["said_where"] = False
 
 
 def config_dir() -> pathlib.Path:
@@ -212,7 +213,52 @@ def config_dir() -> pathlib.Path:
                 _LOG_PREFIX,
             )
     directory.mkdir(parents=True, exist_ok=True)
+    if not _state.get("said_where"):
+        _state["said_where"] = True
+        # Into the journal, not only the console. Where the settings live is
+        # the first thing to know when a tab that was set up yesterday says
+        # it needs setting up today, and it used to be the one fact nobody
+        # could see.
+        _note_where(directory)
     return directory
+
+
+def candidate_dirs() -> typing.List[pathlib.Path]:
+    """Every directory a config of ours could be sitting in, best first.
+
+    One directory is the answer only while nothing about the host changes.
+    ``data_root`` asks the host where its data lives and falls back to this
+    extension's own folder when it will not say, so a Forge that answers on
+    one run and not the next - or answers with a different path - leaves a
+    perfectly good config in a folder nothing looks in any more, and the tab
+    says "set up first" about an integration that is set up.
+
+    So the others are known, and ``load`` looks in them rather than declaring
+    a working setup missing.
+    """
+    seen: typing.List[pathlib.Path] = []
+    for candidate in (
+        config_dir(),
+        pathlib.Path(data_root()[0]) / DIRECTORY_NAME,
+        paths.root_path / FALLBACK_DIRECTORY_NAME,
+        paths.root_path / DIRECTORY_NAME,
+    ):
+        try:
+            resolved = pathlib.Path(candidate)
+        except Exception:
+            continue
+        if resolved not in seen:
+            seen.append(resolved)
+    return seen
+
+
+def _note_where(directory: typing.Any) -> None:
+    try:
+        from . import journal
+
+        journal.note("config", f"settings directory: {directory}")
+    except Exception:
+        pass
 
 
 def config_path() -> pathlib.Path:
@@ -465,8 +511,37 @@ def _read(path: pathlib.Path) -> typing.Optional[Config]:
 
 
 def load() -> typing.Optional[Config]:
-    """The active config. None means "never set up", which is not an error."""
-    return _read(config_path())
+    """The active config. None means "never set up", which is not an error.
+
+    Looked for where it should be, and then where it could be. "Never set up"
+    and "set up into a folder this run is not looking in" produce the same
+    answer from one path and completely different answers from a user, who is
+    told to do a setup they already did - and whose next setup may land in
+    the other folder again.
+    """
+    found = _read(config_path())
+    if found is not None:
+        return found
+    primary = config_path()
+    for directory in candidate_dirs():
+        path = pathlib.Path(directory) / CONFIG_NAME
+        if path == primary:
+            continue
+        other = _read(path)
+        if other is None:
+            continue
+        try:
+            from . import journal
+
+            journal.note(
+                "config",
+                f"the settings this run would have written to ({primary.parent}) hold nothing, "
+                f"so the ones at {path.parent} are being used instead",
+            )
+        except Exception:
+            pass
+        return other
+    return None
 
 
 def write_pending(config: Config) -> None:

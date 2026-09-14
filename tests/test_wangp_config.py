@@ -838,6 +838,68 @@ def check_probe(r: Results, base: pathlib.Path) -> None:
                 discovery.DIRECT_PYTHON in detail and discovery.CONDA_RUN in detail)
 
 
+def check_moved_settings(r: Results, base: pathlib.Path) -> None:
+    """A setup that was written somewhere this run is not looking is still a setup.
+
+    THE TAB SAID "SET UP FIRST" TO SOMEBODY WHO HAD.
+
+    Where the settings live is decided once per process: the host is asked
+    where its data root is, and when it will not say, the extension's own
+    folder is used instead. Both are reasonable; what is not reasonable is
+    that a Forge which answers on one run and not the next leaves a perfectly
+    good config in a folder nothing looks in any more - and the tab then asks
+    for a setup that has already been done, whose result lands in whichever
+    folder *that* run picked. Round and round.
+
+    So the other candidates are known and are looked in. The one thing this
+    must not do is invent a setup: a genuinely fresh install still answers
+    "never set up", because that is true and the wizard is the right answer
+    to it.
+    """
+    host = base / "host-root" / config.DIRECTORY_NAME
+    extension = base / "extension-root" / config.FALLBACK_DIRECTORY_NAME
+    host.mkdir(parents=True, exist_ok=True)
+    extension.mkdir(parents=True, exist_ok=True)
+
+    # Set up once, into the folder this run happens to be using.
+    config.use_config_dir(host)
+    written = config_from_wizard_like()
+    config.atomic_write(config.config_path(), config._dumps(written))
+    r.check("the setup is readable where it was written", config.load() is not None)
+
+    # Next run, the host answers differently and the other folder is current.
+    original_root = config.data_root
+    config.use_config_dir(extension)
+    config.data_root = lambda sources=None: (base / "host-root", "")
+    try:
+        r.check("a run looking in the other folder still finds the setup rather than asking for another",
+                config.load() is not None and config.load().initialized is True)
+        r.check("and the tab therefore does not ask for setup",
+                errors.SETUP_REQUIRED not in (config.load().validate() or []),
+                str(config.load().validate()))
+
+        # But a genuinely fresh install is still fresh.
+        empty = base / "nothing-here"
+        config.use_config_dir(empty / config.DIRECTORY_NAME)
+        config.data_root = lambda sources=None: (empty, "")
+        r.check("a first-ever run still says it has never been set up",
+                config.load() is None)
+    finally:
+        config.data_root = original_root
+
+
+def config_from_wizard_like():
+    """A minimal, valid, initialized config - whatever the schema needs."""
+    return config.Config(
+        schema_version=config.SCHEMA_VERSION,
+        initialized=True,
+        wangp_root=str(pathlib.Path.home()),
+        runtime={"type": "venv", "prefix": str(pathlib.Path.home()), "display_name": "venv", "launch_strategy": "venv"},
+        gpu={"uuid": "GPU-12345678-1234-1234-1234-123456789abc"},
+        integration={"proxy_path": "/wan2gp", "auto_start": "lazy", "auth_checked": True},
+    )
+
+
 def run() -> Results:
     r = Results("wangp setup")
 
@@ -846,6 +908,7 @@ def run() -> Results:
         base = pathlib.Path(temporary)
         try:
             check_location(r, base)
+            check_moved_settings(r, base)
             check_schema(r)
             check_forbidden_keys(r, base)
             check_atomic_write(r, base)

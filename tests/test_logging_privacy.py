@@ -434,6 +434,46 @@ def drain_prose_checks(r: Results) -> None:
                 "No module named 'torch'" in written, written)
 
 
+def no_exemptions_checks(r: Results) -> None:
+    """Nothing is exempt from the scrubber, including us.
+
+    WHY THIS IS A TEST AND NOT A COMMENT.
+
+    A diagnostic once needed one of our own routes to survive redaction, and
+    a narrow exception was written to let it through. It worked, the fact was
+    captured, and it was taken out again the same day - but a rule with a
+    hole in it is exactly the kind of thing that grows back, because the next
+    person to want a path in a log will find the same reasons persuasive.
+
+    So the property is asserted rather than remembered: a route this
+    extension serves is a path, is redacted like any other path, and there is
+    no allowlist anywhere for it to be added to. A log that is worth sharing
+    is one whose rules have no exceptions in them.
+    """
+    for name in ("allow_route_prefix", "is_own_route", "_SAFE_ROUTE_PREFIXES", "SAFE_ROUTES", "exempt"):
+        r.check(f"the scrubber has no {name}", not hasattr(scrub, name))
+
+    ours = (
+        "/wan2gp/",
+        "/deepy/deepy_api/state",
+        "/minipaint-interop/events",
+        "/wan2gp/__minipaint_auth_probe",
+    )
+    for route in ours:
+        cleaned = scrub.line(f"reverse proxy ready at {route} (one loopback upstream)")
+        r.check(f"{route} is redacted in a console line like any other path",
+                route not in cleaned and scrub.PATH in cleaned, cleaned)
+        kept = scrub.private(f"a request for {route} answered 404")
+        r.check(f"{route} is redacted in a file line too", route not in kept and scrub.PATH in kept, kept)
+
+    # And the things a shared log is shared in spite of.
+    private = scrub.private("upstream 127.0.0.1:60434; localhost:7860")
+    r.check("the backend port never reaches a file anybody sends us",
+            "60434" not in private and "7860" not in private, private)
+    r.check("but the console keeps it, because that screen belongs to whoever is at the machine",
+            "60434" in scrub.line("upstream 127.0.0.1:60434"))
+
+
 def run() -> Results:
     r = Results("logging privacy")
     kept_roots = scrub.known_roots()
@@ -450,6 +490,7 @@ def run() -> Results:
         for label, prefix in kept_roots:
             scrub.register_root(label.strip("<>"), prefix)
         journal.clear()
+    no_exemptions_checks(r)
     return r
 
 

@@ -277,6 +277,44 @@ def deepy_other_form(form: typing.Any = None) -> str:
     return DEEPY_BARE if str(form or DEEPY_ROOTED) == DEEPY_ROOTED else DEEPY_ROOTED
 
 
+def origin_allowed(origin: typing.Any, netloc: typing.Any) -> bool:
+    """Is this WebSocket's ``Origin`` this Forge's own?
+
+    THE CHECK MOVES HERE BECAUSE HERE IS WHERE IT MEANS ANYTHING.
+
+    Wan2GP's auth middleware treats every WebSocket as an unsafe request and
+    requires its ``Origin`` to equal ``<scheme>://<the host it was asked
+    on>``. Through this proxy it never can. An ordinary request is forwarded
+    with the browser's ``Host`` intact, so the child computes the public host
+    and the browser's origin matches it - which is why POSTs have always
+    worked. An upgrade is not: the handshake is negotiated by the client
+    library, so ``Host`` comes off and the child sees the loopback address it
+    is actually listening on, while the ``Origin`` still names Forge. The two
+    can never agree, the middleware closes the socket before accepting it,
+    and uvicorn answers HTTP 403.
+
+    That check is a real defence and is not simply dropped: a WebSocket is
+    exempt from CORS and carries cookies, so a page on another site could
+    open one against a Forge its visitor is signed in to. It is enforced
+    here instead, where the origin can be compared against the host the
+    browser actually asked for, and the upgrade is then presented to the
+    child with an origin it will recognise as its own.
+
+    An absent origin passes, exactly as the child's own rule has it: that is
+    a client that is not a browser, and the sign-in gate is the one that
+    decides for those. Either transport is accepted for a matching host,
+    because a TLS-terminating proxy in front of Forge changes the scheme the
+    browser sees and does not change the host.
+    """
+    text = str(origin or "").strip()
+    if not text:
+        return True
+    host = str(netloc or "").strip()
+    if not host:
+        return False
+    return text.lower() in {f"http://{host}".lower(), f"https://{host}".lower()}
+
+
 def stream_shaped(path: typing.Any, accept: typing.Any = "") -> bool:
     """Does this request look like an event/queue stream before it is sent?
 
@@ -409,19 +447,52 @@ def rewrite_location(value: str, target: typing.Optional[str] = None) -> str:
     return PROXY_PATH + text
 
 
-def rewrite_set_cookie(value: str) -> str:
-    """Scope a backend cookie to ``/wan2gp/`` and to this origin.
+def cookie_paths(path: typing.Any) -> typing.List[str]:
+    """Where a backend cookie's path lands on the public origin.
+
+    ONE LOGIN, TWO NAMESPACES.
+
+    Two of the child's namespaces are served here - its own under
+    ``/wan2gp/`` and its Deepy app at the site root, which is where the page
+    asks for it - and a single WanGP sign-in covers both; the child's own
+    login page says so. A cookie the child scoped to its whole site
+    therefore has to reach both of ours, and there is no one path that
+    covers ``/wan2gp/`` and ``/deepy/`` and nothing else. So it is set once
+    for each: the browser stores two, sends exactly one to each namespace,
+    and a deletion arrives the same way and clears both. ``Path=/`` would
+    have done it in one, at the price of riding along on every Forge
+    request, which is the thing this function exists to prevent.
+
+    A cookie the child already scoped to its Deepy app is left alone,
+    because that namespace is served at the same path here as there.
+    """
+    text = str(path or "/") or "/"
+    if not text.startswith("/"):
+        text = "/" + text
+    if text == DEEPY_PATH or text.startswith(DEEPY_PREFIX):
+        return [text]
+    if text == "/":
+        return [PROXY_PREFIX, DEEPY_PREFIX]
+    if text == PROXY_PATH or text.startswith(PROXY_PREFIX):
+        return [text]
+    return [PROXY_PATH + text]
+
+
+def scoped_cookies(value: str) -> typing.List[str]:
+    """One backend cookie, scoped to this origin - as one header or as two.
 
     WanGP's cookies are WanGP's business. Left at ``Path=/`` they would ride
     along on every Forge request, and a ``Domain`` chosen for 127.0.0.1 is
     simply wrong on the public origin, so it is dropped and the browser
-    defaults to the host it is talking to.
+    defaults to the host it is talking to. Which paths it comes back on is
+    ``cookie_paths``'s answer.
     """
     parts = [part.strip() for part in str(value or "").split(";") if part.strip()]
     if not parts:
-        return str(value or "")
+        return [str(value or "")]
 
     kept = [parts[0]]
+    declared = "/"
     saw_path = False
     for part in parts[1:]:
         name = part.split("=", 1)[0].strip().lower()
@@ -429,15 +500,12 @@ def rewrite_set_cookie(value: str) -> str:
             continue
         if name == "path":
             saw_path = True
-            path = part.split("=", 1)[1].strip() if "=" in part else "/"
-            if not (path == PROXY_PATH or path.startswith(PROXY_PREFIX)):
-                path = PROXY_PATH + (path if path.startswith("/") else "/" + path)
-            kept.append(f"Path={path}")
+            declared = part.split("=", 1)[1].strip() if "=" in part else "/"
             continue
         kept.append(part)
     if not saw_path:
-        kept.append(f"Path={PROXY_PREFIX}")
-    return "; ".join(kept)
+        declared = "/"
+    return ["; ".join([kept[0], f"Path={path}"] + kept[1:]) for path in cookie_paths(declared)]
 
 
 def response_headers(pairs: typing.Iterable[typing.Tuple[str, str]], target: typing.Optional[str] = None) -> typing.List[typing.Tuple[str, str]]:
@@ -458,7 +526,9 @@ def response_headers(pairs: typing.Iterable[typing.Tuple[str, str]], target: typ
         if name == "location":
             value = rewrite_location(value, target)
         elif name == "set-cookie":
-            value = rewrite_set_cookie(value)
+            # One arriving cookie can leave as two. See ``cookie_paths``.
+            cleaned.extend((name, scoped) for scoped in scoped_cookies(value))
+            continue
         cleaned.append((name, value))
     return cleaned
 
@@ -911,7 +981,7 @@ async def _connect_upstream(url: str, headers: typing.Mapping[str, str], subprot
     except Exception:
         _log_once(
             "no-websocket",
-            "no WebSocket client library is installed, so /wan2gp/ carries HTTP only. "
+            "no WebSocket client library is installed, so this proxy carries HTTP only. "
             "This matters only if the installed Gradio uses a WebSocket transport.",
         )
         yield None
@@ -951,13 +1021,13 @@ async def _websocket_endpoint(websocket: typing.Any) -> None:
     # open without ever fetching the page, so refusing only in ``forward``
     # would leave the door it was meant to close.
     if not signed_in(websocket) or not serving_allowed():
-        _log_once("ws-refused", "a /wan2gp/ WebSocket was refused before it was opened (sign-in or serving gate).")
+        _log_once("ws-refused", "a WebSocket was refused before it was opened (sign-in or serving gate).")
         await websocket.close(code=1011)
         return
 
     target = upstream()
     if not target:
-        _log_once("ws-no-upstream", "a /wan2gp/ WebSocket arrived with no upstream to carry it to.")
+        _log_once("ws-no-upstream", "a WebSocket arrived with no upstream to carry it to.")
         await websocket.close(code=1011)
         return
 
@@ -975,6 +1045,17 @@ async def _websocket_endpoint(websocket: typing.Any) -> None:
     for name in ("sec-websocket-key", "sec-websocket-version", "sec-websocket-extensions", "host"):
         headers.pop(name, None)
 
+    # Checked here and then restated, for the reason ``origin_allowed`` gives:
+    # the child cannot judge an origin it is not told the public host for, and
+    # this is the hop that knows both.
+    kind = "Deepy" if path.startswith(DEEPY_PREFIX) or path.startswith(PROXY_PATH + DEEPY_PREFIX) else "WanGP"
+    public = str(getattr(getattr(websocket, "url", None), "netloc", "") or "")
+    if not origin_allowed(headers.get("origin", ""), public):
+        _log_once("ws-cross-origin", "a WebSocket was refused: its Origin is not this Forge's own.")
+        await websocket.close(code=1008)
+        return
+    headers["origin"] = target
+
     try:
         async with _connect_upstream(url, headers, requested) as socket:
             if socket is None:
@@ -982,7 +1063,7 @@ async def _websocket_endpoint(websocket: typing.Any) -> None:
                 # socket with the same code and no line at all, which left a
                 # page showing a permanent "connection lost" banner and
                 # nothing anywhere to say which of them it was.
-                _log_once("ws-no-client", "a /wan2gp/ WebSocket could not be opened upstream (no usable client library).")
+                _log_once("ws-no-client", f"a {kind} WebSocket could not be opened upstream (no usable client library).")
                 await websocket.close(code=1011)
                 return
             await websocket.accept(subprotocol=socket.subprotocol)
@@ -998,7 +1079,7 @@ async def _websocket_endpoint(websocket: typing.Any) -> None:
                 with contextlib.suppress(Exception):
                     task.result()
     except Exception as error:
-        _log_once("ws-failed", f"a /wan2gp/ WebSocket could not be bridged ({redact(error)}).")
+        _log_once(f"ws-failed {kind}", f"a {kind} WebSocket could not be bridged ({redact(error)}).")
     finally:
         with contextlib.suppress(Exception):
             await websocket.close()

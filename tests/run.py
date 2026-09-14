@@ -45,10 +45,17 @@ SUITES = [
     # Clipboard tab that is its first client.
     "test_wangp_queue",
     "test_wangp_start",
+    # Protocol 6: the control plane between Forge and the WanGP child, and
+    # the one worker both submission paths funnel through - which is where
+    # "at most one generation, whoever started it" is actually established.
+    "test_wangp_control",
     "test_interop",
     "test_clipboard_store",
     "test_clipboard_outbox",
     "test_clipboard_enhance",
+    # The server executor: press, walk away, come back to a generated file.
+    # Ahead of the tab, because the tab is one of its screens.
+    "test_clipboard_executor",
     "test_clipboard_ui",
     "test_queue_e2e",
 ]

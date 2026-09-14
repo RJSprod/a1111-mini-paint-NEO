@@ -1646,7 +1646,13 @@ def record_execution(
 def _state_for_record(record: typing.Mapping[str, typing.Any]) -> str:
     """The job state one child-side execution state means."""
     return {
-        protocol.EXEC_ACCEPTED: SUBMITTING_WANGP,
+        # "accepted" means the child has recorded it and it is in WanGP's own
+        # queue - so the job is *waiting*, not still being submitted. Mapping
+        # it back to SUBMITTING_WANGP would put the job in the state whose
+        # stage submits, and the next pass would hand it over again: harmless
+        # only because the child's ledger answers a repeat from the record,
+        # and pointless work either way.
+        protocol.EXEC_ACCEPTED: GENERATION_WAITING,
         protocol.EXEC_QUEUED: GENERATION_WAITING,
         protocol.EXEC_RUNNING: GENERATION_RUNNING,
         protocol.EXEC_DONE: COMPLETED,

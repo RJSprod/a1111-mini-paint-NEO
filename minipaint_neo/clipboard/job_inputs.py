@@ -151,9 +151,9 @@ def adopt(handle: typing.Mapping[str, typing.Any], job_id: str = "", slot: str =
             "slot": slot,
             "created_at": now,
             "released_at": 0.0,
-            "width": written.width,
-            "height": written.height,
-            "digest": written.sha256,
+            "width": written.manifest.get("width"),
+            "height": written.manifest.get("height"),
+            "digest": written.manifest.get("sha256"),
             "source_kind": handle.get("kind"),
             "source_id": handle.get("id"),
         }

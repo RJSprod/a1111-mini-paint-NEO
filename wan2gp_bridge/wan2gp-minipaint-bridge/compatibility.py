@@ -468,6 +468,19 @@ _SLOT_FOR_RECEIVER: typing.Mapping[str, str] = {
 #: control on a page.
 SETTINGS_FLAG_COMPONENTS: typing.Tuple[str, ...] = (IMAGE_PROMPT_TYPE, VIDEO_PROMPT_TYPE)
 
+#: Which flag string each receiver lives in, and the letters that mean "this
+#: slot is in use". Struck out for a slot a submission does not fill, so a
+#: composed base cannot describe pictures this job does not have.
+#:
+#: VERIFY ON A REAL INSTALL: the letters, like every other WanGP identifier
+#: in this file. K/F/I are the reference choices a model publishes; a model
+#: that names its own filter widens this, and these are the fallback.
+_FLAG_LETTERS: typing.Mapping[str, typing.Tuple[str, str]] = {
+    protocol.START_FRAME: (IMAGE_PROMPT_TYPE, "S"),
+    protocol.END_FRAME: (IMAGE_PROMPT_TYPE, "E"),
+    protocol.REFERENCE: (VIDEO_PROMPT_TYPE, "KFI"),
+}
+
 #: A ceiling used only when WanGP does not state one. Section 16.5 forbids
 #: MiniPaint from knowing a model's reference limit; it does not forbid the
 #: bridge from refusing to append forever into a list nobody bounded.
@@ -1489,6 +1502,22 @@ class Compatibility:
                 settings[name] = [] if receiver_id == protocol.REFERENCE else None
                 continue
             settings[name] = list(supplied) if receiver_id == protocol.REFERENCE else supplied[0]
+        # The flags for the slots this job does not fill, struck out. This is
+        # the half that is easy to leave out and that a base composed from
+        # somebody else's configuration makes necessary: WanGP's own
+        # back-fill only ADDS flags implied by media that is present, so a
+        # base whose letters said "start and end frame" would still say so
+        # after the end frame was cleared, and generation would go looking
+        # for a picture that is not there. The switch below then puts back
+        # exactly the letters this job's own media earns.
+        for receiver_id in V1_RECEIVERS:
+            slot = _SLOT_FOR_RECEIVER.get(receiver_id, "")
+            if slot and media.get(slot):
+                continue
+            flag_key, letters = _FLAG_LETTERS.get(receiver_id, ("", ""))
+            name = self.settings_key(flag_key) if flag_key else ""
+            if name and name in settings:
+                settings[name] = _del_letters(settings[name], letters)
         # The flags, after every value is in place, so a switch computed for
         # one slot sees the others as they will be.
         for receiver_id in V1_RECEIVERS:

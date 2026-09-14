@@ -434,11 +434,56 @@ def drain_prose_checks(r: Results) -> None:
                 "No module named 'torch'" in written, written)
 
 
+def own_route_checks(r: Results) -> None:
+    """A route this extension serves may be named. Nothing else gains anything.
+
+    THE ONE EXCEPTION, AND THE REASON IT IS SAFE TO HAVE.
+
+    A URL route and a filesystem path are the same shape, so a diagnostic
+    written to say *which* route answered 404 came out as "<path> answered
+    404" and said nothing at all. A route under a namespace this extension
+    serves is a constant of somebody's published HTTP surface - it names a
+    mount point, never a file - so it is kept.
+
+    What is asserted here is the fence around that, because an exception with
+    no fence is an off switch:
+
+    *   ``/wan2gp/`` is NOT exempt, and must never be. Gradio serves user
+        files under it, so exempting it would hand over the very thing this
+        module exists to keep back.
+    *   a filename passed as a value under an exempt prefix is still redacted,
+        because the shape check refuses ``=``;
+    *   so is anything with ``..`` in it;
+    *   and an ordinary path is untouched by any of this.
+    """
+    from minipaint_neo.wangp import proxy  # registers its own prefix
+
+    r.check("a route under a declared prefix is said in full, which is the whole point",
+            scrub.line("/deepy/deepy_api/state answered 404") == "/deepy/deepy_api/state answered 404",
+            scrub.line("/deepy/deepy_api/state answered 404"))
+    r.check("the proxy's own prefix is NOT declared, because Gradio serves user files under it",
+            proxy.PROXY_PREFIX not in scrub._SAFE_ROUTE_PREFIXES
+            and scrub.PATH in scrub.line("GET /wan2gp/file=/home/someone/a photo.png"),
+            scrub.line("GET /wan2gp/file=/home/someone/a photo.png"))
+    r.check("a filename passed as a value under an exempt prefix is still taken out",
+            scrub.PATH in scrub.line("/deepy/deepy_api/media=/home/me/holiday.png"),
+            scrub.line("/deepy/deepy_api/media=/home/me/holiday.png"))
+    r.check("and so is anything trying to climb out of the namespace",
+            scrub.PATH in scrub.line("/deepy/../../etc/passwd"), scrub.line("/deepy/../../etc/passwd"))
+    r.check("an ordinary path is redacted exactly as before",
+            scrub.PATH in scrub.line("wrote /home/someone/Videos/holiday.mp4"),
+            scrub.line("wrote /home/someone/Videos/holiday.mp4"))
+    r.check("a prefix cannot be declared as a bare word, only as a rooted namespace",
+            (scrub.allow_route_prefix("deepy"), scrub.allow_route_prefix(""),
+             "deepy" not in scrub._SAFE_ROUTE_PREFIXES)[-1])
+
+
 def run() -> Results:
     r = Results("logging privacy")
     kept_roots = scrub.known_roots()
     try:
         scrubber_checks(r)
+        own_route_checks(r)
         child_output_checks(r)
         relayed_prose_checks(r)
         drain_prose_checks(r)

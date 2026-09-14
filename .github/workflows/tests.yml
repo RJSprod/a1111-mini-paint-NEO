@@ -28,8 +28,9 @@ jobs:
     env:
       # Gradio probes its own local URL through httpx on launch, which follows
       # the proxy environment; excluding loopback keeps that honest on any
-      # runner that sets one.
-      no_proxy: "127.0.0.1,localhost,::1"
+      # runner that sets one. One spelling only - GitHub treats env keys as
+      # case-insensitive and rejects the whole file for a duplicate, and
+      # Python's proxy handling reads this one regardless of case.
       NO_PROXY: "127.0.0.1,localhost,::1"
       # Every suite in SUITES must actually run. A skip is a broken
       # environment, and a broken environment that reports success is the

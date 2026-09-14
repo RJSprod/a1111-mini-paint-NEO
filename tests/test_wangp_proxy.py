@@ -261,6 +261,10 @@ class Reply:
     def names(self):
         return [name for name, _value in self.headers]
 
+    def all(self, name):
+        """Every value for a header. Set-Cookie arrives more than once."""
+        return [value for key, value in self.headers if key.lower() == name.lower()]
+
 
 async def call(app, method, path, headers=(), query=b"", body=b"", peer="203.0.113.9"):
     messages = []
@@ -375,9 +379,27 @@ def sync_checks(r: Results) -> None:
             proxy.rewrite_location(f"http://127.0.0.1:{PRETEND_PORT}/config") == "/wan2gp/config")
     r.check("a redirect to a real external host is untouched",
             proxy.rewrite_location("https://example.com/docs") == "https://example.com/docs")
-    cookie = proxy.rewrite_set_cookie("wangp_session=abc; Path=/; Domain=127.0.0.1; HttpOnly")
-    r.check("a backend cookie is scoped to the prefix and loses its domain",
-            "Path=/wan2gp" in cookie and "Domain" not in cookie and "HttpOnly" in cookie, cookie)
+    # One login covers both namespaces this proxy serves, and no single path
+    # covers /wan2gp/ and /deepy/ and nothing else - so a site-wide cookie
+    # comes back as one per namespace. Path=/ would have done it in one, at
+    # the price of riding along on every Forge request.
+    cookies = proxy.scoped_cookies("wangp_session=abc; Path=/; Domain=127.0.0.1; HttpOnly")
+    r.check("a site-wide backend cookie is set once for each namespace that is served",
+            [value.split(";")[1].strip() for value in cookies] == ["Path=/wan2gp/", "Path=/deepy/"], str(cookies))
+    r.check("and each keeps the cookie, its flags, and none of its domain",
+            all(value.startswith("wangp_session=abc;") and "HttpOnly" in value and "Domain" not in value
+                for value in cookies), str(cookies))
+    r.check("a cookie the child already scoped to its Deepy app is left where it is - "
+            "that namespace is served at the same path here as there",
+            proxy.scoped_cookies("d=1; Path=/deepy/") == ["d=1; Path=/deepy/"], str(proxy.scoped_cookies("d=1; Path=/deepy/")))
+    r.check("and any other path of the child's goes under the prefix, as it always has",
+            proxy.scoped_cookies("g=2; Path=/queue") == ["g=2; Path=/wan2gp/queue"], str(proxy.scoped_cookies("g=2; Path=/queue")))
+    r.check("a cookie that named no path is treated as the site-wide one it is",
+            len(proxy.scoped_cookies("s=3; HttpOnly")) == 2, str(proxy.scoped_cookies("s=3; HttpOnly")))
+    # A logout must clear both, or the other namespace stays signed in.
+    cleared = proxy.scoped_cookies('wangp_session=""; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0')
+    r.check("a deletion arrives the same way, so a logout clears both",
+            len(cleared) == 2 and all("Max-Age=0" in value for value in cleared), str(cleared))
 
     # ---- the path the backend sees
     r.check("the prefix is stripped on the way in", proxy.upstream_path("/wan2gp/file/x.png") == "/file/x.png")
@@ -742,9 +764,12 @@ async def async_checks(r: Results) -> None:
         r.check("the backend's own hop-by-hop headers do not reach the browser",
                 "connection" not in got.names() and "x-upstream-hop" not in got.names(), str(got.names()))
         r.check("the backend's ordinary headers do reach the browser", got.header("x-upstream") == "the-fake-wangp")
-        r.check("the backend's cookie is confined to the prefix",
-                "Path=/wan2gp" in got.header("set-cookie") and "Domain" not in got.header("set-cookie"),
-                got.header("set-cookie"))
+        cookies = got.all("set-cookie")
+        r.check("the backend's cookie is confined to the namespaces this proxy serves, and reaches both",
+                sorted(value.split("Path=")[1].split(";")[0] for value in cookies) == ["/deepy/", "/wan2gp/"],
+                str(cookies))
+        r.check("and neither copy carries a domain chosen for the loopback",
+                cookies and not any("Domain" in value for value in cookies), str(cookies))
 
         sent = json.dumps({"data": ["a prompt"], "fn_index": 3}).encode("utf-8")
         posted = await call(

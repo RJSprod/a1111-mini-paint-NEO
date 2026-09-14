@@ -447,19 +447,52 @@ def rewrite_location(value: str, target: typing.Optional[str] = None) -> str:
     return PROXY_PATH + text
 
 
-def rewrite_set_cookie(value: str) -> str:
-    """Scope a backend cookie to ``/wan2gp/`` and to this origin.
+def cookie_paths(path: typing.Any) -> typing.List[str]:
+    """Where a backend cookie's path lands on the public origin.
+
+    ONE LOGIN, TWO NAMESPACES.
+
+    Two of the child's namespaces are served here - its own under
+    ``/wan2gp/`` and its Deepy app at the site root, which is where the page
+    asks for it - and a single WanGP sign-in covers both; the child's own
+    login page says so. A cookie the child scoped to its whole site
+    therefore has to reach both of ours, and there is no one path that
+    covers ``/wan2gp/`` and ``/deepy/`` and nothing else. So it is set once
+    for each: the browser stores two, sends exactly one to each namespace,
+    and a deletion arrives the same way and clears both. ``Path=/`` would
+    have done it in one, at the price of riding along on every Forge
+    request, which is the thing this function exists to prevent.
+
+    A cookie the child already scoped to its Deepy app is left alone,
+    because that namespace is served at the same path here as there.
+    """
+    text = str(path or "/") or "/"
+    if not text.startswith("/"):
+        text = "/" + text
+    if text == DEEPY_PATH or text.startswith(DEEPY_PREFIX):
+        return [text]
+    if text == "/":
+        return [PROXY_PREFIX, DEEPY_PREFIX]
+    if text == PROXY_PATH or text.startswith(PROXY_PREFIX):
+        return [text]
+    return [PROXY_PATH + text]
+
+
+def scoped_cookies(value: str) -> typing.List[str]:
+    """One backend cookie, scoped to this origin - as one header or as two.
 
     WanGP's cookies are WanGP's business. Left at ``Path=/`` they would ride
     along on every Forge request, and a ``Domain`` chosen for 127.0.0.1 is
     simply wrong on the public origin, so it is dropped and the browser
-    defaults to the host it is talking to.
+    defaults to the host it is talking to. Which paths it comes back on is
+    ``cookie_paths``'s answer.
     """
     parts = [part.strip() for part in str(value or "").split(";") if part.strip()]
     if not parts:
-        return str(value or "")
+        return [str(value or "")]
 
     kept = [parts[0]]
+    declared = "/"
     saw_path = False
     for part in parts[1:]:
         name = part.split("=", 1)[0].strip().lower()
@@ -467,15 +500,12 @@ def rewrite_set_cookie(value: str) -> str:
             continue
         if name == "path":
             saw_path = True
-            path = part.split("=", 1)[1].strip() if "=" in part else "/"
-            if not (path == PROXY_PATH or path.startswith(PROXY_PREFIX)):
-                path = PROXY_PATH + (path if path.startswith("/") else "/" + path)
-            kept.append(f"Path={path}")
+            declared = part.split("=", 1)[1].strip() if "=" in part else "/"
             continue
         kept.append(part)
     if not saw_path:
-        kept.append(f"Path={PROXY_PREFIX}")
-    return "; ".join(kept)
+        declared = "/"
+    return ["; ".join([kept[0], f"Path={path}"] + kept[1:]) for path in cookie_paths(declared)]
 
 
 def response_headers(pairs: typing.Iterable[typing.Tuple[str, str]], target: typing.Optional[str] = None) -> typing.List[typing.Tuple[str, str]]:
@@ -496,7 +526,9 @@ def response_headers(pairs: typing.Iterable[typing.Tuple[str, str]], target: typ
         if name == "location":
             value = rewrite_location(value, target)
         elif name == "set-cookie":
-            value = rewrite_set_cookie(value)
+            # One arriving cookie can leave as two. See ``cookie_paths``.
+            cleaned.extend((name, scoped) for scoped in scoped_cookies(value))
+            continue
         cleaned.append((name, value))
     return cleaned
 

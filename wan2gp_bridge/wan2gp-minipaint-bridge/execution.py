@@ -208,7 +208,7 @@ class Executor:
         record = self.ledger.reserve(execution_id, model_type=request.get("model_type", ""), residency_key=residency)
 
         try:
-            self._enqueue(service, gen, settings, execution_id, bool(request.get("priority")))
+            self._enqueue(service, gen, settings, execution_id)
         except ExecutionError:
             self.ledger.update(execution_id, state=protocol.EXEC_FAILED, code=protocol.EXECUTION_REFUSED,
                                message="WanGP would not take the task", stage="")
@@ -229,7 +229,7 @@ class Executor:
         self._ensure_tracker()
         self._note(
             f"execute {execution_id[:8]}: {len(settings)} setting(s) into WanGP's own queue "
-            f"({'priority' if request.get('priority') else 'appended'}); residency {residency or 'unknown'}"
+            f"(appended); residency {residency or 'unknown'}"
         )
         return self.ledger.get(execution_id) or record
 
@@ -258,6 +258,17 @@ class Executor:
         if model_type:
             self._require_model(model_type)
             settings["model_type"] = model_type
+        if not settings.get("model_type"):
+            # Refused here rather than handed over. Wan2GP's queue unpacker
+            # requires it and SKIPS a task without it - printing a line and
+            # carrying on - so a task that reached the queue this way was
+            # never a task at all, and the job that owned it waited forever
+            # for a generation nobody was ever going to run. A refusal with a
+            # code is the difference between a bug you can see and a hang.
+            raise ExecutionError(
+                protocol.MODEL_UNAVAILABLE,
+                "the composed settings name no model, and WanGP's queue would skip the task",
+            )
         return settings
 
     def _resolve_media(self, media: typing.Mapping[str, typing.Any]) -> typing.Dict[str, typing.List[str]]:
@@ -309,7 +320,6 @@ class Executor:
         gen: typing.Any,
         settings: typing.Mapping[str, typing.Any],
         execution_id: str,
-        priority: bool,
     ) -> None:
         """Leave the task where the one worker will find it, and ask it to look.
 
@@ -320,12 +330,21 @@ class Executor:
         """
         if not isinstance(gen, dict):
             raise ExecutionError(protocol.SERVICE_UNAVAILABLE, "the shared generation record could not be read")
+        # A LIST, and that is the whole of it.
+        #
+        # Wan2GP's loader wraps the inline slot itself when it finds a dict:
+        # ``newly_loaded_queue = [{"id": 0, "params": newly_loaded_queue}]``.
+        # Handing it a dict that was already ``{"id": …, "params": …}`` got
+        # that wrapped a second time, so the manifest's ``params`` was
+        # ``{"id": 0, "params": {…}}`` - a mapping with no ``model_type`` in
+        # it, one level above the settings. Wan2GP then said exactly that
+        # ("Settings must contain 'model_type'"), skipped the task, and the
+        # job sat in WanGP's queue forever having never been a task at all.
+        #
+        # A list is passed through as the manifest verbatim, so this is the
+        # shape the parser actually reads: one entry, its params the settings.
         entry: typing.Dict[str, typing.Any] = {"id": 0, "params": dict(settings)}
-        if priority:
-            # Only for a job somebody is sitting in front of waiting for.
-            # Unattended work never jumps the queue a user is looking at.
-            entry["priority"] = True
-        gen[compatibility.INLINE_QUEUE_KEY] = entry
+        gen[compatibility.INLINE_QUEUE_KEY] = [entry]
         try:
             service.command(compatibility.LOAD_QUEUE_COMMAND, {"client_id": execution_id})
         except Exception as error:

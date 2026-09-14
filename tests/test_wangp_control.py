@@ -105,6 +105,9 @@ class FakeService:
         self.workers = []
         self.loop_entries = 0
         self.commands = []
+        #: Tasks Wan2GP's unpacker would have thrown away. Never empty by
+        #: accident: a skipped task is a job that will wait forever.
+        self.skipped = []
         self.gate = threading.Event()
         self.gate.set()
         self.unload_gate = threading.Event()
@@ -127,15 +130,35 @@ class FakeService:
         return self._queue_worker is not None
 
     def command(self, name, payload=None):
+        """``load_queue_trigger``, unpacked the way Wan2GP actually unpacks it.
+
+        THIS STUB USED TO BE TOO KIND, AND IT COST A RELEASE.
+
+        It read ``inline["params"]`` straight off the slot, which accepted a
+        shape Wan2GP does not. Wan2GP wraps a *dict* itself -
+        ``if isinstance(newly_loaded_queue, dict): newly_loaded_queue =
+        [{"id": 0, "params": newly_loaded_queue}]`` - so a slot that was
+        already ``{"id": …, "params": …}`` got wrapped twice and the
+        manifest's params became ``{"id": 0, "params": {…}}``, one level
+        above the settings and carrying no ``model_type``. Wan2GP said so and
+        skipped the task; the job sat in the queue having never been one.
+
+        So this mirrors the real rule, including the requirement that makes
+        the failure visible: a task whose params have no ``model_type`` is
+        skipped rather than quietly queued.
+        """
         self.commands.append((name, dict(payload or {})))
         gen = self._state["gen"]
         inline = gen.pop("inline_queue", None)
         if inline is not None:
-            task = {"id": len(gen["queue"]) + 1, "params": dict(inline.get("params") or {})}
-            if inline.get("priority"):
-                gen["queue"].insert(1, task)
-            else:
-                gen["queue"].append(task)
+            manifest = [{"id": 0, "params": inline}] if isinstance(inline, dict) else list(inline)
+            for entry in manifest:
+                params = dict((entry or {}).get("params") or {})
+                if not params.get("model_type"):
+                    # Wan2GP: "Settings must contain 'model_type'. Skipping."
+                    self.skipped.append(params)
+                    continue
+                gen["queue"].append({"id": len(gen["queue"]) + 1, "params": params})
         return self.start_generation()
 
     def abort(self):
@@ -238,7 +261,11 @@ def _executor(gen=None, root=None, forms=None):
 
 
 def _settings(**extra):
-    base = {"image_start": None, "image_end": None, "image_refs": [], "image_prompt_type": "", "video_prompt_type": "", "steps": 30}
+    # ``model_type`` is in here because a real compose always puts it there,
+    # and because Wan2GP's queue unpacker skips a task without it. A fixture
+    # that left it out was submitting tasks the real WanGP would throw away.
+    base = {"image_start": None, "image_end": None, "image_refs": [], "image_prompt_type": "",
+            "video_prompt_type": "", "steps": 30, "model_type": "t2v"}
     base.update(extra)
     return base
 
@@ -359,8 +386,8 @@ def identity_checks(r: Results) -> None:
     r.check("and the job completes", _drain(service, gen), str(gen["queue"]))
 
     # (6) Ordering. Unattended work goes on the end of whatever the user has
-    #     queued; a job somebody is waiting for may be placed at index 1, and
-    #     never at 0, which is the running task.
+    #     queued, and stays there: nothing this path submits reorders the
+    #     queue in front of somebody.
     runner, service, gen, _book = _executor()
     service.gate.clear()
     gen["queue"].extend([{"id": 1, "params": {"client_id": "user1"}}, {"id": 2, "params": {"client_id": "user2"}}])
@@ -369,15 +396,71 @@ def identity_checks(r: Results) -> None:
     r.check("an unattended job is appended behind the user's own tasks",
             (gen["queue"][-1].get("params") or {}).get("client_id") == "f" * 32,
             str([(task.get("params") or {}).get("client_id") for task in gen["queue"]]))
+    # Even asked for, priority does not splice. Wan2GP's queue manifest has
+    # no such key - an entry is {id, params, plugin_data} and nothing else -
+    # so a priority flag written into it was read by nobody, and the only way
+    # to honour one would be to reorder the queue a user is looking at. This
+    # used to pass because the stub invented a priority the real loader has
+    # not, which is how a stub stops being a model of anything.
     _submit(runner, "0" * 32, priority=True)
-    r.check("a job somebody is waiting for goes at index 1, never ahead of the running task",
-            (gen["queue"][1].get("params") or {}).get("client_id") == "0" * 32 and (gen["queue"][0].get("params") or {}).get("client_id") == "user1",
+    r.check("even a job somebody is waiting for goes on the end: the user's queue is never reordered",
+            [(task.get("params") or {}).get("client_id") for task in gen["queue"]]
+            == ["user1", "user2", "f" * 32, "0" * 32],
             str([(task.get("params") or {}).get("client_id") for task in gen["queue"]]))
     service.gate.set()
     _drain(service, gen)
 
 
 # ------------------------------------------------------------- the ledger --
+
+
+def manifest_shape_checks(r: Results) -> None:
+    """The task reaches WanGP in the shape WanGP's own unpacker reads.
+
+    THE FAILURE THIS CATCHES WAS SILENT AND COMPLETE.
+
+    Wan2GP's loader wraps the inline slot when it finds a dict::
+
+        if isinstance(newly_loaded_queue, dict):
+            newly_loaded_queue = [{"id": 0, "params": newly_loaded_queue}]
+
+    Handing it a dict that was already ``{"id": …, "params": …}`` wrapped it
+    twice, so the manifest's ``params`` was ``{"id": 0, "params": {…}}`` - a
+    mapping one level above the settings with no ``model_type`` in it.
+    Wan2GP printed "Settings must contain 'model_type'", skipped the task and
+    carried on; the bridge saw a command that returned cleanly and reported
+    the job handed over. It then waited forever for a generation that had
+    never been queued.
+
+    Nothing in the round trip said no. That is why the shape is asserted
+    here, and why the stub now applies Wan2GP's rule rather than being kind.
+    """
+    _compatibility, _compose, _control, _execution, _ledger, protocol = _modules()
+    runner, service, gen, _book = _executor()
+    service.gate.clear()
+    _submit(runner, "a" * 32, model_type="t2v")
+
+    r.check("the slot is a list, so Wan2GP reads it as the manifest instead of wrapping it again",
+            gen["queue"] and not service.skipped, f"queued {len(gen['queue'])}, skipped {len(service.skipped)}")
+    params = (gen["queue"][-1].get("params") or {}) if gen["queue"] else {}
+    r.check("the task's params ARE the settings, not a box with the settings inside",
+            params.get("model_type") == "t2v" and "params" not in params, str(sorted(params)[:6]))
+    r.check("and they carry the job's own id as WanGP's client id, so the artifacts come back identifiable",
+            params.get("client_id") == "a" * 32, str(params.get("client_id")))
+    service.gate.set()
+    _drain(service, gen)
+
+    # And a snapshot that names no model is refused rather than handed over
+    # to be skipped: a visible code beats a job that hangs.
+    runner, service, gen, _book = _executor()
+    refused = ""
+    try:
+        _submit(runner, "b" * 32, settings={"steps": 30}, model_type="")
+    except _execution.ExecutionError as error:
+        refused = error.code
+    r.check("settings that name no model are refused here, not skipped silently there",
+            refused == protocol.MODEL_UNAVAILABLE, refused)
+    r.check("and nothing was left in WanGP's queue for it", not gen["queue"], str(gen["queue"]))
 
 
 def ledger_checks(r: Results) -> None:
@@ -972,6 +1055,7 @@ def manifest_checks(r: Results) -> None:
 def run() -> Results:
     r = Results("wangp control")
     identity_checks(r)
+    manifest_shape_checks(r)
     ledger_checks(r)
     idempotency_checks(r)
     surface_checks(r)

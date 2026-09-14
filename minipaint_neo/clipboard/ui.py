@@ -840,7 +840,7 @@ class ClipboardTab:
 
     # -- the queue ------------------------------------------------------------
 
-    def prepare_queue(self, prompt, page, model=None):
+    def prepare_queue(self, prompt, page, model=None, enhance_wanted=None):
         """Add to Queue: the draft as a public request, into the server's outbox.
 
         Everything inherited is omitted from the request. A slot whose file
@@ -852,6 +852,22 @@ class ClipboardTab:
         asked for at once and the job waits as enhancing. The instruction
         box then tells the browser a job exists, and the page's pump does
         the rest.
+
+        ``enhance_wanted`` IS THE SWITCH, AS IT STANDS AT THE PRESS, AND IT
+        DECIDES.
+
+        It used to be left out, and the press asked the stored setting
+        instead. Those are the same answer right up until they are not: the
+        switch's value lives in the browser, the setting lives on disk, and
+        the only thing that reconciles them is a change event. Lose one -
+        a click during a reload, a page that was open before the setting
+        moved, a second browser - and the box says off while the press
+        enhances, which is what it did.
+
+        A checkbox that does not decide is not a checkbox, so the value that
+        travels with the press is the one that was on screen when it was
+        pressed. None means no switch was supplied (a caller that is not the
+        tab) and the stored setting still decides.
         """
         page_id = _page_of(page)
         block = _model_of(model)
@@ -871,7 +887,16 @@ class ClipboardTab:
         request = history.public_request(draft)
         request["start"] = protocol.START_AUTO
         try:
-            job = outbox.submit(request, page_id, outbox.ORIGIN_CLIPBOARD, model=block)
+            wanted = None if enhance_wanted is None else bool(enhance_wanted)
+            if wanted is not None and wanted != enhance.enabled():
+                # The switch and the stored setting had drifted, so the click
+                # that should have written it never arrived. Take the press as
+                # the answer and make them agree: otherwise the next Forge
+                # start reads the setting back and the box goes on lying, once
+                # per restart, with nothing to show the user why.
+                enhance.set_enabled(wanted)
+                self._journal(f"enhanced prompts {'on' if wanted else 'off'} from the press; the stored setting disagreed")
+            job = outbox.submit(request, page_id, outbox.ORIGIN_CLIPBOARD, model=block, enhance=wanted)
         except IntegrationError as error:
             self._journal(f"queue clicked; refused - {error.code}")
             notes = ["nothing was stored; press it again once WanGP is running"] if error.code == errors.WANGP_NOT_RUNNING else []
@@ -1340,7 +1365,7 @@ class ClipboardTab:
         # after the click); the pump reports to the server's routes, and the
         # browser presses the hidden refresh so the list and the history are
         # re-rendered from what the server holds.
-        p["queue_btn"].click(self.prepare_queue, inputs=[p["prompt"], p["page_box"], p["model_box"]],
+        p["queue_btn"].click(self.prepare_queue, inputs=[p["prompt"], p["page_box"], p["model_box"], p["enhance_toggle"]],
                              outputs=[p["queue_instruction"], p["queue_status"], p["outbox_list"], p["queue_btn"]], js=ARM_QUEUE_JS, **quiet)
         p["queue_instruction"].change(None, js=QUEUE_JS, inputs=[p["queue_instruction"]])
         p["outbox_refresh"].click(self.refresh_outbox, inputs=[p["page_box"]],

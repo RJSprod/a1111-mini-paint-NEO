@@ -228,8 +228,14 @@ def page_checks(r: Results, base: pathlib.Path):
     r.check("Add to Queue is one backend event that arms the browser first",
             len(click) == 1 and click[0]["backend_fn"] and "armQueue" in (click[0].get("js") or ""), str(len(click)))
     r.check("with the prompt, the page's identity and the page's WanGP model as its inputs, and the instruction, the status, the queue list and the button as outputs",
-            click and click[0]["inputs"] == [cid("prompt"), cid("page_id"), cid("model")]
+            click and click[0]["inputs"][:3] == [cid("prompt"), cid("page_id"), cid("model")]
             and click[0]["outputs"] == [cid("queue_instruction"), cid("queue_status"), cid("outbox_list"), cid("queue")], str(click[0]["outputs"] if click else None))
+    # The switch is an input of the press, not a setting the press looks up.
+    # It used to be looked up, and the two drifted: the box said off while the
+    # press enhanced, because the value on screen and the value on disk are
+    # only ever reconciled by a change event and one had been lost.
+    r.check("and the enhancement switch travels with the press, so what is on screen is what happens",
+            click and click[0]["inputs"][3:] == [cid("enhance_toggle")], str(click[0]["inputs"] if click else None))
     handoff = targeting("queue_instruction", "change")
     r.check("the instruction's change hands it to the browser script and to nothing on the server",
             len(handoff) == 1 and not handoff[0]["backend_fn"] and ".queue(" in (handoff[0].get("js") or "") and handoff[0]["outputs"] == [], str(handoff))
@@ -406,6 +412,7 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
     r.check("and never a path", str(base) not in json.dumps(request) and "/" not in json.dumps(request["images"]))
     r.check("the list shows it waiting, with Cancel", 'data-job="' + job["job_id"] in listing and "Waiting" in listing and 'data-outbox-action="cancel:' in listing and str(base) not in listing)
     r.check("the button stays a button", _value(button) == clipboard_ui.QUEUE_BUTTON_LABEL and button.get("interactive") is True)
+
 
     # -- the page runs it: claim, admitted, confirmed queued -> history
     claimed = outbox.claim(page_id)
@@ -647,6 +654,48 @@ def integration_checks(r: Results, base: pathlib.Path, tab) -> None:
 # --------------------------------------------------------------- fallbacks --
 
 
+def enhance_switch_checks(r: Results, base: pathlib.Path, tab) -> None:
+    """The switch decides the press, and a disagreement is repaired.
+
+    A press used to ask the STORED setting whether to enhance, and the box on
+    screen only wrote that setting through a change event. Lose the event - a
+    click during a reload, a page opened before the setting moved, a second
+    browser - and the box said off while every press enhanced, with nothing to
+    tell the user why. A checkbox that does not decide is not a checkbox.
+
+    Last, and with its own jobs, because these presses add to the same outbox
+    the checks above read by position.
+    """
+    from minipaint_neo.clipboard import enhance as clipboard_enhance
+
+    page_id = "e" * 16
+    clipboard_enhance.set_enabled(True)
+    r.check("the stored setting can be on while the box on screen says off", clipboard_enhance.enabled() is True)
+    tab.prepare_queue("another prompt", page_id, None, False)
+    queued = outbox.jobs()[-1]
+    r.check("a press with the switch off is not enhanced, whatever the stored setting says",
+            queued["enhance_requested"] is False and queued["enhance"] is None, str(queued["enhance_requested"]))
+    r.check("and the disagreement is repaired rather than left to mislead the next press",
+            clipboard_enhance.enabled() is False)
+
+    # The other direction, and no enhancer here to run it: what matters is
+    # that the press asked for it rather than consulting the setting.
+    asked = {}
+    original_enabled = clipboard_enhance.enabled
+    clipboard_enhance.enabled = lambda: asked.setdefault("consulted", True) or False
+    try:
+        tab.prepare_queue("a third prompt", page_id, None, False)
+    finally:
+        clipboard_enhance.enabled = original_enabled
+    r.check("a press that carries the switch never falls back to the stored setting to decide",
+            outbox.jobs()[-1]["enhance_requested"] is False)
+
+    # A caller that supplies no switch - anything that is not the tab - still
+    # gets the stored setting, which is the contract the public API has.
+    clipboard_enhance.set_enabled(False)
+    r.check("and a caller with no switch is still decided by the setting",
+            outbox.submit({"prompt": "x", "request_id": "0" * 32}, page_id)["enhance_requested"] is False)
+
 def fallback_checks(r: Results) -> None:
     """A tab that cannot be built says so and takes nothing else with it."""
     print("  (the traceback below is this test breaking the Clipboard tab on purpose)")
@@ -740,6 +789,7 @@ def run() -> Results:
                 composer_checks(r, base, tab, ids)
                 send_checks(r, base, tab)
                 integration_checks(r, base, tab)
+                enhance_switch_checks(r, base, tab)
             fallback_checks(r)
             theming_checks(r)
         finally:

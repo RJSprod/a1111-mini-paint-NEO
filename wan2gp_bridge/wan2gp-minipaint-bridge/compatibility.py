@@ -373,7 +373,22 @@ SERVICE_FACTORY = "service_for"
 #: Names a build might keep the one service under, when the factory needs a
 #: state this caller does not have. Tried in order, and each is only accepted
 #: when it looks like a service - has a ``start_generation`` and a state.
-SERVICE_SINGLETONS: typing.Tuple[str, ...] = ("_service", "service", "SERVICE", "_hybrid_service", "current_service")
+#: Where the one service actually lives, in order of how sure we are.
+#:
+#: ``_deepy_hybrid`` is first because it is the real one: ``wgp.py`` declares
+#: it at module level and assigns it while it builds the generator tab
+#: (``global _deepy_hybrid; _deepy_hybrid = HybridService(...)``). The rest
+#: are names a future build might use instead, kept because asking costs
+#: nothing and a wrong name is caught by ``is_service``.
+SERVICE_SINGLETONS: typing.Tuple[str, ...] = (
+    "_deepy_hybrid", "_service", "service", "SERVICE", "_hybrid_service", "current_service",
+)
+
+#: The modules that may hold it, looked up in ``sys.modules`` and NEVER
+#: imported. Wan2GP is launched as ``python wgp.py``, so its module object is
+#: ``__main__`` - and ``import wgp`` would not find that object, it would
+#: execute the whole application a second time inside its own process.
+SERVICE_HOLDERS: typing.Tuple[str, ...] = ("__main__", "wgp", SERVICE_MODULE)
 
 #: The key an inline submission is left under for ``load_queue_action`` to
 #: pick up, and the command that makes the service look. Both are Wan2GP's
@@ -1078,23 +1093,59 @@ class Compatibility:
         found = self._call_factory(factory, state)
         if found is not None:
             return found
+        # The factory again, off the module this time - a build that did not
+        # hand it over as a global may still have it. Its absence is not fatal
+        # and must not end the search: the singleton below is the route that
+        # works for a caller with no session, and gating it on an optional
+        # import is how a missing module turned into "this WanGP has no
+        # generation service".
         try:
             import importlib
 
             module = importlib.import_module(SERVICE_MODULE)
         except Exception:
-            return None
-        found = self._call_factory(getattr(module, SERVICE_FACTORY, None), state)
-        if found is not None:
-            return found
-        # A server-side caller has no session state, so a factory that needs
-        # one cannot answer. The service is a process-wide singleton by the
-        # same design that shares the ``gen`` dict across every browser
-        # state, so the module is asked for it directly.
-        for name in SERVICE_SINGLETONS:
-            candidate = getattr(module, name, None)
-            if self.is_service(candidate):
-                return candidate
+            module = None
+        if module is not None:
+            found = self._call_factory(getattr(module, SERVICE_FACTORY, None), state)
+            if found is not None:
+                return found
+        return self._singleton()
+
+    def _singleton(self) -> typing.Any:
+        """The process-wide service, read live out of the module that owns it.
+
+        THE FACTORY CANNOT ANSWER THIS ONE, AND NOT BY ACCIDENT.
+
+        ``service_for`` is one line - ``state.service if isinstance(state,
+        SharedState) else None`` - so a server-side caller, which by
+        definition has no session state, gets None from it every time. It is
+        the right answer to the question it was asked; it is just not the
+        question the control plane has.
+
+        Nor can the global be requested through the plugin API. Wan2GP injects
+        globals by *copying* each requested name onto the plugin object
+        (``inject_globals``: ``setattr(plugin, name, references[name])``), and
+        it does that while the plugins load - long before the generator tab is
+        built and the service exists. The snapshot would be None for the life
+        of the process.
+
+        So it is read here, at call time, straight off the module object, and
+        read out of ``sys.modules`` rather than imported. That is the part
+        worth being careful about: Wan2GP is launched as ``python wgp.py``, so
+        its module object is ``__main__``, and ``import wgp`` would not return
+        that object at all - it would execute the entire application a second
+        time inside its own process. Nothing here imports anything.
+        """
+        import sys
+
+        for name in SERVICE_HOLDERS:
+            module = sys.modules.get(name)
+            if module is None:
+                continue
+            for attribute in SERVICE_SINGLETONS:
+                candidate = getattr(module, attribute, None)
+                if self.is_service(candidate):
+                    return candidate
         return None
 
     def _call_factory(self, factory: typing.Any, state: typing.Any) -> typing.Any:

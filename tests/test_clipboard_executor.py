@@ -526,15 +526,41 @@ def failure_checks(r: Results, clock) -> None:
         r.check("a model WanGP no longer has fails with its own code, never a silent substitution",
                 settled["error"]["code"] == wire.MODEL_UNAVAILABLE, str(settled["error"]))
 
+        # A WanGP that is up but cannot take a job yet is WAITED for, not
+        # failed. READY means a process is alive and answered HTTP, and
+        # Wan2GP builds its UI - and creates the generation service - after
+        # that. Failing on the first ask threw away jobs that would have run
+        # seconds later, which is the opposite of what walking away is for.
         child.refuse = ""
         child.available = False
         job = outbox.submit(_request(), PAGE)
         for _ in range(4):
             executor.step()
+        waiting = outbox.get(job["job_id"])
+        r.check("a WanGP that is up but not ready yet holds the job rather than throwing it away",
+                waiting["state"] == outbox.ENSURING_WANGP and waiting["error"] is None, str(waiting["state"]))
+        r.check("and says so while it waits, rather than looking stalled",
+                "not ready" in waiting["stage"].lower() and "again in" in waiting["stage"].lower(), waiting["stage"])
+        r.check("nothing was submitted to a child that said it could not execute", not child.submissions, str(child.submissions))
+
+        # Bounded, though: a build that genuinely cannot execute still ends up
+        # saying so rather than retrying all night.
+        for _ in range(executor.MAX_RETRYABLE_ATTEMPTS + 4):
+            executor.step()
         settled = outbox.get(job["job_id"])
-        r.check("a WanGP running without a control surface says so rather than waiting forever",
-                settled["state"] == outbox.FAILED and settled["error"]["code"] in (wire.SERVICE_UNAVAILABLE, errors.CONTROL_UNAVAILABLE),
+        r.check("but a WanGP that never becomes able to run one does eventually say so",
+                settled["state"] == outbox.FAILED
+                and settled["error"]["code"] in (wire.SERVICE_UNAVAILABLE, errors.CONTROL_UNAVAILABLE),
                 str(settled["error"]))
+
+        # And the moment it can, the job it was holding goes on.
+        child.available = True
+        job = outbox.submit(_request(prompt="held then run"), PAGE)
+        for _ in range(3):
+            executor.step()
+        held = outbox.get(job["job_id"])
+        r.check("a job held through a slow start runs as soon as the child can take it",
+                held["state"] not in (outbox.FAILED, outbox.ENSURING_WANGP), held["state"])
     finally:
         control.use_transport(None)
         _restore(monkey)

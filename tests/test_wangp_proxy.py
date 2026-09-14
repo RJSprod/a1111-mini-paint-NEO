@@ -457,6 +457,100 @@ async def no_open_proxy(r: Results) -> None:
         proxy.use_client(None)
 
 
+class DeepyClient:
+    """An upstream that serves the Deepy API without the /deepy prefix.
+
+    Which is the arrangement that was actually found: the page asks at
+    ``/deepy/deepy_api/state`` and this build answers at ``/deepy_api/state``.
+    """
+
+    def __init__(self, prefixed_ok=False, broken=False):
+        self.paths = []
+        self.prefixed_ok = prefixed_ok
+        self.broken = broken
+
+    def build_request(self, method, url, headers=None, content=None, timeout=None):
+        self.paths.append(str(httpx.URL(url).raw_path.decode("latin-1")).split("?")[0])
+        return httpx.Request(method, url, headers=headers)
+
+    async def send(self, request, stream=False, follow_redirects=False):
+        path = str(request.url.raw_path.decode("latin-1")).split("?")[0]
+        if self.broken:
+            return httpx.Response(500, headers=[("content-type", "text/plain")], content=b"inside")
+        served = path.startswith("/deepy/") if self.prefixed_ok else not path.startswith("/deepy/")
+        if served:
+            return httpx.Response(200, headers=[("content-type", "application/json")], content=b"{}")
+        return httpx.Response(404, headers=[("content-type", "text/plain")], content=b"no")
+
+
+async def deepy_checks(r: Results) -> None:
+    """The Deepy API is asked for at the other place when the first 404s.
+
+    THE BANNER THAT WOULD NOT CLEAR.
+
+    Wan2GP mounts its Deepy app as a sub-application, so its API is at
+    ``/deepy/deepy_api/...`` and that is where the page asks - its marker is
+    a root-relative ``/deepy/`` and the transport resolves against it. On the
+    install this was found on, that answers 404 and the panel shows
+    "Connection to server lost" for ever while every other part of the page
+    works, because its transport has no fallback and marks the notice
+    persistent.
+
+    Which of the two places a given build answers at is not knowable from
+    here, so it is asked once and remembered.
+    """
+    proxy._state["deepy_form"] = None
+    proxy._state["deepy"] = set()
+    proxy._state["logged"] = set()
+    spy = DeepyClient()
+    proxy.use_client(spy)
+    try:
+        as_ready(PRETEND_PORT)
+        answer = await forwarded(request_for("GET", "/deepy/deepy_api/state"))
+        r.check("a Deepy request that 404s under the prefix is answered from the other place",
+                answer.status_code == 200, str(answer.status_code))
+        r.check("which took exactly two upstream requests, not a search",
+                spy.paths == ["/deepy/deepy_api/state", "/deepy_api/state"], str(spy.paths))
+
+        # Learnt. The next request goes straight there.
+        before = len(spy.paths)
+        answer = await forwarded(request_for("GET", "/deepy/deepy_api/settings"))
+        r.check("and the next one goes straight there, having learnt it once",
+                answer.status_code == 200 and spy.paths[before:] == ["/deepy_api/settings"], str(spy.paths[before:]))
+    finally:
+        proxy.use_client(None)
+        proxy._state["deepy_form"] = None
+
+    # A build that answers where the page asks never pays for any of this.
+    proxy._state["deepy_form"] = None
+    proxy._state["logged"] = set()
+    spy = DeepyClient(prefixed_ok=True)
+    proxy.use_client(spy)
+    try:
+        as_ready(PRETEND_PORT)
+        answer = await forwarded(request_for("GET", "/deepy/deepy_api/state"))
+        r.check("a build that answers where the page asks is left alone, with one request",
+                answer.status_code == 200 and spy.paths == ["/deepy/deepy_api/state"], str(spy.paths))
+    finally:
+        proxy.use_client(None)
+        proxy._state["deepy_form"] = None
+
+    # 500 is the app saying something went wrong inside it. Asking a different
+    # way would be papering over that, so it is not retried.
+    proxy._state["deepy_form"] = None
+    proxy._state["logged"] = set()
+    spy = DeepyClient(broken=True)
+    proxy.use_client(spy)
+    try:
+        as_ready(PRETEND_PORT)
+        answer = await forwarded(request_for("GET", "/deepy/deepy_api/state"))
+        r.check("a 500 is handed back as it is, not retried into a different answer",
+                answer.status_code == 500 and len(spy.paths) == 1, f"{answer.status_code} {spy.paths}")
+    finally:
+        proxy.use_client(None)
+        proxy._state["deepy_form"] = None
+
+
 async def forwarded(request):
     """``forward`` plus the small amount of work a real server would do."""
     response = await proxy.forward(request)
@@ -759,6 +853,7 @@ def run() -> Results:
         enforced_auth_checks(r)
         asyncio.run(async_checks(r))
         asyncio.run(auth_gate_checks(r))
+        asyncio.run(deepy_checks(r))
     finally:
         proxy.use_client(None)
         runtime.reset_for_tests()

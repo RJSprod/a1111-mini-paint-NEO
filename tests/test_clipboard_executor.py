@@ -593,15 +593,17 @@ def failure_checks(r: Results, clock) -> None:
                 "not ready" in waiting["stage"].lower() and "again in" in waiting["stage"].lower(), waiting["stage"])
         r.check("nothing was submitted to a child that said it could not execute", not child.submissions, str(child.submissions))
 
-        # Bounded, though: a build that genuinely cannot execute still ends up
-        # saying so rather than retrying all night.
+        # Bounded, though - and what it gives up to is the page, not a
+        # failure. Running with the tab open is not walking away, but it is
+        # generating, and a job thrown away is neither.
         for _ in range(executor.MAX_RETRYABLE_ATTEMPTS + 4):
             executor.step()
         settled = outbox.get(job["job_id"])
-        r.check("but a WanGP that never becomes able to run one does eventually say so",
-                settled["state"] == outbox.FAILED
-                and settled["error"]["code"] in (wire.SERVICE_UNAVAILABLE, errors.CONTROL_UNAVAILABLE),
-                str(settled["error"]))
+        r.check("a WanGP that never becomes able to run one hands the job to the page rather than binning it",
+                settled["executor"] == outbox.EXECUTOR_BROWSER and settled["state"] == outbox.PENDING,
+                f"{settled['executor']} {settled['state']}")
+        r.check("and the page can claim it, which is the whole point of handing it over",
+                outbox.claim(PAGE).get("job", {}).get("job_id") == job["job_id"], str(outbox.claim(PAGE))[:120])
 
         # And the moment it can, the job it was holding goes on.
         child.available = True

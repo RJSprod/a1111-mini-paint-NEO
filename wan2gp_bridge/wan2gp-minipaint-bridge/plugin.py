@@ -166,6 +166,22 @@ class MiniPaintBridge:
 
     # -- reading -------------------------------------------------------------
 
+    def learn_from(self, live: typing.Mapping[str, typing.Any]) -> None:
+        """Take from a page the one thing a control-plane thread cannot get.
+
+        ``service_for`` needs a session state, and every request from a page
+        carries one. The control surface has none and never will, so the
+        service is learned here - once, from whichever page asks first - and
+        kept for the life of the process.
+        """
+        state = live.get(compatibility.SESSION_STATE)
+        if state is None:
+            return
+        try:
+            self.compat.remember_service(state)
+        except Exception:
+            pass
+
     def live_values(self, values: typing.Sequence[typing.Any]) -> typing.Dict[str, typing.Any]:
         """Positional event inputs back into component keys.
 
@@ -174,7 +190,9 @@ class MiniPaintBridge:
         that reason: a mismatch here would read the reference list as the
         prompt type without anything looking wrong.
         """
-        return {key: values[index] for index, key in enumerate(self.state_keys) if index < len(values)}
+        live = {key: values[index] for index, key in enumerate(self.state_keys) if index < len(values)}
+        self.learn_from(live)
+        return live
 
     def state(self, values: typing.Sequence[typing.Any]) -> "receiver_state.SessionState":
         return receiver_state.read(self.compat, self.live_values(values))

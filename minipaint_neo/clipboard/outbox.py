@@ -1735,6 +1735,47 @@ def attempt(job_id: typing.Any) -> typing.Optional[dict]:
         return public(job)
 
 
+def hand_to_browser(job_id: typing.Any, why: str = "") -> typing.Optional[dict]:
+    """Give a server job back to the page, because this WanGP cannot run it.
+
+    The unattended path submits into the one queue Wan2GP's own worker
+    drains. A Wan2GP built without that worker has nothing to submit into,
+    and the design refuses - correctly - to invent a second execution path
+    beside the arbiter: that is two generations on one card, which is the
+    hazard the whole thing is arranged to avoid.
+
+    What is left is the path that was always there. The page drives the live
+    form and presses WanGP's own button, exactly as it did before any of this
+    existed. It needs the tab open, so it is not walking away - but it is
+    generating, which is the thing the user asked for, and a job that waits
+    forever for a service that will never exist is not.
+    """
+    with _lock:
+        listed = _load()
+        job = _find(listed, job_id)
+        if job["state"] in TERMINAL or job.get("executor") != EXECUTOR_SERVER:
+            return None
+        pins = input_ids(job)
+        job["executor"] = EXECUTOR_BROWSER
+        job["state"] = PENDING
+        job["stage"] = ""
+        job["attempts"] = 0
+        job["execution_id"] = ""
+        job["updated_at"] = _now()
+        job["revision"] = int(job.get("revision") or 0) + 1
+        job["inputs"] = {}
+        job["inputs_released"] = True
+        _save(listed)
+        answer = public(job)
+    if pins:
+        # The browser path resolves the handles in the request itself, so the
+        # job's own copies are no longer what it runs from.
+        _release_inputs(pins)
+    _journal(f"job {str(job_id)[:8]}: handed back to the page{(' - ' + why) if why else ''}")
+    _publish(answer)
+    return answer
+
+
 def start_session() -> dict:
     """Begin a Forge run with an empty queue. Returns what was let go.
 
@@ -1867,6 +1908,7 @@ __all__ = [
     "ADMITTED", "CANCELLED", "COMPLETED", "COMPOSING", "ENHANCED", "ENHANCING", "ENSURING_WANGP",
     "EXECUTION_UNKNOWN", "EXECUTORS", "EXECUTOR_BROWSER", "EXECUTOR_SERVER", "FAILED",
     "GENERATION_RUNNING", "GENERATION_WAITING", "LEASE_SECONDS", "LEGACY_TERMINAL", "MAX_JOBS",
+    "hand_to_browser",
     "MAX_PENDING", "ORIGIN_API", "ORIGIN_CLIPBOARD", "OUTBOX_NAME", "PAGE_ACTIVE_SECONDS", "PENDING",
     "PHASE_DONE", "PHASE_SENT", "POSITIVE", "QUEUED", "SCHEMA", "SENDING", "SERVER_ACTIVE",
     "SERVER_SUBMITTED", "SERVER_TERMINAL", "STAGE_TEXT", "STARTED", "STATES", "SUBMITTING_WANGP",

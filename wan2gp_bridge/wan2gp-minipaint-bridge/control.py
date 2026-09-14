@@ -241,6 +241,11 @@ class ControlSurface:
             # the reason reaches whoever is reading a log rather than staying
             # inside this process as a three-word code.
             "diagnosis": "" if can_execute else self.compat.service_diagnosis(),
+            # Whether waiting could ever help. False means this Wan2GP does
+            # not carry the generation service at all, so a job that waits for
+            # it waits forever - and the caller should do something else
+            # rather than hold the queue open on a hope.
+            "service_possible": bool(can_execute or self.compat.service_possible()),
             "can_compose": bool(self.composer is not None and self.composer.available()),
             "service": service is not None,
             "generation_running": self.compat.service_generation_running(service),

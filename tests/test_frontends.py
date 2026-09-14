@@ -223,21 +223,29 @@ def run() -> Results:
     wait_id = component("minipaint_canvas_wait")["id"]
     mode_id = component("minipaint_canvas_mode")["id"]
 
-    # -- a structural step: image -> wait for the canvas -> mask layer
+    # -- a structural step: the image and the mask that belongs to it, in one
+    # reply, with the *ordering* kept by the browser rather than by a second
+    # round trip. What is asserted is the invariant, not a step count: the
+    # mask is never written to the canvas's own foreground by the server, and
+    # the browser is the thing that applies it after the load.
+    pending_id = component("minipaint_canvas_pending_mask")["id"]
     apply_crop = by_elem("minipaint_canvas_crop_apply")
     steps = chain(apply_crop[0]) if apply_crop else []
-    r.check("apply crop is one chain of three backend steps", len(apply_crop) == 1 and len(steps) == 3 and all(s["backend_fn"] for s in steps), str(len(steps)))
+    r.check("apply crop is one backend step", len(apply_crop) == 1 and len(steps) == 1 and steps[0]["backend_fn"], str(len(steps)))
     r.check("apply crop reads the strokes and the frame, never the picture (the document has it)",
             steps and background["id"] not in steps[0]["inputs"] and foreground["id"] in steps[0]["inputs"]
             and component("minipaint_canvas_crop_box")["id"] in steps[0]["inputs"] and "cropBox()" in steps[0]["js"] and "mark()" in steps[0]["js"])
-    r.check("apply crop writes the image, the status and the wait flag",
-            steps and {background["id"], foreground["id"], status_id, wait_id, mode_id} <= set(steps[0]["outputs"]))
-    r.check("then waits for the canvas", len(steps) > 1 and "waitForImage" in steps[1]["js"] and steps[1]["inputs"] == [wait_id])
-    r.check("then writes the mask layer only, knowing whether the image was replaced", len(steps) > 2 and steps[2]["outputs"] == [foreground["id"]] and wait_id in steps[2]["inputs"] and not steps[2].get("js"))
+    r.check("apply crop writes the image, the mask to hold, the status and the wait flag",
+            steps and {background["id"], pending_id, status_id, wait_id, mode_id} <= set(steps[0]["outputs"]))
+    r.check("and never writes the canvas's own foreground, which would land before the picture",
+            steps and foreground["id"] not in steps[0]["outputs"], str(steps[0]["outputs"]))
+    held = deps_targeting(pending_id, "change")
+    r.check("the held mask is applied by the browser, on its own load hook",
+            len(held) == 1 and not held[0]["backend_fn"] and "pendingMask" in held[0]["js"], str(held))
 
     for elem_id in ("minipaint_canvas_undo", "minipaint_canvas_redo", "minipaint_canvas_reset", "minipaint_canvas_expand_apply"):
         d = by_elem(elem_id)
-        r.check(f"{elem_id} is the same three-step chain", len(d) == 1 and len(chain(d[0])) == 3 and "mark(" in d[0]["js"])
+        r.check(f"{elem_id} is the same one-step chain", len(d) == 1 and len(chain(d[0])) == 1 and "mark(" in d[0]["js"])
     for elem_id, helper in (("minipaint_canvas_undo", "undoStroke"), ("minipaint_canvas_redo", "redoStroke")):
         d = by_elem(elem_id)[0]
         r.check(f"{elem_id} tries the canvas's stroke history first and says which it did",
@@ -246,11 +254,11 @@ def run() -> Results:
 
     # -- layers: the selection, the list, the drag's landing, and every panel action are the same chain
     new_layer = by_elem("minipaint_canvas_layer_new")
-    r.check("new from selection reads the frame and keeps the view", len(new_layer) == 1 and "cropBox()" in new_layer[0]["js"] and "mark(true)" in new_layer[0]["js"] and len(chain(new_layer[0])) == 3)
+    r.check("new from selection reads the frame and keeps the view", len(new_layer) == 1 and "cropBox()" in new_layer[0]["js"] and "mark(true)" in new_layer[0]["js"] and len(chain(new_layer[0])) == 1)
     move = deps_targeting(component("minipaint_canvas_layer_move")["id"], "input")
-    r.check("a dropped layer reaches the server through the hidden textbox, keeping the view", len(move) == 1 and move[0]["backend_fn"] and "mark(true)" in move[0]["js"] and len(chain(move[0])) == 3 and background["id"] not in move[0]["inputs"] and foreground["id"] in move[0]["inputs"])
+    r.check("a dropped layer reaches the server through the hidden textbox, keeping the view", len(move) == 1 and move[0]["backend_fn"] and "mark(true)" in move[0]["js"] and len(chain(move[0])) == 1 and background["id"] not in move[0]["inputs"] and foreground["id"] in move[0]["inputs"])
     action = deps_targeting(component("minipaint_canvas_layer_action")["id"], "input")
-    r.check("a tap in the layer list reaches the server the same way", len(action) == 1 and action[0]["backend_fn"] and "mark(true)" in action[0]["js"] and len(chain(action[0])) == 3
+    r.check("a tap in the layer list reaches the server the same way", len(action) == 1 and action[0]["backend_fn"] and "mark(true)" in action[0]["js"] and len(chain(action[0])) == 1
             and background["id"] not in action[0]["inputs"] and component("minipaint_canvas_layer_list")["id"] in action[0]["outputs"])
     r.check("nothing is bound to the list itself: the browser delegates its taps", not any(component("minipaint_canvas_layer_list")["id"] in [t[0] for t in d["targets"]] for d in deps))
     for elem_id, trigger in (("minipaint_canvas_layer_merge", "click"), ("minipaint_canvas_layer_delete", "click"), ("minipaint_canvas_layer_center", "click"),
@@ -258,18 +266,18 @@ def run() -> Results:
                              ("minipaint_canvas_layer_rename", "click"), ("minipaint_canvas_mask_to_layer", "click"),
                              ("minipaint_canvas_layer_opacity", "release")):
         d = deps_targeting(component(elem_id)["id"], trigger)
-        r.check(f"{elem_id} is a view-keeping three-step chain", len(d) == 1 and "mark(true)" in d[0]["js"] and len(chain(d[0])) == 3)
+        r.check(f"{elem_id} is a view-keeping one-step chain", len(d) == 1 and "mark(true)" in d[0]["js"] and len(chain(d[0])) == 1)
     transform = deps_targeting(component("minipaint_canvas_layer_transform")["id"], "input")
-    r.check("Done in transform mode reaches the server through its hidden textbox, keeping the view", len(transform) == 1 and transform[0]["backend_fn"] and "mark(true)" in transform[0]["js"] and len(chain(transform[0])) == 3)
+    r.check("Done in transform mode reaches the server through its hidden textbox, keeping the view", len(transform) == 1 and transform[0]["backend_fn"] and "mark(true)" in transform[0]["js"] and len(chain(transform[0])) == 1)
     start = by_elem("minipaint_canvas_layer_transform_start", "click")
     done = by_elem("minipaint_canvas_layer_transform_done", "click")
     r.check("entering and leaving transform mode are browser-only", len(start) == 1 and not start[0]["backend_fn"] and "startTransform" in start[0]["js"] and len(done) == 1 and not done[0]["backend_fn"] and "finishTransform" in done[0]["js"])
     r.check("Done is shown only while transforming", "minipaint-transform-only" in component("minipaint_canvas_layer_transform_done")["props"]["elem_classes"] and component("minipaint_canvas_layer_transform_done")["props"]["visible"] is not False)
     for elem_id in ("minipaint_canvas_layer_half", "minipaint_canvas_layer_full", "minipaint_canvas_layer_double"):
         d = by_elem(elem_id)
-        r.check(f"{elem_id} is a view-keeping three-step chain", len(d) == 1 and "mark(true)" in d[0]["js"] and len(chain(d[0])) == 3)
+        r.check(f"{elem_id} is a view-keeping one-step chain", len(d) == 1 and "mark(true)" in d[0]["js"] and len(chain(d[0])) == 1)
     d = deps_targeting(component("minipaint_canvas_layer_scale")["id"], "release")
-    r.check("the size slider is a view-keeping three-step chain on release", len(d) == 1 and "mark(true)" in d[0]["js"] and len(chain(d[0])) == 3)
+    r.check("the size slider is a view-keeping one-step chain on release", len(d) == 1 and "mark(true)" in d[0]["js"] and len(chain(d[0])) == 1)
     outline = deps_targeting(component("minipaint_canvas_layer_preview")["id"], "change")
     r.check("the selection outline follows the preview, browser-only", len(outline) == 1 and "refreshOverlays" in outline[0]["js"] and not outline[0]["backend_fn"])
     layer_widgets = {component(f"minipaint_canvas_layer_{name}")["id"] for name in ("list", "scale", "opacity", "name", "preview", "underlay")}
@@ -281,16 +289,16 @@ def run() -> Results:
     menu = by_elem("minipaint_canvas_menu")
     r.check("the menu button is browser-only", len(menu) == 1 and "toggleMenu" in menu[0]["js"] and not menu[0]["backend_fn"])
     opened = by_elem("minipaint_canvas_open", "upload")
-    r.check("open is the same chain on upload", len(opened) == 1 and len(chain(opened[0])) == 3)
+    r.check("open is the same chain on upload", len(opened) == 1 and len(chain(opened[0])) == 1)
 
     # -- receive: pick from the gallery, the chain, then the host's tab switch
     receive = by_elem("txt2img_send_to_minipaint")
     steps = chain(receive[0]) if receive else []
     r.check("receive picks the gallery image in the browser", len(receive) == 1 and "pickGalleryImage" in receive[0]["js"] and refs["txt2img_gallery"]._id in receive[0]["inputs"] and receive[0]["backend_fn"])
     r.check("receive then asks the server where it landed and switches to that tab - the Canvas, or Clipboard under the intercept",
-            len(steps) == 5 and steps[3]["backend_fn"] and steps[3]["outputs"] == [component("minipaint_canvas_switch")["id"]]
-            and "switchTo(target)" in (steps[4].get("js") or "") and not steps[4]["backend_fn"]
-            and steps[4]["inputs"] == [component("minipaint_canvas_switch")["id"]], str(len(steps)))
+            len(steps) == 3 and steps[1]["backend_fn"] and steps[1]["outputs"] == [component("minipaint_canvas_switch")["id"]]
+            and "switchTo(target)" in (steps[2].get("js") or "") and not steps[2]["backend_fn"]
+            and steps[2]["inputs"] == [component("minipaint_canvas_switch")["id"]], str(len(steps)))
 
     # -- what the canvas holds: the input event, filtered in the browser
     canvas_input = deps_targeting(background["id"], "input")
@@ -358,7 +366,7 @@ def run() -> Results:
     r.check("the hidden Open button is an upload button the menu can press", component("minipaint_canvas_open")["type"] == "uploadbutton" and len(by_elem("minipaint_canvas_open", "upload")) == 1)
     add_upload = by_elem("minipaint_canvas_layer_add", "upload")
     r.check("Add image as layer is a hidden upload button whose file is a view-keeping layer step", component("minipaint_canvas_layer_add")["type"] == "uploadbutton" and component("minipaint_canvas_layer_add")["props"].get("visible") is False
-            and len(add_upload) == 1 and add_upload[0]["backend_fn"] and "mark(true)" in add_upload[0]["js"] and len(chain(add_upload[0])) == 3 and background["id"] not in add_upload[0]["inputs"])
+            and len(add_upload) == 1 and add_upload[0]["backend_fn"] and "mark(true)" in add_upload[0]["js"] and len(chain(add_upload[0])) == 1 and background["id"] not in add_upload[0]["inputs"])
     add_press = by_elem("minipaint_canvas_layer_add_btn", "click")
     r.check("the panel's Add image button only presses it, in the browser", len(add_press) == 1 and not add_press[0]["backend_fn"] and "pressHidden('minipaint_canvas_layer_add')" in add_press[0]["js"])
     r.check("Reselect in Crop and in Layers is browser-only", all(len(d) == 1 and not d[0]["backend_fn"] and "reselect()" in d[0]["js"] for d in (by_elem("minipaint_canvas_crop_reselect", "click"), by_elem("minipaint_canvas_layer_reselect", "click"))))

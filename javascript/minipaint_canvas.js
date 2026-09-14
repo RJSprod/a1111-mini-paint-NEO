@@ -120,6 +120,12 @@ window.minipaintCanvas = (function () {
         contrast: false,
         loaded: 0,
         marker: 0,
+        //: Everybody waiting for the next image load. The load hook wakes
+        //: them; nothing polls for it. See ``waitForImage``.
+        loadWaiters: [],
+        //: The mask layer a structural step sent with its picture, waiting
+        //: for that picture to load. Only ever the latest. See pendingMask.
+        pendingMask: null,
         keepView: null,
         serverLoad: false,
         echoValue: null,
@@ -576,6 +582,11 @@ window.minipaintCanvas = (function () {
             endTransform(false);
             endLayerDrag(false);
             S.loaded += 1;
+            // The mask that came with this picture, now that the picture is
+            // on the canvas and has its size. This is where the round trip
+            // the server used to make is replaced.
+            applyPendingMask();
+            wakeLoadWaiters();
             setTimeout(function () {
                 trimHistory();
                 refreshFrame(!kept);
@@ -659,11 +670,72 @@ window.minipaintCanvas = (function () {
      * already has its image's size, which is why the server writes them in
      * two steps with this in between.
      */
-    async function waitForImage() {
-        const deadline = Date.now() + LOAD_TIMEOUT;
-        while (S.instance && S.loaded === S.marker && Date.now() < deadline) {
-            await tick(40);
-        }
+    /**
+     * The mask layer for the picture the server is sending, held until it
+     * has loaded. A3.
+     *
+     * Rule four of that section, and the one that matters: a newer result
+     * *replaces* an older pending layer rather than queueing behind it. Two
+     * structural edits in quick succession produce two pictures and two
+     * masks, and an out-of-order load must not paint the first mask onto the
+     * second picture - so there is only ever one pending layer, and it is
+     * always the latest the server has said.
+     */
+    function pendingMask(payload) {
+        let parsed = null;
+        try { parsed = JSON.parse(String(payload || "") || "null"); } catch (e) { parsed = null; }
+        if (!parsed || typeof parsed.mask !== "string") { return false; }
+        S.pendingMask = parsed.mask;
+        // The picture may already be on the canvas: a step that changed the
+        // mask without changing the image size loads nothing, and waiting
+        // for a load that will not come would leave the strokes stale.
+        if (S.loaded !== S.marker) { applyPendingMask(); }
+        return true;
+    }
+
+    /** Write the held mask into the canvas's own foreground. */
+    function applyPendingMask() {
+        const value = S.pendingMask;
+        if (value === null) { return false; }
+        S.pendingMask = null;
+        const i = S.instance;
+        const bind = i && i.foreground_gradio_bind;
+        const target = bind && bind.target;
+        if (!target) { return false; }
+        target.value = value;
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+        return true;
+    }
+
+    /**
+     * Everybody waiting for the next load, woken by the load itself.
+     *
+     * Told, not asked. The wait a structural edit used to make was a poll -
+     * twenty-five times a second against an event that happens in this very
+     * file - and the producer's cadence and the observer's timer were never
+     * synchronised, so it added somewhere between nothing and a whole
+     * interval to every edit for no benefit. The load hook is the event; a
+     * waiter is woken by it, or by its own deadline if the load never comes.
+     */
+    function wakeLoadWaiters() {
+        const waiting = S.loadWaiters;
+        S.loadWaiters = [];
+        for (const resolve of waiting) { try { resolve(); } catch (e) { /* the waiter's */ } }
+    }
+
+    function waitForImage() {
+        if (!S.instance || S.loaded !== S.marker) { return Promise.resolve(); }
+        return new Promise(function (resolve) {
+            let settled = false;
+            const done = function () {
+                if (settled) { return; }
+                settled = true;
+                clearTimeout(timer);
+                resolve();
+            };
+            const timer = setTimeout(done, LOAD_TIMEOUT);
+            S.loadWaiters.push(done);
+        });
     }
 
     /**
@@ -678,10 +750,35 @@ window.minipaintCanvas = (function () {
         if (!match || !canvas) { return; }
         const width = Number(match[1]);
         const height = Number(match[2]);
-        const deadline = Date.now() + LOAD_TIMEOUT;
-        while ((canvas.width !== width || canvas.height !== height) && Date.now() < deadline) {
-            await tick(40);
+        if (canvas.width === width && canvas.height === height) { return; }
+        // The host's canvas takes its size by having its width and height
+        // *attributes* written, which a MutationObserver sees the moment it
+        // happens. A ResizeObserver would not: setting those attributes need
+        // not change the element's layout box at all. The poll stays as the
+        // fallback for a browser without one, bounded by the same deadline.
+        if (typeof MutationObserver !== "function") {
+            const deadline = Date.now() + LOAD_TIMEOUT;
+            while ((canvas.width !== width || canvas.height !== height) && Date.now() < deadline) {
+                await tick(40);
+            }
+            return;
         }
+        await new Promise(function (resolve) {
+            let settled = false;
+            const done = function () {
+                if (settled) { return; }
+                settled = true;
+                clearTimeout(timer);
+                observer.disconnect();
+                resolve();
+            };
+            const timer = setTimeout(done, LOAD_TIMEOUT);
+            const observer = new MutationObserver(function () {
+                if (canvas.width === width && canvas.height === height) { done(); }
+            });
+            observer.observe(canvas, { attributes: true, attributeFilter: ["width", "height"] });
+            if (canvas.width === width && canvas.height === height) { done(); }
+        });
     }
 
     /**
@@ -2407,6 +2504,7 @@ window.minipaintCanvas = (function () {
         attached: attached,
         mark: mark,
         waitForImage: waitForImage,
+        pendingMask: pendingMask,
         waitForHostImage: waitForHostImage,
         canvasInput: canvasInput,
         undoStroke: undoStroke,

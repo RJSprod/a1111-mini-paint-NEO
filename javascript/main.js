@@ -34,29 +34,69 @@ window.a1111minipaint = window.a1111minipaint || {};
         return document;
     }
 
-    /** Resolve once `selector` exists in the WebUI DOM. */
-    function waitForSelector(selector, timeoutMs) {
-        const existing = root().querySelector(selector);
-        if (existing) {
-            return Promise.resolve(existing);
+    /**
+     * The narrowest container that holds every output row we bind to.
+     *
+     * Forge puts all of them inside one `gr.Tabs(elem_id="tabs")`. Observing
+     * that instead of the whole application is the difference between
+     * watching one subtree during hydration and watching every node the
+     * WebUI creates - galleries, progress bars, every extension's own UI -
+     * for the whole of it. The document is the fallback for a host that has
+     * no such container, not the default.
+     */
+    function scope() {
+        const app = root();
+        return (app.querySelector && app.querySelector("#tabs")) || app;
+    }
+
+    /**
+     * Resolve once every selector exists, watching one subtree once.
+     *
+     * ONE observer for all of them, not one each. Six observers over the
+     * document during hydration is six callbacks per mutation, and hydration
+     * is thousands of mutations; they also each outlived their own target
+     * until the whole set had resolved. This checks first - by the time the
+     * iframe has loaded its bundle the rows are usually already there, which
+     * is the common case and costs no observer at all - and otherwise
+     * watches the smallest container that can contain them, disconnecting
+     * the moment the last one appears.
+     *
+     * Still not `onUiLoaded`, and the reason has not changed: that callback
+     * list fires once, as soon as #txt2img_prompt exists, which is long
+     * before this extension's iframe finishes loading. Registering after it
+     * has fired never runs at all.
+     */
+    function waitForSelectors(selectors, timeoutMs) {
+        function found() {
+            const app = root();
+            const out = {};
+            for (const selector of selectors) {
+                const element = app.querySelector(selector);
+                if (!element) { return null; }
+                out[selector] = element;
+            }
+            return out;
         }
 
+        const ready = found();
+        if (ready) { return Promise.resolve(ready); }
+
         return new Promise(function (resolve, reject) {
+            let observer = null;
             const timer = setTimeout(function () {
-                observer.disconnect();
-                reject(new Error("MiniPaint: " + selector + " was not found within " + timeoutMs + "ms"));
+                if (observer) { observer.disconnect(); }
+                reject(new Error("MiniPaint: the output rows were not found within " + timeoutMs + "ms"));
             }, timeoutMs);
 
-            const observer = new MutationObserver(function () {
-                const element = root().querySelector(selector);
-                if (element) {
-                    clearTimeout(timer);
-                    observer.disconnect();
-                    resolve(element);
-                }
+            observer = new MutationObserver(function () {
+                const all = found();
+                if (!all) { return; }
+                clearTimeout(timer);
+                observer.disconnect();
+                resolve(all);
             });
 
-            observer.observe(root(), { childList: true, subtree: true });
+            observer.observe(scope(), { childList: true, subtree: true });
         });
     }
 
@@ -83,12 +123,23 @@ window.a1111minipaint = window.a1111minipaint || {};
     async function bindButtons() {
         await waitForBridge(TIMEOUT_MS);
 
+        const selectors = [];
+        for (const target of TARGETS) { selectors.push("#" + target[0], "#" + target[1]); }
+        try {
+            await waitForSelectors(selectors, TIMEOUT_MS);
+        } catch (e) {
+            // A host without one of the rows - a Forge with extras switched
+            // off, say - must not cost the tabs that are there, so the wait
+            // is best-effort and each binding is still tried on its own.
+            console.error(e);
+        }
+
+        const app = root();
         for (const target of TARGETS) {
             const buttonsId = target[0];
-            const galleryId = target[1];
+            const gallery = app.querySelector("#" + target[1]);
+            if (!app.querySelector("#" + buttonsId) || !gallery) { continue; }
             try {
-                await waitForSelector("#" + buttonsId, TIMEOUT_MS);
-                const gallery = await waitForSelector("#" + galleryId, TIMEOUT_MS);
                 window.a1111minipaint.createSendButton(buttonsId, gallery);
             } catch (e) {
                 // One missing tab must not stop the others from binding.

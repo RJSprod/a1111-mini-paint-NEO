@@ -30,6 +30,7 @@ from __future__ import annotations
 import html as html_escape
 import json
 import os.path
+import secrets
 import typing
 
 import gradio as gr
@@ -81,9 +82,19 @@ def _id(name: str) -> str:
 # one that runs alone (no backend step) returns nothing.
 _JS = "window.minipaintCanvas"
 ATTACH_JS = f"{_JS} && {_JS}.attach"
-WAIT_JS = (
-    f"async (flag) => {{ if (flag === 'wait' && {_JS}) {{ await {_JS}.waitForImage(); }} return [flag]; }}"
-)
+# A3: the mask layer, handed to the browser in the SAME response as the image
+# it belongs to, and applied by the browser once that image has loaded.
+#
+# The ordering requirement is real and unchanged - a mask can only be drawn
+# onto a canvas that already has its image's size - but the network round
+# trip that used to enforce it was not. A structural edit was three transport
+# steps: the server wrote the image, the browser waited for the canvas, and
+# the server was asked a second time for the layer it had already computed.
+# Now it computes the layer once, sends it with the image, and the browser
+# holds it until the load hook fires. One round trip; the same ordering; and
+# a newer result replaces an older pending layer, so an out-of-order load
+# cannot apply a mask that belongs to a picture that is gone.
+PENDING_MASK_JS = f"(payload) => {{ if ({_JS}) {_JS}.pendingMask(payload); }}"
 MODE_JS = f"(mode) => {{ if ({_JS}) {_JS}.onMode(mode); }}"
 MENU_JS = f"() => {{ if ({_JS}) {_JS}.toggleMenu(); }}"
 OVERLAYS_JS = f"() => {{ if ({_JS}) {_JS}.refreshOverlays(); }}"
@@ -544,15 +555,39 @@ class TouchCanvas:
         # the pixels: those stay here, and a PNG of them is what made every
         # step slow.
         background = imaging.display_data_url(doc.image) if doc.image is not None else None
-        foreground = gr.skip() if doc.has_mask else None
         return (
             background,
-            foreground,
+            self.pending_mask(doc),
             *self._info(doc, mode, message, notes, sides=sides, reset_aspect=reset_aspect, wait=doc.has_mask),
         )
 
+    def pending_mask(self, doc: document.Document) -> str:
+        """The mask layer for the picture this reply is sending, as one value.
+
+        Computed here rather than in a second call, and carried as a PNG
+        because a mask is exact coverage: the picture beside it may be a
+        lossy display copy, this may not.
+
+        The nonce is what makes two identical layers in a row still reach the
+        browser - a Gradio textbox whose value did not change fires nothing,
+        and "the same mask again after another edit" is an ordinary thing to
+        send. An empty mask is ``""``, which clears the strokes, and is not
+        the same as sending nothing at all.
+        """
+        if doc.has_mask and doc.image is not None:
+            layer = imaging.to_data_url(self._layer(doc.mask, doc.image.size))
+        else:
+            layer = ""
+        return json.dumps({"nonce": secrets.token_hex(4), "mask": layer})
+
     def _unchanged(self, doc: document.Document, mode: str, message: str, notes: typing.Sequence[str] = ()) -> tuple:
-        """The commit-shaped reply for a step that changed nothing."""
+        """The commit-shaped reply for a step that changed nothing.
+
+        Nothing means nothing: the canvas keeps its picture, and its strokes
+        and their history with it. A pending mask is deliberately not sent -
+        sending one would replace the user's live strokes with a rendering of
+        what the server last knew about them.
+        """
         return (gr.skip(), gr.skip(), *self._info(doc, mode, message, notes))
 
     INFO_COUNT = 7 + MODE_COUNT
@@ -875,15 +910,6 @@ class TouchCanvas:
         doc.checkpoint("reset")
         doc.load(doc.original, doc.origin, doc.filename)
         return self._commit(doc, "crop", "Back to the image as it arrived.")
-
-    def commit_foreground(self, state, flag="wait"):
-        """The mask layer, written once the canvas has the image it belongs
-        to. Only after a step that replaced the image: a step that left the
-        canvas alone leaves the strokes and their history alone too."""
-        doc = document.ensure(state)
-        if flag == "wait" and doc.has_mask and doc.image is not None:
-            return self._layer(doc.mask, doc.image.size)
-        return gr.skip()
 
     # -- callbacks: layers ----------------------------------------------------
 
@@ -1489,6 +1515,12 @@ class TouchCanvas:
                 crop_box = gr.Textbox("", visible=False, elem_id=_id("crop_box"))
                 original_size = gr.Textbox("", visible=False, elem_id=_id("original_size"))
                 wait_flag = gr.Textbox("", visible=False, elem_id=_id("wait"))
+                # A3: the mask layer for the picture a structural step just
+                # sent, held here until the browser's own load hook applies
+                # it. It is a textbox rather than the canvas's foreground
+                # because a write to that lands immediately, and immediately
+                # is before the picture it belongs to.
+                pending_mask = gr.Textbox("", visible=False, elem_id=_id("pending_mask"))
                 switch_box = gr.Textbox("", visible=False, elem_id=_id("switch"))
                 event_kind = gr.Textbox("", visible=False, elem_id=_id("event"))
                 payload_box = gr.Textbox("", visible=False, elem_id=_id("payload"))
@@ -1531,6 +1563,7 @@ class TouchCanvas:
             send_request=send_request,
             targets_box=targets_box,
             suggest_box=suggest_box,
+            pending_mask=pending_mask,
             wangp_result=wangp_result,
             wangp_fetch=wangp_fetch,
             panels={"crop": panel_crop, "mask": panel_mask, "expand": panel_expand, "layers": panel_layers},
@@ -1727,18 +1760,23 @@ class TouchCanvas:
         ]
         assert len(mode_outputs) == self.MODE_COUNT
         info_outputs = [state, status, expand["preview"], crop["aspect"], parts["original_size"], wait_flag, parts["suggest_box"], *mode_outputs]
-        commit_outputs = [background, foreground, *info_outputs]
+        # The mask travels as a value the browser holds, not as a write to
+        # the canvas's own foreground: written directly it would land before
+        # the picture it belongs to, on a canvas still the old size.
+        commit_outputs = [background, parts["pending_mask"], *info_outputs]
         canvas_inputs = [foreground, state, mode_state]
 
         quiet = {"show_progress": "hidden"}
 
         def structural(event, fn, inputs, js=None, keep=False):
-            """image -> wait for the canvas -> mask layer. See the module docstring."""
-            return (
-                event(fn, inputs=inputs, outputs=commit_outputs, js=js or _mark_js(len(inputs), keep), **quiet)
-                .then(_noop, js=WAIT_JS, inputs=[wait_flag], outputs=None, **quiet)
-                .then(self.commit_foreground, inputs=[state, wait_flag], outputs=[foreground], **quiet)
-            )
+            """One step: the image and the mask that belongs to it, together.
+
+            The ordering invariant is kept by the browser rather than by the
+            network - the pending mask is applied on the canvas's own load
+            hook - so this is one backend call where it used to be three
+            transport steps. See PENDING_MASK_JS.
+            """
+            return event(fn, inputs=inputs, outputs=commit_outputs, js=js or _mark_js(len(inputs), keep), **quiet)
 
         # Kept for a tab built after this one that hands pictures in
         # (Clipboard's Send to Mini Paint), so it takes the same chain.
@@ -1754,6 +1792,10 @@ class TouchCanvas:
         for mode, button in parts["tools"].items():
             button.click(lambda state, mode=mode: self.set_mode(mode, state), inputs=[state], outputs=mode_outputs, **quiet)
         mode_state.change(None, js=MODE_JS, inputs=[mode_state])
+        # Browser-only, like every other hook that exists to keep the canvas
+        # in step with what the server just said. No backend function: the
+        # value it carries is already the answer.
+        parts["pending_mask"].change(None, js=PENDING_MASK_JS, inputs=[parts["pending_mask"]])
 
         # -- what the canvas holds, when a file is opened, dropped or pasted onto it
         background.input(

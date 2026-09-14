@@ -1814,12 +1814,18 @@ class Compatibility:
         )[:200]
 
     def factory_settings(self, model_type: str) -> typing.Optional[dict]:
-        """The model's own defaults, through whichever seam this build has.
+        """The settings WanGP itself loads for a model, if it will say.
 
-        The fallback of last resort and never the preferred base: a job that
-        silently runs at settings nobody chose is the failure compose exists
-        to prevent, so a base that came from here is recorded as such and
-        said out loud on the job.
+        ``get_default_settings`` is the preferred seam and is better than its
+        name: it reads the model's saved settings file - the one WanGP writes
+        and then loads into the page whenever you switch to that model - and
+        only falls back to factory values when no such file exists yet. So
+        what comes back here is usually the user's own configuration at rest.
+
+        It is still the fallback of last resort and never the preferred base,
+        because "at rest" is not "on screen": anything changed in the page
+        and not committed is not in it. A base that came from here is
+        recorded as such and said out loud on the job.
         """
         for name in ("get_default_settings", "get_factory_settings"):
             getter = self.host.read_global(name)

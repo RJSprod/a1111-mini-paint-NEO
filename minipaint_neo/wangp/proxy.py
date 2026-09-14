@@ -68,14 +68,20 @@ PROXY_PREFIX = PROXY_PATH + "/"
 #: Rewriting the marker from our injected script would also work, and would
 #: depend on winning a race against the transport's own observer for an
 #: attribute it reads exactly once. This does not: whatever base the page
-#: resolves, the path is served. ``upstream_path`` already passes anything
-#: outside our own prefix through unchanged, so the child sees ``/deepy/...``
-#: exactly as it would with no proxy in the way.
+#: resolves, the path is served.
+#:
+#: Where it is served *from* is the other half, and the half that was wrong
+#: first: see ``deepy_upstream_path``.
 #: How many distinct Deepy paths get a line before the log stops saying.
 DEEPY_NOTED_MAX = 8
 
 DEEPY_PATH = "/deepy"
 DEEPY_PREFIX = DEEPY_PATH + "/"
+
+#: How this child addresses its Deepy app. ``ROOTED`` is the default and,
+#: on every build launched the way we launch one, the right answer.
+DEEPY_ROOTED = "rooted"
+DEEPY_BARE = "bare"
 
 
 #: A route under our own prefix that answers nothing and proves everything.
@@ -226,6 +232,49 @@ def upstream_path(path: typing.Any) -> str:
     if not text.startswith("/"):
         text = "/" + text
     return text or "/"
+
+
+def deepy_upstream_path(path: typing.Any, form: typing.Any = None) -> str:
+    """Where the child answers a Deepy request that arrived at the site root.
+
+    THE SUB-APPLICATION NEEDS BACK THE PREFIX THIS PROXY STRIPS.
+
+    Wan2GP mounts its Deepy app *on* the Gradio app - ``app.mount('/deepy',
+    create_app(...))`` in ``shared/deepy/hybrid.py`` - and we launch that
+    Gradio app with ``GRADIO_ROOT_PATH=/wan2gp``. Starlette resolves a mount
+    by adding the matched segment to ``root_path`` and then asking the
+    sub-application to strip ``root_path`` back off ``path``. That lines up
+    only while ``path`` still carries the root path.
+
+    ``upstream_path`` takes ours off, which the top-level app never misses:
+    ``get_route_path`` gives up on stripping when the path does not start
+    with the root path, so Gradio's own routes match either way. A mounted
+    sub-application is the one thing that does miss it - ``root_path``
+    becomes ``/wan2gp/deepy`` while ``path`` is still ``/deepy/...``, nothing
+    is stripped, and the sub-application answers 404 to every request. The
+    page's transport reads that as a dead server and latches its "Connection
+    to server lost. Reconnecting…" notice, for ever, while the rest of the
+    page works perfectly.
+
+    So Deepy requests are the one kind sent upstream with our prefix left on:
+    ``/deepy/deepy_api/state`` goes as ``/wan2gp/deepy/deepy_api/state``,
+    which is the address a browser would have used with no proxy in the way.
+    ``DEEPY_BARE`` is the opposite, for a child launched without a root path,
+    where the prefix would be the thing that breaks it.
+
+    Pure, and given anything outside the Deepy namespace it changes nothing.
+    """
+    text = str(path or "")
+    if not text.startswith(DEEPY_PREFIX) and text != DEEPY_PATH:
+        return text
+    if str(form or DEEPY_ROOTED) == DEEPY_BARE:
+        return text
+    return PROXY_PATH + text
+
+
+def deepy_other_form(form: typing.Any = None) -> str:
+    """The address that was not tried. Two places, so exactly one retry."""
+    return DEEPY_BARE if str(form or DEEPY_ROOTED) == DEEPY_ROOTED else DEEPY_ROOTED
 
 
 def stream_shaped(path: typing.Any, accept: typing.Any = "") -> bool:
@@ -612,45 +661,38 @@ def _proxied(request: typing.Any, response: httpx.Response) -> typing.Any:
 async def _retry_deepy(
     request: typing.Any,
     first: httpx.Response,
-    raw_path: bytes,
+    arrived_at: bytes,
     raw_query: bytes,
     headers: typing.Mapping[str, str],
     method: str,
 ) -> typing.Any:
-    """Ask for the same Deepy resource at the other place it can live.
+    """Ask for the same Deepy resource at the other address it can live at.
 
-    THE PAGE ASKS AT ONE PLACE; SOME BUILDS ANSWER AT THE OTHER.
+    THE BANNER THAT WOULD NOT CLEAR.
 
-    Wan2GP mounts its Deepy app as a sub-application - ``app.mount('/deepy',
-    create_app(...))`` - so its API is at ``/deepy/deepy_api/...``. That is
-    where the page asks, because its marker is a root-relative ``/deepy/``
-    and the transport resolves ``deepy_api/state`` against it.
+    ``deepy_upstream_path`` explains which address is right and why. This is
+    what happens when it is wrong: a 404 under the Deepy prefix, with the
+    address still unknown, is retried once at the other one, and whichever
+    answers is remembered for the life of the process. After the first
+    request there is no second one, and the common build - the one whose
+    address we default to - never pays for this at all.
 
-    On the install this was found on, that path answers 404 and the panel
-    shows "Connection to server lost" for ever while every other part of the
-    page works. The same routes exist unprefixed on the main app in other
-    arrangements of this code, and from outside the two are indistinguishable
-    until one of them is asked.
-
-    So one of them is asked. A 404 under the Deepy prefix is retried once
-    without it, and whichever form answers is remembered for the life of the
-    process: after the first request there is no second one, and a build
-    where the prefixed form is right never pays for this at all. Only 404 is
-    retried - a 500 is the app saying something went wrong inside it, and
-    asking a different way would be papering over that.
+    Only 404 is retried. A 500 is the app saying something went wrong inside
+    it, and asking a different way would be papering over that.
     """
-    stripped = raw_path[len(DEEPY_PATH):] or b"/"
-    if not stripped.startswith(b"/"):
+    other = deepy_other_form(_state["deepy_form"])
+    second_path = deepy_upstream_path(arrived_at.decode("latin-1", "ignore"), other).encode("latin-1")
+    if second_path == arrived_at and other == DEEPY_ROOTED:
         return None
     target = upstream()
     if not target:
         return None
-    url = httpx.URL(target).copy_with(raw_path=stripped + (b"?" + raw_query if raw_query else b""))
+    url = httpx.URL(target).copy_with(raw_path=second_path + (b"?" + raw_query if raw_query else b""))
     try:
         second = await _client().send(
             _client().build_request(
                 method, url, headers=dict(headers), content=None,
-                timeout=timeout_for(stripped.decode("latin-1", "ignore"), headers.get("accept", "")),
+                timeout=timeout_for(second_path.decode("latin-1", "ignore"), headers.get("accept", "")),
             ),
             stream=True,
             follow_redirects=False,
@@ -658,13 +700,20 @@ async def _retry_deepy(
     except httpx.HTTPError:
         return None
     if second.status_code == 404:
-        _state["deepy_form"] = "prefixed"
-        _log_once("deepy-form", "the Deepy panel's API answers at neither place; its banner is the child's own.")
+        # Neither address answers. Stop asking, and say so: from here the
+        # banner is the child's own and no amount of proxying will clear it.
+        _state["deepy_form"] = DEEPY_ROOTED
+        _log_once("deepy-form", "the Deepy panel's API answers at neither address; its banner is the child's own.")
         with contextlib.suppress(Exception):
             await second.aclose()
         return None
-    _state["deepy_form"] = "unprefixed"
-    _log_once("deepy-form", "this Wan2GP serves its Deepy API without the /deepy prefix; requests are sent that way now.")
+    _state["deepy_form"] = other
+    _log_once(
+        "deepy-form",
+        "this Wan2GP answers Deepy requests at the site root rather than under our prefix; they are sent that way now."
+        if other == DEEPY_BARE
+        else "this Wan2GP answers Deepy requests under our prefix; they are sent that way now.",
+    )
     with contextlib.suppress(Exception):
         await first.aclose()
     return _proxied(request, second)
@@ -722,9 +771,13 @@ async def forward(request: typing.Any) -> typing.Any:
     # value is consulted here, and none may be added later.
     raw_query = _raw_query(request)
     raw_path = _raw_target(request)
-    if _state["deepy_form"] == "unprefixed" and raw_path.startswith(DEEPY_PREFIX.encode("latin-1")):
-        # Learnt once, applied from then on. See ``_retry_deepy``.
-        raw_path = raw_path[len(DEEPY_PATH):] or b"/"
+    arrived_at = raw_path if raw_path.startswith(DEEPY_PREFIX.encode("latin-1")) else None
+    if arrived_at is not None:
+        # See ``deepy_upstream_path``. Our prefix goes back on unless this
+        # child has been found to be one of the ones that wants it off.
+        raw_path = deepy_upstream_path(
+            arrived_at.decode("latin-1", "ignore"), _state["deepy_form"]
+        ).encode("latin-1")
     url = httpx.URL(target).copy_with(raw_path=raw_path + (b"?" + raw_query if raw_query else b""))
 
     method = str(getattr(request, "method", "GET") or "GET").upper()
@@ -751,15 +804,19 @@ async def forward(request: typing.Any) -> typing.Any:
     # says nothing about why, so the one place that can tell the two apart -
     # "the route is not there" from "the route is there and answered 404" -
     # is here.
-    decoded = raw_path.decode("latin-1", "ignore")
-    if decoded.startswith(DEEPY_PREFIX):
-        if response.status_code == 404 and _state["deepy_form"] is None:
-            # See DEEPY_PREFIX. The page asks at one place and this build
-            # answers at the other; which one is not knowable from here, so
-            # it is asked rather than assumed - once, and the answer is kept.
-            retried = await _retry_deepy(request, response, raw_path, raw_query, headers, method)
-            if retried is not None:
-                return retried
+    if arrived_at is not None:
+        decoded = arrived_at.decode("latin-1", "ignore")
+        if _state["deepy_form"] is None:
+            if response.status_code == 404:
+                # The default address is the right one on every build launched
+                # the way we launch one, but "every" is a claim about builds we
+                # have not seen. So the other one is asked rather than assumed
+                # - once, and the answer is kept for the life of the process.
+                retried = await _retry_deepy(request, response, arrived_at, raw_query, headers, method)
+                if retried is not None:
+                    return retried
+            else:
+                _state["deepy_form"] = DEEPY_ROOTED
         if len(_state["deepy"]) < DEEPY_NOTED_MAX:
             _state["deepy"].add(decoded)
             _log_once(f"deepy {decoded}", f"a Deepy request answered {response.status_code}.")
@@ -905,6 +962,9 @@ async def _websocket_endpoint(websocket: typing.Any) -> None:
         return
 
     path = upstream_path(str(getattr(getattr(websocket, "url", None), "path", "") or "/"))
+    # Deepy's event stream is a WebSocket, and it needs the same address the
+    # rest of its API does. See ``deepy_upstream_path``.
+    path = deepy_upstream_path(path, _state["deepy_form"])
     query = _raw_query(websocket).decode("latin-1", "ignore")
     url = "ws" + target[len("http") :] + path + (f"?{query}" if query else "")
 

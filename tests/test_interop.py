@@ -317,6 +317,23 @@ def spine_checks(r: Results) -> None:
             "state" in snapshot["runtime"] and "port" not in json.dumps(snapshot["runtime"]), str(snapshot["runtime"]))
     r.check("and what the enhancer can do without naming a model path",
             "found" in snapshot["enhancer"] and "/" not in json.dumps(snapshot["enhancer"]), str(snapshot["enhancer"]))
+    # The two the page cannot work out for itself and needs before anybody
+    # presses anything: whether the server runs the queue, and whether a job
+    # is built from the WanGP page's settings. The second is what tells the
+    # WanGP tab to keep its live form committed ahead of a press, which is
+    # what removes "generate once in WanGP first".
+    from minipaint_neo.clipboard import outbox as clipboard_outbox
+
+    r.check("the snapshot says whether jobs are built from the WanGP page's settings",
+            snapshot["inherit_settings"] is clipboard_outbox.inherit_settings(), str(snapshot.get("inherit_settings")))
+    clipboard_outbox.use_inherit(True)
+    try:
+        r.check("and it follows the setting rather than a copy of it",
+                interop.snapshot("a" * 16)["inherit_settings"] is True)
+        clipboard_outbox.use_inherit(False)
+        r.check("in both directions", interop.snapshot("a" * 16)["inherit_settings"] is False)
+    finally:
+        clipboard_outbox.use_inherit(None)
     events.reset_for_tests()
 
 

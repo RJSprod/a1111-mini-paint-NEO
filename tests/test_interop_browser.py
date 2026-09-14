@@ -82,11 +82,16 @@ global.window = {
     EventSource: FakeEventSource
 };
 global.EventSource = FakeEventSource;
+const told = [];
 window.minipaintWanGP = {
     flushForm: function () {
         flushes.push({ at: calls.length });
         return Promise.resolve(FLUSH_MODE === "absent" ? { ok: false } : { ok: true, flush: FLUSH_MODE });
-    }
+    },
+    // The WanGP tab's own script keeps the recorded form current ahead of a
+    // press, but only when something is going to read it. It cannot find
+    // that out for itself; this is how it is told.
+    inheritSettings: function (on) { told.push(on === true); }
 };
 global.document = {
     visibilityState: "visible",
@@ -115,7 +120,7 @@ global.fetch = function (url, options) {
     } else if (text.indexOf("/outbox/claim") !== -1) {
         payload = { ok: true, empty: true, pending: 0 };
     } else if (text.indexOf("/sync") !== -1) {
-        payload = { ok: true, server_epoch: EPOCH, revision: SYNC_REVISION, cursor: EPOCH + ":" + SYNC_REVISION, jobs: JOBS.list, unattended: UNATTENDED };
+        payload = { ok: true, server_epoch: EPOCH, revision: SYNC_REVISION, cursor: EPOCH + ":" + SYNC_REVISION, jobs: JOBS.list, unattended: UNATTENDED, inherit_settings: INHERIT };
     } else if (text.indexOf("/outbox") !== -1) {
         payload = { ok: true, jobs: JOBS.list, running: true, counts: {} };
     }
@@ -131,6 +136,7 @@ let SYNC_REVISION = 4;
 let SUBMIT_STATE = "admitted";
 let SUBMIT_EXECUTOR = "server";
 let UNATTENDED = true;
+let INHERIT = true;
 
 new Function("window", "document", "fetch", "EventSource", "CustomEvent", "localStorage",
     fs.readFileSync(process.argv[2], "utf8"))(window, document, fetch, FakeEventSource, CustomEvent, localStorage);
@@ -144,6 +150,7 @@ function report(extra) {
         calls: calls.map(function (c) { return c.url.split("?")[0]; }),
         streams: streams.map(function (s) { return s.url.split("?")[0]; }),
         flushes: flushes.slice(),
+        told: told.slice(),
         submitBodies: calls.filter(function (c) { return c.url.indexOf("/outbox/submit") !== -1; }).map(function (c) { return c.body; }),
         cursors: streams.map(function (s) { const at = s.url.indexOf("cursor="); return at === -1 ? "" : s.url.slice(at + 7); }),
         state: api.streamState()
@@ -155,6 +162,8 @@ const MODE = process.argv[3] || "server";
 
 async function main() {
     if (MODE === "browser") { SUBMIT_EXECUTOR = "browser"; SUBMIT_STATE = "pending"; UNATTENDED = false; }
+    if (MODE === "noinherit") { INHERIT = false; }
+    if (MODE === "noinherit") { await api.sync(); }
     if (MODE === "noflush") { FLUSH_MODE = "absent"; }
     // A press decides whether to flush from what the last snapshot said, so
     // the browser-path run has to have taken one first - which is what a
@@ -179,6 +188,9 @@ async function main() {
         for (const s of streams) { s.fire("job", { job_id: "1111222233334444", state: "completed", revision: 3 }, EPOCH + ":3"); }
         const settled = await waited;
         await new Promise(function (r) { setTimeout(r, 20); });
+        // Last, so the fetch it costs cannot move the ordering assertions
+        // above it: every snapshot passes the setting on to the WanGP tab.
+        await api.sync();
         report({ answer: answer, settled: settled && settled.status });
         return;
     }
@@ -293,6 +305,17 @@ def run() -> Results:
                 absent["answer"]["status"] == "pending" and absent["answer"]["job_id"], str(absent["answer"]))
         r.check("and the job records that nothing was carried, rather than implying it was",
                 bool(bodies) and bodies[0].get("settings_flush") == "unavailable", str(bodies[:1]))
+
+    # The other half of inheritance, and the half a press cannot do: the
+    # WanGP tab keeps the recorded form current *ahead* of any press, and it
+    # only knows whether that is worth doing because the snapshot says so.
+    r.check("a snapshot tells the WanGP tab whether a job will be built from its settings",
+            (server.get("told") or [])[:1] == [True], str(server.get("told")))
+    without = _run("noinherit")
+    r.check("the harness drove a Forge with inheritance off", without is not None and "error" not in without, str(without)[:300])
+    if without and "error" not in without:
+        r.check("and with it off the tab is told to leave WanGP's form alone",
+                (without.get("told") or []) and all(item is False for item in without["told"]), str(without.get("told")))
 
     browser = _run("browser")
     r.check("the harness drove the legacy path too", browser is not None and "error" not in browser, str(browser)[:300])

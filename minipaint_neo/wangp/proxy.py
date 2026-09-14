@@ -71,8 +71,20 @@ PROXY_PREFIX = PROXY_PATH + "/"
 #: resolves, the path is served. ``upstream_path`` already passes anything
 #: outside our own prefix through unchanged, so the child sees ``/deepy/...``
 #: exactly as it would with no proxy in the way.
+#: How many distinct Deepy paths get a line before the log stops saying. The
+#: page asks for a handful and then repeats them; this is enough to tell a
+#: missing mount from a missing route, and few enough to be a diagnostic
+#: rather than a request log.
+DEEPY_NOTED_MAX = 8
+
 DEEPY_PATH = "/deepy"
 DEEPY_PREFIX = DEEPY_PATH + "/"
+
+#: Every path under it is one of the child's own route names, so a log may say
+#: which one answered. ``PROXY_PREFIX`` is deliberately not declared: Gradio
+#: serves user files under it (``/wan2gp/file=/home/someone/a photo.png``),
+#: and that is exactly what the scrubber is for.
+scrub.allow_route_prefix(DEEPY_PREFIX)
 
 #: A route under our own prefix that answers nothing and proves everything.
 #: Section 12.6 says route registration is not authentication coverage and
@@ -152,7 +164,7 @@ _ASSET_RE = re.compile(
 
 #: Module state: the shared client, the loop it belongs to, and the keys of
 #: one-shot log lines. None of it is persisted, and none of it is a secret.
-_state: typing.Dict[str, typing.Any] = {"client": None, "loop": None, "injected": None, "logged": set()}
+_state: typing.Dict[str, typing.Any] = {"client": None, "loop": None, "injected": None, "logged": set(), "deepy": set()}
 
 
 def _log(text: str) -> None:
@@ -670,12 +682,19 @@ async def forward(request: typing.Any) -> typing.Any:
         # child expects, and those are different problems with the same
         # status code. The path is the child's own route namespace; it
         # carries nothing of the user's.
-        _log_once(
-            f"deepy-{response.status_code}",
-            f"{decoded} answered {response.status_code}"
-            + ("." if response.status_code < 400 else
-               " - the Deepy panel shows its own banner until this is 200; the child mounts it at /deepy."),
-        )
+        # Per path, not per status, and bounded. Which of these answers what
+        # is the whole question: an index that answers 200 while its API
+        # answers 404 is a mount that is there and a route that is not, and
+        # everything answering 404 is a mount that is not reachable at all.
+        # Those need opposite fixes and one line cannot tell them apart.
+        if len(_state["deepy"]) < DEEPY_NOTED_MAX:
+            _state["deepy"].add(decoded)
+            _log_once(
+                f"deepy {decoded}",
+                f"{decoded} answered {response.status_code}"
+                + ("." if response.status_code < 400 else
+                   " - the child mounts its Deepy app at /deepy/ and this is what it said."),
+            )
 
     proxied = StreamingResponse(
         _stream_response(response),

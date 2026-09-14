@@ -504,9 +504,15 @@ class TouchCanvas:
         *,
         sides: typing.Sequence[int] = (0, 0, 0, 0),
         reset_aspect: bool = False,
-        wait: bool = False,
     ) -> tuple:
-        """Everything a callback reports back apart from the canvas itself."""
+        """Everything a callback reports back apart from the canvas itself.
+
+        C2: the wait flag used to be one of these - a hidden textbox written
+        on every structural step whose only reader was the step that has
+        gone. What it said ("a picture is about to load") is now said in the
+        pending mask's own payload, where the browser that acts on it can
+        read it without a component in between.
+        """
         notes = [note for note in notes if note]
         if doc.image is not None:
             size = imaging.megapixels(doc.image.size)
@@ -529,7 +535,6 @@ class TouchCanvas:
             outpaint.describe(doc.size, sides),
             gr.update(value="Free") if reset_aspect else gr.skip(),
             doc.original_size_text(),
-            "wait" if wait else "",
             suggestion_text(doc),
             *self._mode_updates(mode, doc),
         )
@@ -558,7 +563,7 @@ class TouchCanvas:
         return (
             background,
             self.pending_mask(doc),
-            *self._info(doc, mode, message, notes, sides=sides, reset_aspect=reset_aspect, wait=doc.has_mask),
+            *self._info(doc, mode, message, notes, sides=sides, reset_aspect=reset_aspect),
         )
 
     def _display(self, image) -> str:
@@ -579,7 +584,7 @@ class TouchCanvas:
                 log_quietly(f"a display object could not be written ({type(error).__name__}); the copy is embedded instead")
         return imaging.display_data_url(image)
 
-    def pending_mask(self, doc: document.Document) -> str:
+    def pending_mask(self, doc: document.Document, after_load: bool = True) -> str:
         """The mask layer for the picture this reply is sending, as one value.
 
         Computed here rather than in a second call, and carried as a PNG
@@ -596,7 +601,11 @@ class TouchCanvas:
             layer = imaging.to_data_url(self._layer(doc.mask, doc.image.size))
         else:
             layer = ""
-        return json.dumps({"nonce": secrets.token_hex(4), "mask": layer})
+        # ``after_load`` is the ordering, said by the reply that needs it
+        # rather than inferred by the browser from whether a load happens to
+        # be pending. A step that replaces the picture wants its mask applied
+        # once that picture has arrived; one that does not wants it now.
+        return json.dumps({"nonce": secrets.token_hex(4), "mask": layer, "after_load": bool(after_load)})
 
     def _unchanged(self, doc: document.Document, mode: str, message: str, notes: typing.Sequence[str] = ()) -> tuple:
         """The commit-shaped reply for a step that changed nothing.
@@ -608,7 +617,7 @@ class TouchCanvas:
         """
         return (gr.skip(), gr.skip(), *self._info(doc, mode, message, notes))
 
-    INFO_COUNT = 7 + MODE_COUNT
+    INFO_COUNT = 6 + MODE_COUNT
 
     def _skip_info(self) -> tuple:
         return tuple(gr.skip() for _ in range(self.INFO_COUNT))
@@ -1532,7 +1541,6 @@ class TouchCanvas:
                 # Hidden wires between chained events. Values, not DOM.
                 crop_box = gr.Textbox("", visible=False, elem_id=_id("crop_box"))
                 original_size = gr.Textbox("", visible=False, elem_id=_id("original_size"))
-                wait_flag = gr.Textbox("", visible=False, elem_id=_id("wait"))
                 # A3: the mask layer for the picture a structural step just
                 # sent, held here until the browser's own load hook applies
                 # it. It is a textbox rather than the canvas's foreground
@@ -1592,7 +1600,6 @@ class TouchCanvas:
             save_file=save_file,
             crop_box=crop_box,
             original_size=original_size,
-            wait_flag=wait_flag,
             switch_box=switch_box,
             event_kind=event_kind,
             payload_box=payload_box,
@@ -1758,7 +1765,6 @@ class TouchCanvas:
         panels = parts["panels"]
         background = self.surface.background
         foreground = self.surface.foreground
-        wait_flag = parts["wait_flag"]
         switch_box = parts["switch_box"]
         event_kind = parts["event_kind"]
 
@@ -1777,7 +1783,7 @@ class TouchCanvas:
             layers["underlay"],
         ]
         assert len(mode_outputs) == self.MODE_COUNT
-        info_outputs = [state, status, expand["preview"], crop["aspect"], parts["original_size"], wait_flag, parts["suggest_box"], *mode_outputs]
+        info_outputs = [state, status, expand["preview"], crop["aspect"], parts["original_size"], parts["suggest_box"], *mode_outputs]
         # The mask travels as a value the browser holds, not as a write to
         # the canvas's own foreground: written directly it would land before
         # the picture it belongs to, on a canvas still the old size.

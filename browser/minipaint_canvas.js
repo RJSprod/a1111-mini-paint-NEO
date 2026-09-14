@@ -686,10 +686,12 @@ window.minipaintCanvas = (function () {
         try { parsed = JSON.parse(String(payload || "") || "null"); } catch (e) { parsed = null; }
         if (!parsed || typeof parsed.mask !== "string") { return false; }
         S.pendingMask = parsed.mask;
-        // The picture may already be on the canvas: a step that changed the
-        // mask without changing the image size loads nothing, and waiting
-        // for a load that will not come would leave the strokes stale.
-        if (S.loaded !== S.marker) { applyPendingMask(); }
+        // The reply says whether to wait, rather than this guessing from
+        // whether a load happens to be pending. A step that replaces the
+        // picture wants its mask applied once that picture has arrived; one
+        // that does not wants it now, and waiting for a load that will never
+        // come would leave the strokes stale until the next edit.
+        if (parsed.after_load === false || S.loaded !== S.marker) { applyPendingMask(); }
         return true;
     }
 

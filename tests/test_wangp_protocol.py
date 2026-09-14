@@ -37,7 +37,7 @@ from minipaint_neo.wangp import protocol  # noqa: E402
 
 FORGE_COPY = ROOT / "minipaint_neo" / "wangp" / "protocol.py"
 BRIDGE_COPY = ROOT / "wan2gp_bridge" / "wan2gp-minipaint-bridge" / "protocol.py"
-BROWSER_COPY = ROOT / "javascript" / "minipaint_wangp.js"
+BROWSER_COPY = ROOT / "browser" / "minipaint_wangp.js"
 
 #: The markers themselves are matched on bytes, so a file that grew a BOM or
 #: changed its line endings is a difference rather than a surprise later.

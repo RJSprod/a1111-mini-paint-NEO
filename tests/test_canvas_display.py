@@ -215,6 +215,62 @@ def readback_checks(r: Results) -> None:
         r.check(f"{str(hostile)[:24]!r} is not a display object", surface._display_object(hostile) is None)
 
 
+def bundle_checks(r: Results) -> None:
+    """C1: the tab bundles, fetched rather than parsed into every page.
+
+    Forge loads every file in an extension's ``javascript/`` folder into
+    every page. Four bundles - the Canvas adapter, the WanGP bridge, the
+    public queue API and the Clipboard tab - were parsed on the main thread
+    during hydration for a session that may open none of them.
+    """
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from minipaint_neo import assets
+
+    assets.reset_for_tests()
+    r.check("only the bootstrap is left where Forge loads everything",
+            sorted(path.name for path in (assets.root().parent / "javascript").iterdir()) == ["main.js"],
+            str(sorted(path.name for path in (assets.root().parent / "javascript").iterdir())))
+    r.check("and every bundle is where Forge does not", all(assets.path_for(name).is_file() for name in assets.BUNDLES))
+    r.check("the loader is in the bootstrap, so a page always has it",
+            "minipaintAssets" in (assets.root().parent / "javascript" / "main.js").read_text(encoding="utf-8"))
+
+    for name, url in assets.manifest().items():
+        r.check(f"{name} carries its own content in its URL", "?v=" in url and len(url.split("?v=")[1]) == 16, url)
+    r.check("a name that is not a bundle cannot be asked for",
+            not any(_refused_key(lambda: assets.url_for(bad)) is None for bad in ("../../etc/passwd", "main", "")),
+            "a name outside the table resolved")
+
+    app = FastAPI()
+    assets.install(app)
+    assets.install(app)
+    r.check("the route is installed once",
+            sum(1 for route in app.router.routes if getattr(route, "path", "") == assets.SCRIPT_ROUTE) == 1)
+    client = TestClient(app)
+    answer = client.get(assets.url_for("canvas"))
+    r.check("a bundle is served as JavaScript",
+            answer.status_code == 200 and "javascript" in answer.headers["content-type"], answer.headers.get("content-type"))
+    r.check("and is the file", answer.text == assets.path_for("canvas").read_text(encoding="utf-8"))
+    r.check("cacheable forever, because the content is in the URL",
+            "immutable" in answer.headers.get("cache-control", ""), answer.headers.get("cache-control"))
+    r.check("and never sniffed into something else", answer.headers.get("x-content-type-options") == "nosniff")
+    r.check("a name outside the table is a 404", client.get("/minipaint-assets/js/wat.js").status_code == 404)
+    r.check("and so is a path", client.get("/minipaint-assets/js/..%2f..%2fetc%2fpasswd").status_code in (404, 422))
+
+    loader = assets.tab_loader_js("minipaint_clipboard", ["clipboard"])
+    r.check("a tab loader names its panel and its bundles and nothing else",
+            "loadOnTab" in loader and "minipaint_clipboard" in loader and assets.url_for("clipboard") in loader, loader[:120])
+
+
+def _refused_key(call):
+    try:
+        call()
+    except KeyError:
+        return "KeyError"
+    return None
+
+
 def setting_checks(r: Results) -> None:
     r.check("the canvas keeps embedding copies until somebody proves the other half",
             display.enabled() is False)
@@ -231,6 +287,7 @@ def run() -> Results:
             lifetime_checks(r)
             route_checks(r)
             readback_checks(r)
+            bundle_checks(r)
             setting_checks(r)
         finally:
             wangp_config.use_config_dir(None)

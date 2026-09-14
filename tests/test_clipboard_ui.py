@@ -117,6 +117,14 @@ def build_page():
 # ------------------------------------------------------------------ the page --
 
 
+#: What this tab is allowed to carry. Measured on the built page: a
+#: source-level count double-counts a component built in a loop and counts
+#: every ``gr.update(visible=False)`` a callback returns as if it were a
+#: declaration, which is how the figure this workstream started from came
+#: out a fifth too high.
+CLIPBOARD_HIDDEN_CEILING = 32
+
+
 def page_checks(r: Results, base: pathlib.Path):
     """One tab, its parts, and every event on the assembled page."""
     tabs = clipboard_ui.on_ui_tabs()
@@ -134,6 +142,18 @@ def page_checks(r: Results, base: pathlib.Path):
     order = [component_of(page, name)["id"] for name in ("tab_minipaint", "tab_wangp", "tab_minipaint_clipboard")]
     r.check("after Mini Paint and WanGP in the tab bar", order == sorted(order), str(order))
     r.check("the tab instance was built once and kept", tab is not None)
+
+    # C2, this tab's half. Counted on the built page, and asserted rather
+    # than reported: a new hidden textbox is a decision somebody makes, not
+    # something that accretes. Every one of these is a message channel the
+    # browser writes or a control its menu presses; the inventory by purpose
+    # is in docs/clipboard/CONTRACTS.md.
+    hidden = [c for c in page["components"]
+              if str(c["props"].get("elem_id") or "").startswith("minipaint_clipboard_")
+              and c["props"].get("visible") is False
+              and c["type"] not in ("column", "row", "tab", "tabitem", "group", "accordion")]
+    r.check(f"the Clipboard tab carries {len(hidden)} hidden components, at or below its ceiling",
+            len(hidden) <= CLIPBOARD_HIDDEN_CEILING, f"{len(hidden)} > {CLIPBOARD_HIDDEN_CEILING}")
 
     needed = [
         "root", "body", "browser", "composer", "toolbar", "menu", "to_first", "to_last", "to_ref", "sort", "thumb",
@@ -694,7 +714,7 @@ def theming_checks(r: Results) -> None:
 
     markup = (ROOT / "minipaint_neo" / "clipboard" / "ui.py").read_text(encoding="utf-8")
     r.check("the server-rendered markup carries no inline styles", "style=" not in markup)
-    script = (ROOT / "javascript" / "minipaint_clipboard.js").read_text(encoding="utf-8")
+    script = (ROOT / "browser" / "minipaint_clipboard.js").read_text(encoding="utf-8")
     r.check("the browser script sets no colours of its own", "#fff" not in script.lower() and not re.search(r"(^|[^-\w])white\b(?!-space)", script) and "backgroundColor" not in script)
     r.check("and never puts the prompt or a filename into the journal", "note(" in script and "request.prompt" not in script and not re.search(r'note\([^)]*\bname\b', script))
     r.check("the queue list, too, is theme variables only", "minipaint-clip-job" in block and "background: var(--" in block.split(".minipaint-clip-job {")[1].split("}")[0])

@@ -66,6 +66,34 @@ def _id(name: str) -> str:
 # event, and none of them runs on a timer for longer than one bounded wait.
 _JS = "window.minipaintClipboard"
 ATTACH_JS = f"() => {{ if ({_JS}) {_JS}.attach(); }}"
+
+
+def _attach_with_bundles_js() -> str:
+    """Fetch this tab's browser half when it is first opened, then attach it.
+
+    THE ONLY BUNDLE IN THIS EXTENSION THAT CAN BE TRULY LAZY, and it is worth
+    saying why the others cannot. The Canvas adapter is reached from outside
+    its tab - "Send to Mini Paint" on the txt2img output row runs in the
+    browser before the Canvas has ever been opened - and the WanGP bridge is
+    reached from the Canvas. Nothing outside this tab addresses this one, so
+    a session that never opens Clipboard never parses it.
+
+    It brings the queue API and the WanGP bridge with it, because it calls
+    both; they are idempotent by URL, so a page that already has them from
+    the Canvas pays a dictionary lookup.
+    """
+    from .. import assets
+    from . import TAB_ID
+
+    return (
+        "async () => { "
+        f"await ({assets.tab_loader_js(TAB_ID, ['wangp', 'interop', 'clipboard'])})(); "
+        f"if ({_JS}) {_JS}.attach(); "
+        "}"
+    )
+
+
+ATTACH_WITH_BUNDLES_JS = _attach_with_bundles_js()
 MENU_JS = f"() => {{ if ({_JS}) {_JS}.toggleMenu(); }}"
 THUMB_JS = f"(size) => {{ if ({_JS}) {_JS}.setThumbnailSize(size); }}"
 # The queue instruction box changes when the server has built a request;
@@ -1253,7 +1281,17 @@ class ClipboardTab:
         with contextlib.suppress(Exception):
             from gradio.context import Context
 
-            Context.root_block.load(None, js=ATTACH_JS)
+            # The only bundle in this extension nothing outside its own tab
+            # addresses, and therefore the only one that can be left until
+            # somebody opens that tab. It brings the public queue API and
+            # the WanGP bridge with it, because it calls both.
+            #
+            # Registered on page load, but what it registers is a listener
+            # on this tab's own nav button: the host builds the tab around
+            # this block and an extension has no Gradio handle on it, so the
+            # activation hook is in the browser. A panel that is already on
+            # screen - a reload with this tab selected - loads at once.
+            Context.root_block.load(None, js=ATTACH_WITH_BUNDLES_JS)
         p["menu_btn"].click(None, js=MENU_JS)
         p["grid"].change(None, js=SELECTED_JS, inputs=[p["grid"], selected])
 

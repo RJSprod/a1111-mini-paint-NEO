@@ -31,6 +31,15 @@ def elem_ids(config) -> set:
     return {c["props"].get("elem_id") for c in config["components"] if c.get("props")}
 
 
+#: What the Canvas page is allowed to carry, host components included.
+#: Measured on the built page rather than counted in source - see the check
+#: that reads it. The figure this workstream started from was 84 and was
+#: wrong in two ways at once: it counted callback *returns* as declarations
+#: and it summed two frontends that never appear together. The Clipboard and
+#: WanGP tabs carry their own, counted in their own suites.
+HIDDEN_CEILING = 40
+
+
 def run() -> Results:
     r = Results("frontends")
 
@@ -83,7 +92,7 @@ def run() -> Results:
                    "minipaint_canvas_mask_tool", "minipaint_canvas_mask_size", "minipaint_canvas_mask_clear",
                    "minipaint_canvas_mask_invert",
                    "minipaint_canvas_mode", "minipaint_canvas_crop_box", "minipaint_canvas_original_size",
-                   "minipaint_canvas_wait", "minipaint_canvas_switch", "minipaint_canvas_event",
+                   "minipaint_canvas_pending_mask", "minipaint_canvas_switch", "minipaint_canvas_event",
                    "minipaint_canvas_panel_crop", "minipaint_canvas_panel_mask", "minipaint_canvas_panel_expand",
                    "minipaint_canvas_panel_layers", "minipaint_canvas_expand_fill", "minipaint_canvas_expand_snap", "minipaint_canvas_expand_num_left",
                    "minipaint_canvas_layer_list", "minipaint_canvas_layer_action", "minipaint_canvas_layer_new",
@@ -108,6 +117,25 @@ def run() -> Results:
     r.check("no ImageEditor anywhere in the page", "imageeditor" not in {c["type"] for c in config["components"]})
 
     by_id = {c["id"]: c for c in config["components"]}
+
+    # -- C2: how many hidden components this page actually carries.
+    #
+    # Counted on the *built page*, which is the only honest way to count
+    # them: a source-level count double-counts a component built in a loop
+    # and counts every ``gr.update(visible=False)`` a callback *returns* as
+    # if it were a declaration, which is how the figure this workstream
+    # started from came out a fifth too high.
+    #
+    # The number is asserted rather than merely reported so that a new
+    # hidden textbox is a decision somebody makes on purpose. Going *down*
+    # is always fine and updates the ceiling; going up needs a reason.
+    hidden = [c for c in config["components"]
+              if c["props"].get("visible") is False and c["type"] not in ("column", "row", "tab", "tabitem", "group", "accordion")]
+    r.check(f"the page carries {len(hidden)} hidden components, at or below the ceiling",
+            len(hidden) <= HIDDEN_CEILING, f"{len(hidden)} > {HIDDEN_CEILING}")
+    channels = [c for c in hidden if c["type"] in ("textbox", "button", "uploadbutton")]
+    r.check("and they are message channels and controls a menu presses, not state nobody reads",
+            len(channels) >= len(hidden) - 4, f"{len(channels)} of {len(hidden)}")
 
     def component(elem_id, klass=None):
         for c in config["components"]:
@@ -220,7 +248,6 @@ def run() -> Results:
             steps.append(nxt[0])
 
     status_id = component("minipaint_canvas_status")["id"]
-    wait_id = component("minipaint_canvas_wait")["id"]
     mode_id = component("minipaint_canvas_mode")["id"]
 
     # -- a structural step: the image and the mask that belongs to it, in one
@@ -235,8 +262,8 @@ def run() -> Results:
     r.check("apply crop reads the strokes and the frame, never the picture (the document has it)",
             steps and background["id"] not in steps[0]["inputs"] and foreground["id"] in steps[0]["inputs"]
             and component("minipaint_canvas_crop_box")["id"] in steps[0]["inputs"] and "cropBox()" in steps[0]["js"] and "mark()" in steps[0]["js"])
-    r.check("apply crop writes the image, the mask to hold, the status and the wait flag",
-            steps and {background["id"], pending_id, status_id, wait_id, mode_id} <= set(steps[0]["outputs"]))
+    r.check("apply crop writes the image, the mask to hold, the status and the mode",
+            steps and {background["id"], pending_id, status_id, mode_id} <= set(steps[0]["outputs"]))
     r.check("and never writes the canvas's own foreground, which would land before the picture",
             steps and foreground["id"] not in steps[0]["outputs"], str(steps[0]["outputs"]))
     held = deps_targeting(pending_id, "change")

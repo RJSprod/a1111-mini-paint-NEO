@@ -210,8 +210,29 @@ class Surface:
         from gradio.context import Context
 
         # The same kind of load event the host registers for each of its own
-        # canvases; ours calls the adapter, which keeps the instance.
+        # canvases; ours fetches the adapter and then calls it.
+        #
+        # WHY THIS ONE IS ON PAGE LOAD RATHER THAN ON TAB ACTIVATION.
+        #
+        # The Canvas adapter is reached from outside its own tab: "Send to
+        # Mini Paint" on the txt2img output row runs ``pickGalleryImage`` in
+        # the browser, before the Canvas tab has ever been selected, and the
+        # same chain ends by switching to it. So the bundle has to be there
+        # for a user who has not opened the tab. Making it genuinely lazy
+        # means teaching those entry points to await it first, which is a
+        # change to the receive chain and wants a browser to prove - see
+        # ``assets.py``. What is already won is that it is fetched once,
+        # cached immutably, and parsed after the app has mounted rather than
+        # during hydration with everything else.
+        from .. import assets
+
+        bundles = assets.loader_js(["canvas", "wangp"])
         Context.root_block.load(
             None,
-            js=f"() => {attach_js}({json.dumps(self.uuid)}, {json.dumps(self.options)})",
+            js=(
+                "async () => { "
+                f"await ({bundles})(); "
+                f"if (window.minipaintCanvas) {{ {attach_js}({json.dumps(self.uuid)}, {json.dumps(self.options)}); }} "
+                "}"
+            ),
         )

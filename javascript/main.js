@@ -11,6 +11,124 @@
  */
 window.a1111minipaint = window.a1111minipaint || {};
 
+/**
+ * The loader for this extension's other bundles.
+ *
+ * Forge loads every file in an extension's javascript/ folder into every
+ * page, always. The Canvas adapter, the WanGP bridge, the public queue API
+ * and the Clipboard tab are none of them wanted by a session that opens
+ * txt2img and nothing else, and all four used to be parsed on the main
+ * thread during hydration, which is the busiest moment the page has. So they
+ * live outside that folder now and each tab asks for its own when it loads.
+ *
+ * Idempotent by URL, and that is the load-bearing part: Reload UI rebuilds
+ * the page without reloading the document, so a loader that appended a
+ * script per rebuild would install a second copy of every listener its
+ * bundle registers - two menu handlers, two pumps, two of everything.
+ *
+ * A bundle that will not load costs exactly the tab it belongs to. The
+ * promise is kept either way, so a caller that awaits one is not left
+ * hanging by a network that refused.
+ */
+window.minipaintAssets = window.minipaintAssets || (function () {
+    "use strict";
+
+    const loaded = Object.create(null);
+
+    function one(url) {
+        const key = String(url || "");
+        if (!key) { return Promise.resolve(false); }
+        if (loaded[key]) { return loaded[key]; }
+        loaded[key] = new Promise(function (resolve) {
+            // A script the document already carries - a reload that kept the
+            // element, or a second tab asking for the same bundle - is not
+            // added again, whatever this object remembers.
+            const existing = document.querySelector('script[data-minipaint-bundle="' + key + '"]');
+            if (existing) { resolve(true); return; }
+            const element = document.createElement("script");
+            element.src = key;
+            element.async = false;
+            element.defer = false;
+            element.setAttribute("data-minipaint-bundle", key);
+            element.addEventListener("load", function () { resolve(true); });
+            element.addEventListener("error", function () {
+                console.error("MiniPaint: the bundle " + key + " could not be loaded; that tab stays degraded.");
+                // Forgotten, so a later tab activation may try again: a
+                // bundle that failed once on a flaky connection should not
+                // be permanently unavailable for the life of the page.
+                delete loaded[key];
+                resolve(false);
+            });
+            (document.head || document.documentElement).appendChild(element);
+        });
+        return loaded[key];
+    }
+
+    function app() {
+        try {
+            if (typeof gradioApp === "function") { return gradioApp() || document; }
+        } catch (e) { /* fall through */ }
+        return document;
+    }
+
+    /** Whether a top-level tab's panel is the one on screen. */
+    function showing(panel) {
+        if (!panel) { return false; }
+        if (panel.style && panel.style.display === "none") { return false; }
+        return !!(panel.offsetParent || (panel.getClientRects && panel.getClientRects().length));
+    }
+
+    /**
+     * Load these bundles when a tab is first opened - or now, if it is
+     * already open, or if this page has no such tab to watch.
+     *
+     * The fallbacks are the point. A tab that cannot be found, a nav that
+     * is shaped differently, a host that renders its tabs some other way:
+     * every one of those loads the bundle immediately rather than leaving a
+     * tab that never works. Being lazy is the optimisation; being there is
+     * the requirement.
+     */
+    function loadOnTab(panelId, urls) {
+        const root = app();
+        const panel = root.querySelector ? root.querySelector("#" + panelId) : null;
+        if (!panel || showing(panel)) { return load(urls); }
+        const button = root.querySelector('button[aria-controls="' + panelId + '"]');
+        if (!button) { return load(urls); }
+        return new Promise(function (resolve) {
+            let settled = false;
+            const go = function () {
+                if (settled) { return; }
+                settled = true;
+                button.removeEventListener("click", go);
+                load(urls).then(resolve, function () { resolve(false); });
+            };
+            button.addEventListener("click", go);
+            // A tab that becomes visible without this button being clicked -
+            // another script switching to it, a deep link - is still a tab
+            // whose bundle is wanted.
+            if (typeof MutationObserver === "function") {
+                const observer = new MutationObserver(function () {
+                    if (!showing(panel)) { return; }
+                    observer.disconnect();
+                    go();
+                });
+                observer.observe(panel, { attributes: true, attributeFilter: ["style", "class"] });
+            }
+        });
+    }
+
+    function load(urls) {
+        const wanted = Array.isArray(urls) ? urls : [urls];
+        return Promise.all(wanted.map(one));
+    }
+
+    return {
+        load: load,
+        loadOnTab: loadOnTab,
+        loaded: function () { return Object.keys(loaded); }
+    };
+})();
+
 (function () {
     "use strict";
 

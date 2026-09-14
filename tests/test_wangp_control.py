@@ -34,11 +34,13 @@ from harness import Results, ROOT, setup_path
 
 setup_path()
 
+import importlib  # noqa: E402
 import json  # noqa: E402
 import socket  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
 import threading  # noqa: E402
+import types  # noqa: E402
 import time  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
@@ -739,6 +741,120 @@ def flush_checks(r: Results) -> None:
             str(live[compatibility.SESSION_STATE]))
 
 
+def service_lookup_checks(r: Results) -> None:
+    """Finding the one service from a thread with no browser session.
+
+    THE REGRESSION THIS EXISTS FOR SHIPPED, AND FAILED EXACTLY HERE.
+
+    Every unattended job went ``enhanced -> ensuring_wangp -> failed``, and the
+    child said SERVICE_UNAVAILABLE, because the lookup could not have worked:
+
+    *   ``service_for`` is ``state.service if isinstance(state, SharedState)
+        else None``. A control-plane thread has no state by definition, so
+        calling it with None - or with nothing - is answered None every time.
+        It is the right answer to the question it was asked.
+    *   the global cannot be requested either: Wan2GP *copies* each requested
+        global onto the plugin object while the plugins load, which is before
+        the generator tab is built and therefore before the service exists.
+        The snapshot would be None for the life of the process.
+    *   and the singleton was looked for under the wrong names in the wrong
+        module. It is ``_deepy_hybrid`` in ``wgp`` - and ``wgp`` is
+        ``__main__``, because Wan2GP is launched as ``python wgp.py``.
+
+    So what is asserted is the shape of the real thing: a factory that only
+    answers for a SharedState, a service that exists only as a module global,
+    and a module reachable solely as ``__main__``. And that nothing here
+    imports: an ``import wgp`` would not find that module object, it would run
+    the whole application again inside its own process.
+    """
+    compatibility, _compose, _control, _execution, _ledger, protocol = _modules()
+    gen = {"queue": [], "in_progress": False}
+    service = FakeService(gen)
+
+    class SharedState(dict):
+        """Wan2GP's own: the service hangs off the state, defaulting to None."""
+
+        service = None
+
+    def service_for(state):
+        return state.service if isinstance(state, SharedState) else None
+
+    holder = types.ModuleType("pretend-wgp")
+    compat = _compat({"service_for": service_for})
+    r.check("with no session state the factory cannot answer, and that is not a bug",
+            service_for(None) is None and compat.service() is None)
+
+    imported = []
+    real_import = importlib.import_module
+
+    def watched(name, *args, **keywords):
+        imported.append(name)
+        return real_import(name, *args, **keywords)
+
+    saved = sys.modules.get("__main__")
+    try:
+        holder._deepy_hybrid = service
+        sys.modules["__main__"] = holder
+        importlib.import_module = watched
+        found = compat.service()
+    finally:
+        importlib.import_module = real_import
+        if saved is not None:
+            sys.modules["__main__"] = saved
+    r.check("the process-wide service is found where Wan2GP actually keeps it",
+            found is service, str(found))
+    r.check("and nothing imported wgp to get it, which would run the application twice",
+            not any(name in ("wgp", "__main__") for name in imported), str(imported))
+
+    # Read live, not once: the global is assigned while the generator tab is
+    # built, so anything that cached an answer from plugin-load time caches
+    # None forever.
+    holder2 = types.ModuleType("pretend-wgp-2")
+    saved = sys.modules.get("__main__")
+    try:
+        sys.modules["__main__"] = holder2
+        empty = compat.service()
+        holder2._deepy_hybrid = service
+        late = compat.service()
+    finally:
+        if saved is not None:
+            sys.modules["__main__"] = saved
+    r.check("a service that does not exist yet reads as absent, and as present once it does",
+            empty is None and late is service)
+
+    # A state is still the better answer when a caller has one: that is the
+    # browser path, and it must not have been broken by fixing the other.
+    state = SharedState()
+    state.service = service
+    r.check("a caller holding a real session state still gets the service through the factory",
+            _compat({"service_for": service_for}).service(state) is service)
+
+    r.check("something merely named like the service is refused",
+            compatibility.Compatibility.is_service(types.SimpleNamespace(start_generation=1, command=2)) is False)
+
+
+def manifest_checks(r: Results) -> None:
+    """The version the operator is shown is the version that is running.
+
+    ``plugin_info.json`` is what the setup panel reports as "bridge status:
+    ok - version X", and it is the only thing an operator has to tell them
+    whether an update actually landed in the WanGP install. It had drifted a
+    release behind the code, so a install carrying the new control surface
+    still announced itself as the old one - which is worse than no version at
+    all, because it answers the question wrongly.
+    """
+    compatibility, _compose, _control, _execution, _ledger, protocol = _modules()
+    manifest = json.loads((BRIDGE_DIR / "plugin_info.json").read_text(encoding="utf-8"))
+    r.check("the manifest's version is the code's version",
+            manifest["version"] == compatibility.BRIDGE_VERSION, f"{manifest['version']} vs {compatibility.BRIDGE_VERSION}")
+    r.check("and so is the bridge version beside it",
+            manifest["bridge_version"] == compatibility.BRIDGE_VERSION, str(manifest["bridge_version"]))
+    r.check("the manifest names the postMessage protocol this build actually speaks",
+            manifest["bridge_protocol"] == protocol.PROTOCOL, f"{manifest['bridge_protocol']} vs {protocol.PROTOCOL}")
+    r.check("and declares the two things this release added",
+            {"unattended_execution", "settings_flush"} <= set(manifest["capabilities"]), str(manifest["capabilities"]))
+
+
 def run() -> Results:
     r = Results("wangp control")
     identity_checks(r)
@@ -751,6 +867,8 @@ def run() -> Results:
     cancellation_checks(r)
     unavailable_checks(r)
     flush_checks(r)
+    service_lookup_checks(r)
+    manifest_checks(r)
     return r
 
 

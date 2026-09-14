@@ -400,11 +400,32 @@ def _stage_ensuring_wangp(job: dict) -> bool:
     if not ok:
         if code in (errors.CONTROL_UNAVAILABLE, errors.CONTROL_UNAUTHORISED):
             # The child is running but is not one this Forge can drive - an
-            # older bridge, or a child from a previous run. Said plainly
-            # rather than retried into a wall.
+            # older bridge, or a child from a previous run. Neither fixes
+            # itself, so it is said plainly rather than retried into a wall.
             return bool(outbox.fail(job["job_id"], code))
-        return bool(outbox.fail(job["job_id"], code or errors.SERVICE_UNAVAILABLE))
+        # Everything else here is "not yet" at least as often as it is
+        # "never", and READY is the reason: it means a process is alive and
+        # answered HTTP, which happens before Wan2GP has finished building
+        # its UI - and the generation service does not exist until it does.
+        # Failing the job on the first ask threw away work that would have
+        # run seconds later, which is the opposite of what pressing and
+        # walking away is for. Bounded, so a build that genuinely cannot
+        # execute still ends up saying so.
+        return _wait_for_service(job, code or errors.SERVICE_UNAVAILABLE)
     return bool(outbox.transition(job["job_id"], outbox.COMPOSING, expect_revision=job["revision"]))
+
+
+def _wait_for_service(job: dict, code: str) -> bool:
+    """Hold a job while WanGP finishes coming up. Bounded, and honest while it waits."""
+    counted = outbox.attempt(job["job_id"])
+    attempts = int((counted or job).get("attempts") or 0)
+    if attempts > MAX_RETRYABLE_ATTEMPTS:
+        return bool(outbox.fail(job["job_id"], code, f"still not ready after {attempts} attempts"))
+    delay = min(BACKOFF_MAX, BACKOFF_START * (2 ** min(6, attempts - 1)))
+    outbox.transition(job["job_id"], outbox.ENSURING_WANGP,
+                      stage=f"WanGP is up but not ready to take a job yet. Trying again in {int(delay)}s.")
+    _pause(delay)
+    return True
 
 
 def _stage_composing(job: dict) -> bool:

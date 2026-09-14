@@ -46,6 +46,9 @@ SWITCH_JS = {
 }
 
 _captured: typing.Dict[str, typing.Any] = {}
+#: Every destination this module has handed out, by name, so that the page
+#: they were wired into can be asked about them once it exists. See ``audit``.
+_handed: typing.Dict[str, typing.Any] = {}
 _foregrounds: typing.Dict[str, typing.Any] = {}
 _pending: typing.Dict[str, typing.Any] = {}
 
@@ -55,6 +58,49 @@ def reset_capture() -> None:
     _captured.clear()
     _foregrounds.clear()
     _pending.clear()
+    _handed.clear()
+
+
+def audit(demo: typing.Any) -> typing.List[str]:
+    """Name any destination the finished page turns out not to contain.
+
+    WHY THIS CANNOT BE CHECKED WHERE IT IS WIRED.
+
+    Every destination here belongs to the host or to another extension, and
+    is remembered as the host builds it. The host builds its tabs as separate
+    ``gr.Blocks`` and composes them afterwards, so while our own tab is being
+    built there is no registry that holds them all and nothing to check a
+    destination against: "is this component on the page" has no answer yet.
+
+    It has one here. By the time the app has started, Gradio's root block
+    holds every component the page ended up with, and a destination that is
+    not in it is one kept across a rebuild - a Reload UI, or anything else
+    that builds the interface twice in one process.
+
+    Left unsaid, that surfaces as ``KeyError: <some number>`` thrown from
+    inside Gradio's ``postprocess_data`` when somebody uses the Send menu:
+    no component name, no extension named anywhere in the stack, and nothing
+    to connect it to the tab it came from. This turns that number back into a
+    name, once, at startup, before anybody clicks anything.
+
+    Returns the names, and says them. It changes nothing: by the time this
+    runs the events are wired and Gradio offers no way to unwire one.
+    """
+    registry = getattr(demo, "blocks", None)
+    if not isinstance(registry, dict) or not registry or not _handed:
+        return []
+    missing = sorted(
+        key for key, component in _handed.items()
+        if getattr(component, "_id", None) is not None and component._id not in registry
+    )
+    if missing:
+        scrub.console(
+            "these Send destinations are not on the finished page and belong to an earlier build of it: "
+            + ", ".join(missing)
+            + ". Sending to one of them will fail inside Gradio; restarting the WebUI clears it.",
+            "MiniPaint:",
+        )
+    return missing
 
 
 def receive_button_id(tab: str) -> str:
@@ -222,6 +268,7 @@ def destinations() -> typing.Dict[str, typing.Any]:
             found[key] = gallery
             found[f"{key}_enable"] = enable
 
+    _handed.update(found)
     return found
 
 

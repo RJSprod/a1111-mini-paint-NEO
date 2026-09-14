@@ -40,6 +40,41 @@ def elem_ids(config) -> set:
 HIDDEN_CEILING = 40
 
 
+def destination_audit_checks(r: Results) -> None:
+    """A Send destination kept across a rebuild is named, not left as a number.
+
+    The host builds its tabs as separate ``gr.Blocks`` and composes them
+    afterwards, so while our tab is being built there is no registry holding
+    them all - "is this component on the page" has no answer until the app
+    has started. It has one then, and this is what is done with it: a
+    destination that is not on the finished page is named out loud, once,
+    rather than surfacing later as a bare ``KeyError`` from inside Gradio's
+    postprocess with no component and no extension anywhere in the stack.
+    """
+    demo, refs = forge_like.build_host(router.on_ui_tabs)
+
+    r.check("a page whose destinations are all present reports nothing",
+            host.audit(demo) == [], str(host.audit(demo)))
+
+    # A destination from an earlier build: same shape, an id this page's
+    # registry has never heard of.
+    kept = dict(host._handed)
+    try:
+        stale = list(host._handed)[0] if host._handed else ""
+        r.check("the host handed out at least one destination to check", bool(stale))
+        if stale:
+            host._handed[stale] = type("Gone", (), {"_id": max(demo.blocks) + 5000})()
+            named = host.audit(demo)
+            r.check("and one that is not on the page is named by its destination, not its number",
+                    named == [stale], str(named))
+    finally:
+        host._handed.clear()
+        host._handed.update(kept)
+
+    r.check("a page that will not say what it holds is not second-guessed",
+            host.audit(object()) == [])
+
+
 def run() -> Results:
     r = Results("frontends")
 
@@ -462,6 +497,7 @@ def run() -> Results:
         del os.environ[settings.OLD_UI_ENV]
     r.check("and stops forcing it when unset", settings.use_old_ui() is False)
 
+    destination_audit_checks(r)
     return r
 
 

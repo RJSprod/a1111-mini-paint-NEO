@@ -152,11 +152,9 @@ def _browser_expected() -> bool:
     It should when something has gone to the trouble of installing a browser,
     which is the case in CI and generally not the case on a laptop.
     """
-    try:
-        import playwright  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    import importlib.util
+
+    return importlib.util.find_spec("playwright") is not None
 
 
 if __name__ == "__main__":

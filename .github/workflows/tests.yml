@@ -11,14 +11,21 @@
 # treated as failures.
 name: tests
 
+# A branch with a pull request is covered by ``pull_request``; main is covered
+# by ``push``. Running both on every branch ran the whole suite twice for one
+# commit - two browser installs, two of everything - for one answer. A branch
+# with no pull request yet can be checked from the Actions tab
+# (``workflow_dispatch``).
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
+# One run per pull request (or per branch, on main), and a new push stands the
+# previous one down rather than queueing behind it.
 concurrency:
-  group: tests-${{ github.ref }}
+  group: tests-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

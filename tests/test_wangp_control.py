@@ -414,6 +414,56 @@ def identity_checks(r: Results) -> None:
 # ------------------------------------------------------------- the ledger --
 
 
+def inheritance_checks(r: Results) -> None:
+    """Off does not read the user's form. It is not read-then-discard.
+
+    "Build the job from what the WanGP page is set to" and "let WanGP fill it
+    in from that model's saved defaults" are two answers somebody chooses
+    between, not a preference and a fallback. So with it off the recorded
+    form is never asked for - a base that was read and then thrown away is
+    still a base that was read, and the job would say ``recorded_form`` about
+    settings it did not use.
+    """
+    compatibility, compose, _control, _execution, _ledger, protocol = _modules()
+    gen = {"queue": [], "in_progress": False, "model_type": "t2v"}
+    service = FakeService(gen)
+    service.forms["t2v"] = {"steps": 42, "loras_multipliers": "0.9"}
+    asked = []
+
+    class Watched(type(service)):  # type: ignore[misc]
+        pass
+
+    host = compatibility.Host(FakeHost({
+        "service_for": lambda *_a: service,
+        "get_gen_info": lambda state: state["gen"],
+        "get_default_settings": lambda model_type: {"steps": 30, "from": "defaults"},
+        "get_model_def": lambda model_type: {"name": "T2V"},
+    }))
+    compat = compatibility.Compatibility(host=host, environ={})
+    compat.declare_globals()
+    original = compat.recorded_form
+
+    def watched(service_object, model_type):
+        asked.append(model_type)
+        return original(service_object, model_type)
+
+    compat.recorded_form = watched  # type: ignore[assignment]
+    composer = compose.Composer(compat, note=lambda _text: None)
+
+    answer = composer.compose("t2v", "", True)
+    r.check("with inheritance on the user's committed form is what the job runs at",
+            answer["source"] == protocol.BASE_RECORDED and answer["settings"]["steps"] == 42, str(answer["source"]))
+    r.check("and reading it is what was done", asked == ["t2v"], str(asked))
+
+    asked.clear()
+    answer = composer.compose("t2v", "", False)
+    r.check("with it off the job runs at the model's own defaults",
+            answer["source"] == protocol.BASE_FACTORY and answer["settings"].get("from") == "defaults", str(answer["source"]))
+    r.check("and the user's form was never read at all, not read and discarded", asked == [], str(asked))
+    r.check("the model still travels, because a task without one is a task WanGP skips",
+            answer["settings"]["model_type"] == "t2v", str(answer["settings"].get("model_type")))
+
+
 def manifest_shape_checks(r: Results) -> None:
     """The task reaches WanGP in the shape WanGP's own unpacker reads.
 
@@ -1055,6 +1105,7 @@ def manifest_checks(r: Results) -> None:
 def run() -> Results:
     r = Results("wangp control")
     identity_checks(r)
+    inheritance_checks(r)
     manifest_shape_checks(r)
     ledger_checks(r)
     idempotency_checks(r)

@@ -262,7 +262,7 @@ class ControlSurface:
             return 400, {"ok": False, "code": code, "message": "the compose request did not normalise"}
         if self.composer is None:
             return 409, {"ok": False, "code": protocol.COMPOSE_UNAVAILABLE, "message": "the control surface is not started"}
-        return 200, self.composer.compose(request["model_type"], request["session_hash"])
+        return 200, self.composer.compose(request["model_type"], request["session_hash"], request["inherit"])
 
     def _submit(self, payload: typing.Any) -> typing.Tuple[int, dict]:
         request, code = protocol.normalize_execution_request(payload)

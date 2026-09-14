@@ -609,9 +609,11 @@ def _submit(raw: dict) -> dict:
     # check it - the fact it reports happened in another process.
     flushed = raw.get("settings_flush")
     flushed = flushed if flushed in protocol.FLUSH_OUTCOMES else ""
+    # A caller may say which it wants; the setting decides when it does not.
+    inherit = raw.get("inherit") if isinstance(raw.get("inherit"), bool) else None
     return {"job": _outbox().submit(raw.get("request"), raw.get("page"), origin, enhance=enhance,
                                     model=raw.get("model"), executor=executor,
-                                    settings_flush=flushed)}
+                                    settings_flush=flushed, inherit=inherit)}
 
 
 def _claim(raw: dict) -> dict:

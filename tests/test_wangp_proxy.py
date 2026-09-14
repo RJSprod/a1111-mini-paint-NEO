@@ -475,7 +475,19 @@ async def async_checks(r: Results) -> None:
     r.check("the auth probe is in front of the catch-all that would swallow it",
             [str(route.path) for route in app.router.routes[:4]].index(proxy.AUTH_PROBE_PATH)
             < [str(route.path) for route in app.router.routes[:4]].index(proxy.PROXY_PREFIX + "{path:path}"))
-    r.check("the probe, the prefix, the tree and a websocket are all mounted", installed == 4, str(installed))
+    r.check("the probe, the prefix, the tree and a websocket are all mounted", installed == 6, str(installed))
+    # The child's Deepy namespace is served too, and at the site root rather
+    # than under our prefix, because that is where its page asks for it: its
+    # marker is a root-relative "/deepy/" that ignores the proxy's path. A
+    # request that lands outside our prefix reached Forge, 404'd, and left a
+    # banner on the page that never cleared.
+    mounted = [str(route.path) for route in app.router.routes[:6]]
+    r.check("the Deepy namespace is served as well, over both transports",
+            proxy.DEEPY_PREFIX + "{path:path}" in mounted
+            and sum(1 for route in app.router.routes[:6]
+                    if str(getattr(route, "path", "")).startswith(proxy.DEEPY_PREFIX)) == 2, str(mounted))
+    r.check("and its event stream is treated as a stream, not cut at the response timeout",
+            proxy.stream_shaped("/deepy/deepy_api/events") is True)
 
     # The probe answers whatever the gate says, because reaching it is the
     # question the gate exists to decide. It carries nothing.

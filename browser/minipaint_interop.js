@@ -668,7 +668,12 @@ window.minipaintInterop = (function () {
         // does. ``false`` is how a caller that has already flushed - or one
         // that means to compose against the recorded form deliberately -
         // opts out.
-        body.settings_flush = (options && options.flush === false) ? "" : await flushSettings();
+        // Only when the job is going to be built from them. With inheritance
+        // off nothing reads the recorded form, so committing it would be a
+        // wait bought for nobody.
+        const inherits = !(options && options.inherit === false);
+        if (options && typeof options.inherit === "boolean") { body.inherit = options.inherit; }
+        body.settings_flush = (!inherits || (options && options.flush === false)) ? "" : await flushSettings();
         return post(OUTBOX_SUBMIT_ROUTE, JSON.stringify(body)).then(function (answer) {
             if (!answer.ok || !answer.job) { return refusal(code(answer.code) || "REQUEST_INVALID", normalised.request.request_id, answer.message); }
             const job = answer.job;

@@ -40,6 +40,19 @@ UNATTENDED_QUEUE = "minipaint_unattended_queue"
 #: somebody else's JavaScript and reading it is not an answer. Everything on
 #: this side is built and tested; this is the switch.
 DISPLAY_OBJECTS = "minipaint_display_objects"
+#: Whether a queued job is built from the settings the WanGP page is on, or
+#: left for WanGP to fill in from its own defaults.
+#:
+#: On, the press commits the live form and the job composes from what was on
+#: screen - the LoRAs, steps, guidance and profile the user has set up. Off,
+#: nothing is read and nothing is carried: WanGP loads the model's saved
+#: defaults, which for somebody whose defaults are already what they want is
+#: the same answer with none of the moving parts.
+#:
+#: Off is the default because it is the path with nothing in it to go wrong.
+#: Inheriting is the better promise and the more fragile one, and a person
+#: who wants it should get to say so.
+INHERIT_SETTINGS = "minipaint_inherit_wangp_settings"
 
 SNAP_CHOICES = ["Off", "8", "16", "32", "64"]
 KEEP_TRANSPARENT = "Keep transparent"
@@ -54,6 +67,7 @@ DEFAULTS: dict[str, typing.Any] = {
     SEND_FILL: KEEP_TRANSPARENT,
     UNATTENDED_QUEUE: True,
     DISPLAY_OBJECTS: False,
+    INHERIT_SETTINGS: False,
 }
 
 # The setting is the way to switch editors - but it lives in a UI, and the one
@@ -116,6 +130,17 @@ def unattended_queue() -> bool:
     checkbox moved.
     """
     return bool(get(UNATTENDED_QUEUE, True))
+
+
+def inherit_settings() -> bool:
+    """Whether a queued job is built from the WanGP page's live settings.
+
+    See INHERIT_SETTINGS. Read on every press, like the executor choice, so
+    turning it off stops the next job carrying settings without needing a
+    Reload UI - and so a job already composed keeps the base it was composed
+    with, because that is frozen and is not a checkbox's to change.
+    """
+    return bool(get(INHERIT_SETTINGS, False))
 
 
 def display_objects() -> bool:
@@ -240,6 +265,21 @@ def on_ui_settings() -> None:
             "press Add to Queue and walk away - Forge starts WanGP if it is cold, waits if you are "
             "generating in the WanGP tab, and tracks the generation to a result with no browser open. "
             "Off means the page that pressed the button runs the job, so closing it stops the queue"
+        ),
+    )
+
+    _add(
+        INHERIT_SETTINGS,
+        OptionInfo(
+            DEFAULTS[INHERIT_SETTINGS],
+            "WanGP queue: build queued jobs from the WanGP page's settings",
+            section=SECTION,
+            category_id=category,
+        ).info(
+            "on, a press commits whatever the WanGP tab is set to - LoRAs and their weights, steps, "
+            "guidance, resolution, profile - and the job runs at that. Off, nothing is read and nothing "
+            "is carried: WanGP fills the job in from that model's own saved defaults, which is the same "
+            "answer with fewer moving parts if your defaults are already what you want"
         ),
     )
 

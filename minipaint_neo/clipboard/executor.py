@@ -484,13 +484,19 @@ def _stage_composing(job: dict) -> bool:
     if job.get("snapshot") and (job["snapshot"] or {}).get("settings_count"):
         return bool(outbox.transition(job["job_id"], outbox.WAITING_FOR_CARD, expect_revision=job["revision"]))
     model_type = (job.get("model") or {}).get("type") or ""
+    # The job's own choice, frozen at the press, not the setting as it stands
+    # now: a job composed while inheriting was on is not re-composed because
+    # somebody has since turned it off, and the record says which it was.
+    inherit = bool(job.get("inherit_settings"))
     try:
-        answer = control.compose(model_type)
+        answer = control.compose(model_type, inherit=inherit)
     except IntegrationError as error:
         return bool(outbox.fail(job["job_id"], error.code, error.detail))
     if not answer["ok"]:
         return bool(outbox.fail(job["job_id"], answer["code"] or errors.COMPOSE_UNAVAILABLE, answer["message"]))
     source = answer["source"]
+    if not inherit:
+        _journal(f"job {job['job_id'][:8]}: settings not inherited by choice; WanGP fills them in from its own defaults")
     if source == wire.BASE_RECORDED and job.get("settings_flush") in wire.FLUSH_FRESH:
         # Same seam, different promise. The page committed its live form on
         # purpose before it pressed, so this base is what was on screen -

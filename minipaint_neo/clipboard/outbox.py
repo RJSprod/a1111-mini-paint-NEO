@@ -219,7 +219,7 @@ PHASES = (PHASE_SENT, PHASE_DONE)
 _LOG_PREFIX = "MiniPaint Clipboard:"
 
 _lock = threading.RLock()
-_seams: typing.Dict[str, typing.Any] = {"clock": time.time, "running": None, "watcher": True, "executor": None}
+_seams: typing.Dict[str, typing.Any] = {"clock": time.time, "running": None, "watcher": True, "executor": None, "inherit": None}
 #: When each page last claimed. In memory on purpose: after a Forge restart
 #: every page is "not asking" until it asks again, which is the truth.
 _pages: typing.Dict[str, float] = {}
@@ -271,6 +271,29 @@ def unattended_enabled() -> bool:
         return bool(settings.unattended_queue())
     except Exception:
         return True
+
+
+def inherit_settings() -> bool:
+    """Whether a new job is built from the WanGP page's live settings.
+
+    Read per press, like the executor choice, and frozen onto the job: what
+    the checkbox said when the button went down is what that job composes
+    from, however it moves afterwards.
+    """
+    seam = _seams.get("inherit")
+    if seam is not None:
+        return bool(seam)
+    try:
+        from .. import settings
+
+        return bool(settings.inherit_settings())
+    except Exception:
+        return False
+
+
+def use_inherit(flag: typing.Optional[bool]) -> None:
+    """Test seam: force the inheritance choice. None restores the setting."""
+    _seams["inherit"] = flag
 
 
 def chosen_executor() -> str:
@@ -610,6 +633,10 @@ def _normalize(raw: typing.Any) -> typing.Optional[dict]:
         #: you were looking at" from "the settings WanGP had recorded".
         "settings_flush": (str(raw.get("settings_flush") or "")
                            if raw.get("settings_flush") in protocol.FLUSH_OUTCOMES else ""),
+        #: Whether this job was pressed with "build from the WanGP page's
+        #: settings" on. Frozen at the press: a job does not change what it
+        #: composes from because a checkbox moved after it was queued.
+        "inherit_settings": bool(raw.get("inherit_settings")),
     }
 
 
@@ -675,6 +702,7 @@ def public(job: typing.Mapping[str, typing.Any]) -> dict:
         # together they say whether the base this job ran at is the one its
         # owner was looking at when they pressed.
         "settings_flush": job.get("settings_flush", ""),
+        "inherit_settings": bool(job.get("inherit_settings")),
     }
 
 
@@ -728,6 +756,7 @@ def _blank(job_id: str, now: float) -> dict:
         "child_instance": "",
         "inputs_released": False,
         "settings_flush": "",
+        "inherit_settings": False,
     }
 
 
@@ -963,6 +992,7 @@ def submit(
     model: typing.Any = None,
     executor: typing.Optional[str] = None,
     settings_flush: str = "",
+    inherit: typing.Optional[bool] = None,
 ) -> dict:
     """Append a job. The request is normalised here, so a bad one is refused
     before it is stored.
@@ -1024,6 +1054,7 @@ def submit(
         return _store(
             normalised, page_id, origin, who, block, wanted, planned, owned, enhancer,
             settings_flush if settings_flush in protocol.FLUSH_OUTCOMES else "",
+            inherit_settings() if inherit is None else bool(inherit),
         )
     except Exception:
         if owned:
@@ -1078,6 +1109,7 @@ def _store(
     owned: typing.Dict[str, typing.Any],
     enhancer: typing.Any,
     settings_flush: str = "",
+    inherit: bool = False,
 ) -> dict:
     """The stored half of ``submit``: the document, under the lock."""
     server = who == EXECUTOR_SERVER
@@ -1100,6 +1132,7 @@ def _store(
             "inputs": _normalize_inputs(owned),
             "stage": STAGE_TEXT[ADMITTED] if server else "",
             "settings_flush": settings_flush,
+            "inherit_settings": bool(inherit),
         })
         if planned is not None:
             asked = enhancer.submit(normalised["prompt"], planned)
@@ -1930,7 +1963,7 @@ __all__ = [
     "ADMITTED", "CANCELLED", "COMPLETED", "COMPOSING", "ENHANCED", "ENHANCING", "ENSURING_WANGP",
     "EXECUTION_UNKNOWN", "EXECUTORS", "EXECUTOR_BROWSER", "EXECUTOR_SERVER", "FAILED",
     "GENERATION_RUNNING", "GENERATION_WAITING", "LEASE_SECONDS", "LEGACY_TERMINAL", "MAX_JOBS",
-    "hand_to_browser",
+    "hand_to_browser", "inherit_settings", "use_inherit",
     "MAX_PENDING", "ORIGIN_API", "ORIGIN_CLIPBOARD", "OUTBOX_NAME", "PAGE_ACTIVE_SECONDS", "PENDING",
     "PHASE_DONE", "PHASE_SENT", "POSITIVE", "QUEUED", "SCHEMA", "SENDING", "SERVER_ACTIVE",
     "SERVER_SUBMITTED", "SERVER_TERMINAL", "STAGE_TEXT", "STARTED", "STATES", "SUBMITTING_WANGP",

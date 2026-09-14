@@ -116,6 +116,17 @@ window.minipaintCanvas = (function () {
         fitApplying: false,
         fitAgain: false,
         fitWindow: null,
+        //: The rows this attachment is watching for height changes, kept so
+        //: ``detach`` can stop watching a page that has been rebuilt.
+        layoutObserver: null,
+        //: Where the toolbar is, for the crop grip to dodge. null means not
+        //: measured yet; false means there is nothing to dodge.
+        toolbarBox: null,
+        //: The other two observers this attachment owns. Like layoutObserver
+        //: they watch nodes that Reload UI replaces, so ``detach`` needs a
+        //: handle on them or they go on watching a page nobody is looking at.
+        statusObserver: null,
+        frameObserver: null,
         alpha: 75,
         contrast: false,
         loaded: 0,
@@ -285,16 +296,85 @@ window.minipaintCanvas = (function () {
      * height setting and the Inpaint tab's brush colour, opacity and
      * high-contrast choice, so the mask looks here the way it will there.
      */
+    /**
+     * Take this attachment down: every listener, observer and frame it owns.
+     *
+     * Reload UI rebuilds the page without reloading the document and gives
+     * the surface a fresh uuid, so the instance standing here belongs to a
+     * container that is no longer in the document. Leaving it in place made
+     * ``attach`` refuse the new surface; leaving its listeners in place
+     * would make the new one fire everything twice. Both are the same bug
+     * seen from either end, and this is the half that is shared.
+     */
+    function detach() {
+        ["layoutObserver", "statusObserver", "frameObserver"].forEach(function (key) {
+            if (!S[key]) { return; }
+            try { S[key].disconnect(); } catch (e) { /* not fatal */ }
+            S[key] = null;
+        });
+        // An armed WanGP send polls the page's boxes by elem id, and those
+        // ids are stable across a rebuild - so a send left armed here would
+        // keep reading the NEW page's boxes and could deliver against them.
+        if (S.wangp && S.wangp.watch) {
+            clearInterval(S.wangp.watch);
+            S.wangp.watch = 0;
+        }
+        if (S.wangp) { S.wangp.pending = null; }
+        window.removeEventListener("resize", scheduleFit);
+        window.removeEventListener("orientationchange", scheduleFit);
+        if (S.menuOutside) { document.removeEventListener("pointerdown", S.menuOutside, true); S.menuOutside = null; }
+        if (S.menuKey) { document.removeEventListener("keydown", S.menuKey, true); S.menuKey = null; }
+        if (S.escapeListener) { document.removeEventListener("keydown", S.escapeListener); S.escapeListener = null; }
+        if (S.fitTimer) { cancelAnimationFrame(S.fitTimer); S.fitTimer = null; }
+        if (pointerFrame) { cancelAnimationFrame(pointerFrame); pointerFrame = 0; }
+        PENDING.clear();
+        S.instance = null;
+        S.uuid = null;
+        S.container = null;
+        S.imageContainer = null;
+        S.drawingCanvas = null;
+        S.imageEl = null;
+        S.toolbarBox = null;
+        S.menu = null;
+        S.overlay = null;
+        S.bounds = null;
+        S.layerBounds = null;
+        S.loadWaiters = [];
+        S.pendingMask = null;
+        S.fitApplying = false;
+        S.fitAgain = false;
+    }
+
+    /** Whether this uuid is the surface currently attached and still on the page. */
+    function attachedTo(uuid) {
+        return !!(S.instance && S.uuid === uuid && S.container && S.container.isConnected);
+    }
+
+    /**
+     * Attach the editor to a surface, and say whether it worked.
+     *
+     * The return value is the whole point: the caller cannot see any of the
+     * four ways this can end, and a page whose shell rendered while this
+     * quietly declined is exactly the state that looks healthy and is not.
+     * "Tab rendered" is not "Canvas ready", and only this function knows
+     * the difference.
+     */
     function attach(uuid, options) {
-        if (S.instance) { return; }
+        if (attachedTo(uuid)) { return true; }
+        // A live instance for some other surface - Reload UI - is stood down
+        // first, rather than making this call a silent no-op.
+        if (S.instance) { detach(); }
         // The host declares its class at the top level of a classic script:
         // a global binding, not a window property.
         if (typeof ForgeCanvas !== "function") {
             console.warn("MiniPaint: the WebUI's ForgeCanvas is not on this page; the Canvas tab has no editor.");
-            return;
+            return false;
         }
         const container = document.getElementById("container_" + uuid);
-        if (!container) { return; }
+        if (!container) {
+            console.warn("MiniPaint: no canvas container for " + uuid + "; the Canvas tab has no editor.");
+            return false;
+        }
         options = options || {};
         S.alpha = Number(options.alpha);
         if (!(S.alpha >= 0)) { S.alpha = 75; }
@@ -338,6 +418,7 @@ window.minipaintCanvas = (function () {
         watchLayout();
         onMode(S.mode);
         fitHeight();
+        return true;
     }
 
     /* ------------------------------------------------------------------ */
@@ -495,6 +576,9 @@ window.minipaintCanvas = (function () {
         S.fitTimer = null;
         S.fitApplying = true;
         S.fitAgain = false;
+        // The canvas is about to change height, so anything measured against
+        // the old one - the toolbar the crop grip dodges - is stale.
+        S.toolbarBox = null;
         try {
             fitHeight();
         } finally {
@@ -534,7 +618,10 @@ window.minipaintCanvas = (function () {
         const column = work();
         if (!column) { return; }
         if (typeof ResizeObserver === "function") {
+            // Kept, because Reload UI builds a second surface and this one
+            // is still watching the first one's rows. See ``detach``.
             const observer = new ResizeObserver(scheduleFit);
+            S.layoutObserver = observer;
             for (const child of column.children) {
                 if (!child.contains(S.container) && child !== S.menu) { observer.observe(child); }
             }
@@ -978,9 +1065,11 @@ window.minipaintCanvas = (function () {
         // back. The height itself belongs to watchLayout()'s observers,
         // which watch boxes the canvas does not size.
         if (typeof ResizeObserver === "function") {
-            new ResizeObserver(function () {
+            const observer = new ResizeObserver(function () {
                 requestAnimationFrame(function () { refreshFrame("refit"); });
-            }).observe(S.imageContainer);
+            });
+            observer.observe(S.imageContainer);
+            S.frameObserver = observer;
         }
     }
 
@@ -1146,9 +1235,11 @@ window.minipaintCanvas = (function () {
     function watchStatus() {
         const status = document.getElementById(STATUS_ID);
         if (!status || typeof MutationObserver !== "function") { return; }
-        new MutationObserver(function () {
+        const observer = new MutationObserver(function () {
             if (!status.querySelector("[data-minipaint-notice]")) { clearNotice(); }
-        }).observe(status, { childList: true, subtree: true, characterData: true });
+        });
+        observer.observe(status, { childList: true, subtree: true, characterData: true });
+        S.statusObserver = observer;
     }
 
     function containerSize() {
@@ -1197,6 +1288,93 @@ window.minipaintCanvas = (function () {
         applyFrame();
     }
 
+    //: The grip, as the stylesheet draws it. Kept here so the collision
+    //: test below measures the thing the user actually has to hit.
+    const GRIP_WIDTH = 64;
+    const GRIP_HEIGHT = 32;
+    const GRIP_RISE = 16;   // how far it sits above the frame's top edge
+    const GRIP_CLEAR = 8;   // breathing room either side of the toolbar
+
+    /**
+     * Where the toolbar is, in the image container's coordinates.
+     *
+     * Cached, because this is consulted on every frame move and the toolbar
+     * does not move between layouts: measuring it inside a drag would put a
+     * layout read in the middle of a run of writes, which is the forced
+     * reflow the sizing work went to some trouble to get rid of. ``fitHeight``
+     * clears it when the geometry can actually have changed.
+     */
+    function toolbarBox() {
+        if (S.toolbarBox !== null) { return S.toolbarBox; }
+        S.toolbarBox = false;
+        if (!S.container || !S.imageContainer) { return S.toolbarBox; }
+        const bar = S.container.querySelector(".forge-toolbar-static");
+        if (!bar) { return S.toolbarBox; }
+        const b = bar.getBoundingClientRect();
+        if (!b.width || !b.height) { return S.toolbarBox; }
+        const c = S.imageContainer.getBoundingClientRect();
+        S.toolbarBox = {
+            left: b.left - c.left, right: b.right - c.left,
+            top: b.top - c.top, bottom: b.bottom - c.top
+        };
+        return S.toolbarBox;
+    }
+
+    /**
+     * Put the move grip somewhere the user can actually reach it.
+     *
+     * The grip's home is the middle of the frame's top edge, and the toolbar
+     * is centred over the same work area, so a frame drawn near the top of
+     * the picture can put one exactly behind the other. The grip is what
+     * moves: it belongs to a selection that exists for a few seconds, while
+     * the toolbar is a fixed part of the editor and is where the muscle
+     * memory of every earlier version expects it.
+     *
+     * It slides along the frame's own top edge to the nearer free side, and
+     * only while the overlap is real - a frame anywhere else keeps the
+     * midpoint and looks exactly as it always has.
+     */
+    /**
+     * Where along the frame's top edge the grip should sit, as a percentage
+     * of the frame's width.
+     *
+     * Pure, and exported, so the rule can be checked without a picture, a
+     * crop selection and a real editor to draw them in - the placement is
+     * arithmetic and deserves to be tested as arithmetic.
+     *
+     * 50 means the midpoint, which is where it has always been and where it
+     * stays unless the toolbar is genuinely in the way.
+     */
+    function gripFraction(r, bar) {
+        if (!r || !r.width || !bar) { return 50; }
+        const half = GRIP_WIDTH / 2;
+        const top = r.top - GRIP_RISE;
+        // Does the grip's band cross the toolbar's at all? A frame lower down
+        // the picture never has to move, however wide it is.
+        if (!(top + GRIP_HEIGHT > bar.top && top < bar.bottom)) { return 50; }
+        const centre = r.left + r.width / 2;
+        if (!(centre + half > bar.left - GRIP_CLEAR && centre - half < bar.right + GRIP_CLEAR)) { return 50; }
+        const lowest = r.left + half;
+        const highest = r.left + r.width - half;
+        let best = null;
+        [bar.left - GRIP_CLEAR - half, bar.right + GRIP_CLEAR + half].forEach(function (x) {
+            if (x < lowest || x > highest) { return; }
+            if (best === null || Math.abs(x - centre) < Math.abs(best - centre)) { best = x; }
+        });
+        // Neither side of the toolbar has room inside this frame - a selection
+        // barely wider than the toolbar itself. The midpoint stays and the
+        // grip paints over the toolbar, which is what it did before any of
+        // this; there is nowhere better to put it.
+        if (best === null) { return 50; }
+        return ((best - r.left) / r.width) * 100;
+    }
+
+    function placeGrip() {
+        const grip = S.frameGrip;
+        if (!grip || !S.frameRect) { return; }
+        grip.style.setProperty("--grip-x", gripFraction(S.frameRect, toolbarBox() || null) + "%");
+    }
+
     function applyFrame() {
         const r = S.frameRect;
         if (!r || !S.frameBox) { return; }
@@ -1204,6 +1382,7 @@ window.minipaintCanvas = (function () {
         S.frameBox.style.top = r.top + "px";
         S.frameBox.style.width = r.width + "px";
         S.frameBox.style.height = r.height + "px";
+        placeGrip();
         updateReadout();
     }
 
@@ -2503,6 +2682,9 @@ window.minipaintCanvas = (function () {
 
     return {
         attach: attach,
+        detach: detach,
+        attachedTo: attachedTo,
+        gripFraction: gripFraction,
         attached: attached,
         mark: mark,
         waitForImage: waitForImage,

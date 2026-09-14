@@ -1,0 +1,64 @@
+# The tests, somewhere that runs them.
+#
+# Until this file existed there was no CI at all: `python tests/run.py` was
+# something a contributor remembered to do, the browser suite was not in that
+# script's list, and a run in an environment missing Gradio or Pillow skipped
+# two thirds of itself and still exited 0. "All tests pass" meant less than it
+# looked like it meant, which is how a Canvas that never attached shipped
+# behind a green suite.
+#
+# So: every suite, on every push, with the browser one included and skips
+# treated as failures.
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suites:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Gradio probes its own local URL through httpx on launch, which follows
+      # the proxy environment; excluding loopback keeps that honest on any
+      # runner that sets one.
+      no_proxy: "127.0.0.1,localhost,::1"
+      NO_PROXY: "127.0.0.1,localhost,::1"
+      # Every suite in SUITES must actually run. A skip is a broken
+      # environment, and a broken environment that reports success is the
+      # thing this workflow exists to prevent.
+      MINIPAINT_REQUIRE_ALL_SUITES: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: tests/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/requirements.txt
+
+      - name: Install Chromium for the browser suite
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run every suite
+        run: python tests/run.py
+
+  # The editor's own suite needs a Forge Neo checkout for the real
+  # ForgeCanvas, which this workflow has no way to provide. It is not run
+  # here; it is run by hand against a real install. Said out loud rather than
+  # left for somebody to discover, because a suite nobody knows is unrun is
+  # the same problem in a different place.
+  #
+  #   FORGE_ROOT=/path/to/forge-neo python tests/browser_smoke.py

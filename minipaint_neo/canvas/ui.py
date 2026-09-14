@@ -81,7 +81,15 @@ def _id(name: str) -> str:
 # A hook that runs before a backend step must hand back the step's inputs;
 # one that runs alone (no backend step) returns nothing.
 _JS = "window.minipaintCanvas"
-ATTACH_JS = f"{_JS} && {_JS}.attach"
+#: The readiness primitive in ``javascript/main.js``. It is on every page
+#: from the start, which ``minipaintCanvas`` is not: the Canvas bundle is
+#: fetched after the app mounts, and the entry points below can be pressed
+#: before it arrives. Anything reachable from OUTSIDE the Canvas tab waits
+#: on this rather than testing for a global and giving up.
+_READY = "window.minipaintCanvasReady"
+#: One statement, so a transform can await readiness without changing what
+#: it hands back to the backend step behind it.
+_AWAIT_READY = f"const r = {_READY}; if (r) {{ await r.ensure(); }} "
 # A3: the mask layer, handed to the browser in the SAME response as the image
 # it belongs to, and applied by the browser once that image has loaded.
 #
@@ -112,10 +120,10 @@ SWITCH_JS = f"(target) => {{ if ({_JS}) {_JS}.switchTo(target); }}"
 WANGP_DELIVER_JS = (
     f"async (target, payload) => {{ if ({_JS}) {{ await {_JS}.deliverWanGP(target, payload); }} }}"
 )
-SWITCH_CANVAS_JS = f"() => {{ if ({_JS}) {_JS}.switchTo('canvas'); }}"
+SWITCH_CANVAS_JS = f"async () => {{ {_AWAIT_READY}if ({_JS}) {_JS}.switchTo('canvas'); }}"
 # After a gallery receive: the tab the receive landed in - the Canvas, or
 # Clipboard when the intercept is on - as the server said it.
-SWITCH_TO_JS = f"(target) => {{ if ({_JS}) {_JS}.switchTo(target); }}"
+SWITCH_TO_JS = f"async (target) => {{ {_AWAIT_READY}if ({_JS}) {_JS}.switchTo(target); }}"
 CROP_JS = (
     f"(fg, state, mode, box) => {{ if ({_JS}) {_JS}.mark(); "
     f"return [fg, state, mode, {_JS} ? {_JS}.cropBox() : '']; }}"
@@ -126,8 +134,15 @@ SELECT_JS = (
     f"(fg, state, mode, box) => {{ if ({_JS}) {_JS}.mark(true); "
     f"return [fg, state, mode, {_JS} ? {_JS}.cropBox() : '']; }}"
 )
+# "Send to Mini Paint" on a txt2img, img2img or Extras result. This one can
+# always arrive before the Canvas has attached - that is the entire reason
+# the bundle is fetched on page load rather than on tab activation - and it
+# is the one entry point whose failure was not a no-op: with no adapter it
+# returned null AS THE IMAGE and the backend was told the user had picked
+# nothing, so the picture was not delayed but discarded. It waits now.
 PICK_JS = (
-    f"(gallery, state, mode) => {{ if ({_JS}) {_JS}.mark(); "
+    f"async (gallery, state, mode) => {{ {_AWAIT_READY}"
+    f"if ({_JS}) {_JS}.mark(); "
     f"return [{_JS} ? {_JS}.pickGalleryImage(gallery) : null, state, mode]; }}"
 )
 # The canvas echoes every image it loads back through its textbox. The
@@ -1514,7 +1529,7 @@ class TouchCanvas:
                     height_percent=self.canvas_height,
                     fit_window=settings.canvas_fits_window(),
                     brush_width=self.brush_width,
-                    attach_js=ATTACH_JS,
+                    status_elem_id=_id("status"),
                 )
 
                 # What the menu presses. Hidden: the menu is their face.

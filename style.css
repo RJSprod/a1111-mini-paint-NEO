@@ -227,6 +227,36 @@
     border-radius: var(--block-radius, 8px);
 }
 
+/* The editor did not start. One line and a way back, in the status row -
+   not a screen of its own. Shown only when the Canvas bundle or its attach
+   failed; see minipaintCanvasReady in javascript/main.js. */
+.minipaint-canvas-alert {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    padding: 6px 10px;
+    border-radius: var(--block-radius, 8px);
+    border: 1px solid var(--color-accent, #ff7c00);
+    background: rgba(255, 124, 0, 0.08);
+    font-size: 0.9em;
+}
+
+.minipaint-canvas-alert-retry {
+    padding: 2px 10px;
+    min-height: 28px;
+    border-radius: var(--button-small-radius, 6px);
+    border: 1px solid var(--border-color-primary, #555);
+    background: var(--button-secondary-background-fill, transparent);
+    color: inherit;
+    cursor: pointer;
+}
+
+.minipaint-canvas-alert-retry[disabled] {
+    opacity: 0.6;
+    cursor: default;
+}
+
 /* Colour, opacity and softness are fixed to the Inpaint tab's, and the
    brush width comes from the slider in the Mask panel. */
 #minipaint_canvas_surface .forge-toolbar-box-b {
@@ -239,12 +269,20 @@
     display: none;
 }
 
-/* The toolbar sits along the top edge, towards the right, instead of in
-   the top-left corner: a fitted image's top-left crop handle lives there,
-   and the frame's grip sits at the top centre. */
+/* The toolbar is centred over the work area, which is where this editor
+   has always put it and what the rest of the layout is balanced around.
+
+   It was displaced to the right for a while to clear two things: a fitted
+   image's top-left crop handle, and the crop frame's move grip at the top
+   centre. Centring answers the first outright - the toolbar is nowhere near
+   the top-left corner any more - and the second is solved at the grip,
+   which is the part that moves, rather than by standing a permanent control
+   out of the way of a selection that may never be made. See
+   .minipaint-frame-grip below. */
 #minipaint_canvas_surface .forge-toolbar-static {
-    left: auto;
-    right: 52px;
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
     border-radius: 0 0 var(--block-radius, 8px) var(--block-radius, 8px);
     white-space: nowrap;
 }
@@ -323,9 +361,15 @@
 }
 
 /* The grip on the top edge moves the frame. */
+/* The grip sits at the middle of the frame's top edge, which is also where
+   the toolbar is. When a frame is drawn high enough for the two to overlap,
+   the grip is the one that moves: the script sets --grip-x to a free
+   fraction of the frame's own width and the rule below follows it. The
+   default is the midpoint, so a frame that is nowhere near the toolbar
+   looks exactly as it always did. */
 #minipaint_canvas_surface .minipaint-frame-grip {
     position: absolute;
-    left: 50%;
+    left: var(--grip-x, 50%);
     top: -16px;
     transform: translateX(-50%);
     width: 64px;

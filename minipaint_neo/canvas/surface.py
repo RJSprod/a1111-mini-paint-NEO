@@ -154,6 +154,81 @@ def host_mask_style() -> typing.Dict[str, typing.Any]:
     }
 
 
+def canvas_markup(uuid: str) -> str:
+    """The markup one canvas is made of, with this surface's id in it.
+
+    Split out of ``Surface`` for the same reason as ``bootstrap_js``: the
+    browser test builds a page out of this, and a copy of it in the test
+    would drift. The toolbar rewrite in particular is load-bearing - the
+    stylesheet, the crop grip's collision test and the geometry check all
+    address the toolbar by the class this produces, not the one Forge ships.
+    """
+    canvas = host_canvas()
+    if canvas is None:
+        raise RuntimeError(missing())
+    html = canvas.canvas_html.replace("forge_mixin", uuid)
+    if _host_option("forge_canvas_plain", False):
+        colour = str(_host_option("forge_canvas_plain_color", "#808080"))
+        html = html.replace(
+            'class="forge-image-container"',
+            f'class="forge-image-container plain" style="background-color: {colour}"',
+        ).replace('stroke="white"', "stroke=#444")
+    # Touch has no hover, so the toolbar is always visible.
+    return html.replace('class="forge-toolbar"', 'class="forge-toolbar-static"')
+
+
+def bootstrap_js(uuid: str, options: typing.Mapping[str, typing.Any], status_elem_id: str = "") -> str:
+    """The page-load JavaScript that brings one Canvas up.
+
+    WHY THIS IS ON PAGE LOAD RATHER THAN ON TAB ACTIVATION.
+
+    The Canvas adapter is reached from outside its own tab: "Send to Mini
+    Paint" on the txt2img output row runs ``pickGalleryImage`` in the browser
+    before the Canvas tab has ever been selected, and the same chain ends by
+    switching to it. Those entry points now await readiness rather than
+    hoping for it, so this could become lazy - but changing the readiness
+    contract and the moment of the fetch in one patch is two experiments at
+    once and only one of them is the repair. What is already won is that the
+    bundle is fetched once, cached immutably, and parsed after the app has
+    mounted rather than during hydration with everything else.
+
+    CANVAS IS REQUIRED. WANGP IS NOT.
+
+    They are separate products from the page's point of view and they are
+    loaded separately because of it: the Canvas load is awaited and decides
+    whether the editor is ready, and the WanGP load is started afterwards
+    and its answer is never consulted. A WanGP bundle that 404s, times out
+    or throws leaves Open, paste, drop, crop, mask and layers exactly as
+    they were. Asking for both in one ``load`` call would manufacture one
+    required failure out of one optional one.
+
+    Split out of ``Surface`` so the browser test can drive the very string
+    the extension ships. A test that reimplemented this would keep passing
+    while this drifted, which is exactly how a dropped promise survived a
+    green suite once already.
+    """
+    from .. import assets
+
+    config = {
+        "url": assets.url_for("canvas"),
+        "uuid": uuid,
+        "options": dict(options),
+        "status": status_elem_id,
+    }
+    wangp = json.dumps([assets.url_for("wangp")])
+    return (
+        "async () => { "
+        "const r = window.minipaintCanvasReady; "
+        "if (!r) { return false; } "
+        f"r.configure({json.dumps(config)}); "
+        "const ok = await r.ensure(); "
+        "const a = window.minipaintAssets; "
+        f"if (a && a.load) {{ a.load({wangp}); }} "
+        "return ok; "
+        "}"
+    )
+
+
 class Surface:
     """One canvas: its HTML block, its two hidden image textboxes, and the
     load event that hands it to the browser-side adapter."""
@@ -165,7 +240,7 @@ class Surface:
         height_percent: int,
         fit_window: bool,
         brush_width: int,
-        attach_js: str,
+        status_elem_id: str = "",
     ) -> None:
         canvas = host_canvas()
         if canvas is None:
@@ -173,17 +248,8 @@ class Surface:
 
         self.uuid = "uuid_" + uuid.uuid4().hex
 
-        html = canvas.canvas_html.replace("forge_mixin", self.uuid)
+        html = canvas_markup(self.uuid)
         # The host's own presentation choices, applied the way the host does.
-        if _host_option("forge_canvas_plain", False):
-            colour = str(_host_option("forge_canvas_plain_color", "#808080"))
-            html = html.replace(
-                'class="forge-image-container"',
-                f'class="forge-image-container plain" style="background-color: {colour}"',
-            ).replace('stroke="white"', "stroke=#444")
-        # Touch has no hover, so the toolbar is always visible.
-        html = html.replace('class="forge-toolbar"', 'class="forge-toolbar-static"')
-
         self.block = gr.HTML(html, elem_id=elem_id, elem_classes=["minipaint-surface"])
         image_class = canvas_image_class()
         self.foreground = image_class(
@@ -209,30 +275,4 @@ class Surface:
 
         from gradio.context import Context
 
-        # The same kind of load event the host registers for each of its own
-        # canvases; ours fetches the adapter and then calls it.
-        #
-        # WHY THIS ONE IS ON PAGE LOAD RATHER THAN ON TAB ACTIVATION.
-        #
-        # The Canvas adapter is reached from outside its own tab: "Send to
-        # Mini Paint" on the txt2img output row runs ``pickGalleryImage`` in
-        # the browser, before the Canvas tab has ever been selected, and the
-        # same chain ends by switching to it. So the bundle has to be there
-        # for a user who has not opened the tab. Making it genuinely lazy
-        # means teaching those entry points to await it first, which is a
-        # change to the receive chain and wants a browser to prove - see
-        # ``assets.py``. What is already won is that it is fetched once,
-        # cached immutably, and parsed after the app has mounted rather than
-        # during hydration with everything else.
-        from .. import assets
-
-        bundles = assets.loader_js(["canvas", "wangp"])
-        Context.root_block.load(
-            None,
-            js=(
-                "async () => { "
-                f"await ({bundles})(); "
-                f"if (window.minipaintCanvas) {{ {attach_js}({json.dumps(self.uuid)}, {json.dumps(self.options)}); }} "
-                "}"
-            ),
-        )
+        Context.root_block.load(None, js=bootstrap_js(self.uuid, self.options, status_elem_id))

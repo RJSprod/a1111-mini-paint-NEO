@@ -150,11 +150,21 @@ def loader_js(names: typing.Sequence[str]) -> str:
     its page without reloading the document, so a loader that appended a
     script per rebuild would install a second copy of every listener the
     bundle registers. ``main.js`` keeps the record; this is the call.
+
+    RETURNS A PROMISE, IN EVERY BRANCH.
+
+    This wrapper used to call ``w.load(...)`` and return nothing. Its caller
+    awaited it, and ``await undefined`` resumes on the microtask queue while
+    a <script> runs in a task - so the await always finished first, the
+    check for the adapter that followed it always failed, and the Canvas was
+    never attached on any machine at any speed. A wrapper used inside an
+    async flow returns its promise or it is not part of that flow at all.
     """
     wanted = [name for name in names if name in BUNDLES]
-    urls = [url_for(name) for name in wanted]
+    urls = repr([url_for(name) for name in wanted]).replace("'", '"')
     return (
-        "() => { const w = window.minipaintAssets; if (w && w.load) { w.load(" + repr(urls).replace("'", '"') + "); } }"
+        "() => { const w = window.minipaintAssets; "
+        f"return (w && w.load) ? w.load({urls}) : Promise.resolve(false); }}"
     )
 
 

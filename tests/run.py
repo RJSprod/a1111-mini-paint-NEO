@@ -64,14 +64,24 @@ SUITES = [
     "test_clipboard_executor",
     "test_clipboard_ui",
     "test_queue_e2e",
+    # The Canvas startup contract, in a real browser, over the real asset
+    # route. Last because it is the slowest, and listed HERE rather than left
+    # to be run by hand because the regression it exists to catch lived
+    # entirely in the gap between "the unit tests pass" and "the page works".
+    "browser_loading",
 ]
+
+#: Suites that drive a browser. They need Playwright and a Chromium, and they
+#: are the only ones that do; a checkout without them still runs everything
+#: else rather than reporting a failure it cannot act on.
+BROWSER = {"browser_loading"}
 
 
 #: Third-party names a suite is allowed to be missing. Gradio is the reason
 #: this list exists - the image maths runs on a bare interpreter and should
 #: not need it - and everything else here is the same kind of optional host
 #: dependency.
-OPTIONAL = ("gradio", "PIL", "httpx", "fastapi", "starlette", "numpy")
+OPTIONAL = ("gradio", "PIL", "httpx", "fastapi", "starlette", "numpy", "playwright")
 
 
 def _is_optional(error: ImportError) -> bool:
@@ -89,12 +99,14 @@ def _is_optional(error: ImportError) -> bool:
 
 def main() -> int:
     ok = True
+    skipped = []
     for name in SUITES:
         try:
             module = __import__(name)
         except ImportError as error:
             if _is_optional(error):
                 print(f"{name}: skipped ({error})")
+                skipped.append(name)
                 continue
             print(f"{name}: FAILED TO IMPORT ({error})")
             ok = False
@@ -111,12 +123,40 @@ def main() -> int:
             # output still looked like a finished run.
             if _is_optional(error):
                 print(f"{name}: skipped ({error})")
+                skipped.append(name)
                 continue
             print(f"{name}: FAILED ({error})")
             ok = False
             continue
         ok = report.report() and ok
+
+    # A run that skipped most of itself and still said nothing is how a green
+    # suite comes to mean very little. Say how much of it actually ran, and
+    # let a caller that cares - CI - insist that all of it did.
+    if skipped:
+        print(f"\n{len(skipped)} of {len(SUITES)} suites skipped: {', '.join(skipped)}")
+        print("   install tests/requirements.txt to run them.")
+        if os.environ.get("MINIPAINT_REQUIRE_ALL_SUITES"):
+            missing = [name for name in skipped if name not in BROWSER or _browser_expected()]
+            if missing:
+                print(f"FAILED: MINIPAINT_REQUIRE_ALL_SUITES is set and these did not run: {', '.join(missing)}")
+                ok = False
+    else:
+        print(f"\nall {len(SUITES)} suites ran.")
     return 0 if ok else 1
+
+
+def _browser_expected() -> bool:
+    """Whether a skipped browser suite should count as a failure.
+
+    It should when something has gone to the trouble of installing a browser,
+    which is the case in CI and generally not the case on a laptop.
+    """
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 if __name__ == "__main__":

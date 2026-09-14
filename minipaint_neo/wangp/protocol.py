@@ -667,4 +667,299 @@ def normalize_queue_track(raw: typing.Any) -> dict:
     }
 
 
+
+
+# -- protocol 6: the control plane -----------------------------------------
+#
+# Everything above this line is a browser talking to an iframe. This part is
+# not: it is Forge talking to the WanGP child directly, over loopback, with
+# no page in between and frequently with no page in existence. That is the
+# whole point of it - a job the user walked away from has nobody to relay for
+# it - and it is why the vocabulary is separate rather than folded into the
+# postMessage types above. Nothing here ever crosses to a browser.
+#
+# The transport is an ordinary JSON POST to the child's own Gradio app, under
+# a prefix of ours, carrying the per-launch secret Forge minted for the child
+# and exported into its environment. Loopback alone is not the boundary: the
+# moment a route on that socket can start a generation with no session, port
+# plus loopback stops being sufficient, so the secret is compared on every
+# request and a mismatch is refused before the body is read.
+
+#: Where the child answers. Under the child's own root, so the Forge-side
+#: proxy's ``/wan2gp/`` prefix is not involved and a browser that reached the
+#: proxy cannot reach this by removing a path segment: the proxy only ever
+#: forwards ``/wan2gp/``-prefixed paths, and this is not one.
+CONTROL_PREFIX = "/minipaint-bridge"
+#: Bumped when the shape of a control request or answer changes in a way an
+#: older Forge could misread. Reported by ``hello`` and checked there.
+#:
+#: Versioned separately from ``PROTOCOL`` on purpose, and that is why the
+#: number above did not move when this whole section was added. ``PROTOCOL``
+#: is the postMessage envelope a browser and an iframe filter on: bumping it
+#: makes every already-loaded page stop answering, which is a real cost, and
+#: nothing about what those two say to each other changed here. This plane
+#: has different participants, a different transport and a different
+#: lifetime, so it carries its own number.
+CONTROL_VERSION = 1
+#: The header the per-launch secret travels in. Never logged, never in an
+#: answer, never in a diagnostics report.
+CONTROL_SECRET_HEADER = "x-minipaint-bridge-secret"
+
+#: What the control plane can be asked. Anything else is a 404 rather than a
+#: refusal, so a probe cannot enumerate operations that exist but are off.
+CONTROL_HELLO = "hello"
+CONTROL_COMPOSE = "compose"
+CONTROL_SUBMIT = "submit"
+CONTROL_STATUS = "status"
+CONTROL_CANCEL = "cancel"
+CONTROL_FORGET = "forget"
+CONTROL_OPERATIONS = (CONTROL_HELLO, CONTROL_COMPOSE, CONTROL_SUBMIT, CONTROL_STATUS, CONTROL_CANCEL, CONTROL_FORGET)
+
+#: An execution id is the same grammar as a request id, for the same reason.
+#: It is the ledger key, and the bridge writes it into WanGP's own
+#: ``client_id`` so that the artifacts a generation returns identify
+#: themselves - the task's settings carry the composing page's client_id
+#: otherwise, and an adapter that did not overwrite it would misattribute
+#: every file it got back.
+EXECUTION_ID_RE = HANDOFF_ID_RE
+
+#: Where one execution is, as the child reports it. These are the child's
+#: words; the Forge job states in ``clipboard/outbox.py`` are derived from
+#: them and are not the same vocabulary.
+EXEC_ACCEPTED = "accepted"
+EXEC_QUEUED = "queued"
+EXEC_RUNNING = "running"
+EXEC_DONE = "done"
+EXEC_FAILED = "failed"
+EXEC_CANCELLED = "cancelled"
+#: A submission was recorded and its outcome never was. The ledger answers
+#: this rather than guessing, and it is what produces EXECUTION_UNKNOWN on
+#: the Forge side instead of a second generation.
+EXEC_UNKNOWN = "unknown"
+EXEC_STATES = (EXEC_ACCEPTED, EXEC_QUEUED, EXEC_RUNNING, EXEC_DONE, EXEC_FAILED, EXEC_CANCELLED, EXEC_UNKNOWN)
+EXEC_TERMINAL = (EXEC_DONE, EXEC_FAILED, EXEC_CANCELLED, EXEC_UNKNOWN)
+EXEC_OPEN = (EXEC_ACCEPTED, EXEC_QUEUED, EXEC_RUNNING)
+
+#: Where a composed settings base came from. Recorded on the job and shown,
+#: because a job that silently ran at factory settings when the user had
+#: configured something else is the failure the whole compose exists to
+#: prevent.
+BASE_RECORDED = "recorded_form"
+BASE_SESSION = "session"
+BASE_FACTORY = "factory_defaults"
+BASE_SOURCES = (BASE_RECORDED, BASE_SESSION, BASE_FACTORY)
+
+#: The media slots a submission may fill, and the settings keys each one
+#: lands in. The keys are WanGP's; they are named in compatibility.py on the
+#: child side and never anywhere else, so this table carries only the logical
+#: names and the order they are applied in.
+EXEC_SLOT_START = "start"
+EXEC_SLOT_END = "end"
+EXEC_SLOT_REFERENCES = "references"
+EXEC_SLOTS = (EXEC_SLOT_START, EXEC_SLOT_END, EXEC_SLOT_REFERENCES)
+
+#: Control-plane refusals. Spelled here so both sides match exactly; the
+#: Forge copy in ``errors.py`` carries the sentences.
+CONTROL_UNAUTHORISED = "CONTROL_UNAUTHORISED"
+CONTROL_UNAVAILABLE = "CONTROL_UNAVAILABLE"
+CONTROL_VERSION_MISMATCH = "CONTROL_VERSION_MISMATCH"
+EXECUTION_ID_CONFLICT = "EXECUTION_ID_CONFLICT"
+EXECUTION_REFUSED = "EXECUTION_REFUSED"
+EXECUTION_UNKNOWN = "EXECUTION_UNKNOWN"
+SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE"
+COMPOSE_UNAVAILABLE = "COMPOSE_UNAVAILABLE"
+MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
+
+
+def valid_execution_id(value: typing.Any) -> bool:
+    return isinstance(value, str) and bool(EXECUTION_ID_RE.match(value))
+
+
+def normalize_compose_request(raw: typing.Any) -> typing.Tuple[dict, str]:
+    """What ``compose`` takes: a model to compose for, and nothing else.
+
+    ``model_type`` empty means "whatever the child is on", which is the
+    honest answer when no page has ever chosen one. A session hash may be
+    supplied to prefer that page's own live settings over the process-wide
+    recorded form; it is an optimisation and its absence is not an error.
+    """
+    if not isinstance(raw, dict):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    model_type = raw.get("model_type")
+    if model_type is not None and not isinstance(model_type, str):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    session = raw.get("session_hash")
+    if session is not None and not isinstance(session, str):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    return {"model_type": str(model_type or "")[:200], "session_hash": str(session or "")[:200]}, ""
+
+
+def normalize_media_map(raw: typing.Any) -> typing.Tuple[dict, str]:
+    """The handoff ids a submission fills its media slots from.
+
+    Ids only. A path never crosses this boundary in either direction: Forge
+    writes the pixels into the handoff root both processes already share and
+    names them, and the child resolves them under its own root or refuses.
+    """
+    if raw is None:
+        return {}, ""
+    if not isinstance(raw, dict):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    out: typing.Dict[str, typing.Any] = {}
+    for slot in (EXEC_SLOT_START, EXEC_SLOT_END):
+        value = raw.get(slot)
+        if value is None or value == "":
+            continue
+        if not valid_handoff_id(value):
+            return {}, QUEUE_CODE_REQUEST_INVALID
+        out[slot] = value
+    references = raw.get(EXEC_SLOT_REFERENCES)
+    if references is not None:
+        if not isinstance(references, (list, tuple)):
+            return {}, QUEUE_CODE_REQUEST_INVALID
+        kept = []
+        for item in references:
+            if item is None or item == "":
+                continue
+            if not valid_handoff_id(item):
+                return {}, QUEUE_CODE_REQUEST_INVALID
+            kept.append(item)
+        if len(kept) > MAX_QUEUE_REFERENCES:
+            return {}, QUEUE_CODE_REQUEST_INVALID
+        if kept:
+            out[EXEC_SLOT_REFERENCES] = kept
+    return out, ""
+
+
+def normalize_execution_request(raw: typing.Any) -> typing.Tuple[dict, str]:
+    """One server-executed submission, as the child will take it.
+
+    The settings dict is passed through rather than validated field by field:
+    it is WanGP's own shape, composed by the child from the user's own
+    configuration, and this side of the wire has no business knowing what is
+    in it. What is checked is everything that is *ours* - the execution id
+    that keys the ledger, the prompt, the media ids, the model the snapshot
+    was composed for - because those are the parts a mistake here would
+    silently corrupt.
+    """
+    if not isinstance(raw, dict):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    execution_id = raw.get("execution_id")
+    if not valid_execution_id(execution_id):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    settings = raw.get("settings")
+    if not isinstance(settings, dict) or not settings:
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    prompt = raw.get("prompt")
+    if prompt is not None and not isinstance(prompt, str):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    cleaned = clean_prompt(prompt)
+    if cleaned is not None and len(cleaned) > PROMPT_MAX_CHARS:
+        return {}, QUEUE_CODE_PROMPT_TOO_LONG
+    media, code = normalize_media_map(raw.get("media"))
+    if code:
+        return {}, code
+    model_type = raw.get("model_type")
+    if model_type is not None and not isinstance(model_type, str):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    request = {
+        "execution_id": execution_id,
+        "settings": dict(settings),
+        "media": media,
+        "model_type": str(model_type or "")[:200],
+        # Unattended work never jumps the user's own queue. ``priority`` is
+        # for a job somebody is sitting in front of waiting for, and it is
+        # off unless a caller says otherwise.
+        "priority": raw.get("priority") is True,
+    }
+    if cleaned is not None:
+        request["prompt"] = cleaned
+    return request, ""
+
+
+def normalize_execution_record(raw: typing.Any) -> dict:
+    """One ledger record, as Forge will read it.
+
+    An unreadable record is ``unknown``, never ``done``: the whole reason the
+    ledger exists is that "I cannot prove what happened" and "it finished"
+    must not be the same answer.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    state = raw.get("state") if raw.get("state") in EXEC_STATES else EXEC_UNKNOWN
+    files = raw.get("generated_files")
+    kept = [str(item)[:400] for item in files if isinstance(item, str) and item][:64] if isinstance(files, (list, tuple)) else []
+    return {
+        "execution_id": raw.get("execution_id") if valid_execution_id(raw.get("execution_id")) else "",
+        "state": state,
+        "stage": str(raw.get("stage") or "")[:160],
+        "position": _depth(raw.get("position")),
+        "queue_depth": _depth(raw.get("queue_depth")),
+        "submitted_at": float(raw.get("submitted_at") or 0.0),
+        "finished_at": float(raw.get("finished_at") or 0.0),
+        "generated_files": kept,
+        "file_count": len(kept),
+        "code": _code_or(raw.get("code")),
+        "message": str(raw.get("message") or "")[:200],
+        # Which residency key this task ran under, and whether it forced a
+        # model load. A job that took three minutes longer deserves the
+        # reason, and it is the only way to catch a setting that is quietly
+        # defeating residency.
+        "residency_key": str(raw.get("residency_key") or "")[:200],
+        "reload_reason": str(raw.get("reload_reason") or "")[:120],
+        # Which run of the child this record belongs to. A record whose
+        # instance is not the child now running is a record about a process
+        # that is gone, which is the whole of the restart reconciliation.
+        "instance": str(raw.get("instance") or "")[:64],
+    }
+
+
+def normalize_control_hello(raw: typing.Any) -> dict:
+    """The child's answer to "are you there, and can you take a job".
+
+    READY on the Forge side is a liveness and transport fact. It does not say
+    the bridge is on the page, that the service arbiter resolved, or that a
+    settings base can be composed - so the child answers those itself and the
+    executor does not treat a running process as an admission.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        "ok": raw.get("ok") is True,
+        "control_version": _whole(raw.get("control_version")),
+        "protocol": _whole(raw.get("protocol")),
+        "bridge_version": str(raw.get("bridge_version") or "")[:40],
+        "wan2gp_version": str(raw.get("wan2gp_version") or "")[:40],
+        "instance": str(raw.get("instance") or "")[:64],
+        #: Whether a job can actually be submitted right now, and if not, why.
+        "can_execute": raw.get("can_execute") is True,
+        "can_compose": raw.get("can_compose") is True,
+        #: The one process-wide generation arbiter. False means the shared
+        #: queue cannot be reached and server execution is off for this run -
+        #: never a reason to fall back to a path that runs beside it.
+        "service": raw.get("service") is True,
+        "generation_running": _tristate(raw.get("generation_running")),
+        "queue_depth": _depth(raw.get("queue_depth")),
+        "model_type": str(raw.get("model_type") or "")[:200],
+        "code": _code_or(raw.get("code")),
+        "message": str(raw.get("message") or "")[:200],
+    }
+
+
+def normalize_compose_answer(raw: typing.Any) -> dict:
+    """A composed settings base and where it came from."""
+    raw = raw if isinstance(raw, dict) else {}
+    settings = raw.get("settings")
+    ok = raw.get("ok") is True and isinstance(settings, dict) and bool(settings)
+    source = raw.get("source") if raw.get("source") in BASE_SOURCES else BASE_FACTORY
+    return {
+        "ok": ok,
+        "settings": dict(settings) if ok else {},
+        "source": source if ok else "",
+        "model_type": str(raw.get("model_type") or "")[:200],
+        "wan2gp_version": str(raw.get("wan2gp_version") or "")[:40],
+        "residency_key": str(raw.get("residency_key") or "")[:200],
+        "model": model_block(raw.get("model")),
+        "code": "" if ok else _code_or(raw.get("code"), COMPOSE_UNAVAILABLE),
+        "message": str(raw.get("message") or "")[:200],
+    }
+
 # ------------------------------------------------------------ END SHARED --

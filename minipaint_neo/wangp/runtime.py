@@ -70,6 +70,13 @@ STATES = (STOPPED, STARTING, READY, STOPPING, CRASHED, INCOMPATIBLE, REINIT_REQU
 ENV_INSTANCE_ID = "MINIPAINT_WANGP_INSTANCE_ID"
 ENV_HANDOFF_ROOT = "MINIPAINT_WANGP_HANDOFF_ROOT"
 ENV_BRIDGE_SECRET = "MINIPAINT_WANGP_BRIDGE_SECRET"
+#: Protocol 6: the loopback port this process keeps for the child's control
+#: surface, and the directory the child writes its execution ledger into.
+#: Both are chosen here, before the launch, for the reason the Gradio port is:
+#: a child that picked its own number would have to announce it, and an
+#: announcement is a discovery step that can be stale, spoofed or missed.
+ENV_CONTROL_PORT = "MINIPAINT_WANGP_CONTROL_PORT"
+ENV_LEDGER_ROOT = "MINIPAINT_WANGP_LEDGER_ROOT"
 
 #: The address the backend is allowed to bind. Not a default, not a setting.
 LOOPBACK = "127.0.0.1"
@@ -196,6 +203,8 @@ def build_environment(
     secret: str,
     environ: typing.Optional[typing.Mapping[str, str]] = None,
     handoff_root: typing.Any = "",
+    control_port: int = 0,
+    ledger_root: typing.Any = "",
 ) -> typing.Dict[str, str]:
     """The exact environment the child is started in.
 
@@ -254,6 +263,10 @@ def build_environment(
     child[ENV_INSTANCE_ID] = _text(instance_id)
     child[ENV_HANDOFF_ROOT] = _text(handoff_root)
     child[ENV_BRIDGE_SECRET] = _text(secret)
+    # Protocol 6. Absent when this launch is not for server execution, which
+    # is what an older bridge sees and what keeps its control surface shut.
+    child[ENV_CONTROL_PORT] = str(int(control_port)) if control_port else ""
+    child[ENV_LEDGER_ROOT] = _text(ledger_root)
     return child
 
 
@@ -667,6 +680,12 @@ class Runtime:
         self._launching: typing.Optional[_Child] = None
         self._secret = ""
         self._last_instance_id = ""
+        #: Protocol 6: the loopback port the child's control surface binds.
+        #: Kept here beside the backend port, and left out of ``snapshot``
+        #: for the same reason that one is: the browser must not learn it,
+        #: and the surest way to keep that true is for it never to be in
+        #: anything that gets rendered.
+        self.control_port = 0
 
     # -- reading ------------------------------------------------------------
 
@@ -765,6 +784,7 @@ class Runtime:
             self._last_instance_id = previous
         self.instance_id = ""
         self.backend_port = 0
+        self.control_port = 0
         if previous:
             _invalidate_bridge(previous)
 
@@ -859,11 +879,24 @@ class Runtime:
             process_log.begin(instance_id, f"root {scrub.line(root_text)}")
 
             last_detail = ""
+            # Protocol 6: one more loopback port, kept the same way and for
+            # the same reason. The child's control surface binds it; nothing
+            # else ever learns the number, and a run that cannot get one
+            # simply launches without unattended execution rather than
+            # failing - the browser-driven paths are unaffected by it.
+            try:
+                control = free_port()
+            except IntegrationError:
+                control = 0
+                journal.note("runtime", "no control port could be kept; unattended execution is off for this run")
+            ledger_root = str(runtime_dir())
+
             for attempt in range(PORT_ATTEMPTS):
                 port = free_port()
                 command = command_line(config, port)
                 environment = build_environment(
-                    config, port, instance_id, secret, handoff_root=handoff
+                    config, port, instance_id, secret, handoff_root=handoff,
+                    control_port=control, ledger_root=ledger_root,
                 )
 
                 journal.note("runtime", f"launch attempt {attempt + 1}: {' '.join(command)}")
@@ -884,6 +917,7 @@ class Runtime:
                     self._child = child
                     self.instance_id = instance_id
                     self.backend_port = port
+                    self.control_port = control
                     self._secret = secret
                     self.state = READY
                     self.error_code = ""

@@ -53,13 +53,14 @@ import time
 import typing
 
 try:
-    from . import admission, bridge_js, bridge_ui, compatibility, handoff, page_head, protocol
+    from . import admission, bridge_js, bridge_ui, compatibility, control, handoff, page_head, protocol
     from . import receiver_adapters, receiver_state, scrub
 except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import admission  # type: ignore[no-redef]
     import bridge_js  # type: ignore[no-redef]
     import bridge_ui  # type: ignore[no-redef]
     import compatibility  # type: ignore[no-redef]
+    import control  # type: ignore[no-redef]
     import handoff  # type: ignore[no-redef]
     import page_head  # type: ignore[no-redef]
     import protocol  # type: ignore[no-redef]
@@ -788,6 +789,11 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         #: Whether the browser half has been handed to WanGP. Once only: the
         #: UI is built more than once on some pages.
         self.injected = False
+        #: Protocol 6: the way in that is not a browser. Built here and
+        #: started in post_ui_setup, once the globals it needs have been
+        #: injected and the resolution is known; silent on a WanGP that
+        #: somebody started by hand, or that an older Forge launched.
+        self.control = control.ControlSurface(self.bridge.compat, environ=self.bridge.environ, note=_note)
 
     # -- hooks ----------------------------------------------------------------
 
@@ -866,7 +872,37 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
                 print(scrub.block(traceback.format_exc()))
             except Exception:
                 pass
+
+        # The control surface last, and separately: it is how Forge runs jobs
+        # with no browser, and it must not be taken down by a failure to
+        # place the browser-facing controls - nor take them down with it.
+        # The order matters the other way too: it is started here rather than
+        # in setup_ui because the globals it reads are injected before
+        # setup_ui and the resolution it reports is known only now.
+        try:
+            self._start_control()
+        except Exception as error:
+            _note(f"the control surface could not be started ({type(error).__name__}: {error}); unattended jobs stay off")
         return result
+
+    def _start_control(self) -> None:
+        """Open the loopback control surface, or say why it stays shut.
+
+        Two notes rather than one silence: a WanGP started by hand should not
+        be told it is missing anything, and a WanGP the integration launched
+        that cannot open the surface is a Forge whose queue will sit still,
+        which is worth a line in the child's own log where somebody
+        diagnosing it will look.
+        """
+        if not compatibility.server_execution_available(self.bridge.environ):
+            if compatibility.managed(self.bridge.environ):
+                _note("unattended execution is off for this run: this WanGP was launched without a control port")
+            return
+        if self.control.start():
+            can, why = (self.control.executor.available() if self.control.executor is not None else (False, ""))
+            if not can:
+                _note(f"the control surface is listening but cannot execute yet ({why or 'unknown'})")
+        return
 
     def _place(self, handed: typing.Mapping[str, typing.Any]) -> None:
         """Ask WanGP to put the controls on the page, wired. See ``post_ui_setup``.

@@ -1,6 +1,7 @@
 # Checks
 
 ```
+pip install -r tests/requirements.txt                 # four packages, no torch, under two minutes
 python tests/run.py                                   # image maths, both frontends, the workflow, WanGP, the queue, Clipboard
 FORGE_ROOT=/path/to/forge-neo python tests/browser_smoke.py   # the real extension in a real browser
 ```

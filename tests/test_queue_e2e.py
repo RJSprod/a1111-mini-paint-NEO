@@ -82,6 +82,15 @@ def _modules():
     return plugin, compatibility, bridge_ui
 
 
+def bridge_version() -> str:
+    """The plugin's own version string, read rather than repeated.
+
+    Written down in one place, so a version bump is one edit and not a
+    failing assertion in a suite that has nothing to do with it.
+    """
+    return _modules()[1].BRIDGE_VERSION
+
+
 def _png(colour, size=(6, 4)) -> bytes:
     buffer = io.BytesIO()
     Image.new("RGBA", size, colour).save(buffer, format="PNG")
@@ -462,7 +471,7 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
     plugin_session = hello.get("bridge_session")
     r.check("a hello through Gradio is ready and offers the queue",
             hello.get("ready") is True and hello.get("capabilities", {}).get("queue") is True and protocol.valid_handoff_id(plugin_session or ""), json.dumps(hello)[:200])
-    r.check("and speaks protocol 5", hello.get("protocol") == 5 and hello.get("bridge_version") == "1.4.0")
+    r.check("and speaks protocol 5", hello.get("protocol") == 5 and hello.get("bridge_version") == bridge_version())
     r.check("and offers start, with WanGP idle", hello.get("capabilities", {}).get("start") is True and hello.get("generation_running") is False, json.dumps(hello.get("capabilities")))
 
     def queue(request_id, **fields):

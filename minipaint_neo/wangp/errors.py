@@ -91,6 +91,33 @@ ENHANCE_CANCELLED = "ENHANCE_CANCELLED"
 ENHANCE_LOST = "ENHANCE_LOST"
 MODEL_CHANGED = "MODEL_CHANGED"
 
+# -- protocol 6: server-owned execution -------------------------------------
+# The control plane between Forge and the WanGP child, and the stages a job
+# passes through once no browser is required for it. Spelled the same in the
+# plugin's own protocol.py copy, because a code invented on one side reaches
+# the other as "unknown" and is reported as an internal error.
+CONTROL_UNAUTHORISED = "CONTROL_UNAUTHORISED"
+CONTROL_UNAVAILABLE = "CONTROL_UNAVAILABLE"
+CONTROL_VERSION_MISMATCH = "CONTROL_VERSION_MISMATCH"
+EXECUTION_ID_CONFLICT = "EXECUTION_ID_CONFLICT"
+EXECUTION_REFUSED = "EXECUTION_REFUSED"
+#: The one state that never auto-retries. A submission was recorded and its
+#: outcome was not, so nothing in this extension may decide it did not happen.
+EXECUTION_UNKNOWN = "EXECUTION_UNKNOWN"
+EXECUTION_STRANDED = "EXECUTION_STRANDED"
+SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE"
+COMPOSE_UNAVAILABLE = "COMPOSE_UNAVAILABLE"
+MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
+#: The enhancement side, read from the shipped mc_llm_api rather than guessed.
+ENHANCE_EXTENSION_MISSING = "ENHANCE_EXTENSION_MISSING"
+ENHANCE_SWITCHED_OFF = "ENHANCE_SWITCHED_OFF"
+ENHANCE_NOT_CONFIGURED = "ENHANCE_NOT_CONFIGURED"
+ENHANCE_API_TOO_NEW = "ENHANCE_API_TOO_NEW"
+#: An input a job owns went missing before the job reached its stage. It is
+#: the failure B12's pin exists to prevent, and it is named so a recurrence
+#: is visible rather than read as a generic refusal.
+JOB_INPUT_MISSING = "JOB_INPUT_MISSING"
+
 # -- everything else --------------------------------------------------------
 WANGP_RESTARTED = "WANGP_RESTARTED"
 INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -162,6 +189,21 @@ MESSAGES: dict[str, str] = {
     ENHANCE_CANCELLED: "The prompt enhancement was cancelled.",
     ENHANCE_LOST: "The enhancement's record was gone before its result was collected (LLM Studio forgot it, or Forge restarted); retry to enhance again.",
     MODEL_CHANGED: "The WanGP page moved to another model after the prompt was enhanced for it; retry to enhance it for the current model.",
+    CONTROL_UNAUTHORISED: "WanGP refused the control request; the integration will restart WanGP to mint a new credential.",
+    CONTROL_UNAVAILABLE: "The MiniPaint bridge inside WanGP is not answering its control surface; unattended jobs cannot be run until it is.",
+    CONTROL_VERSION_MISMATCH: "The MiniPaint bridge plugin in WanGP speaks a different control version; update it.",
+    EXECUTION_ID_CONFLICT: "That execution id was already used for a different submission.",
+    EXECUTION_REFUSED: "WanGP would not take the generation.",
+    EXECUTION_UNKNOWN: "Whether WanGP ran this generation could not be proved, so it was not sent again. Check WanGP's outputs and retry if it did not run.",
+    EXECUTION_STRANDED: "The task reached WanGP's queue but nothing started it; it was not sent again.",
+    SERVICE_UNAVAILABLE: "This WanGP build does not expose the generation service the unattended queue submits through.",
+    COMPOSE_UNAVAILABLE: "WanGP's settings for that model could not be read, so nothing was queued at settings nobody chose.",
+    MODEL_UNAVAILABLE: "The model this job was composed for is not available in WanGP any more.",
+    ENHANCE_EXTENSION_MISSING: "Prompt enhancement needs the SD-Neo-ModelSwitchRefiner extension, which is not installed here.",
+    ENHANCE_SWITCHED_OFF: "LLM Studio is switched off in this WebUI's settings, so the prompt was not enhanced. Nothing was switched on for you.",
+    ENHANCE_NOT_CONFIGURED: "LLM Studio has no enhancement model set up; choose one there first.",
+    ENHANCE_API_TOO_NEW: "ModelSwitchRefiner's external LLM API is a newer major version than this extension understands.",
+    JOB_INPUT_MISSING: "An image this job owns is no longer on disk, so the job was not run with a picture missing.",
 }
 
 #: Codes that mean "the setup on disk no longer describes reality". The tab

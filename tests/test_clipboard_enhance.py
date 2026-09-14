@@ -537,7 +537,8 @@ def pipeline_checks(r: Results, fake: FakeApi, clock: _Clock, base: pathlib.Path
 
     # -- the document and the log
     stored = json.loads((config.config_dir() / outbox.OUTBOX_NAME).read_text(encoding="utf-8"))
-    r.check("the outbox document is schema 2 with the enhancement records inside the jobs", stored["schema"] == 2 and any(item.get("enhance") for item in stored["jobs"]))
+    r.check("the outbox document is at the current schema with the enhancement records inside the jobs",
+            stored["schema"] == outbox.SCHEMA and any(item.get("enhance") for item in stored["jobs"]))
     log = process_log.path()
     text = pathlib.Path(log).read_text(encoding="utf-8") if os.path.isfile(log) else ""
     r.check("nothing written to the log is a prompt, typed or written, or an override",

@@ -413,7 +413,95 @@ def write_discipline_checks(r: Results, clock) -> None:
 
 
 def recovery_checks(r: Results, clock) -> None:
-    """A restart never generates anything twice."""
+    """A restart starts empty, and never generates anything twice.
+
+    THIS USED TO RECONCILE, AND RECONCILING WAS THE WRONG PROMISE.
+
+    The queue was durable across restarts, on the reasoning that a job
+    somebody walked away from should survive one. In use that was the
+    complaint: a restart brought back prompts from hours earlier, ran them
+    again, and held up the ones that had just been pressed. A queue that
+    resurrects work nobody asked for again is worse than one that forgets
+    work they did.
+
+    So what is asserted now is that a session starts empty - every job, every
+    state, every pin - and that nothing is resubmitted on the way there,
+    which is the one property the old reconciliation existed to protect and
+    the one this must not lose.
+    """
+    _setup(clock)
+    runtime = FakeRuntime()
+    runtime.state = FakeRuntime.READY
+    runtime.instance_id = "child-one"
+    child = FakeChild(clock)
+    monkey = []
+    _install(monkey, runtime)
+    try:
+        control.use_transport(child)
+        asset = _asset()
+        job = outbox.submit(_request(start={"kind": "clipboard_asset", "id": asset}), PAGE)
+        for _ in range(6):
+            executor.step()
+        r.check("the job is submitted before the restart", len(child.submissions) == 1, str(len(child.submissions)))
+        held = outbox.get(job["job_id"])["inputs"]["start"]
+        r.check("and holds a pinned picture of its own", bool(held), str(held))
+
+        # A second job that never reached WanGP, and a finished one, so the
+        # clear is asserted across every kind of record the queue can hold.
+        waiting = outbox.submit(_request("never submitted"), PAGE)
+        outbox.transition(waiting["job_id"], outbox.COMPOSING)
+
+        counted = executor.recover()
+        r.check("a restart starts with an empty queue, whatever was in it",
+                outbox.jobs() == [] and counted["cleared"] == 2, f"{len(outbox.jobs())} {counted}")
+        r.check("nothing is resubmitted on the way there - that is the whole point of clearing rather than resuming",
+                len(child.submissions) == 1, str(len(child.submissions)))
+        r.check("and the pictures those jobs owned are let go rather than left as orphans",
+                counted["inputs_released"] >= 1, str(counted))
+
+        from minipaint_neo.clipboard import job_inputs
+
+        r.check("the pinned input really is let go, not left held for a job that no longer exists",
+                job_inputs.counts()["held"] == 0, str(job_inputs.counts()))
+
+        # An empty queue is an ordinary thing to start with, not a special case.
+        counted = executor.recover()
+        r.check("a second start finds nothing to clear and says so",
+                counted["cleared"] == 0 and outbox.jobs() == [], str(counted))
+
+        # And the queue still works afterwards.
+        fresh = outbox.submit(_request("after the restart"), PAGE)
+        for _ in range(6):
+            executor.step()
+        r.check("a job pressed after the restart runs normally",
+                outbox.get(fresh["job_id"])["state"] in outbox.SERVER_SUBMITTED
+                and len(child.submissions) == 2, outbox.get(fresh["job_id"])["state"])
+    finally:
+        control.use_transport(None)
+        _restore(monkey)
+
+
+def session_switch_checks(r: Results, clock) -> None:
+    """The enhancement switch is this session's too, and off is the default.
+
+    "Off by default" is what the panel says, and persisting the switch made
+    that true only of a fresh install - after that it was "off until you ever
+    turn it on, then on in every session forever". A user who turned it on
+    days ago, collapsed the panel, and pressed Add to Queue today got an
+    enhanced prompt from a switch they could not see and did not set.
+    """
+    _setup(clock)
+    enhance.set_enabled(True)
+    r.check("the switch can be on at the end of a session", enhance.enabled() is True)
+    executor.recover()
+    r.check("and a new session starts with it off, because that is what the panel promises",
+            enhance.enabled() is False)
+    r.check("a session that starts with it already off leaves it alone rather than writing again",
+            executor.recover().get("enhance_reset") is None)
+
+
+def retention_checks(r: Results, clock) -> None:
+    """A finished job leaves the queue. The queue is a queue, not a record."""
     _setup(clock)
     runtime = FakeRuntime()
     runtime.state = FakeRuntime.READY
@@ -426,57 +514,19 @@ def recovery_checks(r: Results, clock) -> None:
         job = outbox.submit(_request(), PAGE)
         for _ in range(6):
             executor.step()
-        execution_id = outbox.get(job["job_id"])["execution_id"]
-        r.check("the job is submitted before the restart", len(child.submissions) == 1, str(len(child.submissions)))
-
-        # -- POSIX: the child outlived Forge and its ledger says what happened.
-        child.finish(execution_id)
-        counted = executor.recover()
-        settled = outbox.get(job["job_id"])
-        r.check("a restart adopts an outcome the child can still prove",
-                settled["state"] == outbox.COMPLETED and counted["adopted"] == 1, f"{settled['state']} {counted}")
-        r.check("and does not submit it again", len(child.submissions) == 1, str(len(child.submissions)))
-
-        # -- the child is still running it: re-attach rather than resubmit.
-        second = outbox.submit(_request("another"), PAGE)
-        for _ in range(6):
-            executor.step()
-        second_id = outbox.get(second["job_id"])["execution_id"]
-        child.generating(second_id)
-        counted = executor.recover()
-        r.check("a generation still running in the same child is re-attached",
-                counted["reattached"] == 1 and outbox.get(second["job_id"])["state"] == outbox.GENERATION_RUNNING, str(counted))
-        r.check("and still not submitted again", len(child.submissions) == 2, str(len(child.submissions)))
-
-        # -- Windows: the child was killed with Forge. Nobody can say.
-        # The earlier job has to be settled first: the executor advances one
-        # job at a time, on purpose, because two would be two things
-        # competing for one card.
-        child.finish(second_id)
+        child.finish(outbox.get(job["job_id"])["execution_id"])
         executor.step()
-        third = outbox.submit(_request("a third"), PAGE)
-        for _ in range(8):
-            executor.step()
-        r.check("the third job reaches WanGP once the second is done",
-                outbox.get(third["job_id"])["state"] in outbox.SERVER_SUBMITTED, outbox.get(third["job_id"])["state"])
-        child.records.clear()
-        counted = executor.recover()
-        settled = outbox.get(third["job_id"])
-        r.check("a submission the child has no record of is unknown, which is the Windows answer and is a pass",
-                settled["state"] == outbox.EXECUTION_UNKNOWN and counted["unknown"] == 1, f"{settled['state']} {counted}")
-        r.check("never an automatic resubmission", len(child.submissions) == 3, str(len(child.submissions)))
-        counted_again = executor.recover()
-        r.check("and asking again does not start one either",
-                len(child.submissions) == 3 and counted_again["unknown"] == 0, str(len(child.submissions)))
-        r.check("and it says so in words somebody can act on",
-                "could not be proved" in (settled["error"] or {}).get("message", ""), str(settled["error"]))
+        r.check("a job that finished is still there a moment later, so the page that was waiting is told",
+                outbox.get(job["job_id"])["state"] == outbox.COMPLETED)
 
-        # -- a job that never got as far as submitting simply resumes.
-        fourth = outbox.submit(_request("a fourth"), PAGE)
-        outbox.transition(fourth["job_id"], outbox.COMPOSING)
-        executor.recover()
-        r.check("a job that never reached WanGP resumes from the start of its stage",
-                outbox.get(fourth["job_id"])["state"] == outbox.ADMITTED)
+        # The grace exists for the waiter and for nothing else. Past it, the
+        # job has left the queue - history is where finished work lives.
+        clock.tick(outbox.KEEP_TERMINAL_SECONDS + 1.0)
+        outbox.submit(_request("something to sweep on"), PAGE)
+        r.check("and gone once the grace is over, rather than sitting in the list for a week",
+                all(item["job_id"] != job["job_id"] for item in outbox.jobs()), str([i["state"] for i in outbox.jobs()]))
+        r.check("the grace is short enough to be a queue rather than a log",
+                outbox.KEEP_TERMINAL_SECONDS <= 600.0, str(outbox.KEEP_TERMINAL_SECONDS))
     finally:
         control.use_transport(None)
         _restore(monkey)
@@ -805,9 +855,13 @@ def migration_checks(r: Results, clock) -> None:
             outbox.claim(PAGE).get("job", {}).get("job_id") == "1" * 16, str(outbox.claim(PAGE))[:120])
     r.check("and the new fields are present and empty rather than missing",
             listed[0]["execution_id"] == "" and listed[0]["snapshot"] is None and listed[0]["generated_count"] == 0)
-    r.check("recovery leaves it alone: its rules are the old ones",
-            executor.recover()["legacy"] == 1)
-    r.check("and the executor does not pick it up", outbox.next_executable() is None)
+    r.check("and the executor does not pick it up: its rules are the old ones",
+            outbox.next_executable() is None)
+    # Read across a restart, an old job goes the same way a new one does. Its
+    # page is gone with the browser that held it, so keeping the record would
+    # leave a job in the list that nothing on earth was going to advance.
+    r.check("and a new session clears it with everything else",
+            executor.recover()["cleared"] == 1 and outbox.jobs() == [], str(outbox.jobs()))
 
 
 def enhanced_checks(r: Results, clock) -> None:
@@ -926,6 +980,8 @@ def run() -> Results:
     input_lifetime_checks(r, clock)
     write_discipline_checks(r, clock)
     recovery_checks(r, clock)
+    retention_checks(r, clock)
+    session_switch_checks(r, clock)
     failure_checks(r, clock)
     cancellation_checks(r, clock)
     event_checks(r, clock)

@@ -267,6 +267,14 @@ composed from the record after a successful flush is recorded as `flushed_form` 
 `recorded_form`; both came out of `load_model_form`, and nothing downstream could tell them
 apart otherwise.
 
+**The queue is one Forge session's.** `start_session()` runs before anything sweeps and
+empties it: every job, in every state, and every pinned input released. Nothing carries into
+the next run, and a finished job leaves the list after a short grace
+(`KEEP_TERMINAL_SECONDS`, long enough for a waiting page to be told what happened and no
+longer). The enhancement switch is session-scoped the same way — `enhance.start_session()`
+turns it off, which is what "off by default" has always claimed. What this gives up is
+written down in `docs/wangp/SERVER_EXECUTION.md` §9.
+
 The rules: one lease at a time across every page; the line keeps press
 order - its head is the oldest job not yet handed out, and while that head
 is `enhancing` nobody is served, whichever page asks (`wait: enhancing`); a

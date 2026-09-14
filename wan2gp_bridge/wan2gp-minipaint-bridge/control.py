@@ -236,6 +236,11 @@ class ControlSurface:
             "wan2gp_revision_pinned": compatibility.WAN2GP_EXECUTION_REVISION,
             "instance": self.instance,
             "can_execute": bool(can_execute),
+            # What was looked at, when there is nothing to execute with. The
+            # Forge side puts it in the job's stage line and the journal, so
+            # the reason reaches whoever is reading a log rather than staying
+            # inside this process as a three-word code.
+            "diagnosis": "" if can_execute else self.compat.service_diagnosis(),
             "can_compose": bool(self.composer is not None and self.composer.available()),
             "service": service is not None,
             "generation_running": self.compat.service_generation_running(service),

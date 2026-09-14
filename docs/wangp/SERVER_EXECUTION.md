@@ -376,9 +376,24 @@ inference and is now a citation:
 
 ## 9. What is deliberately not promised
 
-* **Survival of a powered-off Forge machine.** Durability means
-  browser-independent execution while the execution host is running, plus
-  defined reconciliation after a restart where that is safe.
+* **Survival of a Forge restart.** Durability means browser-independent
+  execution *while Forge is running*: close the tab, lock the phone, walk
+  away, and the job still runs. It does not mean the queue outlives Forge.
+
+  This was the other way round, and the reversal came from use. The queue was
+  durable across restarts and reconciled against the child's ledger, and what
+  that produced was a restart bringing back prompts from hours earlier,
+  running them again, and holding up the ones just pressed. A queue that
+  resurrects work nobody asked for again is worse than one that forgets work
+  they did, so a run now starts empty and a finished job leaves the list.
+
+  What that gives up, stated rather than discovered: a generation in flight
+  when Forge stops is no longer tracked. It is not cancelled — on POSIX the
+  child outlives Forge and finishes what it was given, and the output lands
+  in WanGP's own gallery — but this extension no longer has a record of it,
+  and `recover()` no longer reconciles anything. Press it again if you want
+  it queued again, which is what the old `EXECUTION_UNKNOWN` outcome left you
+  doing anyway.
 * **A viewer.** Success is a `GenerationResult` and persisted generated-file
   paths. The paths are kept on the job for a later viewer; they never cross
   to a browser on the shared event stream, where only the count goes.

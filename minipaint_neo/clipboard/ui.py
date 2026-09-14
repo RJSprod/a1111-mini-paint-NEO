@@ -888,6 +888,15 @@ class ClipboardTab:
         request["start"] = protocol.START_AUTO
         try:
             wanted = None if enhance_wanted is None else bool(enhance_wanted)
+            # What decided it, in the log, every time. The switch's value
+            # lives in the browser and the setting lives on disk, and when a
+            # report says "the box was off but it enhanced" there is otherwise
+            # nothing to tell whether the box sent True or was never asked.
+            if wanted is None:
+                decided = f"{'on' if enhance.enabled() else 'off'} (no switch was sent; the stored setting decided)"
+            else:
+                decided = f"{'on' if wanted else 'off'} (from the switch, as it stood at the press)"
+            self._journal(f"queue clicked: enhancement {decided}")
             if wanted is not None and wanted != enhance.enabled():
                 # The switch and the stored setting had drifted, so the click
                 # that should have written it never arrived. Take the press as

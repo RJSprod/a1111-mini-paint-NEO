@@ -970,7 +970,18 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         if self.control.start():
             can, why = (self.control.executor.available() if self.control.executor is not None else (False, ""))
             if not can:
-                _note(f"the control surface is listening but cannot execute yet ({why or 'unknown'})")
+                # With the reason, not just the code. This runs while WanGP is
+                # still building its UI, so "not yet" is the ordinary answer -
+                # but it is also what a build that can never execute says, and
+                # a line that cannot tell the two apart is a line that sends
+                # whoever reads the log guessing.
+                detail = ""
+                if why == protocol.SERVICE_UNAVAILABLE:
+                    try:
+                        detail = f" - {self.bridge.compat.service_diagnosis()}"
+                    except Exception:
+                        detail = ""
+                _note(f"the control surface is listening but cannot execute yet ({why or 'unknown'}){detail}")
         return
 
     def _place(self, handed: typing.Mapping[str, typing.Any]) -> None:

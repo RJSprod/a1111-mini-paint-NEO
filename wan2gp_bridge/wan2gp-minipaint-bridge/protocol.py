@@ -971,6 +971,12 @@ def normalize_control_hello(raw: typing.Any) -> dict:
         "instance": str(raw.get("instance") or "")[:64],
         #: Whether a job can actually be submitted right now, and if not, why.
         "can_execute": raw.get("can_execute") is True,
+        #: What the child looked at when it could not execute, in its own
+        #: words. Diagnostic only - nothing branches on it - and carried so
+        #: that "SERVICE_UNAVAILABLE" in a Forge log is a sentence rather than
+        #: the start of a guessing game. Names of things in another process,
+        #: never anything of the user's.
+        "diagnosis": str(raw.get("diagnosis") or "")[:400],
         "can_compose": raw.get("can_compose") is True,
         #: The one process-wide generation arbiter. False means the shared
         #: queue cannot be reached and server execution is off for this run -

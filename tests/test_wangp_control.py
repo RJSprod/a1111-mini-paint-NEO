@@ -833,6 +833,66 @@ def service_lookup_checks(r: Results) -> None:
             compatibility.Compatibility.is_service(types.SimpleNamespace(start_generation=1, command=2)) is False)
 
 
+def diagnosis_checks(r: Results) -> None:
+    """When there is no service, the log says what was looked at.
+
+    SERVICE_UNAVAILABLE is one code for several different worlds - a factory
+    that answered None, a module that is not loaded, a global not assigned
+    yet, a build that has none of this - and a line carrying only the code
+    sends whoever reads it guessing. It sent me guessing twice.
+    """
+    compatibility, _compose, _control, _execution, _ledger, _protocol = _modules()
+    compat = _compat({})
+    text = compat.service_diagnosis()
+    r.check("with no service the diagnosis names what was looked for rather than repeating the code",
+            text and "SERVICE_UNAVAILABLE" not in text and compatibility.SERVICE_FACTORY in text, text[:200])
+    r.check("and says which modules were not even loaded, which is the usual answer",
+            "not loaded" in text, text[:200])
+
+    gen = {"queue": [], "in_progress": False}
+    service = FakeService(gen)
+    holder = types.ModuleType("pretend-wgp")
+    holder._deepy_hybrid = service
+    saved = sys.modules.get("__main__")
+    try:
+        sys.modules["__main__"] = holder
+        found = compat.service_diagnosis()
+    finally:
+        if saved is not None:
+            sys.modules["__main__"] = saved
+    r.check("and once there is one it says so in a word rather than listing everything again",
+            found == "resolved", found)
+
+    # Found by shape, not by name: a rename upstream must not read as "this
+    # build has no generation service", which is indistinguishable from the
+    # real thing and would send the next reader down the same hole.
+    renamed = types.ModuleType("pretend-wgp-renamed")
+    renamed._deepy_generation_arbiter = service
+    saved = sys.modules.get("__main__")
+    try:
+        sys.modules["__main__"] = renamed
+        by_shape = compat.service()
+    finally:
+        if saved is not None:
+            sys.modules["__main__"] = saved
+    r.check("a service under a name this bridge has never heard of is still found",
+            by_shape is service, str(by_shape))
+
+    # But the class is not the instance, and the class is importable from the
+    # same namespaces - so a sweep by shape has to tell them apart.
+    only_class = types.ModuleType("pretend-wgp-class-only")
+    only_class.HybridService = FakeService
+    saved = sys.modules.get("__main__")
+    try:
+        sys.modules["__main__"] = only_class
+        nothing = compat.service()
+    finally:
+        if saved is not None:
+            sys.modules["__main__"] = saved
+    r.check("a class that merely looks like the service is not mistaken for one",
+            nothing is None, str(nothing))
+
+
 def manifest_checks(r: Results) -> None:
     """The version the operator is shown is the version that is running.
 
@@ -869,6 +929,7 @@ def run() -> Results:
     flush_checks(r)
     service_lookup_checks(r)
     manifest_checks(r)
+    diagnosis_checks(r)
     return r
 
 

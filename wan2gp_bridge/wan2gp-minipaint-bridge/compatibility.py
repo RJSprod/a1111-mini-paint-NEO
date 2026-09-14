@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.5.0"
+BRIDGE_VERSION = "1.5.1"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -1143,10 +1143,70 @@ class Compatibility:
             if module is None:
                 continue
             for attribute in SERVICE_SINGLETONS:
-                candidate = getattr(module, attribute, None)
+                try:
+                    candidate = getattr(module, attribute, None)
+                except Exception:
+                    continue
                 if self.is_service(candidate):
                     return candidate
+        # By shape, when the name is wrong. Every name above is a name read
+        # out of one revision of Wan2GP, and a rename there would leave this
+        # answering "no generation service" about a process that has one -
+        # which is the worst answer available, because it is indistinguishable
+        # from a build that genuinely cannot execute.
+        #
+        # ``vars`` rather than ``dir``/``getattr``: it reads the module's own
+        # __dict__ and so cannot trigger a lazy attribute or a module-level
+        # __getattr__, which is what makes sweeping somebody else's namespace
+        # safe to do at all.
+        for name in SERVICE_HOLDERS:
+            module = sys.modules.get(name)
+            if module is None:
+                continue
+            try:
+                namespace = dict(vars(module))
+            except Exception:
+                continue
+            for value in namespace.values():
+                if self.is_service(value):
+                    return value
         return None
+
+    def service_diagnosis(self) -> str:
+        """Why there is no service, in the words of what was actually looked at.
+
+        SERVICE_UNAVAILABLE is one code for several different worlds - a
+        factory that answered None, a module that is not loaded, a global that
+        has not been assigned yet, a build that has none of this - and a log
+        line carrying only the code sends whoever reads it guessing. This is
+        the sentence that stops that, and it is deliberately about what was
+        seen rather than what it means.
+        """
+        import sys
+
+        if self.service() is not None:
+            return "resolved"
+        parts: typing.List[str] = []
+        factory = self.host.read_global(SERVICE_FACTORY)
+        parts.append(f"{SERVICE_FACTORY}={'callable' if callable(factory) else 'absent'}")
+        for name in SERVICE_HOLDERS:
+            module = sys.modules.get(name)
+            if module is None:
+                parts.append(f"{name}=not loaded")
+                continue
+            try:
+                namespace = dict(vars(module))
+            except Exception:
+                parts.append(f"{name}=unreadable")
+                continue
+            named = [key for key in SERVICE_SINGLETONS if key in namespace]
+            if not named:
+                parts.append(f"{name}=loaded, none of the known names")
+                continue
+            parts.append(f"{name}=" + ", ".join(
+                f"{key} is {type(namespace[key]).__name__}" for key in named
+            ))
+        return "; ".join(parts)[:400]
 
     def _call_factory(self, factory: typing.Any, state: typing.Any) -> typing.Any:
         """``service_for`` with a state if we have one, without if we do not."""
@@ -1171,7 +1231,14 @@ class Compatibility:
         generation is not the thing the submission needs, whatever it is
         called.
         """
-        return value is not None and callable(getattr(value, "start_generation", None)) and callable(getattr(value, "command", None))
+        if value is None or isinstance(value, type):
+            # A class is not a service. It matters because the class itself is
+            # importable and sits in the same namespaces the instance does, so
+            # anything sweeping for the shape finds ``HybridService`` before it
+            # finds ``_deepy_hybrid`` - and a class answers every call with
+            # "missing self" rather than with a generation.
+            return False
+        return callable(getattr(value, "start_generation", None)) and callable(getattr(value, "command", None))
 
     def shared_gen(self, service: typing.Any = None, state: typing.Any = None) -> typing.Any:
         """The one generation record every page shares, or None.

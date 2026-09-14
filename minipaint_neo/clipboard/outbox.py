@@ -203,7 +203,13 @@ WATCH_SECONDS = 2.0
 #: capped so a runaway caller cannot fill the disk with requests.
 MAX_JOBS = 500
 MAX_PENDING = 200
-KEEP_TERMINAL_SECONDS = 7 * 24 * 3600.0
+#: How long a finished job stays in the queue before it is dropped.
+#:
+#: Short, because the queue is a queue and not a record: what is finished has
+#: left it, and the history list is where finished work lives. It is not zero
+#: because a page that was waiting on the job still has to be told what
+#: happened, and history has to be written from the job before it goes.
+KEEP_TERMINAL_SECONDS = 120.0
 
 PAGE_RE = re.compile(r"\A[0-9a-f]{8,32}\Z")
 PHASE_SENT = "sent"
@@ -806,7 +812,7 @@ def _sweep(jobs: typing.List[dict], now: float) -> bool:
                 _journal(f"job {job['job_id'][:8]}: lease expired before anything was written; pending again")
     if _advance(jobs, now):
         changed = True
-    kept = [job for job in jobs if not (job["state"] in TERMINAL and now - job["updated_at"] > KEEP_TERMINAL_SECONDS)]
+    kept = [job for job in jobs if not _finished_with(job, now)]
     while len(kept) > MAX_JOBS:
         victim = next((job for job in kept if job["state"] in TERMINAL), None)
         if victim is None:
@@ -816,6 +822,21 @@ def _sweep(jobs: typing.List[dict], now: float) -> bool:
         jobs[:] = kept
         changed = True
     return changed
+
+
+def _finished_with(job: dict, now: float) -> bool:
+    """Whether a finished job has been in the list long enough to go.
+
+    The grace is not politeness: a page waiting on this job still has to be
+    told what happened, and a caller of the public API is holding a promise
+    that resolves from this record. Dropping it the instant it goes terminal
+    turns "your job finished" into QUEUE_JOB_UNKNOWN.
+
+    ``history_recorded`` deliberately does NOT shorten this, tempting as it
+    looks. It is set when a job is handed to WanGP, not when it comes back -
+    so a job would leave the queue at the moment it started running.
+    """
+    return job["state"] in TERMINAL and now - job["updated_at"] > KEEP_TERMINAL_SECONDS
 
 
 def _find(jobs: typing.List[dict], job_id: typing.Any) -> dict:
@@ -1712,6 +1733,46 @@ def attempt(job_id: typing.Any) -> typing.Optional[dict]:
         job["updated_at"] = _now()
         _save(listed)
         return public(job)
+
+
+def start_session() -> dict:
+    """Begin a Forge run with an empty queue. Returns what was let go.
+
+    THE QUEUE IS THIS SESSION'S, AND NOTHING CARRIES INTO THE NEXT ONE.
+
+    It used to be durable across restarts, on the reasoning that a job
+    somebody walked away from should survive one. In use that was wrong, and
+    wrong in the way that costs trust: a restart brought back prompts from
+    hours earlier, re-ran them, and held up the ones that had just been
+    pressed. A queue that resurrects work nobody asked for again is worse
+    than one that forgets work they did.
+
+    So a run starts empty. What that gives up is real and is written down
+    here rather than discovered: a generation that was in flight when Forge
+    stopped is no longer reconciled against the child's ledger, and its
+    record is gone. It is not *cancelled* - on POSIX the child outlives Forge
+    and will finish what it was given, and its output lands in WanGP's own
+    gallery as it always did - it is simply no longer tracked here. A person
+    who wants it queued again presses it again, which is the thing they can
+    do and the thing they would have had to do anyway once the old record
+    turned into EXECUTION_UNKNOWN.
+
+    Every pin is released, because a pinned input whose job no longer exists
+    is an orphan the sweeper would carry for an hour for no reason.
+    """
+    with _lock:
+        listed = _load()
+        count = len(listed)
+        if not count:
+            return {"cleared": 0, "inputs_released": 0}
+        pins: typing.List[str] = []
+        for job in listed:
+            pins.extend(input_ids(job))
+        _save([])
+    released = _release_inputs(pins) if pins else 0
+    if count:
+        _journal(f"a new Forge session starts with an empty queue; {count} job(s) from the last one let go")
+    return {"cleared": count, "inputs_released": released}
 
 
 def recover(child_instance: str = "") -> dict:

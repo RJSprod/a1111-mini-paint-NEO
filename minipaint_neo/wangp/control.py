@@ -289,8 +289,18 @@ def available() -> typing.Tuple[bool, str]:
     return True, ""
 
 
+def why_not() -> str:
+    """The child's own account of why it cannot execute, or "".
+
+    Read from the cached hello rather than asked for, because the caller is
+    the executor and it has just asked. Diagnostic only.
+    """
+    answer = last_hello()
+    return str((answer or {}).get("diagnosis") or "")
+
+
 __all__ = [
     "CALL_TIMEOUT", "COMPOSE_TIMEOUT", "CONNECT_TIMEOUT", "LOOPBACK",
     "HELLO_TTL", "available", "call", "cancel", "compose", "forget", "hello", "last_hello", "reset_for_tests",
-    "status", "submit", "use_transport",
+    "status", "submit", "use_transport", "why_not",
 ]

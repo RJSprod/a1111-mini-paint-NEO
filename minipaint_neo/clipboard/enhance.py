@@ -417,6 +417,30 @@ def enabled() -> bool:
         return False
 
 
+def start_session() -> bool:
+    """Begin a Forge run with enhancement off. Returns what it was.
+
+    "Off by default" is what the panel has always said, and it was only true
+    of a fresh install: the switch was persisted, so it was really "off until
+    you ever turn it on, then on forever, including in every session after
+    this one". That is a surprising thing for a switch that spends money and
+    minutes on every press to do, and it read as a bug - the panel said off,
+    because the panel had been collapsed since a session where it was, and
+    presses kept being enhanced.
+
+    So it is session-scoped now, like the queue: each run of Forge starts
+    with it off, and turning it on is a thing you do for the work in front of
+    you rather than a decision you make once and then inherit.
+    """
+    document = _document()
+    was = bool(document.get("enabled"))
+    if was:
+        document["enabled"] = False
+        _write(document)
+        _journal("a new Forge session starts with enhanced prompts off")
+    return was
+
+
 def set_enabled(flag: typing.Any) -> bool:
     document = _document()
     document["enabled"] = bool(flag)
@@ -883,6 +907,6 @@ __all__ = [
     "ORIGIN", "REF2VA", "REJECTIONS", "SLOTS", "SLOTS_FOR", "SLOT_FIRST", "SLOT_LABELS", "SLOT_LAST", "SLOT_REFERENCE", "VARIANTS",
     "VARIANT_LABELS", "api", "availability", "cancel", "cancel_all", "capabilities", "clear_override", "default_prompt", "describe",
     "effective_prompt", "enabled", "follow", "model_block", "override", "overrides", "plan", "preflight", "release_runtime",
-    "reset_for_tests", "set_enabled", "set_override", "status", "submit", "system_prompts", "use_api", "variant_for_model",
+    "reset_for_tests", "set_enabled", "set_override", "start_session", "status", "submit", "system_prompts", "use_api", "variant_for_model",
     "FEED_CONTENT_EVENTS", "FEED_TERMINAL_EVENTS", "FEED_WAIT_SECONDS",
 ]

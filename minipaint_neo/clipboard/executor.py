@@ -417,8 +417,18 @@ def _stage_ensuring_wangp(job: dict) -> bool:
 
 def _wait_for_service(job: dict, code: str) -> bool:
     """Hold a job while WanGP finishes coming up. Bounded, and honest while it waits."""
+    from ..wangp import control
+
     counted = outbox.attempt(job["job_id"])
     attempts = int((counted or job).get("attempts") or 0)
+    if attempts == 1:
+        # Once per job, not once per attempt: the child's own account of what
+        # it looked at. A log that says only SERVICE_UNAVAILABLE cannot tell a
+        # WanGP that is still building its UI from one that will never be able
+        # to run a job, and those need opposite responses from whoever reads it.
+        why = control.why_not()
+        if why:
+            _journal(f"job {job['job_id'][:8]}: waiting for WanGP's generation service - {why[:300]}")
     if attempts > MAX_RETRYABLE_ATTEMPTS:
         return bool(outbox.fail(job["job_id"], code, f"still not ready after {attempts} attempts"))
     delay = min(BACKOFF_MAX, BACKOFF_START * (2 ** min(6, attempts - 1)))
@@ -683,11 +693,21 @@ def recover() -> dict:
     and staging sweeps: a sweep that ran first would already have deleted the
     pictures the pins were about to protect.
     """
-    counted = outbox.recover()
-    reconciled = reconcile()
-    counted.update(reconciled)
-    if counted.get("resumed"):
-        wake()
+    # The queue is this session's. Nothing carries in, so there is nothing to
+    # recover and nothing to reconcile: a restart that resurrected old prompts
+    # and ran them again was the behaviour this replaces.
+    counted = outbox.start_session()
+    # The switch spends money and minutes on every press, and "off by
+    # default" is what the panel says. Persisting it made that true only of a
+    # fresh install; a session that starts with it on, inherited from one the
+    # user does not remember, is the surprise this removes.
+    try:
+        from . import enhance
+
+        if enhance.start_session():
+            counted["enhance_reset"] = True
+    except Exception:
+        pass
     return counted
 
 

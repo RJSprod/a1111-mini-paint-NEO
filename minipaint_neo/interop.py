@@ -916,6 +916,14 @@ def install(app: typing.Any) -> None:
 def _on_app_started(_demo: typing.Any, app: typing.Any) -> None:
     install(app)
     try:
+        # The first moment the whole page exists and can be asked what is on
+        # it. See ``host.audit`` for what a destination that is not answers to.
+        from .canvas import host
+
+        host.audit(_demo)
+    except Exception as error:  # pragma: no cover - a report is never fatal
+        scrub.console(f"the Send destinations could not be checked ({error}).", _LOG_PREFIX)
+    try:
         removed = sweep_staging()
         if removed:
             scrub.console(f"cleared {removed} stale staged image(s).", _LOG_PREFIX)

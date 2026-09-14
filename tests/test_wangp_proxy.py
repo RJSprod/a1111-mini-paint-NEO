@@ -893,8 +893,8 @@ async def auth_gate_checks(r: Results) -> None:
 class _Socket:
     """Just enough WebSocket for the endpoint to refuse one, or open one."""
 
-    def __init__(self, path: str, origin: str = "") -> None:
-        self.url = FakeUrl(scheme="ws", path=path)
+    def __init__(self, path: str, origin: str = "", scheme: str = "ws") -> None:
+        self.url = FakeUrl(scheme=scheme, path=path)
         self.headers = {"host": "forge.example.test:7860"}
         if origin:
             self.headers["origin"] = origin
@@ -973,23 +973,37 @@ async def websocket_origin_checks(r: Results) -> None:
             sent = opened[0]
             r.check("to the child's Deepy app at the address its mount answers on",
                     sent["url"] == f"ws://127.0.0.1:{PRETEND_PORT}/wan2gp/deepy/deepy_api/events", sent["url"])
-            r.check("with an origin the child will recognise as its own - "
-                    "the browser's could never have matched a host it is not told",
-                    sent["headers"].get("origin") == f"http://127.0.0.1:{PRETEND_PORT}",
-                    str(sent["headers"].get("origin")))
+            r.check("carrying no origin at all - the browser's was judged one hop earlier, "
+                    "and a corrected one would have to predict a scheme this side cannot know",
+                    "origin" not in sent["headers"], str(sent["headers"].get("origin")))
             r.check("and none of the headers that describe the hop it came in on",
                     not any(name in sent["headers"] for name in
                             ("host", "sec-websocket-key", "sec-websocket-version", "sec-websocket-extensions")),
                     str(sorted(sent["headers"])))
+
+        # A Forge behind TLS. This is the case that sent a second 403: uvicorn
+        # rewrites the child's socket scheme from the X-Forwarded-Proto this
+        # proxy has to send, so the child wanted an https:// origin while a
+        # corrected one said http://. Nothing is predicted now.
+        opened.clear()
+        socket = _Socket("/deepy/deepy_api/events", origin="https://forge.example.test:7860", scheme="wss")
+        await proxy._websocket_endpoint(socket)
+        r.check("a page served over TLS is carried, and its origin is judged against either transport",
+                len(opened) == 1 and socket.closed != 1008, str(opened))
+        if opened:
+            r.check("the child is told the public scheme, as it must be for Gradio's URLs",
+                    opened[0]["headers"].get("x-forwarded-proto") == "https", str(opened[0]["headers"]))
+            r.check("and still no origin, which is the only answer that holds whichever "
+                    "scheme the child ends up deriving from it",
+                    "origin" not in opened[0]["headers"], str(opened[0]["headers"]))
 
         # A client that is not a browser sends no origin, and the sign-in gate
         # is the one that decides for those.
         opened.clear()
         socket = _Socket("/wan2gp/queue/join")
         await proxy._websocket_endpoint(socket)
-        r.check("a client with no origin is carried, and still told the child's own",
-                len(opened) == 1 and opened[0]["headers"].get("origin") == f"http://127.0.0.1:{PRETEND_PORT}",
-                str(opened))
+        r.check("a client with no origin is carried, and gains none on the way",
+                len(opened) == 1 and "origin" not in opened[0]["headers"], str(opened))
     finally:
         proxy._connect_upstream = real
         proxy._boundary = remembered

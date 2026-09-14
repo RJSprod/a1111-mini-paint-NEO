@@ -293,12 +293,30 @@ def origin_allowed(origin: typing.Any, netloc: typing.Any) -> bool:
     can never agree, the middleware closes the socket before accepting it,
     and uvicorn answers HTTP 403.
 
-    That check is a real defence and is not simply dropped: a WebSocket is
+    That check is a real defence and is not simply discarded: a WebSocket is
     exempt from CORS and carries cookies, so a page on another site could
     open one against a Forge its visitor is signed in to. It is enforced
     here instead, where the origin can be compared against the host the
-    browser actually asked for, and the upgrade is then presented to the
-    child with an origin it will recognise as its own.
+    browser actually asked for, and the upgrade then goes upstream carrying
+    no origin at all.
+
+    NO ORIGIN, RATHER THAN A CORRECTED ONE, AND THE REASON IS NOT TASTE.
+
+    Restating it means predicting the scheme the child will compare against,
+    and that is not knowable from here. The child derives it from its own
+    socket scope, and uvicorn rewrites that scope from the very header this
+    proxy must forward for Gradio's URLs to come out right:
+    ``X-Forwarded-Proto: https`` turns the child's ``ws`` into ``wss``, so
+    it wants an ``https://`` origin - but only while its proxy-header
+    handling is on, which is a setting of the server we launch and not a
+    fact about this code. Two possible answers and no way to tell which,
+    so a corrected origin is wrong roughly half the time. That is what sent
+    a Forge behind TLS back a second 403.
+
+    An absent origin has one answer under both, and it is the child's own
+    rule that gives it: a request with no origin is not a browser, and the
+    hop from this proxy to the loopback is not a browser. The browser's
+    origin was already judged, one hop earlier, where it meant something.
 
     An absent origin passes, exactly as the child's own rule has it: that is
     a client that is not a browser, and the sign-in gate is the one that
@@ -1045,7 +1063,7 @@ async def _websocket_endpoint(websocket: typing.Any) -> None:
     for name in ("sec-websocket-key", "sec-websocket-version", "sec-websocket-extensions", "host"):
         headers.pop(name, None)
 
-    # Checked here and then restated, for the reason ``origin_allowed`` gives:
+    # Checked here and then taken off, for the reason ``origin_allowed`` gives:
     # the child cannot judge an origin it is not told the public host for, and
     # this is the hop that knows both.
     kind = "Deepy" if path.startswith(DEEPY_PREFIX) or path.startswith(PROXY_PATH + DEEPY_PREFIX) else "WanGP"
@@ -1054,7 +1072,7 @@ async def _websocket_endpoint(websocket: typing.Any) -> None:
         _log_once("ws-cross-origin", "a WebSocket was refused: its Origin is not this Forge's own.")
         await websocket.close(code=1008)
         return
-    headers["origin"] = target
+    headers.pop("origin", None)
 
     try:
         async with _connect_upstream(url, headers, requested) as socket:

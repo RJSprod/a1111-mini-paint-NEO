@@ -136,7 +136,7 @@ def toast(page):
         " return (t && !t.hidden) ? t.textContent.trim() : ''; }")
 
 
-def record_toasts(page):
+def record_toasts(page, reset=True):
     """Watch for every notice the page shows, rather than sampling for one.
 
     A toast takes itself down after a few seconds, so a poll that happens to
@@ -144,9 +144,9 @@ def record_toasts(page):
     interesting ones here appear twelve seconds after a click, which is
     exactly when a poll is doing something else.
     """
-    page.evaluate("""() => {
-        window.__toasts = [];
-        const seen = new Set();
+    page.evaluate("""reset => {
+        if (reset || !window.__toasts) { window.__toasts = []; window.__toastSeen = new Set(); }
+        const seen = window.__toastSeen;
         const look = () => {
             const t = document.querySelector('.minipaint-clip-toast');
             if (!t || t.hidden) { return; }
@@ -156,7 +156,7 @@ def record_toasts(page):
         if (window.__toastTimer) { clearInterval(window.__toastTimer); }
         window.__toastTimer = setInterval(look, 120);
         look();
-    }""")
+    }""", reset)
 
 
 def recorded_toasts(page):
@@ -342,14 +342,16 @@ def check_send_survives_a_dead_queue(r: Results, page, targets) -> None:
     try:
         record_toasts(page)
         r.check("dead queue: the send is attempted", send_selected(page, "img2img") == "clicked")
-        landed = False
-        for _ in range(26):
+        landed, said = False, []
+        for _ in range(30):
             time.sleep(1)
-            if host_value() > 0:
-                landed = True
+            landed = landed or host_value() > 0
+            said = recorded_toasts(page)
+            # Both halves: the picture, and the line explaining how it got
+            # there. They are written one after the other but a poll can land
+            # between them, so neither alone ends the wait.
+            if landed and said:
                 break
-        time.sleep(1.5)
-        said = recorded_toasts(page)
         r.check("dead queue: the picture still reaches img2img, over plain HTTP",
                 landed, f"host textbox length {host_value()}")
         r.check("dead queue: and the page says how it got there",
@@ -367,13 +369,13 @@ def check_backend_destination_is_honest(r: Results, page) -> None:
     page.route("**/queue/**", lambda route: route.abort())
     page.route("**/gradio_api/**", lambda route: route.abort())
     try:
-        record_toasts(page)
+        record_toasts(page, reset=True)
         send_selected(page, "ImageStitch (txt2img)")
         said = []
-        for _ in range(26):
+        for _ in range(30):
             time.sleep(1)
             said = recorded_toasts(page)
-            if said:
+            if any("needs the connection back" in one or "never reached" in one for one in said):
                 break
         r.check("dead queue: a server-written destination says so instead of looking sent",
                 any("needs the connection back" in one or "never reached" in one for one in said), str(said))

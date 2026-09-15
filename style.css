@@ -915,16 +915,24 @@
    single element, and the script writes to the grid itself. */
 #minipaint_clipboard_root {
     --minipaint-clip-thumb: 144px;
+    /* The strip under the square that carries the name: its line box, the
+       gap above it, the tile's padding and its border. Tile height is the
+       square plus this, and a row is one tile high - see the grid. */
+    --minipaint-clip-caption: 32px;
 }
 
 #minipaint_clipboard_root .minipaint-clip-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(var(--minipaint-clip-thumb), 1fr));
-    /* Every tile is its own content's height, and a row can never stretch
-       one out of square: the thumb is a square box and the name is one
-       line, so all tiles come out identical whatever the pictures are. */
-    grid-auto-rows: max-content;
-    align-items: start;
+    /* A row is the size the slider names, not the size of the tallest
+       picture in it. Tile height used to be whatever the tile's content
+       came to, which is only uniform while the thumb box is holding its
+       picture to a square - and a tile that trusts one rule to do that has
+       nothing left when the rule does not land. A row measured from the
+       same variable as the columns cannot grow to fit a picture at all, so
+       every tile is identical before any picture has loaded. */
+    grid-auto-rows: calc(var(--minipaint-clip-thumb) + var(--minipaint-clip-caption));
+    align-items: stretch;
     justify-items: stretch;
     gap: var(--minipaint-clip-gap);
     padding: var(--minipaint-clip-gap);
@@ -951,7 +959,11 @@
     flex-direction: column;
     gap: 4px;
     min-width: 0;
-    align-self: start;
+    min-height: 0;
+    height: 100%;
+    align-self: stretch;
+    /* The tile is the boundary: nothing it holds is drawn outside it. */
+    overflow: hidden;
     padding: 4px;
     border: 2px solid transparent;
     border-radius: var(--block-radius, 8px);
@@ -974,11 +986,17 @@
     box-shadow: 0 0 0 1px var(--color-accent, #ff7c00);
 }
 
+/* The square takes the room the name leaves, rather than claiming a square
+   of its own. The tile's height is already fixed by the row, so flex gives
+   this box a definite height - which is what the picture's height: 100%
+   needs to resolve against. It used to come from aspect-ratio on a box of
+   indefinite height: one declaration, and every picture in the grid at its
+   own natural size the moment anything kept that declaration from landing. */
 #minipaint_clipboard_root .minipaint-clip-thumb {
     display: block;
     width: 100%;
-    aspect-ratio: 1 / 1;
-    flex: 0 0 auto;
+    flex: 1 1 auto;
+    min-height: 0;
     overflow: hidden;
     border-radius: 6px;
     background: var(--background-fill-primary, rgba(127, 127, 127, 0.08));
@@ -991,8 +1009,22 @@
     object-fit: contain;
 }
 
+/* The same boundary again, said in absolute lengths and keyed off the tile
+   rather than the box inside it. A percentage can only be measured against
+   a parent that has a height to measure, so if the box above ever stops
+   applying, percentages stop meaning anything and the picture goes back to
+   its natural size. These do not: they hold whatever the browser makes of
+   the rest of this file. */
+#minipaint_clipboard_root .minipaint-clip-item img {
+    max-width: 100%;
+    max-height: var(--minipaint-clip-thumb);
+    object-fit: contain;
+}
+
 #minipaint_clipboard_root .minipaint-clip-name {
     display: block;
+    flex: 0 0 auto;
+    min-width: 0;
     font-size: 12px;
     line-height: 1.3;
     white-space: nowrap;
@@ -1033,6 +1065,42 @@
     flex: 1 1 0;
     min-width: 0 !important;
     min-height: var(--minipaint-clip-target);
+}
+
+/* The live connection is gone: said once, and left standing until it is
+   back, because every send after it takes the long way round. */
+#minipaint_clipboard_root .minipaint-clip-offline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--minipaint-clip-gap, 8px);
+    padding: 8px 10px;
+    border: 1px solid var(--error-text-color, #d9534f);
+    border-radius: var(--block-radius, 8px);
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.12));
+    color: var(--body-text-color, inherit);
+    font-size: var(--text-sm, 0.85em);
+}
+
+#minipaint_clipboard_root .minipaint-clip-offline-text {
+    flex: 1 1 12em;
+    min-width: 0;
+}
+
+#minipaint_clipboard_root .minipaint-clip-offline-reconnect {
+    flex: 0 0 auto;
+    min-height: var(--minipaint-clip-target);
+    padding: 0 12px;
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    border-radius: var(--radius-sm, 6px);
+    background: var(--button-secondary-background-fill, transparent);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-offline[hidden] {
+    display: none;
 }
 
 #minipaint_clipboard_root .minipaint-clip-toast {

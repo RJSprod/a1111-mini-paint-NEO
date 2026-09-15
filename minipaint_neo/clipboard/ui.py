@@ -539,10 +539,17 @@ def send_plan(target: typing.Any, asset_id: typing.Any) -> dict:
     carries the answer: an event over the queue, or a JSON response over the
     transport that still works when the queue does not.
 
-    ``backend`` says the destination is one the server writes - the Extras
-    image, the ImageStitch galleries - which no amount of browser work can
-    complete. The browser is told so plainly instead of being handed a
-    payload it cannot deliver.
+    Every destination is something the browser can finish. Two of them are
+    written by putting the picture in a hidden textbox the host canvas
+    reads; the rest hold their value in a Gradio component, and a component
+    takes a picture from an upload as readily as from the server - so the
+    plan names the component and hands over the picture, and the browser
+    gives it the file the way a person dropping one would, over the upload
+    route rather than the queue.
+
+    ``backend`` is left true only when the component cannot be named, which
+    is the one case no amount of browser work can finish. The browser is
+    told so plainly instead of being handed a payload it cannot deliver.
     """
     name = str(target or "")
     label = canvas_ui.DESTINATION_LABELS.get(name, name)
@@ -581,9 +588,25 @@ def send_plan(target: typing.Any, asset_id: typing.Any) -> dict:
         plan["instruction"] = f"inpaint:{image.width}x{image.height}" if name == "inpaint" else name
         plan["payload"] = imaging.to_data_url(image)
     else:
-        # Extras and the stitch galleries are written from the backend; there
-        # is nothing to hand the browser and it must not be told otherwise.
+        # Extras and the stitch galleries. The server writes these by
+        # returning a new value for the component, which is a Gradio event
+        # and therefore the queue; the browser can put the same picture in
+        # the same component by handing it the file, which is the ordinary
+        # upload route and is not. Which component is this side's to say:
+        # the host registers them by element id and a page built twice
+        # would otherwise be told about one that is not on it.
+        tab = current()
+        targets = tab.targets if tab is not None else host.destinations()
+        elem = getattr(targets.get(name), "elem_id", "") or ""
         plan["instruction"] = name
+        if elem:
+            plan["elem"] = elem
+            plan["payload"] = imaging.to_data_url(image)
+            #: A gallery keeps what is already in it when a file is added,
+            #: where the server's write replaces the lot. The browser says
+            #: which happened rather than claiming the server's wording.
+            plan["adds"] = name in canvas_ui.STITCH_TARGETS
+            plan["backend"] = False
     return plan
 
 

@@ -307,21 +307,36 @@ They are not any more:
   place.
 
 * A send the queue does not carry is finished over `POST
-  /minipaint-clipboard/send` instead, about twelve seconds later. **img2img**
-  and **Inpaint** complete fully: their pictures are delivered by writing the
-  host canvas's hidden textbox, which is browser work however the send was
-  carried, so nothing is missing and the tab still switches. The status line
-  says the page had lost its connection, so a picture arriving late is not a
-  mystery.
+  /minipaint-clipboard/send` instead, and **every destination finishes**.
+  **img2img** and **Inpaint** are delivered by writing the host canvas's
+  hidden textbox. **Extras** and the two **ImageStitch** galleries hold their
+  value in the component, which the server fills by returning a new value -
+  a Gradio event, and so the queue - so the browser hands the component its
+  file instead, over the upload route. The toast says the page had lost its
+  connection, so a picture arriving the long way round is not a mystery.
 
-* **Extras** and the two **ImageStitch** galleries are written by the server
-  itself, and no amount of browser work can finish those. Those say so -
-  "needs the connection back" - rather than reporting a send that did not
-  happen.
+* The picture being sent is held for the whole round trip. The fallback runs
+  twelve seconds after the menu was pressed, and it used to look the
+  selection up again when it got there - so a render landing in between left
+  it with nothing to send, and it returned without a word.
 
-Reloading the page still fixes everything, and is still the right move when
-the status line says the connection is gone. The difference is that the tab
-now tells you that is what happened.
+* A render cannot take the selection away. A selection is made in the browser
+  and reaches the server as a Gradio event, so while the queue is not
+  delivering, every render carries back a server that still believes nothing
+  is selected. Adopting that answer is how a Send menu came to have every
+  destination greyed out with a picture plainly selected on the grid. The
+  page keeps its own selection now, and gives it up only when the grid is
+  listing pictures and the selected one is not among them.
+
+* The first send to go unanswered says so and leaves a line standing -
+  *"This page has lost its live connection to Forge"* - with a **Reconnect**
+  button, because the state it is reporting lasts until the page is reloaded.
+  Sends after that one stop waiting twelve seconds for an answer that is not
+  coming: they try the direct route after two and a half. The first
+  acknowledgement to arrive clears both.
+
+Reloading the page still makes sending quick again, and the Reconnect button
+is there to do it. The difference is that sending works either way.
 
 ## Where things live
 

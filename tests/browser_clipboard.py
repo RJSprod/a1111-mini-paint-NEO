@@ -163,6 +163,19 @@ def toast(page):
         " return (t && !t.hidden) ? t.textContent.trim() : ''; }")
 
 
+def failure_toast(page):
+    """A notice the page is showing as a failure, rather than any notice.
+
+    Every send says so now, because the page is what places the picture and
+    the status line is the server's. So "said nothing" stopped being the
+    test for "nothing went wrong"; "said nothing bad" is.
+    """
+    return page.evaluate(
+        "() => { const t = document.querySelector('.minipaint-clip-toast');"
+        " return (t && !t.hidden && t.classList.contains('minipaint-clip-toast-failure'))"
+        " ? t.textContent.trim() : ''; }")
+
+
 def record_toasts(page, reset=True):
     """Watch for every notice the page shows, rather than sampling for one.
 
@@ -172,13 +185,20 @@ def record_toasts(page, reset=True):
     exactly when a poll is doing something else.
     """
     page.evaluate("""reset => {
-        if (reset || !window.__toasts) { window.__toasts = []; window.__toastSeen = new Set(); }
+        if (reset || !window.__toasts) {
+            window.__toasts = []; window.__toastSeen = new Set(); window.__toastT0 = performance.now();
+        }
         const seen = window.__toastSeen;
         const look = () => {
             const t = document.querySelector('.minipaint-clip-toast');
             if (!t || t.hidden) { return; }
             const text = (t.textContent || '').trim();
-            if (text && !seen.has(text)) { seen.add(text); window.__toasts.push(text); }
+            // When, as well as what: whether a send made the user wait is
+            // the thing being checked, and a list of words cannot say.
+            if (text && !seen.has(text)) {
+                seen.add(text);
+                window.__toasts.push({text: text, at: performance.now() - window.__toastT0});
+            }
         };
         if (window.__toastTimer) { clearInterval(window.__toastTimer); }
         window.__toastTimer = setInterval(look, 120);
@@ -187,7 +207,16 @@ def record_toasts(page, reset=True):
 
 
 def recorded_toasts(page):
-    return page.evaluate("() => window.__toasts || []")
+    """What the page has said since the recording started."""
+    return [entry["text"] for entry in page.evaluate("() => window.__toasts || []")]
+
+
+def said_when(page, prefix):
+    """How long after the recording started the page first said this, in seconds."""
+    for entry in page.evaluate("() => window.__toasts || []"):
+        if str(entry.get("text", "")).startswith(prefix):
+            return float(entry.get("at", 0)) / 1000.0
+    return None
 
 
 def open_clipboard(page):
@@ -371,7 +400,8 @@ def check_send(r: Results, page, targets) -> None:
                 box(page, "minipaint_clipboard_send_ack") not in (None, "", stamp_before),
                 repr(box(page, "minipaint_clipboard_send_ack")))
         r.check(f"send to {key}: the status confirms it", status().startswith("Sent "), status())
-        r.check(f"send to {key}: and nothing is reported as lost", toast(page) == "", toast(page))
+        r.check(f"send to {key}: and nothing is reported as lost", failure_toast(page) == "", failure_toast(page))
+        r.check(f"send to {key}: and the page says it went", toast(page).startswith("Sent "), toast(page))
         open_clipboard(page)
 
 
@@ -398,6 +428,14 @@ def check_send_survives_a_dead_queue(r: Results, page, targets) -> None:
 
     # Cut only Gradio's queue. Plain HTTP - the event stream, the routes -
     # is untouched, exactly as in the report.
+    #
+    # How long this takes is part of what is being checked. The picture used
+    # to be placed only after the queued event had been given twelve seconds
+    # to arrive, and on a phone - where the page is backgrounded constantly
+    # and Gradio's stream does not survive it - the queue is down far more
+    # often than not, so every send paid that wait. The page places the
+    # picture itself now and lets the event catch up, so a dead queue costs
+    # a round trip, not a deadline.
     # Empty the destination first. An earlier send in this run put the same
     # picture there, and the same picture is the same number of bytes - so a
     # test that watches the length would pass without anything happening.
@@ -412,7 +450,7 @@ def check_send_survives_a_dead_queue(r: Results, page, targets) -> None:
     page.route("**/queue/**", lambda route: route.abort())
     page.route("**/gradio_api/**", lambda route: route.abort())
     try:
-        record_toasts(page)
+        record_toasts(page)  # its clock starts here, one line before the press
         r.check("dead queue: the send is attempted", send_selected(page, "img2img") == "clicked")
         landed, said = False, []
         for _ in range(30):
@@ -426,6 +464,12 @@ def check_send_survives_a_dead_queue(r: Results, page, targets) -> None:
                 break
         r.check("dead queue: the picture still reaches img2img, over plain HTTP",
                 landed, f"host textbox length {host_value()}")
+        # Timed from the page's own clock, against the notice the user
+        # actually sees. Measuring the textbox instead would have called a
+        # send fast because the canvas had put its own picture back.
+        when = said_when(page, "Sent ")
+        r.check("dead queue: and it does not wait out a deadline first",
+                when is not None and when < 8, "never said it went" if when is None else f"{when:.1f}s after the press")
         r.check("dead queue: and the page says how it got there",
                 any("lost its connection" in one or one.startswith("Sent ") for one in said), str(said))
     finally:
@@ -479,8 +523,8 @@ def check_a_component_destination_fills_without_the_queue(r: Results, page, targ
                 break
         r.check(f"dead queue: {label} is filled anyway, over the upload route",
                 landed, f"pictures in {elem_id}: {before} -> {pictures()}")
-        r.check("dead queue: and the page says how it got there",
-                any("lost its connection" in one for one in said), str(said))
+        r.check("dead queue: and the page says it went",
+                any(one.startswith("Sent ") for one in said), str(said))
         r.check("dead queue: the page offers to reconnect rather than leaving it to be guessed",
                 page.evaluate("() => { const b = document.querySelector('.minipaint-clip-offline');"
                               " return !!(b && !b.hidden && b.querySelector('.minipaint-clip-offline-reconnect')); }"))

@@ -15,8 +15,8 @@ raise into WanGP.
 `POST /minipaint-clipboard/send` with `{"target": ..., "asset": ...}` answers
 with everything the browser needs to finish a send, and nothing about Gradio.
 
-It exists because sending used to be a hidden textbox written by script plus a
-Gradio event carrying it over the queue. When that queue stops delivering - a
+It is how every send is placed. It exists because sending used to be a hidden
+textbox written by script plus a Gradio event carrying it over the queue. When that queue stops delivering - a
 connection that dropped and did not come back, a session the server has
 forgotten - the box is written and nothing else happens, for as long as the
 page stays open. Everything else the tab does for a running job rides plain
@@ -61,6 +61,13 @@ image before uploading into it, writes a ForgeCanvas through the native value
 setter, settles the img2img sub-tab, and then checks what the WebUI will
 submit against what was sent. A page that could not import it still writes
 the canvas textbox directly, and says the send was not verified.
+
+The queued event still runs, with `:done` appended to its request
+(`<target>:<asset>:<stamp>:done`), which tells `ClipboardTab.send` to record
+the send and acknowledge it without writing the destination again - a second
+write is harmless for a canvas and one picture too many for a gallery that
+appends. An unmarked request still performs the send, which is what happens
+when the page could not place it.
 
 Both this route and the tab's own Gradio path decide what a send means in one
 place, `ui.send_plan`, so they cannot drift apart. The route answers from the

@@ -579,6 +579,19 @@ def send_checks(r: Results, base: pathlib.Path, tab) -> None:
     out = tab.send(f"minipaint:{selected}:1700000002", "")
     r.check("Send to Mini Paint hands the asset to the Canvas's receive box and nothing to the host",
             out[n + 2].startswith(f"{selected}:") and out[n] == "" and out[n + 1] == "" and out[n + 3].startswith("Sent send.png to Mini Paint."), str(out[n + 2]))
+    # The page places the picture itself and marks the event, so the event
+    # records the send instead of performing it. Writing the destination a
+    # second time is harmless for a canvas and one picture too many for a
+    # gallery that appends.
+    out = tab.send(f"img2img:{selected}:1700000003:done", "")
+    r.check("a send the page already made is recorded, not performed again",
+            all(_skipped(v) for v in out[:n]) and out[n] == "" and out[n + 1] == "" and out[n + 2] == ""
+            and out[n + 3].startswith("Sent send.png to img2img.") and out[n + 4] == "1700000003",
+            str(out[n + 3]))
+    if stitch:
+        out = tab.send(f"{stitch[0]}:{selected}:1700000004:done", "")
+        index = tab.image_targets.index(stitch[0])
+        r.check("and a gallery is not appended to twice", _skipped(out[index]), str(out[index])[:80])
     out = tab.send("nowhere:" + selected, "")
     r.check("an unknown destination is refused by name", "not available" in out[n + 3])
     out = tab.send("img2img", "")

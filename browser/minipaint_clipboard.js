@@ -479,6 +479,80 @@ window.minipaintClipboard = (function () {
         return answer.asset;
     }
 
+    /**
+     * A picture handed in from another tab, put into the library here.
+     *
+     * The 🖌️ button under a result picks its picture in the browser and
+     * hands it to the server as a Gradio event, so it stopped working for
+     * the same reason sending out did. This is the other half of the same
+     * repair: the library's import is an ordinary POST, so the page fetches
+     * the picture the host is already serving and posts it itself.
+     *
+     * The host's own file is what is fetched, not a re-encode of what is on
+     * screen, so a generated PNG keeps the metadata Forge wrote into it -
+     * the same thing the server path is careful about.
+     *
+     * Only when Clipboard is the destination. With the intercept off the
+     * picture was going to the Canvas, whose document lives on the server:
+     * putting it in the library instead would be answering a different
+     * question from the one the button asked.
+     */
+    async function receiveOverHttp(picked) {
+        const state = menuState();
+        if (!state.intercept) {
+            note("receive: the picture never arrived, and the Canvas cannot be filled from here");
+            toast("That picture did not reach Mini Paint - this page has lost its live connection. "
+                  + "Reconnect and try again.", true);
+            connectionNotice(true);
+            return false;
+        }
+        const url = galleryUrl(picked);
+        if (!url) {
+            note("receive: the handed-in picture named no file this page can read");
+            toast("That picture could not be read from this page.", true);
+            return false;
+        }
+        connectionNotice(true);
+        try {
+            const response = await fetch(url, { credentials: "same-origin", cache: "no-store" });
+            if (!response.ok) { throw new Error("the host would not serve it (" + response.status + ")"); }
+            const blob = await response.blob();
+            const asset = await importBlob(blob, nameFromUrl(url), "forge_gallery");
+            note("receive: put into the library over the direct route without the queue");
+            toast("Put " + ((asset && asset.filename) || "the picture") + " in Clipboard "
+                  + "(the page had lost its connection).");
+            pressHidden(PRESS.refresh);
+            return true;
+        } catch (error) {
+            const why = (error && error.message) || String(error);
+            note("receive: could not put the picture into the library: " + why);
+            toast("That picture could not be put into Clipboard: " + why, true);
+            return false;
+        }
+    }
+
+    /** The file a gallery item stands for, as a URL this page can fetch. */
+    function galleryUrl(picked) {
+        let item = picked;
+        if (Array.isArray(item)) { item = item.length ? item[0] : null; }
+        if (!item) { return ""; }
+        if (typeof item === "string") { return item; }
+        const image = (item && typeof item === "object" && item.image) ? item.image : item;
+        const direct = image && (image.url || image.data);
+        if (direct) { return String(direct); }
+        const path = image && (image.path || image.name);
+        if (!path) { return ""; }
+        // Forge serves a temporary file under its own file route; the page
+        // asks for it the same way the gallery's own thumbnail does.
+        return "/file=" + String(path).split("/").map(encodeURIComponent).join("/");
+    }
+
+    function nameFromUrl(url) {
+        const clean = String(url || "").split("?")[0].split("#")[0];
+        const last = clean.substring(clean.lastIndexOf("/") + 1);
+        try { return decodeURIComponent(last) || "gallery.png"; } catch (e) { return last || "gallery.png"; }
+    }
+
     function extensionFor(type) {
         if (type === "image/jpeg") { return ".jpg"; }
         if (type === "image/webp") { return ".webp"; }
@@ -705,26 +779,6 @@ window.minipaintClipboard = (function () {
             toast((plan && plan.message) || "That picture could not be sent.", true);
             return false;
         }
-        if (plan.elem && plan.payload) {
-            const outcome = deliverByUpload(plan.elem, plan.payload, plan.filename);
-            if (outcome === "sent") {
-                note("send " + target + ": handed to " + plan.elem + " as an upload, without the queue");
-                toast("Sent " + plan.filename + " to " + (plan.label || target)
-                      + (plan.adds ? " (added to what is already there)" : "")
-                      + " (the page had lost its connection).");
-                return true;
-            }
-            if (outcome === "occupied") {
-                note("send " + target + ": " + plan.elem + " already holds a picture, so it has no upload to use");
-                toast((plan.label || target) + " already has a picture in it. Clear that one and send again, "
-                      + "or reconnect the page.", true);
-                return false;
-            }
-            note("send " + target + ": " + (outcome === "missing"
-                 ? plan.elem + " is not on this page" : "the picture could not be turned into a file"));
-            toast("There is no " + (plan.label || target) + " on this page to send to.", true);
-            return false;
-        }
         if (plan.backend || !plan.payload) {
             note("send " + target + ": prepared, but " + (plan.label || target)
                  + " is not on this page to be written directly");
@@ -738,60 +792,28 @@ window.minipaintClipboard = (function () {
             toast("That send could not be completed by this page. Reload it and try again.", true);
             return false;
         }
-        const delivered = canvas.deliverToHost(plan.instruction, plan.payload, plan.box);
-        if (!delivered) {
-            note("send " + target + ": nowhere on this page to put it");
-            toast("There is no " + (plan.label || target) + " on this page to send to.", true);
+        // One delivery for every destination: the hidden box of a host
+        // canvas, or the component's own upload. Both are the editor's own
+        // transfer library, which checks that the picture actually landed
+        // rather than reporting that it wrote something somewhere.
+        const delivered = await canvas.deliverToHost(plan.instruction, plan.payload, plan.box, {
+            elem: plan.elem || "",
+            adds: !!plan.adds,
+            filename: plan.filename || "",
+            label: plan.label || target
+        });
+        if (!delivered || !delivered.ok) {
+            const why = (delivered && delivered.reason) || "it did not land";
+            note("send " + target + ": " + why);
+            toast("That picture did not reach " + (plan.label || target) + ": " + why, true);
             return false;
         }
-        note("send " + target + ": delivered over the direct route without the queue");
-        toast("Sent " + plan.filename + " to " + (plan.label || target) + " (the page had lost its connection).");
+        note("send " + target + ": delivered over the direct route without the queue"
+             + (delivered.reason ? " (" + delivered.reason + ")" : ""));
+        toast("Sent " + plan.filename + " to " + (plan.label || target)
+              + (plan.adds ? " (added to what is already there)" : "")
+              + " (the page had lost its connection).");
         return true;
-    }
-
-    /**
-     * Hand a Gradio component a picture as a file, the way a person would.
-     *
-     * The Extras image and the ImageStitch galleries hold their value in
-     * the component rather than in a box on the page, and the server writes
-     * them by returning a new value - a Gradio event, and so the queue. But
-     * a component that accepts uploads will take the same picture from its
-     * own file input, which travels the ordinary upload route: the half of
-     * the connection that is still working when the queue is not.
-     *
-     * The input is only there while the component is empty; once it holds a
-     * picture Gradio shows that instead. Saying so is more use than
-     * silently doing nothing.
-     */
-    function fileFromDataUrl(dataUrl, filename) {
-        const comma = String(dataUrl || "").indexOf(",");
-        if (comma < 0) { return null; }
-        const head = dataUrl.slice(0, comma);
-        const match = head.match(/data:([^;,]+)/);
-        const mime = (match && match[1]) || "image/png";
-        let binary;
-        try { binary = atob(dataUrl.slice(comma + 1)); } catch (e) { return null; }
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i += 1) { bytes[i] = binary.charCodeAt(i); }
-        return new File([bytes], filename || "clipboard.png", { type: mime });
-    }
-
-    function deliverByUpload(elemId, dataUrl, filename) {
-        const target = byId(elemId);
-        if (!target) { return "missing"; }
-        const input = target.querySelector('input[type="file"]');
-        if (!input) { return "occupied"; }
-        const file = fileFromDataUrl(dataUrl, filename);
-        if (!file) { return "unreadable"; }
-        try {
-            const transfer = new DataTransfer();
-            transfer.items.add(file);
-            input.files = transfer.files;
-        } catch (e) {
-            return "unreadable";
-        }
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-        return "sent";
     }
 
     /* ------------------------------------------------------------------ */
@@ -1140,6 +1162,7 @@ window.minipaintClipboard = (function () {
         afterCancelAll: afterCancelAll,
         refreshCapabilities: refreshCapabilities,
         pressHidden: pressHidden,
+        receiveOverHttp: receiveOverHttp,
         debug: debug
     };
 })();

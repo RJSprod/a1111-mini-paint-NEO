@@ -1193,6 +1193,59 @@ function preview_source(wrapper) {
 	return preview ? preview.src : '';
 }
 
+/**
+ * Whether a component's value is a picture it will submit.
+ *
+ * One component holds one file and says so as an object with a path or a
+ * url; a gallery holds a list and says so by being one. Reading a list as
+ * if it were the object reports a component that is plainly holding the
+ * picture as holding nothing.
+ */
+function holds_a_file(value) {
+	if (!value) {
+		return false;
+	}
+	if (Array.isArray(value)) {
+		return value.length > 0;
+	}
+	if (typeof value !== 'object') {
+		return true;
+	}
+	return !!(value.path || value.url);
+}
+
+/**
+ * Every picture a component is showing, in order.
+ *
+ * A gallery keeps what it has and adds to it, so the first preview it shows
+ * is not the one that just arrived - and waiting for that one to change
+ * would report a send that worked as a send that never landed.
+ *
+ * `in_buttons` is what separates the two kinds of component. An ordinary
+ * image puts its controls in buttons and its picture outside them, so a
+ * picture inside a button there is a control's icon; a gallery makes every
+ * item a button with the picture inside it, so skipping those counts none
+ * of them - which is how a gallery that had just taken a picture reported
+ * that it was still waiting for one.
+ */
+function image_previews(wrapper, in_buttons = false) {
+	if (!wrapper) {
+		return [];
+	}
+	const found = [];
+	for (const candidate of wrapper.querySelectorAll('img')) {
+		const src = candidate.getAttribute('src') || '';
+		if (!src || src.indexOf('data:image/svg+xml') === 0) {
+			continue;
+		}
+		if (!in_buttons && candidate.closest('button')) {
+			continue;
+		}
+		found.push(candidate);
+	}
+	return found;
+}
+
 function clear_button_in(wrapper) {
 	return (
 		wrapper.querySelector("button[aria-label='Remove Image']") ||
@@ -1210,15 +1263,24 @@ function clear_button_in(wrapper) {
  * component's DOM, so neither the wrapper nor the file input may be held
  * across that step.
  */
-async function set_gradio_image_file(resolve, data_url, filename, record) {
+async function set_gradio_image_file(resolve, data_url, filename, record, options = {}) {
 	const wrapper = resolve();
 	const label = `#${(wrapper && wrapper.id) || '(no id)'}`;
 	const previous_source = preview_source(wrapper);
-	record.step('ordinary gradio image', `preview was ${previous_source ? 'present' : 'empty'}`);
+	// A destination that adds rather than replaces (a gallery) is finished
+	// when it is showing one more picture than it was, not when its first
+	// one changes - and it must not be cleared on the way in, because what
+	// is already in it is the point of it.
+	const adds = !!options.accept_more;
+	const previous_count = image_previews(wrapper, adds).length;
+	record.step(
+		adds ? 'gradio component that adds' : 'ordinary gradio image',
+		`${previous_count} picture(s) there already`
+	);
 
 	let cleared = !previous_source;
 
-	const clear_button = clear_button_in(wrapper);
+	const clear_button = adds ? null : clear_button_in(wrapper);
 	if (clear_button) {
 		clear_button.click();
 
@@ -1263,7 +1325,18 @@ async function set_gradio_image_file(resolve, data_url, filename, record) {
 	// cannot be the one that was there before.
 	await wait_until(
 		() => {
-			const preview = image_preview(resolve());
+			const wrapper_now = resolve();
+			if (adds) {
+				// One more item is the whole signal here. Whether its
+				// thumbnail has finished painting is a separate question
+				// from whether the component took the picture - a gallery
+				// item's preview is fetched back from the server, so a slow
+				// or unreachable preview would fail a transfer that had
+				// already succeeded. What the component will submit is
+				// checked below, the same as for an ordinary image.
+				return image_previews(wrapper_now, true).length > previous_count;
+			}
+			const preview = image_preview(wrapper_now);
 			return (
 				!!preview &&
 				(cleared || preview.src !== previous_source) &&
@@ -1271,7 +1344,7 @@ async function set_gradio_image_file(resolve, data_url, filename, record) {
 				preview.naturalWidth > 0
 			);
 		},
-		{ description: `${label} to load the sent image` }
+		{ description: `${label} to ${adds ? 'show one more picture' : 'load the sent image'}` }
 	);
 
 	// The preview is drawn from the component's value here, but check the
@@ -1281,10 +1354,7 @@ async function set_gradio_image_file(resolve, data_url, filename, record) {
 	if (state.readable) {
 		try {
 			await wait_until(
-				() => {
-					const value = gradio_component_value(wrapper_id).value;
-					return !!value && (typeof value !== 'object' || !!(value.path || value.url));
-				},
+				() => holds_a_file(gradio_component_value(wrapper_id).value),
 				{ timeout_ms: UI_ACK_TIMEOUT_MS, description: `${label} to hold an uploaded file` }
 			);
 		} catch (e) {
@@ -1301,12 +1371,20 @@ async function set_gradio_image_file(resolve, data_url, filename, record) {
 		record,
 		verified_against: state.readable ? 'gradio value' : 'preview',
 		still_holds: async () => {
+			if (adds && state.readable) {
+				return holds_a_file(gradio_component_value(wrapper_id).value)
+					? null
+					: 'the WebUI now holds no file for it';
+			}
+			if (adds) {
+				return image_previews(resolve(), true).length > previous_count
+					? null
+					: 'the component is no longer showing the picture that was added';
+			}
 			if (state.readable) {
-				const value = gradio_component_value(wrapper_id).value;
-				if (!value || (typeof value === 'object' && !value.path && !value.url)) {
-					return 'the WebUI now holds no file for it';
-				}
-				return null;
+				return holds_a_file(gradio_component_value(wrapper_id).value)
+					? null
+					: 'the WebUI now holds no file for it';
 			}
 			const preview = image_preview(resolve());
 			return preview && preview.naturalWidth > 0 ? null : 'the component no longer shows the image';
@@ -1344,7 +1422,7 @@ export async function set_image_file(target, data_url, options = {}) {
 	if (kind === 'forge-canvas') {
 		return set_forge_canvas_image(wrapper, data_url, options);
 	}
-	return set_gradio_image_file(resolve, data_url, filename, options.record || start_send_record(label));
+	return set_gradio_image_file(resolve, data_url, filename, options.record || start_send_record(label), options);
 }
 
 export async function set_image_on_target(selector, data_url, options = {}) {

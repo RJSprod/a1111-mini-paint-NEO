@@ -88,6 +88,7 @@ def _attach_with_bundles_js() -> str:
     return (
         "async () => { "
         f"await ({assets.tab_loader_js(TAB_ID, ['wangp', 'interop', 'clipboard'])})(); "
+        f"await ({assets.module_js('host')})(); "
         f"if ({_JS}) {_JS}.attach(); "
         "}"
     )

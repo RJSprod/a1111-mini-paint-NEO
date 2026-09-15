@@ -103,6 +103,10 @@ window.minipaintCanvas = (function () {
     const LAYER_UNDERLAY_ID = "minipaint_canvas_layer_underlay";
 
     const S = {
+        //: A picture handed in from another tab, and the watch that
+        //: finishes it here when the server never answers for it.
+        pendingReceive: null,
+        receiveWatch: null,
         instance: null,
         uuid: null,
         container: null,
@@ -2609,13 +2613,56 @@ window.minipaintCanvas = (function () {
     /** The selected gallery item, the way the host's own send buttons pick it. */
     function pickGalleryImage(gallery) {
         if (!Array.isArray(gallery) || gallery.length === 0) { return null; }
+        let picked = [gallery[0]];
         if (typeof window.extract_image_from_gallery === "function") {
             try {
-                const picked = window.extract_image_from_gallery(gallery);
-                if (Array.isArray(picked) && picked.length) { return picked[0]; }
-            } catch (e) { /* fall through */ }
+                const extracted = window.extract_image_from_gallery(gallery);
+                if (Array.isArray(extracted) && extracted.length) { picked = [extracted[0]]; }
+            } catch (e) { /* the first item it is */ }
         }
-        return [gallery[0]];
+        watchReceive(picked);
+        return picked;
+    }
+
+    //: How long a picture handed in from another tab is given to arrive
+    //: before the page finishes the handover itself.
+    const RECEIVE_TIMEOUT_MS = 12000;
+
+    /**
+     * Watch a picture handed in from another tab, and finish it if the
+     * server never does.
+     *
+     * The 🖌️ button under a txt2img, img2img or Extras result picks its
+     * picture here, in the browser, and then hands it to the server as a
+     * Gradio event - the half that stops when the queue stops. Nothing said
+     * so: the button simply did nothing, which is what "I used to be able
+     * to send from other tabs into Clipboard" describes.
+     *
+     * The receive chain ends by switching to whichever tab the picture
+     * landed in, and that switch comes through this adapter - so it is the
+     * acknowledgement, with no extra plumbing on either side. Only a switch
+     * to one of this extension's own tabs counts: a send out to img2img
+     * switches too, and it is not this picture arriving.
+     */
+    function watchReceive(picked) {
+        if (S.receiveWatch) { clearTimeout(S.receiveWatch); S.receiveWatch = null; }
+        S.pendingReceive = picked;
+        S.receiveWatch = setTimeout(function () {
+            S.receiveWatch = null;
+            const item = S.pendingReceive;
+            S.pendingReceive = null;
+            if (!item) { return; }
+            const clipboard = window.minipaintClipboard;
+            if (clipboard && typeof clipboard.receiveOverHttp === "function") {
+                clipboard.receiveOverHttp(item);
+            }
+        }, RECEIVE_TIMEOUT_MS);
+    }
+
+    /** A picture handed in did arrive: stop watching for it. */
+    function receiveLanded() {
+        if (S.receiveWatch) { clearTimeout(S.receiveWatch); S.receiveWatch = null; }
+        S.pendingReceive = null;
     }
 
     function app() {
@@ -2645,10 +2692,138 @@ window.minipaintCanvas = (function () {
      * apart by class, and only the server knows which canvas the host
      * registered for a given tab.
      */
-    function deliverToHost(instruction, payload, boxId) {
+    //: The transfer library the legacy editor has always delivered pictures
+    //: with, imported rather than copied. See deliverToHost.
+    function hostLibrary() {
+        if (window.minipaintHost) { return Promise.resolve(window.minipaintHost); }
+        const assets = window.minipaintAssets;
+        const url = window.minipaintHostUrl;
+        if (!assets || typeof assets.module !== "function" || !url) { return Promise.resolve(null); }
+        return assets.module(url).catch(function () { return null; });
+    }
+
+    /**
+     * The wrapper a ForgeCanvas uuid belongs to.
+     *
+     * The server names the canvas by the id of its hidden image box, because
+     * ForgeCanvas gives its background and scribble boxes the same one and
+     * tells them apart by class - only the server knows which canvas the
+     * host registered for a tab. The transfer library addresses the same
+     * canvas from the outside in, so this walks from the parts that carry
+     * the uuid up to the element that holds them.
+     */
+    function forgeWrapperFor(uuid) {
+        const root = app();
+        const byInput = root.querySelector('input.forge-file-upload[id="imageInput_' + uuid + '"]');
+        const byContainer = root.querySelector('.forge-container[id="container_' + uuid + '"]');
+        let node = (byInput && byInput.parentElement) || (byContainer && byContainer.parentElement) || null;
+        while (node && node !== root && !node.querySelector("input.forge-file-upload") && !node.querySelector(".forge-container")) {
+            node = node.parentElement;
+        }
+        return node && node !== root ? node : null;
+    }
+
+    /**
+     * Put a picture into one of the host's own inputs, the way the editor has
+     * always done it.
+     *
+     * WHY THIS GOES THROUGH THE EDITOR'S LIBRARY.
+     *
+     * This used to be six lines: find the hidden textbox, assign its value,
+     * dispatch "input", switch tabs, report true. It reported true whether
+     * or not anything arrived, and it was true in the only sense it could
+     * check - that it had written a string somewhere.
+     *
+     * The legacy editor has had the honest version of this since before the
+     * Canvas existed, in miniPaint/src/js/libs/webui-host.js, and it does
+     * the things six lines cannot: it classifies the destination by what is
+     * actually inside it rather than assuming; it primes the canvas element
+     * so the first re-encode has a frame to draw; it clears a scribble that
+     * would otherwise be sent along with a new picture of the same size; it
+     * writes through the native value setter, which is what a framework
+     * listens to; and then it reads back what the WebUI will actually
+     * submit, compares it with what was sent, and tries again when they
+     * differ. A gr.Image is cleared before the file is handed to its upload
+     * input, because a component that already holds a picture has no upload
+     * input to hand it to.
+     *
+     * So the new UI sends the way the old one does, out of the same file,
+     * rather than keeping a second implementation that can only ever catch
+     * up. The six lines remain as the last resort for a page where the
+     * library could not be imported: a send that is merely unverified beats
+     * a send that does not happen.
+     */
+    async function deliverToHost(instruction, payload, boxId, options) {
+        const opts = options || {};
         const name = String(instruction || "").split(":")[0];
         const id = String(boxId || "");
-        if (!id || !payload) { return false; }
+        const elem = String(opts.elem || "");
+        if (!payload || (!id && !elem)) { return { ok: false, reason: "nothing to deliver, or nowhere named to put it" }; }
+
+        const Host = await hostLibrary();
+        if (!Host || typeof Host.set_image_file !== "function") {
+            return { ok: deliverTheOldWay(name, payload, id), reason: "the transfer library is not on this page" };
+        }
+
+        const wrapper = elem ? app().querySelector('[id="' + elem + '"]') : forgeWrapperFor(id);
+        if (!wrapper) {
+            // Nothing addressable on this page. The unverified write is still
+            // worth trying for a canvas: its box is found a different way.
+            return { ok: id ? deliverTheOldWay(name, payload, id) : false,
+                     reason: (elem || id) + " is not on this page" };
+        }
+
+        const record = Host.start_send_record(opts.label || name);
+        try {
+            const committed = await Host.set_image_file(wrapper, String(payload), {
+                record: record,
+                filename: opts.filename || "clipboard.png",
+                // A gallery keeps what it has and adds to it, so "the first
+                // preview changed" is the wrong thing to wait for there.
+                accept_more: !!opts.adds
+            });
+            const mode = IMG2IMG_DESTINATIONS[name];
+            if (mode && typeof Host.select_img2img_mode === "function") {
+                // img2img generates from the slot its own hidden mode value
+                // names, and that value only moves on a server round trip.
+                // Settling it here is what keeps Generate from using the
+                // picture that was there before this one.
+                try {
+                    const settled = await Host.select_img2img_mode(mode);
+                    record.step("img2img sub-tab", JSON.stringify(settled));
+                } catch (error) {
+                    record.step("img2img sub-tab", (error && error.message) || String(error));
+                }
+            }
+            if (committed && typeof committed.still_holds === "function") {
+                const problem = await committed.still_holds();
+                record.step("final check before switching tabs", problem || "still holds the sent image");
+                if (problem) { throw new Error(problem); }
+            }
+            switchTo(name);
+            return { ok: true, reason: "" };
+        } catch (error) {
+            const why = (error && error.message) || String(error);
+            record.outcome = "failed: " + why;
+            // A canvas can still be written the plain way: the library's
+            // refusal is usually its verification, not the write.
+            if (id && deliverTheOldWay(name, payload, id)) {
+                return { ok: true, reason: "written without being verified: " + why };
+            }
+            return { ok: false, reason: why };
+        } finally {
+            if (typeof Host.write_send_log === "function") {
+                try { Host.write_send_log(record); } catch (e) { /* never worth an exception */ }
+            }
+        }
+    }
+
+    //: img2img's sub-tabs, by the destination each one owns.
+    const IMG2IMG_DESTINATIONS = { img2img: "img2img_img2img", inpaint: "img2img_inpaint" };
+
+    /** The write with nothing behind it, for a page without the library. */
+    function deliverTheOldWay(name, payload, id) {
+        if (!id) { return false; }
         const root = app();
         const host = root.querySelector('.logical_image_background[id="' + id + '"]')
             || root.querySelector('[id="' + id + '"].logical_image_background');
@@ -2705,6 +2880,10 @@ window.minipaintCanvas = (function () {
         };
         const ours = { canvas: TAB_PANEL_ID, wangp: WANGP_TAB_PANEL_ID, clipboard: CLIPBOARD_TAB_PANEL_ID };
         const name = String(target || "").split(":")[0];
+        // A switch to one of this extension's own tabs is the end of a
+        // receive chain, which is how a picture handed in from another tab
+        // says it arrived. See watchReceive.
+        if (name === "canvas" || name === "clipboard") { receiveLanded(); }
         if (name in helpers) {
             if (typeof window[helpers[name]] === "function") { window[helpers[name]](); return; }
             // A host without that global, or one whose tab set this build

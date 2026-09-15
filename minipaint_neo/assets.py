@@ -63,6 +63,23 @@ BUNDLES: typing.Mapping[str, str] = {
 #: its own. Renaming it is a breaking change to nothing but this file.
 DIRECTORY_NAME = "browser"
 
+#: Files shared with the legacy editor, which live in its own source tree
+#: rather than in ``browser/``.
+#:
+#: ``host`` is the transfer library the editor has always delivered pictures
+#: with: it classifies a destination by what is actually in it, clears a
+#: Gradio image before uploading into it, writes a ForgeCanvas through the
+#: native value setter, and then reads back what the WebUI will submit and
+#: compares it with what was sent, retrying when they differ. The new UI
+#: sends to the same destinations in the same page, so it uses the same
+#: implementation rather than a second one that can drift from it.
+#:
+#: Same rules as ``BUNDLES``: a fixed table, no path from a request, and the
+#: file has to resolve inside this extension or it is not served.
+SHARED: typing.Mapping[str, str] = {
+    "host": "miniPaint/src/js/libs/webui-host.js",
+}
+
 #: Forever, because the digest is in the URL. A changed file is a changed
 #: URL, so there is nothing for a browser to revalidate.
 CACHE_CONTROL = "private, max-age=31536000, immutable"
@@ -74,9 +91,19 @@ _lock = threading.RLock()
 _digests: typing.Dict[str, str] = {}
 
 
+def extension_root() -> pathlib.Path:
+    """This extension's own folder. Nothing is served from outside it."""
+    return pathlib.Path(__file__).resolve().parent.parent
+
+
 def root() -> pathlib.Path:
     """The folder the bundles are in. Inside this extension, always."""
-    return pathlib.Path(__file__).resolve().parent.parent / DIRECTORY_NAME
+    return extension_root() / DIRECTORY_NAME
+
+
+def names() -> typing.Tuple[str, ...]:
+    """Every name a caller may ask for: the bundles and the shared files."""
+    return tuple(BUNDLES) + tuple(SHARED)
 
 
 def path_for(name: typing.Any) -> pathlib.Path:
@@ -86,10 +113,20 @@ def path_for(name: typing.Any) -> pathlib.Path:
     That is the whole of the path safety here, and it is why there is a
     table rather than a naming convention.
     """
-    filename = BUNDLES.get(str(name or ""))
-    if filename is None:
-        raise KeyError(str(name or "")[:40])
-    return root() / filename
+    key = str(name or "")
+    filename = BUNDLES.get(key)
+    if filename is not None:
+        return root() / filename
+    shared = SHARED.get(key)
+    if shared is None:
+        raise KeyError(key[:40])
+    # A table entry, not a request - but it is the only value here with a
+    # path in it, so it is checked rather than trusted.
+    base = extension_root()
+    found = (base / shared).resolve()
+    if base != found and base not in found.parents:
+        raise KeyError(key[:40])
+    return found
 
 
 def digest(name: str) -> str:
@@ -115,7 +152,7 @@ def digest(name: str) -> str:
 
 def url_for(name: str) -> str:
     """The URL a page loads a bundle from, with its content in it."""
-    if name not in BUNDLES:
+    if name not in names():
         raise KeyError(str(name)[:40])
     stamp = digest(name)
     return f"{ROUTE_PREFIX}/js/{name}.js" + (f"?v={stamp}" if stamp else "")
@@ -123,7 +160,7 @@ def url_for(name: str) -> str:
 
 def manifest() -> typing.Dict[str, str]:
     """Every bundle and its URL, for a page that wants to know up front."""
-    return {name: url_for(name) for name in BUNDLES}
+    return {name: url_for(name) for name in names()}
 
 
 def tab_loader_js(panel_id: str, names: typing.Sequence[str]) -> str:
@@ -140,6 +177,21 @@ def tab_loader_js(panel_id: str, names: typing.Sequence[str]) -> str:
     return (
         "() => { const w = window.minipaintAssets; "
         f"return w && w.loadOnTab ? w.loadOnTab({panel_id!r}, {urls}) : Promise.resolve(false); }}".replace("'", '"')
+    )
+
+
+def module_js(name: str) -> str:
+    """A Gradio ``js=`` that imports a shared module and keeps it.
+
+    A bundle is a classic script the loader appends; this one is an ES
+    module with exports, so it is imported rather than appended. The result
+    is kept by the page, so the second tab to ask for it gets the first
+    tab's copy.
+    """
+    url = url_for(name)
+    return (
+        "() => { const w = window.minipaintAssets; "
+        f'return (w && w.module) ? w.module({url!r}) : Promise.resolve(null); }}'.replace("'", '"')
     )
 
 
@@ -183,7 +235,7 @@ async def _script(request: typing.Any) -> typing.Any:
     name = str(request.path_params.get("name", ""))
     if name.endswith(".js"):
         name = name[:-3]
-    if name not in BUNDLES:
+    if name not in names():
         return JSONResponse({"ok": False, "code": "REQUEST_INVALID"}, status_code=404, headers={"Cache-Control": "no-store"})
     if not _signed_in(request):
         return JSONResponse({"ok": False, "code": "AUTH_BOUNDARY_FAILED"}, status_code=401, headers={"Cache-Control": "no-store"})
@@ -217,7 +269,7 @@ def reset_for_tests() -> None:
 
 
 __all__ = [
-    "BUNDLES", "CACHE_CONTROL", "DIRECTORY_NAME", "ROUTE_PREFIX", "SCRIPT_ROUTE",
-    "digest", "install", "loader_js", "manifest", "path_for", "reset_for_tests", "root",
-    "tab_loader_js", "url_for",
+    "BUNDLES", "CACHE_CONTROL", "DIRECTORY_NAME", "ROUTE_PREFIX", "SCRIPT_ROUTE", "SHARED",
+    "digest", "extension_root", "install", "loader_js", "manifest", "module_js", "names",
+    "path_for", "reset_for_tests", "root", "tab_loader_js", "url_for",
 ]

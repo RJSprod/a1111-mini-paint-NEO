@@ -335,8 +335,42 @@ They are not any more:
   coming: they try the direct route after two and a half. The first
   acknowledgement to arrive clears both.
 
+* A picture handed **in** from another tab arrives too. The button under a
+  txt2img, img2img or Extras result picks its picture in the browser and
+  hands it to the server as a Gradio event, so it stopped for the same
+  reason sending out did. The page now watches for it to arrive - the tab
+  switch at the end of the receive is the acknowledgement - and puts it in
+  the library itself when it does not, by fetching the file the host is
+  already serving and posting it to the import route. That keeps the
+  metadata Forge wrote into a generated PNG, which a re-encode of what is on
+  screen would lose. Only when the intercept is on: with it off the picture
+  was going to the Canvas, whose document lives on the server, and the page
+  says so rather than putting it somewhere else.
+
 Reloading the page still makes sending quick again, and the Reconnect button
 is there to do it. The difference is that sending works either way.
+
+### How a picture is actually put into a destination
+
+Both directions go through the transfer library the legacy editor has always
+used (`miniPaint/src/js/libs/webui-host.js`), served to the page rather than
+copied, so there is one implementation of "put this picture there" and not
+two that drift.
+
+It does what writing a value cannot: it classifies a destination by what is
+inside it rather than assuming; primes a ForgeCanvas so its first re-encode
+has a frame to draw; clears a scribble that would otherwise be sent along
+with a new picture of the same size; writes through the native value setter,
+which is what a framework listens to; clears a Gradio image before handing
+its upload input a file, because a component that already holds a picture
+has no upload input to hand it to; and then reads back what the WebUI will
+actually submit, compares it with what was sent, and tries again when they
+differ.
+
+A send to img2img or Inpaint also settles the img2img sub-tab, because
+img2img generates from the slot its own hidden mode value names and that
+value only moves on a server round trip - the "my image is right there and
+it was ignored" case.
 
 ## Where things live
 

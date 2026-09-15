@@ -993,11 +993,14 @@
    indefinite height: one declaration, and every picture in the grid at its
    own natural size the moment anything kept that declaration from landing. */
 #minipaint_clipboard_root .minipaint-clip-thumb {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     width: 100%;
     flex: 1 1 auto;
     min-height: 0;
     overflow: hidden;
+    text-align: center;
     border-radius: 6px;
     background: var(--background-fill-primary, rgba(127, 127, 127, 0.08));
 }
@@ -1016,9 +1019,18 @@
    its natural size. These do not: they hold whatever the browser makes of
    the rest of this file. */
 #minipaint_clipboard_root .minipaint-clip-item img {
+    display: block;
     max-width: 100%;
     max-height: var(--minipaint-clip-thumb);
     object-fit: contain;
+    /* Centred by the tile, not only by object-fit. object-fit centres a
+       picture inside the element's own box, which says nothing about where
+       that box sits: a picture narrower than its cell was left against one
+       edge as soon as the box above stopped filling the width. Auto margins
+       centre the box itself, and cost nothing when it is already the full
+       width. */
+    margin-left: auto;
+    margin-right: auto;
 }
 
 #minipaint_clipboard_root .minipaint-clip-name {

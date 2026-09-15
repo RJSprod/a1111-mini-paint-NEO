@@ -301,13 +301,28 @@ HTTP. Only the actions were tied to Gradio.
 
 They are not any more:
 
+* **The page places the picture itself, first.** The send used to be handed
+  to Gradio, with the direct route kept back as a fallback the page tried
+  after twelve seconds of silence. On a phone that is the wrong way round:
+  the logs from one are full of *"the page went to the background"* and
+  *"back on screen after 2386s"*, and Gradio's event stream does not survive
+  being backgrounded - so the queue there is not an occasional casualty, it
+  is down more often than not, and every send was paying twelve seconds to
+  rediscover that. The picture now goes over the route and the page's own
+  DOM straight away, which takes about as long as one request.
+
+* The queued event still goes, marked as already delivered, so the server
+  records the send - the status line, the history, the log - without writing
+  the destination a second time. Nothing waits on it.
+
 * Every send is acknowledged. The server echoes back the stamp the browser put
   on its own request, so the page can tell "refused" from "never heard" -
   which it could not before, and which is why the failure was so hard to
-  place.
+  place. That receipt is now diagnostic rather than something the user waits
+  on: when it does not arrive, the page says the live connection is gone.
 
-* A send the queue does not carry is finished over `POST
-  /minipaint-clipboard/send` instead, and **every destination finishes**.
+* The delivery goes over `POST /minipaint-clipboard/send`, and **every
+  destination finishes**.
   **img2img** and **Inpaint** are delivered by writing the host canvas's
   hidden textbox. **Extras** and the two **ImageStitch** galleries hold their
   value in the component, which the server fills by returning a new value -

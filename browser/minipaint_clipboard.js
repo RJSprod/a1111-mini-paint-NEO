@@ -206,10 +206,11 @@ window.minipaintClipboard = (function () {
      *
      * A toast is the wrong shape for this: it hides itself after a few
      * seconds, and the thing it is reporting lasts until the page is
-     * reloaded. Every send after it goes the long way round - twelve
-     * seconds of waiting before the direct route is tried - so the user is
-     * told once, plainly, rather than being left to infer it from a send
-     * that took an age.
+     * reloaded. What is lost is not the sending - that happens here now -
+     * but everything the server has to answer for: the status line, the
+     * queue, a grid that shows a picture added since. Said once, plainly,
+     * rather than left to be inferred from a page that quietly stops
+     * keeping up.
      */
     function connectionNotice(show) {
         const container = byId(BROWSER_ID) || root();
@@ -225,8 +226,9 @@ window.minipaintClipboard = (function () {
             bar.setAttribute("role", "status");
             const line = document.createElement("span");
             line.className = "minipaint-clip-offline-text";
-            line.textContent = "This page has lost its live connection to Forge. Sending still works - it "
-                + "goes the direct way and takes a few seconds longer. Reconnecting makes it quick again.";
+            line.textContent = "This page has lost its live connection to Forge. Sending still works - "
+                + "pictures are placed by the page itself. The status line, the queue and new "
+                + "thumbnails need the connection back.";
             const button = document.createElement("button");
             button.type = "button";
             button.className = "minipaint-clip-offline-reconnect";
@@ -678,7 +680,7 @@ window.minipaintClipboard = (function () {
      * the watch expires, the send did not arrive - and the page says so
      * rather than leaving the user to guess whether they mis-clicked.
      */
-    function sendTo(target) {
+    async function sendTo(target) {
         // Held for the whole round trip. The fallback runs twelve seconds
         // after this point and used to read the selection again when it
         // got there: a render landing in between left it with nothing to
@@ -687,20 +689,49 @@ window.minipaintClipboard = (function () {
         if (!asset) { toast("Select an image first.", true); return; }
         note("send " + target + " chosen from the menu");
         const stamp = String(Date.now());
-        if (!sendInput(BOXES.sendRequest, target + ":" + asset + ":" + stamp)) {
-            // The hidden box is not on the page: the tab is half-built and
-            // nothing was sent. This path used to return false and be
-            // dropped by the caller, which is how a dead button stayed quiet.
-            note("send " + target + ": the hidden request box is not on the page; nothing was sent");
-            toast("Mini Paint could not reach its send control. Reload the page.", true);
-            return;
+
+        // The picture goes first, from here.
+        //
+        // This used to hand the send to Gradio and wait twelve seconds for
+        // a receipt before trying anything else. On a phone that is the
+        // wrong way round: the logs from one are full of "the page went to
+        // the background" and "back on screen after 2386s", and Gradio's
+        // event stream does not survive being backgrounded - so the queue
+        // is not an occasional casualty there, it is down most of the time,
+        // and every send was paying twelve seconds to rediscover it.
+        //
+        // So the delivery happens here, over plain HTTP and the page's own
+        // DOM, which is the half that keeps working. The queued event still
+        // goes - marked, so the server records the send without writing the
+        // destination a second time - and nothing waits on it.
+        const outcome = await deliverNow(target, asset);
+        const marked = outcome && outcome.ok ? ":done" : "";
+        if (!sendInput(BOXES.sendRequest, target + ":" + asset + ":" + stamp + marked)) {
+            // The hidden box is not on the page: the tab is half-built. The
+            // picture may still have gone, so say which happened.
+            note("send " + target + ": the hidden request box is not on the page");
+            if (!(outcome && outcome.ok)) {
+                toast("Mini Paint could not reach its send control. Reload the page.", true);
+                return;
+            }
         }
-        watchSend(target, stamp, asset);
+        if (outcome && outcome.ok) {
+            note("send " + target + ": delivered from the page" + (outcome.reason ? " (" + outcome.reason + ")" : ""));
+            toast("Sent " + (outcome.filename || "the picture") + " to " + (outcome.label || target)
+                  + (outcome.adds ? " (added to what is already there)" : ""));
+        }
+        watchSend(target, stamp, asset, outcome);
     }
 
     /**
-     * Wait for the server's receipt for THIS send, and say so if it never
-     * comes.
+     * Watch for the server's receipt for THIS send, in the background.
+     *
+     * The picture has already gone by the time this is armed, so nothing the
+     * user is waiting for happens here. What it is still worth knowing is
+     * whether the queued event arrived at all: it is what writes the status
+     * line, the history and the log, and when it does not arrive the page
+     * should say the live connection is gone rather than leaving that to be
+     * inferred from a status line that never changes.
      *
      * The stamp is the whole point. The status line was the obvious thing to
      * watch and it is the wrong thing: it says "Sent ..." and is then
@@ -710,7 +741,8 @@ window.minipaintClipboard = (function () {
      * this call put on its own request, so there is exactly one value that
      * means "the server handled the thing I just asked for".
      */
-    function watchSend(target, stamp, asset) {
+    function watchSend(target, stamp, asset, outcome) {
+        const delivered = !!(outcome && outcome.ok);
         if (S.sendWatch) { clearTimeout(S.sendWatch); S.sendWatch = null; }
         if (S.sendPoll) { clearInterval(S.sendPoll); S.sendPoll = null; }
         const done = function () {
@@ -722,42 +754,53 @@ window.minipaintClipboard = (function () {
             done();
             S.queueDown = false;
             connectionNotice(false);
-            note("send " + target + ": acknowledged by the server");
+            note("send " + target + ": recorded by the server");
         }, 250);
-        const deadline = S.queueDown ? SEND_RETRY_TIMEOUT_MS : SEND_TIMEOUT_MS;
-        S.sendWatch = setTimeout(function () {
+        S.sendWatch = setTimeout(async function () {
             done();
             if (boxValue(BOXES.sendAck) === stamp) { return; }
             S.queueDown = true;
-            note("send " + target + ": no acknowledgement after "
-                 + (deadline / 1000) + "s; falling back to the direct route");
             connectionNotice(true);
-            sendOverHttp(target, asset);
-        }, deadline);
+            if (delivered) {
+                // The picture went; only the server's record of it did not.
+                note("send " + target + ": the server never recorded it; the picture went from the page");
+                return;
+            }
+            // The page could not place it either. One more try, in case the
+            // destination has since appeared, and then say so plainly.
+            note("send " + target + ": nothing arrived in "
+                 + (SEND_TIMEOUT_MS / 1000) + "s; trying once more from the page");
+            const again = await deliverNow(target, asset);
+            if (again && again.ok) {
+                note("send " + target + ": delivered from the page on the second try");
+                toast("Sent " + (again.filename || "the picture") + " to " + (again.label || target)
+                      + " (the page had lost its connection).");
+                return;
+            }
+            const why = (again && again.reason) || (outcome && outcome.reason) || "it did not land";
+            toast("That picture did not reach " + ((again && again.label) || target) + ": " + why, true);
+        }, SEND_TIMEOUT_MS);
     }
 
     /**
-     * Finish a send over plain HTTP, because the queue did not carry it.
+     * Put the picture in its destination now, from this page.
      *
-     * The event stream, the imports and the thumbnails all ride ordinary
-     * HTTP and keep working when Gradio's queue stops delivering; only the
-     * actions were tied to the queue, which is why a page that could still
-     * talk to the server could not send a picture out of this tab.
+     * The route answers the same question the queued path answers - what
+     * does "send to X" mean - through one ``send_plan``, so the two cannot
+     * disagree. What comes back is the picture and either the box to write
+     * (a host canvas) or the component to hand it to (Extras, the stitch
+     * galleries); the placing itself is the editor's own transfer library,
+     * which checks that it landed rather than reporting that it wrote
+     * something somewhere.
      *
-     * img2img and Inpaint finish completely here: their pictures are
-     * delivered by writing a hidden textbox, which is browser work either
-     * way, so nothing is missing. The destinations the server writes cannot
-     * be finished without it, and say so rather than looking like they went.
+     * Says nothing on its own. The caller knows whether this was the send
+     * itself or a second attempt after the queue went quiet, and those want
+     * different words.
      */
-    async function sendOverHttp(target, asset) {
+    async function deliverNow(target, asset) {
         const picture = asset || S.selected;
         if (!picture) {
-            // Reachable only if a send started with nothing selected, which
-            // sendTo refuses - but a fallback that can return without
-            // saying anything is how the last one of these went missing.
-            note("send " + target + ": there is no longer a picture to send");
-            toast("That send could not be finished: nothing is selected any more.", true);
-            return false;
+            return { ok: false, reason: "nothing is selected any more" };
         }
         let plan;
         try {
@@ -770,50 +813,38 @@ window.minipaintClipboard = (function () {
             });
             plan = await response.json();
         } catch (error) {
-            note("send " + target + ": the direct route could not be reached either");
-            toast("That send never reached the server - this page has lost its connection. Reload it and try again.", true);
-            return false;
+            return { ok: false, reason: "the server could not be reached" };
         }
         if (!plan || !plan.ok) {
-            note("send " + target + ": the direct route refused it (" + ((plan && plan.code) || "unknown") + ")");
-            toast((plan && plan.message) || "That picture could not be sent.", true);
-            return false;
+            return { ok: false, reason: (plan && plan.message) || "that picture could not be sent",
+                     code: (plan && plan.code) || "" };
         }
+        const label = plan.label || target;
         if (plan.backend || !plan.payload) {
-            note("send " + target + ": prepared, but " + (plan.label || target)
-                 + " is not on this page to be written directly");
-            toast((plan.label || target) + " is filled in by the server, so this one needs the connection back. "
-                  + "Reload the page and try again.", true);
-            return false;
+            // Nothing on this page to put it in: the server has to do it.
+            return { ok: false, label: label, filename: plan.filename,
+                     reason: label + " is filled in by the server, and this page has no live connection to it" };
         }
         const canvas = window.minipaintCanvas;
         if (!canvas || typeof canvas.deliverToHost !== "function") {
-            note("send " + target + ": the Canvas adapter this page delivers through is not loaded");
-            toast("That send could not be completed by this page. Reload it and try again.", true);
-            return false;
+            return { ok: false, label: label, filename: plan.filename,
+                     reason: "the adapter this page delivers through is not loaded" };
         }
         // One delivery for every destination: the hidden box of a host
-        // canvas, or the component's own upload. Both are the editor's own
-        // transfer library, which checks that the picture actually landed
-        // rather than reporting that it wrote something somewhere.
+        // canvas, or the component's own upload.
         const delivered = await canvas.deliverToHost(plan.instruction, plan.payload, plan.box, {
             elem: plan.elem || "",
             adds: !!plan.adds,
             filename: plan.filename || "",
-            label: plan.label || target
+            label: label
         });
-        if (!delivered || !delivered.ok) {
-            const why = (delivered && delivered.reason) || "it did not land";
-            note("send " + target + ": " + why);
-            toast("That picture did not reach " + (plan.label || target) + ": " + why, true);
-            return false;
-        }
-        note("send " + target + ": delivered over the direct route without the queue"
-             + (delivered.reason ? " (" + delivered.reason + ")" : ""));
-        toast("Sent " + plan.filename + " to " + (plan.label || target)
-              + (plan.adds ? " (added to what is already there)" : "")
-              + " (the page had lost its connection).");
-        return true;
+        return {
+            ok: !!(delivered && delivered.ok),
+            reason: (delivered && delivered.reason) || "",
+            label: label,
+            filename: plan.filename,
+            adds: !!plan.adds
+        };
     }
 
     /* ------------------------------------------------------------------ */

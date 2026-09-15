@@ -1211,6 +1211,12 @@ class ClipboardTab:
         # The browser stamps each request so it can recognise the answer to
         # its own; echoed back untouched.
         ack = parts[2][:32] if len(parts) > 2 else ""
+        # "done" means the page has already put the picture where it goes,
+        # over the route and its own DOM, and this event is here to record
+        # the send rather than to perform it. Writing the destination again
+        # would be a second delivery of the same picture - harmless for a
+        # canvas, and one picture too many for a gallery that appends.
+        delivered = len(parts) > 3 and parts[3] == "done"
         skips = [gr.skip() for _ in self.image_targets]
         label = dict(self.destinations).get(target, target)
         if target not in dict(self.destinations):
@@ -1222,6 +1228,8 @@ class ClipboardTab:
             image = self.library.open_image(asset.asset_id)
         except IntegrationError as error:
             return (*skips, "", "", "", _status(errors.message(error.code)), ack)
+        if delivered:
+            return (*skips, "", "", "", _status(f"Sent {asset.filename} to {label}."), ack)
         nonce = _nonce()
         if target == "minipaint":
             return (*skips, "", "", f"{asset.asset_id}:{nonce}", _status(f"Sent {asset.filename} to Mini Paint."), ack)

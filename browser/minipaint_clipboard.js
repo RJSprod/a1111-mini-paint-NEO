@@ -66,9 +66,18 @@ window.minipaintClipboard = (function () {
         history: "minipaint_clipboard_history_open",
         outboxRefresh: "minipaint_clipboard_outbox_refresh",
         send: "minipaint_clipboard_send_press",
-        sendBackend: "minipaint_clipboard_send_backend"
+        sendBackend: "minipaint_clipboard_send_backend",
+        //: The toolbar's own delete, which acts on the press with nothing to
+        //: confirm - so the browser keeps it disabled while nothing is
+        //: selected. See select().
+        deleteNow: "minipaint_clipboard_delete_now"
     };
     const ROLE_IDS = { first: "minipaint_clipboard_to_first", last: "minipaint_clipboard_to_last", ref: "minipaint_clipboard_to_ref" };
+    //: Every control that does something TO the selected picture.
+    const NEEDS_SELECTION = function () {
+        return Object.keys(ROLE_IDS).map(function (slot) { return ROLE_IDS[slot]; })
+            .concat([PRESS.deleteNow]);
+    };
     const SLOT_UPLOAD_PREFIX = "minipaint_clipboard_slot_upload_";
     const SLOT_FIELDS = { first: "start", last: "end", ref: "references" };
     // The press acknowledgement. A Gradio chained callback writes the
@@ -409,8 +418,12 @@ window.minipaintClipboard = (function () {
             item.classList.toggle("minipaint-clip-selected", on);
             item.setAttribute("aria-selected", on ? "true" : "false");
         }
-        for (const slot in ROLE_IDS) {
-            const host = byId(ROLE_IDS[slot]);
+        // Everything that acts on the selected picture is dead without one.
+        // Delete is in this list rather than beside it: it deletes on the
+        // press, with nothing to confirm, so "nothing is selected" has to be
+        // visible before the press rather than reported after it.
+        for (const id of NEEDS_SELECTION()) {
+            const host = byId(id);
             const button = host ? (host.tagName === "BUTTON" ? host : host.querySelector("button")) : null;
             if (button) { button.disabled = !S.selected; }
         }

@@ -104,12 +104,47 @@ def head_html() -> str:
 MENU_ITEMS_JS = ("() => Array.from(document.querySelectorAll('.minipaint-clip-menu .minipaint-clip-menu-item'))"
                  ".map(b => b.textContent.trim() + (b.disabled ? ' [disabled]' : ''))")
 
+# The geometry of every tile, and of the picture actually DRAWN in it.
+#
+# offX - the <img> element's box against the tile's - is what this used to
+# measure, and it cannot see the bug it was written for. The element is
+# width:100% of its box, so its middle is the tile's middle by construction:
+# offX reads 0 whether the picture inside it is centred, against one edge,
+# or not drawn at all. The grid was reported off-centre a third time with
+# every one of these checks passing.
+#
+# What the eye judges is where object-fit puts the pixels inside that
+# element, so that is computed here from the picture's own dimensions,
+# exactly as the browser resolves `contain` and `object-position`. paintOffX
+# is the number the tile is actually accused of.
 TILES_JS = """() => Array.from(document.querySelectorAll('.minipaint-clip-item')).map(el => {
     const r = el.getBoundingClientRect();
     const t = el.querySelector('.minipaint-clip-thumb');
     const tr = t ? t.getBoundingClientRect() : null;
     const im = el.querySelector('img');
     const ir = im ? im.getBoundingClientRect() : null;
+    let paint = null;
+    if (im && ir && im.naturalWidth && im.naturalHeight && ir.width && ir.height) {
+        const cs = getComputedStyle(im);
+        const fit = cs.objectFit;
+        // `contain` fits the whole picture in; `cover`/`fill`/`none` are not
+        // used here, and are reported as they land rather than assumed.
+        const s = fit === 'contain' || fit === 'scale-down'
+            ? Math.min(ir.width / im.naturalWidth, ir.height / im.naturalHeight,
+                       fit === 'scale-down' ? 1 : Infinity)
+            : (fit === 'cover' ? Math.max(ir.width / im.naturalWidth, ir.height / im.naturalHeight) : 0);
+        const pw = s ? im.naturalWidth * s : ir.width;
+        const ph = s ? im.naturalHeight * s : ir.height;
+        const pos = String(cs.objectPosition || '50% 50%').split(/\\s+/);
+        const fx = pos[0] && pos[0].endsWith('%') ? parseFloat(pos[0]) / 100 : 0.5;
+        const fy = pos[1] && pos[1].endsWith('%') ? parseFloat(pos[1]) / 100 : 0.5;
+        paint = {left: ir.left + (ir.width - pw) * (isNaN(fx) ? 0.5 : fx),
+                 top: ir.top + (ir.height - ph) * (isNaN(fy) ? 0.5 : fy), w: pw, h: ph};
+    }
+    // The tile's own inside: what the picture is meant to be centred in.
+    const cs = getComputedStyle(el);
+    const inL = r.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft);
+    const inR = r.right - parseFloat(cs.borderRightWidth) - parseFloat(cs.paddingRight);
     return {name: el.dataset.name || '', w: Math.round(r.width), h: Math.round(r.height),
             thumbW: tr ? Math.round(tr.width) : 0, thumbH: tr ? Math.round(tr.height) : 0,
             // How far the picture reaches past the tile that is meant to
@@ -118,8 +153,18 @@ TILES_JS = """() => Array.from(document.querySelectorAll('.minipaint-clip-item')
             spillX: ir ? Math.round(ir.right - r.right) : 0,
             // How far the picture's middle sits from the tile's middle. A
             // picture that fits but hugs one edge is not in its cell.
-            offX: ir ? Math.round(((ir.left + ir.right) / 2) - ((r.left + r.right) / 2)) : 0};
+            offX: ir ? Math.round(((ir.left + ir.right) / 2) - ((r.left + r.right) / 2)) : 0,
+            // The same question asked of the drawn pixels.
+            paintW: paint ? Math.round(paint.w) : 0,
+            paintH: paint ? Math.round(paint.h) : 0,
+            paintOffX: paint ? Math.round((paint.left + paint.w / 2) - ((inL + inR) / 2)) : 0,
+            drawn: !!paint};
 })"""
+
+
+def adrift(tiles):
+    """Tiles whose DRAWN picture is not in the middle of the tile."""
+    return [(t["name"], t["paintOffX"]) for t in tiles if not t["drawn"] or abs(t["paintOffX"]) > 1]
 
 # The tile's own geometry, with the box inside it prevented from doing any
 # of the work: the shape the grid was in when it was reported a second time.
@@ -275,8 +320,9 @@ def check_grid(r: Results, page) -> None:
     r.check("and every thumbnail box is the same size", len(thumbs) == 1, str(thumbs))
     spilling = [(t["name"], t["spillX"], t["spillY"]) for t in tiles if t["spillY"] > 1 or t["spillX"] > 1]
     r.check("and no picture is drawn outside the tile holding it", not spilling, str(spilling))
-    adrift = [(t["name"], t["offX"]) for t in tiles if abs(t["offX"]) > 1]
-    r.check("and every picture sits in the middle of its tile", not adrift, str(adrift))
+    off = adrift(tiles)
+    r.check("and every picture is DRAWN in the middle of its tile", not off, str(off))
+    check_a_hostile_page_cannot_move_a_picture(r, page)
 
     # The slider. It writes a CSS variable; the grid has to be the element
     # that hears it, which is the whole of the bug this covers.
@@ -341,8 +387,50 @@ def check_tiles_hold_without_the_thumb_box(r: Results, page) -> None:
                 f"heights {heights} widths {widths}")
         spilling = [(t["name"], t["spillX"], t["spillY"]) for t in tiles if t["spillY"] > 1 or t["spillX"] > 1]
         r.check("and no picture is drawn outside its tile even then", not spilling, str(spilling))
-        adrift = [(t["name"], t["offX"]) for t in tiles if abs(t["offX"]) > 1]
-        r.check("and every picture is still in the middle of its tile", not adrift, str(adrift))
+        off = adrift(tiles)
+        r.check("and every picture is still drawn in the middle of its tile", not off, str(off))
+    finally:
+        style.evaluate("el => el.remove()")
+        time.sleep(0.4)
+
+
+# The page this grid actually lives on. Forge's own stylesheet, its theme and
+# every other installed extension are loaded alongside this one, and any of
+# them may say !important about an `img`. None of these rules is invented:
+# each is a way the reported symptom - a thumbnail hard against one side of
+# its cell, everything else about the grid correct - is produced from
+# outside. The tile has to hold its picture through all of them.
+HOSTILE_PAGE_CSS = """
+img { margin-right: 0 !important; margin-left: auto !important; }
+.gradio-container img { object-position: right center !important; }
+.prose img, .gradio-container .prose img { width: auto !important; max-width: 100% !important; }
+#minipaint_clipboard_root .minipaint-clip-thumb { justify-content: flex-end !important; }
+#minipaint_clipboard_root .minipaint-clip-item { align-items: flex-end !important; text-align: right !important; }
+"""
+
+
+def check_a_hostile_page_cannot_move_a_picture(r: Results, page) -> None:
+    """The host page cannot push a thumbnail off-centre.
+
+    This grid was reported off-centre three times, and each fix centred it
+    again on the page the suite builds - which is a Gradio page and nothing
+    else. The page it has to be right on carries Forge's stylesheet, a
+    theme, and every other extension the user installed, and any of those
+    can say `!important` about an image.
+
+    So the rules that decide where a picture is drawn are checked against a
+    page that is trying to move it, rather than against a clean one.
+    """
+    style = page.add_style_tag(content=HOSTILE_PAGE_CSS)
+    try:
+        time.sleep(0.5)
+        tiles = page.evaluate(TILES_JS)
+        r.check("a hostile page still leaves every picture drawn in the middle of its tile",
+                tiles and not adrift(tiles), str(adrift(tiles)))
+        r.check("and still inside it", tiles and not [
+            t for t in tiles if t["spillY"] > 1 or t["spillX"] > 1],
+            str([(t["name"], t["spillX"], t["spillY"]) for t in tiles
+                 if t["spillY"] > 1 or t["spillX"] > 1]))
     finally:
         style.evaluate("el => el.remove()")
         time.sleep(0.4)
@@ -665,6 +753,149 @@ def check_a_send_reaches_a_framework_owned_input(r: Results, page, targets) -> N
         time.sleep(0.5)
 
 
+def check_a_send_survives_a_box_the_host_never_hears(r: Results, page, targets) -> None:
+    """The send still reaches the server when the written box is not heard.
+
+    THE INSTALL THIS IS FOR. One user's logs, across four builds of this
+    extension, contain not a single acknowledged send - and in the same logs,
+    on the same pages, fifty-six Add to Queue round trips that went to the
+    server and came back. The difference between the two is not the
+    connection, the session or the queue, all of which were working: it is
+    that Add to Queue is a button somebody presses and a send was a hidden
+    box written by script. Three fixes were spent on better ways to write the
+    box; the logs after each say exactly what they said before.
+
+    So the send does not rest on the write any more. It writes the box - that
+    is still the request - and then presses a hidden button, and the server
+    answers whichever arrives. Here the write is made unhearable the way that
+    install behaves: the events it dispatches are stopped before they reach
+    the element, so the framework is never told. Nothing else is touched.
+
+    The press has to carry the send through that. If it ever stops doing so
+    this check fails, and the extension is back to the state those logs
+    describe.
+    """
+    open_clipboard(page)
+    if not select_first(page):
+        r.check("unheard box: a picture is selected first", False, "no selection")
+        return
+    deafened = page.evaluate("""() => {
+        const host = document.getElementById('minipaint_clipboard_send_request');
+        const el = host && host.querySelector('textarea, input');
+        if (!el) { return false; }
+        // Capture on an ancestor: the event is stopped on the way down, so
+        // the listener the framework put on the element never runs. The
+        // value still lands in the DOM, exactly as it does today.
+        window.__minipaintDeafen = function (event) {
+            if (event.target === el) { event.stopPropagation(); }
+        };
+        for (const kind of ['input', 'change']) {
+            document.addEventListener(kind, window.__minipaintDeafen, true);
+        }
+        return true;
+    }""")
+    r.check("unheard box: the host is made deaf to the write", deafened)
+    try:
+        before = box(page, "minipaint_clipboard_send_ack")
+        r.check("unheard box: the send is attempted", send_selected(page, "img2img") == "clicked")
+        answered = False
+        for _ in range(20):
+            time.sleep(1)
+            if box(page, "minipaint_clipboard_send_ack") not in (None, "", before):
+                answered = True
+                break
+        r.check("unheard box: the server still receives the send, carried by the press",
+                answered, repr(box(page, "minipaint_clipboard_send_ack")))
+    finally:
+        page.evaluate("""() => {
+            if (!window.__minipaintDeafen) { return; }
+            for (const kind of ['input', 'change']) {
+                document.removeEventListener(kind, window.__minipaintDeafen, true);
+            }
+            window.__minipaintDeafen = null;
+        }""")
+        time.sleep(0.5)
+
+
+def check_the_page_can_say_why_a_send_was_silent(r: Results, page) -> None:
+    """A silent send produces facts, not another guess.
+
+    Four builds went on this because no log could tell three faults apart:
+    the event never fired, it fired and the request failed, or it fired and
+    the answer never came back. The page can distinguish them - it knows what
+    its own boxes hold, the browser will tell it what left, and the host's
+    config says where the host thinks it is - so it says so, and the next
+    report names the fault instead of inviting a fifth guess.
+    """
+    r.check("the page is watching what the host's framework puts on the wire",
+            page.evaluate("() => !!(window.minipaintNetJournal && window.minipaintNetJournal.watching())"))
+    seen = page.evaluate("() => window.minipaintNetJournal.since(0)")
+    r.check("and has seen the host's own API calls on this page",
+            isinstance(seen, list) and len(seen) > 0 and all("path" in row for row in seen),
+            f"{len(seen) if isinstance(seen, list) else seen} call(s)")
+    r.check("which it can put in a log line",
+            "request(s):" in page.evaluate("() => window.minipaintNetJournal.sentence(0)"),
+            page.evaluate("() => window.minipaintNetJournal.sentence(0)"))
+    # The wiring itself. An event whose outputs name a component that is not
+    # in this build cannot run, and it fails exactly the way an unreachable
+    # server fails - so "is it even on the page" has to be answerable without
+    # pressing anything.
+    for name, trigger in (("send_request", "input"), ("send_press", "click")):
+        wiring = page.evaluate("id => window.minipaintHostWiring(id)", f"minipaint_clipboard_{name}")
+        r.check(f"the page can see that {name} is wired for {trigger}",
+                wiring.get("known") and wiring.get("elements") == 1 and wiring.get("components") == 1
+                and trigger in (wiring.get("triggers") or []), str(wiring))
+        r.check(f"and that its {trigger} names nothing that is not on this page",
+                wiring.get("missing") == 0, str(wiring))
+    r.check("and says so in a clause a log line can carry",
+            "wired for" in page.evaluate("() => window.minipaintHostWiringNote('the request box',"
+                                         " 'minipaint_clipboard_send_request')"),
+            page.evaluate("() => window.minipaintHostWiringNote('the request box', 'minipaint_clipboard_send_request')"))
+    r.check("a control nothing is wired to is named as such, not merely missing",
+            "NO EVENT IS WIRED" in page.evaluate("() => window.minipaintHostWiringNote('the payload box',"
+                                                 " 'minipaint_clipboard_payload')"),
+            page.evaluate("() => window.minipaintHostWiringNote('the payload box', 'minipaint_clipboard_payload')"))
+    # The fault this is really for: the trigger is wired, and the event still
+    # cannot run because one of the components it writes belongs to a build
+    # this page is not. Put one in and the page has to name it.
+    broken = page.evaluate("""() => {
+        const config = window.gradio_config;
+        const mine = config.components.find(c => c.props && c.props.elem_id === 'minipaint_clipboard_send_press');
+        const fake = {targets: [[mine.id, 'click']], inputs: [], outputs: [987654321], backend_fn: true};
+        config.dependencies.push(fake);
+        try { return window.minipaintHostWiringNote('send button', 'minipaint_clipboard_send_press'); }
+        finally { config.dependencies.pop(); }
+    }""")
+    r.check("an event naming a component from another build is named as one the host cannot run",
+            "NOT ON THIS PAGE" in broken, broken)
+    r.check("and the page is left as it was",
+            page.evaluate("() => window.minipaintHostWiring('minipaint_clipboard_send_press').missing") == 0)
+
+    # The one configuration that blocks every framework request while leaving
+    # everything this extension does over a relative URL working. This page is
+    # served straight, so it has nothing to report; the verdict is checked
+    # against the roots that do, which the function takes as arguments because
+    # a browser will not let `location.protocol` be redefined.
+    straight = page.evaluate("() => window.minipaintHostRoot()")
+    r.check("on a page the host addresses correctly, there is nothing to report",
+            straight.get("known") and straight.get("ok"), str(straight))
+    crossed = page.evaluate("() => window.minipaintHostRoot('http://127.0.0.1:7860',"
+                            " {origin: 'https://forge.example.com', protocol: 'https:'})")
+    r.check("a host that tells an https page to call it over http is named as mixed content",
+            crossed.get("known") and crossed.get("ok") is False and crossed.get("mixed") is True
+            and "mixed content" in crossed.get("note", ""), str(crossed)[:200])
+    r.check("and the note says where the fix is",
+            "x-forwarded-proto" in crossed.get("note", ""), crossed.get("note", "")[:200])
+    other = page.evaluate("() => window.minipaintHostRoot('https://elsewhere.example.com',"
+                          " {origin: 'https://forge.example.com', protocol: 'https:'})")
+    r.check("a host on another origin entirely is reported, but not as mixed content",
+            other.get("ok") is False and other.get("mixed") is False and "CORS" in other.get("note", ""),
+            str(other)[:160])
+    same = page.evaluate("() => window.minipaintHostRoot('https://forge.example.com/x',"
+                         " {origin: 'https://forge.example.com', protocol: 'https:'})")
+    r.check("and a host that agrees with its own page is not reported at all", same.get("ok") is True, str(same))
+
+
 def check_a_render_cannot_take_the_selection(r: Results, page) -> None:
     """A render must not clear a selection this page made.
 
@@ -869,6 +1100,8 @@ def run() -> Results:
                 check_a_component_destination_fills_without_the_queue(r, page, targets)
                 check_a_render_cannot_take_the_selection(r, page)
                 check_a_send_reaches_a_framework_owned_input(r, page, targets)
+                check_a_send_survives_a_box_the_host_never_hears(r, page, targets)
+                check_the_page_can_say_why_a_send_was_silent(r, page)
                 check_a_picture_handed_in_arrives_without_the_queue(r, page, library)
             finally:
                 browser.close()

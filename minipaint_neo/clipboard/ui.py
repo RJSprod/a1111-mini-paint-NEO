@@ -529,6 +529,10 @@ class ClipboardTab:
         self.image_targets = [key for key in canvas_ui.BACKEND_TARGETS if key in self.targets]
         self.stitch_targets = [key for key in canvas_ui.STITCH_TARGETS if key in self.targets]
         self.canvas = canvas_ui.current()
+        #: The last markup sent for each repeatedly re-rendered section, so an
+        #: update that would change nothing on screen is not sent at all. See
+        #: ``_unchanged``.
+        self._rendered: typing.Dict[str, typing.Any] = {}
         # Where a selected picture can go: Mini Paint when the Canvas is
         # mounted, and every host destination the Canvas itself knows.
         self.destinations: typing.List[typing.Tuple[str, str]] = []
@@ -1012,7 +1016,31 @@ class ClipboardTab:
         line = job_sentence(latest) if latest else ("" if not mine else "Waiting its turn.")
         ignored = [item.get("field") for item in ((latest or {}).get("result") or {}).get("ignored") or []]
         notes.extend(f"{FIELD_LABELS.get(field, field)} was not used by the current model." for field in ignored)
-        return self._outbox(page_id), (_status(line, notes) if line or notes else gr.skip()), self._history(), self._queue_button()
+        return (
+            self._unchanged("outbox", self._outbox(page_id)),
+            (_status(line, notes) if line or notes else gr.skip()),
+            self._unchanged("history", self._history()),
+            self._queue_button(),
+        )
+
+    def _unchanged(self, key: str, rendered: typing.Any) -> typing.Any:
+        """``gr.skip()`` when this render is the same as the last one.
+
+        The queue moves for reasons that change nothing on screen - a job
+        advancing through states the list does not show, another page's job,
+        a heartbeat - and every one of those used to replace the list's HTML
+        wholesale. Gradio tears the old nodes out and puts new ones in, so
+        the section lost its scroll position and everything below it jumped,
+        several times a minute, while the user was reading it.
+
+        Comparing the rendered markup is the cheapest honest test of "would
+        the user see any difference", and it is exact: identical markup
+        cannot look different. What did change is still sent.
+        """
+        if self._rendered.get(key) == rendered:
+            return gr.skip()
+        self._rendered[key] = rendered
+        return rendered
 
     def outbox_action(self, value, page):
         """A button on a job: ``cancel:<job>``, ``retry:<job>``, ``adopt:<job>``, with the page after."""
@@ -1073,24 +1101,36 @@ class ClipboardTab:
     # -- send out -----------------------------------------------------------------
 
     def send(self, request, selected):
-        """Send the selected picture to another tab, the way the Canvas does it."""
+        """Send the selected picture to another tab, the way the Canvas does it.
+
+        Every path returns an acknowledgement carrying the browser's own
+        stamp for this request. Writing a hidden box is only half of a send -
+        the other half is a Gradio event crossing the queue, and that half
+        can go missing on a connection that dropped or a session the server
+        has forgotten. Without an answer to wait for, the browser could not
+        tell "refused" from "never arrived", and a send that never arrived
+        looked exactly like a button that did nothing.
+        """
         parts = str(request or "").split(":")
         target = parts[0] if parts else ""
         asset_id = _hex(parts[1]) if len(parts) > 1 else ""
+        # The browser stamps each request so it can recognise the answer to
+        # its own; echoed back untouched.
+        ack = parts[2][:32] if len(parts) > 2 else ""
         skips = [gr.skip() for _ in self.image_targets]
         label = dict(self.destinations).get(target, target)
         if target not in dict(self.destinations):
-            return (*skips, "", "", "", _status(f"{label or 'That destination'} is not available in this WebUI."))
+            return (*skips, "", "", "", _status(f"{label or 'That destination'} is not available in this WebUI."), ack)
         asset = self._asset(asset_id or selected)
         if asset is None:
-            return (*skips, "", "", "", _status("Select an image in the browser first."))
+            return (*skips, "", "", "", _status("Select an image in the browser first."), ack)
         try:
             image = self.library.open_image(asset.asset_id)
         except IntegrationError as error:
-            return (*skips, "", "", "", _status(errors.message(error.code)))
+            return (*skips, "", "", "", _status(errors.message(error.code)), ack)
         nonce = _nonce()
         if target == "minipaint":
-            return (*skips, "", "", f"{asset.asset_id}:{nonce}", _status(f"Sent {asset.filename} to Mini Paint."))
+            return (*skips, "", "", f"{asset.asset_id}:{nonce}", _status(f"Sent {asset.filename} to Mini Paint."), ack)
         payload = ""
         if target == "inpaint":
             instruction = f"inpaint:{image.width}x{image.height}"
@@ -1105,7 +1145,7 @@ class ClipboardTab:
         for key in self.image_targets:
             outputs.append(([image] if key in canvas_ui.STITCH_TARGETS else image) if key == target else gr.skip())
         notes = ["it is now the only reference image there"] if target in canvas_ui.STITCH_TARGETS else []
-        return (*outputs, instruction, payload, "", _status(f"Sent {asset.filename} to {label}.", notes))
+        return (*outputs, instruction, payload, "", _status(f"Sent {asset.filename} to {label}.", notes), ack)
 
     # -- the folder and the file operations ---------------------------------------
 
@@ -1224,6 +1264,9 @@ class ClipboardTab:
                     sort_request = gr.Textbox("", visible=False, elem_id=_id("sort_request"))
                     slot_action = gr.Textbox("", visible=False, elem_id=_id("slot_action"))
                     send_request = gr.Textbox("", visible=False, elem_id=_id("send_request"))
+                    # The server's receipt for a send, carrying the stamp the
+                    # browser put on the request. See ClipboardTab.send.
+                    send_ack = gr.Textbox("", visible=False, elem_id=_id("send_ack"))
                     history_action = gr.Textbox("", visible=False, elem_id=_id("history_action"))
                     menu_state = gr.Textbox(self._menu_state(), visible=False, elem_id=_id("menu_state"))
                     switch_box = gr.Textbox("", visible=False, elem_id=_id("switch"))
@@ -1310,7 +1353,7 @@ class ClipboardTab:
             enhance_line=enhance_line, enhance_toggle=enhance_toggle, sp_variant=sp_variant, sp_mode=sp_mode, system_prompt=system_prompt,
             sp_state=sp_state, sp_apply=sp_apply, sp_restore=sp_restore, sp_reload=sp_reload,
             history_list=history_list, history_close=history_close, history_action=history_action,
-            send_request=send_request, switch_box=switch_box, payload_box=payload_box, to_canvas=to_canvas, mask_clear=mask_clear,
+            send_request=send_request, send_ack=send_ack, switch_box=switch_box, payload_box=payload_box, to_canvas=to_canvas, mask_clear=mask_clear,
             wangp_line=wangp_line,
         )
 
@@ -1414,7 +1457,7 @@ class ClipboardTab:
         target_components = [self.targets[key] for key in self.image_targets]
         sent = p["send_request"].input(
             self.send, inputs=[p["send_request"], selected],
-            outputs=target_components + [switch_box, payload_box, p["to_canvas"], p["status"]], **quiet,
+            outputs=target_components + [switch_box, payload_box, p["to_canvas"], p["status"], p["send_ack"]], **quiet,
         )
         textbox_targets = [self.targets[key] for key in ("img2img", "inpaint") if key in self.targets]
         if len(textbox_targets) == 2:

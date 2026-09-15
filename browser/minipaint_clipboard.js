@@ -38,12 +38,15 @@ window.minipaintClipboard = (function () {
     const QUEUE_STATUS_ID = "minipaint_clipboard_queue_status";
     const WANGP_LINE_ID = "minipaint_clipboard_wangp_line";
     const TAB_PANEL_ID = "tab_minipaint_clipboard";
+    //: Matches the stylesheet's own default for --minipaint-clip-thumb.
+    const DEFAULT_THUMB = 144;
     const IMPORT_ROUTE = "/minipaint-clipboard/import";
     const BOXES = {
         selected: "minipaint_clipboard_selected",
         sortRequest: "minipaint_clipboard_sort_request",
         slotAction: "minipaint_clipboard_slot_action",
         sendRequest: "minipaint_clipboard_send_request",
+        sendAck: "minipaint_clipboard_send_ack",
         historyAction: "minipaint_clipboard_history_action",
         menuState: "minipaint_clipboard_menu_state",
         queueInstruction: "minipaint_clipboard_queue_instruction",
@@ -92,6 +95,14 @@ window.minipaintClipboard = (function () {
     const S = {
         attached: false,
         selected: "",
+        //: The timer and the watcher looking for the server's receipt for a
+        //: send. See watchSend.
+        sendWatch: null,
+        sendPoll: null,
+        //: The thumbnail size in pixels, remembered across refreshes: the
+        //: grid element is replaced wholesale and takes its inline style
+        //: with it, so without this every refresh snapped back to default.
+        thumb: 0,
         menu: null,
         menuSection: null,
         menuOutside: null,
@@ -221,15 +232,32 @@ window.minipaintClipboard = (function () {
         const present = items().some(function (item) { return item.dataset.asset === confirmed; });
         select(present ? confirmed : "", true);
         if (!present && confirmed) { sendInput(BOXES.selected, ""); }
-        applyThumbnailSize();
+        // The grid element is new after every refresh, so the size written
+        // onto the old one went with it. Put the remembered one back rather
+        // than falling to the default and snapping every tile back to 144.
+        applyThumbnailSize(S.thumb);
         refreshBadges();
     }
 
+    /**
+     * Size the thumbnails, by writing the variable the grid actually reads.
+     *
+     * On the grid itself, not on the Gradio block around it. Gradio renders
+     * an HTML component's elem_classes onto both the outer block and the
+     * inner "prose" div, so the stylesheet's default matched twice and the
+     * inner match re-declared the variable - which meant a value written to
+     * the outer element was shadowed before it ever reached the grid, and
+     * the slider moved nothing. The grid is the element that reads the
+     * variable, so it is the element that gets written.
+     */
     function applyThumbnailSize(size) {
-        const grid = byId(GRID_ID);
+        const host = byId(GRID_ID);
+        const grid = (host && host.querySelector(".minipaint-clip-grid"))
+            || app().querySelector(".minipaint-clip-grid");
         const slider = byId("minipaint_clipboard_thumb");
         const input = slider ? slider.querySelector("input[type=range]") : null;
-        const value = Number(size) || (input ? Number(input.value) : 0) || 144;
+        const value = Number(size) || (input ? Number(input.value) : 0) || DEFAULT_THUMB;
+        S.thumb = value;
         if (grid) { grid.style.setProperty("--minipaint-clip-thumb", value + "px"); }
     }
 
@@ -484,10 +512,72 @@ window.minipaintClipboard = (function () {
     /* Send out                                                              */
     /* ------------------------------------------------------------------ */
 
+    //: How long a send may take to come back before the page says so. The
+    //: server answers in well under a second on a working connection; this
+    //: is long enough to cover a slow one and short enough to be useful.
+    const SEND_TIMEOUT_MS = 12000;
+
+    /**
+     * Send the selected picture to another tab, and never do it silently.
+     *
+     * Writing the hidden box is only half of a send: the other half is a
+     * Gradio event travelling the queue, and that is the half that can go
+     * missing - a connection that dropped, a session the server no longer
+     * knows, a queue that never drains. When it does, this used to be a
+     * button that did nothing at all: no picture, no error, nothing in the
+     * status line, and nothing in the log to say what had happened.
+     *
+     * So the round trip is watched. The server answers every send by
+     * writing the status line, so if the status has not changed by the time
+     * the watch expires, the send did not arrive - and the page says so
+     * rather than leaving the user to guess whether they mis-clicked.
+     */
     function sendTo(target) {
         if (!S.selected) { toast("Select an image first.", true); return; }
         note("send " + target + " chosen from the menu");
-        sendInput(BOXES.sendRequest, target + ":" + S.selected + ":" + Date.now());
+        const stamp = String(Date.now());
+        if (!sendInput(BOXES.sendRequest, target + ":" + S.selected + ":" + stamp)) {
+            // The hidden box is not on the page: the tab is half-built and
+            // nothing was sent. This path used to return false and be
+            // dropped by the caller, which is how a dead button stayed quiet.
+            note("send " + target + ": the hidden request box is not on the page; nothing was sent");
+            toast("Mini Paint could not reach its send control. Reload the page.", true);
+            return;
+        }
+        watchSend(target, stamp);
+    }
+
+    /**
+     * Wait for the server's receipt for THIS send, and say so if it never
+     * comes.
+     *
+     * The stamp is the whole point. The status line was the obvious thing to
+     * watch and it is the wrong thing: it says "Sent ..." and is then
+     * rewritten by the next refresh, so a successful send looks unanswered a
+     * few seconds later and an unanswered one looks fine if anything else
+     * wrote to it meanwhile. The acknowledgement box carries back the stamp
+     * this call put on its own request, so there is exactly one value that
+     * means "the server handled the thing I just asked for".
+     */
+    function watchSend(target, stamp) {
+        if (S.sendWatch) { clearTimeout(S.sendWatch); S.sendWatch = null; }
+        if (S.sendPoll) { clearInterval(S.sendPoll); S.sendPoll = null; }
+        const done = function () {
+            if (S.sendPoll) { clearInterval(S.sendPoll); S.sendPoll = null; }
+            if (S.sendWatch) { clearTimeout(S.sendWatch); S.sendWatch = null; }
+        };
+        S.sendPoll = setInterval(function () {
+            if (boxValue(BOXES.sendAck) !== stamp) { return; }
+            done();
+            note("send " + target + ": acknowledged by the server");
+        }, 250);
+        S.sendWatch = setTimeout(function () {
+            done();
+            if (boxValue(BOXES.sendAck) === stamp) { return; }
+            note("send " + target + ": no acknowledgement after "
+                 + Math.round(SEND_TIMEOUT_MS / 1000) + "s; this page is not being heard by the server");
+            toast("That send never reached the server - this page has lost its connection. Reload it and try again.", true);
+        }, SEND_TIMEOUT_MS);
     }
 
     /* ------------------------------------------------------------------ */

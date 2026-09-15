@@ -11,6 +11,7 @@ see tests/browser_smoke.py.
 from __future__ import annotations
 
 import os
+import pathlib
 import sys
 
 os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
@@ -69,12 +70,16 @@ SUITES = [
     # to be run by hand because the regression it exists to catch lived
     # entirely in the gap between "the unit tests pass" and "the page works".
     "browser_loading",
+    # The Clipboard tab in a browser: sending a picture out, and the
+    # thumbnail grid. Both failed in the page while its 181 unit checks
+    # passed, because both failures live where the graph cannot see.
+    "browser_clipboard",
 ]
 
 #: Suites that drive a browser. They need Playwright and a Chromium, and they
 #: are the only ones that do; a checkout without them still runs everything
 #: else rather than reporting a failure it cannot act on.
-BROWSER = {"browser_loading"}
+BROWSER = {"browser_loading", "browser_clipboard"}
 
 
 #: Third-party names a suite is allowed to be missing. Gradio is the reason
@@ -97,10 +102,52 @@ def _is_optional(error: ImportError) -> bool:
     return bool(missing) and missing in OPTIONAL
 
 
+def _run_isolated(name: str) -> str:
+    """Run a browser suite in its own interpreter.
+
+    They build a whole Forge-shaped page, and building one is not a pure
+    function of this process: Gradio keeps a render context, the host keeps
+    the components it captured, the WebUI stubs keep their callback lists,
+    and twenty-two suites have already had their way with all three. Run in
+    the shared interpreter after them, the page comes out unbuildable - and
+    the suite fails for a reason that has nothing to do with what it tests.
+
+    A subprocess is also the honest boundary in the other direction: a suite
+    that drives a browser cannot leave anything behind for the next one.
+
+    Returns "ok", "failed" or "skipped".
+    """
+    import subprocess
+
+    started = subprocess.run([sys.executable, str(pathlib.Path(__file__).parent / f"{name}.py")],
+                             capture_output=True, text=True)
+    output = (started.stdout or "") + (started.stderr or "")
+    if "No module named 'playwright'" in output or "no chromium" in output.lower():
+        print(f"{name}: skipped (needs Playwright with a Chromium)")
+        return "skipped"
+    for line in output.splitlines():
+        if line.startswith("  FAIL") or ": " in line and ("passed" in line or "failed" in line):
+            print(line)
+    if started.returncode != 0:
+        tail = [x for x in output.splitlines() if x.strip()][-4:]
+        print(f"{name}: FAILED (exit {started.returncode})")
+        for line in tail:
+            print("   " + line[:200])
+        return "failed"
+    return "ok"
+
+
 def main() -> int:
     ok = True
     skipped = []
     for name in SUITES:
+        if name in BROWSER:
+            outcome = _run_isolated(name)
+            if outcome == "skipped":
+                skipped.append(name)
+            elif outcome == "failed":
+                ok = False
+            continue
         try:
             module = __import__(name)
         except ImportError as error:

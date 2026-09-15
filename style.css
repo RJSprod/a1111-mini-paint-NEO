@@ -906,13 +906,26 @@
 
 /* -- the grid ------------------------------------------------------- */
 
-#minipaint_clipboard_root .minipaint-clip-grid-host {
+/* The thumbnail size lives on the tab root, not on the grid's own wrapper.
+   Gradio puts a component's elem_classes on BOTH the outer block and the
+   inner "prose" div it renders into, so a rule keyed on that class matches
+   twice - and the inner copy re-declares the variable, shadowing anything
+   set on the outer one. The size slider wrote to the outer element and the
+   grid never heard about it. One declaration, on an ancestor that is a
+   single element, and the script writes to the grid itself. */
+#minipaint_clipboard_root {
     --minipaint-clip-thumb: 144px;
 }
 
 #minipaint_clipboard_root .minipaint-clip-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(var(--minipaint-clip-thumb), 1fr));
+    /* Every tile is its own content's height, and a row can never stretch
+       one out of square: the thumb is a square box and the name is one
+       line, so all tiles come out identical whatever the pictures are. */
+    grid-auto-rows: max-content;
+    align-items: start;
+    justify-items: stretch;
     gap: var(--minipaint-clip-gap);
     padding: var(--minipaint-clip-gap);
     min-height: 160px;
@@ -938,6 +951,7 @@
     flex-direction: column;
     gap: 4px;
     min-width: 0;
+    align-self: start;
     padding: 4px;
     border: 2px solid transparent;
     border-radius: var(--block-radius, 8px);
@@ -964,6 +978,7 @@
     display: block;
     width: 100%;
     aspect-ratio: 1 / 1;
+    flex: 0 0 auto;
     overflow: hidden;
     border-radius: 6px;
     background: var(--background-fill-primary, rgba(127, 127, 127, 0.08));
@@ -1356,12 +1371,29 @@
 }
 
 /* -- the queue: the outbox list in the composer ------------------------- */
+/* The queue list holds its place. It is re-rendered whenever the queue
+   moves, and a list that grows and shrinks by a row pushes everything under
+   it up and down while the user is reading. A floor on the height means the
+   common cases - empty, one job, two - all occupy the same space, and the
+   scroll container above the floor keeps a longer list from moving anything
+   below it at all. The server also stops sending renders that would change
+   nothing; see ClipboardTab._unchanged. */
 #minipaint_clipboard_root .minipaint-clip-outbox {
     display: flex;
     flex-direction: column;
     gap: var(--minipaint-clip-gap, 8px);
+    min-height: 3.5em;
     max-height: 40vh;
     overflow-y: auto;
+    /* A re-render must not move the page under the pointer. */
+    overflow-anchor: none;
+    scrollbar-gutter: stable;
+}
+
+/* The status lines above and below the queue are one line high whatever
+   they say, so a longer sentence cannot reflow the column. */
+#minipaint_clipboard_root .minipaint-clip-status {
+    min-height: 1.5em;
 }
 #minipaint_clipboard_root .minipaint-clip-job {
     border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));

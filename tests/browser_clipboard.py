@@ -1090,6 +1090,72 @@ def check_tab_switching_survives_reordering(r: Results, page) -> None:
     time.sleep(2)
 
 
+def check_the_toolbar_pastes_and_deletes(r: Results, page) -> None:
+    """The two verbs this tab is actually used for, one press each.
+
+    A clipboard is a place things pass through: something comes in from
+    somewhere else, gets used, and goes. Both of those have always been in
+    the menu, which is right for discovering them and wrong for doing them
+    forty times in a row. These are the same two actions with the flyout
+    taken out of the way.
+
+    Delete has no confirmation on purpose, so the thing that has to be true
+    is that it cannot be pressed with nothing selected - the guard moves from
+    after the press to before it. That is checked first, because it is the
+    only thing standing between a toolbar button and a file that is gone.
+    """
+    open_clipboard(page)
+    disabled = page.evaluate("""() => {
+        window.minipaintClipboard.select('');
+        const host = document.getElementById('minipaint_clipboard_delete_now');
+        const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
+        return b ? b.disabled : null;
+    }""")
+    r.check("with nothing selected, the toolbar's Delete cannot be pressed", disabled is True, str(disabled))
+    if not select_first(page):
+        r.check("toolbar delete: a picture is selected first", False, "no selection")
+        return
+    enabled = page.evaluate("""() => {
+        const host = document.getElementById('minipaint_clipboard_delete_now');
+        const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
+        return b ? b.disabled : null;
+    }""")
+    r.check("and selecting one enables it", enabled is False, str(enabled))
+
+    before = page.evaluate(TILES_JS)
+    doomed = before[0]["name"] if before else ""
+    page.evaluate("() => document.getElementById('minipaint_clipboard_delete_now').click()")
+    gone = False
+    for _ in range(20):
+        time.sleep(1)
+        now = page.evaluate(TILES_JS)
+        if len(now) == len(before) - 1 and all(tile["name"] != doomed for tile in now):
+            gone = True
+            break
+    r.check("one press deletes the selected picture, with nothing to confirm", gone,
+            f"{len(before)} -> {len(page.evaluate(TILES_JS))}")
+    r.check("and the confirmation panel was never opened",
+            not page.evaluate("() => { const p = document.getElementById('minipaint_clipboard_delete_panel');"
+                              " return !!(p && getComputedStyle(p).display !== 'none'); }"))
+    r.check("the status line says which picture went",
+            "Deleted" in page.evaluate("() => { const s = document.getElementById('minipaint_clipboard_status');"
+                                       " return s ? s.textContent : ''; }"),
+            page.evaluate("() => { const s = document.getElementById('minipaint_clipboard_status');"
+                          " return (s ? s.textContent : '').slice(0, 80); }"))
+    # Paste reads the system clipboard, which a headless browser has no
+    # permission for and this suite must not grant: what is checked is that
+    # the button is wired to the page's own paste, not to a server round
+    # trip that could not do it anyway.
+    r.check("the toolbar's Paste is the page's own clipboard read",
+            page.evaluate("() => typeof window.minipaintClipboard.pasteFromClipboard === 'function'"))
+    r.check("and it is always pressable, because pasting needs no selection",
+            page.evaluate("""() => {
+                const host = document.getElementById('minipaint_clipboard_paste_now');
+                const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
+                return b ? b.disabled === false : null;
+            }""") is True)
+
+
 def check_hidden_tab_is_not_offered(r: Results, targets) -> None:
     """A destination whose tab the user hid is not offered at all.
 
@@ -1160,6 +1226,9 @@ def run() -> Results:
                 check_the_page_can_say_why_a_send_was_silent(r, page)
                 check_the_notice_takes_itself_down(r, page)
                 check_a_picture_handed_in_arrives_without_the_queue(r, page, library)
+                # Last: it removes a picture from the library the checks above
+                # count.
+                check_the_toolbar_pastes_and_deletes(r, page)
             finally:
                 browser.close()
     finally:

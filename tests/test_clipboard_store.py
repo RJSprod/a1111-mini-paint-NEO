@@ -348,6 +348,71 @@ def document_checks(r: Results, base: pathlib.Path) -> None:
     r.check("the file holds exactly the declared keys", set(json.loads(written)) == {"schema_version", "storage_root", "root_id", "intercept", "sort", "thumbnail"})
 
 
+def send_route_checks(r: Results, base) -> None:
+    """The send that does not need Gradio.
+
+    Sending used to be a hidden box plus a Gradio event over the queue, and
+    when that queue stopped delivering the send simply vanished. This route
+    is the same decision reached over the transport that still works, so
+    what it answers has to be exactly what the browser needs to finish the
+    job - and it has to refuse honestly for the destinations it cannot.
+    """
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from minipaint_neo.clipboard import ui as clip_ui
+
+    # A destination only exists on a page that was built: the route answers
+    # from the tab's own targets, and without a tab there is nothing to name.
+    import forge_like
+    from modules import script_callbacks, shared
+    from minipaint_neo import router, settings
+    from minipaint_neo.canvas import host as canvas_host
+
+    shared.opts.data[settings.USE_OLD_UI] = False
+    script_callbacks.callbacks["after_component"][:] = [canvas_host.on_after_component]
+    canvas_host.reset_capture()
+    forge_like.build_host(lambda: (router.on_ui_tabs() or []) + (clip_ui.on_ui_tabs() or []))
+
+    library = base / "sendable"
+    library.mkdir(exist_ok=True)
+    answer = store.store().set_root(str(library), create=True)
+    r.check("the send route's library is in place", answer["ok"], str(answer))
+    Image.new("RGB", (48, 32), (10, 20, 30)).save(library / "one.png")
+    store.store().refresh()
+    asset = next(iter(store.store().assets()))
+
+    app = FastAPI()
+    routes.install(app)
+    client = TestClient(app)
+
+    answered = client.post(routes.SEND_ROUTE, json={"target": "img2img", "asset": asset.asset_id})
+    body = answered.json()
+    r.check("a send to img2img is answered without Gradio", answered.status_code == 200 and body.get("ok"), str(body)[:160])
+    r.check("and carries the picture the browser has to write",
+            str(body.get("payload", "")).startswith("data:image/"), str(body.get("payload", ""))[:40])
+    r.check("and names the box to write it into, rather than leaving the browser to guess",
+            "box" in body, str(sorted(body)))
+    r.check("and is not marked as one the server has to finish", body.get("backend") is False, str(body.get("backend")))
+
+    stitched = client.post(routes.SEND_ROUTE, json={"target": "stitch_txt2img", "asset": asset.asset_id}).json()
+    r.check("a destination the server writes says so and hands over no payload",
+            stitched.get("ok") and stitched.get("backend") is True and not stitched.get("payload"), str(stitched)[:160])
+
+    unknown = client.post(routes.SEND_ROUTE, json={"target": "nowhere", "asset": asset.asset_id})
+    r.check("a destination that is not one is refused", unknown.status_code == 400 and not unknown.json().get("ok"))
+    missing = client.post(routes.SEND_ROUTE, json={"target": "img2img", "asset": "00" * 16})
+    r.check("a picture that is not there is refused", missing.status_code == 400 and not missing.json().get("ok"))
+    r.check("and a body that is not a send at all is refused rather than guessed at",
+            client.post(routes.SEND_ROUTE, content=b"not json").status_code == 400)
+
+    # The same question asked directly, so the route and the tab cannot drift.
+    plan = clip_ui.send_plan("img2img", asset.asset_id)
+    r.check("the route and the tab answer the same question the same way",
+            plan.get("instruction") == body.get("instruction") and plan.get("backend") == body.get("backend"),
+            f"{plan.get('instruction')!r} vs {body.get('instruction')!r}")
+
+
 def run() -> Results:
     r = Results("clipboard store")
     with tempfile.TemporaryDirectory(prefix="minipaint-clipboard-") as scratch:
@@ -363,6 +428,7 @@ def run() -> Results:
             refresh_checks(r, base)
             root_change_checks(r, base)
             document_checks(r, base)
+            send_route_checks(r, base)
         finally:
             wangp_config.use_config_dir(None)
             config.use_config_dir(None)

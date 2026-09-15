@@ -10,6 +10,45 @@ raise into WanGP.
 
 ---
 
+## Sending a picture out, when the queue is not delivering
+
+`POST /minipaint-clipboard/send` with `{"target": ..., "asset": ...}` answers
+with everything the browser needs to finish a send, and nothing about Gradio.
+
+It exists because sending used to be a hidden textbox written by script plus a
+Gradio event carrying it over the queue. When that queue stops delivering - a
+connection that dropped and did not come back, a session the server has
+forgotten - the box is written and nothing else happens, for as long as the
+page stays open. Everything else the tab does for a running job rides plain
+HTTP and keeps working through exactly that failure: the event stream, the
+imports, the thumbnails. Only the actions were tied to the queue.
+
+The answer:
+
+    {"ok": true, "target": "img2img", "label": "img2img", "filename": "x.png",
+     "backend": false, "instruction": "img2img", "box": "uuid_...",
+     "payload": "data:image/png;base64,..."}
+
+`payload` and `box` are present for `img2img` and `inpaint` only. Those two
+are delivered by the browser writing the host canvas's hidden textbox - which
+is browser work however the send was carried - so they finish completely with
+no server events at all. `box` is named by the server because only it knows
+which canvas the host registered for that tab, and because ForgeCanvas gives
+its background and scribble boxes the same id and tells them apart by class.
+
+`backend: true` marks a destination the server has to write itself - the
+Extras image, the ImageStitch galleries. There is no payload for those and the
+browser is told so plainly, rather than being handed something it cannot
+deliver and reporting a send that did not happen.
+
+Both this route and the tab's own Gradio path decide what a send means in one
+place, `ui.send_plan`, so they cannot drift apart. The route answers from the
+built tab's own destinations (`ui.current()`), not from a fresh lookup: asking
+the host again rebuilds its answer from whatever was registered last, and a
+process that built a page more than once would otherwise name a box nothing on
+the page is listening to.
+
+
 ## The public contract — `minipaint.wangp.queue/v1` (protocol 5)
 
 ```

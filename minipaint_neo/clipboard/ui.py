@@ -517,6 +517,76 @@ def _nonce() -> str:
     return secrets.token_hex(4)
 
 
+#: The ClipboardTab most recently built, so the HTTP send route answers from
+#: the same destinations the tab itself was wired to. Asking the host again
+#: is not the same question: it rebuilds its answer from whatever was
+#: registered last, and a page built more than once in a process (a test, a
+#: Reload UI) hands back components the running tab never used - so the route
+#: would name a box that nothing on the page is listening to.
+_current: typing.Dict[str, typing.Any] = {"tab": None}
+
+
+def current() -> typing.Optional["ClipboardTab"]:
+    """The Clipboard tab of the UI being built, or None when there is none."""
+    return _current.get("tab")
+
+
+def send_plan(target: typing.Any, asset_id: typing.Any) -> dict:
+    """Everything the browser needs to finish a send, without Gradio.
+
+    The Gradio path and the HTTP route in ``routes.py`` both end up here, so
+    "what does sending to X mean" is decided once. What differs is only who
+    carries the answer: an event over the queue, or a JSON response over the
+    transport that still works when the queue does not.
+
+    ``backend`` says the destination is one the server writes - the Extras
+    image, the ImageStitch galleries - which no amount of browser work can
+    complete. The browser is told so plainly instead of being handed a
+    payload it cannot deliver.
+    """
+    name = str(target or "")
+    label = canvas_ui.DESTINATION_LABELS.get(name, name)
+    if name not in canvas_ui.DESTINATION_LABELS and name != "minipaint":
+        return {"ok": False, "code": errors.REQUEST_INVALID,
+                "message": f"{label or 'That destination'} is not a destination."}
+    library = store.store()
+    found = library.get(asset_id) if _hex(asset_id) else None
+    if found is None:
+        return {"ok": False, "code": errors.CLIPBOARD_ASSET_UNKNOWN,
+                "message": "Select an image in the browser first."}
+    try:
+        image = library.open_image(found.asset_id)
+    except IntegrationError as error:
+        return {"ok": False, "code": error.code, "message": errors.message(error.code)}
+
+    plan: dict = {"ok": True, "target": name, "filename": found.filename,
+                  "label": label, "backend": name in canvas_ui.BACKEND_TARGETS}
+    if name == "minipaint":
+        plan["instruction"] = "minipaint"
+        plan["asset"] = found.asset_id
+        return plan
+    if name in ("img2img", "inpaint"):
+        # The browser finishes these by writing the host canvas's hidden
+        # textbox, so it is told exactly which one rather than deducing it
+        # from the page: ForgeCanvas gives its two boxes the same id and
+        # tells them apart by class, and only this side knows which canvas
+        # the host registered for this tab.
+        tab = current()
+        targets = tab.targets if tab is not None else host.destinations()
+        box = getattr(targets.get(name), "elem_id", "") or ""
+        if not box:
+            return {"ok": False, "code": errors.REQUEST_INVALID,
+                    "message": f"There is no {label} on this page to send to."}
+        plan["box"] = box
+        plan["instruction"] = f"inpaint:{image.width}x{image.height}" if name == "inpaint" else name
+        plan["payload"] = imaging.to_data_url(image)
+    else:
+        # Extras and the stitch galleries are written from the backend; there
+        # is nothing to hand the browser and it must not be told otherwise.
+        plan["instruction"] = name
+    return plan
+
+
 # ----------------------------------------------------------------- the tab --
 
 
@@ -1522,6 +1592,7 @@ def _keep_build_context():
 def create_ui() -> ClipboardTab:
     tab = ClipboardTab()
     tab.build()
+    _current["tab"] = tab
     return tab
 
 

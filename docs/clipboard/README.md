@@ -288,6 +288,41 @@ recorded, and a request from another extension is in the Queue but never in this
   picture — no folder chosen, a refused file — it goes to the Canvas as before, with the
   reason on the Canvas's status line.
 
+## When the page loses its connection
+
+Sending a picture out used to be two halves: a hidden textbox written by
+script, and a Gradio event carrying it over the queue. The first half always
+worked; the second could stop delivering - a connection that dropped and did
+not come back, a session the server has forgotten - and then the menu item did
+nothing at all. No picture, no error, no status. Everything else the tab does
+for a running job kept working through exactly that failure, because the
+queue, the event stream, the imports and the thumbnails all ride ordinary
+HTTP. Only the actions were tied to Gradio.
+
+They are not any more:
+
+* Every send is acknowledged. The server echoes back the stamp the browser put
+  on its own request, so the page can tell "refused" from "never heard" -
+  which it could not before, and which is why the failure was so hard to
+  place.
+
+* A send the queue does not carry is finished over `POST
+  /minipaint-clipboard/send` instead, about twelve seconds later. **img2img**
+  and **Inpaint** complete fully: their pictures are delivered by writing the
+  host canvas's hidden textbox, which is browser work however the send was
+  carried, so nothing is missing and the tab still switches. The status line
+  says the page had lost its connection, so a picture arriving late is not a
+  mystery.
+
+* **Extras** and the two **ImageStitch** galleries are written by the server
+  itself, and no amount of browser work can finish those. Those say so -
+  "needs the connection back" - rather than reporting a send that did not
+  happen.
+
+Reloading the page still fixes everything, and is still the right move when
+the status line says the connection is gone. The difference is that the tab
+now tells you that is what happened.
+
 ## Where things live
 
 | what | where |

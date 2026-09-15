@@ -41,6 +41,7 @@ window.minipaintClipboard = (function () {
     //: Matches the stylesheet's own default for --minipaint-clip-thumb.
     const DEFAULT_THUMB = 144;
     const IMPORT_ROUTE = "/minipaint-clipboard/import";
+    const SEND_ROUTE = "/minipaint-clipboard/send";
     const BOXES = {
         selected: "minipaint_clipboard_selected",
         sortRequest: "minipaint_clipboard_sort_request",
@@ -575,9 +576,68 @@ window.minipaintClipboard = (function () {
             done();
             if (boxValue(BOXES.sendAck) === stamp) { return; }
             note("send " + target + ": no acknowledgement after "
-                 + Math.round(SEND_TIMEOUT_MS / 1000) + "s; this page is not being heard by the server");
-            toast("That send never reached the server - this page has lost its connection. Reload it and try again.", true);
+                 + Math.round(SEND_TIMEOUT_MS / 1000) + "s; falling back to the direct route");
+            sendOverHttp(target);
         }, SEND_TIMEOUT_MS);
+    }
+
+    /**
+     * Finish a send over plain HTTP, because the queue did not carry it.
+     *
+     * The event stream, the imports and the thumbnails all ride ordinary
+     * HTTP and keep working when Gradio's queue stops delivering; only the
+     * actions were tied to the queue, which is why a page that could still
+     * talk to the server could not send a picture out of this tab.
+     *
+     * img2img and Inpaint finish completely here: their pictures are
+     * delivered by writing a hidden textbox, which is browser work either
+     * way, so nothing is missing. The destinations the server writes cannot
+     * be finished without it, and say so rather than looking like they went.
+     */
+    async function sendOverHttp(target) {
+        if (!S.selected) { return false; }
+        let plan;
+        try {
+            const response = await fetch(SEND_ROUTE, {
+                method: "POST",
+                credentials: "same-origin",
+                cache: "no-store",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ target: target, asset: S.selected })
+            });
+            plan = await response.json();
+        } catch (error) {
+            note("send " + target + ": the direct route could not be reached either");
+            toast("That send never reached the server - this page has lost its connection. Reload it and try again.", true);
+            return false;
+        }
+        if (!plan || !plan.ok) {
+            note("send " + target + ": the direct route refused it (" + ((plan && plan.code) || "unknown") + ")");
+            toast((plan && plan.message) || "That picture could not be sent.", true);
+            return false;
+        }
+        if (plan.backend || !plan.payload) {
+            // Extras and the ImageStitch galleries are written by the server.
+            note("send " + target + ": prepared, but " + (plan.label || target)
+                 + " is filled in by the server and the connection is down");
+            toast((plan.label || target) + " is filled in by the server, so this one needs the connection back. "
+                  + "Reload the page and try again.", true);
+            return false;
+        }
+        const canvas = window.minipaintCanvas;
+        if (!canvas || typeof canvas.deliverToHost !== "function") {
+            toast("That send could not be completed by this page. Reload it and try again.", true);
+            return false;
+        }
+        const delivered = canvas.deliverToHost(plan.instruction, plan.payload, plan.box);
+        if (!delivered) {
+            note("send " + target + ": nowhere on this page to put it");
+            toast("There is no " + (plan.label || target) + " on this page to send to.", true);
+            return false;
+        }
+        note("send " + target + ": delivered over the direct route without the queue");
+        toast("Sent " + plan.filename + " to " + (plan.label || target) + " (the page had lost its connection).");
+        return true;
     }
 
     /* ------------------------------------------------------------------ */

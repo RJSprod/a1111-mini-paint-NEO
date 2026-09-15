@@ -750,8 +750,16 @@ window.minipaintCanvas = (function () {
     function sendInput(id, text) {
         const target = document.querySelector("#" + id + " textarea");
         if (!target) { return false; }
+        // Through the host's own accessor, not a plain assignment: see
+        // window.minipaintWriteInput in javascript/main.js. A framework keeps
+        // its own record of what an input holds, and an assignment leaves it
+        // untouched - the write lands and the event never happens.
+        if (typeof window.minipaintWriteInput === "function") {
+            return window.minipaintWriteInput(target, text);
+        }
         target.value = text;
         target.dispatchEvent(new Event("input", { bubbles: true }));
+        target.dispatchEvent(new Event("change", { bubbles: true }));
         return true;
     }
 
@@ -795,8 +803,16 @@ window.minipaintCanvas = (function () {
         const bind = i && i.foreground_gradio_bind;
         const target = bind && bind.target;
         if (!target) { return false; }
+        // Through the host's own accessor, not a plain assignment: see
+        // window.minipaintWriteInput in javascript/main.js. A framework keeps
+        // its own record of what an input holds, and an assignment leaves it
+        // untouched - the write lands and the event never happens.
+        if (typeof window.minipaintWriteInput === "function") {
+            return window.minipaintWriteInput(target, value);
+        }
         target.value = value;
         target.dispatchEvent(new Event("input", { bubbles: true }));
+        target.dispatchEvent(new Event("change", { bubbles: true }));
         return true;
     }
 
@@ -2821,6 +2837,17 @@ window.minipaintCanvas = (function () {
     //: img2img's sub-tabs, by the destination each one owns.
     const IMG2IMG_DESTINATIONS = { img2img: "img2img_img2img", inpaint: "img2img_inpaint" };
 
+    /** One of the host's own inputs, written so the host hears it. */
+    function writeHostInput(element, value) {
+        if (typeof window.minipaintWriteInput === "function") {
+            return window.minipaintWriteInput(element, value);
+        }
+        element.value = String(value);
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+    }
+
     /** The write with nothing behind it, for a page without the library. */
     function deliverTheOldWay(name, payload, id) {
         if (!id) { return false; }
@@ -2829,8 +2856,7 @@ window.minipaintCanvas = (function () {
             || root.querySelector('[id="' + id + '"].logical_image_background');
         const field = host ? host.querySelector("textarea, input") : null;
         if (!field) { return false; }
-        field.value = String(payload);
-        field.dispatchEvent(new Event("input", { bubbles: true }));
+        writeHostInput(field, String(payload));
         // Inpaint carries a mask layer, and the queued path clears it in the
         // same breath as the picture. A new picture under the previous
         // picture's mask is not the same send, so it is cleared here too.
@@ -2838,10 +2864,7 @@ window.minipaintCanvas = (function () {
             const mask = root.querySelector('.logical_image_foreground[id="' + id + '"]')
                 || root.querySelector('[id="' + id + '"].logical_image_foreground');
             const maskField = mask ? mask.querySelector("textarea, input") : null;
-            if (maskField) {
-                maskField.value = "";
-                maskField.dispatchEvent(new Event("input", { bubbles: true }));
-            }
+            if (maskField) { writeHostInput(maskField, ""); }
         }
         switchTo(name);
         return true;

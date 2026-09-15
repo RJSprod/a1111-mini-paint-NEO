@@ -600,6 +600,71 @@ def check_a_picture_handed_in_arrives_without_the_queue(r: Results, page, librar
         page.evaluate("() => window.minipaintClipboard.closeMenu()")
 
 
+
+def check_a_send_reaches_a_framework_owned_input(r: Results, page, targets) -> None:
+    """The server hears the send even when its inputs are framework-owned.
+
+    Every send this tab makes crosses to the server by writing a hidden
+    textbox. That write was a plain assignment, and a plain assignment is
+    exactly what a framework does not hear: it keeps its own record of what
+    an input holds, an assignment touches the DOM and not the record, so the
+    framework compares the two, sees no change and sends nothing. The write
+    succeeds and the event never happens - which is what a user's logs
+    showed, every send "delivered from the page" and not one of them ever
+    acknowledged, on a desktop browser that never lost its connection.
+
+    It worked on the Gradio this suite runs against, which is why nothing
+    caught it. So the input is made to behave the way a framework-owned one
+    does: its own value property ignores assignment, while the prototype's
+    setter - the way in that every framework leaves open - still works.
+    """
+    open_clipboard(page)
+    if not select_first(page):
+        r.check("framework-owned input: a picture is selected first", False, "no selection")
+        return
+
+    ignored = page.evaluate("""() => {
+        const host = document.getElementById('minipaint_clipboard_send_request');
+        const el = host && host.querySelector('textarea, input');
+        if (!el) { return false; }
+        const prototype = el.tagName === 'TEXTAREA'
+            ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+        const native = Object.getOwnPropertyDescriptor(prototype, 'value');
+        Object.defineProperty(el, 'value', {
+            configurable: true,
+            get() { return native.get.call(this); },
+            set(_v) { /* owned by the framework: an assignment is not a change */ }
+        });
+        return true;
+    }""")
+    r.check("framework-owned input: the hidden box is owned the way a framework owns it", ignored)
+    r.check("framework-owned input: and a plain assignment really is ignored",
+            page.evaluate("""() => {
+                const host = document.getElementById('minipaint_clipboard_send_request');
+                const el = host.querySelector('textarea, input');
+                el.value = 'ignore me';
+                return el.value !== 'ignore me';
+            }"""))
+    try:
+        before = box(page, "minipaint_clipboard_send_ack")
+        r.check("framework-owned input: the send is attempted", send_selected(page, "img2img") == "clicked")
+        answered = False
+        for _ in range(20):
+            time.sleep(1)
+            if box(page, "minipaint_clipboard_send_ack") not in (None, "", before):
+                answered = True
+                break
+        r.check("framework-owned input: the server still receives the send",
+                answered, repr(box(page, "minipaint_clipboard_send_ack")))
+    finally:
+        page.evaluate("""() => {
+            const host = document.getElementById('minipaint_clipboard_send_request');
+            const el = host && host.querySelector('textarea, input');
+            if (el) { delete el.value; }
+        }""")
+        time.sleep(0.5)
+
+
 def check_a_render_cannot_take_the_selection(r: Results, page) -> None:
     """A render must not clear a selection this page made.
 
@@ -803,6 +868,7 @@ def run() -> Results:
                 check_send_survives_a_dead_queue(r, page, targets)
                 check_a_component_destination_fills_without_the_queue(r, page, targets)
                 check_a_render_cannot_take_the_selection(r, page)
+                check_a_send_reaches_a_framework_owned_input(r, page, targets)
                 check_a_picture_handed_in_arrives_without_the_queue(r, page, library)
             finally:
                 browser.close()

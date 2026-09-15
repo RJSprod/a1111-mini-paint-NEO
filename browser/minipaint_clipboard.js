@@ -123,7 +123,10 @@ window.minipaintClipboard = (function () {
         pasteListener: null,
         outboxListener: null,
         outboxRefreshTimer: null,
-        toastTimer: null
+        toastTimer: null,
+        //: When the grid was last re-rendered by the server. A round trip
+        //: landing is what tells the page the connection is back.
+        renderedAt: 0
     };
 
     /* ------------------------------------------------------------------ */
@@ -155,8 +158,16 @@ window.minipaintClipboard = (function () {
     function sendInput(id, text) {
         const target = textarea(id);
         if (!target) { return false; }
+        // Through the host's own accessor, not a plain assignment: see
+        // window.minipaintWriteInput in javascript/main.js. A framework keeps
+        // its own record of what an input holds, and an assignment leaves it
+        // untouched - the write lands and the event never happens.
+        if (typeof window.minipaintWriteInput === "function") {
+            return window.minipaintWriteInput(target, text);
+        }
         target.value = text;
         target.dispatchEvent(new Event("input", { bubbles: true }));
+        target.dispatchEvent(new Event("change", { bubbles: true }));
         return true;
     }
 
@@ -232,14 +243,44 @@ window.minipaintClipboard = (function () {
             const button = document.createElement("button");
             button.type = "button";
             button.className = "minipaint-clip-offline-reconnect";
-            button.textContent = "Reconnect";
-            button.title = "Reloads this page.";
-            button.addEventListener("click", function () { window.location.reload(); });
+            button.textContent = "Check again";
+            button.title = "Asks the server for the library again, and clears this line if it answers.";
+            // NEVER A RELOAD. This offered one, and on a Forge behind its own
+            // TLS front end reloading took the whole WebUI page with it - the
+            // session gone, for a line that is only ever advisory. A button
+            // that can cost more than the problem it reports is not a repair.
+            button.addEventListener("click", function () { checkConnection(); });
             bar.appendChild(line);
             bar.appendChild(button);
             container.insertBefore(bar, container.firstChild);
         }
         bar.hidden = false;
+    }
+
+    /**
+     * Ask the server for something small, and clear the notice if it answers.
+     *
+     * A re-render of the grid is a whole Gradio round trip - the press goes
+     * over the queue and the answer comes back through the same channel the
+     * notice is about - so one arriving is the evidence the line is stale.
+     */
+    function checkConnection() {
+        const before = S.renderedAt;
+        pressHidden(PRESS.refresh);
+        let waited = 0;
+        const timer = setInterval(function () {
+            waited += 500;
+            if (S.renderedAt !== before) {
+                clearInterval(timer);
+                connectionNotice(false);
+                toast("The connection is back.");
+                return;
+            }
+            if (waited >= 8000) {
+                clearInterval(timer);
+                toast("Still no answer from the server. Sending works; the rest needs it back.", true);
+            }
+        }, 500);
     }
 
     function tabVisible() {
@@ -299,6 +340,7 @@ window.minipaintClipboard = (function () {
         if (!keep) { keep = onGrid(confirmed) ? confirmed : ""; }
         else if (listed.length && !onGrid(keep)) { keep = ""; }
         select(keep, true);
+        S.renderedAt = Date.now();
         if (confirmed !== keep) { sendInput(BOXES.selected, keep); }
         // The grid element is new after every refresh, so the size written
         // onto the old one went with it. Put the remembered one back rather
@@ -503,8 +545,8 @@ window.minipaintClipboard = (function () {
         const state = menuState();
         if (!state.intercept) {
             note("receive: the picture never arrived, and the Canvas cannot be filled from here");
-            toast("That picture did not reach Mini Paint - this page has lost its live connection. "
-                  + "Reconnect and try again.", true);
+            toast("That picture did not reach Mini Paint - this page has lost its live connection "
+                  + "to the server, and only the server can fill the Canvas.", true);
             connectionNotice(true);
             return false;
         }

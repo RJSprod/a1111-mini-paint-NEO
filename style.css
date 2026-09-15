@@ -957,6 +957,13 @@
 #minipaint_clipboard_root .minipaint-clip-item {
     display: flex;
     flex-direction: column;
+    /* The tile centres what it holds. object-fit centres a picture inside
+       its own box and auto margins centre a block in its containing block,
+       and both of those stop meaning anything the moment something else
+       decides the picture is not a full-width block - so the tile says it
+       too, from the outside, where nothing inside can lose it. The two
+       full-width children opt back out below. */
+    align-items: center;
     gap: 4px;
     min-width: 0;
     min-height: 0;
@@ -996,6 +1003,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    align-self: stretch;
     width: 100%;
     flex: 1 1 auto;
     min-height: 0;
@@ -1036,6 +1044,9 @@
 #minipaint_clipboard_root .minipaint-clip-name {
     display: block;
     flex: 0 0 auto;
+    /* The name is the tile's width, not its own: centring it would let a
+       long one shrink-wrap out past the edge instead of being clipped. */
+    align-self: stretch;
     min-width: 0;
     font-size: 12px;
     line-height: 1.3;

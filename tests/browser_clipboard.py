@@ -342,6 +342,20 @@ def check_grid(r: Results, page) -> None:
                              " return i ? i.value : ''; }")
         r.check(f"the grid itself carries the size the slider holds (asked {size})",
                 shown == held + "px", f"grid {shown!r} vs slider {held!r}")
+        # The tile has to be the SHAPE of the picture it holds, not just a
+        # uniform size. The columns used to be stretched to fill the row
+        # while the rows came from the slider, so every box was wider than it
+        # was tall - at 260px, 369 wide and 264 tall - and a square picture
+        # sat in it with a hundred pixels of dead space around it. Reported
+        # as "the tile's border extends well beyond the thumbnail", which is
+        # what it looks like from outside, and not a centring fault at all.
+        box = after[0]
+        r.check(f"and the box a picture is drawn in is square at {size}",
+                abs(box["thumbW"] - box["thumbH"]) <= 2,
+                f"{box['thumbW']}x{box['thumbH']}")
+        r.check(f"so a picture as wide as it is tall fills it at {size}",
+                any(t["paintW"] >= box["thumbW"] - 2 and t["paintH"] >= box["thumbH"] - 2 for t in after),
+                str(sorted((t["paintW"], t["paintH"]) for t in after)))
 
     # A refresh replaces the grid element; the size must not snap back.
     set_slider(page, 220)
@@ -817,6 +831,48 @@ def check_a_send_survives_a_box_the_host_never_hears(r: Results, page, targets) 
         time.sleep(0.5)
 
 
+def check_the_notice_takes_itself_down(r: Results, page) -> None:
+    """The page gets its own connection back, without being asked to.
+
+    The notice used to stand until somebody pressed Check again - the page
+    asking a person to do the one thing it could do itself, and the honest
+    answer to "why can I not just have it back" was that nothing was trying.
+    Something is now: while the line is up the page asks the server for the
+    library again on a backing-off timer, and takes the line down when an
+    answer arrives.
+
+    Driven here by putting the line up with the server perfectly healthy,
+    which is exactly the state a page is in a moment after a round trip is
+    lost and comes back.
+    """
+    open_clipboard(page)
+    page.evaluate("() => window.minipaintClipboard.debug && null")
+    shown = page.evaluate("""() => {
+        const api = window.minipaintClipboard;
+        if (!api || typeof api.showOffline !== 'function') { return false; }
+        api.showOffline(true);
+        const bar = document.querySelector('.minipaint-clip-offline');
+        return !!(bar && !bar.hidden);
+    }""")
+    r.check("the connection notice can be raised", shown)
+    if not shown:
+        return
+    r.check("and says it is trying again by itself, rather than only offering a button",
+            "by itself" in page.evaluate("() => { const b = document.querySelector('.minipaint-clip-offline-text');"
+                                         " return b ? b.textContent : ''; }"))
+    gone = False
+    for _ in range(25):
+        time.sleep(1)
+        if page.evaluate("() => { const b = document.querySelector('.minipaint-clip-offline');"
+                         " return !b || b.hidden; }"):
+            gone = True
+            break
+    r.check("and it takes itself down once the server answers, with nothing pressed", gone)
+    r.check("leaving no timer behind on a page that is fine",
+            page.evaluate("() => window.minipaintClipboard.debug().retrying") is False,
+            str(page.evaluate("() => window.minipaintClipboard.debug().retrying")))
+
+
 def check_the_page_can_say_why_a_send_was_silent(r: Results, page) -> None:
     """A silent send produces facts, not another guess.
 
@@ -1102,6 +1158,7 @@ def run() -> Results:
                 check_a_send_reaches_a_framework_owned_input(r, page, targets)
                 check_a_send_survives_a_box_the_host_never_hears(r, page, targets)
                 check_the_page_can_say_why_a_send_was_silent(r, page)
+                check_the_notice_takes_itself_down(r, page)
                 check_a_picture_handed_in_arrives_without_the_queue(r, page, library)
             finally:
                 browser.close()

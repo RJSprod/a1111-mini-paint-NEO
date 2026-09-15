@@ -69,6 +69,16 @@ write is harmless for a canvas and one picture too many for a gallery that
 appends. An unmarked request still performs the send, which is what happens
 when the page could not place it.
 
+**The send names no component from another tab.** `send` writes only this
+tab's own boxes (`switch`, `payload`, `to_canvas`, `status`, `send_ack`), so
+the event can always run. Extras and the stitch galleries are held in
+components belonging to other tabs, and an event naming one that is not on
+the page cannot run at all - silently, for ever - so they are wired to
+`send_backend.click` on their own, pressed by the browser only when
+`send_plan` came back `backend: true`. `host.destinations` also drops any
+component whose `is_rendered` is false, so one built but never placed is not
+offered in the first place.
+
 **Two events carry that request, not one.** The browser writes
 `send_request` and then presses the hidden `send_press` button;
 `send_press.click` and `send_request.input` are bound to the same callback,

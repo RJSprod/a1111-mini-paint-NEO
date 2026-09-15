@@ -384,29 +384,55 @@ the two, see no change, and send nothing. The write succeeds and the event
 never happens - and from the page's side there is nothing to report, because
 the write worked.
 
-**A send does not rest on that any more, and this is why.** One user's logs,
-across four builds, contain not one acknowledged send. The same logs, on the
-same pages, contain fifty-six Add to Queue round trips that reached the
-server and came back. The connection, the session and the queue were all
-working; what separates the two is that Add to Queue is a button somebody
-presses and a send was a hidden box written by script. Three of those four
-builds were better ways to write the box, and the logs after each say exactly
-what the logs before say.
+**None of that was the fault, and here is what was.** Five builds went on
+sending, and the page's own report named the cause in one line the first time
+it was asked:
 
-So a send writes the box *and* presses a hidden button
-(`minipaint_clipboard_send_press`). The box is the request; the press only
-says "read it". Both are wired to the same callback with the same outputs and
-the same follow-up steps, and `ClipboardTab.send` remembers the requests it
-has answered, so whichever arrives first delivers the picture and any later
-arrival gets the same receipt and does nothing. Remembering more than the
-last one is deliberate: on a page whose framework never heard a write, a
-press carries whatever value the framework still holds for that box, which
-may be a request from several sends ago - and re-delivering *that* would put
-a picture the user has moved on from into their canvas.
+```
+request box: 1 element(s), 1 component(s), wired for input
+             but naming 1 component(s) NOT ON THIS PAGE,
+             which is an event the host cannot run
+```
 
-The suite checks the press against the failure it is for: the write is made
-unhearable (its events are stopped before they reach the element, so the
-framework is never told) and the send still has to arrive.
+The send event named, among its outputs, a component that no page contained.
+Gradio does not complain about that - it simply never runs the event. No
+error, no failed request, no console line: the control is there, the write
+lands, and nothing answers, on every build, for ever, while every other event
+on the same tab works.
+
+Where the component came from: destinations belong to other tabs and are
+remembered as the host builds its UI, and the hook that remembers one fires
+when a component is CREATED. Creating is not placing. Gradio has
+``render=False``, a scratch context is a normal thing to build in, and a
+script can build a component for one tab and place only the copy it made for
+another. ``host.destinations`` now asks Gradio's own ``is_rendered`` and
+drops anything that was never put anywhere.
+
+And the severity was not the missing destination. Every send named every
+backend destination in its outputs, so one component nobody rendered stopped
+sending to *all* of them - including img2img, a canvas plainly on the page,
+which the browser was writing perfectly well on its own. So ``send`` names
+nothing but this tab's own boxes now and can always run, and the outputs that
+carry that risk moved to ``send_backend``, pressed only when the page has
+just found out it cannot place the picture itself. A destination that is not
+on the page costs that destination.
+
+A send also writes the box *and* presses a hidden button
+(`minipaint_clipboard_send_press`), and posts the request to the tab's own
+HTTP route. That was built for a different theory of the fault and is kept,
+because none of the three costs anything and no two of them fail together:
+the box is the request, the press only says "read it", and the route is where
+the request waits when the framework is holding a stale value for that box.
+`ClipboardTab.send` remembers the requests it has answered, so whichever
+arrives first delivers the picture and any later arrival gets the same
+receipt. Remembering more than the last one is deliberate: a press carries
+whatever value the framework holds for the box, which on an unlucky page may
+be a request from several sends ago - and re-delivering *that* would put a
+picture the user has moved on from into their canvas.
+
+The suite checks each against the failure it is for: a destination built but
+never rendered must not be offered and must not break the other destinations,
+and the send must still arrive with the page made deaf to the write.
 
 ### When something crosses to the server and nothing happens
 

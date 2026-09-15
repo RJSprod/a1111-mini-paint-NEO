@@ -65,7 +65,8 @@ window.minipaintClipboard = (function () {
         paste: "minipaint_clipboard_paste_open",
         history: "minipaint_clipboard_history_open",
         outboxRefresh: "minipaint_clipboard_outbox_refresh",
-        send: "minipaint_clipboard_send_press"
+        send: "minipaint_clipboard_send_press",
+        sendBackend: "minipaint_clipboard_send_backend"
     };
     const ROLE_IDS = { first: "minipaint_clipboard_to_first", last: "minipaint_clipboard_to_last", ref: "minipaint_clipboard_to_ref" };
     const SLOT_UPLOAD_PREFIX = "minipaint_clipboard_slot_upload_";
@@ -129,7 +130,12 @@ window.minipaintClipboard = (function () {
         //: landing is what tells the page the connection is back.
         renderedAt: 0,
         //: The last thing reportTiles said, so an unchanged grid says it once.
-        tileReport: ""
+        tileReport: "",
+        //: The self-check that runs only while the connection notice is up.
+        retryTimer: 0,
+        retryDelay: 0,
+        retryPending: false,
+        retryVisibility: null
     };
 
     /* ------------------------------------------------------------------ */
@@ -231,6 +237,7 @@ window.minipaintClipboard = (function () {
         if (!container) { return; }
         let bar = container.querySelector(".minipaint-clip-offline");
         if (!show) {
+            stopRetrying();
             if (bar) { bar.hidden = true; }
             return;
         }
@@ -242,7 +249,8 @@ window.minipaintClipboard = (function () {
             line.className = "minipaint-clip-offline-text";
             line.textContent = "This page has lost its live connection to Forge. Sending still works - "
                 + "pictures are placed by the page itself. The status line, the queue and new "
-                + "thumbnails need the connection back.";
+                + "thumbnails need the connection back. Trying again by itself; this line goes "
+                + "when the server answers.";
             const button = document.createElement("button");
             button.type = "button";
             button.className = "minipaint-clip-offline-reconnect";
@@ -258,6 +266,83 @@ window.minipaintClipboard = (function () {
             container.insertBefore(bar, container.firstChild);
         }
         bar.hidden = false;
+        retryConnection();
+    }
+
+    //: How long the page waits before trying the server again, and the
+    //: ceiling it backs off to. It starts short because most of what breaks
+    //: a round trip is brief, and backs off because a server that is down is
+    //: down and a page that asks every five seconds for an hour is a page
+    //: nobody should have to have open.
+    const RETRY_FIRST_MS = 5000;
+    const RETRY_LIMIT_MS = 60000;
+
+    /**
+     * Keep asking, so nobody has to press anything.
+     *
+     * The notice used to sit there until the user pressed Check again, which
+     * is the page asking a person to do what it could do itself - and the
+     * honest answer to "why can I not just have it back" was that nothing
+     * was trying. Now something is: while the line is up, and only while it
+     * is up, the page asks for the library again on a backing-off timer and
+     * takes the line down the moment an answer arrives. The button is still
+     * there for somebody who does not want to wait.
+     *
+     * Bounded on both sides. It runs only while the notice is showing - a
+     * healthy page has no timer at all - and it does not fire while the tab
+     * is in the background, where the reply would be throttled and the
+     * attempt wasted; coming back on screen tries immediately, which is the
+     * moment a person is most likely to be looking at it.
+     */
+    /** Whether the line is actually up, which is what the retry follows. */
+    function noticeShowing() {
+        const container = byId(BROWSER_ID) || root();
+        const bar = container ? container.querySelector(".minipaint-clip-offline") : null;
+        return !!(bar && !bar.hidden);
+    }
+
+    function retryConnection() {
+        if (S.retryTimer) { return; }
+        S.retryDelay = RETRY_FIRST_MS;
+        const attempt = function () {
+            S.retryTimer = 0;
+            if (!noticeShowing()) { return; }
+            if (document.visibilityState === "hidden") {
+                // Nothing is thrown away: coming back on screen re-arms it,
+                // and the deadline was never going to be honoured here.
+                S.retryPending = true;
+                return;
+            }
+            const before = S.renderedAt;
+            pressHidden(PRESS.refresh);
+            setTimeout(function () {
+                if (!noticeShowing()) { return; }
+                if (S.renderedAt !== before) {
+                    S.queueDown = false;
+                    connectionNotice(false);
+                    toast("The connection is back.");
+                    note("connection: came back on its own after " + Math.round(S.retryDelay / 1000) + "s");
+                    return;
+                }
+                S.retryDelay = Math.min(S.retryDelay * 2, RETRY_LIMIT_MS);
+                S.retryTimer = setTimeout(attempt, S.retryDelay);
+            }, 3000);
+        };
+        S.retryTimer = setTimeout(attempt, S.retryDelay);
+        if (!S.retryVisibility) {
+            S.retryVisibility = function () {
+                if (document.visibilityState !== "visible" || !noticeShowing() || !S.retryPending) { return; }
+                S.retryPending = false;
+                if (S.retryTimer) { clearTimeout(S.retryTimer); }
+                S.retryTimer = setTimeout(attempt, 250);
+            };
+            document.addEventListener("visibilitychange", S.retryVisibility);
+        }
+    }
+
+    function stopRetrying() {
+        if (S.retryTimer) { clearTimeout(S.retryTimer); S.retryTimer = 0; }
+        S.retryPending = false;
     }
 
     /**
@@ -850,6 +935,13 @@ window.minipaintClipboard = (function () {
         const recorded = await recordRequest(request);
         const written = sendInput(BOXES.sendRequest, request);
         const pressed = pressHidden(PRESS.send);
+        // A destination only the server can fill gets its own press, and
+        // only now that the page knows it could not fill it. That event is
+        // the one whose outputs name another tab's component - the one thing
+        // an event can name that may not be on this page - so it is kept off
+        // the path every other send takes. If it cannot run, this one
+        // destination fails and the rest are untouched.
+        if (outcome && outcome.backend) { pressHidden(PRESS.sendBackend); }
         if (!written || !pressed) {
             // Half-built tab: say which half is missing rather than "it did
             // not work", and only give up if the picture did not go either.
@@ -1046,9 +1138,10 @@ window.minipaintClipboard = (function () {
         }
         const label = plan.label || target;
         if (plan.backend || !plan.payload) {
-            // Nothing on this page to put it in: the server has to do it.
-            return { ok: false, label: label, filename: plan.filename,
-                     reason: label + " is filled in by the server, and this page has no live connection to it" };
+            // Nothing on this page to put it in: the server has to do it,
+            // through its own event. See sendTo, which presses it.
+            return { ok: false, backend: true, label: label, filename: plan.filename,
+                     reason: label + " can only be filled in by the server" };
         }
         const canvas = window.minipaintCanvas;
         if (!canvas || typeof canvas.deliverToHost !== "function") {
@@ -1408,7 +1501,7 @@ window.minipaintClipboard = (function () {
     function debug() {
         return { attached: S.attached, selected: S.selected, menuOpen: !!(S.menu && !S.menu.hidden), menuSection: S.menuSection,
                  capabilities: S.capabilities, watching: !!S.watch, lastInstruction: S.lastInstruction.slice(0, 40), page: pageId(),
-                 model: S.lastModel };
+                 model: S.lastModel, retrying: !!S.retryTimer || S.retryPending };
     }
 
     return {
@@ -1427,6 +1520,7 @@ window.minipaintClipboard = (function () {
         afterCancelAll: afterCancelAll,
         refreshCapabilities: refreshCapabilities,
         pressHidden: pressHidden,
+        showOffline: connectionNotice,
         receiveOverHttp: receiveOverHttp,
         debug: debug
     };

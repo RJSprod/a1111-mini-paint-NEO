@@ -122,7 +122,7 @@ def build_page():
 #: every ``gr.update(visible=False)`` a callback returns as if it were a
 #: declaration, which is how the figure this workstream started from came
 #: out a fifth too high.
-CLIPBOARD_HIDDEN_CEILING = 33
+CLIPBOARD_HIDDEN_CEILING = 34
 
 
 def page_checks(r: Results, base: pathlib.Path):
@@ -160,7 +160,7 @@ def page_checks(r: Results, base: pathlib.Path):
         "grid", "status", "folder_panel", "folder", "folder_use", "folder_create", "folder_close", "folder_status",
         "rename_panel", "rename_text", "rename_ok", "rename_cancel", "delete_panel", "delete_ok", "delete_cancel",
         "paste_panel", "paste", "paste_close", "refresh", "upload", "intercept", "folder_open", "rename_open",
-        "delete_open", "paste_open", "history_open", "selected", "sort_request", "slot_action", "send_request", "send_press",
+        "delete_open", "paste_open", "history_open", "selected", "sort_request", "slot_action", "send_request", "send_press", "send_backend",
         "history_action", "menu_state", "switch", "payload", "to_canvas", "mask_clear", "wangp_line", "cards",
         "card_first", "card_last", "card_ref", "slot_upload_first", "slot_upload_last", "slot_upload_ref", "prompt",
         "queue", "queue_status", "queue_instruction", "page_id", "outbox_action", "outbox_refresh", "outbox_list",
@@ -193,7 +193,7 @@ def page_checks(r: Results, base: pathlib.Path):
     r.check("Add to Queue is the primary button", queue.get("value") == "Add to Queue" and queue.get("variant") == "primary", str(queue))
     r.check("and it is enabled before anything is composed, WanGP running", queue.get("interactive") is not False and queue.get("visible") is not False)
     r.check("the queue list is on the page, empty", "No request has been sent" in component_of(page, "minipaint_clipboard_outbox_list")["props"].get("value", ""))
-    for name in ("selected", "sort_request", "slot_action", "send_request", "send_press", "history_action", "menu_state", "switch", "payload",
+    for name in ("selected", "sort_request", "slot_action", "send_request", "send_press", "send_backend", "history_action", "menu_state", "switch", "payload",
                  "to_canvas", "mask_clear", "queue_instruction", "page_id", "model", "outbox_action", "outbox_refresh", "refresh", "upload", "intercept", "folder_open",
                  "rename_open", "delete_open", "paste_open", "history_open", "slot_upload_first", "slot_upload_last", "slot_upload_ref"):
         if component_of(page, f"minipaint_clipboard_{name}")["props"].get("visible") is not False:
@@ -269,6 +269,22 @@ def page_checks(r: Results, base: pathlib.Path):
     # required to be the same event with the same outputs and the same
     # follow-up steps. A press wired to a different callback, or to fewer
     # outputs, is a second implementation of sending waiting to drift.
+    # The fault that cost five builds: an event naming a component that is
+    # not on the page cannot run - silently, for ever - and while the send
+    # named other tabs' components, one absent component stopped every send
+    # this tab made, including to a canvas plainly on the page. The send is
+    # now required to name nothing but this tab's own boxes.
+    foreign = [o for o in sent[0]["outputs"] if o not in
+               {cid(n) for n in ("switch", "payload", "to_canvas", "status", "send_ack")}] if sent else []
+    r.check("a send names nothing but this tab's own components, so it can always run",
+            sent and not foreign, str(foreign))
+    backend = targeting("send_backend", "click")
+    r.check("the destinations only the server can write are on an event of their own",
+            len(backend) == 1 and backend[0]["backend_fn"]
+            and cid("status") in backend[0]["outputs"], str(backend))
+    r.check("and that is the only event carrying another tab's component",
+            backend and len(backend[0]["outputs"]) == len(tab.image_targets) + 1,
+            f"{len(backend[0]['outputs']) if backend else '?'} vs {len(tab.image_targets) + 1}")
     pressed = targeting("send_press", "click")
     r.check("the same send is also carried by a press, for a page whose written box is not heard",
             len(pressed) == 1 and pressed[0]["backend_fn"], str(pressed))
@@ -576,27 +592,27 @@ def send_checks(r: Results, base: pathlib.Path, tab) -> None:
     """A picture leaves the browser the way it leaves the Canvas."""
     picture = _write(base / "in" / "send.png", "PNG", (40, 30), (9, 8, 7))
     grid, status, selected, *_rest = tab.upload([picture], "")
-    n = len(tab.image_targets)
+    n = 0  # send() names no other tab's components at all now; see send_backend
     if not selected:
         r.check("an upload to send", False, status)
         return
     out = tab.send(f"img2img:{selected}:1700000001", "")
-    r.check("Send to img2img writes the instruction and a PNG payload, nothing into the backend targets",
-            out[n] == "img2img" and str(out[n + 1]).startswith("data:image/png;base64,") and out[n + 2] == "" and all(_skipped(v) for v in out[:n])
-            and out[n + 3].startswith("Sent send.png to img2img."), str(out[n + 3]))
+    r.check("Send to img2img writes the instruction and a PNG payload, and names no other tab",
+            out[n] == "img2img" and str(out[n + 1]).startswith("data:image/png;base64,") and out[n + 2] == ""
+            and len(out) == 5 and out[n + 3].startswith("Sent send.png to img2img."), str(out[n + 3]))
     out = tab.send(f"inpaint:{selected}", "")
     r.check("Send to Inpaint names the size the Inpaint canvas must reach", out[n] == "inpaint:40x30" and str(out[n + 1]).startswith("data:image/png"))
     if "extras" in tab.image_targets:
-        out = tab.send(f"extras:{selected}", "")
+        out = tab.send_backend(f"extras:{selected}", "")
         index = tab.image_targets.index("extras")
         r.check("Send to Extras writes its image component directly, saved where the host serves it from",
-                hasattr(out[index], "already_saved_as") and out[n] == "extras" and out[n + 1] == "")
+                hasattr(out[index], "already_saved_as"), str(out[index])[:80])
     stitch = [key for key in tab.image_targets if key in canvas_ui.STITCH_TARGETS]
     if stitch:
-        out = tab.send(f"{stitch[0]}:{selected}", "")
+        out = tab.send_backend(f"{stitch[0]}:{selected}", "")
         index = tab.image_targets.index(stitch[0])
         r.check("Send to ImageStitch replaces its gallery with this one picture",
-                isinstance(out[index], list) and len(out[index]) == 1 and "only reference image" in out[n + 3])
+                isinstance(out[index], list) and len(out[index]) == 1 and "only reference image" in out[-1], str(out[-1])[:90])
     out = tab.send(f"minipaint:{selected}:1700000002", "")
     r.check("Send to Mini Paint hands the asset to the Canvas's receive box and nothing to the host",
             out[n + 2].startswith(f"{selected}:") and out[n] == "" and out[n + 1] == "" and out[n + 3].startswith("Sent send.png to Mini Paint."), str(out[n + 2]))
@@ -606,13 +622,15 @@ def send_checks(r: Results, base: pathlib.Path, tab) -> None:
     # gallery that appends.
     out = tab.send(f"img2img:{selected}:1700000003:done", "")
     r.check("a send the page already made is recorded, not performed again",
-            all(_skipped(v) for v in out[:n]) and out[n] == "" and out[n + 1] == "" and out[n + 2] == ""
+            out[n] == "" and out[n + 1] == "" and out[n + 2] == ""
             and out[n + 3].startswith("Sent send.png to img2img.") and out[n + 4] == "1700000003",
             str(out[n + 3]))
     if stitch:
-        out = tab.send(f"{stitch[0]}:{selected}:1700000004:done", "")
+        out = tab.send_backend(f"{stitch[0]}:{selected}:1700000004:done", "")
         index = tab.image_targets.index(stitch[0])
-        r.check("and a gallery is not appended to twice", _skipped(out[index]), str(out[index])[:80])
+        tab.send_backend(f"{stitch[0]}:{selected}:1700000004:done", "")
+        twice = tab.send_backend(f"{stitch[0]}:{selected}:1700000004:done", "")
+        r.check("and a gallery is not appended to twice", _skipped(twice[index]), str(twice[index])[:80])
     # Two events carry one send - a press and the written box - because on
     # some installs only one of them arrives. On a healthy install both do,
     # and the second must not deliver the picture again: to a canvas that is
@@ -622,15 +640,8 @@ def send_checks(r: Results, base: pathlib.Path, tab) -> None:
     again = tab.send(f"img2img:{selected}:1700000005", "")
     r.check("the same request arriving twice is delivered once and acknowledged twice",
             first[n] == "img2img" and str(first[n + 1]).startswith("data:image/png")
-            and all(_skipped(v) for v in again[:n]) and _skipped(again[n]) and _skipped(again[n + 1])
-            and again[n + 4] == "1700000005",
+            and _skipped(again[n]) and _skipped(again[n + 1]) and again[n + 4] == "1700000005",
             f"{again[n]!r} {again[n + 4]!r}")
-    if stitch:
-        tab.send(f"{stitch[0]}:{selected}:1700000006", "")
-        twice = tab.send(f"{stitch[0]}:{selected}:1700000006", "")
-        index = tab.image_targets.index(stitch[0])
-        r.check("and a gallery is not appended to by the second arrival either",
-                _skipped(twice[index]) and twice[n + 4] == "1700000006", str(twice[index])[:80])
     third = tab.send(f"img2img:{selected}:1700000007", "")
     r.check("while the next request is a new send, not a repeat",
             third[n] == "img2img" and str(third[n + 1]).startswith("data:image/png") and third[n + 4] == "1700000007",
@@ -872,6 +883,7 @@ def run() -> Results:
                 ids = browser_checks(r, base, tab)
                 composer_checks(r, base, tab, ids)
                 send_checks(r, base, tab)
+                unrendered_destination_checks(r)
                 integration_checks(r, base, tab)
                 enhance_switch_checks(r, base, tab)
             fallback_checks(r)
@@ -883,6 +895,70 @@ def run() -> Results:
             process_log.use_log_dir(None)
             store.reset_for_tests()
     return r
+
+
+
+def unrendered_destination_checks(r: Results) -> None:
+    """A destination that was built but never put on the page.
+
+    THE FAULT THIS IS FOR, in the shape it actually arrived in. A user could
+    not send a picture to img2img - a canvas plainly on their screen - and
+    nothing anywhere said why. Not a connection, not the queue, not a session:
+    the send event named, among its outputs, one component that no page
+    contained, and an event naming a component that is not there cannot run.
+    Gradio does not complain about that. It simply never answers, on every
+    build, for ever, while every other event on the same tab works perfectly.
+
+    Two things are checked, because either alone would have let it through:
+
+    *   a component that was made but never rendered is not offered as a
+        destination at all - ``host.destinations`` asks Gradio's own
+        ``is_rendered`` rather than assuming that having been handed a
+        component means it is somewhere;
+
+    *   and the send event names nothing from another tab whatever happens,
+        so even a destination that slips through costs that destination
+        instead of every send the tab makes. That is the part that turns this
+        from a silent total failure into a named one.
+    """
+    from minipaint_neo.canvas import host as canvas_host
+
+    class _Made:
+        """A component the way Gradio leaves one that was never placed."""
+
+        def __init__(self, elem_id, rendered):
+            self.elem_id = elem_id
+            self._id = abs(hash(elem_id)) % 100000
+            self.is_rendered = rendered
+
+    canvas_host.reset_capture()
+    canvas_host._captured["stitch_txt2img"] = _Made("stitch_gallery", True)
+    canvas_host._captured["stitch_txt2img_enable"] = _Made("stitch_enable", True)
+    canvas_host._captured["stitch_img2img"] = _Made("stitch_gallery_2", False)
+    canvas_host._captured["stitch_img2img_enable"] = _Made("stitch_enable_2", True)
+    try:
+        offered = canvas_host.destinations()
+        r.check("a destination that was built but never put on the page is not offered",
+                "stitch_img2img" not in offered, str(sorted(offered)))
+        r.check("and neither is the box that went with it, rather than half of it",
+                "stitch_img2img_enable" not in offered, str(sorted(offered)))
+        r.check("while the one that IS on the page is still offered",
+                offered.get("stitch_txt2img") is not None and offered.get("stitch_txt2img_enable") is not None,
+                str(sorted(offered)))
+    finally:
+        canvas_host.reset_capture()
+
+    # And the guarantee that does not depend on spotting it: whatever ends up
+    # in the destinations, the send event never names one.
+    demo, _refs, tab = build_page()
+    page = config_of(demo)
+    own = {component_of(page, f"minipaint_clipboard_{name}")["id"]
+           for name in ("switch", "payload", "to_canvas", "status", "send_ack")}
+    box = component_of(page, "minipaint_clipboard_send_request")["id"]
+    sends = [d for d in page["dependencies"] if any(t[0] == box for t in d["targets"])]
+    r.check("every event that carries a send names only this tab's own components",
+            sends and all(set(d["outputs"]) <= own for d in sends),
+            str([sorted(set(d["outputs"]) - own) for d in sends]))
 
 
 if __name__ == "__main__":

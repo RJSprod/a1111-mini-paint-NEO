@@ -919,11 +919,33 @@
        gap above it, the tile's padding and its border. Tile height is the
        square plus this, and a row is one tile high - see the grid. */
     --minipaint-clip-caption: 32px;
+    /* The tile's own frame on one axis: 4px padding and a 2px border, twice.
+       A column is the thumbnail plus this, so what is left inside the tile is
+       exactly the size the slider names - otherwise every tile is 12px
+       narrower than it is tall and a square picture never quite fills it. */
+    --minipaint-clip-frame: 12px;
 }
 
 #minipaint_clipboard_root .minipaint-clip-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(var(--minipaint-clip-thumb), 1fr));
+    /* Columns are the size the slider names, and are NOT stretched to fill
+       the row.
+
+       `minmax(thumb, 1fr)` was tidier at the right-hand edge and it made
+       every tile wider than the picture in it. The row height comes from the
+       slider, so the picture is held to that height, while 1fr hands the
+       column whatever is left over from dividing the grid up - at 260px the
+       box came out 369 wide and 264 tall, and a square picture sat in it
+       with 105px of dead space around it. That is what "the tile's border
+       extends well beyond the thumbnail" is: not a centring fault at all,
+       but a box that was never the shape of the picture it holds.
+
+       A fixed track is the same number the row uses, so the box is square
+       and a square picture fills it exactly. The cost is a ragged right-hand
+       edge, which is what every other thumbnail grid does. min() keeps a
+       single column from overflowing a panel narrower than one tile. */
+    grid-template-columns: repeat(auto-fill, min(calc(var(--minipaint-clip-thumb) + var(--minipaint-clip-frame)), 100%));
+    justify-content: start;
     /* A row is the size the slider names, not the size of the tallest
        picture in it. Tile height used to be whatever the tile's content
        came to, which is only uniform while the thumb box is holding its

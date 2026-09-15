@@ -892,8 +892,53 @@
     font-weight: 600;
 }
 
+/* The toolbar's two icon buttons, beside the menu.
+
+   Square, and the same height as the buttons they sit with. The label is
+   kept - a screen reader reads it, and it is the tooltip - but drawn at no
+   size, and the glyph is an SVG mask filled with the button's OWN text
+   colour. That is the Canvas's technique, used here for the same reason:
+   an icon that is a mask over currentColor follows whatever the host theme
+   makes of a button, where an <img> or a coloured SVG would be a light-mode
+   icon on somebody's dark theme. */
+#minipaint_clipboard_root .minipaint-clip-icon,
+#minipaint_clipboard_root .minipaint-clip-icon button {
+    flex: 0 0 auto;
+    min-width: 44px;
+    width: 44px;
+    padding: 0;
+    font-size: 0;
+    line-height: 0;
+}
+
+#minipaint_clipboard_root .minipaint-clip-icon button::before,
+#minipaint_clipboard_root button.minipaint-clip-icon::before {
+    content: "";
+    display: block;
+    width: 20px;
+    height: 20px;
+    margin: 0 auto;
+    background-color: currentColor;
+    -webkit-mask: var(--minipaint-clip-icon) center / contain no-repeat;
+    mask: var(--minipaint-clip-icon) center / contain no-repeat;
+}
+
+#minipaint_clipboard_root .minipaint-clip-icon-paste {
+    --minipaint-clip-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2'/%3E%3Crect x='8' y='2' width='8' height='4' rx='1'/%3E%3C/svg%3E");
+}
+
+/* Nothing about this one is destructive-red: it sits beside Paste and a
+   colour that says "danger" on a button somebody presses all day stops
+   meaning anything. The confirmation it does not have is the reason it is
+   disabled until something is selected. */
+#minipaint_clipboard_root .minipaint-clip-icon-delete {
+    --minipaint-clip-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='3 6 5 6 21 6'/%3E%3Cpath d='M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6'/%3E%3Cpath d='M10 11v6M14 11v6'/%3E%3Cpath d='M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2'/%3E%3C/svg%3E");
+}
+
 #minipaint_clipboard_root .minipaint-clip-role[disabled],
-#minipaint_clipboard_root .minipaint-clip-role button[disabled] {
+#minipaint_clipboard_root .minipaint-clip-role button[disabled],
+#minipaint_clipboard_root .minipaint-clip-icon[disabled],
+#minipaint_clipboard_root .minipaint-clip-icon button[disabled] {
     opacity: 0.45;
     cursor: default;
 }

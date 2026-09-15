@@ -65,9 +65,18 @@ window.minipaintClipboard = (function () {
         paste: "minipaint_clipboard_paste_open",
         history: "minipaint_clipboard_history_open",
         send: "minipaint_clipboard_send_press",
-        sendBackend: "minipaint_clipboard_send_backend"
+        sendBackend: "minipaint_clipboard_send_backend",
+        //: The toolbar's own delete, which acts on the press with nothing to
+        //: confirm - so the browser keeps it disabled while nothing is
+        //: selected. See select().
+        deleteNow: "minipaint_clipboard_delete_now"
     };
     const ROLE_IDS = { first: "minipaint_clipboard_to_first", last: "minipaint_clipboard_to_last", ref: "minipaint_clipboard_to_ref" };
+    //: Every control that does something TO the selected picture.
+    const NEEDS_SELECTION = function () {
+        return Object.keys(ROLE_IDS).map(function (slot) { return ROLE_IDS[slot]; })
+            .concat([PRESS.deleteNow]);
+    };
     const SLOT_UPLOAD_PREFIX = "minipaint_clipboard_slot_upload_";
     const SLOT_FIELDS = { first: "start", last: "end", ref: "references" };
     // THE PRESS ACKNOWLEDGEMENT USED TO BE A HIDDEN BOX, WATCHED.
@@ -533,8 +542,12 @@ window.minipaintClipboard = (function () {
             item.classList.toggle("minipaint-clip-selected", on);
             item.setAttribute("aria-selected", on ? "true" : "false");
         }
-        for (const slot in ROLE_IDS) {
-            const host = byId(ROLE_IDS[slot]);
+        // Everything that acts on the selected picture is dead without one.
+        // Delete is in this list rather than beside it: it deletes on the
+        // press, with nothing to confirm, so "nothing is selected" has to be
+        // visible before the press rather than reported after it.
+        for (const id of NEEDS_SELECTION()) {
+            const host = byId(id);
             const button = host ? (host.tagName === "BUTTON" ? host : host.querySelector("button")) : null;
             if (button) { button.disabled = !S.selected; }
         }
@@ -1894,7 +1907,23 @@ window.minipaintClipboard = (function () {
         }
     }
 
-    /** Ask the public API to keep this page's view fresh. Idempotent. */
+    /**
+     * Hold the one event stream this page has, so the grid can be told.
+     *
+     * THE GRID NOW DEPENDS ON THIS, and nothing else on the tab did. A job
+     * opened the stream when there was a job to watch, so an idle page had
+     * no stream at all - which was fine while the server re-rendered the
+     * grid over the framework's channel and is not fine now: a picture
+     * imported from another page, or deleted from this one, would leave
+     * every open grid quietly stale until something else made it re-ask.
+     *
+     * Per the spine's own rule, a page with this tab closed is subscribed to
+     * nothing: this bundle is fetched when the tab is first opened, so a
+     * session that never opens Clipboard never gets here. A page that has it
+     * open holds the one connection it already holds, and the interop
+     * module's own lifecycle lets it go while the page is hidden and takes
+     * it back on return.
+     */
     function watch() {
         const api = interop();
         if (!api || !api.wangp || typeof api.wangp.watch !== "function") { return false; }
@@ -2357,6 +2386,7 @@ window.minipaintClipboard = (function () {
                     // a framework channel that a backgrounded tab has lost.
                     // With a folder re-read, because coming back to the tab
                     // is exactly when the folder may have moved underneath it.
+                    watch();
                     fetchLibrary({ quiet: true, refresh: true });
                     refreshCapabilities(false);
                 }
@@ -2395,7 +2425,9 @@ window.minipaintClipboard = (function () {
         element.addEventListener("keydown", onLibraryKey);
         watchTab();
         // The grid, from the index route, before anything else is asked of
-        // the server: it is the thing the user is looking at.
+        // the server: it is the thing the user is looking at. The stream
+        // first, so a change that lands between these two is not missed.
+        watch();
         gridMount();
         fetchLibrary({ quiet: true, refresh: true });
         // And the queue: what ran while this browser was closed, from the

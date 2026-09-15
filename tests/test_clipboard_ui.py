@@ -216,7 +216,7 @@ def page_checks(r: Results, base: pathlib.Path):
 
     needed = [
         "root", "body", "browser", "composer", "toolbar", "menu", "to_first", "to_last", "to_ref", "sort", "thumb",
-        "grid", "status", "folder_panel", "folder", "folder_use", "folder_create", "folder_close", "folder_status",
+        "paste_now", "delete_now", "grid", "status", "folder_panel", "folder", "folder_use", "folder_create", "folder_close", "folder_status",
         "rename_panel", "rename_text", "rename_ok", "rename_cancel", "delete_panel", "delete_ok", "delete_cancel",
         "paste_panel", "paste", "paste_close", "refresh", "upload", "intercept", "folder_open", "rename_open",
         "delete_open", "paste_open", "history_open", "selected", "sort_request", "slot_action", "send_request", "send_press", "send_backend",
@@ -313,6 +313,30 @@ def page_checks(r: Results, base: pathlib.Path):
     r.check("the prompt is saved into the draft when the box loses focus", any(d["backend_fn"] for d in targeting("prompt", "blur")))
     for name in ("to_first", "to_last", "to_ref"):
         r.check(f"{name} assigns the selection from the backend", any(d["backend_fn"] and d["inputs"] == [cid("selected")] for d in targeting(name, "click")))
+    # The toolbar's own two, beside the menu. Both exist in the menu as well;
+    # these are the ones under the thumb for the mode this tab is actually
+    # used in - a picture in from somewhere else, a picture out when it has
+    # served its purpose, over and over.
+    for name in ("paste_now", "delete_now"):
+        part = component_of(page, f"minipaint_clipboard_{name}")
+        r.check(f"{name} is a visible button in the toolbar",
+                part["type"] == "button" and part["props"].get("visible") is not False,
+                f"{part['type']}/{part['props'].get('visible')}")
+    pasting = targeting("paste_now", "click")
+    r.check("Paste is browser work and has no server half: reading the system clipboard needs the browser",
+            len(pasting) == 1 and pasting[0]["backend_fn"] is False
+            and "pasteFromClipboard" in (pasting[0].get("js") or ""), str(pasting))
+    deleting = targeting("delete_now", "click")
+    confirmed = targeting("delete_ok", "click")
+    r.check("Delete acts on the press, through the same callback the confirmation panel uses",
+            len(deleting) == 1 and deleting[0]["backend_fn"]
+            and confirmed and deleting[0]["backend_fn"] == confirmed[0]["backend_fn"],
+            str(deleting))
+    r.check("and writes the same outputs, so the grid and the cards follow it",
+            deleting and confirmed and deleting[0]["outputs"] == confirmed[0]["outputs"],
+            f"{len(deleting[0]['outputs']) if deleting else '?'} vs {len(confirmed[0]['outputs']) if confirmed else '?'}")
+    r.check("and opens no panel on the way - that is the whole point of it",
+            deleting and cid("delete_panel") not in deleting[0]["inputs"], str(deleting[0]["inputs"] if deleting else ""))
     load_events = [d for d in deps if any(t[1] == "load" for t in d["targets"]) and ".attach()" in (d.get("js") or "")]
     r.check("the page's load event attaches the browser script", len(load_events) == 1, str(len(load_events)))
 
@@ -920,11 +944,24 @@ def theming_checks(r: Results) -> None:
     r.check("the Clipboard rules are one block at the end of style.css", start > 0)
     block = re.sub(r"/\*.*?\*/", "", css[start:], flags=re.S)  # the comments say "white" only to forbid it
     r.check("scoped to the tab's root", "#minipaint_clipboard_root" in block and not re.search(r"^\.minipaint-clip", block, re.M))
+    # A mask is not a colour decision. Only its alpha is used: what the user
+    # sees is the background painted THROUGH it, and that background is
+    # currentColor - the button's own text colour, which is the theme's. So
+    # the paint inside a mask's own SVG says nothing about what anything looks
+    # like, and the scan below skips it. The exclusion is guarded rather than
+    # trusted: an icon that is not painted from currentColor fails the check
+    # under it, which is the thing this section is really asserting.
+    # To end of line, not to the next ";": a data URI contains one of its own
+    # ("data:image/svg+xml;utf8,"), so a semicolon does not end the
+    # declaration and a scan that assumed it did stopped inside the icon.
+    painted = re.sub(r"(?m)^\s*(?:(?:-webkit-)?mask|--minipaint-clip-icon)\s*:.*$", "", block)
     r.check("no white, no #fff, no black as a colour",
-            not re.search(r"(^|[^-\w])white\b(?!-space)", block) and not re.search(r"#fff\b|#ffffff\b|#000\b|#000000\b|(^|[^-\w])black\b", block, re.I))
+            not re.search(r"(^|[^-\w])white\b(?!-space)", painted) and not re.search(r"#fff\b|#ffffff\b|#000\b|#000000\b|(^|[^-\w])black\b", painted, re.I))
+    r.check("and an icon is painted with the button's own text colour, so its mask carries none",
+            ("mask:" not in block) or "background-color: currentColor" in block)
     backgrounds = re.findall(r"background(?:-color)?\s*:\s*([^;]+);", block)
-    r.check("every background is a theme variable or transparent",
-            backgrounds and all(v.strip().startswith("var(--") or v.strip() in ("transparent", "none") for v in backgrounds), str([v for v in backgrounds if not v.strip().startswith("var(--")][:3]))
+    r.check("every background is a theme variable, transparent, or the text colour",
+            backgrounds and all(v.strip().startswith("var(--") or v.strip() in ("transparent", "none", "currentColor") for v in backgrounds), str([v for v in backgrounds if not v.strip().startswith("var(--")][:3]))
     colours = re.findall(r"(?<![-\w])color\s*:\s*([^;]+);", block)
     r.check("every text colour is a theme variable or inherited",
             colours and all(v.strip().startswith("var(--") or v.strip() in ("inherit", "currentColor", "transparent") for v in colours), str([v for v in colours if not v.strip().startswith("var(--")][:3]))

@@ -459,6 +459,33 @@ The suite checks each against the failure it is for: a destination built but
 never rendered must not be offered and must not break the other destinations,
 and the send must still arrive with the page made deaf to the write.
 
+### The toolbar's Paste and Delete
+
+Beside the menu button, one press each, because this tab is used as a
+clipboard: a picture arrives from somewhere else, gets used, and goes, over
+and over. Both actions are also in the menu, which is where they are
+discovered; these are for doing them forty times without a flyout in between.
+
+**Paste** reads the system clipboard and imports what is in it. There is no
+server half at all — reading the clipboard needs the browser's permission —
+so it calls the same `pasteFromClipboard()` the menu item calls, including its
+fallback to the paste panel when a browser refuses.
+
+**Delete removes the selected picture immediately.** No confirmation, no
+second press, and the store unlinks the file rather than moving it anywhere:
+it is gone. That is deliberate — a clipboard is a place things are meant to
+leave quickly — and the confirmation panel is still on the menu for anyone who
+wants to be asked.
+
+The guard moves from after the press to before it: the button is **disabled
+while nothing is selected**, which is the only thing standing between a
+toolbar button and a file that is not coming back. The status line says which
+picture went.
+
+Both icons are an SVG mask filled with the button's own text colour, the same
+technique the Canvas's tool icons use, so they follow the host theme instead
+of being a light-mode glyph on somebody's dark one.
+
 ### When something crosses to the server and nothing happens
 
 Three different faults look identical from inside the page: the event never

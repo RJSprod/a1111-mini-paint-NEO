@@ -629,14 +629,33 @@ def check_patching(r: Results, page, library) -> None:
     page.evaluate("() => { const g = document.querySelector('.minipaint-clip-grid'); g.scrollTop = 24; }")
     scrolled = page.evaluate("() => document.querySelector('.minipaint-clip-grid').scrollTop")
 
-    Image.new("RGB", (200, 200), (10, 200, 60)).save(library / "aaa-new.png")
-    page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
-    time.sleep(2.5)
+    # THE PAGE IS NOT TOLD TO LOOK. A picture goes into the library through
+    # the same import route a paste or a drop takes, the server says the
+    # library moved, and the grid re-asks and patches on its own. Calling
+    # library() here instead would prove the drawing and skip the half that
+    # keeps every other open page correct.
+    landed = page.evaluate("""async () => {
+        const id = document.querySelector('.minipaint-clip-item').dataset.asset;
+        const blob = await (await fetch('/minipaint-clipboard/image/' + id,
+                                        { credentials: 'same-origin' })).blob();
+        const answer = await fetch('/minipaint-clipboard/import?source=paste', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': blob.type || 'image/png', 'X-MiniPaint-Filename': 'aaa-new.png' },
+            body: blob
+        });
+        return (await answer.json()).ok === true;
+    }""")
+    r.check("patching: a picture is imported from outside the grid", landed is True, str(landed))
+    for _ in range(20):
+        time.sleep(0.5)
+        if len(page.evaluate(READ_TILES_JS)) == 7:
+            break
 
     after = page.evaluate(READ_TILES_JS)
     kept = [t for t in after if t["stamp"]]
     fresh = [t for t in after if not t["stamp"]]
-    r.check("one picture in means one node in", len(after) == 7 and len(fresh) == 1, f"{len(after)} tiles, {len(fresh)} new")
+    r.check("one picture in means one node in, from the event alone",
+            len(after) == 7 and len(fresh) == 1, f"{len(after)} tiles, {len(fresh)} new")
     r.check("AND THE OTHER SIX ARE THE SAME ELEMENTS, not new ones that look the same",
             sorted(t["stamp"] for t in kept) == sorted(t["stamp"] for t in before), str(len(kept)))
     r.check("the new one is in its place in the order, not appended",
@@ -645,17 +664,26 @@ def check_patching(r: Results, page, library) -> None:
             page.evaluate("() => document.querySelector('.minipaint-clip-grid').scrollTop") == scrolled,
             str(page.evaluate("() => document.querySelector('.minipaint-clip-grid').scrollTop")))
 
-    page.evaluate("() => { const c = document.querySelectorAll('.minipaint-clip-item')[3]; if (c) { c.click(); } }")
-    time.sleep(0.6)
-    chosen = page.evaluate("() => window.minipaintClipboard.debug().selected")
-    (library / "aaa-new.png").unlink()
-    page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
-    time.sleep(2.5)
+    # And out again the same way: the menu's Delete is a server action, and
+    # the grid hears about it rather than being handed new markup.
+    page.evaluate("""() => {
+        const doomed = Array.from(document.querySelectorAll('.minipaint-clip-item'))
+            .filter(t => t.dataset.name === 'aaa-new.png')[0];
+        if (doomed) { doomed.click(); }
+    }""")
+    time.sleep(0.8)
+    page.evaluate("() => document.getElementById('minipaint_clipboard_delete_now').click()")
+    for _ in range(24):
+        time.sleep(0.5)
+        if len(page.evaluate(READ_TILES_JS)) == 6:
+            break
     left = page.evaluate(READ_TILES_JS)
     r.check("a picture out means one node out, and the rest are still the same elements",
-            len(left) == 6 and len([t for t in left if t["stamp"]]) == 6, str(len(left)))
-    r.check("and the selection survives a patch, for free, because its tile was not rebuilt",
-            page.evaluate("() => window.minipaintClipboard.debug().selected") == chosen, chosen)
+            len(left) == 6 and len([t for t in left if t["stamp"]]) == 6,
+            f"{len(left)} tiles, {len([t for t in left if t['stamp']])} kept")
+    r.check("and the ones that survived are the ones that were there before",
+            sorted(t["name"] for t in left) == sorted(t["name"] for t in before),
+            str(sorted(t["name"] for t in left)))
 
 
 def check_the_failure_modes_have_answers(r: Results, page, library) -> None:
@@ -688,6 +716,7 @@ def check_the_failure_modes_have_answers(r: Results, page, library) -> None:
 
     # -- a thumbnail that will not load costs that tile its picture, and
     #    nothing else on the page anything at all
+    before = page.evaluate(READ_TILES_JS)
     # A real 404 from the real route, rather than a stubbed one: an id the
     # library has never minted is exactly what a tile holds when the file
     # behind it has gone.
@@ -702,7 +731,7 @@ def check_the_failure_modes_have_answers(r: Results, page, library) -> None:
                 return tile.classList.contains('minipaint-clip-item-missing') && !!tile.dataset.name;
             }"""))
     r.check("and the page is otherwise unaffected",
-            len(page.evaluate(READ_TILES_JS)) == 6, str(len(page.evaluate(READ_TILES_JS))))
+            len(page.evaluate(READ_TILES_JS)) == len(before), f"{len(before)} -> {len(page.evaluate(READ_TILES_JS))}")
 
     # -- the index route unreachable: keep what is on screen, say so, retry
     held = [t["name"] for t in page.evaluate(READ_TILES_JS)]
@@ -1508,7 +1537,13 @@ def check_a_destination_is_never_pre_opened(r: Results, page, targets) -> None:
             continue
         r.check(f"no pre-open: the menu offers {key} although its tab has never been opened",
                 send_selected(page, label) == "clicked")
-        time.sleep(4.0)
+        # Polled rather than slept: the page places the picture itself and
+        # then verifies it, and a gallery's upload takes as long as it takes.
+        # What is asserted is the outcome, never the latency.
+        for _ in range(25):
+            time.sleep(1)
+            if visible_panel(page) == DESTINATION_PANELS[key]:
+                break
         landed = page.evaluate("""id => {
             const host = id ? document.getElementById(id) : null;
             if (host && host.querySelectorAll('img').length) { return true; }
@@ -1801,6 +1836,72 @@ def check_tab_switching_survives_reordering(r: Results, page) -> None:
     time.sleep(2)
 
 
+def check_the_toolbar_pastes_and_deletes(r: Results, page) -> None:
+    """The two verbs this tab is actually used for, one press each.
+
+    A clipboard is a place things pass through: something comes in from
+    somewhere else, gets used, and goes. Both of those have always been in
+    the menu, which is right for discovering them and wrong for doing them
+    forty times in a row. These are the same two actions with the flyout
+    taken out of the way.
+
+    Delete has no confirmation on purpose, so the thing that has to be true
+    is that it cannot be pressed with nothing selected - the guard moves from
+    after the press to before it. That is checked first, because it is the
+    only thing standing between a toolbar button and a file that is gone.
+    """
+    open_clipboard(page)
+    disabled = page.evaluate("""() => {
+        window.minipaintClipboard.select('');
+        const host = document.getElementById('minipaint_clipboard_delete_now');
+        const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
+        return b ? b.disabled : null;
+    }""")
+    r.check("with nothing selected, the toolbar's Delete cannot be pressed", disabled is True, str(disabled))
+    if not select_first(page):
+        r.check("toolbar delete: a picture is selected first", False, "no selection")
+        return
+    enabled = page.evaluate("""() => {
+        const host = document.getElementById('minipaint_clipboard_delete_now');
+        const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
+        return b ? b.disabled : null;
+    }""")
+    r.check("and selecting one enables it", enabled is False, str(enabled))
+
+    before = page.evaluate(TILES_JS)
+    doomed = before[0]["name"] if before else ""
+    page.evaluate("() => document.getElementById('minipaint_clipboard_delete_now').click()")
+    gone = False
+    for _ in range(20):
+        time.sleep(1)
+        now = page.evaluate(TILES_JS)
+        if len(now) == len(before) - 1 and all(tile["name"] != doomed for tile in now):
+            gone = True
+            break
+    r.check("one press deletes the selected picture, with nothing to confirm", gone,
+            f"{len(before)} -> {len(page.evaluate(TILES_JS))}")
+    r.check("and the confirmation panel was never opened",
+            not page.evaluate("() => { const p = document.getElementById('minipaint_clipboard_delete_panel');"
+                              " return !!(p && getComputedStyle(p).display !== 'none'); }"))
+    r.check("the status line says which picture went",
+            "Deleted" in page.evaluate("() => { const s = document.getElementById('minipaint_clipboard_status');"
+                                       " return s ? s.textContent : ''; }"),
+            page.evaluate("() => { const s = document.getElementById('minipaint_clipboard_status');"
+                          " return (s ? s.textContent : '').slice(0, 80); }"))
+    # Paste reads the system clipboard, which a headless browser has no
+    # permission for and this suite must not grant: what is checked is that
+    # the button is wired to the page's own paste, not to a server round
+    # trip that could not do it anyway.
+    r.check("the toolbar's Paste is the page's own clipboard read",
+            page.evaluate("() => typeof window.minipaintClipboard.pasteFromClipboard === 'function'"))
+    r.check("and it is always pressable, because pasting needs no selection",
+            page.evaluate("""() => {
+                const host = document.getElementById('minipaint_clipboard_paste_now');
+                const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
+                return b ? b.disabled === false : null;
+            }""") is True)
+
+
 def check_hidden_tab_is_not_offered(r: Results, targets) -> None:
     """A destination whose tab the user hid is not offered at all.
 
@@ -1841,6 +1942,13 @@ def run() -> Results:
     assets.install(demo.app)
     from minipaint_neo.clipboard import routes as clip_routes
     clip_routes.install(demo.app)
+    # The event spine, which this page now needs rather than merely uses: the
+    # grid is told that the library moved and re-asks. Without these routes a
+    # page draws once and then quietly stops keeping up, which is the whole
+    # failure this suite exists to catch - so the suite serves what Forge
+    # serves rather than a subset of it.
+    from minipaint_neo import interop as interop_routes
+    interop_routes.install(demo.app)
     targets = host.destinations()
     try:
         with sync_playwright() as p:
@@ -1877,8 +1985,11 @@ def run() -> Results:
                 check_the_page_can_say_why_a_send_was_silent(r, page)
                 check_the_notice_takes_itself_down(r, page)
                 check_a_picture_handed_in_arrives_without_the_queue(r, page, library)
-                # The Send-to contract, last because the first of these
-                # reloads the page to prove nothing was opened beforehand.
+                # Before the Send-to contract, because its Delete is a
+                # framework event and the checks below cut that channel.
+                check_the_toolbar_pastes_and_deletes(r, page)
+                # Last: the first of these reloads the page to prove no
+                # destination was opened beforehand.
                 check_a_destination_is_never_pre_opened(r, page, targets)
                 check_navigation_is_never_what_makes_a_send_work(r, page, targets)
                 check_a_failed_send_leaves_you_in_clipboard(r, page, targets)

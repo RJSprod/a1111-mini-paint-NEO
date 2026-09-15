@@ -111,6 +111,9 @@ QUEUE_JS = f"(prompt, enhanceOn) => {{ if ({_JS}) {_JS}.addToQueue(prompt, enhan
 # of those jobs.
 CANCEL_ALL_JS = f"() => {{ if ({_JS}) {_JS}.cancelAll(); }}"
 MENU_STATE_JS = f"(state) => {{ if ({_JS}) {_JS}.menuStateChanged(state); }}"
+#: The toolbar's Paste. Reading the system clipboard is the browser's to do
+#: and needs its permission, so this has no server half at all.
+PASTE_JS = f"() => {{ if ({_JS}) {_JS}.pasteFromClipboard(); }}"
 SWITCH_JS = "(target) => { if (window.minipaintCanvas && window.minipaintCanvas.switchTo) { window.minipaintCanvas.switchTo(target); } }"
 CAPABILITIES_JS = f"() => {{ if ({_JS}) {_JS}.refreshCapabilities(); }}"
 
@@ -1411,6 +1414,28 @@ class ClipboardTab:
                 with gr.Column(scale=2, min_width=320, elem_id=_id("browser"), elem_classes=["minipaint-clip-browser"]):
                     with gr.Row(elem_id=_id("toolbar"), elem_classes=["minipaint-clip-toolbar"]):
                         menu_btn = gr.Button("☰ Menu", elem_id=_id("menu"), elem_classes=["minipaint-clip-action", "minipaint-clip-menu-button"], min_width=0)
+                        # The two things this tab is for, one press each.
+                        #
+                        # Both are in the menu already and stay there - the
+                        # menu is where they are discovered. These are for the
+                        # other mode of use: a picture from somewhere else,
+                        # in; a picture that has served its purpose, out; over
+                        # and over, without a flyout between each one. A
+                        # clipboard people manage by hand needs its two verbs
+                        # under the thumb.
+                        #
+                        # Labelled for a screen reader and titled for a
+                        # tooltip; the glyph is a CSS mask filled with the
+                        # button's own text colour, so it follows the theme
+                        # like the Canvas's tool icons do.
+                        paste_btn = gr.Button(
+                            "Paste", elem_id=_id("paste_now"), min_width=0,
+                            elem_classes=["minipaint-clip-action", "minipaint-clip-icon", "minipaint-clip-icon-paste"],
+                        )
+                        delete_btn = gr.Button(
+                            "Delete", elem_id=_id("delete_now"), min_width=0,
+                            elem_classes=["minipaint-clip-action", "minipaint-clip-icon", "minipaint-clip-icon-delete"],
+                        )
                         to_first = gr.Button("+First", elem_id=_id("to_first"), elem_classes=["minipaint-clip-action", "minipaint-clip-role"], min_width=0)
                         to_last = gr.Button("+Last", elem_id=_id("to_last"), elem_classes=["minipaint-clip-action", "minipaint-clip-role"], min_width=0)
                         to_ref = gr.Button("+Ref", elem_id=_id("to_ref"), elem_classes=["minipaint-clip-action", "minipaint-clip-role"], min_width=0)
@@ -1571,7 +1596,7 @@ class ClipboardTab:
 
         self._wire(
             grid=grid, status=status, selected_box=selected_box, menu_state=menu_state,
-            cards=(card_first, card_last, card_ref), menu_btn=menu_btn, roles=(to_first, to_last, to_ref),
+            cards=(card_first, card_last, card_ref), menu_btn=menu_btn, paste_btn=paste_btn, delete_btn=delete_btn, roles=(to_first, to_last, to_ref),
             sort=sort, sort_request=sort_request, thumb=thumb, refresh_btn=refresh_btn, upload_btn=upload_btn,
             intercept_btn=intercept_btn, folder_open=folder_open, folder_panel=folder_panel, folder_text=folder_text,
             folder_use=folder_use, folder_create=folder_create, folder_close=folder_close, folder_status=folder_status,
@@ -1643,6 +1668,22 @@ class ClipboardTab:
         p["rename_cancel"].click(lambda: gr.update(visible=False), inputs=[], outputs=[p["rename_panel"]], **quiet)
         p["rename_ok"].click(self.rename, inputs=[selected, p["rename_text"]], outputs=[p["rename_panel"], p["status"], *cards], **quiet)
         p["delete_open"].click(self.open_delete, inputs=[selected], outputs=[p["delete_panel"], p["status"]], **quiet)
+        # The toolbar's own two, beside the menu.
+        #
+        # Paste is browser work and nothing else: reading the system clipboard
+        # needs the browser's permission, so there is no server half to call.
+        # It runs the same function the menu item runs, which already falls
+        # back to the paste panel where a browser refuses to hand the
+        # clipboard over.
+        #
+        # Delete goes straight to the same callback the confirmation panel's
+        # OK button calls - no panel, no second press. That is what was asked
+        # for and it is the right shape for a clipboard, which is a place
+        # things are meant to leave quickly. It is not recoverable: the store
+        # unlinks the file. The panel stays on the menu for anyone who wants
+        # to be asked.
+        p["paste_btn"].click(None, js=PASTE_JS, inputs=[], outputs=[])
+        p["delete_btn"].click(self.delete, inputs=[selected], outputs=[p["delete_panel"], *refresh_outputs], **quiet)
         p["delete_cancel"].click(lambda: gr.update(visible=False), inputs=[], outputs=[p["delete_panel"]], **quiet)
         p["delete_ok"].click(self.delete, inputs=[selected], outputs=[p["delete_panel"], *refresh_outputs], **quiet)
 

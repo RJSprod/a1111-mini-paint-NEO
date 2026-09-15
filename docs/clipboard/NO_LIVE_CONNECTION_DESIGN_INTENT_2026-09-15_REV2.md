@@ -1,16 +1,22 @@
-> **Superseded.** This is the first step's document.
-> `NO_LIVE_CONNECTION_DESIGN_INTENT_2026-09-15_REV2.md` absorbs it and covers
-> the whole programme, and
-> `NO_LIVE_CONNECTION_WHAT_WAS_BUILT_AND_V2.md` says what of it is built.
-
 # The Clipboard tab without a live connection
 
 One design intent for the whole programme: move this tab off Gradio's event
 transport, so the *"This page has lost its live connection to Forge"* line
 stops being something a user ever sees on a machine where Forge is running.
 
-Written 2026-09-15, after the send fault was found. Supersedes and absorbs
-`GRID_DESIGN_INTENT_2026-09-15.md`, which covered only the first step.
+Written 2026-09-15, after the send fault was found. Revised the same day after
+the destination-send behaviour was checked against Forge main and this
+repository. Supersedes and absorbs `GRID_DESIGN_INTENT_2026-09-15.md`, which
+covered only the first step.
+
+This revision makes one user-facing contract explicit: **a Send to destination
+does not have to be opened first, and a verified successful send opens that
+destination afterwards.** That is how Forge's own txt2img Send to img2img /
+Extras path behaves, and it is the behaviour Clipboard keeps. It also folds in
+the feasibility review's mechanical corrections: the current
+`/minipaint-interop` route prefix, a library-specific revision rather than the
+event spine's global revision, a thumbnail version that matches the cache key,
+and the write routes still needed for prompt-enhancement settings.
 
 Every number here was measured on this repository. Where a figure decides
 something, the measurement is described so it can be repeated.
@@ -38,9 +44,9 @@ what made this hard to reason about.
 **Push** — the server telling a page something it did not ask about: a job
 finished, another page added a picture. This genuinely needs a channel held
 open. **In this extension it already is one, and it is not Gradio:**
-`/minipaint/events` is server-sent events over plain HTTP, with
-`/minipaint/sync` for a snapshot and a resumable cursor namespaced by process
-epoch. The WanGP queue has used it since protocol 3.
+`/minipaint-interop/events` is server-sent events over plain HTTP, with
+`/minipaint-interop/sync` for a snapshot and a resumable cursor namespaced by
+process epoch. The WanGP queue has used it since protocol 3.
 
 **Request and response** — press a thing, get an answer. Needs nothing held
 open. An HTTP request does it.
@@ -84,7 +90,7 @@ page that comes back needs Gradio to show the job that ran fine without it.
 
 ## 2. Principles
 
-Five rules that decide where any piece of this tab belongs. Everything in
+Six rules that decide where any piece of this tab belongs. Everything in
 sections 5–13 follows from them.
 
 1. **The server owns truth. The browser owns drawing.** The server decides
@@ -108,6 +114,13 @@ sections 5–13 follows from them.
 5. **A failure is named, never silent.** The whole cost of the last six builds
    was a fault with no symptom. Every failure mode in section 15 has a defined
    thing the page says.
+
+6. **A send means deliver, prove, then show.** A destination being hidden is
+   not a prerequisite failure and the user never has to open it first. The
+   page delivers to the already-built destination, verifies that the picture
+   landed, and only then makes that destination visible. A failed send leaves
+   the user in Clipboard and says why; navigation is never used as evidence
+   that delivery worked.
 
 ---
 
@@ -172,11 +185,12 @@ this tab that rides it, the less that misconfiguration can take with it.
   a route instead of a Gradio callback. Most already have both.
 
 * **Not a new API.** `interop.py` already publishes
-  `/minipaint/outbox/{submit,claim,report,cancel,retry,adopt,cancel_all,track}`,
-  `/minipaint/enhance`, `/minipaint/stage`, `/minipaint/events` and
-  `/minipaint/sync` — the documented public `minipaint.wangp.queue/v1`
-  contract. The Clipboard's Gradio callbacks and those routes **call the same
-  functions**. Two front doors, one core. Most of this is wiring.
+  `/minipaint-interop/outbox/{submit,claim,report,cancel,retry,adopt,cancel_all,track}`,
+  `/minipaint-interop/enhance`, `/minipaint-interop/stage`,
+  `/minipaint-interop/events` and `/minipaint-interop/sync` — the documented
+  public `minipaint.wangp.queue/v1` contract. The Clipboard's Gradio callbacks
+  and those routes **call the same functions**. Two front doors, one core. Most
+  of this is wiring.
 
 * **Not virtualisation.** Paging bounds the DOM; that is what virtualisation
   would have been for.
@@ -209,13 +223,20 @@ in-memory index, so this route is a slice of work the store does correctly
 today. The ordering logic is not moved, rewritten or duplicated — which is
 most of why this step is cheap.
 
-**`revision` is the library's identity**, in the event spine's existing
-`<epoch>:<revision>` form, so a value from a previous Forge process is not
-stale but meaningless, and says so. The browser holds the revision its page
-was built from; a mismatch means "ask again".
+**`revision` is the library's identity**, in `<epoch>:<library revision>`
+form. The epoch is the event spine's existing process epoch; the number is a
+Clipboard-library generation that advances only when the library changes. It
+is deliberately **not** `events.revision()`, because job, enhancement, runtime
+and WanGP events advance that global counter even when the library is
+unchanged. A value from a previous Forge process is not stale but meaningless,
+and says so. The browser holds the revision its page was built from; a mismatch
+means "ask again".
 
-**`v` is the version of the picture's bytes** (`asset.mtime_ns`). It is what
-makes the browser's thumbnail cache work — see section 10.
+**`v` is the version of the picture's bytes**, expressed from the same cheap
+identity the thumbnail cache already trusts: `<mtime_ns>-<size_bytes>`. The
+asset id is already in the path, so those two file facts complete the cache
+key for the browser. It is what makes the browser's thumbnail cache work — see
+section 10.
 
 **Bad input is answered, not refused.** An unknown sort falls back to the
 stored one; a page past the end returns the last page; a size outside its
@@ -349,8 +370,9 @@ you look at.
 * In the extension's own data directory, beside `clipboard.json` — **not** the
   user's picture folder, which is theirs and should not acquire files it did
   not ask for.
-* Named `<asset id>-<mtime_ns>-<side>.webp`, so a changed file simply does not
-  hit and no invalidation logic exists to get wrong.
+* Named `<asset id>-<mtime_ns>-<size_bytes>-<side>.webp`, matching the
+  in-memory cache's file identity, so a changed file simply does not hit and no
+  invalidation logic exists to get wrong.
 * Bounded by total size with least-recently-used eviction, swept at startup
   and occasionally after writes. A cache that grows for ever is a bug with a
   long fuse.
@@ -359,9 +381,11 @@ you look at.
 
 **In the browser** — this is "if the thumbnail has not changed, do not
 download it again", and it is nearly free because the URL is already
-versioned. `routes.image_url` appends `?v=<mtime_ns>`, so the URL changes
-exactly when the bytes do. Today's header re-validates hourly for content that
-by construction cannot have changed. For a request carrying a version:
+versioned. `routes.image_url` appends
+`?v=<mtime_ns>-<size_bytes>`, matching the server cache's file identity, so an
+observed file change gets a new URL. Today's header re-validates hourly for
+content that this version has made immutable. For a request carrying the
+asset's **current canonical** version:
 
 ```
 Cache-Control: private, max-age=31536000, immutable
@@ -369,8 +393,9 @@ Cache-Control: private, max-age=31536000, immutable
 
 `immutable` is the part that works: the browser stops re-validating on reload,
 so a thumbnail fetched once is never fetched again while it is in the cache. A
-request *without* `?v=` keeps the conservative header, because an unversioned
-URL can genuinely change meaning.
+request *without* `?v=`, or with a value that is not the asset's current
+canonical version, keeps the conservative header: an unversioned or falsely
+versioned URL must never be blessed immutable.
 
 A rename changes the caption and not the file, so `mtime_ns` is unchanged, the
 URL is unchanged, and nothing is re-fetched — the asked-for behaviour falling
@@ -417,12 +442,12 @@ kind of helpfulness nobody wants.
 | rename, delete, choose folder | no | no | thin routes over existing store methods | small each |
 | upload, paste, drop | no | **already not** | `/minipaint-clipboard/import` has always been HTTP | done |
 | slot assignment | no | no | thin route | small |
-| Add to Queue | no | no | `/minipaint/outbox/submit` exists; call the public API | small |
-| prompt enhancement settings | no | no | `/minipaint/enhance` exists | small |
-| send to img2img, Inpaint, Extras, ImageStitch | no | **already not** | the browser writes those components itself | done |
-| send to Mini Paint | no | **yes** | section 13 | out of scope |
+| Add to Queue | no | no | `/minipaint-interop/outbox/submit` exists; call the public API | small |
+| prompt enhancement settings | no | no | describe route exists; add thin write routes for toggle / override / restore | medium-small |
+| send to img2img, Inpaint, Extras, ImageStitch | no | **already not** | `send_plan` + `deliverToHost`: fill while hidden, verify, then switch | done; make it a contract |
+| send to Mini Paint | no | **yes for delivery** | server receive chain stays; no pre-open requirement; switch after acknowledgement | out of scope for transport removal |
 
-Three of these deserve detail.
+Four of these deserve detail.
 
 ### The status line
 
@@ -444,7 +469,7 @@ Updates already arrive on the event spine, which is why the list moves without
 polling today. Only the **rendering** is Gradio: the browser presses a hidden
 refresh button and the server returns HTML.
 
-`outbox.jobs()` is already exposed at `/minipaint/outbox` and already returns
+`outbox.jobs()` is already exposed at `/minipaint-interop/outbox` and already returns
 the job records the HTML is built from. Moving this is: fetch instead of press,
 draw instead of receive markup. The job buttons (cancel, retry, adopt) already
 have routes.
@@ -462,6 +487,61 @@ it already loads for the WanGP bridge — and the server builds the request from
 the same draft through the same `outbox.submit`. The durable acknowledgement
 the browser waits for is the one the contract already defines.
 
+### Send to another tab: Forge's behaviour is the contract
+
+Forge's own result buttons establish the user-facing rule. In
+`modules/infotext_utils.py`, `connect_paste_params_buttons()` binds the source
+image to the destination component and also binds the same press to
+`switch_to_<tabname>`. A user can be on txt2img, send to img2img or Extras
+without first visiting that tab, and the destination becomes the visible tab.
+**Being visible is an outcome of the send, not a precondition for it.**
+
+Clipboard already has the mechanics for the same rule. `send_plan()` names the
+host component that was built with the page. `minipaintCanvas.deliverToHost()`
+can fill that component while its tab is hidden, verifies the committed image
+with `still_holds()` when the transfer library can do so, and only after that
+calls `switchTo(name)`. Its switch table uses Forge's own
+`switch_to_img2img`, `switch_to_inpaint` and `switch_to_extras` helpers; the
+two ImageStitch destinations map to the txt2img and img2img top-level tabs.
+
+The real-browser suite already proves the important first half for component
+destinations: it opens Clipboard, never opens Extras or ImageStitch first,
+cuts Gradio's queue, sends, and asserts that the hidden destination gained the
+picture through its ordinary upload path. This revision makes the second half
+— the view change — an explicit contract rather than an implementation detail.
+
+The exact rule for every **Send selected to** action is:
+
+1. **Do not pre-open the destination.** Its component may be hidden; hidden is
+   not absent. A send that only works after the user has visited the target is
+   a bug.
+2. **Deliver first.** Use the target named by `send_plan`; do not navigate in
+   the hope that making it visible will make delivery possible.
+3. **Verify before switching.** For browser-delivered targets, the transfer
+   library's successful result — including its final `still_holds()` check
+   where available — is the gate.
+4. **On success, show the destination.** img2img opens img2img; Inpaint opens
+   the Inpaint sub-tab; Extras opens Extras; ImageStitch opens the host tab that
+   owns that gallery. The received picture is already there when the user sees
+   it.
+5. **On failure, stay in Clipboard.** Do not move the user to an empty target.
+   The Clipboard status / toast says what failed.
+6. **Delivery and navigation are separate facts.** If the picture is proved to
+   have landed but the tab switch itself cannot be made, never resend the
+   picture. Say `Sent <name> to <destination>, but could not open that tab.`
+   and leave the delivered picture alone. `switchTo()` should therefore return
+   a success/failure result instead of being fire-and-forget where this path
+   needs to distinguish the two.
+7. **Mini Paint follows the same UX even though its transport is different.**
+   Its receive remains a Gradio event until the Canvas is migrated, but the
+   user still does not have to visit Mini Paint first. A successful receive is
+   acknowledged first; then the Mini Paint tab is shown. A failed receive does
+   not switch tabs.
+
+That last point matters to scope: section 13 says Mini Paint remains dependent
+on Gradio for **delivery**. It does not grant Mini Paint a different Send-to
+user experience.
+
 ---
 
 ## 13. What is genuinely irreducible
@@ -476,14 +556,20 @@ page has loaded, the shell needs nothing from the transport.
 UI is Gradio-rendered, so handing it a picture means a Gradio event that
 re-renders the Canvas. This stays until the Canvas gets the same treatment —
 separate work, named here so it is not discovered as a surprise. It is also
-the rarest of the destinations.
+the rarest of the destinations. **That is a transport exception, not a UX
+exception:** Mini Paint does not have to be opened before the send. Once its
+receive is acknowledged, the page switches to Mini Paint; if the receive is
+not acknowledged, it stays in Clipboard.
 
 Note what is **not** on that list: putting a picture into img2img, Inpaint,
 Extras or ImageStitch. Those look like they must need Gradio, because the
 picture ends up in another tab's component — but the browser already writes
 those components directly, through the transfer library, and has since the
-send route was built. That is precisely why sending kept working through every
-connection failure in this tab's history.
+send route was built. The destination does not need to have been opened: its
+component was built with the page and can be filled while hidden. After the
+transfer is proved, the same helper switches the view there. That is precisely
+why sending kept working through every connection failure in this tab's
+history.
 
 ---
 
@@ -530,7 +616,10 @@ none.
 | disk thumbnail cache unreadable | encode as before; log once; never fail |
 | library empties while on page 5 | clamp to the last page that exists |
 | an action route fails | the status line says which action and why; nothing else is disturbed |
-| Gradio channel dead, programme complete | nothing visible except Mini Paint as a destination |
+| destination tab has never been opened | no special case: deliver to its already-built component; after verification, switch to it |
+| send delivery fails | stay in Clipboard; name the failure; do not switch to an empty destination |
+| delivery succeeds but tab switching fails | keep the delivered picture; say it was sent but the tab could not be opened; never resend |
+| Gradio channel dead, programme complete | Forge destinations still deliver and switch normally; Mini Paint delivery is the one remaining exception |
 | Forge actually stopped | the new notice, retrying quietly |
 
 ---
@@ -552,9 +641,23 @@ test plan is part of the design.
 * a thumbnail whose `v` is unchanged is not re-requested — asserted from
   `PerformanceObserver`, which the page already carries;
 * selection survives paging and survives a patch;
+* **a destination never has to be pre-opened**: from a fresh page, open only
+  Clipboard, send to img2img, Inpaint, Extras and an available ImageStitch
+  destination, and prove the picture lands;
+* **a verified successful send changes the visible tab** to that destination,
+  and the image is already present when the tab is shown;
+* delay the transfer and prove Clipboard remains visible until delivery is
+  verified — navigation must not be the thing that makes a send work;
+* break a destination and prove a failed send leaves Clipboard visible;
+* prove delivery-success / switch-failure is not retried: one picture at the
+  destination, plus the explicit `sent, but could not open` notice;
+* with Mini Paint never opened, a healthy Gradio receive fills it and only
+  then shows its tab; with Gradio cut, that receive fails visibly and does not
+  navigate;
 * **the whole tab works with Gradio's channel cut**: browse, page, sort,
-  select, send, queue, read the queue list. This suite already cuts the queue
-  with page routing, so the fixture exists.
+  select, send to every browser-deliverable Forge destination and be taken to
+  it, return to Clipboard, queue, and read the queue list. This suite already
+  cuts the queue with page routing, so the fixture exists.
 
 **`tests/test_clipboard_store.py`**: the route contracts — sort over the whole
 library then sliced, clamping, `revision` changing when and only when the
@@ -575,6 +678,12 @@ cannot quietly keep both doors for ever.
 Each step leaves the tab working and is independently revertable. Value over
 cost, with the deletions last.
 
+**Before step 1, lock the Send-to contract in the browser suite:** no target
+pre-open, verified delivery before navigation, successful navigation after
+delivery, and no navigation on failure. The mechanics already exist for Forge
+destinations; the point is to make them impossible to regress while the rest
+of the tab is moved.
+
 | # | step | why here |
 | --- | --- | --- |
 | 1 | Thumbnail caches: memory bound, disk cache, immutable versioned URLs | No UI change; speeds up today's grid; stands alone if all else is abandoned |
@@ -591,8 +700,10 @@ cost, with the deletions last.
 | 12 | **Retire the notice**; replace with the HTTP one | Only honest once 1–11 are done |
 
 **After step 9 the tab is usable end to end with Gradio's channel dead**:
-browse, page, sort, select, send, queue, and watch a job run. Steps 10 and 11
-are the last things that would still quietly not work.
+browse, page, sort, select, send to a browser-deliverable Forge destination
+without pre-opening it, arrive on that destination after the verified transfer,
+queue, and watch a job run. Steps 10 and 11 are the last things that would
+still quietly not work.
 
 Steps 1–6 add. Only 7 and 12 take away. That is the right order for something
 people are using.
@@ -654,10 +765,13 @@ calls the same functions the Gradio callbacks call.
 So: the server keeps the order and the truth, the browser draws, changes arrive
 as advisory events over the spine, pictures are cached in the server's memory,
 on its disk, and immutably in the browser, and the grid pages 60 at a time with
-Back / Next / go-to.
+Back / Next / go-to. A Send-to target never has to be visited first: the page
+fills it while hidden, proves the image landed, and then shows that destination.
+A failed send does not move the user.
 
 What remains on Gradio at the end is the tab shell, which is build time, and
-Mini Paint as a destination, which is separate work.
+Mini Paint's **delivery** as a destination, which is separate work. Mini Paint
+still follows the same no-pre-open / switch-after-success user contract.
 
 And the line stops saying *"the live connection is gone"* and starts saying
 *"Forge is not answering"* — which, on a machine where Forge is running, it

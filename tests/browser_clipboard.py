@@ -647,6 +647,77 @@ def check_patching(r: Results, page, library) -> None:
             page.evaluate("() => window.minipaintClipboard.debug().selected") == chosen, chosen)
 
 
+def check_the_failure_modes_have_answers(r: Results, page, library) -> None:
+    """Every failure in section 15 has a defined thing the page says.
+
+    The whole cost of the last six builds was a fault with no symptom, so
+    "it went quiet" is not an outcome any of these is allowed to have.
+    """
+    from PIL import Image
+
+    open_clipboard(page)
+    show_page(page, {"size": 60, "page": 0, "sort": "name_asc", "refresh": True})
+
+    # -- a selection gives way to truth, and only to truth
+    page.evaluate("() => { const c = document.querySelector('.minipaint-clip-item'); if (c) { c.click(); } }")
+    time.sleep(0.6)
+    chosen = page.evaluate("() => window.minipaintClipboard.debug().selected")
+    name = page.evaluate("() => (document.querySelector('.minipaint-clip-item') || {}).dataset.name")
+    r.check("failure modes: a picture is selected", bool(chosen) and bool(name), repr(chosen))
+    copy = (library / name).read_bytes()
+    (library / name).unlink()
+    page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
+    time.sleep(2.5)
+    r.check("the selected picture being deleted clears the selection - a selection gives way to truth",
+            page.evaluate("() => window.minipaintClipboard.debug().selected") == "",
+            repr(page.evaluate("() => window.minipaintClipboard.debug().selected")))
+    (library / name).write_bytes(copy)
+    page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
+    time.sleep(2.5)
+
+    # -- a thumbnail that will not load costs that tile its picture, and
+    #    nothing else on the page anything at all
+    # A real 404 from the real route, rather than a stubbed one: an id the
+    # library has never minted is exactly what a tile holds when the file
+    # behind it has gone.
+    page.evaluate("""() => {
+        const tile = document.querySelectorAll('.minipaint-clip-item')[1];
+        tile.querySelector('img').src = '/minipaint-clipboard/image/' + '0'.repeat(32) + '?thumb=1&v=1-1';
+    }""")
+    time.sleep(2.5)
+    r.check("a thumbnail that 404s marks its tile and leaves its name readable",
+            page.evaluate("""() => {
+                const tile = document.querySelectorAll('.minipaint-clip-item')[1];
+                return tile.classList.contains('minipaint-clip-item-missing') && !!tile.dataset.name;
+            }"""))
+    r.check("and the page is otherwise unaffected",
+            len(page.evaluate(READ_TILES_JS)) == 6, str(len(page.evaluate(READ_TILES_JS))))
+
+    # -- the index route unreachable: keep what is on screen, say so, retry
+    held = [t["name"] for t in page.evaluate(READ_TILES_JS)]
+    page.route("**/minipaint-clipboard/library*", lambda route: route.abort())
+    try:
+        page.evaluate("() => window.minipaintClipboard.library({})")
+        time.sleep(2.5)
+        r.check("an index that cannot be reached keeps the tiles that were right when they were drawn",
+                [t["name"] for t in page.evaluate(READ_TILES_JS)] == held, str(held))
+        r.check("and the page says FORGE IS NOT ANSWERING - the one line that means the server is gone",
+                page.evaluate("() => window.minipaintClipboard.debug().offline.server") is True)
+        r.check("in those words, and not in the retired ones about a live connection",
+                page.evaluate("""() => { const bar = document.querySelector('.minipaint-clip-offline');
+                    return bar && !bar.hidden ? bar.textContent : ''; }""").startswith("Forge is not answering"),
+                page.evaluate("""() => { const bar = document.querySelector('.minipaint-clip-offline');
+                    return bar ? bar.textContent.slice(0, 60) : 'NO BAR'; }"""))
+        r.check("and it is trying again by itself rather than only offering a button",
+                page.evaluate("() => window.minipaintClipboard.debug().retrying") is True)
+    finally:
+        page.unroute("**/minipaint-clipboard/library*")
+    page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
+    time.sleep(2.5)
+    r.check("and the line goes by itself the moment the server answers",
+            page.evaluate("() => window.minipaintClipboard.debug().offline.server") is False)
+
+
 def check_sorting_is_separate_from_drawing(r: Results, page) -> None:
     """Changing the sort does not touch a tile until the new order arrives.
 
@@ -1718,6 +1789,7 @@ def run() -> Results:
                 check_paging(r, page, library)
                 check_patching(r, page, library)
                 check_sorting_is_separate_from_drawing(r, page)
+                check_the_failure_modes_have_answers(r, page, library)
                 check_a_thumbnail_is_fetched_once(r, page)
                 r.check("a picture can be selected", select_first(page),
                         repr(box(page, "minipaint_clipboard_selected")))

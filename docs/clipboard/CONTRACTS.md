@@ -608,76 +608,152 @@ and `generating(gen)` (`gen["in_progress"]`), beside the loose gallery
 signatures of 1.2.0. `bridge_js.py`'s `queueProblem` refuses a `start` that
 is not a mode; `plugin_info.json` said 1.3.0, protocol 4, capability `start`.
 
+## The tab's own routes — everything that used to need Gradio
+
+Five doors, all under `/minipaint-clipboard/`, all gated by the same
+`_signed_in` the picture route uses, all answering `Cache-Control: no-store`
+and their own `status` sentence for the status line. They exist because every
+one of this tab's events was a request with a response and none was ever a
+push: what made them fragile was the transport, not the interaction.
+
+    GET  /minipaint-clipboard/library?sort&page&size&selected&refresh
+      -> {ok, revision: "<epoch>:<n>", configured, sort, total, page, pages, size,
+          selected_page, reason: ""|"empty"|"unconfigured", status,
+          items: [{id, name, w, h, bytes, v}]}
+
+`routes.library_page(sort, page, size, selected, refresh)` is the whole of it;
+the route is a signed-in wrapper. **Sorting is applied over the whole library
+and then sliced** — `store.assets(sort)` already returns the complete ordered
+list, so this is a slice of work the store does correctly rather than a second
+ordering to keep in step. Bad input is answered, never refused: an unknown
+sort falls back to the stored one, a page past the end returns the last page
+that exists, a size outside `PAGE_SIZE_MIN..PAGE_SIZE_MAX` is clamped.
+`PAGE_SIZE = 60`. `refresh=1` re-reads the folder first.
+
+`revision` is the **library's own** generation (`Store.revision()`), not
+`events.revision()`: job, enhancement, runtime and WanGP events move that one
+constantly while the library sits still. `v` is `<mtime_ns>-<size_bytes>` —
+the same identity both thumbnail caches are keyed by.
+
+    POST /minipaint-clipboard/settings   {sort?, thumbnail?, intercept?}
+      -> {ok, status, sort, thumbnail, intercept, menu: {...}}
+
+    GET  /minipaint-clipboard/queue?page=<page id>
+    POST /minipaint-clipboard/queue      {action: add|cancel|retry|adopt|cancel_all, ...}
+      -> {ok, jobs: [...], history: [...], status, queue_button: {label, enabled}, instruction?}
+
+    GET  /minipaint-clipboard/enhance-settings?variant&mode
+    POST /minipaint-clipboard/enhance-settings  {action: toggle|override|restore, ...}
+
+    POST /minipaint-clipboard/send       (as before)
+
+`GET /image/<id>?thumb=1&v=<version>` answers
+`private, max-age=31536000, immutable` when `v` is the asset's **current
+canonical** version — read from the file, not from the index — and
+`private, max-age=3600` for anything else. An unversioned or falsely versioned
+URL must never be blessed immutable.
+
 ## `minipaint_neo/clipboard/` — the tab
 
 ```python
-# __init__.py / config.py / store.py / history.py / routes.py: as in 1.2.0 (the folder, the intercept, the library, the draft and history, the image and import routes)
+# __init__.py / config.py / history.py: as in 1.2.0 (the folder, the intercept, the draft and history)
+
+# store.py
+THUMBNAIL_CACHE_SIZE = 512; THUMBNAIL_DIR_NAME = "clipboard-thumbnails"; THUMBNAIL_DISK_BUDGET = 64 MiB; THUMBNAIL_NAME_RE
+def version_of(asset) -> "<mtime_ns>-<size_bytes>"                                  # what a thumbnail URL carries
+class Store:
+    revision() -> "<epoch>:<n>"; moved(total=None) -> revision                       # publishes events.LIBRARY
+    canonical_version(asset_id) -> str                                               # from the file, for the cache header
+    thumbnail_dir(); sweep_thumbnails(budget=THUMBNAIL_DISK_BUDGET) -> {ok, kept, removed, bytes}
+# import_bytes / import_image / rename / delete / set_root / a refresh that found a difference all call moved()
+
+# routes.py
+LIBRARY_ROUTE; SETTINGS_ROUTE; QUEUE_ROUTE; ENHANCE_SETTINGS_ROUTE; PAGE_SIZE = 60; PAGE_SIZE_MIN = 10; PAGE_SIZE_MAX = 250
+IMMUTABLE_CACHE; REVALIDATED_CACHE
+def library_page(sort, page, size, selected="", refresh=False) -> dict; def apply_settings(changes) -> dict
+def clamp_size(value) -> int; def page_of(value, pages) -> int                        # zero-based; the pager shows page + 1
+def image_url(asset_id, thumb=True, version="")
 
 # history.py: a record also carries enhanced (bool) and enhanced_prompt (the written prompt; the typed one stays the recipe); make_record(draft, result, enhanced_prompt="")
 
 # ui.py
 PREFIX = "minipaint_clipboard"; SLOTS = (("first", "First Frame", "start"), ("last", "Last Frame", "end"), ("ref", "Reference", "references"))
 QUEUE_BUTTON_LABEL = "Add to Queue"; QUEUE_BUTTON_BLOCKED = "WanGP is not running"; OUTBOX_LABELS (+ Enhancing); ENHANCE_LABELS; WANGP_LABELS; NO_PAGE = "00000000"; OUTBOX_SHOWN = 40
-SP_VARIANT_CHOICES; SP_MODE_CHOICES; ARM_QUEUE_JS returns [prompt, page id, model json]; AFTER_CANCEL_JS
-def grid_html(assets, selected, configured); def card_html(slot, label, field, assets, missing=False); def history_html(records, asset_of)   # + the enhanced line
-def outbox_html(jobs, page) -> str; def job_sentence(job) -> str; def enhance_sentence(job) -> str; def wangp_sentence(job) -> str; def enhance_line_html(availability, enabled) -> str
+SP_VARIANT_CHOICES; SP_MODE_CHOICES; QUEUE_JS (prompt, switch -> addToQueue); CANCEL_ALL_JS; MENU_STATE_JS; GRID_MOUNT = ""; LIST_MOUNT = ""
+def card_html(slot, label, field, assets, missing=False)                              # the one server-rendered section left; see the V2 list
+def outbox_view(jobs, page) -> [dict]; def history_view(records, asset_of) -> [dict]   # content, not nodes: the browser draws it
+def job_sentence(job) -> str; def enhance_sentence(job) -> str; def wangp_sentence(job) -> str; def enhance_line_html(availability, enabled) -> str
 class ClipboardTab:
     refresh; sort_changed; sort_request; thumbnail_changed; toggle_intercept          # every refresh output ends with the button's state
     assign(slot, selected); slot_action("clear:<slot>" | "assign:<slot>:<id>"); slot_upload(slot, file, selected); upload(files, selected); pasted(path, selected)
     prompt_changed(prompt)
     toggle_enhance(flag, model) -> enhance line; model_changed(model) -> enhance line
     system_prompt_selected(variant, mode) -> (box, state); apply_override(variant, mode, text) -> (box, state, status); restore_default(variant, mode) -> (box, state, status)
-    cancel_all(page) -> (outbox html, status)                                           # outbox.cancel_all()
-    prepare_queue(prompt, page, model) -> (instruction json {nonce, job_id} | "", status, outbox html, button)   # outbox.submit(..., "clipboard", model=); WANGP_NOT_RUNNING and ENHANCE_* refuse
-    refresh_outbox(page) -> (outbox html, status, history html, button)                # records history for unrecorded positive Clipboard jobs, once (typed prompt + written prompt)
-    outbox_action("cancel|retry|adopt:<job>:<page>:<nonce>", page) -> (outbox html, status)
-    show_history(); history_action("load:<id>" | "delete:<id>", prompt)
+    cancel_all(page) -> {ok, cancelled, jobs, status}                                   # outbox.cancel_all()
+    add_to_queue(prompt, page, model=None, enhance_wanted=None) -> {ok, instruction {nonce, job_id, executor, state} | None, status, jobs, queue_button}
+    queue_answer(page) -> {ok, page, jobs, history, status, queue_button, running}      # records history for unrecorded positive Clipboard jobs, once
+    outbox_action("cancel|retry|adopt:<job>:<page>", page) -> {ok, jobs, status, queue_button?}
+    show_history() -> gr.update(visible=True); history_action("load:<id>" | "delete:<id>", prompt)
+    _queue_button_view(running=None) -> {label, enabled}                                # the same decision as _queue_button, as facts
     send("<target>:<asset id>:<nonce>", selected)          # minipaint | img2img | inpaint | extras | stitch_*
     choose_folder(text, create); open_folder; open_rename; rename; open_delete; delete
     _queue_button(running=None) -> gr.update(interactive, value); _running() -> outbox.wangp_running()
 def create_ui() -> ClipboardTab; def on_ui_tabs() -> [(blocks, "Clipboard", "minipaint_clipboard")]   # a failure gives a note under the same id
 ```
 
-Components added for the queue: the hidden `page_id` (the page writes its
-identity into it on attach; the Add to Queue click's JS returns it as the
-second input), the hidden `model` (the page writes the WanGP model the public
-API's capabilities answer named, once per change; the click's JS returns it
-as the third input), the hidden `outbox_action` textbox, the hidden
-`outbox_refresh` button, the `cancel_all` button and the `outbox_list` HTML
-under the button; for enhancement, the `enhance_panel` accordion with
-`enhance_line`, `enhance_toggle`, `sp_variant`, `sp_mode`, `system_prompt`,
-`sp_state`, `sp_apply`, `sp_restore`, `sp_reload`. The events:
-`queue.click(prepare_queue, [prompt, page_id, model] -> [queue_instruction,
-queue_status, outbox_list, queue])`, `queue_instruction.change(js: pump)`,
-`outbox_refresh.click(refresh_outbox, [page_id] -> [outbox_list,
-queue_status, history_list, queue])`, `outbox_action.input(outbox_action,
-[outbox_action, page_id] -> [outbox_list, queue_status])`,
-`cancel_all.click(cancel_all, [page_id] -> [outbox_list, queue_status]).then(js:
-afterCancelAll)`, `enhance_toggle.input(toggle_enhance, [enhance_toggle,
-model] -> [enhance_line])`, `model.input(model_changed)`, the selectors' and
-Reload's `system_prompt_selected`, `sp_apply.click(apply_override)`,
+`grid`, `outbox_list` and `history_list` are **mounts, not renders**: they are
+built with an empty value and no event names them as an output. The browser
+draws into them from the routes above. The hidden `queue_instruction`,
+`outbox_action`, `outbox_refresh` and `page_id` that the queue used to need
+are gone, and `tests/test_clipboard_ui.py` asserts both the hidden-component
+ceiling (26) and their absence, so the tab cannot quietly keep both doors.
+
+`receive_receipt` is new: the Canvas writes `landed` or `failed` into it for
+the receive this send caused, and only `landed` shows the Mini Paint tab. It
+is the one hidden box this change added, and it buys Mini Paint the same
+Send-to contract every other destination keeps.
+
+`menu_state` carries a `nonce`, so a callback that happened to return the same
+settings still reaches the browser — the page watches it to know the
+framework's channel is alive, which is the one thing an HTTP request cannot
+tell it.
+
+The events that remain around the queue: `queue.click(js: addToQueue, [prompt,
+enhance_toggle])`, `cancel_all.click(js: cancelAll)`,
+`menu_state.change(js: menuStateChanged)`,
+`enhance_toggle.input(toggle_enhance, [enhance_toggle, model] ->
+[enhance_line])`, `model.input(model_changed)`, the selectors' and Reload's
+`system_prompt_selected`, `sp_apply.click(apply_override)`,
 `sp_restore.click(restore_default)`.
 
-The tab's browser side, `javascript/minipaint_clipboard.js`
-(`window.minipaintClipboard`): `attach` (writes the page id, listens for
-`minipaint:outbox`, pumps once so a reloaded page resumes its jobs),
-`afterRender`, `toggleMenu`, `select`, `setThumbnailSize`,
-`pasteFromClipboard`, drop-on-card import, the menu, `sendTo` (writes
-`send_request`, presses `send_press`, then `watchSend`; `whySilent` puts the
-three facts that separate "the event never fired", "it failed" and "the answer
-never came back" in the log when nothing is acknowledged), `reportTiles` (says
-when a thumbnail is *drawn* off-centre, measured through `object-fit` rather
-than from the `<img>` box, which is centred whatever the picture does),
-`armQueue` (a
-bounded watcher on the instruction box), `queue(instruction)` (→
-`minipaintInterop.wangp.pump()`), `pump`, `pageId`, `modelJson` (the model
-the press carries), `afterCancelAll` (→ `refreshWaiters`), `refreshCapabilities`
-(throttled, never on a timer; the line says generating / idle; writes the
-model box through `sendModel` once per change), `pressHidden`. `attach` also
-resumes the public API's tracking of this page's queued jobs. Job buttons
-write `outbox_action`; retry and adopt kick the pump; `waiting` and
-`tracked` events re-render the list. It sets no colour of its own and
+The tab's browser side, `browser/minipaint_clipboard.js`
+(`window.minipaintClipboard`): `attach` (mounts the grid, fetches the library
+and the queue, listens for `minipaint:outbox`, pumps once so a reloaded page
+resumes its jobs), `library(options)` / `goToPage` / `setSort` (the grid, its
+pager and the sort, over the index route; only the newest answer draws, and a
+LIBRARY event makes the page re-ask rather than apply a delta),
+`libraryState()`, `addToQueue(prompt, switch)`, `cancelAll`, `refreshQueue`,
+`queue(instruction)` (→ `minipaintInterop.wangp.pump()`), `pump`, `pageId`,
+`modelJson`, `afterRender`, `toggleMenu`, `select`, `setThumbnailSize` (sizes
+now, remembers shortly, over `/settings`), `pasteFromClipboard`,
+drop-on-card import, the menu, `sendTo` (delivers first, says
+`Sent <name> to <destination>, but could not open that tab.` when the picture
+landed and the tab would not open, and never resends in that case;
+`whySilent` puts the three facts that separate "the event never fired", "it
+failed" and "the answer never came back" in the log), `reportTiles` (says when
+a thumbnail is *drawn* off-centre, measured through `object-fit` rather than
+from the `<img>` box, which is centred whatever the picture does),
+`refreshCapabilities` (throttled, never on a timer), `pressHidden`,
+`menuStateChanged`, `showOffline`, `debug()`. Job buttons call the queue
+route; retry and adopt kick the pump. It sets no colour of its own and
 journals no prompt and no filename.
+
+The one standing notice has two sentences and no third: **Forge is not
+answering**, raised only when an HTTP request to this extension's own routes
+fails; and **the composer's live channel to Forge is down on this page**,
+raised when the framework's channel is not delivering and the server is fine,
+naming the parts that are stale (`STALE_WITHOUT_THE_CHANNEL`). That list
+shrinks as rows move, and when it is empty the second notice stops existing.
 
 ## The Canvas and the host
 
@@ -686,11 +762,25 @@ journals no prompt and no filename.
 Clipboard when `clipboard.intercept_enabled()` and passes through on failure;
 `after_receive(state)` → which tab the follow-up step switches to;
 `receive_picture(image, state, mode, origin, label)`;
-`receive_from(event, provider, inputs)` wires an outside trigger into the
-Canvas's own structural receive chain; `send()` routes `clipboard` to
-`_send_to_clipboard()`. `canvas/host.py`: `gallery_file(payload)` — the file a
-gallery item stands for, only through the host's own `check_tmp_file`.
-`javascript/minipaint_canvas.js`: `switchTo("clipboard")`.
+`receive_from(event, provider, inputs, origin="clipboard", label="Clipboard",
+receipt=None)` wires an outside trigger into the Canvas's own structural
+receive chain; with a `receipt` textbox it writes `RECEIVED` / `NOT_RECEIVED`
+for **that** receive (keyed by the exact trigger value, so two pages sending
+at once cannot read each other's outcome) and shows the Canvas tab only for
+one that landed. `send()` routes `clipboard` to `_send_to_clipboard()`.
+`canvas/host.py`: `gallery_file(payload)` — the file a gallery item stands
+for, only through the host's own `check_tmp_file`.
+
+`browser/minipaint_canvas.js`: **deliver, prove, then show.**
+`switchTo(target)` returns `{ok, reason}` and reads the answer off the page —
+a host helper that exists but left a different tab showing is a failed
+switch, and `tabShowing(panelId)` is how that is known. `deliverToHost(...)`
+answers `{ok, reason, switched, switchReason}`, so delivery and navigation
+are separate facts: nothing navigates before `still_holds()` has passed, and
+a picture proved to have landed in a tab that will not open is said, not
+resent. `deliverTheOldWay` no longer navigates on its own — the caller
+decides, through `landed(ok, reason, name)`, and only after a delivery that
+actually happened.
 
 ## Tests
 

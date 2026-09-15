@@ -874,15 +874,11 @@ window.minipaintClipboard = (function () {
         grid.classList.toggle("minipaint-clip-empty", !items.length);
         emptyNotice(grid, items.length ? "" : String(answer.reason || "empty"));
         drawPager();
-        applyThumbnailSize(S.thumb);
         // The selection is the browser's and does not belong to a page: it
-        // survives paging because the send path names a picture by id. It is
-        // given up only when the library is listing pictures and the
-        // selected one is not among them - see afterRender.
-        select(S.selected, true);
-        S.renderedAt = Date.now();
-        refreshBadges();
-        setTimeout(reportTiles, 400);
+        // survives paging because the send path names a picture by id, and it
+        // gives way to truth only when the library says the picture is not in
+        // it at all. That rule, the size and the badges are all one step.
+        afterRender();
     }
 
     /**

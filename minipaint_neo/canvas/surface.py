@@ -216,6 +216,10 @@ def bootstrap_js(uuid: str, options: typing.Mapping[str, typing.Any], status_ele
         "status": status_elem_id,
     }
     wangp = json.dumps([assets.url_for("wangp")])
+    # The transfer library, named for the page and started early. A send is
+    # the first thing that needs it and a send is the worst moment to be
+    # fetching it, so it is asked for here and awaited only where it is used.
+    host = json.dumps(assets.url_for("host"))
     return (
         "async () => { "
         "const r = window.minipaintCanvasReady; "
@@ -223,6 +227,8 @@ def bootstrap_js(uuid: str, options: typing.Mapping[str, typing.Any], status_ele
         f"r.configure({json.dumps(config)}); "
         "const ok = await r.ensure(); "
         "const a = window.minipaintAssets; "
+        f"window.minipaintHostUrl = {host}; "
+        f"if (a && a.module) {{ a.module({host}); }} "
         f"if (a && a.load) {{ a.load({wangp}); }} "
         "return ok; "
         "}"

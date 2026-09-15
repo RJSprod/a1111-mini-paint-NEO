@@ -115,7 +115,10 @@ TILES_JS = """() => Array.from(document.querySelectorAll('.minipaint-clip-item')
             // How far the picture reaches past the tile that is meant to
             // hold it, on the two sides a picture can run over.
             spillY: ir ? Math.round(ir.bottom - r.bottom) : 0,
-            spillX: ir ? Math.round(ir.right - r.right) : 0};
+            spillX: ir ? Math.round(ir.right - r.right) : 0,
+            // How far the picture's middle sits from the tile's middle. A
+            // picture that fits but hugs one edge is not in its cell.
+            offX: ir ? Math.round(((ir.left + ir.right) / 2) - ((r.left + r.right) / 2)) : 0};
 })"""
 
 # The tile's own geometry, with the box inside it prevented from doing any
@@ -243,6 +246,8 @@ def check_grid(r: Results, page) -> None:
     r.check("and every thumbnail box is the same size", len(thumbs) == 1, str(thumbs))
     spilling = [(t["name"], t["spillX"], t["spillY"]) for t in tiles if t["spillY"] > 1 or t["spillX"] > 1]
     r.check("and no picture is drawn outside the tile holding it", not spilling, str(spilling))
+    adrift = [(t["name"], t["offX"]) for t in tiles if abs(t["offX"]) > 1]
+    r.check("and every picture sits in the middle of its tile", not adrift, str(adrift))
 
     # The slider. It writes a CSS variable; the grid has to be the element
     # that hears it, which is the whole of the bug this covers.
@@ -307,6 +312,8 @@ def check_tiles_hold_without_the_thumb_box(r: Results, page) -> None:
                 f"heights {heights} widths {widths}")
         spilling = [(t["name"], t["spillX"], t["spillY"]) for t in tiles if t["spillY"] > 1 or t["spillX"] > 1]
         r.check("and no picture is drawn outside its tile even then", not spilling, str(spilling))
+        adrift = [(t["name"], t["offX"]) for t in tiles if abs(t["offX"]) > 1]
+        r.check("and every picture is still in the middle of its tile", not adrift, str(adrift))
     finally:
         style.evaluate("el => el.remove()")
         time.sleep(0.4)
@@ -480,6 +487,62 @@ def check_a_component_destination_fills_without_the_queue(r: Results, page, targ
     finally:
         page.unroute("**/queue/**")
         time.sleep(3)
+
+
+
+def check_a_picture_handed_in_arrives_without_the_queue(r: Results, page, library) -> None:
+    """The other direction: a result from another tab, into the library.
+
+    The button under a txt2img, img2img or Extras result picks its picture
+    in the browser and hands it to the server as a Gradio event - the same
+    half that stops when the queue stops, which is why "I used to be able to
+    send from other tabs into Clipboard" stopped being true. The library's
+    import is an ordinary POST, so the page can finish the handover itself:
+    it fetches the file the host is already serving and posts that, which
+    also keeps whatever metadata Forge wrote into it.
+    """
+    open_clipboard(page)
+    if not select_first(page):
+        r.check("handed in: a picture is in the library to hand back", False, "no selection")
+        return
+    asset = box(page, "minipaint_clipboard_selected")
+    # The picture as the host would serve one: a URL this page can fetch.
+    url = f"/minipaint-clipboard/image/{asset}"
+
+    page.evaluate("() => window.minipaintClipboard.toggleMenu()")
+    time.sleep(0.4)
+    r.check("handed in: the intercept can be turned on", menu_click(page, "Intercept") == "clicked")
+    time.sleep(2.5)
+    r.check("handed in: and the page knows it is on",
+            page.evaluate("() => { const h = document.getElementById('minipaint_clipboard_menu_state');"
+                          " const t = h && h.querySelector('textarea,input');"
+                          " try { return !!JSON.parse(t.value || '{}').intercept; } catch (e) { return false; } }"))
+
+    before = len(list(library.glob("*")))
+    page.route("**/queue/**", lambda route: route.abort())
+    try:
+        record_toasts(page, reset=True)
+        page.evaluate("u => window.minipaintClipboard.receiveOverHttp([{image: {url: u}}])", url)
+        landed, said = False, []
+        for _ in range(20):
+            time.sleep(1)
+            landed = len(list(library.glob("*"))) > before
+            said = recorded_toasts(page)
+            if landed and said:
+                break
+        r.check("handed in: the picture reaches the library with the queue cut",
+                landed, f"{before} file(s) before, {len(list(library.glob('*')))} after")
+        r.check("handed in: and the page says it went in",
+                any("in Clipboard" in one for one in said), str(said))
+    finally:
+        page.unroute("**/queue/**")
+        time.sleep(2)
+        # Put the intercept back: it is stored, and the next suite inherits it.
+        page.evaluate("() => window.minipaintClipboard.toggleMenu()")
+        time.sleep(0.4)
+        menu_click(page, "Intercept")
+        time.sleep(2.0)
+        page.evaluate("() => window.minipaintClipboard.closeMenu()")
 
 
 def check_a_render_cannot_take_the_selection(r: Results, page) -> None:
@@ -685,6 +748,7 @@ def run() -> Results:
                 check_send_survives_a_dead_queue(r, page, targets)
                 check_a_component_destination_fills_without_the_queue(r, page, targets)
                 check_a_render_cannot_take_the_selection(r, page)
+                check_a_picture_handed_in_arrives_without_the_queue(r, page, library)
             finally:
                 browser.close()
     finally:

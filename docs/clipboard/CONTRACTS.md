@@ -54,6 +54,14 @@ is not on this page at all. There is no payload for that, and the browser is
 told so plainly rather than being handed something it cannot deliver and
 reporting a send that did not happen.
 
+Whichever way the plan arrives, the browser places the picture with the
+legacy editor's own transfer library (`miniPaint/src/js/libs/webui-host.js`,
+served as the `host` bundle): it classifies the destination, clears a Gradio
+image before uploading into it, writes a ForgeCanvas through the native value
+setter, settles the img2img sub-tab, and then checks what the WebUI will
+submit against what was sent. A page that could not import it still writes
+the canvas textbox directly, and says the send was not verified.
+
 Both this route and the tab's own Gradio path decide what a send means in one
 place, `ui.send_plan`, so they cannot drift apart. The route answers from the
 built tab's own destinations (`ui.current()`), not from a fresh lookup: asking

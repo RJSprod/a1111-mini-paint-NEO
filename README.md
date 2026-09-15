@@ -463,7 +463,12 @@ is the whole of it, including what is still an inference waiting for a real inst
 ## Legacy editor (Old UI)
 
 Everything below is unchanged from the original extension and applies when *Use Old UI* is
-on.
+on - with one part no longer only the legacy editor's. The transfer library it delivers
+pictures with (`miniPaint/src/js/libs/webui-host.js`) is now served to the Canvas and
+Clipboard tabs as well, so all three put a picture into a destination the same way, and
+the paragraphs below about detecting the destination type, waiting for it to accept the
+image, verifying the value the WebUI will submit and settling the img2img sub-tab describe
+what every send in this extension does.
 
 ![preview](images/img1.png)
 

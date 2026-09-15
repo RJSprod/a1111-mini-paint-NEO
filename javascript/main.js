@@ -181,10 +181,47 @@ window.minipaintAssets = window.minipaintAssets || (function () {
         return !!existing && existing.getAttribute(STATE) === "loaded";
     }
 
+    //: Imported modules by URL. A module is not a bundle: it has exports,
+    //: so it is imported rather than appended as a <script>, and what the
+    //: caller wants is the namespace and not a boolean.
+    const modules = {};
+
+    /**
+     * Import a shared module once, and hand every later caller the same one.
+     *
+     * The transfer library both tabs deliver pictures with is a module, and
+     * both tabs ask for it on their own load - so the request has to be
+     * shared rather than repeated. A failed import resolves to null and is
+     * forgotten, so a later attempt is a real attempt: a tab left unable to
+     * send because one import failed once is the whole failure mode this
+     * loader exists to avoid.
+     */
+    function module(url) {
+        const key = String(url || "");
+        if (!key) { return Promise.resolve(null); }
+        if (modules[key]) { return modules[key]; }
+        const pending = import(key).then(function (namespace) {
+            // The transfer library, named so a later caller can ask for it
+            // again by URL rather than having to be told where it lives.
+            if (namespace && typeof namespace.set_image_file === "function") {
+                window.minipaintHost = window.minipaintHost || namespace;
+                window.minipaintHostUrl = window.minipaintHostUrl || key;
+            }
+            return namespace;
+        }, function (error) {
+            delete modules[key];
+            console.error("MiniPaint: could not import " + key, error);
+            return null;
+        });
+        modules[key] = pending;
+        return pending;
+    }
+
     return {
         load: load,
         loadOnTab: loadOnTab,
         ready: ready,
+        module: module,
         loaded: function () { return Object.keys(loaded); }
     };
 })();

@@ -343,6 +343,12 @@ They are not any more:
   page keeps its own selection now, and gives it up only when the grid is
   listing pictures and the selected one is not among them.
 
+* The line offers to **check again**, never to reload. It offered a reload
+  once, and on a Forge behind its own TLS front end reloading took the whole
+  WebUI page with it - the session gone, for a line that is only ever
+  advisory. Checking presses Refresh and clears the line if the server
+  answers.
+
 * The first send to go unanswered says so and leaves a line standing -
   *"This page has lost its live connection to Forge"* - with a **Reconnect**
   button, because the state it is reporting lasts until the page is reloaded.
@@ -364,6 +370,26 @@ They are not any more:
 
 Reloading the page still makes sending quick again, and the Reconnect button
 is there to do it. The difference is that sending works either way.
+
+### Writing one of the host's inputs
+
+Everything this tab asks the server to do crosses the same way: the browser
+writes a hidden Gradio textbox and the event bound to it fires. That write
+goes through the input's own prototype setter, never `element.value = ...`.
+
+The difference is not cosmetic. Gradio's inputs are owned by its framework,
+and a framework keeps its own record of what an input holds; an assignment
+writes the DOM and leaves that record untouched, so the framework compares
+the two, sees no change, and sends nothing. The write succeeds and the event
+never happens - and from the page's side there is nothing to report, because
+the write worked.
+
+Whether it bites depends on the build. It worked on the Gradio this
+repository tests against and did not on the one a user's Forge Neo shipped:
+every send on that install was placed by the page and never once
+acknowledged by the server, on a desktop browser that never lost its
+connection. The suite now checks it against an input owned the way a
+framework owns one.
 
 ### How a picture is actually put into a destination
 

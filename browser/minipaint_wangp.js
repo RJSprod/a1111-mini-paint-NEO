@@ -443,8 +443,16 @@ window.minipaintWanGP = (function () {
     function writeBox(elementId, value) {
         const target = box(elementId);
         if (!target) { return false; }
+        // Through the host's own accessor, not a plain assignment: see
+        // window.minipaintWriteInput in javascript/main.js. A framework keeps
+        // its own record of what an input holds, and an assignment leaves it
+        // untouched - the write lands and the event never happens.
+        if (typeof window.minipaintWriteInput === "function") {
+            return window.minipaintWriteInput(target, value);
+        }
         target.value = value;
         target.dispatchEvent(new Event("input", { bubbles: true }));
+        target.dispatchEvent(new Event("change", { bubbles: true }));
         return true;
     }
 

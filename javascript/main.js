@@ -43,6 +43,57 @@ window.a1111minipaint = window.a1111minipaint || {};
  * bundle is there and goes looking for globals that were never defined.
  * The element carries its own state, and only "loaded" counts.
  */
+/**
+ * Write a value into one of the host's inputs, so the host actually hears it.
+ *
+ * WHY THIS IS NOT `element.value = text`.
+ *
+ * Gradio's inputs are owned by its framework, and a framework keeps its own
+ * record of what an input holds. Assigning to `.value` writes the DOM and
+ * leaves that record untouched, so the framework compares the two, sees no
+ * change, and sends nothing - the write succeeds and the event never
+ * happens. Whether that bites depends on the build: it worked on the Gradio
+ * this repository tests against and did not on the one Forge Neo ships, so
+ * the same page could write a hidden box all day and never reach the server.
+ * Nothing said so, because from the page's side the write had worked.
+ *
+ * The prototype's own setter is the way in that every framework leaves open:
+ * it goes through the accessor the framework wrapped, so the framework hears
+ * it and updates its record. Then "input" and "change" - a build listens for
+ * one or the other, and dispatching both costs nothing.
+ *
+ * The editor's transfer library has had this since long before the Canvas
+ * (set_native_value, used for the same reason on the host's canvases); this
+ * is that lesson, applied to this extension's own boxes at last.
+ */
+window.minipaintWriteInput = window.minipaintWriteInput || function (element, value) {
+    if (!element) { return false; }
+    const text = String(value == null ? "" : value);
+    let native = false;
+    try {
+        const prototype = element.tagName === "TEXTAREA"
+            ? window.HTMLTextAreaElement.prototype
+            : window.HTMLInputElement.prototype;
+        const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+        if (descriptor && descriptor.set) {
+            descriptor.set.call(element, text);
+            native = true;
+        }
+    } catch (e) {
+        /* fall through to the plain assignment */
+    }
+    if (!native) {
+        try { element.value = text; } catch (e) { return false; }
+    }
+    try {
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+    } catch (e) {
+        return false;
+    }
+    return true;
+};
+
 window.minipaintAssets = window.minipaintAssets || (function () {
     "use strict";
 

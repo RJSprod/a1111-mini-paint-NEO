@@ -60,12 +60,13 @@ minutes ago, and every Forge restart re-encodes everything.
     slot cards and every action stay exactly where they are. Only the browser
     half of the grid changes, plus the one route and one event that feed it.
 
-*   **Not the end of the live connection.** Said plainly because it would be
-    easy to oversell: the status line, the queue list, the composer cards and
-    every action's result still come back through Gradio. The
-    *"lost its live connection"* line will still appear when that channel
-    goes. What changes is that the thing you spend most of your time looking
-    at keeps working, and keeps updating, without it.
+*   **Not, by itself, the end of the live connection.** This change frees the
+    grid. The status line, the queue list, the composer cards and every
+    action's result still come back through Gradio afterwards, so the notice
+    can still appear. That is a property of *this step*, not a limit of the
+    design: section 10 sets out why nothing in this tab genuinely needs a live
+    connection, what each remaining piece would cost to move, and what the
+    notice should become once they have.
 
 *   **Not virtualisation.** Paging bounds the DOM to one page, which is what
     virtualisation would have been for. If a page of 60 is ever too many nodes
@@ -343,24 +344,147 @@ is the kind of helpfulness nobody wants.
 
 ---
 
-## 10. What still needs the live connection
+## 10. Why anything is "live" at all, and what should be
 
-Stated plainly so this is not oversold:
+This section exists because the question was asked directly, and the honest
+answer turns out to be better than the one section 2 first implied.
 
-| after this change | needs Gradio |
-| --- | --- |
-| the grid, its pictures, paging, sorting, live updates | **no** |
-| placing a picture in a destination | no (already) |
-| the status line, the queue list, the history, the composer cards | yes |
-| rename, delete, folder, upload, paste, slot assignment | yes |
+### Three different things get called "the connection"
 
-The notice will still appear when Gradio's channel drops. It will mean much
-less. Moving the remaining actions is the logical next step and is deliberately
-not in this change: each is a small independent job once the grid has proved
-the shape, and doing them together would make one reviewable change into an
-unreviewable one.
+**Push** — the server telling a page something it did not ask about: a job
+finished, another page added a picture. This genuinely needs a channel held
+open. **In this extension it already is one, and it is not Gradio:**
+`/minipaint/events` is server-sent events over plain HTTP, with
+`/minipaint/sync` for a snapshot and a cursor to resume from after a gap. The
+WanGP queue has used it since protocol 3.
 
----
+**Request and response** — press a thing, get an answer. This needs nothing
+held open at all. An HTTP request does it, and has since the web did.
+
+**Server-rendered UI** — the server deciding what the page *displays*. This is
+the only one of the three that forces Gradio, because the value of a Gradio
+component can only be set by a Gradio event.
+
+### Counted on this tab: all 38 of its Gradio events are the second kind
+
+Not one of them is a push. Every one is a click, an input, an upload or a blur
+that returns a value to the page that asked for it.
+
+So the honest answer to *"why does this page need anything live?"* is:
+**it does not.** It needs Gradio — and Gradio's request and response happen to
+travel over a queue-and-SSE transport that dies when the tab is backgrounded,
+when a session is forgotten, and when Forge restarts. The fragility belongs to
+the transport, not to the interaction.
+
+And it needs Gradio only where we let the server render. **Every
+server-rendered component is a purchased dependency on that transport.** The
+grid is the largest such purchase. It is not the only one.
+
+### The test: submit a request, close the browser, have it complete
+
+That already works, and it is the stated intent of the code rather than a
+happy accident. From `clipboard/executor.py`:
+
+> the outbox is work Forge owns, and the browser's only remaining job is to
+> describe what the user wants and get a durable acknowledgement before it
+> disappears.
+
+`outbox.chosen_executor()` returns server execution unless unattended
+execution is switched off in settings, or this WanGP build has *explicitly*
+said it cannot run unattended jobs. Silence is not a refusal — a cold start
+still admits as unattended, because that is the case the unattended path
+exists for. On a normal install, a queued job survives the browser closing.
+
+What does not survive is **the view of it**. The queue list is Gradio-rendered,
+so a page that comes back needs Gradio to show you the job that ran perfectly
+well without it. The work is already durable; only the window onto it is not.
+
+### What each remaining piece would take
+
+The important discovery is how much already exists. `interop.py` publishes
+`/minipaint/outbox/{submit,claim,report,cancel,retry,adopt,cancel_all,track}`,
+`/minipaint/enhance`, `/minipaint/stage`, `/minipaint/events` and
+`/minipaint/sync` — the documented public `minipaint.wangp.queue/v1` contract
+that any extension may call. And the Clipboard's Gradio callbacks and those
+routes **call the same functions**: `outbox.submit`, `outbox.jobs`,
+`outbox.cancel`, `outbox.retry`, `outbox.adopt`, `outbox.cancel_all`. Two front
+doors, one core.
+
+So most of what follows is wiring a browser to an API that is already built,
+already public and already tested — not designing one.
+
+| piece | needs push? | needs Gradio? | how it moves | effort |
+| --- | --- | --- | --- | --- |
+| grid, pictures, paging, sorting | on change only | no | this document | medium |
+| status line | no — it is the *response* to your own action | no | each action's JSON answer carries its own sentence; the browser draws the line | small |
+| queue list | already pushed on the spine | no | `outbox.jobs` is already an HTTP route; only the rendering moves | small |
+| Queue Send History | no | no | one read route over `history` | small |
+| composer cards, the draft | no | no | read and write the draft over two routes | medium |
+| rename, delete, choose folder | no | no | thin routes over store methods that already exist | small each |
+| upload, paste, drop | no | **already not** | `/minipaint-clipboard/import` has always been HTTP | done |
+| slot assignment | no | no | thin route | small |
+| Add to Queue | no | no | `/minipaint/outbox/submit` exists; the browser calls the public API | small |
+| prompt enhancement settings | no | no | `/minipaint/enhance` exists | small |
+| send to img2img, Inpaint, Extras, ImageStitch | no | **already not** | the browser writes those components itself | done |
+| send to Mini Paint | no | **yes** | see below | out of scope |
+
+### What is genuinely irreducible
+
+Two things, and both are narrower than they sound.
+
+**The tab has to be a Gradio tab.** Forge builds its tab bar from Gradio
+blocks, so the shell is Gradio and always will be. That is build time. Once the
+page has loaded, the shell needs nothing from the transport.
+
+**Mini Paint as a destination.** The Canvas's document is server state and its
+UI is Gradio-rendered, so handing it a picture means a Gradio event that
+re-renders the Canvas. That stays until the Canvas gets this same treatment —
+separate work, named here so it is not discovered as a surprise later. It is
+also the rarest of the destinations.
+
+Note what is **not** on that list: putting a picture into img2img, Inpaint,
+Extras or ImageStitch. Those look like they must need Gradio, because the
+picture ends up in another tab's component — but the browser already writes
+those components directly, through the transfer library, and has since the
+send route was built. That is precisely why sending kept working through every
+connection failure in this tab's history.
+
+### What the notice becomes
+
+Retire *"This page has lost its live connection to Forge"* and replace it with
+one that means what it says: **Forge is not answering.**
+
+Raised only when an HTTP request to this extension's own routes fails — not
+when a framework's event stream sulks. On localhost that means Forge has
+actually stopped, which is worth being told and which no amount of design can
+hide. Over a network it means the network is gone. Either way it is rare, it is
+true, and it is actionable.
+
+**We cannot make "the server is gone" never appear. We can make it the only
+thing that appears** — and on a machine where Forge is running, that is never.
+
+Until every row above has moved, the notice keeps its current meaning for what
+has not moved, and says which: a page whose grid is live and whose queue list
+is stale should say that, rather than claiming the whole tab is offline.
+
+### The order to move them in
+
+Roughly by value over cost, and each is independently shippable:
+
+1. **The grid** — sections 3 to 9 of this document. The largest piece, and the
+   one most looked at.
+2. **The status line** — small, and the thing that most often looks wrong when
+   a round trip is lost, because it silently keeps its old text.
+3. **The queue list** — small, because the routes exist; and it is the answer
+   to "I closed the browser and came back".
+4. **Add to Queue, history, enhancement settings** — small each, all over
+   routes that already exist.
+5. **The draft, the slot cards, rename, delete, folder** — the long tail.
+6. **Retire the notice**, and replace it with the HTTP one.
+
+After step 3 the tab is usable end to end with Gradio's channel dead: browse,
+page, sort, select, send, queue, and watch a job run. Steps 4 and 5 are the
+last things that would still quietly not work.
 
 ## 11. Failure modes
 
@@ -469,6 +593,14 @@ server's memory, on the server's disk, and immutably in the browser.
 
 The grid stops depending on the connection whose failure has dominated this
 tab's history, stops re-rendering everything to change one thing, and gains a
-ceiling it does not currently have. The rest of the tab is untouched and still
-needs that connection — which is said here, in writing, so nobody reads this
-document and expects otherwise.
+ceiling it does not currently have.
+
+It is also the first step of a larger one. Nothing in this tab genuinely needs
+a live connection: every one of its 38 Gradio events is a request with a
+response, not a push, and push already rides this extension's own HTTP event
+spine. Gradio is needed only where the server renders — and most of the HTTP
+API that would replace those renders is already built, public and tested.
+Section 10 sets out the order to move the rest in, what is genuinely
+irreducible (the tab shell, and Mini Paint as a destination), and what the
+notice should become: not *"the live connection is gone"* but *"Forge is not
+answering"* — which, on a machine where Forge is running, is never.

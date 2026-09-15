@@ -544,6 +544,48 @@ for the child's own words, plus `runtime`, `proxy`, `browser` and `checks`). It 
 `wangp-log.previous.txt` at 2 MB, so there is always at least one full run of history and
 never more than two files.
 
+### What to look for when something in a tab does nothing
+
+A control that does nothing looks the same whether the page failed to reach Forge, the
+request was refused on the way, or the event was never on the page to begin with — and
+until those can be told apart, fixing it is guesswork. The `browser` lines now carry the
+facts that separate them. When a send is not acknowledged, or **Check again** on the
+*"lost its live connection"* line comes back empty, look for:
+
+```
+browser   clipboard: send img2img: why it went unanswered - the request box holds this
+          request; the receipt box is empty; the host's framework: no request left this
+          browser; request box: 1 element(s), 1 component(s), wired for input
+```
+
+* **`no request left this browser`** — the event never fired. Nothing was asked of Forge,
+  so there is nothing to find in Forge's console.
+* **`NO EVENT IS WIRED TO IT ON THIS PAGE`**, or **`naming N component(s) NOT ON THIS
+  PAGE`** — the control exists and the event behind it cannot run. That is a page that was
+  built wrong, not a connection.
+* **`2 element(s)`** — the page carries that control twice, so a script writing it by id
+  may be writing the copy nothing is listening to.
+* **`the receipt box holds an older stamp`** — the request arrived, carrying a value from
+  an earlier send.
+* **`the host tells this page to call it at http://… while the page is on https://…`** —
+  see below. This one is reported as soon as the tab opens, not only after something fails.
+
+### Forge behind TLS: why every event fails and nothing else does
+
+Gradio's frontend does not use relative URLs. It reads an absolute root out of the config
+Forge inlines into the page and builds every event from it, and Forge works that root out
+from the request it saw. So a Forge reached over HTTPS — through a front end, a tunnel, or
+a browser extension that upgrades the address bar — can serve a page over `https` whose
+config says `http`. The browser blocks every one of those calls as mixed content, silently.
+Nothing looks broken: the page loads, the pictures load, this extension's own routes work
+perfectly, because all of those are relative URLs. Only Gradio's own events fail, every
+time, on every build.
+
+If the log says the host and the page disagree, fix it at the source: have whatever
+terminates TLS send `x-forwarded-proto: https`, or give Forge the public address with
+`--subpath`/`root_path` — or reach it over plain `http`. The extension reports this rather
+than rewriting Forge's config behind your back.
+
 ## Nothing in a log identifies you
 
 Prompts and output filenames are the same thing twice — WanGP names a file after the prompt

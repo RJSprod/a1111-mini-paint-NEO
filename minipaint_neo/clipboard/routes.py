@@ -1,4 +1,4 @@
-"""Two routes of Clipboard's own: a picture by its id, and bytes in.
+"""Clipboard's own routes: a picture by its id, bytes in, and a send.
 
 ``/minipaint-clipboard/image/<asset_id>`` serves a library file - or, with
 ``?thumb=1``, a small copy of it - after the store has proved the id names a
@@ -11,12 +11,21 @@ from the browser's clipboard, a file dropped on a slot - and answers with
 the asset id the store gave them. No path, no filename beyond the basename
 the browser suggests, and that one is validated like every other.
 
-Both are gated by the same sign-in the WanGP proxy applies, where the host
-has one.
+``/minipaint-clipboard/send`` is everything about sending a picture out of
+the tab that does not need Gradio: given a destination it answers with what
+the browser needs to place the picture itself, and given a request it keeps
+that request for the tab's own Gradio event to fall back on. Both halves
+exist because the browser's other way of reaching the server - writing a
+hidden box and hoping the framework noticed - is not reliable on every
+install.
+
+All three are gated by the same sign-in the WanGP proxy applies, where the
+host has one.
 """
 
 from __future__ import annotations
 
+import time
 import typing
 
 from .. import scrub
@@ -131,13 +140,70 @@ async def _send(request: typing.Any) -> typing.Any:
         return _json({"ok": False, "code": errors.REQUEST_INVALID, "message": "A send needs a target and a picture."}, 400)
     target = str((body or {}).get("target") or "")
     asset_id = str((body or {}).get("asset") or "")
+    request_text = str((body or {}).get("request") or "")
+
+    # A request and no destination is the browser leaving the request itself
+    # here, once it knows how the send went. Nothing is prepared and nothing
+    # is read: see ``remember_request`` for what it is for.
+    if request_text and not target:
+        remember_request(request_text)
+        return _json({"ok": True, "recorded": True})
 
     from . import ui as ui_module
 
     plan = ui_module.send_plan(target, asset_id)
     if not plan.get("ok"):
         return _json(plan, 400 if plan.get("code") != errors.CLIPBOARD_NOT_CONFIGURED else 409)
+    if request_text:
+        remember_request(request_text)
     return _json(plan)
+
+
+#: The last send request the browser posted here, and when.
+#:
+#: WHAT THIS IS FOR. The Gradio event that records a send reads the request
+#: out of a hidden textbox - which means it reads whatever value the host's
+#: framework holds for that box, not what the page wrote there. On a page
+#: where a scripted write is not heard, those are different: the press
+#: arrives carrying a request from some earlier send, or nothing at all, and
+#: the user is told about a picture they have moved on from.
+#:
+#: The browser posts the request here on its way out, over the transport that
+#: keeps working when the framework does not, and ``ClipboardTab.send`` falls
+#: back to it when the box offers nothing new. It is posted after the picture
+#: has been placed rather than before, because the request says whether it
+#: was - a send already made is recorded, one that was not is performed, and
+#: guessing wrong appends a second picture to a gallery.
+#:
+#: One slot. A send is a user action on a page, and this is only ever read in
+#: the seconds between a press and its receipt.
+_last_request: typing.Optional[typing.Tuple[str, float]] = None
+
+#: How long that slot is worth anything. Long enough to cover a slow event,
+#: short enough that a request nobody followed up on cannot be picked up by
+#: an unrelated press much later.
+REQUEST_MEMORY_SECONDS = 120.0
+
+
+def remember_request(text: str) -> None:
+    """Keep this request for ``ClipboardTab.send`` to fall back on."""
+    global _last_request
+
+    _last_request = (str(text)[:200], time.monotonic())
+
+
+def recent_request() -> str:
+    """The last request posted to the send route, if it is still fresh."""
+    if _last_request is None:
+        return ""
+    text, at = _last_request
+    return text if (time.monotonic() - at) <= REQUEST_MEMORY_SECONDS else ""
+
+
+def forget_request() -> None:
+    """Drop the remembered request. For the checks, and for a fresh tab."""
+    global _last_request
+    _last_request = None
 
 
 def install(app: typing.Any) -> None:
@@ -160,4 +226,5 @@ def install(app: typing.Any) -> None:
     scrub.console(f"routes ready under {ROUTE_PREFIX}/.", _LOG_PREFIX)
 
 
-__all__ = ["IMAGE_ROUTE", "IMPORT_ROUTE", "ROUTE_PREFIX", "SEND_ROUTE", "image_url", "install"]
+__all__ = ["IMAGE_ROUTE", "IMPORT_ROUTE", "ROUTE_PREFIX", "SEND_ROUTE", "REQUEST_MEMORY_SECONDS",
+           "forget_request", "image_url", "install", "recent_request", "remember_request"]

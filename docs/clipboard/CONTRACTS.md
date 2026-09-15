@@ -69,6 +69,20 @@ write is harmless for a canvas and one picture too many for a gallery that
 appends. An unmarked request still performs the send, which is what happens
 when the page could not place it.
 
+**Two events carry that request, not one.** The browser writes
+`send_request` and then presses the hidden `send_press` button;
+`send_press.click` and `send_request.input` are bound to the same callback,
+the same inputs and outputs, and the same follow-up steps. Neither way in is
+reliable on every install - on one user's Forge no written box ever produced
+an event, across four builds, while presses on the same page worked
+throughout - so the tab offers both and the server sorts it out.
+`ClipboardTab.send` keeps the last `_ANSWERED_KEPT` requests it has answered
+and returns the stored receipt for any of them without delivering again. The
+depth matters: a press carries whatever value the framework holds for the
+box, so on a page where writes are not heard it can arrive carrying a request
+from several sends ago, and delivering that would put the wrong picture in
+the destination.
+
 Both this route and the tab's own Gradio path decide what a send means in one
 place, `ui.send_plan`, so they cannot drift apart. The route answers from the
 built tab's own destinations (`ui.current()`), not from a fresh lookup: asking
@@ -638,7 +652,13 @@ The tab's browser side, `javascript/minipaint_clipboard.js`
 (`window.minipaintClipboard`): `attach` (writes the page id, listens for
 `minipaint:outbox`, pumps once so a reloaded page resumes its jobs),
 `afterRender`, `toggleMenu`, `select`, `setThumbnailSize`,
-`pasteFromClipboard`, drop-on-card import, the menu, `sendTo`, `armQueue` (a
+`pasteFromClipboard`, drop-on-card import, the menu, `sendTo` (writes
+`send_request`, presses `send_press`, then `watchSend`; `whySilent` puts the
+three facts that separate "the event never fired", "it failed" and "the answer
+never came back" in the log when nothing is acknowledged), `reportTiles` (says
+when a thumbnail is *drawn* off-centre, measured through `object-fit` rather
+than from the `<img>` box, which is centred whatever the picture does),
+`armQueue` (a
 bounded watcher on the instruction box), `queue(instruction)` (→
 `minipaintInterop.wangp.pump()`), `pump`, `pageId`, `modelJson` (the model
 the press carries), `afterCancelAll` (→ `refreshWaiters`), `refreshCapabilities`

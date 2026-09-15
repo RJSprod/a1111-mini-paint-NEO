@@ -64,7 +64,8 @@ window.minipaintClipboard = (function () {
         remove: "minipaint_clipboard_delete_open",
         paste: "minipaint_clipboard_paste_open",
         history: "minipaint_clipboard_history_open",
-        outboxRefresh: "minipaint_clipboard_outbox_refresh"
+        outboxRefresh: "minipaint_clipboard_outbox_refresh",
+        send: "minipaint_clipboard_send_press"
     };
     const ROLE_IDS = { first: "minipaint_clipboard_to_first", last: "minipaint_clipboard_to_last", ref: "minipaint_clipboard_to_ref" };
     const SLOT_UPLOAD_PREFIX = "minipaint_clipboard_slot_upload_";
@@ -126,7 +127,9 @@ window.minipaintClipboard = (function () {
         toastTimer: null,
         //: When the grid was last re-rendered by the server. A round trip
         //: landing is what tells the page the connection is back.
-        renderedAt: 0
+        renderedAt: 0,
+        //: The last thing reportTiles said, so an unchanged grid says it once.
+        tileReport: ""
     };
 
     /* ------------------------------------------------------------------ */
@@ -266,7 +269,8 @@ window.minipaintClipboard = (function () {
      */
     function checkConnection() {
         const before = S.renderedAt;
-        pressHidden(PRESS.refresh);
+        const armed = Date.now();
+        const pressed = pressHidden(PRESS.refresh);
         let waited = 0;
         const timer = setInterval(function () {
             waited += 500;
@@ -274,11 +278,26 @@ window.minipaintClipboard = (function () {
                 clearInterval(timer);
                 connectionNotice(false);
                 toast("The connection is back.");
+                note("connection: the server answered; the notice is cleared");
                 return;
             }
             if (waited >= 8000) {
                 clearInterval(timer);
                 toast("Still no answer from the server. Sending works; the rest needs it back.", true);
+                // The same three facts a silent send reports. This button is
+                // the one thing a user presses when the notice is up, so it
+                // is the cheapest place to collect them.
+                const parts = ["the refresh button " + (pressed ? "was pressed" : "is not on this page")];
+                try {
+                    const journal = window.minipaintNetJournal;
+                    parts.push(journal ? "the host's framework: " + journal.sentence(armed)
+                                       : "this browser cannot report what left it");
+                } catch (e) { /* the line simply does not carry it */ }
+                try {
+                    const root = window.minipaintHostRoot && window.minipaintHostRoot();
+                    if (root && root.known && !root.ok) { parts.push(root.note); }
+                } catch (e) { /* nor this one */ }
+                note("connection: still nothing after 8s - " + parts.join("; "));
             }
         }, 500);
     }
@@ -347,6 +366,10 @@ window.minipaintClipboard = (function () {
         // than falling to the default and snapping every tile back to 144.
         applyThumbnailSize(S.thumb);
         refreshBadges();
+        // After the size is back on the grid, and once the pictures have
+        // had a frame to lay out: measured before that, every tile is
+        // "off-centre" because nothing has been drawn yet.
+        setTimeout(reportTiles, 400);
     }
 
     /**
@@ -372,6 +395,61 @@ window.minipaintClipboard = (function () {
     }
 
     function setThumbnailSize(size) { applyThumbnailSize(size); }
+
+    /**
+     * Say so when a thumbnail is not drawn in the middle of its tile.
+     *
+     * WHAT IS MEASURED, AND WHY IT IS NOT THE OBVIOUS THING. The <img> is
+     * the full width of its box, so the element's own middle is the tile's
+     * middle whatever the picture inside it does - measuring the element
+     * reports zero on a grid that is visibly wrong, which is how this was
+     * fixed twice and reported a third time. object-fit decides where the
+     * pixels go inside that element, so the drawn rectangle is worked out
+     * here the way the browser works it out, and that is what is judged.
+     *
+     * This grid lives on a page carrying Forge's stylesheet, a theme and
+     * every other installed extension, any of which can say !important about
+     * an image. The rules here are written to survive that; when they do not,
+     * this is the line that says so, with the number and the declaration that
+     * won - which is the difference between fixing it and guessing again.
+     */
+    function reportTiles() {
+        const tiles = items();
+        if (!tiles.length) { return; }
+        const adrift = [];
+        for (const tile of tiles.slice(0, 24)) {
+            const picture = tile.querySelector("img");
+            if (!picture || !picture.complete || !picture.naturalWidth || !picture.naturalHeight) { continue; }
+            const box = picture.getBoundingClientRect();
+            if (!box.width || !box.height) { continue; }
+            const style = getComputedStyle(picture);
+            const tileBox = tile.getBoundingClientRect();
+            const tileStyle = getComputedStyle(tile);
+            const left = tileBox.left + parseFloat(tileStyle.borderLeftWidth) + parseFloat(tileStyle.paddingLeft);
+            const right = tileBox.right - parseFloat(tileStyle.borderRightWidth) - parseFloat(tileStyle.paddingRight);
+            const fits = style.objectFit === "contain" || style.objectFit === "scale-down";
+            const scale = fits ? Math.min(box.width / picture.naturalWidth, box.height / picture.naturalHeight) : 0;
+            const drawn = scale ? picture.naturalWidth * scale : box.width;
+            const position = String(style.objectPosition || "50% 50%").split(/\s+/);
+            const fraction = position[0] && position[0].indexOf("%") > 0 ? parseFloat(position[0]) / 100 : 0.5;
+            const offset = Math.round(box.left + (box.width - drawn) * (isNaN(fraction) ? 0.5 : fraction)
+                                      + drawn / 2 - (left + right) / 2);
+            if (Math.abs(offset) > 1) {
+                adrift.push({ offset: offset, fit: style.objectFit, at: style.objectPosition,
+                              width: style.width, margins: style.marginLeft + "/" + style.marginRight });
+            }
+        }
+        if (!adrift.length) { S.tileReport = ""; return; }
+        const worst = adrift.reduce(function (a, b) { return Math.abs(b.offset) > Math.abs(a.offset) ? b : a; });
+        const line = "grid: " + adrift.length + " of " + tiles.length + " thumbnail(s) drawn off-centre, worst "
+            + worst.offset + "px (object-fit " + worst.fit + ", object-position " + worst.at
+            + ", width " + worst.width + ", margins " + worst.margins + ")";
+        // Once per situation. A render that changes nothing must not add a
+        // line, or a grid the user scrolls fills the log with one sentence.
+        if (line === S.tileReport) { return; }
+        S.tileReport = line;
+        note(line);
+    }
 
     /* ------------------------------------------------------------------ */
     /* The menu                                                              */
@@ -748,11 +826,37 @@ window.minipaintClipboard = (function () {
         // destination a second time - and nothing waits on it.
         const outcome = await deliverNow(target, asset);
         const marked = outcome && outcome.ok ? ":done" : "";
-        if (!sendInput(BOXES.sendRequest, target + ":" + asset + ":" + stamp + marked)) {
-            // The hidden box is not on the page: the tab is half-built. The
-            // picture may still have gone, so say which happened.
-            note("send " + target + ": the hidden request box is not on the page");
-            if (!(outcome && outcome.ok)) {
+        const request = target + ":" + asset + ":" + stamp + marked;
+        // The request, three ways, because the first two are not reliable
+        // everywhere and this is what four builds of guessing cost.
+        //
+        // Writing the box used to be the whole of it. On one install the
+        // server never heard a single one - not one send acknowledged across
+        // four builds, on a desktop browser that never lost its connection -
+        // while a pressed button on the same page worked every time. A
+        // scripted write only reaches the host if the host notices it; a
+        // press is a DOM event, and the only way to miss one is not to be
+        // listening.
+        //
+        // But a press carries no payload: it makes the server READ the box,
+        // and on a page whose writes are not heard the box still holds an
+        // older send. So the request goes to the server's own route first,
+        // over the transport that keeps working, and the server falls back
+        // to it when the box has nothing new. Awaited, not fired off, so it
+        // cannot lose the race against the press it is there to complete.
+        //
+        // The server answers whichever arrives first and hands the rest the
+        // same receipt, so the picture is delivered exactly once.
+        const recorded = await recordRequest(request);
+        const written = sendInput(BOXES.sendRequest, request);
+        const pressed = pressHidden(PRESS.send);
+        if (!written || !pressed) {
+            // Half-built tab: say which half is missing rather than "it did
+            // not work", and only give up if the picture did not go either.
+            note("send " + target + ": on this page the request box is "
+                 + (written ? "there" : "MISSING") + " and the send button is "
+                 + (pressed ? "there" : "MISSING"));
+            if (!(outcome && outcome.ok) && !written && !pressed) {
                 toast("Mini Paint could not reach its send control. Reload the page.", true);
                 return;
             }
@@ -762,7 +866,7 @@ window.minipaintClipboard = (function () {
             toast("Sent " + (outcome.filename || "the picture") + " to " + (outcome.label || target)
                   + (outcome.adds ? " (added to what is already there)" : ""));
         }
-        watchSend(target, stamp, asset, outcome);
+        watchSend(target, stamp, asset, outcome, recorded);
     }
 
     /**
@@ -783,8 +887,86 @@ window.minipaintClipboard = (function () {
      * this call put on its own request, so there is exactly one value that
      * means "the server handled the thing I just asked for".
      */
-    function watchSend(target, stamp, asset, outcome) {
+    /**
+     * Leave the request with the server, so a press is enough on its own.
+     *
+     * Never fatal: a page that could not reach this route is a page that
+     * could not have sent anything either, and the box and the press are
+     * still going. Silent, because the caller is about to say what happened
+     * to the send as a whole.
+     */
+    async function recordRequest(request) {
+        try {
+            const response = await fetch(SEND_ROUTE, {
+                method: "POST",
+                credentials: "same-origin",
+                cache: "no-store",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ request: request })
+            });
+            return !!(response && response.ok);
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /**
+     * Why a send went unanswered, in one line somebody can act on.
+     *
+     * A send that is not acknowledged has three different causes wearing the
+     * same face, and four builds of this extension were spent guessing
+     * between them. Each line below rules one of them out or in:
+     *
+     *   what the page holds - whether the request box took the write at all,
+     *   and whether the receipt box is empty or holds some OTHER send's
+     *   stamp. A stamp that is not this one means the server answered a
+     *   request this page had already made: the press arrived and carried a
+     *   value the framework never updated, which is a different fault from
+     *   the press not arriving;
+     *
+     *   what left the browser - whether the host's framework put a single
+     *   request on the wire in the seconds after the press. Nothing on the
+     *   wire means the event never fired and no amount of server-side
+     *   looking will show anything;
+     *
+     *   where the host told this page to call it - the one configuration
+     *   that blocks every framework request while leaving everything this
+     *   extension does working, which is exactly how this looks.
+     *
+     * Only on failure, and only for the send that failed.
+     */
+    function whySilent(target, stamp, armed, recorded) {
+        const parts = [];
+        const ack = boxValue(BOXES.sendAck);
+        const requestBox = textarea(BOXES.sendRequest);
+        parts.push("the request box " + (!requestBox ? "is not on this page"
+            : (String(requestBox.value || "").indexOf(stamp) !== -1 ? "holds this request" : "did NOT take the write")));
+        parts.push("the receipt box " + (!ack ? "is empty" : (ack === stamp ? "holds this stamp" : "holds an older stamp (" + ack + ")")));
+        parts.push("the send route " + (recorded ? "took the request" : "did NOT take the request"));
+        try {
+            const wiring = window.minipaintHostWiringNote;
+            if (wiring) {
+                parts.push(wiring("request box", BOXES.sendRequest));
+                parts.push(wiring("send button", PRESS.send));
+            }
+        } catch (e) { /* the line simply does not carry it */ }
+        try {
+            const journal = window.minipaintNetJournal;
+            parts.push(journal ? "the host's framework: " + journal.sentence(armed)
+                               : "this browser cannot report what left it");
+        } catch (e) { /* the line simply does not carry it */ }
+        try {
+            const root = window.minipaintHostRoot && window.minipaintHostRoot();
+            if (root && root.known && !root.ok) { parts.push(root.note); }
+        } catch (e) { /* nor this one */ }
+        note("send " + target + ": why it went unanswered - " + parts.join("; "));
+    }
+
+    function watchSend(target, stamp, asset, outcome, recorded) {
         const delivered = !!(outcome && outcome.ok);
+        //: When the request went out, so the journal is asked about the right
+        //: window rather than about the whole session.
+        const armed = Date.now();
         if (S.sendWatch) { clearTimeout(S.sendWatch); S.sendWatch = null; }
         if (S.sendPoll) { clearInterval(S.sendPoll); S.sendPoll = null; }
         const done = function () {
@@ -803,6 +985,7 @@ window.minipaintClipboard = (function () {
             if (boxValue(BOXES.sendAck) === stamp) { return; }
             S.queueDown = true;
             connectionNotice(true);
+            whySilent(target, stamp, armed, recorded);
             if (delivered) {
                 // The picture went; only the server's record of it did not.
                 note("send " + target + ": the server never recorded it; the picture went from the page");
@@ -1197,6 +1380,15 @@ window.minipaintClipboard = (function () {
             S.outboxListener = onOutboxEvent;
             document.addEventListener("minipaint:outbox", S.outboxListener);
         }
+        // A standing fault worth saying before anything is tried, rather than
+        // after the first thing fails: a host that tells its own page to call
+        // it somewhere the browser will not let the page call. Nothing this
+        // tab does can work around it, and nothing else reports it - the page
+        // loads, and only the framework's own requests are refused.
+        try {
+            const hostRoot = window.minipaintHostRoot && window.minipaintHostRoot();
+            if (hostRoot && hostRoot.known && !hostRoot.ok) { note("host: " + hostRoot.note); }
+        } catch (e) { /* never worth an exception */ }
         // The page's identity, so a press submits under it; and the jobs this
         // page composed before a reload resume without another press - as
         // does the tracking of the ones WanGP already took from this page.

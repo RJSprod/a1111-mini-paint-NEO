@@ -1013,11 +1013,34 @@
     background: var(--background-fill-primary, rgba(127, 127, 127, 0.08));
 }
 
+/* The picture fills this box exactly, and is placed inside it by object-fit
+   alone.
+
+   Stated with !important, which nothing else in this file needs. This
+   stylesheet is loaded into somebody else's page - Forge's own CSS, its
+   theme, and every other extension's - and an id selector is only the
+   strongest thing here until one of those says !important. Two of the
+   declarations below decide where a picture is drawn, and both were being
+   lost on an install we cannot see:
+
+   width/height are what leave no free space in the box. With them, the
+   margins and justify-content below have nothing to distribute and cannot
+   move the picture; without them the element shrink-wraps, and then a
+   single margin-right from anywhere on the page puts the picture against an
+   edge - which is what a grid full of thumbnails hugging one side looks
+   like.
+
+   object-position is the one property that moves the drawn pixels inside a
+   box that is already the right size. Its initial value centres, so it is
+   normally not worth writing; it is written here because a rule that never
+   meant this grid can still inherit-or-override its way in, and the failure
+   is silent - the layout stays perfect and only the picture is off. */
 #minipaint_clipboard_root .minipaint-clip-thumb img {
     display: block;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: contain !important;
+    object-position: 50% 50% !important;
 }
 
 /* The same boundary again, said in absolute lengths and keyed off the tile
@@ -1031,12 +1054,11 @@
     max-width: 100%;
     max-height: var(--minipaint-clip-thumb);
     object-fit: contain;
-    /* Centred by the tile, not only by object-fit. object-fit centres a
-       picture inside the element's own box, which says nothing about where
-       that box sits: a picture narrower than its cell was left against one
-       edge as soon as the box above stopped filling the width. Auto margins
-       centre the box itself, and cost nothing when it is already the full
-       width. */
+    /* The same centring as above, for the case the box above is not shaping
+       anything: object-fit centres the pixels inside the element's own box,
+       auto margins centre that box in the tile, and the tile centres it
+       again from the outside. Each covers a different way of losing it. */
+    object-position: 50% 50%;
     margin-left: auto;
     margin-right: auto;
 }

@@ -38,6 +38,7 @@ that cannot be built is a tab that says so under the same label and id.
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import html
 import json
@@ -53,6 +54,11 @@ from ..canvas import ui as canvas_ui
 from ..wangp import errors, protocol
 from ..wangp.errors import IntegrationError
 from . import TAB_ID, TAB_LABEL, config, enhance, history, outbox, routes, store
+
+#: How many answered send requests a tab remembers. Enough to cover a
+#: page whose framework is several sends behind, small enough that the
+#: record is never worth thinking about. See ``ClipboardTab.send``.
+_ANSWERED_KEPT = 16
 
 PREFIX = "minipaint_clipboard"
 
@@ -627,6 +633,9 @@ class ClipboardTab:
         #: update that would change nothing on screen is not sent at all. See
         #: ``_unchanged``.
         self._rendered: typing.Dict[str, typing.Any] = {}
+        #: The send requests already answered, newest last, so no event that
+        #: carries one can deliver the same picture twice. See ``send``.
+        self._answered: "collections.OrderedDict[str, None]" = collections.OrderedDict()
         # Where a selected picture can go: Mini Paint when the Canvas is
         # mounted, and every host destination the Canvas itself knows.
         self.destinations: typing.List[typing.Tuple[str, str]] = []
@@ -1205,19 +1214,62 @@ class ClipboardTab:
         tell "refused" from "never arrived", and a send that never arrived
         looked exactly like a button that did nothing.
         """
-        parts = str(request or "").split(":")
+        text = str(request or "")
+        # When the box has nothing new, take the request the browser posted.
+        #
+        # ``request`` is the hidden textbox's value as the host's framework
+        # holds it, and on a page where a scripted write is not heard that
+        # value is whatever the last heard write left there - a request from
+        # an earlier send, or the empty string. A press then arrives asking
+        # for a send that has already been answered, and the user gets the
+        # receipt for a picture they moved on from.
+        #
+        # The browser posts every send to ``routes``' own HTTP route on its
+        # way out, over the transport that keeps working, so the request is
+        # already here. The box is still preferred - on a healthy page it is
+        # the same string, and it is the one input that is unambiguously
+        # about this event - and this is consulted only when the box offers
+        # nothing this call has not already answered.
+        if not text or text in self._answered:
+            fresh = routes.recent_request()
+            if fresh and fresh not in self._answered:
+                text = fresh
+        parts = text.split(":")
         target = parts[0] if parts else ""
         asset_id = _hex(parts[1]) if len(parts) > 1 else ""
         # The browser stamps each request so it can recognise the answer to
         # its own; echoed back untouched.
         ack = parts[2][:32] if len(parts) > 2 else ""
+        skips = [gr.skip() for _ in self.image_targets]
+        # One request, delivered once, however many times it arrives.
+        #
+        # Two events carry a send - the press and the written box - because
+        # neither is reliable everywhere, and on a healthy install both
+        # arrive. The second must not deliver the picture again: to a canvas
+        # that is waste, to a gallery that appends it is one picture too many.
+        #
+        # More than the last request is remembered, and that is the part that
+        # is load-bearing rather than tidy. A press carries whatever value the
+        # framework holds for the box, and the install this was written for is
+        # one where a written box may not reach the framework at all - so a
+        # press can arrive carrying not the previous request but one from
+        # several sends ago, and re-deliver a picture the user has moved on
+        # from. Anything already answered is answered the same way again.
+        #
+        # The whole request is the key, not the stamp: a page that somehow
+        # reused a stamp for a different picture should get the picture.
+        if text and text in self._answered:
+            return (*skips, gr.skip(), gr.skip(), gr.skip(), gr.skip(), ack)
+        if text:
+            self._answered[text] = None
+            while len(self._answered) > _ANSWERED_KEPT:
+                self._answered.popitem(last=False)
         # "done" means the page has already put the picture where it goes,
         # over the route and its own DOM, and this event is here to record
         # the send rather than to perform it. Writing the destination again
         # would be a second delivery of the same picture - harmless for a
         # canvas, and one picture too many for a gallery that appends.
         delivered = len(parts) > 3 and parts[3] == "done"
-        skips = [gr.skip() for _ in self.image_targets]
         label = dict(self.destinations).get(target, target)
         if target not in dict(self.destinations):
             return (*skips, "", "", "", _status(f"{label or 'That destination'} is not available in this WebUI."), ack)
@@ -1366,6 +1418,20 @@ class ClipboardTab:
                     sort_request = gr.Textbox("", visible=False, elem_id=_id("sort_request"))
                     slot_action = gr.Textbox("", visible=False, elem_id=_id("slot_action"))
                     send_request = gr.Textbox("", visible=False, elem_id=_id("send_request"))
+                    # The press that carries a send to the server.
+                    #
+                    # The request itself is the box above; this is only what
+                    # tells the server to read it. Both are wired to the same
+                    # callback, because the two ways a browser has of
+                    # reaching a Gradio event are not equally reliable on
+                    # every install: a written box relies on the framework
+                    # noticing a scripted write, and on one user's Forge it
+                    # never did - not one send acknowledged, across four
+                    # builds, while a pressed button on the same page worked
+                    # every time. A press is a DOM event and needs nothing
+                    # noticed. See ClipboardTab.send for what makes the two
+                    # of them arriving together harmless.
+                    send_press = gr.Button("Send", visible=False, elem_id=_id("send_press"))
                     # The server's receipt for a send, carrying the stamp the
                     # browser put on the request. See ClipboardTab.send.
                     send_ack = gr.Textbox("", visible=False, elem_id=_id("send_ack"))
@@ -1455,7 +1521,7 @@ class ClipboardTab:
             enhance_line=enhance_line, enhance_toggle=enhance_toggle, sp_variant=sp_variant, sp_mode=sp_mode, system_prompt=system_prompt,
             sp_state=sp_state, sp_apply=sp_apply, sp_restore=sp_restore, sp_reload=sp_reload,
             history_list=history_list, history_close=history_close, history_action=history_action,
-            send_request=send_request, send_ack=send_ack, switch_box=switch_box, payload_box=payload_box, to_canvas=to_canvas, mask_clear=mask_clear,
+            send_request=send_request, send_press=send_press, send_ack=send_ack, switch_box=switch_box, payload_box=payload_box, to_canvas=to_canvas, mask_clear=mask_clear,
             wangp_line=wangp_line,
         )
 
@@ -1557,26 +1623,35 @@ class ClipboardTab:
         # -- send out: the same routes the Canvas takes, per destination.
         switch_box, payload_box = p["switch_box"], p["payload_box"]
         target_components = [self.targets[key] for key in self.image_targets]
-        sent = p["send_request"].input(
-            self.send, inputs=[p["send_request"], selected],
-            outputs=target_components + [switch_box, payload_box, p["to_canvas"], p["status"], p["send_ack"]], **quiet,
-        )
+        send_outputs = target_components + [switch_box, payload_box, p["to_canvas"], p["status"], p["send_ack"]]
         textbox_targets = [self.targets[key] for key in ("img2img", "inpaint") if key in self.targets]
-        if len(textbox_targets) == 2:
-            sent.then(None, js=canvas_ui.DELIVER_IMAGE_JS, inputs=[switch_box, payload_box], outputs=textbox_targets)
-        elif textbox_targets:
-            only = "img2img" if "img2img" in self.targets else "inpaint"
-            sent.then(None, js=f"(target, payload) => [String(target || '').indexOf('{only}') === 0 ? payload : {canvas_ui._KEEP}]",
-                      inputs=[switch_box, payload_box], outputs=textbox_targets)
-        if self.stitch_targets:
-            enables = [self.targets[f"{key}_enable"] for key in self.stitch_targets]
-            sent.then(None, js=canvas_ui._stitch_enable_js(self.stitch_targets), inputs=[switch_box], outputs=enables)
-        sent.then(None, js=SWITCH_JS, inputs=[switch_box], outputs=None)
-        if "inpaint_mask" in self.targets:
-            inpaint_uuid = getattr(self.targets["inpaint"], "elem_id", "") or ""
-            sent.then(canvas_ui._noop, js=canvas_ui._host_wait_js(inpaint_uuid), inputs=[switch_box], outputs=None, **quiet).then(
-                None, js=canvas_ui.DELIVER_MASK_JS, inputs=[switch_box, p["mask_clear"]], outputs=[self.targets["inpaint_mask"]]
-            )
+
+        def after_send(sent):
+            """The steps that finish a send, for one of the two triggers."""
+            if len(textbox_targets) == 2:
+                sent.then(None, js=canvas_ui.DELIVER_IMAGE_JS, inputs=[switch_box, payload_box], outputs=textbox_targets)
+            elif textbox_targets:
+                only = "img2img" if "img2img" in self.targets else "inpaint"
+                sent.then(None, js=f"(target, payload) => [String(target || '').indexOf('{only}') === 0 ? payload : {canvas_ui._KEEP}]",
+                          inputs=[switch_box, payload_box], outputs=textbox_targets)
+            if self.stitch_targets:
+                enables = [self.targets[f"{key}_enable"] for key in self.stitch_targets]
+                sent.then(None, js=canvas_ui._stitch_enable_js(self.stitch_targets), inputs=[switch_box], outputs=enables)
+            sent.then(None, js=SWITCH_JS, inputs=[switch_box], outputs=None)
+            if "inpaint_mask" in self.targets:
+                inpaint_uuid = getattr(self.targets["inpaint"], "elem_id", "") or ""
+                sent.then(canvas_ui._noop, js=canvas_ui._host_wait_js(inpaint_uuid), inputs=[switch_box], outputs=None, **quiet).then(
+                    None, js=canvas_ui.DELIVER_MASK_JS, inputs=[switch_box, p["mask_clear"]], outputs=[self.targets["inpaint_mask"]]
+                )
+
+        # Two triggers, one callback. The press is what the browser uses; the
+        # written box is kept because it is what every build before this one
+        # used, and an install where the press is the one that goes missing
+        # is no more hypothetical than the install this was written for.
+        # ``send`` answers the second arrival of a request with the receipt
+        # it already gave, so nothing is delivered twice.
+        after_send(p["send_press"].click(self.send, inputs=[p["send_request"], selected], outputs=send_outputs, **quiet))
+        after_send(p["send_request"].input(self.send, inputs=[p["send_request"], selected], outputs=send_outputs, **quiet))
         # Mini Paint: the Canvas takes the picture through its own receive
         # chain, wired here because the Canvas was built first.
         if self.canvas is not None:

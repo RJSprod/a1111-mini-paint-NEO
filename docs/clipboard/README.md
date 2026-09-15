@@ -373,23 +373,69 @@ is there to do it. The difference is that sending works either way.
 
 ### Writing one of the host's inputs
 
-Everything this tab asks the server to do crosses the same way: the browser
+Most of what this tab asks the server to do crosses the same way: the browser
 writes a hidden Gradio textbox and the event bound to it fires. That write
 goes through the input's own prototype setter, never `element.value = ...`.
 
 The difference is not cosmetic. Gradio's inputs are owned by its framework,
 and a framework keeps its own record of what an input holds; an assignment
-writes the DOM and leaves that record untouched, so the framework compares
-the two, sees no change, and sends nothing. The write succeeds and the event
+writes the DOM and leaves that record untouched, so the framework can compare
+the two, see no change, and send nothing. The write succeeds and the event
 never happens - and from the page's side there is nothing to report, because
 the write worked.
 
-Whether it bites depends on the build. It worked on the Gradio this
-repository tests against and did not on the one a user's Forge Neo shipped:
-every send on that install was placed by the page and never once
-acknowledged by the server, on a desktop browser that never lost its
-connection. The suite now checks it against an input owned the way a
-framework owns one.
+**A send does not rest on that any more, and this is why.** One user's logs,
+across four builds, contain not one acknowledged send. The same logs, on the
+same pages, contain fifty-six Add to Queue round trips that reached the
+server and came back. The connection, the session and the queue were all
+working; what separates the two is that Add to Queue is a button somebody
+presses and a send was a hidden box written by script. Three of those four
+builds were better ways to write the box, and the logs after each say exactly
+what the logs before say.
+
+So a send writes the box *and* presses a hidden button
+(`minipaint_clipboard_send_press`). The box is the request; the press only
+says "read it". Both are wired to the same callback with the same outputs and
+the same follow-up steps, and `ClipboardTab.send` remembers the requests it
+has answered, so whichever arrives first delivers the picture and any later
+arrival gets the same receipt and does nothing. Remembering more than the
+last one is deliberate: on a page whose framework never heard a write, a
+press carries whatever value the framework still holds for that box, which
+may be a request from several sends ago - and re-delivering *that* would put
+a picture the user has moved on from into their canvas.
+
+The suite checks the press against the failure it is for: the write is made
+unhearable (its events are stopped before they reach the element, so the
+framework is never told) and the send still has to arrive.
+
+### When something crosses to the server and nothing happens
+
+Three different faults look identical from inside the page: the event never
+fired, it fired and the request failed, or it fired and the answer never came
+back. Nothing in any log separated them, which is how four builds went on
+guessing. The page now collects the three facts that do, and writes them into
+`logs/wangp-log.txt` when a send goes unanswered and when **Check again** on
+the connection line comes back empty:
+
+* **what the page holds** - whether the request box took the write, and
+  whether the receipt box is empty or holds some *other* send's stamp. An
+  older stamp means the press arrived carrying a value the framework never
+  updated, which is a different fault from the press not arriving at all.
+* **what left the browser** - every call the host's own framework put on the
+  wire in that window, from `PerformanceObserver`, which is read-only and
+  cannot become the fault it is diagnosing. "No request left this browser"
+  means the event never fired and there is nothing to look for server-side.
+* **where the host told the page to call it** - Gradio's frontend does not use
+  relative URLs; it reads an absolute root out of the config the server
+  inlined. A Forge behind anything that terminates TLS - a front end, a
+  tunnel, a browser extension that upgrades the address bar - can serve a
+  page over `https` whose config says `http`, and the browser then blocks
+  every framework call as mixed content while everything this extension does
+  over a relative URL keeps working perfectly. That is reported, not
+  repaired: the fix is to tell Forge it is behind TLS (an `x-forwarded-proto`
+  header from whatever terminates it, or `--subpath`/`root_path`), and an
+  extension that quietly rewrote the host's own config would be one upgrade
+  away from breaking an install that was fine.
 
 ### How a picture is actually put into a destination
 

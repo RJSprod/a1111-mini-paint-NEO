@@ -431,6 +431,24 @@ def send_route_checks(r: Results, base) -> None:
         canvas_host.reset_capture()
         clip_ui._current["tab"] = held
 
+    # The request left where the Gradio event can find it. A press makes the
+    # server read a hidden box and gets whatever the framework holds for it,
+    # which on the install this is for is not what the page wrote; this is
+    # the same request arriving over the transport that keeps working.
+    routes.forget_request()
+    r.check("with nothing posted, there is no request to fall back on", routes.recent_request() == "")
+    recorded = client.post(routes.SEND_ROUTE, json={"request": f"img2img:{asset.asset_id}:1700000100:done"})
+    r.check("a request with no destination is kept, and nothing is prepared",
+            recorded.status_code == 200 and recorded.json().get("recorded") is True
+            and "payload" not in recorded.json(), str(recorded.json())[:160])
+    r.check("and is what the event falls back on",
+            routes.recent_request() == f"img2img:{asset.asset_id}:1700000100:done", routes.recent_request())
+    stale_at = routes._last_request[1] - routes.REQUEST_MEMORY_SECONDS - 1
+    routes._last_request = (routes._last_request[0], stale_at)
+    r.check("a request nobody followed up on stops being offered, rather than being picked up much later",
+            routes.recent_request() == "", routes.recent_request())
+    routes.forget_request()
+
     unknown = client.post(routes.SEND_ROUTE, json={"target": "nowhere", "asset": asset.asset_id})
     r.check("a destination that is not one is refused", unknown.status_code == 400 and not unknown.json().get("ok"))
     missing = client.post(routes.SEND_ROUTE, json={"target": "img2img", "asset": "00" * 16})

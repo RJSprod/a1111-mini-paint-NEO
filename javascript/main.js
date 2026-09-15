@@ -50,12 +50,9 @@ window.a1111minipaint = window.a1111minipaint || {};
  *
  * Gradio's inputs are owned by its framework, and a framework keeps its own
  * record of what an input holds. Assigning to `.value` writes the DOM and
- * leaves that record untouched, so the framework compares the two, sees no
- * change, and sends nothing - the write succeeds and the event never
- * happens. Whether that bites depends on the build: it worked on the Gradio
- * this repository tests against and did not on the one Forge Neo ships, so
- * the same page could write a hidden box all day and never reach the server.
- * Nothing said so, because from the page's side the write had worked.
+ * leaves that record untouched, so the framework can compare the two, see no
+ * change, and send nothing - the write succeeds and the event never happens.
+ * Nothing says so, because from the page's side the write had worked.
  *
  * The prototype's own setter is the way in that every framework leaves open:
  * it goes through the accessor the framework wrapped, so the framework hears
@@ -65,6 +62,15 @@ window.a1111minipaint = window.a1111minipaint || {};
  * The editor's transfer library has had this since long before the Canvas
  * (set_native_value, used for the same reason on the host's canvases); this
  * is that lesson, applied to this extension's own boxes at last.
+ *
+ * WHAT THIS DID NOT FIX, so nobody spends another build on it. It was put in
+ * to explain an install where no written box ever reached the server, and it
+ * did not: the logs from that install after this landed say exactly what
+ * they said before. It is still the right way to write an input - a plain
+ * assignment is a real hazard on some builds - but the send no longer rests
+ * on it. See ``sendTo`` in the Clipboard bundle: the request is written here
+ * AND a hidden button is pressed, and the press is the half that install
+ * never lost.
  */
 window.minipaintWriteInput = window.minipaintWriteInput || function (element, value) {
     if (!element) { return false; }
@@ -92,6 +98,250 @@ window.minipaintWriteInput = window.minipaintWriteInput || function (element, va
         return false;
     }
     return true;
+};
+
+/**
+ * What the host's own framework put on the wire, and when.
+ *
+ * WHY THIS EXISTS. When a page asks Gradio to do something and nothing
+ * happens, there are three different faults with one symptom, and no way to
+ * tell them apart from inside the page:
+ *
+ *   1. the event never fired - the framework did not hear the page, so
+ *      nothing was ever requested;
+ *   2. it fired and the request failed - blocked, refused, or timed out;
+ *   3. it fired and succeeded, and the answer never got back here.
+ *
+ * Four builds were spent on this extension's sending, each fixing a
+ * plausible version of (1), because nothing in any log could rule (2) or (3)
+ * out. One line saying whether a request left the browser at all separates
+ * them, and it is worth more than any amount of reasoning about what Gradio
+ * might be doing.
+ *
+ * Read-only, on purpose. The obvious way to collect this is to wrap
+ * window.fetch, and wrapping the host's fetch to diagnose a fault is a good
+ * way to become one. PerformanceObserver is told about every request the
+ * page makes and cannot affect any of them; the cost is the HTTP status,
+ * which only some browsers report here - and "did a request happen" is the
+ * question that matters.
+ *
+ * Nothing here is sent anywhere by itself. A caller that has just watched
+ * something fail asks for the window it cares about and puts a sentence in
+ * the log.
+ */
+window.minipaintNetJournal = window.minipaintNetJournal || (function () {
+    "use strict";
+
+    //: The host's own API calls, whatever version it is on: Gradio 3's
+    //: predict/queue, Gradio 4's, and the /gradio_api prefix 5 moved to.
+    const HOST_CALL = /\/(?:gradio_api\/)?(?:queue\/(?:join|data)|run\/predict|api\/predict|reset|upload|stream)(?:[/?]|$)/;
+    const KEEP = 80;
+    const seen = [];
+    let observing = false;
+
+    function pathOf(url) {
+        try { return new URL(url, document.baseURI).pathname.slice(0, 120); } catch (e) { return String(url).slice(0, 120); }
+    }
+
+    function take(entries) {
+        for (const entry of entries) {
+            const name = String(entry.name || "");
+            if (!HOST_CALL.test(name)) { continue; }
+            seen.push({
+                //: Wall-clock, so a caller can line this up against its own
+                //: Date.now() deadlines without knowing about timeOrigin.
+                at: Math.round(performance.timeOrigin + entry.startTime),
+                ms: Math.round(entry.duration),
+                path: pathOf(name),
+                //: Chrome only; 0 elsewhere, and 0 from a request that never
+                //: got an answer - which is itself the finding.
+                status: typeof entry.responseStatus === "number" ? entry.responseStatus : 0,
+                bytes: typeof entry.transferSize === "number" ? entry.transferSize : -1
+            });
+        }
+        if (seen.length > KEEP) { seen.splice(0, seen.length - KEEP); }
+    }
+
+    function start() {
+        if (observing) { return; }
+        try {
+            const observer = new PerformanceObserver(function (list) { take(list.getEntries()); });
+            observer.observe({ type: "resource", buffered: true });
+            observing = true;
+        } catch (e) {
+            // No observer: fall back to reading the buffer when asked. It is
+            // capped by the browser and may have dropped the oldest entries,
+            // which is still better than nothing to look at.
+            observing = false;
+        }
+    }
+
+    function sweep() {
+        if (observing) { return; }
+        try { take(performance.getEntriesByType("resource")); } catch (e) { /* nothing to read */ }
+    }
+
+    start();
+
+    return {
+        /** Every host API call since ``at`` (a Date.now() value). */
+        since: function (at) {
+            sweep();
+            const from = Number(at) || 0;
+            const recent = seen.filter(function (row) { return row.at >= from - 250; });
+            // Duplicates are possible through the fallback; one row per call.
+            const unique = [];
+            for (const row of recent) {
+                if (!unique.some(function (k) { return k.at === row.at && k.path === row.path; })) { unique.push(row); }
+            }
+            return unique;
+        },
+        /** That window as one line for a log. */
+        sentence: function (at) {
+            const rows = this.since(at);
+            if (!rows.length) { return "no request left this browser"; }
+            return rows.length + " request(s): " + rows.map(function (row) {
+                return row.path + (row.status ? " " + row.status : "") + " in " + row.ms + "ms";
+            }).join(", ");
+        },
+        /** Whether this page is even able to answer the question. */
+        watching: function () { return observing; }
+    };
+})();
+
+/**
+ * Where the host has told this page to call it, against where it is.
+ *
+ * Gradio's frontend does not use relative URLs: it reads an absolute root
+ * out of the config the server inlined and builds every API call from that.
+ * The server works that root out from the request it saw, so a Forge behind
+ * anything that terminates TLS - a front end, a tunnel, a browser extension
+ * that upgrades the address bar - can serve a page over https whose config
+ * says http. The browser then blocks every one of those calls as mixed
+ * content, silently, while everything this extension does over a relative
+ * URL keeps working perfectly.
+ *
+ * Reported, not repaired. The repair is one line - put the page's own origin
+ * in the config before Gradio boots - and it is the host's page, the host's
+ * framework and the host's config; an extension that quietly rewrites it is
+ * one upgrade away from breaking an install that was fine. Said plainly, it
+ * takes a user about a minute to fix at the source.
+ *
+ * ``root`` and ``here`` are for the checks: production passes neither and
+ * this reads the page it is on. A browser will not let `location.protocol`
+ * be redefined, so the one verdict that matters - an https page told to call
+ * an http host - cannot be exercised any other way.
+ */
+window.minipaintHostRoot = window.minipaintHostRoot || function (root, here) {
+    if (root === undefined) {
+        try { root = String((window.gradio_config && window.gradio_config.root) || ""); } catch (e) { root = ""; }
+    }
+    root = String(root || "");
+    const page = here || window.location;
+    if (!root) { return { known: false, note: "this page has no host config to read" }; }
+    if (!/^https?:\/\//i.test(root)) {
+        // A relative root is built onto the page's own origin: nothing to
+        // disagree about.
+        return { known: true, ok: true, root: root, note: "the host's root is relative to this page" };
+    }
+    let parsed;
+    try { parsed = new URL(root); } catch (e) { return { known: false, note: "the host's root is not a URL" }; }
+    if (parsed.origin === page.origin) {
+        return { known: true, ok: true, root: parsed.origin, note: "the host's root is this page's own origin" };
+    }
+    const mixed = page.protocol === "https:" && parsed.protocol === "http:";
+    return {
+        known: true, ok: false, root: parsed.origin, mixed: mixed,
+        note: "the host tells this page to call it at " + parsed.origin + " while the page is on "
+            + page.origin + (mixed
+                ? " - a browser blocks that as mixed content, so no Gradio event can leave this page."
+                  + " Forge has to be told it is behind TLS (an x-forwarded-proto header from whatever"
+                  + " terminates it, or --subpath/root_path), or reached over plain http."
+                : " - a browser will not let the page call the other origin without CORS.")
+    };
+};
+
+/**
+ * Whether the host actually wired up the control this page is pressing.
+ *
+ * THE QUESTION NOTHING ELSE ANSWERS. A control that does nothing looks the
+ * same whether the page is failing to reach the server or the event was
+ * never on the page to begin with - and the second is not hypothetical. An
+ * event whose outputs name a component that is not in this build is a
+ * dependency the frontend cannot run, and it fails the way an unreachable
+ * server fails: silently, every time, on every build. Everything else on the
+ * same tab keeps working, because everything else names only its own
+ * components.
+ *
+ * The host inlines its whole graph into the page, so this is simply a
+ * lookup: find the component that carries this elem_id, then find the events
+ * that fire from it. Nothing is written and nothing is fetched.
+ *
+ * ``elements`` is the other half. Two DOM nodes carrying one id is a page
+ * built twice, and then getElementById hands the script whichever came
+ * first, which may not be the one the framework is listening to - a write
+ * that lands in the document and is heard by nobody.
+ */
+window.minipaintHostWiring = window.minipaintHostWiring || function (elemId) {
+    const found = { id: String(elemId || ""), elements: 0, components: 0, triggers: [], known: false };
+    try {
+        found.elements = document.querySelectorAll('[id="' + String(elemId).replace(/["\\]/g, "\\$&") + '"]').length;
+    } catch (e) { /* the count is simply not known */ }
+    let config = null;
+    try { config = window.gradio_config; } catch (e) { config = null; }
+    if (!config || !Array.isArray(config.components)) { return found; }
+    found.known = true;
+    const ids = [];
+    for (const component of config.components) {
+        const props = component && component.props;
+        if (props && props.elem_id === found.id) { ids.push(component.id); }
+    }
+    found.components = ids.length;
+    const everything = new Set();
+    for (const component of config.components) { if (component) { everything.add(component.id); } }
+    const dependencies = Array.isArray(config.dependencies) ? config.dependencies : [];
+    // Components an event names that are not on this page.
+    //
+    // An event is not runnable just because its trigger is wired: its inputs
+    // and outputs are component ids too, and one of them belonging to a
+    // build this page is not - a tab the host hid, a component captured
+    // before the page was rebuilt - leaves a dependency the frontend cannot
+    // run. It then fails the way an unreachable server fails, on every
+    // press, for ever, while every event on the same tab that names only its
+    // own components carries on working. Sending is the one thing this
+    // extension does whose outputs belong to other tabs, which is exactly
+    // the shape of a fault that hits sending and nothing else.
+    found.missing = 0;
+    for (const dependency of dependencies) {
+        const targets = Array.isArray(dependency.targets) ? dependency.targets : [];
+        let mine = false;
+        for (const target of targets) {
+            //: Gradio 4 pairs the component with its trigger; 3 named the
+            //: trigger on the dependency itself.
+            const component = Array.isArray(target) ? target[0] : target;
+            const trigger = Array.isArray(target) ? target[1] : (dependency.trigger || "?");
+            if (ids.indexOf(component) === -1) { continue; }
+            mine = true;
+            if (found.triggers.indexOf(trigger) === -1) { found.triggers.push(trigger); }
+        }
+        if (!mine) { continue; }
+        for (const wired of [].concat(dependency.inputs || [], dependency.outputs || [])) {
+            if (!everything.has(wired)) { found.missing += 1; }
+        }
+    }
+    return found;
+};
+
+/** ``minipaintHostWiring`` as a clause for a log line. */
+window.minipaintHostWiringNote = window.minipaintHostWiringNote || function (label, elemId) {
+    let wiring;
+    try { wiring = window.minipaintHostWiring(elemId); } catch (e) { return label + ": not known"; }
+    if (!wiring.known) { return label + ": " + wiring.elements + " element(s), this page has no host graph to read"; }
+    return label + ": " + wiring.elements + " element(s), " + wiring.components + " component(s), "
+        + (wiring.triggers.length ? "wired for " + wiring.triggers.join("+")
+                                  : "NO EVENT IS WIRED TO IT ON THIS PAGE")
+        + (wiring.missing ? " but naming " + wiring.missing + " component(s) NOT ON THIS PAGE, which is an event"
+                            + " the host cannot run" : "");
 };
 
 window.minipaintAssets = window.minipaintAssets || (function () {

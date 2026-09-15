@@ -122,7 +122,7 @@ def build_page():
 #: every ``gr.update(visible=False)`` a callback returns as if it were a
 #: declaration, which is how the figure this workstream started from came
 #: out a fifth too high.
-CLIPBOARD_HIDDEN_CEILING = 32
+CLIPBOARD_HIDDEN_CEILING = 33
 
 
 def page_checks(r: Results, base: pathlib.Path):
@@ -160,7 +160,7 @@ def page_checks(r: Results, base: pathlib.Path):
         "grid", "status", "folder_panel", "folder", "folder_use", "folder_create", "folder_close", "folder_status",
         "rename_panel", "rename_text", "rename_ok", "rename_cancel", "delete_panel", "delete_ok", "delete_cancel",
         "paste_panel", "paste", "paste_close", "refresh", "upload", "intercept", "folder_open", "rename_open",
-        "delete_open", "paste_open", "history_open", "selected", "sort_request", "slot_action", "send_request",
+        "delete_open", "paste_open", "history_open", "selected", "sort_request", "slot_action", "send_request", "send_press",
         "history_action", "menu_state", "switch", "payload", "to_canvas", "mask_clear", "wangp_line", "cards",
         "card_first", "card_last", "card_ref", "slot_upload_first", "slot_upload_last", "slot_upload_ref", "prompt",
         "queue", "queue_status", "queue_instruction", "page_id", "outbox_action", "outbox_refresh", "outbox_list",
@@ -193,7 +193,7 @@ def page_checks(r: Results, base: pathlib.Path):
     r.check("Add to Queue is the primary button", queue.get("value") == "Add to Queue" and queue.get("variant") == "primary", str(queue))
     r.check("and it is enabled before anything is composed, WanGP running", queue.get("interactive") is not False and queue.get("visible") is not False)
     r.check("the queue list is on the page, empty", "No request has been sent" in component_of(page, "minipaint_clipboard_outbox_list")["props"].get("value", ""))
-    for name in ("selected", "sort_request", "slot_action", "send_request", "history_action", "menu_state", "switch", "payload",
+    for name in ("selected", "sort_request", "slot_action", "send_request", "send_press", "history_action", "menu_state", "switch", "payload",
                  "to_canvas", "mask_clear", "queue_instruction", "page_id", "model", "outbox_action", "outbox_refresh", "refresh", "upload", "intercept", "folder_open",
                  "rename_open", "delete_open", "paste_open", "history_open", "slot_upload_first", "slot_upload_last", "slot_upload_ref"):
         if component_of(page, f"minipaint_clipboard_{name}")["props"].get("visible") is not False:
@@ -260,6 +260,27 @@ def page_checks(r: Results, base: pathlib.Path):
     sent = targeting("send_request", "input")
     r.check("a send request is one backend event writing the host inputs, the instruction and the payload",
             len(sent) == 1 and sent[0]["backend_fn"] and {cid("switch"), cid("payload"), cid("to_canvas"), cid("status")} <= set(sent[0]["outputs"]), str(sent))
+    # The same send, carried by a press as well as by the written box.
+    #
+    # Not redundancy for its own sake: on one user's Forge the written box
+    # never reached the server - four builds, not one send acknowledged -
+    # while a pressed button on the same page worked every time. Neither way
+    # in is reliable everywhere, so the tab offers both, and the two are
+    # required to be the same event with the same outputs and the same
+    # follow-up steps. A press wired to a different callback, or to fewer
+    # outputs, is a second implementation of sending waiting to drift.
+    pressed = targeting("send_press", "click")
+    r.check("the same send is also carried by a press, for a page whose written box is not heard",
+            len(pressed) == 1 and pressed[0]["backend_fn"], str(pressed))
+    if pressed and sent:
+        r.check("the press and the written box are the same event",
+                pressed[0]["backend_fn"] == sent[0]["backend_fn"]
+                and pressed[0]["inputs"] == sent[0]["inputs"]
+                and pressed[0]["outputs"] == sent[0]["outputs"],
+                f"{pressed[0]['inputs']} vs {sent[0]['inputs']}")
+        r.check("and both are followed by the same steps",
+                [f.get("js") for f in followers(pressed[0])] == [f.get("js") for f in followers(sent[0])],
+                f"{len(followers(pressed[0]))} vs {len(followers(sent[0]))}")
     follow = followers(sent[0]) if sent else []
     r.check("followed by browser-only steps that write the host textboxes and switch tabs",
             len(follow) >= 3 and all(not f["backend_fn"] for f in follow if "switchTo" in (f.get("js") or "")) and any("switchTo" in (f.get("js") or "") for f in follow), str(len(follow)))
@@ -592,6 +613,56 @@ def send_checks(r: Results, base: pathlib.Path, tab) -> None:
         out = tab.send(f"{stitch[0]}:{selected}:1700000004:done", "")
         index = tab.image_targets.index(stitch[0])
         r.check("and a gallery is not appended to twice", _skipped(out[index]), str(out[index])[:80])
+    # Two events carry one send - a press and the written box - because on
+    # some installs only one of them arrives. On a healthy install both do,
+    # and the second must not deliver the picture again: to a canvas that is
+    # waste, to a gallery that appends it is one picture too many. So the
+    # repeat is answered with the receipt and nothing else.
+    first = tab.send(f"img2img:{selected}:1700000005", "")
+    again = tab.send(f"img2img:{selected}:1700000005", "")
+    r.check("the same request arriving twice is delivered once and acknowledged twice",
+            first[n] == "img2img" and str(first[n + 1]).startswith("data:image/png")
+            and all(_skipped(v) for v in again[:n]) and _skipped(again[n]) and _skipped(again[n + 1])
+            and again[n + 4] == "1700000005",
+            f"{again[n]!r} {again[n + 4]!r}")
+    if stitch:
+        tab.send(f"{stitch[0]}:{selected}:1700000006", "")
+        twice = tab.send(f"{stitch[0]}:{selected}:1700000006", "")
+        index = tab.image_targets.index(stitch[0])
+        r.check("and a gallery is not appended to by the second arrival either",
+                _skipped(twice[index]) and twice[n + 4] == "1700000006", str(twice[index])[:80])
+    third = tab.send(f"img2img:{selected}:1700000007", "")
+    r.check("while the next request is a new send, not a repeat",
+            third[n] == "img2img" and str(third[n + 1]).startswith("data:image/png") and third[n + 4] == "1700000007",
+            str(third[n + 4]))
+
+    # The press that carries no payload.
+    #
+    # A press makes the server read the hidden box, and it reads whatever
+    # value the framework holds for it - which on the install this is for is
+    # not what the page wrote. So the browser leaves the request on the send
+    # route on its way out, and this falls back to it when the box offers
+    # nothing it has not already answered. Without it the press is answered
+    # with the receipt for an older send and the picture never moves.
+    from minipaint_neo.clipboard import routes as clip_routes
+
+    clip_routes.forget_request()
+    stale = tab.send(f"img2img:{selected}:1700000007", "")
+    r.check("with nothing posted, a stale box is still only answered once",
+            _skipped(stale[n]) and stale[n + 4] == "1700000007", str(stale[n + 4]))
+    clip_routes.remember_request(f"img2img:{selected}:1700000009")
+    carried = tab.send(f"img2img:{selected}:1700000007", "")
+    r.check("a press whose box is stale is answered from the request the browser posted",
+            carried[n] == "img2img" and str(carried[n + 1]).startswith("data:image/png")
+            and carried[n + 4] == "1700000009", str(carried[n + 4]))
+    repeat = tab.send(f"img2img:{selected}:1700000007", "")
+    r.check("and that request is not then delivered again by the next press",
+            _skipped(repeat[n]) and repeat[n + 4] == "1700000007", str(repeat[n + 4]))
+    clip_routes.remember_request(f"img2img:{selected}:1700000010")
+    fresh_box = tab.send(f"img2img:{selected}:1700000011", "")
+    r.check("while a box with something new to say is always preferred to it",
+            fresh_box[n + 4] == "1700000011", str(fresh_box[n + 4]))
+    clip_routes.forget_request()
     out = tab.send("nowhere:" + selected, "")
     r.check("an unknown destination is refused by name", "not available" in out[n + 3])
     out = tab.send("img2img", "")

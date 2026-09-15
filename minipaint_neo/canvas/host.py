@@ -241,9 +241,40 @@ def _inpaint_foreground(background) -> typing.Any:
     return _foregrounds.get(elem_id)
 
 
+def _on_the_page(component: typing.Any) -> bool:
+    """Whether this component was ever put on a page, or only made.
+
+    A destination is remembered as the host builds its UI, and the hook that
+    remembers it fires when a component is CREATED. Creating one is not the
+    same as putting it on the page: Gradio has ``render=False``, a scratch
+    context is a normal thing to build in, and a script can make a component
+    for one tab and place only the copy it made for another. What is left is
+    a perfectly good component that no page contains.
+
+    Wiring an event to one of those produces the fault this cost five builds
+    to find. The event is in the page's graph and cannot run, because one of
+    the components it names is not there - so it fails silently, every time,
+    for ever, while every other event on the same tab works. Nothing reports
+    it: no error, no console line, no failed request. The page simply does
+    not answer.
+
+    And it is not confined to the destination that is missing. Every send
+    this tab makes named every backend destination in its outputs, so one
+    component nobody rendered took sending to *all* of them with it - which
+    is why a user could not send to img2img, a tab plainly on their screen.
+
+    ``is_rendered`` is Gradio's own answer, set when a component is placed.
+    A build that does not have it is left alone rather than guessed at.
+    """
+    return getattr(component, "is_rendered", True) is not False
+
+
 def destinations() -> typing.Dict[str, typing.Any]:
     """Whatever this host has: img2img, inpaint (+ its mask layer), extras,
-    and ImageStitch's galleries (+ their enabling boxes) in txt2img and img2img."""
+    and ImageStitch's galleries (+ their enabling boxes) in txt2img and img2img.
+
+    Only what is actually on the page - see ``_on_the_page``.
+    """
     found: typing.Dict[str, typing.Any] = {}
 
     img2img = _init_img("img2img")
@@ -267,6 +298,27 @@ def destinations() -> typing.Dict[str, typing.Any]:
         if gallery is not None and enable is not None:
             found[key] = gallery
             found[f"{key}_enable"] = enable
+
+    # A destination that was made but never placed is not a destination.
+    # Dropped in one pass at the end so a pair - a gallery and the box that
+    # enables it, a canvas and its mask layer - goes together: half a
+    # destination is a worse answer than none.
+    absent = sorted(key for key, component in found.items() if not _on_the_page(component))
+    for key in absent:
+        found.pop(key, None)
+        for partner in (f"{key}_enable", f"{key}_mask"):
+            found.pop(partner, None)
+        if key.endswith("_enable"):
+            found.pop(key[: -len("_enable")], None)
+        if key.endswith("_mask"):
+            found.pop(key[: -len("_mask")], None)
+    if absent:
+        scrub.console(
+            "these Send destinations were built but never put on the page, so they are not offered: "
+            + ", ".join(absent)
+            + ". An event wired to one cannot run, and it would have taken every other destination with it.",
+            "MiniPaint:",
+        )
 
     _handed.update(found)
     return found

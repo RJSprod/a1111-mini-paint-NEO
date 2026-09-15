@@ -636,6 +636,9 @@ class ClipboardTab:
         #: The send requests already answered, newest last, so no event that
         #: carries one can deliver the same picture twice. See ``send``.
         self._answered: "collections.OrderedDict[str, None]" = collections.OrderedDict()
+        #: The same, for the backend-only delivery below, which is a separate
+        #: event and so has its own idea of what it has already done.
+        self._answered_backend: "collections.OrderedDict[str, None]" = collections.OrderedDict()
         # Where a selected picture can go: Mini Paint when the Canvas is
         # mounted, and every host destination the Canvas itself knows.
         self.destinations: typing.List[typing.Tuple[str, str]] = []
@@ -1240,7 +1243,6 @@ class ClipboardTab:
         # The browser stamps each request so it can recognise the answer to
         # its own; echoed back untouched.
         ack = parts[2][:32] if len(parts) > 2 else ""
-        skips = [gr.skip() for _ in self.image_targets]
         # One request, delivered once, however many times it arrives.
         #
         # Two events carry a send - the press and the written box - because
@@ -1259,7 +1261,7 @@ class ClipboardTab:
         # The whole request is the key, not the stamp: a page that somehow
         # reused a stamp for a different picture should get the picture.
         if text and text in self._answered:
-            return (*skips, gr.skip(), gr.skip(), gr.skip(), gr.skip(), ack)
+            return (gr.skip(), gr.skip(), gr.skip(), gr.skip(), ack)
         if text:
             self._answered[text] = None
             while len(self._answered) > _ANSWERED_KEPT:
@@ -1272,19 +1274,19 @@ class ClipboardTab:
         delivered = len(parts) > 3 and parts[3] == "done"
         label = dict(self.destinations).get(target, target)
         if target not in dict(self.destinations):
-            return (*skips, "", "", "", _status(f"{label or 'That destination'} is not available in this WebUI."), ack)
+            return ("", "", "", _status(f"{label or 'That destination'} is not available in this WebUI."), ack)
         asset = self._asset(asset_id or selected)
         if asset is None:
-            return (*skips, "", "", "", _status("Select an image in the browser first."), ack)
+            return ("", "", "", _status("Select an image in the browser first."), ack)
         try:
             image = self.library.open_image(asset.asset_id)
         except IntegrationError as error:
-            return (*skips, "", "", "", _status(errors.message(error.code)), ack)
+            return ("", "", "", _status(errors.message(error.code)), ack)
         if delivered:
-            return (*skips, "", "", "", _status(f"Sent {asset.filename} to {label}."), ack)
+            return ("", "", "", _status(f"Sent {asset.filename} to {label}."), ack)
         nonce = _nonce()
         if target == "minipaint":
-            return (*skips, "", "", f"{asset.asset_id}:{nonce}", _status(f"Sent {asset.filename} to Mini Paint."), ack)
+            return ("", "", f"{asset.asset_id}:{nonce}", _status(f"Sent {asset.filename} to Mini Paint."), ack)
         payload = ""
         if target == "inpaint":
             instruction = f"inpaint:{image.width}x{image.height}"
@@ -1293,13 +1295,64 @@ class ClipboardTab:
             instruction = target
             if target == "img2img":
                 payload = imaging.to_data_url(image)
+        notes = ["the page places it; this event only records it"] if target in self.image_targets else []
+        return (instruction, payload, "", _status(f"Sent {asset.filename} to {label}.", notes), ack)
+
+    def send_backend(self, request, selected):
+        """Write a destination the browser cannot write itself.
+
+        WHY THIS IS NOT PART OF ``send``.
+
+        Extras and the ImageStitch galleries hold their picture in a Gradio
+        component, so the only way the server can put one there is to name
+        that component in an event's outputs. Those components belong to
+        other tabs, and a component from another tab is the one thing an
+        event can name that may not be on the page at all - a script that
+        built it with ``render=False``, a copy made for a tab it was never
+        placed in, anything left over from a build that was thrown away.
+
+        An event naming one cannot run. Not "fails for that destination":
+        the whole event is unrunnable, silently, for ever. While these
+        components were among ``send``'s outputs, one of them being absent
+        stopped every send this tab made - including to img2img, a canvas
+        plainly on the page, which the browser was writing perfectly well on
+        its own. That is what a user spent five builds reporting.
+
+        So ``send`` names nothing but this tab's own boxes and can always
+        run, and the outputs that carry that risk are here, on an event the
+        browser presses only when it has just found out it cannot place the
+        picture itself. The blast radius of a destination that is not on the
+        page is now that destination.
+        """
+        text = str(request or "")
+        if not text or text in self._answered_backend:
+            fresh = routes.recent_request()
+            if fresh and fresh not in self._answered_backend:
+                text = fresh
+        skips = [gr.skip() for _ in self.image_targets]
+        if not text or text in self._answered_backend:
+            return (*skips, gr.skip())
+        self._answered_backend[text] = None
+        while len(self._answered_backend) > _ANSWERED_KEPT:
+            self._answered_backend.popitem(last=False)
+        parts = text.split(":")
+        target = parts[0] if parts else ""
+        if target not in self.image_targets:
+            return (*skips, gr.skip())
+        asset = self._asset(_hex(parts[1]) if len(parts) > 1 else "" or selected)
+        if asset is None:
+            return (*skips, _status("Select an image in the browser first."))
+        try:
+            image = self.library.open_image(asset.asset_id)
+        except IntegrationError as error:
+            return (*skips, _status(errors.message(error.code)))
+        host.staged(image)
         outputs: typing.List[typing.Any] = []
-        if target in self.image_targets:
-            host.staged(image)
         for key in self.image_targets:
             outputs.append(([image] if key in canvas_ui.STITCH_TARGETS else image) if key == target else gr.skip())
+        label = dict(self.destinations).get(target, target)
         notes = ["it is now the only reference image there"] if target in canvas_ui.STITCH_TARGETS else []
-        return (*outputs, instruction, payload, "", _status(f"Sent {asset.filename} to {label}.", notes), ack)
+        return (*outputs, _status(f"Sent {asset.filename} to {label}.", notes))
 
     # -- the folder and the file operations ---------------------------------------
 
@@ -1432,6 +1485,12 @@ class ClipboardTab:
                     # noticed. See ClipboardTab.send for what makes the two
                     # of them arriving together harmless.
                     send_press = gr.Button("Send", visible=False, elem_id=_id("send_press"))
+                    # The press for a destination only the server can write.
+                    # Separate from the one above on purpose: this is the one
+                    # whose outputs name other tabs' components, which is the
+                    # only thing an event can name that may not be on the
+                    # page. See ClipboardTab.send_backend.
+                    send_backend = gr.Button("Send (server)", visible=False, elem_id=_id("send_backend"))
                     # The server's receipt for a send, carrying the stamp the
                     # browser put on the request. See ClipboardTab.send.
                     send_ack = gr.Textbox("", visible=False, elem_id=_id("send_ack"))
@@ -1521,7 +1580,7 @@ class ClipboardTab:
             enhance_line=enhance_line, enhance_toggle=enhance_toggle, sp_variant=sp_variant, sp_mode=sp_mode, system_prompt=system_prompt,
             sp_state=sp_state, sp_apply=sp_apply, sp_restore=sp_restore, sp_reload=sp_reload,
             history_list=history_list, history_close=history_close, history_action=history_action,
-            send_request=send_request, send_press=send_press, send_ack=send_ack, switch_box=switch_box, payload_box=payload_box, to_canvas=to_canvas, mask_clear=mask_clear,
+            send_request=send_request, send_press=send_press, send_backend=send_backend, send_ack=send_ack, switch_box=switch_box, payload_box=payload_box, to_canvas=to_canvas, mask_clear=mask_clear,
             wangp_line=wangp_line,
         )
 
@@ -1623,7 +1682,13 @@ class ClipboardTab:
         # -- send out: the same routes the Canvas takes, per destination.
         switch_box, payload_box = p["switch_box"], p["payload_box"]
         target_components = [self.targets[key] for key in self.image_targets]
-        send_outputs = target_components + [switch_box, payload_box, p["to_canvas"], p["status"], p["send_ack"]]
+        # NOTHING FROM ANOTHER TAB IS IN HERE. See ClipboardTab.send_backend:
+        # an event that names a component which is not on the page cannot
+        # run, silently and for ever, and while these outputs carried other
+        # tabs' components one absent component stopped every send this tab
+        # made. The send names only this tab's own boxes now, so it can
+        # always run; the outputs that carry the risk are on their own event.
+        send_outputs = [switch_box, payload_box, p["to_canvas"], p["status"], p["send_ack"]]
         textbox_targets = [self.targets[key] for key in ("img2img", "inpaint") if key in self.targets]
 
         def after_send(sent):
@@ -1652,6 +1717,13 @@ class ClipboardTab:
         # it already gave, so nothing is delivered twice.
         after_send(p["send_press"].click(self.send, inputs=[p["send_request"], selected], outputs=send_outputs, **quiet))
         after_send(p["send_request"].input(self.send, inputs=[p["send_request"], selected], outputs=send_outputs, **quiet))
+        # The destinations only the server can write, on their own event, so
+        # that one of them not being on the page costs that destination and
+        # nothing else. The browser presses it only when it has just found
+        # out it cannot place the picture itself.
+        if target_components:
+            p["send_backend"].click(self.send_backend, inputs=[p["send_request"], selected],
+                                    outputs=target_components + [p["status"]], **quiet)
         # Mini Paint: the Canvas takes the picture through its own receive
         # chain, wired here because the Canvas was built first.
         if self.canvas is not None:

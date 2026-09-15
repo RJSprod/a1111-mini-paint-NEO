@@ -561,8 +561,9 @@ browser   clipboard: send img2img: why it went unanswered - the request box hold
 * **`no request left this browser`** — the event never fired. Nothing was asked of Forge,
   so there is nothing to find in Forge's console.
 * **`NO EVENT IS WIRED TO IT ON THIS PAGE`**, or **`naming N component(s) NOT ON THIS
-  PAGE`** — the control exists and the event behind it cannot run. That is a page that was
-  built wrong, not a connection.
+  PAGE`** — the control exists and the event behind it cannot run. Gradio will not say so:
+  it just never answers. This is what was actually wrong with sending, found the first time
+  the page was asked.
 * **`2 element(s)`** — the page carries that control twice, so a script writing it by id
   may be writing the copy nothing is listening to.
 * **`the receipt box holds an older stamp`** — the request arrived, carrying a value from

@@ -321,6 +321,13 @@ def check_send_survives_a_dead_queue(r: Results, page, targets) -> None:
             if host_value() > 0:
                 landed = True
                 break
+        # The notice is written just after the picture and hides itself a few
+        # seconds later, so give it its moment rather than racing the break.
+        for _ in range(3):
+            if said:
+                break
+            time.sleep(1)
+            said = toast(page) or said
         r.check("dead queue: the picture still reaches img2img, over plain HTTP",
                 landed, f"host textbox length {host_value()}")
         r.check("dead queue: and the page says how it got there",
@@ -505,10 +512,14 @@ def run() -> Results:
                 r.check("a picture can be selected", select_first(page),
                         repr(box(page, "minipaint_clipboard_selected")))
                 check_send(r, page, targets)
+                # Tab switching first: the checks below cut Gradio's queue
+                # with page routing, and a reload while a route handler is
+                # in flight is a good way to hang a browser for no reason
+                # that has anything to do with what is being tested.
+                check_tab_switching_survives_reordering(r, page)
+                check_recovers_after_the_interruption(r, page, targets)
                 check_send_survives_a_dead_queue(r, page, targets)
                 check_backend_destination_is_honest(r, page)
-                check_recovers_after_the_interruption(r, page, targets)
-                check_tab_switching_survives_reordering(r, page)
             finally:
                 browser.close()
     finally:

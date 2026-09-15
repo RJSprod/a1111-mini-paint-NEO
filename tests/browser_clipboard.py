@@ -136,6 +136,33 @@ def toast(page):
         " return (t && !t.hidden) ? t.textContent.trim() : ''; }")
 
 
+def record_toasts(page):
+    """Watch for every notice the page shows, rather than sampling for one.
+
+    A toast takes itself down after a few seconds, so a poll that happens to
+    look a moment early and a moment late sees nothing at all - and the
+    interesting ones here appear twelve seconds after a click, which is
+    exactly when a poll is doing something else.
+    """
+    page.evaluate("""() => {
+        window.__toasts = [];
+        const seen = new Set();
+        const look = () => {
+            const t = document.querySelector('.minipaint-clip-toast');
+            if (!t || t.hidden) { return; }
+            const text = (t.textContent || '').trim();
+            if (text && !seen.has(text)) { seen.add(text); window.__toasts.push(text); }
+        };
+        if (window.__toastTimer) { clearInterval(window.__toastTimer); }
+        window.__toastTimer = setInterval(look, 120);
+        look();
+    }""")
+
+
+def recorded_toasts(page):
+    return page.evaluate("() => window.__toasts || []")
+
+
 def open_clipboard(page):
     page.locator("#tabs > .tab-nav > button", has_text="Clipboard").first.click()
     time.sleep(2.5)
@@ -313,25 +340,20 @@ def check_send_survives_a_dead_queue(r: Results, page, targets) -> None:
     page.route("**/queue/**", lambda route: route.abort())
     page.route("**/gradio_api/**", lambda route: route.abort())
     try:
+        record_toasts(page)
         r.check("dead queue: the send is attempted", send_selected(page, "img2img") == "clicked")
-        landed, said = False, ""
+        landed = False
         for _ in range(26):
             time.sleep(1)
-            said = toast(page) or said
             if host_value() > 0:
                 landed = True
                 break
-        # The notice is written just after the picture and hides itself a few
-        # seconds later, so give it its moment rather than racing the break.
-        for _ in range(3):
-            if said:
-                break
-            time.sleep(1)
-            said = toast(page) or said
+        time.sleep(1.5)
+        said = recorded_toasts(page)
         r.check("dead queue: the picture still reaches img2img, over plain HTTP",
                 landed, f"host textbox length {host_value()}")
         r.check("dead queue: and the page says how it got there",
-                "lost its connection" in said or said.startswith("Sent "), repr(said))
+                any("lost its connection" in one or one.startswith("Sent ") for one in said), str(said))
     finally:
         page.unroute("**/queue/**")
         page.unroute("**/gradio_api/**")
@@ -345,15 +367,16 @@ def check_backend_destination_is_honest(r: Results, page) -> None:
     page.route("**/queue/**", lambda route: route.abort())
     page.route("**/gradio_api/**", lambda route: route.abort())
     try:
+        record_toasts(page)
         send_selected(page, "ImageStitch (txt2img)")
-        said = ""
+        said = []
         for _ in range(26):
             time.sleep(1)
-            said = toast(page)
+            said = recorded_toasts(page)
             if said:
                 break
         r.check("dead queue: a server-written destination says so instead of looking sent",
-                "needs the connection back" in said or "never reached" in said, repr(said))
+                any("needs the connection back" in one or "never reached" in one for one in said), str(said))
     finally:
         page.unroute("**/queue/**")
         page.unroute("**/gradio_api/**")

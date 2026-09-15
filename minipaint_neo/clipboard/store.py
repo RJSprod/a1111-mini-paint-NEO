@@ -873,7 +873,7 @@ class Store:
             directory = config.config_dir() / THUMBNAIL_DIR_NAME
             directory.mkdir(parents=True, exist_ok=True)
             return directory
-        except OSError as error:
+        except (OSError, ValueError) as error:
             self._disk_off(f"could not be opened ({type(error).__name__})")
             return None
 

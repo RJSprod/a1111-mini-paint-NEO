@@ -463,6 +463,262 @@ def send_route_checks(r: Results, base) -> None:
             f"{plan.get('instruction')!r} vs {body.get('instruction')!r}")
 
 
+def http_door_checks(r: Results, base: pathlib.Path) -> None:
+    """Every row that moved has a door on plain HTTP, and it is gated.
+
+    "Anything that can ride plain HTTP, does" is not elegance: HTTP is the
+    transport that has kept working through every failure this tab has had,
+    while the one that kept being chosen is the one that broke. So the doors
+    are checked as doors - status codes, sign-in, and an answer that carries
+    its own sentence for the status line.
+    """
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    app = FastAPI()
+    routes.install(app)
+    client = TestClient(app)
+
+    listed = client.get(routes.LIBRARY_ROUTE, params={"sort": "name_asc", "page": 0, "size": 10})
+    body = listed.json()
+    r.check("the index route answers over plain HTTP", listed.status_code == 200 and body.get("ok") is True, str(body)[:120])
+    r.check("and is cached by nobody: it is the truth, asked for again on every change",
+            listed.headers.get("cache-control") == "no-store", str(listed.headers.get("cache-control")))
+    r.check("and carries a sentence for the status line, not just numbers",
+            isinstance(body.get("status"), str) and body["status"], str(body.get("status")))
+
+    refreshed = client.get(routes.LIBRARY_ROUTE, params={"refresh": "1"}).json()
+    r.check("it can be asked to read the folder again first, which is what opening the tab does",
+            refreshed.get("ok") is True)
+
+    saved = client.post(routes.SETTINGS_ROUTE, json={"sort": "largest", "thumbnail": 5000, "intercept": True})
+    kept = saved.json()
+    r.check("the settings route saves the sort, clamps the size and takes the switch",
+            saved.status_code == 200 and kept["sort"] == "largest"
+            and kept["thumbnail"] == config.THUMBNAIL_MAX and kept["intercept"] is True, str(kept)[:160])
+    r.check("and answers with the menu the browser draws itself from, so no render is needed",
+            kept["menu"]["sort"] == "largest" and kept["menu"]["intercept"] is True
+            and [mode for mode, _label in kept["menu"]["sorts"]] == list(config.SORT_MODES), str(kept["menu"])[:120])
+    r.check("and says what it did, in the words the tab has always used",
+            "Clipboard" in kept["status"], str(kept["status"]))
+    nonsense = client.post(routes.SETTINGS_ROUTE, json={"sort": "sideways"}).json()
+    r.check("a sort it does not know changes nothing rather than refusing",
+            nonsense["ok"] is True and nonsense["sort"] == "largest", str(nonsense)[:120])
+    client.post(routes.SETTINGS_ROUTE, json={"sort": config.DEFAULT_SORT, "intercept": False})
+
+    enhancement = client.get(routes.ENHANCE_SETTINGS_ROUTE).json()
+    r.check("the enhancement settings describe themselves over HTTP",
+            enhancement.get("ok") is True and "enabled" in enhancement, str(enhancement)[:120])
+    toggled = client.post(routes.ENHANCE_SETTINGS_ROUTE, json={"action": "toggle", "enabled": True}).json()
+    r.check("and the switch is a write route now, not only a Gradio event",
+            toggled.get("ok") is True and toggled.get("enabled") is True and "on" in toggled.get("status", ""), str(toggled)[:120])
+    client.post(routes.ENHANCE_SETTINGS_ROUTE, json={"action": "toggle", "enabled": False})
+    r.check("an action it does not know is refused with its own sentence",
+            client.post(routes.ENHANCE_SETTINGS_ROUTE, json={"action": "sideways"}).status_code == 400)
+
+    queue = client.get(routes.QUEUE_ROUTE, params={"page": "a" * 16})
+    answer = queue.json()
+    r.check("the queue is readable over HTTP - which is what 'I closed the browser and came back' needs",
+            queue.status_code in (200, 503) and isinstance(answer, dict), str(answer)[:120])
+    if answer.get("ok"):
+        r.check("and carries the jobs, the history and the button's two facts",
+                isinstance(answer.get("jobs"), list) and isinstance(answer.get("history"), list)
+                and set(answer.get("queue_button") or {}) == {"label", "enabled"}, str(sorted(answer))[:160])
+    r.check("a queue action it does not know is refused rather than guessed at",
+            client.post(routes.QUEUE_ROUTE, json={"action": "sideways"}).status_code in (400, 503))
+
+    # -- the sign-in gate, which every one of these shares
+    from minipaint_neo.wangp import proxy
+
+    original = proxy.signed_in
+    proxy.signed_in = lambda request: False
+    try:
+        for route, call in ((routes.LIBRARY_ROUTE, client.get), (routes.QUEUE_ROUTE, client.get)):
+            r.check(f"{route} is gated by the same sign-in as the picture route", call(route).status_code == 401)
+        for route in (routes.SETTINGS_ROUTE, routes.QUEUE_ROUTE, routes.ENHANCE_SETTINGS_ROUTE):
+            r.check(f"and so is writing to {route}", client.post(route, json={}).status_code == 401)
+    finally:
+        proxy.signed_in = original
+
+
+# ------------------------------------------------------- the picture index --
+
+
+def index_checks(r: Results, base: pathlib.Path) -> None:
+    """The route contract: sorted over the whole library, then sliced.
+
+    The grid has been reported broken three times with every check passing,
+    so what the grid is built from is checked directly rather than through
+    the page that draws it.
+    """
+    library = store.store()
+    root = library.root()
+    for stale in root.glob("*"):
+        stale.unlink()
+    library.refresh()
+    # Enough to page. Named so that name_asc is a known order.
+    for number in range(25):
+        (root / f"p{number:02d}.png").write_bytes(_png(size=(4 + number % 3, 4)))
+    library.refresh()
+
+    whole = [asset.filename for asset in library.assets("name_asc")]
+    r.check("the library has the pictures the pages are cut from", len(whole) == 25, str(len(whole)))
+
+    first = routes.library_page("name_asc", 0, 10)
+    second = routes.library_page("name_asc", 1, 10)
+    last = routes.library_page("name_asc", 2, 10)
+    r.check("a page is exactly `size` pictures, and the last one is what is left",
+            len(first["items"]) == 10 and len(second["items"]) == 10 and len(last["items"]) == 5, str(len(last["items"])))
+    r.check("and the totals describe the whole library, not the page",
+            first["total"] == 25 and first["pages"] == 3 and first["page"] == 0 and last["page"] == 2, json.dumps({k: first[k] for k in ("total", "pages", "page")}))
+    r.check("SORTING IS OVER THE WHOLE LIBRARY AND THEN SLICED, not within a page",
+            [item["name"] for item in first["items"]] == whole[:10]
+            and [item["name"] for item in second["items"]] == whole[10:20], str([i["name"] for i in second["items"]])[:90])
+    r.check("the other direction is the same list reversed, page for page",
+            [item["name"] for item in routes.library_page("name_desc", 0, 10)["items"]] == list(reversed(whole))[:10])
+
+    r.check("an unknown sort falls back to the stored one rather than refusing",
+            routes.library_page("sideways", 0, 10)["sort"] == config.load().sort)
+    r.check("a page past the end returns the last page that exists",
+            routes.library_page("name_asc", 99, 10)["page"] == 2 and routes.library_page("name_asc", -5, 10)["page"] == 0)
+    r.check("a size outside its bounds is clamped, not refused",
+            routes.library_page("name_asc", 0, 0)["size"] == routes.PAGE_SIZE_MIN
+            and routes.library_page("name_asc", 0, 9999)["size"] == routes.PAGE_SIZE_MAX
+            and routes.library_page("name_asc", 0, "nonsense")["size"] == routes.PAGE_SIZE)
+    r.check("and the default page holds sixty pictures",
+            routes.PAGE_SIZE == 60 and routes.library_page()["size"] == 60)
+
+    item = first["items"][0]
+    asset = next(a for a in library.assets() if a.asset_id == item["id"])
+    r.check("an item is the id, the name, the shape, the bytes and the version - and no path",
+            set(item) == {"id", "name", "w", "h", "bytes", "v"} and item["name"] == asset.filename
+            and item["v"] == f"{asset.mtime_ns}-{asset.size_bytes}" and str(base) not in json.dumps(first))
+    r.check("and the version is the one the thumbnail cache is keyed by",
+            store.version_of(asset) == item["v"] and library.canonical_version(asset.asset_id) == item["v"])
+
+    where = routes.library_page("name_asc", 0, 10, selected=whole and first["items"][0]["id"])
+    r.check("the answer says which page holds the selection", where["selected_page"] == 0)
+    twelfth = [a for a in library.assets("name_asc")][11]
+    r.check("including when it is not this page", routes.library_page("name_asc", 0, 10, selected=twelfth.asset_id)["selected_page"] == 1)
+    r.check("and says so plainly when the selection is not in the library at all",
+            routes.library_page("name_asc", 0, 10, selected=GOOD)["selected_page"] == -1)
+
+    # -- the revision: it moves when the library does, and at no other time
+    was = library.revision()
+    r.check("the revision is <epoch>:<n>, namespaced by the process", was.count(":") == 1 and was.split(":")[1].isdigit())
+    r.check("reading the library again does not move it",
+            routes.library_page()["revision"] == was and library.assets() and library.revision() == was)
+    library.refresh()
+    r.check("nor does a refresh that found no difference", library.revision() == was)
+    (root / "p25.png").write_bytes(_png())
+    library.refresh()
+    after_refresh = library.revision()
+    r.check("a refresh that found a new file does move it", after_refresh != was)
+    added = library.import_bytes(_png(), "imported.png", "upload")
+    r.check("an import moves it", library.revision() != after_refresh)
+    at_import = library.revision()
+    library.rename(added.asset_id, "renamed-here")
+    r.check("a rename moves it", library.revision() != at_import)
+    at_rename = library.revision()
+    library.delete(added.asset_id)
+    r.check("and a delete moves it", library.revision() != at_rename)
+
+    # -- the states of the index, which are not states of the transport
+    for stale in root.glob("*"):
+        stale.unlink()
+    library.refresh()
+    empty = routes.library_page()
+    r.check("an empty library is answered with a total of zero and a reason",
+            empty["ok"] is True and empty["total"] == 0 and empty["reason"] == "empty" and empty["configured"] is True, json.dumps(empty)[:120])
+    r.check("and a page number is still valid on it", empty["page"] == 0 and empty["pages"] == 1)
+
+
+def thumbnail_cache_checks(r: Results, base: pathlib.Path) -> None:
+    """The three caches, and the one that must never be load-bearing."""
+    library = store.store()
+    root = library.root()
+    asset = library.import_bytes(_png(size=(64, 48)), "cached.png", "upload")
+
+    made, mime = library.thumbnail(asset.asset_id)
+    directory = library.thumbnail_dir()
+    r.check("the disk cache is in the extension's data directory, never in the picture folder",
+            directory is not None and directory.parent == config.config_dir() and directory.parent != root, str(directory))
+    name = f"{asset.asset_id}-{asset.mtime_ns}-{asset.size_bytes}-{store.THUMBNAIL_SIDE}"
+    on_disk = [path.name for path in directory.glob("*")]
+    r.check("and a cached thumbnail names the whole file identity it was made from",
+            any(one.startswith(name) for one in on_disk), str(on_disk[:3]))
+    r.check("so there is no invalidation logic: a file that changed simply does not hit",
+            all(store.THUMBNAIL_NAME_RE.match(one) for one in on_disk), str(on_disk[:3]))
+
+    # A new process: memory gone, disk kept.
+    library._thumbnails.clear()
+    again, again_mime = library.thumbnail(asset.asset_id)
+    r.check("a thumbnail survives the memory cache being emptied - which is what a restart is",
+            again == made and again_mime == mime and len(library._thumbnails) == 1)
+
+    path = root / asset.filename
+    path.write_bytes(_png(colour=(9, 9, 9, 255), size=(70, 50)))
+    library.refresh()
+    changed = next(a for a in library.assets() if a.asset_id == asset.asset_id)
+    r.check("a changed file is a different identity, so a different cache entry",
+            store.version_of(changed) != store.version_of(asset))
+    library.thumbnail(asset.asset_id)
+    r.check("and the new one is written beside the old rather than over it",
+            len([one for one in directory.glob("*") if one.name.startswith(asset.asset_id)]) == 2,
+            str([one.name for one in directory.glob("*")][:4]))
+
+    # -- the bound, and what it drops
+    swept = library.sweep_thumbnails(budget=0)
+    r.check("a sweep to nothing empties the cache, and says what it removed",
+            swept["ok"] is True and swept["removed"] >= 2 and swept["bytes"] == 0
+            and not [one for one in directory.glob("*") if store.THUMBNAIL_NAME_RE.match(one.name)], str(swept))
+    stranger = directory / "not-ours.txt"
+    stranger.write_text("left by something else", encoding="utf-8")
+    library.sweep_thumbnails(budget=0)
+    r.check("and a file in that directory that is not ours is counted by nobody and removed by nobody",
+            stranger.is_file())
+    stranger.unlink()
+    r.check("the budget is a real number of bytes, not a count", store.THUMBNAIL_DISK_BUDGET > 1024 * 1024)
+
+    # -- never load-bearing
+    # A cache directory that cannot exist: something else put a file where
+    # it would have to go. A slower tab, never a broken one.
+    library._thumbnails.clear()
+    for one in directory.glob("*"):
+        one.unlink()
+    directory.rmdir()
+    directory.write_bytes(b"a file where the cache directory would have to be")
+    library._disk_complaint = ""
+    fallback = library.thumbnail(asset.asset_id)
+    r.check("an unwritable cache directory costs a thumbnail nothing but the time to make it",
+            fallback and len(fallback[0]) > 0 and fallback[1] in ("image/webp", "image/png"))
+    r.check("and the sweep over one says so rather than raising",
+            library.sweep_thumbnails()["ok"] is False and library.thumbnail_dir() is None)
+    r.check("said once, not once per tile", library._disk_complaint != "")
+    directory.unlink()
+
+    library.thumbnail(asset.asset_id)
+    library.delete(asset.asset_id)
+    r.check("deleting a picture takes its cached copies with it",
+            library.thumbnail_dir() is not None
+            and not [one for one in library.thumbnail_dir().glob("*") if one.name.startswith(asset.asset_id)])
+
+
+def cache_header_checks(r: Results, base: pathlib.Path) -> None:
+    """Only the asset's CURRENT version earns a year of immutability."""
+    library = store.store()
+    asset = library.import_bytes(_png(size=(20, 20)), "header.png", "upload")
+    current = library.canonical_version(asset.asset_id)
+    r.check("the URL the tab writes carries that version",
+            routes.image_url(asset.asset_id, version=current).endswith("?thumb=1&v=" + current))
+    r.check("and the two headers say different things",
+            "immutable" in routes.IMMUTABLE_CACHE and "immutable" not in routes.REVALIDATED_CACHE
+            and "31536000" in routes.IMMUTABLE_CACHE)
+    r.check("a version that is not the asset's own is not its current one",
+            library.canonical_version(asset.asset_id) != "1-1"
+            and library.canonical_version(GOOD) == "")
+
+
 def run() -> Results:
     r = Results("clipboard store")
     with tempfile.TemporaryDirectory(prefix="minipaint-clipboard-") as scratch:
@@ -479,6 +735,10 @@ def run() -> Results:
             root_change_checks(r, base)
             document_checks(r, base)
             send_route_checks(r, base)
+            index_checks(r, base)
+            http_door_checks(r, base)
+            thumbnail_cache_checks(r, base)
+            cache_header_checks(r, base)
         finally:
             wangp_config.use_config_dir(None)
             config.use_config_dir(None)

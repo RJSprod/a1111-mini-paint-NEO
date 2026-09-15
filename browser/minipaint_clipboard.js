@@ -171,7 +171,11 @@ window.minipaintClipboard = (function () {
             ids: [],
             busy: false,
             inflight: null,
-            pending: false
+            pending: false,
+            //: The page that was last ASKED for, and which request's answer
+            //: is still the current one. See stepPage and fetchLibrary.
+            wanted: 0,
+            ticket: 0
         }
     };
 
@@ -865,6 +869,7 @@ window.minipaintClipboard = (function () {
         S.library.size = Number(answer.size || S.library.size);
         S.library.configured = answer.configured !== false;
         S.library.selectedPage = Number(answer.selected_page);
+        S.library.wanted = S.library.page;
         grid.dataset.count = String(items.length);
         grid.classList.toggle("minipaint-clip-empty", !items.length);
         emptyNotice(grid, items.length ? "" : String(answer.reason || "empty"));
@@ -925,7 +930,7 @@ window.minipaintClipboard = (function () {
             back.type = "button";
             back.className = "minipaint-clip-pager-back";
             back.textContent = "‹ Back";
-            back.addEventListener("click", function () { goToPage(S.library.page - 1); });
+            back.addEventListener("click", function () { stepPage(-1); });
             const label = document.createElement("span");
             label.className = "minipaint-clip-pager-label";
             const lead = document.createElement("span");
@@ -950,7 +955,7 @@ window.minipaintClipboard = (function () {
             next.type = "button";
             next.className = "minipaint-clip-pager-next";
             next.textContent = "Next ›";
-            next.addEventListener("click", function () { goToPage(S.library.page + 1); });
+            next.addEventListener("click", function () { stepPage(1); });
             const count = document.createElement("span");
             count.className = "minipaint-clip-pager-count";
             const mark = document.createElement("button");
@@ -988,9 +993,25 @@ window.minipaintClipboard = (function () {
         }
     }
 
+    /**
+     * Move by a page, from the page that was ASKED FOR rather than the one on
+     * screen.
+     *
+     * Two presses of Next in quick succession are two pages, not one: the
+     * second arrives before the first answer has landed, and computing from
+     * what is drawn would make it a no-op. The pager is a control, and a
+     * control that ignores a press because the network was slow is a control
+     * people press twice more.
+     */
+    function stepPage(delta) {
+        const base = S.library.wanted === undefined ? S.library.page : S.library.wanted;
+        goToPage(base + delta);
+    }
+
     function goToPage(number) {
         const wanted = Math.max(0, Math.min(S.library.pages - 1, Number(number) || 0));
-        if (wanted === S.library.page) { drawPager(); return; }
+        if (wanted === S.library.page && wanted === S.library.wanted) { drawPager(); return; }
+        S.library.wanted = wanted;
         fetchLibrary({ page: wanted });
     }
 
@@ -1014,12 +1035,20 @@ window.minipaintClipboard = (function () {
         const opts = options || {};
         const page = opts.page === undefined ? S.library.page : Number(opts.page);
         const sort = opts.sort === undefined ? S.library.sort : String(opts.sort || "");
+        // The page size is one constant and the route takes it, so it stays
+        // a decision rather than becoming a migration. The answer says what
+        // the server clamped it to, and that is what the pager counts in.
+        if (opts.size !== undefined) { S.library.size = Number(opts.size) || S.library.size; }
         const url = LIBRARY_ROUTE + "?page=" + encodeURIComponent(page)
             + "&size=" + encodeURIComponent(S.library.size)
             + (sort ? "&sort=" + encodeURIComponent(sort) : "")
             + (opts.refresh ? "&refresh=1" : "")
             + (S.selected ? "&selected=" + encodeURIComponent(S.selected) : "");
         setBusy(true);
+        // Only the newest answer draws. Two presses in flight at once can
+        // come back in either order, and the page the user last asked for is
+        // the page they get - never whichever request the network finished.
+        const ticket = ++S.library.ticket;
         const request = fetch(url, { credentials: "same-origin", cache: "no-store" })
             .then(function (response) {
                 if (!response.ok) { throw new Error("HTTP " + response.status); }
@@ -1027,9 +1056,10 @@ window.minipaintClipboard = (function () {
             })
             .then(function (answer) {
                 if (!answer || answer.ok !== true) { throw new Error((answer && answer.message) || "the library could not be read"); }
+                serverSilent(false);
+                if (ticket !== S.library.ticket) { return answer; }
                 setBusy(false);
                 S.library.inflight = null;
-                serverSilent(false);
                 drawLibrary(answer);
                 if (!opts.quiet) { setStatus(answer.status || ""); }
                 // The revision moved between asking and drawing: draw, then
@@ -1041,6 +1071,7 @@ window.minipaintClipboard = (function () {
                 }
                 return answer;
             }, function (error) {
+                if (ticket !== S.library.ticket) { throw error; }
                 setBusy(false);
                 S.library.inflight = null;
                 // The tiles it has are kept: they were right when they were
@@ -1108,12 +1139,27 @@ window.minipaintClipboard = (function () {
         });
     }
 
-    /** The status line, which is the answer to what you just did. */
+    /**
+     * The status line, which is the answer to what you just did.
+     *
+     * IT LOOKS LIKE A THING THE SERVER TELLS YOU. It is not: it is the
+     * response to an action, and nothing else ever writes it. So every
+     * answer carries its own sentence and the browser draws the line - and
+     * during the move, where some actions still cross the framework and some
+     * do not, both write the SAME element, which is why this looks for the
+     * exact node the framework renders into rather than the block around it.
+     * Writing the block's HTML detaches the node the framework holds, and
+     * then its next answer lands somewhere nobody can see - which is the
+     * failure this whole tab is named for, reintroduced by the fix for it.
+     */
+    function statusTarget(host) {
+        return host.querySelector("span.md") || host.querySelector(".prose") || host;
+    }
+
     function setStatus(text) {
         const host = byId(STATUS_ID);
         if (!host || !text) { return; }
-        const target = host.querySelector(".prose") || host;
-        target.innerHTML = String(text);
+        statusTarget(host).innerHTML = String(text);
     }
 
     /** PageUp / PageDown move a page while the grid has focus. A listbox is
@@ -1124,7 +1170,7 @@ window.minipaintClipboard = (function () {
         if (!grid || !grid.contains(event.target)) { return; }
         if (S.library.pages <= 1) { return; }
         event.preventDefault();
-        goToPage(S.library.page + (event.key === "PageDown" ? 1 : -1));
+        stepPage(event.key === "PageDown" ? 1 : -1);
     }
 
     /* ------------------------------------------------------------------ */
@@ -2098,7 +2144,7 @@ window.minipaintClipboard = (function () {
     function setQueueStatus(text) {
         const host = byId(QUEUE_STATUS_ID);
         if (!host || !text) { return; }
-        (host.querySelector(".prose") || host).innerHTML = String(text);
+        statusTarget(host).innerHTML = String(text);
     }
 
     /** One call for every way the queue section changes. */

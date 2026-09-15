@@ -164,7 +164,20 @@ def build_page():
 #: every ``gr.update(visible=False)`` a callback returns as if it were a
 #: declaration, which is how the figure this workstream started from came
 #: out a fifth too high.
-CLIPBOARD_HIDDEN_CEILING = 34
+#:
+#: THE CEILING COMES DOWN, AND NEVER GOES BACK UP. Every hidden component is
+#: a message channel the browser writes or a control its menu presses, and
+#: every one of those is a purchased dependency on a transport whose failures
+#: are invisible. So as rows of this tab move onto plain HTTP the number here
+#: is lowered to what is left - which is what stops the tab quietly keeping
+#: both doors open for ever once the interesting part of a move is done.
+#:
+#: 34 before the grid, the pager, the queue list and the history moved;
+#: 26 after. What went: the queue instruction box and its acknowledgement
+#: watcher, the hidden queue refresh, the job-action box, and the page-id box
+#: the three of them carried. What came: one receipt box, so a picture handed
+#: to Mini Paint is acknowledged before its tab is shown.
+CLIPBOARD_HIDDEN_CEILING = 26
 
 
 def page_checks(r: Results, base: pathlib.Path):
@@ -196,6 +209,10 @@ def page_checks(r: Results, base: pathlib.Path):
               and c["type"] not in ("column", "row", "tab", "tabitem", "group", "accordion")]
     r.check(f"the Clipboard tab carries {len(hidden)} hidden components, at or below its ceiling",
             len(hidden) <= CLIPBOARD_HIDDEN_CEILING, f"{len(hidden)} > {CLIPBOARD_HIDDEN_CEILING}")
+    r.check("and the ones a moved row used to need are gone, not merely unused",
+            not [c for c in hidden if str(c["props"].get("elem_id")).split("minipaint_clipboard_")[-1]
+                 in ("queue_instruction", "outbox_action", "outbox_refresh", "page_id")],
+            str([c["props"].get("elem_id") for c in hidden]))
 
     needed = [
         "root", "body", "browser", "composer", "toolbar", "menu", "to_first", "to_last", "to_ref", "sort", "thumb",

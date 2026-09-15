@@ -41,7 +41,7 @@ import tempfile
 import threading
 import typing
 
-from .. import scrub
+from .. import events, scrub
 from ..wangp import protocol
 from ..wangp.errors import (
     CLIPBOARD_ASSET_OUTSIDE_ROOT,
@@ -90,7 +90,29 @@ _COLLISION_SUFFIX = re.compile(r"\A(.*) \((\d+)\)\Z")
 #: Thumbnails are made on demand and kept in memory, keyed by the file's
 #: identity: a rename keeps them, an external edit replaces them.
 THUMBNAIL_SIDE = 320
-THUMBNAIL_CACHE_SIZE = 256
+#: How many made thumbnails the process keeps. One is ~12 KiB, so this is
+#: about 6 MiB - a rounding error beside a model, and enough to cover
+#: several pages of the grid so paging back and forth stays instant.
+THUMBNAIL_CACHE_SIZE = 512
+
+#: The disk cache, in the extension's own data directory - never in the
+#: user's picture folder, which is theirs and should not acquire files it
+#: did not ask for. Without this, every Forge restart re-encodes at ~46 ms
+#: each whatever the user looks at.
+THUMBNAIL_DIR_NAME = "clipboard-thumbnails"
+#: What that directory is allowed to weigh, in bytes, before the least
+#: recently used entries go. A cache that grows for ever is a bug with a
+#: long fuse; at ~12 KiB an entry this is some thousands of pictures.
+THUMBNAIL_DISK_BUDGET = 64 * 1024 * 1024
+#: How many bytes may be written between sweeps. The sweep is a directory
+#: listing and a sort, so it is not free and does not want to run per write.
+THUMBNAIL_SWEEP_AFTER = THUMBNAIL_DISK_BUDGET // 8
+#: A cache file names the whole identity its contents were made from, so a
+#: file that changed simply does not hit and there is no invalidation logic
+#: to get wrong. Anything else in that directory is not ours and is left.
+THUMBNAIL_NAME_RE = re.compile(r"\A([0-9a-f]{32})-(\d{1,24})-(\d{1,20})-(\d{1,5})\.(webp|png)\Z")
+#: The mime each cached extension carries back.
+THUMBNAIL_MIME = {"webp": "image/webp", "png": "image/png"}
 
 _LOG_PREFIX = "MiniPaint Clipboard:"
 
@@ -164,6 +186,20 @@ def new_asset_id() -> str:
 
 def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def version_of(asset: typing.Any) -> str:
+    """The version of a picture's bytes: ``<mtime_ns>-<size_bytes>``.
+
+    The same cheap identity the thumbnail caches are keyed by, so a URL
+    carrying it can be blessed immutable and a file that changed simply gets
+    a different one. The asset id is already in the path, so these two file
+    facts complete the key.
+    """
+    try:
+        return f"{int(getattr(asset, 'mtime_ns', 0) or 0)}-{int(getattr(asset, 'size_bytes', 0) or 0)}"
+    except (TypeError, ValueError):
+        return ""
 
 
 def _same_directory(left: pathlib.Path, right: pathlib.Path) -> bool:
@@ -283,6 +319,16 @@ def _stat(path: pathlib.Path) -> typing.Optional[os.stat_result]:
         return None
 
 
+def _signature(assets: typing.Iterable[Asset]) -> typing.Set[tuple]:
+    """What the grid would draw, as facts: the id, the name, and the bytes.
+
+    Everything the index route answers with comes out of these, so two reads
+    with the same signature are two reads a page cannot tell apart - which
+    is the definition of a refresh that found no difference.
+    """
+    return {(asset.asset_id, asset.relative_path, int(asset.mtime_ns), int(asset.size_bytes)) for asset in assets}
+
+
 def sort_assets(assets: typing.Iterable[Asset], mode: str) -> typing.List[Asset]:
     """The browser's order. Names compare case-insensitively; ties keep the id order."""
     items = list(assets)
@@ -367,6 +413,53 @@ class Store:
         #: metadata so a file that is *replaced* is read again; in memory,
         #: bounded, and never a reason to hide a file that has changed.
         self._rejected: "collections.OrderedDict[tuple, bool]" = collections.OrderedDict()
+        #: How many bytes have gone into the disk cache since it was last
+        #: swept, and the one complaint it is allowed to make. See
+        #: ``sweep_thumbnails`` and ``_disk_off``.
+        self._disk_written = 0
+        self._disk_complaint = ""
+        #: The library's own generation. It advances when the set of
+        #: pictures or their order could have changed and at no other time -
+        #: which is the whole reason it is not ``events.revision()``, a
+        #: counter that job, enhancement, runtime and WanGP events move
+        #: constantly while this library sits still.
+        self._revision = 0
+
+    # -- the library's identity --------------------------------------------
+
+    def revision(self) -> str:
+        """``<epoch>:<library revision>`` - what a page holds its grid against.
+
+        The epoch is the event spine's, minted once per process, so a value
+        from a previous Forge is not stale but meaningless and says so. The
+        number is this library's own, so a page only re-asks when the
+        library has actually moved.
+        """
+        with self._lock:
+            return f"{events.epoch()}:{self._revision}"
+
+    def moved(self, total: typing.Optional[int] = None) -> str:
+        """The library changed: take the next revision and say so once.
+
+        Advisory, per the spine's own first rule: the event carries the new
+        revision and the new total and nothing else. A page that sees one
+        re-asks for the page it is showing - 9 KiB for sixty items - and
+        patches from the answer, so there are no deltas to get wrong and a
+        missed event cannot leave a page quietly incorrect.
+        """
+        with self._lock:
+            self._revision += 1
+            revision = f"{events.epoch()}:{self._revision}"
+            if total is None:
+                try:
+                    total = len(self._records())
+                except IntegrationError:
+                    total = 0
+        try:
+            events.publish(events.LIBRARY, {"revision": revision, "total": int(total)})
+        except Exception:  # pragma: no cover - a notice is never load-bearing
+            pass
+        return revision
 
     # -- the index --------------------------------------------------------
 
@@ -435,6 +528,9 @@ class Store:
             config.update(storage_root=str(path), root_id=config.root_id_for(path))
             self._thumbnails.clear()
         scrub.console("the storage folder was changed; the library is re-read from it.", _LOG_PREFIX)
+        # A different folder is a different library: every page showing the
+        # old one is holding a revision that no longer describes anything.
+        self.moved()
         return {"ok": True, "code": "", "message": "usable", "path": str(path), "root_id": config.root_id_for(path)}
 
     def _require_root(self) -> typing.Tuple[pathlib.Path, str]:
@@ -542,6 +638,11 @@ class Store:
         root, root_id = self._require_root()
         with self._lock:
             records = self._load_index().setdefault(root_id, {})
+            # What the library looked like before this read, by the three
+            # facts that decide what the grid shows and in what order. A
+            # refresh that finds none of them moved publishes nothing: an
+            # event nobody can act on is a page re-fetching for no reason.
+            before = _signature(records.values())
             by_name = {asset.relative_path: asset for asset in records.values()}
             seen: typing.Dict[str, Asset] = {}
             unclaimed: typing.List[Asset] = []
@@ -594,7 +695,11 @@ class Store:
                     seen[created.asset_id] = created
             self._load_index()[root_id] = seen
             self._save_index()
-            return sort_assets(seen.values(), config.load().sort)
+            changed = _signature(seen.values()) != before
+            listed = sort_assets(seen.values(), config.load().sort)
+        if changed:
+            self.moved(len(listed))
+        return listed
 
     #: How many rejections are remembered. Generous for a folder somebody
     #: keeps working files in, finite because this is memory.
@@ -648,6 +753,7 @@ class Store:
         self._save_index()
         self.last_import = (asset.asset_id, __import__("time").monotonic())
         scrub.console(f"imported one {fmt} ({width}x{height}) from {asset.source}.", _LOG_PREFIX)
+        self.moved()
         return asset
 
     def import_bytes(self, data: bytes, filename: typing.Any = "", source: str = "upload") -> Asset:
@@ -717,7 +823,10 @@ class Store:
             renamed = dataclasses.replace(asset, relative_path=wanted, filename=wanted, mtime_ns=int(info.st_mtime_ns) if info else asset.mtime_ns)
             self._records()[asset.asset_id] = renamed
             self._save_index()
-            return renamed
+        # A rename changes a caption and an order, never a picture's bytes:
+        # the URL is unchanged, so nothing is re-fetched for it.
+        self.moved()
+        return renamed
 
     def delete(self, asset_id: typing.Any) -> Asset:
         """Remove one library file. History keeps its record and says Missing."""
@@ -732,12 +841,174 @@ class Store:
             self._thumbnails = collections.OrderedDict(
                 (key, value) for key, value in self._thumbnails.items() if key[0] != asset.asset_id
             )
-            return asset
+        self._forget_disk_thumbnails(asset.asset_id)
+        self.moved()
+        return asset
 
     # -- thumbnails -------------------------------------------------------
 
+    def canonical_version(self, asset_id: typing.Any) -> str:
+        """What ``version_of`` would say about the file on disk right now.
+
+        Read from the file rather than from the index, because the index is
+        what a refresh brings up to date and the header this decides - a
+        thumbnail blessed immutable for a year - must never be granted to a
+        version the file does not actually have. Empty when the id names
+        nothing servable, which is a request that gets the careful header.
+        """
+        try:
+            _asset, path = self.resolve(asset_id)
+        except IntegrationError:
+            return ""
+        info = _stat(path)
+        return f"{int(info.st_mtime_ns)}-{int(info.st_size)}" if info is not None else ""
+
+    def thumbnail_dir(self) -> typing.Optional[pathlib.Path]:
+        """The disk cache's directory, made if it is not there yet.
+
+        None when it cannot be had at all. Nothing here is load-bearing: an
+        unreadable or unwritable cache is a slower tab, never a broken one.
+        """
+        try:
+            directory = config.config_dir() / THUMBNAIL_DIR_NAME
+            directory.mkdir(parents=True, exist_ok=True)
+            return directory
+        except OSError as error:
+            self._disk_off(f"could not be opened ({type(error).__name__})")
+            return None
+
+    def _disk_off(self, why: str) -> None:
+        """Say once that the disk cache is not working, and stop trying to.
+
+        Once, because a folder that cannot be written will not be writable on
+        the next thumbnail either, and a line per tile is a log nobody reads.
+        """
+        if self._disk_complaint:
+            return
+        self._disk_complaint = why
+        scrub.console(f"the thumbnail cache on disk {why}; thumbnails are made fresh each time.", _LOG_PREFIX)
+
+    @staticmethod
+    def _disk_name(key: tuple, extension: str) -> str:
+        """``<asset id>-<mtime_ns>-<size_bytes>-<side>.webp``.
+
+        The whole file identity is in the name, which is why there is no
+        invalidation logic anywhere in this module: a file that changed
+        produces a different name and simply does not hit.
+        """
+        return f"{key[0]}-{int(key[1])}-{int(key[2])}-{int(key[3])}.{extension}"
+
+    def _disk_read(self, key: tuple) -> typing.Optional[typing.Tuple[bytes, str]]:
+        directory = self.thumbnail_dir()
+        if directory is None:
+            return None
+        for extension, mime in THUMBNAIL_MIME.items():
+            path = directory / self._disk_name(key, extension)
+            try:
+                data = path.read_bytes()
+            except (OSError, ValueError):
+                continue
+            if not data:
+                continue
+            # Touched so least-recently-used means what it says. atime is off
+            # on most filesystems worth having; mtime is the one fact a sweep
+            # can rely on, so a hit re-stamps it.
+            try:
+                os.utime(str(path), None)
+            except OSError:
+                pass
+            return data, mime
+        return None
+
+    def _disk_write(self, key: tuple, data: bytes, mime: str) -> None:
+        directory = self.thumbnail_dir()
+        if directory is None:
+            return
+        extension = "png" if mime == "image/png" else "webp"
+        path = directory / self._disk_name(key, extension)
+        try:
+            _write_bytes(path, data)
+        except (OSError, IntegrationError) as error:
+            self._disk_off(f"could not be written ({type(error).__name__})")
+            return
+        with self._lock:
+            self._disk_written += len(data)
+            due = self._disk_written >= THUMBNAIL_SWEEP_AFTER
+            if due:
+                self._disk_written = 0
+        if due:
+            self.sweep_thumbnails()
+
+    def sweep_thumbnails(self, budget: int = THUMBNAIL_DISK_BUDGET) -> dict:
+        """Bring the disk cache back inside its budget, oldest use first.
+
+        Run at startup and occasionally after writes rather than on every
+        one: it is a directory listing and a sort, and the budget is a
+        ceiling rather than a line the cache has to sit exactly on.
+
+        Files in that directory that are not ours - anything whose name is
+        not the identity a thumbnail is stored under - are counted by nobody
+        and removed by nobody.
+        """
+        directory = self.thumbnail_dir()
+        if directory is None:
+            return {"ok": False, "kept": 0, "removed": 0, "bytes": 0}
+        entries = []
+        total = 0
+        try:
+            for entry in os.scandir(directory):
+                if not THUMBNAIL_NAME_RE.match(entry.name):
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                entries.append((float(info.st_mtime), int(info.st_size), entry.path))
+                total += int(info.st_size)
+        except OSError as error:
+            self._disk_off(f"could not be listed ({type(error).__name__})")
+            return {"ok": False, "kept": 0, "removed": 0, "bytes": 0}
+        removed = 0
+        if total > max(0, int(budget)):
+            entries.sort()
+            for _when, size, path in entries:
+                if total <= max(0, int(budget)):
+                    break
+                try:
+                    os.unlink(path)
+                except OSError:
+                    continue
+                total -= size
+                removed += 1
+        return {"ok": True, "kept": len(entries) - removed, "removed": removed, "bytes": total}
+
+    def _forget_disk_thumbnails(self, asset_id: str) -> None:
+        """Drop one picture's cached copies. Tidiness, never correctness:
+        the name carries the identity, so a stale entry could not be hit."""
+        directory = self.thumbnail_dir()
+        if directory is None:
+            return
+        try:
+            for entry in os.scandir(directory):
+                match = THUMBNAIL_NAME_RE.match(entry.name)
+                if match is not None and match.group(1) == asset_id:
+                    try:
+                        os.unlink(entry.path)
+                    except OSError:
+                        continue
+        except OSError:
+            return
+
     def thumbnail(self, asset_id: typing.Any, side: int = THUMBNAIL_SIDE) -> typing.Tuple[bytes, str]:
-        """A small copy for the browser, made once per file identity."""
+        """A small copy for the browser, made once per file identity.
+
+        Three places are asked in the order they cost anything: this
+        process's memory, the extension's own data directory, and - only
+        then - Pillow, which is ~46 ms of decoding and encoding for a
+        photograph and some hundreds of milliseconds for a phone picture.
+        """
         from PIL import Image
 
         asset, path = self.resolve(asset_id)
@@ -748,6 +1019,10 @@ class Store:
             if cached is not None:
                 self._thumbnails.move_to_end(key)
                 return cached
+        stored = self._disk_read(key)
+        if stored is not None:
+            self._remember_thumbnail(key, stored)
+            return stored
         try:
             with Image.open(str(path)) as opened:
                 if getattr(opened, "is_animated", False) and getattr(opened, "n_frames", 1) > 1:
@@ -768,11 +1043,16 @@ class Store:
             buffer = io.BytesIO()
             small.save(buffer, format="PNG")
             made = (buffer.getvalue(), "image/png")
+        self._remember_thumbnail(key, made)
+        self._disk_write(key, made[0], made[1])
+        return made
+
+    def _remember_thumbnail(self, key: tuple, made: typing.Tuple[bytes, str]) -> None:
         with self._lock:
             self._thumbnails[key] = made
+            self._thumbnails.move_to_end(key)
             while len(self._thumbnails) > THUMBNAIL_CACHE_SIZE:
                 self._thumbnails.popitem(last=False)
-        return made
 
 
 _store: typing.Optional[Store] = None
@@ -802,6 +1082,9 @@ def open_image(asset_id: typing.Any) -> typing.Any:
 __all__ = [
     "Asset",
     "MAX_BYTES",
+    "THUMBNAIL_DISK_BUDGET",
+    "THUMBNAIL_DIR_NAME",
+    "version_of",
     "SOURCES",
     "SUPPORTED_SUFFIXES",
     "Store",

@@ -751,6 +751,17 @@ def snapshot(page: str = "") -> dict:
         payload["inputs"] = job_inputs.counts()
     except Exception:
         payload["inputs"] = {}
+    try:
+        from .clipboard import store as clipboard_store
+
+        # The library's own generation, so a page coming back from sleep
+        # learns in the snapshot it was taking anyway whether the grid it
+        # holds is still the library's. Advisory like the event: what the
+        # page does about it is ask the index route.
+        library = clipboard_store.store()
+        payload["library"] = {"revision": library.revision(), "configured": library.configured()}
+    except Exception:
+        payload["library"] = {}
     if page:
         payload["page"] = page
     return payload

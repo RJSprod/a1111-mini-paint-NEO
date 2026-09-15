@@ -658,11 +658,12 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
     first = library.import_bytes(_png((200, 30, 30, 255)), "first.png", "upload")
     tab.assign("first", first.asset_id)
     page_id = "e" * 16
-    instruction, line, listing, button = tab.prepare_queue("from the Clipboard tab", page_id)
+    answer = tab.add_to_queue("from the Clipboard tab", page_id)
+    instruction, line, listing, button = answer["instruction"], answer["status"], answer["jobs"], answer["queue_button"]
     job = outbox.jobs()[-1]
     request = job["request"]
     r.check("the composer's press is a pending job whose request names its asset by id and carries the prompt",
-            json.loads(instruction)["job_id"] == job["job_id"] and job["state"] == "pending" and job["page"] == page_id
+            instruction["job_id"] == job["job_id"] and job["state"] == "pending" and job["page"] == page_id
             and request["images"]["start"] == {"kind": "clipboard_asset", "id": first.asset_id} and request["prompt"] == "from the Clipboard tab" and request["start"] == "auto")
     claimed = outbox.claim(page_id)
     r.check("the page claims it with a lease", claimed["job"]["job_id"] == job["job_id"] and claimed.get("lease"))
@@ -677,7 +678,8 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
         "ok": True, "status": status.get("status"), "request_id": request["request_id"], "tasks_added": status.get("tasks_added"), "queue_depth": status.get("queue_depth"),
         "route": status.get("route"), "applied": status.get("applied"), "inherited": status.get("inherited"), "ignored": status.get("ignored"), "model": status.get("model")})
     r.check("the server's job is started, with the result and without the prompt", reported["state"] == "started" and "Clipboard tab" not in json.dumps(reported["result"]))
-    listing, text, history_listing, button = tab.refresh_outbox(page_id)
+    view = tab.queue_answer(page_id)
+    listing, text, history_listing = json.dumps(view["jobs"]), view["status"], json.dumps(view["history"])
     record = history.load_history()[0]
     r.check("and the tab's history records exactly that recipe",
             text.startswith("WanGP started generating it.") and record["request_id"] == request["request_id"] and record["first_mode"] == "override" and record["first_asset_id"] == first.asset_id
@@ -699,7 +701,8 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
                 model_block.get("type") == "minimax_h3_fl2va" and model_block.get("architecture") == "minimax_h3_fl2va" and model_block.get("label") == "MiniMax H3 FL2VA", json.dumps(model_block))
         r.check("the tab's line, fed that block, says ready for FL2VA", 'data-state="ready"' in tab.toggle_enhance(True, json.dumps(model_block)))
         tab.assign("ref", ref_asset.asset_id)
-        instruction, line, listing, button = tab.prepare_queue("a rough idea for the H3 model", page_id, json.dumps(model_block))
+        answer = tab.add_to_queue("a rough idea for the H3 model", page_id, json.dumps(model_block))
+        instruction, line, listing, button = answer["instruction"], answer["status"], answer["jobs"], answer["queue_button"]
         job = outbox.jobs()[-1]
         r.check("the press is an enhancing job for FL2VA, its first frame described and its reference left out",
                 job["state"] == "enhancing" and job["enhance"]["variant"] == "fl2va" and job["enhance"]["dropped"] == ["references"]
@@ -736,7 +739,8 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
         tracked = track(request["request_id"])
         r.check("once the run is over the task is gone and the request, once seen queued, is finished", tracked["tracked"][request["request_id"]]["state"] == "finished", json.dumps(tracked)[:200])
         outbox.track(job["job_id"], page_id, tracked["tracked"][request["request_id"]])
-        listing, text_line, history_listing, button = tab.refresh_outbox(page_id)
+        view = tab.queue_answer(page_id)
+        listing, text_line, history_listing = json.dumps(view["jobs"]), view["status"], json.dumps(view["history"])
         record = history.load_history()[0]
         r.check("the tab shows it left WanGP's queue and the history keeps the typed prompt with the written one",
                 "Left WanGP" in listing and record["prompt_override"] == "a rough idea for the H3 model" and record["enhanced_prompt"].startswith("ENHANCED"), json.dumps(record)[:200])

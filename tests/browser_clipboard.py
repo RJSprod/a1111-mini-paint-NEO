@@ -670,10 +670,10 @@ def check_a_picture_handed_in_arrives_without_the_queue(r: Results, page, librar
     time.sleep(0.4)
     r.check("handed in: the intercept can be turned on", menu_click(page, "Intercept") == "clicked")
     time.sleep(2.5)
+    # The page's own answer, not a hidden box's: the switch is saved over
+    # this tab's route now, so what the menu is acting on is what matters.
     r.check("handed in: and the page knows it is on",
-            page.evaluate("() => { const h = document.getElementById('minipaint_clipboard_menu_state');"
-                          " const t = h && h.querySelector('textarea,input');"
-                          " try { return !!JSON.parse(t.value || '{}').intercept; } catch (e) { return false; } }"))
+            page.evaluate("() => window.minipaintClipboard.debug().intercept") is True)
 
     before = len(list(library.glob("*")))
     page.route("**/queue/**", lambda route: route.abort())

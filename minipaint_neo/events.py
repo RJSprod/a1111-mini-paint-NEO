@@ -69,13 +69,26 @@ ENHANCE = "enhance"
 HANDOFF = "handoff"
 RUNTIME = "runtime"
 WANGP = "wangp"
+#: The Clipboard library moved: a picture was imported, renamed, deleted,
+#: the folder was changed, or a refresh found a difference.
+#:
+#: ``{"revision": "<epoch>:<n>", "total": int}`` and nothing else, because
+#: this is advisory like every other event here: it says the set of pictures
+#: or their order could have changed, never what they changed to. A page
+#: that sees one re-asks the index route for the page it is showing.
+#:
+#: The revision it carries is the LIBRARY's own generation, not this
+#: module's: job, enhancement, runtime and WanGP events advance the global
+#: counter constantly, and a browser holding one of those as "the library I
+#: drew" would re-fetch the grid every time an unrelated job moved.
+LIBRARY = "library"
 #: Continuity, not state: told to one page, never replayed.
 RESET = "reset"
 HEARTBEAT = "heartbeat"
 #: Advisory and targeted. Carries no lease and no revision.
 CLAIM_READY = "claim_ready"
 
-DURABLE = (JOB, ENHANCE, HANDOFF, RUNTIME, WANGP)
+DURABLE = (JOB, ENHANCE, HANDOFF, RUNTIME, WANGP, LIBRARY)
 ADVISORY = (CLAIM_READY,)
 
 _lock = threading.RLock()
@@ -380,7 +393,7 @@ def subscriber_count() -> int:
 
 
 __all__ = [
-    "ADVISORY", "CLAIM_READY", "DURABLE", "ENHANCE", "HANDOFF", "HEARTBEAT", "JOB",
+    "ADVISORY", "CLAIM_READY", "DURABLE", "ENHANCE", "HANDOFF", "HEARTBEAT", "JOB", "LIBRARY",
     "PAGE_ACTIVE_SECONDS", "QUEUE_LIMIT", "RESET", "RING_LIMIT", "RUNTIME", "WANGP",
     "Subscription", "active", "active_pages", "connected", "cursor", "disconnected",
     "epoch", "forget", "notify", "parse_cursor", "publish", "replay", "reset_for_tests",

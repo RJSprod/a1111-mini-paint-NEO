@@ -31,25 +31,68 @@ import typing
 from .. import scrub
 from ..wangp import errors
 from ..wangp.errors import IntegrationError
+from . import config
 from . import store as store_module
 
 ROUTE_PREFIX = "/minipaint-clipboard"
 IMAGE_ROUTE = ROUTE_PREFIX + "/image/{asset_id}"
 IMPORT_ROUTE = ROUTE_PREFIX + "/import"
 SEND_ROUTE = ROUTE_PREFIX + "/send"
+LIBRARY_ROUTE = ROUTE_PREFIX + "/library"
+SETTINGS_ROUTE = ROUTE_PREFIX + "/settings"
+QUEUE_ROUTE = ROUTE_PREFIX + "/queue"
+ENHANCE_SETTINGS_ROUTE = ROUTE_PREFIX + "/enhance-settings"
+
+#: How many pictures one page of the grid carries.
+#:
+#: THE BINDING CONSTRAINT IS CONNECTIONS, NOT BYTES. Every thumbnail is its
+#: own request and a browser allows six per origin on HTTP/1.1 - already
+#: shared with Gradio's event stream, this extension's event stream and the
+#: WanGP iframe through the proxy. Sixty fills in six to ten round-trip
+#: waves; 250 would be forty, and would feel like the grid never finishes.
+#: Sixty also lands well in the layout - eight to ten rows at 144px tiles -
+#: and four pages of it fit inside the in-memory thumbnail cache, so paging
+#: back and forth stays warm.
+#:
+#: One constant, and the route takes ``size``, so this stays a decision
+#: rather than becoming a migration.
+PAGE_SIZE = 60
+#: Below this the round trips buy nothing; above it the waves do.
+PAGE_SIZE_MIN = 10
+PAGE_SIZE_MAX = 250
 
 _LOG_PREFIX = "MiniPaint Clipboard:"
 _INSTALLED_FLAG = "_minipaint_clipboard_installed"
 
 
 def image_url(asset_id: str, thumb: bool = True, version: typing.Any = "") -> str:
-    """The URL the tab puts in an ``<img>``: the id, never the name."""
+    """The URL the tab puts in an ``<img>``: the id, never the name.
+
+    ``version`` is ``<mtime_ns>-<size_bytes>`` - what ``store.version_of``
+    says about the asset - and it is what makes the browser's own cache
+    work: a URL carrying the file's current identity is answered
+    ``immutable``, so it is fetched once and never re-validated, and a file
+    that changed is a different URL rather than a stale picture. A rename
+    changes the caption and not the file, so the URL does not move and
+    nothing is re-fetched.
+    """
     query = []
     if thumb:
         query.append("thumb=1")
     if version:
         query.append(f"v={version}")
     return f"{ROUTE_PREFIX}/image/{asset_id}" + (("?" + "&".join(query)) if query else "")
+
+
+#: What a picture is cached as when the URL carries its current identity.
+#: ``immutable`` is the part that works: the browser stops re-validating on
+#: reload, so a thumbnail fetched once is never fetched again while it is in
+#: the cache.
+IMMUTABLE_CACHE = "private, max-age=31536000, immutable"
+#: And what one without that identity gets. An unversioned or falsely
+#: versioned URL must never be blessed immutable: it would be a year of a
+#: picture the file no longer holds.
+REVALIDATED_CACHE = "private, max-age=3600"
 
 
 def _signed_in(request: typing.Any) -> bool:
@@ -74,6 +117,7 @@ async def _image(request: typing.Any) -> typing.Any:
         return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
     asset_id = request.path_params.get("asset_id", "")
     thumb = str(request.query_params.get("thumb", "") or "") in ("1", "true", "yes")
+    wanted = str(request.query_params.get("v", "") or "")
     try:
         if thumb:
             data, mime = store_module.store().thumbnail(asset_id)
@@ -86,7 +130,317 @@ async def _image(request: typing.Any) -> typing.Any:
         return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
     # Cached by the browser against the version the tab put in the URL; a
     # renamed or replaced file gets a new URL and never a stale picture.
-    return Response(content=data, media_type=mime, headers={"Cache-Control": "private, max-age=3600"})
+    #
+    # Only the asset's CURRENT canonical version earns the immutable header.
+    # Anything else - no version at all, or a version somebody made up - is
+    # answered with the careful one, because the whole strength of
+    # ``immutable`` is that the browser will not ask again for a year.
+    canonical = store_module.store().canonical_version(asset_id) if wanted else ""
+    fresh = bool(wanted) and wanted == canonical
+    return Response(content=data, media_type=mime,
+                    headers={"Cache-Control": IMMUTABLE_CACHE if fresh else REVALIDATED_CACHE})
+
+
+def clamp_size(value: typing.Any) -> int:
+    """A page size inside its bounds. A bad one is answered, not refused."""
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return PAGE_SIZE
+    return max(PAGE_SIZE_MIN, min(PAGE_SIZE_MAX, number))
+
+
+def page_of(value: typing.Any, pages: int) -> int:
+    """A page number inside the library, counting from zero.
+
+    Zero-based because that is what the grid asks for - "page 0 of the new
+    sort" - and because a pager that shows "Page 3 of 8" is displaying
+    ``page + 1``, which is presentation and belongs in the browser. Out of
+    range is clamped rather than refused: a grid that shows nothing because
+    a query string was wrong is a worse answer than a grid.
+    """
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        number = 0
+    return max(0, min(max(1, int(pages)) - 1, number))
+
+
+def library_page(sort: typing.Any = "", page: typing.Any = 0, size: typing.Any = PAGE_SIZE,
+                 selected: typing.Any = "", refresh: bool = False) -> dict:
+    """One page of the picture index, and everything the grid draws it from.
+
+    SORTING IS APPLIED OVER THE WHOLE LIBRARY, THEN SLICED. ``store.assets``
+    already returns the complete ordered list from the in-memory index, so
+    this is a slice of work the store does correctly today: the ordering
+    logic is not moved, rewritten or duplicated.
+
+    Bad input is answered rather than refused throughout. An unknown sort
+    falls back to the stored one, a page past the end returns the last page
+    that exists, and a size outside its bounds is clamped.
+    """
+    library = store_module.store()
+    if refresh:
+        # Read the folder again first. The index is what this route slices,
+        # and the index is a memory of the folder rather than the folder: a
+        # file somebody deleted outside Clipboard is still in it, and a tile
+        # for a file that is gone is a broken picture. Opening the tab has
+        # always re-read the folder; this is that, over HTTP, so it no longer
+        # needs the framework's channel to be the thing that heals a page.
+        try:
+            library.refresh()
+        except IntegrationError:
+            pass
+    current = config.load()
+    mode = str(sort or "")
+    if mode not in config.SORT_MODES:
+        mode = current.sort
+    wanted = clamp_size(size)
+    configured = library.configured()
+    assets = library.assets(mode) if configured else []
+    total = len(assets)
+    pages = max(1, -(-total // wanted))
+    index = page_of(page, pages)
+    shown = assets[index * wanted:(index + 1) * wanted]
+    # Which page holds the selection, so the pager can mark it. The selected
+    # id is the browser's and does not belong to a page; this is the one
+    # thing the server can say about it that the browser cannot work out for
+    # itself, because only the server holds the whole order.
+    chosen = str(selected or "")
+    at = next((position for position, asset in enumerate(assets) if asset.asset_id == chosen), -1)
+    if not configured:
+        reason, status = "unconfigured", "Choose a storage folder from the menu to begin."
+    elif not total:
+        reason, status = "empty", "No images in the folder yet."
+    else:
+        reason, status = "", f"{total} image{'s' if total != 1 else ''} in the folder."
+    return {
+        "ok": True,
+        # The library's identity, not the event spine's: see ``Store.moved``.
+        "revision": library.revision(),
+        "configured": configured,
+        "sort": mode,
+        "total": total,
+        "page": index,
+        "pages": pages,
+        "selected_page": (at // wanted) if at >= 0 else -1,
+        "size": wanted,
+        "reason": reason,
+        "status": status,
+        "items": [
+            {
+                "id": asset.asset_id,
+                "name": asset.filename,
+                "w": int(asset.width),
+                "h": int(asset.height),
+                "bytes": int(asset.size_bytes),
+                # The version of this picture's bytes, which is what makes
+                # the browser's own thumbnail cache work. See ``image_url``.
+                "v": store_module.version_of(asset),
+            }
+            for asset in shown
+        ],
+    }
+
+
+async def _library(request: typing.Any) -> typing.Any:
+    """The picture index, as its own route.
+
+    NOT AN EXTENSION OF ``/send``: that one already has two jobs - prepare a
+    send, remember a request - and this is a third with a different cache
+    policy and a different meaning when it fails. A send that fails is a
+    picture that did not move; an index that fails is a page that keeps the
+    tiles it has and says the library could not be re-read.
+    """
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    params = request.query_params
+    try:
+        answer = library_page(params.get("sort"), params.get("page"), params.get("size"), params.get("selected"),
+                              str(params.get("refresh") or "") in ("1", "true", "yes"))
+    except Exception as error:
+        scrub.console(f"the library index could not be read ({type(error).__name__}).", _LOG_PREFIX)
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    return _json(answer)
+
+
+def apply_settings(changes: typing.Mapping[str, typing.Any]) -> dict:
+    """The three things the menu remembers: the sort, the tile size, the intercept.
+
+    Every one of them is request-and-response - press a thing, get an answer
+    - so none of them needs anything held open, and each answers with its own
+    sentence for the status line rather than leaving the page to compose one
+    from a render that may never come.
+
+    A value that is not one falls back rather than refusing: a menu that
+    cannot change the sort because a string was wrong is a worse answer than
+    a sort that did not move.
+    """
+    changes = changes if isinstance(changes, dict) else {}
+    said = []
+    wanted: typing.Dict[str, typing.Any] = {}
+    if "sort" in changes:
+        mode = str(changes.get("sort") or "")
+        if mode in config.SORT_MODES:
+            wanted["sort"] = mode
+            said.append(f"Sorted by {config.SORT_LABELS[mode].lower()}.")
+    if "thumbnail" in changes:
+        wanted["thumbnail"] = config.clamp_thumbnail(changes.get("thumbnail"))
+    if "intercept" in changes:
+        wanted["intercept"] = bool(changes.get("intercept"))
+        said.append("The gallery’s 🖌️ button now sends into Clipboard."
+                    if wanted["intercept"] else
+                    "The gallery’s 🖌️ button sends to Mini Paint again.")
+    current = config.update(**wanted) if wanted else config.load()
+    return {
+        "ok": True,
+        "status": " ".join(said),
+        "sort": current.sort,
+        "thumbnail": current.thumbnail,
+        "intercept": current.intercept,
+        # What the browser's menu draws itself from. Answered here so a menu
+        # that changed a setting is correct without a Gradio render.
+        "menu": {
+            "intercept": bool(current.intercept),
+            "configured": bool(current.configured),
+            "sort": current.sort,
+            "thumbnail": current.thumbnail,
+            "sorts": [[mode, config.SORT_LABELS[mode]] for mode in config.SORT_MODES],
+        },
+    }
+
+
+async def _settings(request: typing.Any) -> typing.Any:
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        return _json(apply_settings(body))
+    except Exception as error:
+        scrub.console(f"a Clipboard setting could not be saved ({type(error).__name__}).", _LOG_PREFIX)
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+
+
+def _tab():
+    """The Clipboard tab of the UI being built, or None when there is none."""
+    from . import ui as ui_module
+
+    return ui_module.current()
+
+
+def _no_tab() -> dict:
+    return {"ok": False, "code": errors.INTERNAL_ERROR,
+            "message": "The Clipboard tab has not been built on this Forge."}
+
+
+async def _queue(request: typing.Any) -> typing.Any:
+    """The queue section: what is in it, and everything a press does to it.
+
+    THE ONE SCREEN THAT ANSWERS "I CLOSED THE BROWSER AND CAME BACK". The
+    jobs themselves already survive that - ``outbox.chosen_executor`` hands
+    them to the server unless unattended execution is switched off - but the
+    VIEW of them did not: the list was Gradio-rendered, so a page that came
+    back needed the framework to show the job that had run fine without it.
+
+    GET answers with the list, the history and the status sentence; POST
+    takes ``{action}`` - ``add``, ``cancel``, ``retry``, ``adopt``,
+    ``cancel_all`` - and answers with the same shape, so one code path draws
+    the section however it changed.
+    """
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    tab = _tab()
+    if tab is None:
+        return _json(_no_tab(), 503)
+    if request.method == "GET":
+        try:
+            return _json(tab.queue_answer(request.query_params.get("page") or ""))
+        except Exception as error:
+            scrub.console(f"the queue could not be read ({type(error).__name__}).", _LOG_PREFIX)
+            return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    action = str(body.get("action") or "add")
+    page = body.get("page") or ""
+    try:
+        if action == "add":
+            answer = tab.add_to_queue(body.get("prompt") or "", page, body.get("model"),
+                                      body.get("enhance") if isinstance(body.get("enhance"), bool) else None)
+        elif action == "cancel_all":
+            answer = tab.cancel_all(page)
+        elif action in ("cancel", "retry", "adopt"):
+            answer = tab.outbox_action(f"{action}:{body.get('job') or ''}:{page}", page)
+        else:
+            return _json({"ok": False, "code": errors.REQUEST_INVALID, "message": f"{action} is not a queue action."}, 400)
+    except Exception as error:
+        scrub.console(f"a queue action failed ({type(error).__name__}).", _LOG_PREFIX)
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    return _json(dict({"ok": True}, **answer))
+
+
+async def _enhance_settings(request: typing.Any) -> typing.Any:
+    """The prompt-enhancement settings, over HTTP: describe, toggle, edit.
+
+    The describe half has existed since the enhancer did; these are the
+    write halves it never had - the switch, an override for one of the four
+    instruction sets, and the restore that forgets one. Each is
+    request-and-response and none of them was ever a push.
+    """
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    from . import enhance as enhance_module
+
+    if request.method == "GET":
+        variant = request.query_params.get("variant") or ""
+        mode = request.query_params.get("mode") or ""
+        try:
+            answer = {"ok": True, "enabled": enhance_module.enabled(),
+                      "capabilities": enhance_module.capabilities()}
+            if variant or mode:
+                text, source = enhance_module.effective_prompt(variant, mode)
+                answer["prompt"] = {"variant": variant, "mode": mode, "text": text, "source": source}
+            return _json(answer)
+        except IntegrationError as error:
+            return _refused_here(error)
+        except Exception:
+            return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    action = str(body.get("action") or "")
+    try:
+        if action == "toggle":
+            wanted = enhance_module.set_enabled(bool(body.get("enabled")))
+            return _json({"ok": True, "enabled": wanted,
+                          "status": f"Prompt enhancement is {'on' if wanted else 'off'}."})
+        if action == "override":
+            enhance_module.set_override(body.get("variant"), body.get("mode"), body.get("text"))
+            text, source = enhance_module.effective_prompt(body.get("variant"), body.get("mode"))
+            return _json({"ok": True, "text": text, "source": source,
+                          "status": "Override saved. Every enhanced press from now on uses it, "
+                                    "on every page, after a restart too."})
+        if action == "restore":
+            had = enhance_module.clear_override(body.get("variant"), body.get("mode"))
+            text, source = enhance_module.effective_prompt(body.get("variant"), body.get("mode"))
+            return _json({"ok": True, "text": text, "source": source,
+                          "status": "Back to the default." if had else "There was no override; the default is shown."})
+    except IntegrationError as error:
+        return _refused_here(error)
+    except Exception:
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    return _json({"ok": False, "code": errors.REQUEST_INVALID, "message": f"{action or 'that'} is not a settings action."}, 400)
+
+
+def _refused_here(error: IntegrationError) -> typing.Any:
+    return _json(dict(error.as_dict(), status=errors.message(error.code)), 400)
 
 
 async def _import(request: typing.Any) -> typing.Any:
@@ -215,6 +569,10 @@ def install(app: typing.Any) -> None:
 
         routes = [
             Route(IMAGE_ROUTE, endpoint=_image, methods=["GET", "HEAD"]),
+            Route(LIBRARY_ROUTE, endpoint=_library, methods=["GET"]),
+            Route(SETTINGS_ROUTE, endpoint=_settings, methods=["POST"]),
+            Route(QUEUE_ROUTE, endpoint=_queue, methods=["GET", "POST"]),
+            Route(ENHANCE_SETTINGS_ROUTE, endpoint=_enhance_settings, methods=["GET", "POST"]),
             Route(IMPORT_ROUTE, endpoint=_import, methods=["POST"]),
             Route(SEND_ROUTE, endpoint=_send, methods=["POST"]),
         ]
@@ -224,7 +582,17 @@ def install(app: typing.Any) -> None:
         scrub.console(f"the Clipboard routes could not be registered ({error}); thumbnails and paste stay off.", _LOG_PREFIX)
         return
     scrub.console(f"routes ready under {ROUTE_PREFIX}/.", _LOG_PREFIX)
+    # The one sweep that is not "occasionally after a write": a Forge that
+    # was killed mid-session left whatever it had written, and this is the
+    # moment nothing is waiting on the answer. Never load-bearing.
+    try:
+        store_module.store().sweep_thumbnails()
+    except Exception as error:  # pragma: no cover - a cache is never a reason to fail
+        scrub.console(f"the thumbnail cache could not be swept ({type(error).__name__}); it will be swept after the next writes.", _LOG_PREFIX)
 
 
-__all__ = ["IMAGE_ROUTE", "IMPORT_ROUTE", "ROUTE_PREFIX", "SEND_ROUTE", "REQUEST_MEMORY_SECONDS",
-           "forget_request", "image_url", "install", "recent_request", "remember_request"]
+__all__ = ["IMAGE_ROUTE", "IMMUTABLE_CACHE", "IMPORT_ROUTE", "LIBRARY_ROUTE", "PAGE_SIZE",
+           "PAGE_SIZE_MAX", "PAGE_SIZE_MIN", "REVALIDATED_CACHE", "ROUTE_PREFIX",
+           "SEND_ROUTE", "SETTINGS_ROUTE", "QUEUE_ROUTE", "ENHANCE_SETTINGS_ROUTE", "REQUEST_MEMORY_SECONDS",
+           "apply_settings", "clamp_size", "forget_request", "image_url", "install", "library_page",
+           "page_of", "recent_request", "remember_request"]

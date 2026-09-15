@@ -2778,15 +2778,15 @@ window.minipaintCanvas = (function () {
 
         const Host = await hostLibrary();
         if (!Host || typeof Host.set_image_file !== "function") {
-            return { ok: deliverTheOldWay(name, payload, id), reason: "the transfer library is not on this page" };
+            return landed(deliverTheOldWay(name, payload, id), "the transfer library is not on this page", name);
         }
 
         const wrapper = elem ? app().querySelector('[id="' + elem + '"]') : forgeWrapperFor(id);
         if (!wrapper) {
             // Nothing addressable on this page. The unverified write is still
             // worth trying for a canvas: its box is found a different way.
-            return { ok: id ? deliverTheOldWay(name, payload, id) : false,
-                     reason: (elem || id) + " is not on this page" };
+            return landed(id ? deliverTheOldWay(name, payload, id) : false,
+                          (elem || id) + " is not on this page", name);
         }
 
         const record = Host.start_send_record(opts.label || name);
@@ -2816,22 +2816,41 @@ window.minipaintCanvas = (function () {
                 record.step("final check before switching tabs", problem || "still holds the sent image");
                 if (problem) { throw new Error(problem); }
             }
-            switchTo(name);
-            return { ok: true, reason: "" };
+            // Verified, so now - and only now - the destination is shown.
+            const shown = landed(true, "", name);
+            record.step("opening the destination tab", shown.switched ? "shown" : ("not shown: " + shown.switchReason));
+            return shown;
         } catch (error) {
             const why = (error && error.message) || String(error);
             record.outcome = "failed: " + why;
             // A canvas can still be written the plain way: the library's
             // refusal is usually its verification, not the write.
             if (id && deliverTheOldWay(name, payload, id)) {
-                return { ok: true, reason: "written without being verified: " + why };
+                return landed(true, "written without being verified: " + why, name);
             }
-            return { ok: false, reason: why };
+            return { ok: false, reason: why, switched: false, switchReason: "" };
         } finally {
             if (typeof Host.write_send_log === "function") {
                 try { Host.write_send_log(record); } catch (e) { /* never worth an exception */ }
             }
         }
+    }
+
+    /**
+     * One answer for a delivery, with the tab switch as its own fact.
+     *
+     * A send is "deliver, prove, then show", and the third step can fail on
+     * its own: a destination whose tab is hidden, a host that renamed its
+     * switch helper. When it does, the picture is still there and must not
+     * be sent again - so this reports what happened to each half rather than
+     * collapsing them into one boolean, and only a delivery that actually
+     * happened is allowed to move the user.
+     */
+    function landed(ok, reason, name) {
+        if (!ok) { return { ok: false, reason: reason, switched: false, switchReason: "" }; }
+        const shown = switchTo(name);
+        return { ok: true, reason: reason, switched: !!(shown && shown.ok),
+                 switchReason: (shown && shown.reason) || "" };
     }
 
     //: img2img's sub-tabs, by the destination each one owns.
@@ -2866,7 +2885,9 @@ window.minipaintCanvas = (function () {
             const maskField = mask ? mask.querySelector("textarea, input") : null;
             if (maskField) { writeHostInput(maskField, ""); }
         }
-        switchTo(name);
+        // The switch is the caller's, not this function's: see ``landed``.
+        // Nothing here proves the picture landed, so nothing here decides
+        // that the user should be moved.
         return true;
     }
 
@@ -2908,17 +2929,48 @@ window.minipaintCanvas = (function () {
         // says it arrived. See watchReceive.
         if (name === "canvas" || name === "clipboard") { receiveLanded(); }
         if (name in helpers) {
-            if (typeof window[helpers[name]] === "function") { window[helpers[name]](); return; }
+            const panel = HOST_PANELS[name];
+            if (typeof window[helpers[name]] === "function") {
+                try { window[helpers[name]](); } catch (error) { /* the panel is tried next */ }
+                // The helper returns nothing, so what it did is read off the
+                // page rather than assumed. A host whose panel cannot be
+                // found at all is given the benefit of the doubt: its helper
+                // is the host's own and knows tabs this build does not.
+                if (!panel || !byPanelId(panel) || tabShowing(panel)) { return { ok: true, reason: "" }; }
+            }
             // A host without that global, or one whose tab set this build
             // does not have: fall back to the panel, still by identity.
-            if (!showTab(HOST_PANELS[name])) {
-                console.warn("MiniPaint: no " + name + " tab on this page to switch to.");
-            }
-            return;
+            if (showTab(panel)) { return { ok: true, reason: "" }; }
+            console.warn("MiniPaint: no " + name + " tab on this page to switch to.");
+            return { ok: false, reason: "there is no " + name + " tab on this page to open" };
         }
-        if (!showTab(ours[name])) {
-            if (ours[name]) { console.warn("MiniPaint: no " + name + " tab on this page to switch to."); }
+        if (showTab(ours[name])) { return { ok: true, reason: "" }; }
+        if (ours[name]) {
+            console.warn("MiniPaint: no " + name + " tab on this page to switch to.");
+            return { ok: false, reason: "there is no " + name + " tab on this page to open" };
         }
+        return { ok: false, reason: '"' + name + '" is not a tab this page has' };
+    }
+
+    /** The tab panel with this id, or null. */
+    function byPanelId(panelId) {
+        const root = app();
+        return (root.getElementById ? root.getElementById(panelId) : document.getElementById(panelId)) || null;
+    }
+
+    /**
+     * Whether that panel is the one on screen.
+     *
+     * The host's switch helpers return nothing, so "did the tab actually
+     * open" has to be read off the page. It is the difference the Clipboard
+     * send contract turns on: a picture proved to have landed plus a tab
+     * that would not open is a different sentence from a send that failed,
+     * and it must never be answered by sending the picture again.
+     */
+    function tabShowing(panelId) {
+        const panel = byPanelId(panelId);
+        if (!panel) { return false; }
+        try { return getComputedStyle(panel).display !== "none"; } catch (e) { return true; }
     }
 
     /** Click the tab button that controls this panel. True if there was one. */

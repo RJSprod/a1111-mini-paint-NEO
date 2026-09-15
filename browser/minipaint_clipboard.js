@@ -36,6 +36,9 @@ window.minipaintClipboard = (function () {
     const MENU_ID = "minipaint_clipboard_menu";
     const STATUS_ID = "minipaint_clipboard_status";
     const QUEUE_STATUS_ID = "minipaint_clipboard_queue_status";
+    const QUEUE_BUTTON_ID = "minipaint_clipboard_queue";
+    const OUTBOX_LIST_ID = "minipaint_clipboard_outbox_list";
+    const HISTORY_LIST_ID = "minipaint_clipboard_history_list";
     const WANGP_LINE_ID = "minipaint_clipboard_wangp_line";
     const TAB_PANEL_ID = "tab_minipaint_clipboard";
     //: Matches the stylesheet's own default for --minipaint-clip-thumb.
@@ -50,9 +53,6 @@ window.minipaintClipboard = (function () {
         sendAck: "minipaint_clipboard_send_ack",
         historyAction: "minipaint_clipboard_history_action",
         menuState: "minipaint_clipboard_menu_state",
-        queueInstruction: "minipaint_clipboard_queue_instruction",
-        outboxAction: "minipaint_clipboard_outbox_action",
-        pageId: "minipaint_clipboard_page_id",
         model: "minipaint_clipboard_model"
     };
     const PRESS = {
@@ -64,28 +64,23 @@ window.minipaintClipboard = (function () {
         remove: "minipaint_clipboard_delete_open",
         paste: "minipaint_clipboard_paste_open",
         history: "minipaint_clipboard_history_open",
-        outboxRefresh: "minipaint_clipboard_outbox_refresh",
         send: "minipaint_clipboard_send_press",
         sendBackend: "minipaint_clipboard_send_backend"
     };
     const ROLE_IDS = { first: "minipaint_clipboard_to_first", last: "minipaint_clipboard_to_last", ref: "minipaint_clipboard_to_ref" };
     const SLOT_UPLOAD_PREFIX = "minipaint_clipboard_slot_upload_";
     const SLOT_FIELDS = { first: "start", last: "end", ref: "references" };
-    // The press acknowledgement. A Gradio chained callback writes the
-    // server's answer into a hidden box, and on some installed Gradio
-    // versions the change event that would tell us never fires - so there is
-    // a fallback that reads the value.
+    // THE PRESS ACKNOWLEDGEMENT USED TO BE A HIDDEN BOX, WATCHED.
     //
-    // It used to read it six times a second from the moment of the press.
-    // That is a busy loop on the main thread for a value that arrives once,
-    // and it ran whether or not anything was in flight. Now: an observer on
-    // the box first, because a mutation is the event the poll was standing
-    // in for, and the value read only starts after the delay below - long
-    // enough that a working install never reaches it - and only while a
-    // press is actually outstanding.
-    const QUEUE_ACK_DELAY_MS = 2000;
-    const QUEUE_WATCH_MS = 500;
-    const QUEUE_WATCH_LIMIT_MS = 15000;
+    // A Gradio chained callback wrote the server's answer into it, and on
+    // some installed versions the change event that would have said so never
+    // fired - so the page kept an observer, then a delay, then a value poll
+    // six times a second, for a value that arrives once. All of that existed
+    // because the answer came back through a channel that might not deliver.
+    //
+    // It comes back in the response to the press now. There is nothing to
+    // observe and nothing to poll: a press that was not answered is a failed
+    // request, which says so.
     const CAPABILITY_THROTTLE_MS = 2500;
     // Job states the server runs. A page that sees one of these watches the
     // event stream instead of pumping: the job continues whether or not this
@@ -94,6 +89,15 @@ window.minipaintClipboard = (function () {
         "waiting_for_card", "submitting_wangp", "wangp_waiting", "wangp_generating",
         "completed", "execution_unknown"];
     const OUTBOX_REFRESH_THROTTLE_MS = 300;
+
+    //: What still needs the framework's channel, named so the notice can
+    //: say which parts of the tab are stale rather than claiming all of it
+    //: is. This list SHRINKS as rows move, and when it is empty the notice
+    //: for a dead channel stops being raised at all.
+    const STALE_WITHOUT_THE_CHANNEL = [
+        "the composer's slot cards", "rename and delete", "the folder chooser",
+        "the prompt enhancement panel", "Queue Send History"
+    ];
 
     const S = {
         attached: false,
@@ -114,11 +118,7 @@ window.minipaintClipboard = (function () {
         menuOutside: null,
         menuKey: null,
         queued: {},
-        armedAt: 0,
-        watch: 0,
         lastInstruction: "",
-        ackDelay: 0,
-        ackObserver: null,
         capabilitiesAt: 0,
         capabilities: null,
         lastModel: "",
@@ -126,16 +126,53 @@ window.minipaintClipboard = (function () {
         outboxListener: null,
         outboxRefreshTimer: null,
         toastTimer: null,
-        //: When the grid was last re-rendered by the server. A round trip
-        //: landing is what tells the page the connection is back.
+        //: The debounce on remembering the thumbnail size. See setThumbnailSize.
+        thumbSave: 0,
+        //: When the grid was last re-drawn. A page that has just drawn is a
+        //: page whose selection and sizes need re-applying.
         renderedAt: 0,
+        //: When a Gradio round trip was last seen to land on this page. The
+        //: menu state carries a nonce for exactly this, so a callback that
+        //: happened to return the same values still proves the channel is
+        //: alive. It is the one thing an HTTP request cannot tell us.
+        gradioSeenAt: 0,
         //: The last thing reportTiles said, so an unchanged grid says it once.
         tileReport: "",
         //: The self-check that runs only while the connection notice is up.
         retryTimer: 0,
         retryDelay: 0,
         retryPending: false,
-        retryVisibility: null
+        retryVisibility: null,
+        //: What the menu has been told since the page was built, over this
+        //: tab's own route rather than through a Gradio render.
+        menuOverride: null,
+        //: What is wrong, if anything. Two different faults with two
+        //: different sentences; see renderNotice.
+        offline: { server: false, queue: false, stale: STALE_WITHOUT_THE_CHANNEL },
+        //: The grid, which the browser draws now. See "The library".
+        library: {
+            //: The library's own generation, as the index route said it.
+            //: Not the event spine's: an unrelated job must not make this
+            //: page re-fetch its pictures.
+            revision: "",
+            sort: "",
+            page: 0,
+            pages: 1,
+            total: 0,
+            size: 60,
+            configured: true,
+            //: Which page holds the selection, or -1. The pager's only job
+            //: towards a selection the user has paged away from.
+            selectedPage: -1,
+            //: The tiles in the document, by asset id, so a page that is
+            //: drawn again reuses the nodes it already has - which is what
+            //: keeps decoded pictures, scroll position and the selection.
+            tiles: new Map(),
+            ids: [],
+            busy: false,
+            inflight: null,
+            pending: false
+        }
     };
 
     /* ------------------------------------------------------------------ */
@@ -191,7 +228,12 @@ window.minipaintClipboard = (function () {
     }
 
     function menuState() {
-        try { return JSON.parse(boxValue(BOXES.menuState) || "{}") || {}; } catch (e) { return {}; }
+        let state = {};
+        try { state = JSON.parse(boxValue(BOXES.menuState) || "{}") || {}; } catch (e) { state = {}; }
+        // What the tab's own routes have said since the page was built wins
+        // over what the page was built with: a setting changed over HTTP is
+        // saved whether or not a Gradio render ever comes back to confirm it.
+        return S.menuOverride ? Object.assign({}, state, S.menuOverride) : state;
     }
 
     function note(message) {
@@ -221,21 +263,47 @@ window.minipaintClipboard = (function () {
     }
 
     /**
-     * A standing line saying the live connection is gone, with the one
-     * action that brings it back.
+     * The one standing line this tab has, and what it is allowed to say.
      *
-     * A toast is the wrong shape for this: it hides itself after a few
-     * seconds, and the thing it is reporting lasts until the page is
-     * reloaded. What is lost is not the sending - that happens here now -
-     * but everything the server has to answer for: the status line, the
-     * queue, a grid that shows a picture added since. Said once, plainly,
-     * rather than left to be inferred from a page that quietly stops
-     * keeping up.
+     * "THIS PAGE HAS LOST ITS LIVE CONNECTION TO FORGE" IS RETIRED. It was
+     * raised when a framework's event stream sulked, which on a machine
+     * where Forge is running happens constantly and means almost nothing -
+     * a tab that was backgrounded, a session the server forgot. A user was
+     * being told the server had gone while the server was answering every
+     * request the page made.
+     *
+     * Two things can now be true, and they get different sentences:
+     *
+     *   the server is not answering - an HTTP request to this extension's
+     *   own routes failed. On localhost that means Forge has actually
+     *   stopped, which is worth being told and which no design can hide;
+     *   over a network it means the network is gone. Either way it is rare,
+     *   true and actionable.
+     *
+     *   the framework's channel is down and the server is fine - everything
+     *   that has moved off that channel keeps working, and the line SAYS
+     *   WHICH parts have not. A page whose grid is live and whose composer
+     *   is stale should say that, rather than claiming the whole tab is off.
+     *
+     * A toast is the wrong shape for either: it hides itself after a few
+     * seconds and what it reports lasts until something changes.
      */
-    function connectionNotice(show) {
+    function noticeText() {
+        if (S.offline.server) {
+            return "Forge is not answering. Nothing on this tab can be read or changed until it does. "
+                + "Trying again by itself; this line goes when the server answers.";
+        }
+        return "The composer's live channel to Forge is down on this page. Browsing, paging, sorting, "
+            + "selecting, sending and the queue list all still work - they do not use it. "
+            + (S.offline.stale.length ? S.offline.stale.join(", ") + " will not update until it comes back. " : "")
+            + "Trying again by itself; this line goes when the server answers.";
+    }
+
+    function renderNotice() {
         const container = byId(BROWSER_ID) || root();
         if (!container) { return; }
         let bar = container.querySelector(".minipaint-clip-offline");
+        const show = S.offline.server || S.offline.queue;
         if (!show) {
             stopRetrying();
             if (bar) { bar.hidden = true; }
@@ -247,15 +315,11 @@ window.minipaintClipboard = (function () {
             bar.setAttribute("role", "status");
             const line = document.createElement("span");
             line.className = "minipaint-clip-offline-text";
-            line.textContent = "This page has lost its live connection to Forge. Sending still works - "
-                + "pictures are placed by the page itself. The status line, the queue and new "
-                + "thumbnails need the connection back. Trying again by itself; this line goes "
-                + "when the server answers.";
             const button = document.createElement("button");
             button.type = "button";
             button.className = "minipaint-clip-offline-reconnect";
             button.textContent = "Check again";
-            button.title = "Asks the server for the library again, and clears this line if it answers.";
+            button.title = "Asks the server again, and clears this line if it answers.";
             // NEVER A RELOAD. This offered one, and on a Forge behind its own
             // TLS front end reloading took the whole WebUI page with it - the
             // session gone, for a line that is only ever advisory. A button
@@ -265,8 +329,39 @@ window.minipaintClipboard = (function () {
             bar.appendChild(button);
             container.insertBefore(bar, container.firstChild);
         }
+        bar.dataset.reason = S.offline.server ? "server" : "queue";
+        const line = bar.querySelector(".minipaint-clip-offline-text");
+        if (line) { line.textContent = noticeText(); }
         bar.hidden = false;
         retryConnection();
+    }
+
+    /**
+     * Forge itself did not answer an HTTP request to one of our own routes.
+     *
+     * This is the only failure that deserves to say the server is gone, and
+     * it is the one the whole programme is built to make rare: every row
+     * moved off the framework's channel is a row that now fails here, where
+     * failure means something, instead of there, where it meant "a stream
+     * closed".
+     */
+    function serverSilent(show, what) {
+        const on = !!show;
+        if (on === S.offline.server) { if (!on) { return; } }
+        S.offline.server = on;
+        if (on && what) { note("server: " + what + " could not be reached"); }
+        renderNotice();
+    }
+
+    /**
+     * The framework's channel is not delivering, and the server is fine.
+     *
+     * Kept while anything on this tab still rides it, and honest about
+     * which: see ``STALE_WITHOUT_THE_CHANNEL``.
+     */
+    function connectionNotice(show) {
+        S.offline.queue = !!show;
+        renderNotice();
     }
 
     //: How long the page waits before trying the server again, and the
@@ -313,19 +408,37 @@ window.minipaintClipboard = (function () {
                 S.retryPending = true;
                 return;
             }
-            const before = S.renderedAt;
+            const again = function () {
+                if (!noticeShowing()) { return; }
+                S.retryDelay = Math.min(S.retryDelay * 2, RETRY_LIMIT_MS);
+                S.retryTimer = setTimeout(attempt, S.retryDelay);
+            };
+            // A server that is not answering is asked over the transport
+            // this tab actually uses. The route clears the line itself when
+            // it answers, so there is nothing to poll for here.
+            if (S.offline.server) {
+                fetchLibrary({ quiet: true }).then(function () {
+                    if (!S.offline.server) {
+                        note("server: answered again after " + Math.round(S.retryDelay / 1000) + "s");
+                        toast("Forge is answering again.");
+                        return;
+                    }
+                    again();
+                }, again);
+                return;
+            }
+            const before = S.gradioSeenAt;
             pressHidden(PRESS.refresh);
             setTimeout(function () {
                 if (!noticeShowing()) { return; }
-                if (S.renderedAt !== before) {
+                if (S.gradioSeenAt !== before) {
                     S.queueDown = false;
                     connectionNotice(false);
                     toast("The connection is back.");
                     note("connection: came back on its own after " + Math.round(S.retryDelay / 1000) + "s");
                     return;
                 }
-                S.retryDelay = Math.min(S.retryDelay * 2, RETRY_LIMIT_MS);
-                S.retryTimer = setTimeout(attempt, S.retryDelay);
+                again();
             }, 3000);
         };
         S.retryTimer = setTimeout(attempt, S.retryDelay);
@@ -353,13 +466,17 @@ window.minipaintClipboard = (function () {
      * notice is about - so one arriving is the evidence the line is stale.
      */
     function checkConnection() {
-        const before = S.renderedAt;
+        const before = S.gradioSeenAt;
         const armed = Date.now();
+        // Always the cheap HTTP question first: it is the one that decides
+        // which of the two sentences the line should be showing at all.
+        fetchLibrary({ quiet: true });
         const pressed = pressHidden(PRESS.refresh);
         let waited = 0;
         const timer = setInterval(function () {
             waited += 500;
-            if (S.renderedAt !== before) {
+            if (!noticeShowing()) { clearInterval(timer); return; }
+            if (S.gradioSeenAt !== before) {
                 clearInterval(timer);
                 connectionNotice(false);
                 toast("The connection is back.");
@@ -442,19 +559,26 @@ window.minipaintClipboard = (function () {
         };
         let keep = S.selected;
         if (!keep) { keep = onGrid(confirmed) ? confirmed : ""; }
-        else if (listed.length && !onGrid(keep)) { keep = ""; }
+        // A selection survives paging: the selected id is browser state and
+        // does not belong to a page, and the send path names a picture by
+        // id. So it is given up only when the library is listing pictures,
+        // this page is the one the library says holds it, and it is not
+        // among them - never merely because you paged away from it.
+        else if (listed.length && !onGrid(keep) && S.library.selectedPage < 0) { keep = ""; }
         select(keep, true);
         S.renderedAt = Date.now();
         if (confirmed !== keep) { sendInput(BOXES.selected, keep); }
-        // The grid element is new after every refresh, so the size written
-        // onto the old one went with it. Put the remembered one back rather
-        // than falling to the default and snapping every tile back to 144.
         applyThumbnailSize(S.thumb);
         refreshBadges();
-        // After the size is back on the grid, and once the pictures have
-        // had a frame to lay out: measured before that, every tile is
-        // "off-centre" because nothing has been drawn yet.
+        // Once the pictures have had a frame to lay out: measured before
+        // that, every tile is "off-centre" because nothing has been drawn.
         setTimeout(reportTiles, 400);
+    }
+
+    /** A Gradio round trip landed on this page, whatever it carried. */
+    function menuStateChanged() {
+        S.gradioSeenAt = Date.now();
+        if (S.offline.queue) { connectionNotice(false); S.queueDown = false; }
     }
 
     /**
@@ -479,7 +603,32 @@ window.minipaintClipboard = (function () {
         if (grid) { grid.style.setProperty("--minipaint-clip-thumb", value + "px"); }
     }
 
-    function setThumbnailSize(size) { applyThumbnailSize(size); }
+    /**
+     * The slider moved: size the tiles now, remember it shortly.
+     *
+     * Sizing is drawing and happens on the frame the slider moved. Keeping
+     * it is a setting, and goes over this tab's own route - debounced,
+     * because a drag is a hundred values and one of them is the answer.
+     */
+    function setThumbnailSize(size) {
+        applyThumbnailSize(size);
+        if (S.thumbSave) { clearTimeout(S.thumbSave); }
+        const wanted = S.thumb;
+        S.thumbSave = setTimeout(function () {
+            S.thumbSave = 0;
+            postSettings({ thumbnail: wanted }).catch(function () { /* the size is still applied */ });
+        }, 400);
+    }
+
+    /** The gallery's 🖌️ button: into Clipboard, or on to Mini Paint. */
+    function toggleIntercept() {
+        const wanted = !menuState().intercept;
+        postSettings({ intercept: wanted }).then(function (answer) {
+            setStatus((answer && answer.status) || "");
+        }, function () {
+            setStatus("That setting could not be saved.");
+        });
+    }
 
     /**
      * Say so when a thumbnail is not drawn in the middle of its tile.
@@ -537,6 +686,448 @@ window.minipaintClipboard = (function () {
     }
 
     /* ------------------------------------------------------------------ */
+    /* The library: the grid, its pager, and the patching                    */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * WHY THE BROWSER DRAWS THIS NOW.
+     *
+     * The grid used to be markup the server rendered and a Gradio event
+     * delivered: 571 bytes a tile, 279 KiB at five hundred pictures, over a
+     * transport that dies when the tab is backgrounded, when a session is
+     * forgotten and when Forge restarts. The same index as JSON is 73 KiB,
+     * one page of it is 9 KiB, and it comes over the plain HTTP that has
+     * kept working through every failure this tab has had.
+     *
+     * The division is the one the whole programme follows: the server owns
+     * truth - what exists, in what order - and the browser owns drawing -
+     * what a tile looks like and which tiles are on screen. The browser
+     * never holds an opinion the server cannot overrule, and an event is
+     * advisory: it says the library moved, never what it moved to, so a page
+     * that sees one re-asks and patches from the answer. There are no deltas
+     * to get wrong and no way for a missed event to leave a page quietly
+     * incorrect.
+     */
+    const LIBRARY_ROUTE = "/minipaint-clipboard/library";
+    const SETTINGS_ROUTE = "/minipaint-clipboard/settings";
+    //: One re-fetch when the revision moved between asking and drawing. One,
+    //: because the second answer is authoritative and a third would be a
+    //: poll wearing a different hat.
+    const LIBRARY_RETRY_MS = 250;
+
+    function imageUrl(id, version) {
+        return "/minipaint-clipboard/image/" + encodeURIComponent(id) + "?thumb=1"
+            + (version ? "&v=" + encodeURIComponent(version) : "");
+    }
+
+    function sizeText(item) {
+        const bytes = Number(item.bytes || 0);
+        const human = bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + " MB"
+            : bytes >= 1024 ? Math.round(bytes / 1024) + " KB" : bytes + " B";
+        return item.w + " × " + item.h + " · " + human;
+    }
+
+    /** Where the browser draws, inside the block the server used to fill. */
+    function gridMount() {
+        const host = byId(GRID_ID);
+        if (!host) { return null; }
+        let mount = host.querySelector(".minipaint-clip-mount");
+        if (mount) { return mount; }
+        mount = document.createElement("div");
+        mount.className = "minipaint-clip-mount";
+        const grid = document.createElement("div");
+        grid.className = "minipaint-clip-grid";
+        grid.setAttribute("role", "listbox");
+        grid.setAttribute("aria-label", "Clipboard images");
+        grid.setAttribute("tabindex", "0");
+        grid.dataset.count = "0";
+        const pager = document.createElement("div");
+        pager.className = "minipaint-clip-pager";
+        pager.hidden = true;
+        mount.appendChild(grid);
+        mount.appendChild(pager);
+        host.appendChild(mount);
+        return mount;
+    }
+
+    function gridElement() {
+        const mount = gridMount();
+        return mount ? mount.querySelector(".minipaint-clip-grid") : null;
+    }
+
+    function pagerElement() {
+        const mount = gridMount();
+        return mount ? mount.querySelector(".minipaint-clip-pager") : null;
+    }
+
+    /** One tile. Built once per picture and then reused - see drawLibrary. */
+    function buildTile(item) {
+        const tile = document.createElement("button");
+        tile.type = "button";
+        tile.className = "minipaint-clip-item";
+        tile.setAttribute("role", "option");
+        tile.setAttribute("aria-selected", "false");
+        tile.dataset.asset = item.id;
+        tile.dataset.name = item.name;
+        tile.dataset.v = item.v || "";
+        tile.title = item.name + " · " + sizeText(item);
+        const thumb = document.createElement("span");
+        thumb.className = "minipaint-clip-thumb";
+        const picture = document.createElement("img");
+        picture.alt = "";
+        picture.loading = "lazy";
+        picture.draggable = false;
+        // A thumbnail that 404s costs that tile its picture and the page
+        // nothing else: the name and a missing mark, where the picture was.
+        picture.addEventListener("error", function () {
+            tile.classList.add("minipaint-clip-item-missing");
+        });
+        picture.src = imageUrl(item.id, item.v);
+        thumb.appendChild(picture);
+        const label = document.createElement("span");
+        label.className = "minipaint-clip-name";
+        label.textContent = item.name;
+        tile.appendChild(thumb);
+        tile.appendChild(label);
+        return tile;
+    }
+
+    /**
+     * The same tile, told what changed about its picture.
+     *
+     * A rename changes the caption and not the file, so mtime is unchanged,
+     * the URL is unchanged, and nothing is re-fetched - the asked-for
+     * behaviour falling out of the versioned URL rather than being
+     * special-cased. Only a genuinely new version costs a request.
+     */
+    function refreshTile(tile, item) {
+        if (tile.dataset.name !== item.name) {
+            tile.dataset.name = item.name;
+            tile.title = item.name + " · " + sizeText(item);
+            const label = tile.querySelector(".minipaint-clip-name");
+            if (label) { label.textContent = item.name; }
+        }
+        if (String(tile.dataset.v || "") !== String(item.v || "")) {
+            tile.dataset.v = item.v || "";
+            tile.classList.remove("minipaint-clip-item-missing");
+            const picture = tile.querySelector("img");
+            if (picture) { picture.src = imageUrl(item.id, item.v); }
+        }
+        return tile;
+    }
+
+    /**
+     * Put this page of the library on screen, keeping every tile it can.
+     *
+     * Building a page and patching one are the same operation against the
+     * same page, so there is one code path that puts tiles on screen and no
+     * second one to drift. An import that lands on your page adds one node;
+     * a delete removes one; a rename changes one caption. The other
+     * fifty-nine are untouched, the scroll position is untouched, and
+     * nothing is decoded twice.
+     *
+     * Re-ordering MOVES existing nodes: insertBefore on an element already
+     * in the document relocates it rather than recreating it, and the loop
+     * only touches the ones that are actually out of place.
+     */
+    function drawLibrary(answer) {
+        const grid = gridElement();
+        if (!grid) { return; }
+        const items = Array.isArray(answer.items) ? answer.items : [];
+        const next = new Map();
+        for (const item of items) {
+            const held = S.library.tiles.get(item.id);
+            next.set(item.id, held ? refreshTile(held, item) : buildTile(item));
+        }
+        for (const entry of S.library.tiles) {
+            if (!next.has(entry[0]) && entry[1].parentNode) { entry[1].parentNode.removeChild(entry[1]); }
+        }
+        let cursor = grid.firstElementChild;
+        for (const item of items) {
+            const tile = next.get(item.id);
+            if (cursor === tile) { cursor = tile.nextElementSibling; continue; }
+            grid.insertBefore(tile, cursor);
+        }
+        // Anything the grid still holds that this page does not name: a tile
+        // from a render the server made before the browser took over.
+        while (cursor) {
+            const following = cursor.nextElementSibling;
+            if (!next.has(cursor.dataset ? cursor.dataset.asset : "")) { grid.removeChild(cursor); }
+            cursor = following;
+        }
+        S.library.tiles = next;
+        S.library.ids = items.map(function (item) { return item.id; });
+        S.library.revision = String(answer.revision || "");
+        S.library.sort = String(answer.sort || S.library.sort);
+        S.library.page = Number(answer.page || 0);
+        S.library.pages = Math.max(1, Number(answer.pages || 1));
+        S.library.total = Number(answer.total || 0);
+        S.library.size = Number(answer.size || S.library.size);
+        S.library.configured = answer.configured !== false;
+        S.library.selectedPage = Number(answer.selected_page);
+        grid.dataset.count = String(items.length);
+        grid.classList.toggle("minipaint-clip-empty", !items.length);
+        emptyNotice(grid, items.length ? "" : String(answer.reason || "empty"));
+        drawPager();
+        applyThumbnailSize(S.thumb);
+        // The selection is the browser's and does not belong to a page: it
+        // survives paging because the send path names a picture by id. It is
+        // given up only when the library is listing pictures and the
+        // selected one is not among them - see afterRender.
+        select(S.selected, true);
+        S.renderedAt = Date.now();
+        refreshBadges();
+        setTimeout(reportTiles, 400);
+    }
+
+    /**
+     * The empty and unconfigured states, in the words they have always had.
+     *
+     * They are states of the INDEX, not of the transport: the route answers
+     * them with a total of zero and a reason, and the sentence is the
+     * browser's because the browser is what draws this now.
+     */
+    function emptyNotice(grid, reason) {
+        const existing = grid.querySelector(".minipaint-clip-nothing");
+        if (!reason) {
+            if (existing) { grid.removeChild(existing); }
+            return;
+        }
+        const note = existing || document.createElement("p");
+        note.className = "minipaint-clip-nothing";
+        note.innerHTML = reason === "unconfigured"
+            ? "<b>No storage folder yet.</b> Menu → <em>Choose storage folder</em> picks a folder on the machine "
+              + "running Forge; Clipboard keeps its pictures there."
+            : "No images yet. Upload or paste one from the menu, send one from Mini Paint, or turn on "
+              + "<em>Intercept “Send to Mini Paint”</em> and press 🖌️ under a result.";
+        if (!existing) { grid.appendChild(note); }
+    }
+
+    /**
+     * One row under the grid: Back, the page, Next, and the whole count.
+     *
+     * The ends are DISABLED rather than hidden, so the row does not change
+     * width as you move through it; the number box is committed on Enter or
+     * blur and clamped rather than refused; the count is the whole library,
+     * because that is the number a person wants and it is free to say. The
+     * row is hidden entirely when there is one page.
+     */
+    function drawPager() {
+        const pager = pagerElement();
+        if (!pager) { return; }
+        const many = S.library.pages > 1;
+        pager.hidden = !many && S.library.total <= S.library.size;
+        if (pager.hidden) { pager.innerHTML = ""; return; }
+        if (!pager.dataset.built) {
+            pager.dataset.built = "1";
+            pager.innerHTML = "";
+            const back = document.createElement("button");
+            back.type = "button";
+            back.className = "minipaint-clip-pager-back";
+            back.textContent = "‹ Back";
+            back.addEventListener("click", function () { goToPage(S.library.page - 1); });
+            const label = document.createElement("span");
+            label.className = "minipaint-clip-pager-label";
+            const lead = document.createElement("span");
+            lead.textContent = "Page ";
+            const box = document.createElement("input");
+            box.type = "number";
+            box.className = "minipaint-clip-pager-number";
+            box.min = "1";
+            box.setAttribute("aria-label", "Page number");
+            const commit = function () { goToPage(Number(box.value) - 1); };
+            box.addEventListener("change", commit);
+            box.addEventListener("blur", commit);
+            box.addEventListener("keydown", function (event) {
+                if (event.key === "Enter") { event.preventDefault(); commit(); }
+            });
+            const of = document.createElement("span");
+            of.className = "minipaint-clip-pager-of";
+            label.appendChild(lead);
+            label.appendChild(box);
+            label.appendChild(of);
+            const next = document.createElement("button");
+            next.type = "button";
+            next.className = "minipaint-clip-pager-next";
+            next.textContent = "Next ›";
+            next.addEventListener("click", function () { goToPage(S.library.page + 1); });
+            const count = document.createElement("span");
+            count.className = "minipaint-clip-pager-count";
+            const mark = document.createElement("button");
+            mark.type = "button";
+            mark.className = "minipaint-clip-pager-mark";
+            mark.hidden = true;
+            mark.addEventListener("click", function () { goToPage(S.library.selectedPage); });
+            pager.appendChild(back);
+            pager.appendChild(label);
+            pager.appendChild(next);
+            pager.appendChild(mark);
+            pager.appendChild(count);
+        }
+        const box = pager.querySelector(".minipaint-clip-pager-number");
+        if (box && document.activeElement !== box) { box.value = String(S.library.page + 1); }
+        if (box) { box.max = String(S.library.pages); }
+        const of = pager.querySelector(".minipaint-clip-pager-of");
+        if (of) { of.textContent = " of " + S.library.pages; }
+        const back = pager.querySelector(".minipaint-clip-pager-back");
+        if (back) { back.disabled = S.library.page <= 0; }
+        const next = pager.querySelector(".minipaint-clip-pager-next");
+        if (next) { next.disabled = S.library.page >= S.library.pages - 1; }
+        const count = pager.querySelector(".minipaint-clip-pager-count");
+        if (count) {
+            count.textContent = S.library.total + " picture" + (S.library.total === 1 ? "" : "s");
+        }
+        // Where the selection is, when it is not here. The selected id is
+        // browser state and does not belong to a page; this is the one thing
+        // the pager owes a user who has paged away from it.
+        const mark = pager.querySelector(".minipaint-clip-pager-mark");
+        if (mark) {
+            const elsewhere = S.selected && S.library.selectedPage >= 0 && S.library.selectedPage !== S.library.page;
+            mark.hidden = !elsewhere;
+            if (elsewhere) { mark.textContent = "selection on page " + (S.library.selectedPage + 1); }
+        }
+    }
+
+    function goToPage(number) {
+        const wanted = Math.max(0, Math.min(S.library.pages - 1, Number(number) || 0));
+        if (wanted === S.library.page) { drawPager(); return; }
+        fetchLibrary({ page: wanted });
+    }
+
+    /** Busy is a state of the grid, not a reason to empty it. */
+    function setBusy(on) {
+        const grid = gridElement();
+        if (grid) { grid.setAttribute("aria-busy", on ? "true" : "false"); }
+        S.library.busy = !!on;
+    }
+
+    /**
+     * Ask the server for one page of the index, and draw what it answers.
+     *
+     * Nothing on screen moves until the answer arrives. That is the whole of
+     * "sorting is separate from drawing": a sort that cannot be fetched
+     * leaves the grid exactly as it was AND SAYS SO, where a failed round
+     * trip used to leave it stale with nothing to indicate the sort did not
+     * take.
+     */
+    function fetchLibrary(options) {
+        const opts = options || {};
+        const page = opts.page === undefined ? S.library.page : Number(opts.page);
+        const sort = opts.sort === undefined ? S.library.sort : String(opts.sort || "");
+        const url = LIBRARY_ROUTE + "?page=" + encodeURIComponent(page)
+            + "&size=" + encodeURIComponent(S.library.size)
+            + (sort ? "&sort=" + encodeURIComponent(sort) : "")
+            + (opts.refresh ? "&refresh=1" : "")
+            + (S.selected ? "&selected=" + encodeURIComponent(S.selected) : "");
+        setBusy(true);
+        const request = fetch(url, { credentials: "same-origin", cache: "no-store" })
+            .then(function (response) {
+                if (!response.ok) { throw new Error("HTTP " + response.status); }
+                return response.json();
+            })
+            .then(function (answer) {
+                if (!answer || answer.ok !== true) { throw new Error((answer && answer.message) || "the library could not be read"); }
+                setBusy(false);
+                S.library.inflight = null;
+                serverSilent(false);
+                drawLibrary(answer);
+                if (!opts.quiet) { setStatus(answer.status || ""); }
+                // The revision moved between asking and drawing: draw, then
+                // re-ask once. Nine kilobytes, and the answer is
+                // authoritative - which is cheaper than being wrong.
+                if (S.library.pending) {
+                    S.library.pending = false;
+                    setTimeout(function () { fetchLibrary({ quiet: true }); }, LIBRARY_RETRY_MS);
+                }
+                return answer;
+            }, function (error) {
+                setBusy(false);
+                S.library.inflight = null;
+                // The tiles it has are kept: they were right when they were
+                // drawn and nothing has said otherwise.
+                note("library: could not be re-read (" + ((error && error.message) || error) + ")");
+                setStatus("The library could not be re-read. Trying again.");
+                serverSilent(true, "the library");
+                return null;
+            });
+        S.library.inflight = request;
+        return request;
+    }
+
+    /**
+     * A LIBRARY event: re-ask for the page being shown and patch from it.
+     *
+     * The event carries a revision and a total and no contents, so this can
+     * neither apply a delta wrongly nor be made stale by one it missed. A
+     * page that was asleep resyncs through the same call.
+     *
+     * A new picture does not move you. An import while you are on page 3
+     * updates the count and the page total; being relocated mid-task because
+     * a background job finished is the kind of helpfulness nobody wants, so
+     * the page you are on is the page you keep.
+     */
+    function onLibraryEvent(payload) {
+        const revision = String((payload && payload.revision) || "");
+        if (revision && revision === S.library.revision) { return; }
+        if (S.library.inflight) { S.library.pending = true; return; }
+        fetchLibrary({ quiet: true });
+    }
+
+    /** The sort, over HTTP: remembered first, then drawn when it arrives. */
+    function setSort(mode) {
+        const wanted = String(mode || "");
+        if (!wanted || wanted === S.library.sort) { return Promise.resolve(false); }
+        setBusy(true);
+        return postSettings({ sort: wanted }).then(function (answer) {
+            // Page 0 of the new sort. Not the page you were on: a position
+            // in one order means nothing in another.
+            return fetchLibrary({ sort: (answer && answer.sort) || wanted, page: 0 });
+        }, function () {
+            setBusy(false);
+            setStatus("The sort could not be changed; the grid is as it was.");
+            return null;
+        });
+    }
+
+    /** What the menu remembers between sessions, over this tab's own route. */
+    function postSettings(changes) {
+        return fetch(SETTINGS_ROUTE, {
+            method: "POST",
+            credentials: "same-origin",
+            cache: "no-store",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(changes || {})
+        }).then(function (response) {
+            if (!response.ok) { throw new Error("HTTP " + response.status); }
+            return response.json();
+        }).then(function (answer) {
+            if (!answer || answer.ok !== true) { throw new Error((answer && answer.message) || "the setting was not saved"); }
+            S.menuOverride = answer.menu || null;
+            serverSilent(false);
+            return answer;
+        });
+    }
+
+    /** The status line, which is the answer to what you just did. */
+    function setStatus(text) {
+        const host = byId(STATUS_ID);
+        if (!host || !text) { return; }
+        const target = host.querySelector(".prose") || host;
+        target.innerHTML = String(text);
+    }
+
+    /** PageUp / PageDown move a page while the grid has focus. A listbox is
+     * expected to do this, and this grid says it is one. */
+    function onLibraryKey(event) {
+        if (event.key !== "PageUp" && event.key !== "PageDown") { return; }
+        const grid = gridElement();
+        if (!grid || !grid.contains(event.target)) { return; }
+        if (S.library.pages <= 1) { return; }
+        event.preventDefault();
+        goToPage(S.library.page + (event.key === "PageDown" ? 1 : -1));
+    }
+
+    /* ------------------------------------------------------------------ */
     /* The menu                                                              */
     /* ------------------------------------------------------------------ */
 
@@ -578,7 +1169,7 @@ window.minipaintClipboard = (function () {
             return list;
         }
         return [
-            { menu: "press", value: PRESS.intercept, label: tick(!!state.intercept) + "Intercept “Send to Mini Paint”" },
+            { menu: "intercept", label: tick(!!state.intercept) + "Intercept “Send to Mini Paint”" },
             { menu: "press", value: PRESS.refresh, label: "Refresh" },
             { menu: "section", value: "sort", label: "Sort ›" },
             { menu: "paste", label: "Paste image" },
@@ -615,8 +1206,17 @@ window.minipaintClipboard = (function () {
             case "section": renderMenu(value); return;
             case "back": renderMenu(null); return;
             case "close": closeMenu(); return;
-            case "press": closeMenu(); pressHidden(value); return;
-            case "sort": closeMenu(); sendInput(BOXES.sortRequest, value + ":" + Date.now()); return;
+            case "press":
+                closeMenu();
+                pressHidden(value);
+                if (value === PRESS.refresh) { fetchLibrary({ refresh: true }); }
+                if (value === PRESS.history) { askQueue(null); }
+                return;
+            case "intercept": closeMenu(); toggleIntercept(); return;
+            // Over the tab's own route, and the grid re-drawn from the
+            // answer. The hidden box still goes so the toolbar dropdown
+            // follows on a page whose Gradio is alive; nothing waits on it.
+            case "sort": closeMenu(); setSort(value); sendInput(BOXES.sortRequest, value + ":" + Date.now()); return;
             case "paste": closeMenu(); pasteFromClipboard(); return;
             case "send": closeMenu(); sendTo(value); return;
             default: return;
@@ -954,9 +1554,10 @@ window.minipaintClipboard = (function () {
             }
         }
         if (outcome && outcome.ok) {
-            note("send " + target + ": delivered from the page" + (outcome.reason ? " (" + outcome.reason + ")" : ""));
-            toast("Sent " + (outcome.filename || "the picture") + " to " + (outcome.label || target)
-                  + (outcome.adds ? " (added to what is already there)" : ""));
+            note("send " + target + ": delivered from the page" + (outcome.reason ? " (" + outcome.reason + ")" : "")
+                 + (outcome.switched ? "; the destination is open" : "; the destination did not open"
+                    + (outcome.switchReason ? " (" + outcome.switchReason + ")" : "")));
+            toast(sentSentence(outcome, target), !outcome.switched);
         }
         watchSend(target, stamp, asset, outcome, recorded);
     }
@@ -1090,8 +1691,8 @@ window.minipaintClipboard = (function () {
             const again = await deliverNow(target, asset);
             if (again && again.ok) {
                 note("send " + target + ": delivered from the page on the second try");
-                toast("Sent " + (again.filename || "the picture") + " to " + (again.label || target)
-                      + " (the page had lost its connection).");
+                toast(sentSentence(again, target) + (again.switched ? " (the page had lost its connection)." : ""),
+                      !again.switched);
                 return;
             }
             const why = (again && again.reason) || (outcome && outcome.reason) || "it did not land";
@@ -1159,10 +1760,34 @@ window.minipaintClipboard = (function () {
         return {
             ok: !!(delivered && delivered.ok),
             reason: (delivered && delivered.reason) || "",
+            // Delivery and navigation are separate facts. A picture proved
+            // to have landed in a tab that would not open is a send that
+            // worked, said differently - never a send to try again.
+            switched: !!(delivered && delivered.switched),
+            switchReason: (delivered && delivered.switchReason) || "",
             label: label,
             filename: plan.filename,
             adds: !!plan.adds
         };
+    }
+
+    /**
+     * What a send that worked is called, once its tab has been dealt with.
+     *
+     * Forge's own result buttons put the picture in the destination and make
+     * that destination visible, and Clipboard keeps that: a target never has
+     * to be opened first, and a verified send opens it afterwards. The one
+     * case that needs its own sentence is the tab that would not open -
+     * because the honest answer there is that the picture is waiting in a
+     * tab the user has to find, and the wrong answer is to send it again.
+     */
+    function sentSentence(outcome, target) {
+        const what = (outcome && outcome.filename) || "the picture";
+        const where = (outcome && outcome.label) || target;
+        if (outcome && !outcome.switched) {
+            return "Sent " + what + " to " + where + ", but could not open that tab.";
+        }
+        return "Sent " + what + " to " + where + (outcome && outcome.adds ? " (added to what is already there)" : "");
     }
 
     /* ------------------------------------------------------------------ */
@@ -1172,50 +1797,6 @@ window.minipaintClipboard = (function () {
     function interop() {
         const api = window.minipaintInterop;
         return api && api.wangp && typeof api.wangp.enqueue === "function" ? api : null;
-    }
-
-    /** The click was made: notice the server's answer, however it arrives.
-     *
-     * Three ways, in the order they cost anything: the chained callback's own
-     * change event (free, and what happens on a healthy install), a mutation
-     * observer on the box (free, and what catches a Gradio that writes the
-     * value without dispatching), and only then a value read on a timer that
-     * starts two seconds late and stops the moment the answer lands or the
-     * press gives up. A page sitting idle runs none of them. */
-    function armQueue() {
-        S.armedAt = Date.now();
-        disarmQueue();
-        const started = Date.now();
-        const box = textarea(BOXES.queueInstruction);
-
-        function settle(from) {
-            const value = boxValue(BOXES.queueInstruction);
-            if (!value || value === S.lastInstruction) { return false; }
-            disarmQueue();
-            queue(value, from);
-            return true;
-        }
-
-        if (box && typeof MutationObserver === "function") {
-            S.ackObserver = new MutationObserver(function () { settle("observer"); });
-            try {
-                S.ackObserver.observe(box, { attributes: true, attributeFilter: ["value"], childList: true, characterData: true, subtree: true });
-            } catch (e) { S.ackObserver = null; }
-        }
-        S.ackDelay = setTimeout(function () {
-            S.ackDelay = 0;
-            if (settle("value")) { return; }
-            S.watch = setInterval(function () {
-                if (settle("value")) { return; }
-                if (Date.now() - started > QUEUE_WATCH_LIMIT_MS) { disarmQueue(); }
-            }, QUEUE_WATCH_MS);
-        }, QUEUE_ACK_DELAY_MS);
-    }
-
-    function disarmQueue() {
-        if (S.watch) { clearInterval(S.watch); S.watch = 0; }
-        if (S.ackDelay) { clearTimeout(S.ackDelay); S.ackDelay = 0; }
-        if (S.ackObserver) { try { S.ackObserver.disconnect(); } catch (e) { /* already gone */ } S.ackObserver = null; }
     }
 
     /** This page's identity for the outbox, the public API's own. */
@@ -1248,7 +1829,6 @@ window.minipaintClipboard = (function () {
         if (S.queued[parsed.nonce]) { return; }
         S.queued[parsed.nonce] = true;
         S.lastInstruction = text;
-        disarmQueue();
         if (!parsed.job_id) { return; }
         const how = fromWatcher ? " (" + fromWatcher + ")" : "";
         // Admitted, durably, and the press is over. A job the server runs
@@ -1288,27 +1868,20 @@ window.minipaintClipboard = (function () {
         return "";
     }
 
-    /** The public API's cancel-all has run on the server; callers still
-     * waiting on those jobs get their answers, and the list is re-read. */
-    function afterCancelAll() {
-        const api = interop();
-        if (api && api.wangp && typeof api.wangp.refreshWaiters === "function") {
-            try { api.wangp.refreshWaiters(); } catch (e) { /* the callers' business */ }
-        }
-        refreshOutbox();
-    }
-
     function refreshOutbox() {
         if (S.outboxRefreshTimer) { return; }
         S.outboxRefreshTimer = setTimeout(function () {
             S.outboxRefreshTimer = null;
-            pressHidden(PRESS.outboxRefresh);
+            askQueue(null);
         }, OUTBOX_REFRESH_THROTTLE_MS);
     }
 
     /** The public API says a job moved: show it, and let the server re-render the list. */
     function onOutboxEvent(event) {
         const detail = event && event.detail ? event.detail : {};
+        // The library moved. Advisory: it says so and nothing else, so the
+        // page re-asks for the page it is showing. See onLibraryEvent.
+        if (detail.kind === "library") { onLibraryEvent(detail.detail || {}); return; }
         const job = detail.job || null;
         if (detail.kind === "done" && job) {
             const failed = job.state !== "queued" && job.state !== "started";
@@ -1322,6 +1895,284 @@ window.minipaintClipboard = (function () {
         // a prompt still being written, another page's turn - and "tracked"
         // whenever a queued task moved in WanGP; both are news for the list.
         refreshOutbox();
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* The queue list, the history, and the press that fills them            */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * THE SCREEN THAT ANSWERS "I CLOSED THE BROWSER AND CAME BACK".
+     *
+     * The jobs already survived that: the outbox is work Forge owns, and the
+     * browser's only job is to describe what the user wants and get a durable
+     * acknowledgement before it disappears. What did not survive was the VIEW
+     * of it - the list was Gradio-rendered, so a page that came back needed
+     * the framework's channel to show a job that had run perfectly well
+     * without it.
+     *
+     * Updates still arrive on the event spine, which is why nothing here
+     * polls. Only the drawing moved: fetch instead of press, build nodes
+     * instead of receive markup. Every sentence in the answer was composed
+     * by ``outbox_view`` on the server, where the rest of this tab's wording
+     * lives.
+     */
+    const QUEUE_ROUTE = "/minipaint-clipboard/queue";
+
+    function queueHost() { return byId(OUTBOX_LIST_ID); }
+
+    function listMount(host, className) {
+        if (!host) { return null; }
+        let mount = host.querySelector("." + className);
+        if (mount) { return mount; }
+        mount = document.createElement("div");
+        mount.className = className;
+        host.appendChild(mount);
+        return mount;
+    }
+
+    function el(tag, className, text) {
+        const node = document.createElement(tag);
+        if (className) { node.className = className; }
+        if (text !== undefined && text !== null) { node.textContent = String(text); }
+        return node;
+    }
+
+    function excerptNodes(prompt) {
+        const nodes = [];
+        if (!prompt || prompt.inherit) {
+            nodes.push(el("div", "minipaint-clip-job-prompt minipaint-clip-inherit-text", "Prompt: Use WanGP"));
+            return nodes;
+        }
+        if (prompt.typed !== undefined && prompt.enhanced !== undefined) {
+            const typed = el("div", "minipaint-clip-job-prompt minipaint-clip-job-prompt-typed",
+                             prompt.typed.slice(0, 90) + (prompt.typed.length > 90 ? "…" : ""));
+            typed.title = prompt.typed;
+            const written = el("div", "minipaint-clip-job-prompt minipaint-clip-job-prompt-enhanced",
+                               prompt.enhanced.slice(0, 120) + (prompt.enhanced.length > 120 ? "…" : ""));
+            written.title = prompt.enhanced;
+            nodes.push(typed, written);
+            return nodes;
+        }
+        const text = String(prompt.text || "");
+        const one = el("div", "minipaint-clip-job-prompt", text.slice(0, 90) + (text.length > 90 ? "…" : ""));
+        one.title = text;
+        nodes.push(one);
+        return nodes;
+    }
+
+    function jobNode(job) {
+        const card = el("div", "minipaint-clip-job minipaint-clip-job-" + job.state);
+        card.dataset.job = job.job_id;
+        card.dataset.mine = job.mine ? "1" : "0";
+        const head = el("div", "minipaint-clip-job-head");
+        head.appendChild(el("span", "minipaint-clip-job-state", job.state_label));
+        head.appendChild(el("span", "minipaint-clip-job-when", job.when));
+        for (const badge of job.badges || []) {
+            const mark = el("span", "minipaint-clip-badge" + (badge.kind === "warn" ? " minipaint-clip-badge-warn" : ""), badge.text);
+            if (badge.title) { mark.title = badge.title; }
+            head.appendChild(mark);
+        }
+        card.appendChild(head);
+        for (const node of excerptNodes(job.prompt)) { card.appendChild(node); }
+        card.appendChild(el("div", "minipaint-clip-job-fields", job.fields));
+        card.appendChild(el("div", "minipaint-clip-job-outcome", job.outcome));
+        for (const line of job.lines || []) {
+            const row = el("div", "minipaint-clip-job-line");
+            row.dataset.live = line.live || "";
+            if (line.wangp) { row.dataset.wangp = line.wangp; }
+            const label = el("b", "", line.label + ":");
+            row.appendChild(label);
+            row.appendChild(document.createTextNode(" " + line.text));
+            card.appendChild(row);
+        }
+        if ((job.actions || []).length) {
+            const row = el("div", "minipaint-clip-job-actions");
+            for (const action of job.actions) {
+                const button = el("button", "", action.label);
+                button.type = "button";
+                button.dataset.outboxAction = action.verb + ":" + job.job_id;
+                if (action.title) { button.title = action.title; }
+                row.appendChild(button);
+            }
+            card.appendChild(row);
+        }
+        return card;
+    }
+
+    function drawQueue(answer) {
+        const mount = listMount(queueHost(), "minipaint-clip-outbox");
+        if (!mount) { return; }
+        const jobs = Array.isArray(answer.jobs) ? answer.jobs : [];
+        // Redrawn wholesale, and that is fine HERE in a way it was not
+        // before: this list is short, bounded and rebuilt from one small
+        // answer, and it is not the thing whose scroll position and decoded
+        // pictures had to survive. The grid is; see drawLibrary.
+        mount.innerHTML = "";
+        mount.dataset.count = String(jobs.length);
+        mount.classList.toggle("minipaint-clip-empty", !jobs.length);
+        if (!jobs.length) {
+            mount.appendChild(el("p", "", "No request has been sent from here yet."));
+        } else {
+            for (const job of jobs) { mount.appendChild(jobNode(job)); }
+        }
+        if (answer.history !== undefined) { drawHistory(answer.history); }
+        if (answer.queue_button) { applyQueueButton(answer.queue_button); }
+        if (answer.status) { setQueueStatus(answer.status); }
+    }
+
+    function drawHistory(entries) {
+        const mount = listMount(byId(HISTORY_LIST_ID), "minipaint-clip-history");
+        if (!mount) { return; }
+        const list = Array.isArray(entries) ? entries : [];
+        mount.innerHTML = "";
+        mount.classList.toggle("minipaint-clip-empty", !list.length);
+        if (!list.length) {
+            mount.appendChild(el("p", "", "No request has been confirmed queued from here yet."));
+            return;
+        }
+        for (const record of list) {
+            const entry = el("div", "minipaint-clip-history-entry");
+            entry.dataset.history = record.history_id;
+            const head = el("div", "minipaint-clip-history-head");
+            head.appendChild(el("span", "minipaint-clip-history-when", record.when));
+            head.appendChild(el("span", "minipaint-clip-history-model", record.model));
+            head.appendChild(el("span", "minipaint-clip-history-tasks",
+                                 record.tasks + " task" + (record.tasks === 1 ? "" : "s")));
+            entry.appendChild(head);
+            const prompt = record.prompt || {};
+            if (prompt.inherit) {
+                entry.appendChild(el("div", "minipaint-clip-history-prompt minipaint-clip-inherit-text", "Prompt: Use WanGP"));
+            } else {
+                const typed = el("div", "minipaint-clip-history-prompt", prompt.typed || "");
+                typed.title = prompt.typed || "";
+                entry.appendChild(typed);
+                if (prompt.enhanced) {
+                    const written = el("div", "minipaint-clip-history-enhanced",
+                                       "enhanced: " + prompt.enhanced.slice(0, 160) + (prompt.enhanced.length > 160 ? "…" : ""));
+                    written.title = prompt.enhanced;
+                    entry.appendChild(written);
+                }
+            }
+            const thumbs = el("div", "minipaint-clip-history-thumbs");
+            for (const slot of record.slots || []) {
+                if (slot.state === "picture") {
+                    const holder = el("span", "minipaint-clip-history-thumb");
+                    holder.title = slot.label + ": " + slot.name;
+                    const picture = document.createElement("img");
+                    picture.src = slot.url;
+                    picture.alt = "";
+                    picture.draggable = false;
+                    holder.appendChild(picture);
+                    holder.appendChild(el("small", "", slot.label));
+                    thumbs.appendChild(holder);
+                } else if (slot.state === "missing") {
+                    thumbs.appendChild(el("span", "minipaint-clip-badge minipaint-clip-badge-missing", slot.label + ": Missing image"));
+                } else if (slot.state === "ignored") {
+                    thumbs.appendChild(el("span", "minipaint-clip-badge minipaint-clip-badge-unsupported", slot.label + " was ignored"));
+                } else {
+                    thumbs.appendChild(el("span", "minipaint-clip-badge", slot.label + ": Use WanGP"));
+                }
+            }
+            entry.appendChild(thumbs);
+            const actions = el("div", "minipaint-clip-history-actions");
+            for (const pair of [["load", "Load"], ["delete", "Delete"]]) {
+                const button = el("button", "", pair[1]);
+                button.type = "button";
+                button.dataset.historyAction = pair[0] + ":" + record.history_id;
+                actions.appendChild(button);
+            }
+            entry.appendChild(actions);
+            mount.appendChild(entry);
+        }
+    }
+
+    function applyQueueButton(state) {
+        const host = byId(QUEUE_BUTTON_ID);
+        const button = host ? (host.tagName === "BUTTON" ? host : host.querySelector("button")) : null;
+        if (!button) { return; }
+        button.textContent = state.label;
+        button.disabled = !state.enabled;
+    }
+
+    function setQueueStatus(text) {
+        const host = byId(QUEUE_STATUS_ID);
+        if (!host || !text) { return; }
+        (host.querySelector(".prose") || host).innerHTML = String(text);
+    }
+
+    /** One call for every way the queue section changes. */
+    function askQueue(body) {
+        const request = body
+            ? fetch(QUEUE_ROUTE, {
+                method: "POST", credentials: "same-origin", cache: "no-store",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(Object.assign({ page: pageId() }, body))
+            })
+            : fetch(QUEUE_ROUTE + "?page=" + encodeURIComponent(pageId()), { credentials: "same-origin", cache: "no-store" });
+        return request.then(function (response) {
+            return response.json().then(function (answer) { return { response: response, answer: answer }; });
+        }).then(function (pair) {
+            const answer = pair.answer || {};
+            if (!pair.response.ok && answer.ok !== true && !answer.status) {
+                throw new Error(answer.message || ("HTTP " + pair.response.status));
+            }
+            serverSilent(false);
+            drawQueue(answer);
+            return answer;
+        }, function (error) {
+            note("queue: could not be read (" + ((error && error.message) || error) + ")");
+            serverSilent(true, "the queue");
+            return null;
+        });
+    }
+
+    /**
+     * Add to Queue, over this tab's own route.
+     *
+     * The prompt as typed and the switch as it stands travel with the press,
+     * because both live in the browser and the stored setting is only ever a
+     * copy of one of them - see ``add_to_queue`` for what a checkbox that
+     * does not decide cost. The page's identity and the WanGP model go with
+     * it too, for the same reason: this page is the only thing that knows
+     * either.
+     */
+    function addToQueue(prompt, enhanceOn) {
+        let model = null;
+        try { model = JSON.parse(modelJson() || "null"); } catch (e) { model = null; }
+        return askQueue({
+            action: "add",
+            prompt: String(prompt === undefined || prompt === null ? promptValue() : prompt),
+            enhance: typeof enhanceOn === "boolean" ? enhanceOn : undefined,
+            model: model
+        }).then(function (answer) {
+            if (!answer) { toast("Forge is not answering; nothing was queued.", true); return null; }
+            if (answer.instruction) { queue(JSON.stringify(answer.instruction), "the queue route"); }
+            return answer;
+        });
+    }
+
+    function promptValue() {
+        const host = byId("minipaint_clipboard_prompt");
+        const box = host ? host.querySelector("textarea, input") : null;
+        return box ? String(box.value || "") : "";
+    }
+
+    function cancelAll() {
+        return askQueue({ action: "cancel_all" }).then(function (answer) {
+            const api = interop();
+            if (api && api.wangp && typeof api.wangp.refreshWaiters === "function") {
+                try { api.wangp.refreshWaiters(); } catch (e) { /* the callers' business */ }
+            }
+            return answer;
+        });
+    }
+
+    function jobAction(verb, jobId) {
+        return askQueue({ action: verb, job: jobId }).then(function (answer) {
+            if (verb === "retry" || verb === "adopt") { setTimeout(pump, 400); }
+            return answer;
+        });
     }
 
     /* ------------------------------------------------------------------ */
@@ -1423,15 +2274,18 @@ window.minipaintClipboard = (function () {
         const action = target.closest("[data-history-action]");
         if (action) {
             event.preventDefault();
+            // Load puts a recipe back into the composer, whose slot cards are
+            // still rendered by the framework - so this one still crosses it.
+            // See the V2 list. The list itself is re-read over HTTP either way.
             sendInput(BOXES.historyAction, action.dataset.historyAction + ":" + Date.now());
+            setTimeout(function () { askQueue(null); }, 300);
             return;
         }
         const outbox = target.closest("[data-outbox-action]");
         if (outbox) {
             event.preventDefault();
-            const verb = String(outbox.dataset.outboxAction || "").split(":")[0];
-            sendInput(BOXES.outboxAction, outbox.dataset.outboxAction + ":" + pageId() + ":" + Date.now());
-            if (verb === "retry" || verb === "adopt") { setTimeout(pump, 400); }
+            const parts = String(outbox.dataset.outboxAction || "").split(":");
+            jobAction(parts[0], parts[1] || "");
         }
     }
 
@@ -1450,7 +2304,11 @@ window.minipaintClipboard = (function () {
             if (!button) { return; }
             setTimeout(function () {
                 if (tabVisible()) {
-                    pressHidden(PRESS.refresh);
+                    // Over HTTP: coming back to this tab must not depend on
+                    // a framework channel that a backgrounded tab has lost.
+                    // With a folder re-read, because coming back to the tab
+                    // is exactly when the folder may have moved underneath it.
+                    fetchLibrary({ quiet: true, refresh: true });
                     refreshCapabilities(false);
                 }
             }, 50);
@@ -1485,8 +2343,16 @@ window.minipaintClipboard = (function () {
         // The page's identity, so a press submits under it; and the jobs this
         // page composed before a reload resume without another press - as
         // does the tracking of the ones WanGP already took from this page.
-        sendInput(BOXES.pageId, pageId());
+        element.addEventListener("keydown", onLibraryKey);
         watchTab();
+        // The grid, from the index route, before anything else is asked of
+        // the server: it is the thing the user is looking at.
+        gridMount();
+        fetchLibrary({ quiet: true, refresh: true });
+        // And the queue: what ran while this browser was closed, from the
+        // route rather than from a framework render that a closed browser
+        // could never have received.
+        askQueue(null);
         afterRender();
         if (tabVisible()) { refreshCapabilities(false); }
         setTimeout(pump, 250);
@@ -1500,24 +2366,40 @@ window.minipaintClipboard = (function () {
 
     function debug() {
         return { attached: S.attached, selected: S.selected, menuOpen: !!(S.menu && !S.menu.hidden), menuSection: S.menuSection,
-                 capabilities: S.capabilities, watching: !!S.watch, lastInstruction: S.lastInstruction.slice(0, 40), page: pageId(),
-                 model: S.lastModel, retrying: !!S.retryTimer || S.retryPending };
+                 capabilities: S.capabilities, lastInstruction: S.lastInstruction.slice(0, 40), page: pageId(),
+                 model: S.lastModel, retrying: !!S.retryTimer || S.retryPending,
+                 offline: { server: S.offline.server, queue: S.offline.queue },
+                 intercept: !!menuState().intercept,
+                 sort: menuState().sort || S.library.sort,
+                 library: { revision: S.library.revision, page: S.library.page, pages: S.library.pages,
+                            total: S.library.total, shown: S.library.ids.length, busy: S.library.busy } };
     }
 
     return {
         attach: attach,
         afterRender: afterRender,
+        menuStateChanged: menuStateChanged,
+        library: fetchLibrary,
+        goToPage: goToPage,
+        setSort: setSort,
+        libraryState: function () {
+            return { revision: S.library.revision, sort: S.library.sort, page: S.library.page,
+                     pages: S.library.pages, total: S.library.total, size: S.library.size,
+                     shown: S.library.ids.length, busy: S.library.busy,
+                     selectedPage: S.library.selectedPage };
+        },
         toggleMenu: toggleMenu,
         closeMenu: closeMenu,
         select: select,
         setThumbnailSize: setThumbnailSize,
         pasteFromClipboard: pasteFromClipboard,
-        armQueue: armQueue,
         queue: queue,
+        addToQueue: addToQueue,
+        cancelAll: cancelAll,
+        refreshQueue: refreshOutbox,
         pump: pump,
         pageId: pageId,
         modelJson: modelJson,
-        afterCancelAll: afterCancelAll,
         refreshCapabilities: refreshCapabilities,
         pressHidden: pressHidden,
         showOffline: connectionNotice,

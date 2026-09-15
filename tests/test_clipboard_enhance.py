@@ -233,6 +233,12 @@ def _request(prompt="a rough prompt", **images):
     return request
 
 
+def _flat(view) -> str:
+    """A view model as one string, for checks that read it like the markup
+    it replaced. The list is content now, not nodes; the words are the same."""
+    return json.dumps(view)
+
+
 def _positive(status="queued", depth=None):
     result = {"ok": True, "status": status, "tasks_added": 1, "applied": {"prompt": True}, "inherited": ["start", "end", "references"],
               "ignored": [], "model": {"type": "minimax_h3_fl2va", "label": "MiniMax H3 FL2VA"}, "route": "generate" if status == "started" else "queue"}
@@ -619,35 +625,41 @@ def tab_checks(r: Results, fake: FakeApi, clock: _Clock, base: pathlib.Path) -> 
     r.check("Restore default forgets it and shows the default again", box["value"] == "DEFAULT ref2va image instructions" and state.startswith("**Default**") and enhance.override("ref2va", "image") == "")
 
     tab.prompt_changed("typed in the tab")
-    instruction, status, listing, button = tab.prepare_queue("typed in the tab", page_id, json.dumps(FL2VA_MODEL))
+    answer = tab.add_to_queue("typed in the tab", page_id, json.dumps(FL2VA_MODEL))
+    instruction, status, listing = answer["instruction"], answer["status"], _flat(answer["jobs"])
     job = outbox.jobs()[-1]
     r.check("an enhanced press is an enhancing job, and the status line says so",
-            json.loads(instruction)["job_id"] == job["job_id"] and job["state"] == "enhancing" and status.startswith("Enhancing the prompt as FL2VA") and "Enhancing" in listing and "LLM:" in listing, status)
-    instruction, status, listing, button = tab.prepare_queue("typed in the tab", page_id, json.dumps(VIDEO_MODEL))
-    r.check("a press on another model is refused with the sentence and a way out", instruction == "" and "MiniMax H3" in status and "switch enhanced prompts off" in status)
+            instruction["job_id"] == job["job_id"] and job["state"] == "enhancing" and status.startswith("Enhancing the prompt as FL2VA") and "Enhancing" in listing and '"LLM"' in listing, status)
+    answer = tab.add_to_queue("typed in the tab", page_id, json.dumps(VIDEO_MODEL))
+    instruction, status = answer["instruction"], answer["status"]
+    r.check("a press on another model is refused with the sentence and a way out", instruction is None and "MiniMax H3" in status and "switch enhanced prompts off" in status)
     fake.run_next()
-    listing, status, history_listing, button = tab.refresh_outbox(page_id)
+    view = tab.queue_answer(page_id)
+    listing, status, history_listing = _flat(view["jobs"]), view["status"], _flat(view["history"])
     r.check("the list shows the stage while the LLM runs", "Describing" not in listing and "Writing the prompt" in listing and "1 being enhanced" in status, status)
     fake.finish(job["enhance"]["llm_id"], "ENHANCED: typed in the tab, at length")
     claimed = outbox.claim(page_id)
     outbox.report(job["job_id"], claimed["lease"], "done", _positive("started", depth=0))
-    listing, status, history_listing, button = tab.refresh_outbox(page_id)
+    view = tab.queue_answer(page_id)
+    listing, status, history_listing = _flat(view["jobs"]), view["status"], _flat(view["history"])
     record = history.load_history()[0]
     r.check("the history records the typed prompt as the recipe and the written one beside it",
             record["prompt_override"] == "typed in the tab" and record["enhanced"] is True and record["enhanced_prompt"] == "ENHANCED: typed in the tab, at length", json.dumps(record))
     r.check("the card shows both prompts, the enhancement line and WanGP's place",
-            "minipaint-clip-job-prompt-typed" in listing and "ENHANCED: typed in the tab" in listing and "Enhanced as FL2VA" in listing and "WanGP is generating it" in listing and "enhanced prompt" in listing)
-    r.check("and the history list shows the enhanced text", "enhanced: ENHANCED" in history_listing)
+            '"typed"' in listing and "ENHANCED: typed in the tab" in listing and "Enhanced as FL2VA" in listing and "WanGP is generating it" in listing and "enhanced prompt" in listing)
+    r.check("and the history list shows the enhanced text", '"enhanced": "ENHANCED' in history_listing, history_listing[:200])
     outbox.track(job["job_id"], page_id, {"state": "finished"})
-    listing, status, history_listing, button = tab.refresh_outbox(page_id)
-    r.check("a finished task is said to have left WanGP's queue", "Left WanGP&#x27;s queue" in listing or "Left WanGP's queue" in listing, listing[-600:])
+    view = tab.queue_answer(page_id)
+    listing = _flat(view["jobs"])
+    r.check("a finished task is said to have left WanGP's queue", "Left WanGP's queue" in listing, listing[-600:])
 
     clock.now += 1
-    tab.prepare_queue("one more", page_id, json.dumps(FL2VA_MODEL))
-    listing, status = tab.cancel_all(page_id)
+    tab.add_to_queue("one more", page_id, json.dumps(FL2VA_MODEL))
+    cancelled = tab.cancel_all(page_id)
+    listing, status = _flat(cancelled["jobs"]), cancelled["status"]
     r.check("Cancel everything from the tab cancels the line and says how many", status.startswith("Cancelled 1 waiting request") and "1 enhancement" in status and "Cancelled" in listing, status)
-    listing, status = tab.cancel_all(page_id)
-    r.check("and says when nothing was waiting", status.startswith("Nothing was waiting"))
+    cancelled = tab.cancel_all(page_id)
+    r.check("and says when nothing was waiting", cancelled["status"].startswith("Nothing was waiting"))
     tab.toggle_enhance(False, "")
     r.check("the switch turns it off again", enhance.enabled() is False)
 

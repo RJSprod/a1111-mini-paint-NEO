@@ -525,9 +525,20 @@ def check_a_component_destination_fills_without_the_queue(r: Results, page, targ
                 landed, f"pictures in {elem_id}: {before} -> {pictures()}")
         r.check("dead queue: and the page says it went",
                 any(one.startswith("Sent ") for one in said), str(said))
-        r.check("dead queue: the page offers to reconnect rather than leaving it to be guessed",
-                page.evaluate("() => { const b = document.querySelector('.minipaint-clip-offline');"
-                              " return !!(b && !b.hidden && b.querySelector('.minipaint-clip-offline-reconnect')); }"))
+        # The picture arrives at once now; the standing notice is raised
+        # later, when the server's receipt for the same send has not come.
+        # Reading it the moment the picture lands is reading it too early -
+        # which passed here and failed on a slower machine, because the two
+        # are not the same event and never were.
+        offered = False
+        for _ in range(24):
+            offered = page.evaluate(
+                "() => { const b = document.querySelector('.minipaint-clip-offline');"
+                " return !!(b && !b.hidden && b.querySelector('.minipaint-clip-offline-reconnect')); }")
+            if offered:
+                break
+            time.sleep(1)
+        r.check("dead queue: the page offers to reconnect rather than leaving it to be guessed", offered)
     finally:
         page.unroute("**/queue/**")
         time.sleep(3)

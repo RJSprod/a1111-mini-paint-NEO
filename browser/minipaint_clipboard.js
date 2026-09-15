@@ -351,9 +351,12 @@ window.minipaintClipboard = (function () {
      */
     function serverSilent(show, what) {
         const on = !!show;
-        if (on === S.offline.server) { if (!on) { return; } }
+        if (!on && !S.offline.server) { return; }
+        const was = S.offline.server;
         S.offline.server = on;
-        if (on && what) { note("server: " + what + " could not be reached"); }
+        // Once per transition. A server that is down stays down, and a line
+        // per retry is a log nobody reads looking for the one that matters.
+        if (on && !was && what) { note("server: " + what + " could not be reached"); }
         renderNotice();
     }
 
@@ -918,7 +921,11 @@ window.minipaintClipboard = (function () {
         if (!pager) { return; }
         const many = S.library.pages > 1;
         pager.hidden = !many && S.library.total <= S.library.size;
-        if (pager.hidden) { pager.innerHTML = ""; return; }
+        // Hidden, not emptied. The controls are built once and then only
+        // updated, so throwing them away here would leave the row built but
+        // blank the next time a library grew past one page - a pager with no
+        // buttons in it, which is worse than no pager at all.
+        if (pager.hidden) { return; }
         if (!pager.dataset.built) {
             pager.dataset.built = "1";
             pager.innerHTML = "";

@@ -581,6 +581,17 @@ def check_paging(r: Results, page, library) -> None:
                 page.evaluate("() => window.minipaintClipboard.debug().selected") == chosen, chosen)
         r.check("and the pager marks the page that is holding it",
                 "selection on page 2" in (pager(page) or {}).get("mark", ""), str(pager(page)))
+        # A library that shrinks to one page hides the row; one that grows
+        # past it must show a row with its buttons still in it.
+        show_page(page, {"size": 60, "page": 0})
+        r.check("with one page the row is hidden entirely", (pager(page) or {}).get("hidden") is True, str(pager(page)))
+        show_page(page, {"size": 10, "page": 0})
+        row = pager(page)
+        r.check("and when the library grows past one page again the row comes back WITH its controls",
+                row and not row["hidden"] and row["number"] == "1" and row["of"].strip() == "of 3"
+                and row["count"].startswith("24 picture"), str(row))
+        show_page(page, {"size": 10, "page": 1})
+
         r.check("so the Send menu is still live, rather than greyed out with a picture plainly chosen",
                 page.evaluate("""() => { window.minipaintClipboard.toggleMenu();
                     const items = () => Array.from(document.querySelectorAll('.minipaint-clip-menu .minipaint-clip-menu-item'));
@@ -716,6 +727,63 @@ def check_the_failure_modes_have_answers(r: Results, page, library) -> None:
     time.sleep(2.5)
     r.check("and the line goes by itself the moment the server answers",
             page.evaluate("() => window.minipaintClipboard.debug().offline.server") is False)
+
+
+def check_the_queue_section_is_the_browsers(r: Results, page) -> None:
+    """The one screen that answers "I closed the browser and came back".
+
+    The jobs already survived that - the outbox is work Forge owns - but the
+    VIEW of them did not: the list was server-rendered markup delivered over
+    the framework's channel, so a page that came back needed that channel to
+    show a job that had run perfectly well without it.
+    """
+    open_clipboard(page)
+    time.sleep(1.5)
+    r.check("the queue list is drawn by the browser, into the block the server used to fill",
+            page.evaluate("""() => {
+                const host = document.getElementById('minipaint_clipboard_outbox_list');
+                return !!(host && host.querySelector('.minipaint-clip-outbox'));
+            }"""))
+    r.check("and says so when nothing has been sent from here yet",
+            "No request has been sent" in page.evaluate("""() => {
+                const host = document.getElementById('minipaint_clipboard_outbox_list');
+                return host ? host.textContent : ''; }"""),
+            page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_outbox_list');
+                return h ? h.textContent.slice(0, 80) : 'NO HOST'; }"""))
+
+    # Add to Queue is a press to this tab's own route now. Whether WanGP is
+    # there to take it is not what is being checked: that the press reaches
+    # the server and comes back with a sentence and a button is.
+    before = page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_queue_status');
+        return h ? h.textContent.trim() : ''; }""")
+    page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_queue');
+        const b = h && (h.tagName === 'BUTTON' ? h : h.querySelector('button'));
+        if (b) { b.click(); } }""")
+    said = ""
+    for _ in range(12):
+        time.sleep(1)
+        said = page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_queue_status');
+            return h ? h.textContent.trim() : ''; }""")
+        if said and said != before:
+            break
+    r.check("Add to Queue reaches the server over that route and comes back with a sentence",
+            bool(said) and said != before, repr(said))
+
+    r.check("the history list is the browser's too",
+            page.evaluate("""() => {
+                const items = () => Array.from(document.querySelectorAll('.minipaint-clip-menu .minipaint-clip-menu-item'));
+                window.minipaintClipboard.toggleMenu();
+                const entry = items().filter(b => b.textContent.indexOf('Queue Send History') >= 0)[0];
+                if (entry) { entry.click(); }
+                return true; }"""))
+    time.sleep(2.5)
+    r.check("and is drawn, with its own words, into the panel the menu opens",
+            page.evaluate("""() => {
+                const host = document.getElementById('minipaint_clipboard_history_list');
+                return !!(host && host.querySelector('.minipaint-clip-history'));
+            }"""),
+            page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_history_list');
+                return h ? h.innerHTML.slice(0, 120) : 'NO HOST'; }"""))
 
 
 def check_sorting_is_separate_from_drawing(r: Results, page) -> None:
@@ -1790,6 +1858,7 @@ def run() -> Results:
                 check_patching(r, page, library)
                 check_sorting_is_separate_from_drawing(r, page)
                 check_the_failure_modes_have_answers(r, page, library)
+                check_the_queue_section_is_the_browsers(r, page)
                 check_a_thumbnail_is_fetched_once(r, page)
                 r.check("a picture can be selected", select_first(page),
                         repr(box(page, "minipaint_clipboard_selected")))

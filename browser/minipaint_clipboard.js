@@ -96,6 +96,9 @@ window.minipaintClipboard = (function () {
     const S = {
         attached: false,
         selected: "",
+        //: Set when a send went unanswered, cleared by the next
+        //: acknowledgement: how long the page is willing to wait next time.
+        queueDown: false,
         //: The timer and the watcher looking for the server's receipt for a
         //: send. See watchSend.
         sendWatch: null,
@@ -197,6 +200,46 @@ window.minipaintClipboard = (function () {
         S.toastTimer = setTimeout(function () { element.hidden = true; S.toastTimer = null; }, 4500);
     }
 
+    /**
+     * A standing line saying the live connection is gone, with the one
+     * action that brings it back.
+     *
+     * A toast is the wrong shape for this: it hides itself after a few
+     * seconds, and the thing it is reporting lasts until the page is
+     * reloaded. Every send after it goes the long way round - twelve
+     * seconds of waiting before the direct route is tried - so the user is
+     * told once, plainly, rather than being left to infer it from a send
+     * that took an age.
+     */
+    function connectionNotice(show) {
+        const container = byId(BROWSER_ID) || root();
+        if (!container) { return; }
+        let bar = container.querySelector(".minipaint-clip-offline");
+        if (!show) {
+            if (bar) { bar.hidden = true; }
+            return;
+        }
+        if (!bar) {
+            bar = document.createElement("div");
+            bar.className = "minipaint-clip-offline";
+            bar.setAttribute("role", "status");
+            const line = document.createElement("span");
+            line.className = "minipaint-clip-offline-text";
+            line.textContent = "This page has lost its live connection to Forge. Sending still works - it "
+                + "goes the direct way and takes a few seconds longer. Reconnecting makes it quick again.";
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "minipaint-clip-offline-reconnect";
+            button.textContent = "Reconnect";
+            button.title = "Reloads this page.";
+            button.addEventListener("click", function () { window.location.reload(); });
+            bar.appendChild(line);
+            bar.appendChild(button);
+            container.insertBefore(bar, container.firstChild);
+        }
+        bar.hidden = false;
+    }
+
     function tabVisible() {
         const panel = byId(TAB_PANEL_ID);
         if (!panel) { return false; }
@@ -227,12 +270,34 @@ window.minipaintClipboard = (function () {
         if (!quiet) { sendInput(BOXES.selected, S.selected); }
     }
 
-    /** The grid was re-rendered: keep the selection the server confirmed, re-apply the size. */
+    /**
+     * The grid was re-rendered: keep the selection, re-apply the size.
+     *
+     * A selection is made here and travels to the server as a Gradio event,
+     * so the server only knows the ones the queue delivered. Every render
+     * carries the server's own answer back, and this used to adopt it -
+     * which means one render while the queue was not delivering took the
+     * picture out from under the user. That is how a Send to menu came to
+     * have every destination greyed out with a picture plainly selected on
+     * the grid, and how a send already in flight lost the asset it was
+     * about to fall back with.
+     *
+     * So the page keeps its own selection. The server's is adopted only
+     * when this page has none of its own, and a selection is given up only
+     * when the grid is listing pictures and the selected one is not among
+     * them - never merely because a render came back empty.
+     */
     function afterRender() {
         const confirmed = boxValue(BOXES.selected);
-        const present = items().some(function (item) { return item.dataset.asset === confirmed; });
-        select(present ? confirmed : "", true);
-        if (!present && confirmed) { sendInput(BOXES.selected, ""); }
+        const listed = items();
+        const onGrid = function (assetId) {
+            return !!assetId && listed.some(function (item) { return item.dataset.asset === assetId; });
+        };
+        let keep = S.selected;
+        if (!keep) { keep = onGrid(confirmed) ? confirmed : ""; }
+        else if (listed.length && !onGrid(keep)) { keep = ""; }
+        select(keep, true);
+        if (confirmed !== keep) { sendInput(BOXES.selected, keep); }
         // The grid element is new after every refresh, so the size written
         // onto the old one went with it. Put the remembered one back rather
         // than falling to the default and snapping every tile back to 144.
@@ -517,6 +582,12 @@ window.minipaintClipboard = (function () {
     //: server answers in well under a second on a working connection; this
     //: is long enough to cover a slow one and short enough to be useful.
     const SEND_TIMEOUT_MS = 12000;
+    //: Once a send has gone unanswered, the queue is not carrying anything
+    //: and every send after it would sit through the same wait for the same
+    //: answer. The page stops giving it as long: the direct route is tried
+    //: almost at once, and the first acknowledgement to arrive puts the
+    //: patient deadline back.
+    const SEND_RETRY_TIMEOUT_MS = 2500;
 
     /**
      * Send the selected picture to another tab, and never do it silently.
@@ -534,10 +605,15 @@ window.minipaintClipboard = (function () {
      * rather than leaving the user to guess whether they mis-clicked.
      */
     function sendTo(target) {
-        if (!S.selected) { toast("Select an image first.", true); return; }
+        // Held for the whole round trip. The fallback runs twelve seconds
+        // after this point and used to read the selection again when it
+        // got there: a render landing in between left it with nothing to
+        // send, and it returned without a word.
+        const asset = S.selected;
+        if (!asset) { toast("Select an image first.", true); return; }
         note("send " + target + " chosen from the menu");
         const stamp = String(Date.now());
-        if (!sendInput(BOXES.sendRequest, target + ":" + S.selected + ":" + stamp)) {
+        if (!sendInput(BOXES.sendRequest, target + ":" + asset + ":" + stamp)) {
             // The hidden box is not on the page: the tab is half-built and
             // nothing was sent. This path used to return false and be
             // dropped by the caller, which is how a dead button stayed quiet.
@@ -545,7 +621,7 @@ window.minipaintClipboard = (function () {
             toast("Mini Paint could not reach its send control. Reload the page.", true);
             return;
         }
-        watchSend(target, stamp);
+        watchSend(target, stamp, asset);
     }
 
     /**
@@ -560,7 +636,7 @@ window.minipaintClipboard = (function () {
      * this call put on its own request, so there is exactly one value that
      * means "the server handled the thing I just asked for".
      */
-    function watchSend(target, stamp) {
+    function watchSend(target, stamp, asset) {
         if (S.sendWatch) { clearTimeout(S.sendWatch); S.sendWatch = null; }
         if (S.sendPoll) { clearInterval(S.sendPoll); S.sendPoll = null; }
         const done = function () {
@@ -570,15 +646,20 @@ window.minipaintClipboard = (function () {
         S.sendPoll = setInterval(function () {
             if (boxValue(BOXES.sendAck) !== stamp) { return; }
             done();
+            S.queueDown = false;
+            connectionNotice(false);
             note("send " + target + ": acknowledged by the server");
         }, 250);
+        const deadline = S.queueDown ? SEND_RETRY_TIMEOUT_MS : SEND_TIMEOUT_MS;
         S.sendWatch = setTimeout(function () {
             done();
             if (boxValue(BOXES.sendAck) === stamp) { return; }
+            S.queueDown = true;
             note("send " + target + ": no acknowledgement after "
-                 + Math.round(SEND_TIMEOUT_MS / 1000) + "s; falling back to the direct route");
-            sendOverHttp(target);
-        }, SEND_TIMEOUT_MS);
+                 + (deadline / 1000) + "s; falling back to the direct route");
+            connectionNotice(true);
+            sendOverHttp(target, asset);
+        }, deadline);
     }
 
     /**
@@ -594,8 +675,16 @@ window.minipaintClipboard = (function () {
      * way, so nothing is missing. The destinations the server writes cannot
      * be finished without it, and say so rather than looking like they went.
      */
-    async function sendOverHttp(target) {
-        if (!S.selected) { return false; }
+    async function sendOverHttp(target, asset) {
+        const picture = asset || S.selected;
+        if (!picture) {
+            // Reachable only if a send started with nothing selected, which
+            // sendTo refuses - but a fallback that can return without
+            // saying anything is how the last one of these went missing.
+            note("send " + target + ": there is no longer a picture to send");
+            toast("That send could not be finished: nothing is selected any more.", true);
+            return false;
+        }
         let plan;
         try {
             const response = await fetch(SEND_ROUTE, {
@@ -603,7 +692,7 @@ window.minipaintClipboard = (function () {
                 credentials: "same-origin",
                 cache: "no-store",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ target: target, asset: S.selected })
+                body: JSON.stringify({ target: target, asset: picture })
             });
             plan = await response.json();
         } catch (error) {
@@ -616,16 +705,36 @@ window.minipaintClipboard = (function () {
             toast((plan && plan.message) || "That picture could not be sent.", true);
             return false;
         }
+        if (plan.elem && plan.payload) {
+            const outcome = deliverByUpload(plan.elem, plan.payload, plan.filename);
+            if (outcome === "sent") {
+                note("send " + target + ": handed to " + plan.elem + " as an upload, without the queue");
+                toast("Sent " + plan.filename + " to " + (plan.label || target)
+                      + (plan.adds ? " (added to what is already there)" : "")
+                      + " (the page had lost its connection).");
+                return true;
+            }
+            if (outcome === "occupied") {
+                note("send " + target + ": " + plan.elem + " already holds a picture, so it has no upload to use");
+                toast((plan.label || target) + " already has a picture in it. Clear that one and send again, "
+                      + "or reconnect the page.", true);
+                return false;
+            }
+            note("send " + target + ": " + (outcome === "missing"
+                 ? plan.elem + " is not on this page" : "the picture could not be turned into a file"));
+            toast("There is no " + (plan.label || target) + " on this page to send to.", true);
+            return false;
+        }
         if (plan.backend || !plan.payload) {
-            // Extras and the ImageStitch galleries are written by the server.
             note("send " + target + ": prepared, but " + (plan.label || target)
-                 + " is filled in by the server and the connection is down");
+                 + " is not on this page to be written directly");
             toast((plan.label || target) + " is filled in by the server, so this one needs the connection back. "
                   + "Reload the page and try again.", true);
             return false;
         }
         const canvas = window.minipaintCanvas;
         if (!canvas || typeof canvas.deliverToHost !== "function") {
+            note("send " + target + ": the Canvas adapter this page delivers through is not loaded");
             toast("That send could not be completed by this page. Reload it and try again.", true);
             return false;
         }
@@ -638,6 +747,51 @@ window.minipaintClipboard = (function () {
         note("send " + target + ": delivered over the direct route without the queue");
         toast("Sent " + plan.filename + " to " + (plan.label || target) + " (the page had lost its connection).");
         return true;
+    }
+
+    /**
+     * Hand a Gradio component a picture as a file, the way a person would.
+     *
+     * The Extras image and the ImageStitch galleries hold their value in
+     * the component rather than in a box on the page, and the server writes
+     * them by returning a new value - a Gradio event, and so the queue. But
+     * a component that accepts uploads will take the same picture from its
+     * own file input, which travels the ordinary upload route: the half of
+     * the connection that is still working when the queue is not.
+     *
+     * The input is only there while the component is empty; once it holds a
+     * picture Gradio shows that instead. Saying so is more use than
+     * silently doing nothing.
+     */
+    function fileFromDataUrl(dataUrl, filename) {
+        const comma = String(dataUrl || "").indexOf(",");
+        if (comma < 0) { return null; }
+        const head = dataUrl.slice(0, comma);
+        const match = head.match(/data:([^;,]+)/);
+        const mime = (match && match[1]) || "image/png";
+        let binary;
+        try { binary = atob(dataUrl.slice(comma + 1)); } catch (e) { return null; }
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) { bytes[i] = binary.charCodeAt(i); }
+        return new File([bytes], filename || "clipboard.png", { type: mime });
+    }
+
+    function deliverByUpload(elemId, dataUrl, filename) {
+        const target = byId(elemId);
+        if (!target) { return "missing"; }
+        const input = target.querySelector('input[type="file"]');
+        if (!input) { return "occupied"; }
+        const file = fileFromDataUrl(dataUrl, filename);
+        if (!file) { return "unreadable"; }
+        try {
+            const transfer = new DataTransfer();
+            transfer.items.add(file);
+            input.files = transfer.files;
+        } catch (e) {
+            return "unreadable";
+        }
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        return "sent";
     }
 
     /* ------------------------------------------------------------------ */

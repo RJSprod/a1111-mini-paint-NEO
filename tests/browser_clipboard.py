@@ -108,9 +108,33 @@ TILES_JS = """() => Array.from(document.querySelectorAll('.minipaint-clip-item')
     const r = el.getBoundingClientRect();
     const t = el.querySelector('.minipaint-clip-thumb');
     const tr = t ? t.getBoundingClientRect() : null;
+    const im = el.querySelector('img');
+    const ir = im ? im.getBoundingClientRect() : null;
     return {name: el.dataset.name || '', w: Math.round(r.width), h: Math.round(r.height),
-            thumbW: tr ? Math.round(tr.width) : 0, thumbH: tr ? Math.round(tr.height) : 0};
+            thumbW: tr ? Math.round(tr.width) : 0, thumbH: tr ? Math.round(tr.height) : 0,
+            // How far the picture reaches past the tile that is meant to
+            // hold it, on the two sides a picture can run over.
+            spillY: ir ? Math.round(ir.bottom - r.bottom) : 0,
+            spillX: ir ? Math.round(ir.right - r.right) : 0};
 })"""
+
+# The tile's own geometry, with the box inside it prevented from doing any
+# of the work: the shape the grid was in when it was reported a second time.
+# Nothing here is hypothetical - it is what the page looked like on the
+# machine that reported it, and what the tile has to survive on its own.
+NO_THUMB_BOX_CSS = """
+#minipaint_clipboard_root .minipaint-clip-thumb {
+    display: inline !important;
+    width: auto !important;
+    flex: 0 0 auto !important;
+    aspect-ratio: auto !important;
+    overflow: visible !important;
+}
+#minipaint_clipboard_root .minipaint-clip-thumb img {
+    width: auto !important;
+    height: auto !important;
+}
+"""
 
 
 def box(page, elem_id):
@@ -216,8 +240,9 @@ def check_grid(r: Results, page) -> None:
     thumbs = sorted({(t["thumbW"], t["thumbH"]) for t in tiles})
     r.check("every tile is the same size, whatever shape its picture is",
             len(heights) == 1 and len(widths) == 1, f"heights {heights} widths {widths}")
-    r.check("and every thumbnail is the same square",
-            len(thumbs) == 1 and abs(thumbs[0][0] - thumbs[0][1]) <= 1, str(thumbs))
+    r.check("and every thumbnail box is the same size", len(thumbs) == 1, str(thumbs))
+    spilling = [(t["name"], t["spillX"], t["spillY"]) for t in tiles if t["spillY"] > 1 or t["spillX"] > 1]
+    r.check("and no picture is drawn outside the tile holding it", not spilling, str(spilling))
 
     # The slider. It writes a CSS variable; the grid has to be the element
     # that hears it, which is the whole of the bug this covers.
@@ -245,6 +270,46 @@ def check_grid(r: Results, page) -> None:
     kept = page.evaluate(TILES_JS)
     r.check("and a refresh does not snap the tiles back to the default",
             kept and kept[0]["w"] > 144, f"{kept[0]['w'] if kept else '?'}px after refresh")
+
+    check_tiles_hold_without_the_thumb_box(r, page)
+
+
+def check_tiles_hold_without_the_thumb_box(r: Results, page) -> None:
+    """The tile is uniform even when the box inside it is not helping.
+
+    The grid was reported a second time with the pictures at their own
+    natural sizes: tiles from 54px to 352px tall in one row, names running
+    out past the tile, tall pictures four times the height of the tile
+    meant to hold them. The rules were on the page and the markup was
+    right; the box inside the tile simply was not shaping anything, and a
+    tile whose height is whatever its content comes to has nothing left to
+    say when that happens.
+
+    So the grid is checked with that box explicitly prevented from doing any
+    of the work. The row's height comes from the same variable as the
+    columns and the tile clips what it holds, so neither the tile nor the
+    picture can grow - and the picture's own ceiling is stated in pixels
+    rather than as a percentage of a box that may have no height to give.
+    """
+    set_slider(page, 144)
+    time.sleep(0.6)
+    style = page.add_style_tag(content=NO_THUMB_BOX_CSS)
+    try:
+        page.wait_for_function(
+            "() => { const i = document.querySelectorAll('.minipaint-clip-item img');"
+            " return i.length && Array.from(i).every(x => x.complete); }", timeout=20000)
+        time.sleep(0.4)
+        tiles = page.evaluate(TILES_JS)
+        heights = sorted({t["h"] for t in tiles})
+        widths = sorted({t["w"] for t in tiles})
+        r.check("with the thumb box doing nothing, the tiles are still all one size",
+                len(tiles) > 1 and len(heights) == 1 and len(widths) == 1,
+                f"heights {heights} widths {widths}")
+        spilling = [(t["name"], t["spillX"], t["spillY"]) for t in tiles if t["spillY"] > 1 or t["spillX"] > 1]
+        r.check("and no picture is drawn outside its tile even then", not spilling, str(spilling))
+    finally:
+        style.evaluate("el => el.remove()")
+        time.sleep(0.4)
 
 
 # --------------------------------------------------------------------------
@@ -362,27 +427,101 @@ def check_send_survives_a_dead_queue(r: Results, page, targets) -> None:
         time.sleep(3)
 
 
-def check_backend_destination_is_honest(r: Results, page) -> None:
-    """A destination the server writes cannot be finished without it."""
-    if not select_first(page):
+def check_a_component_destination_fills_without_the_queue(r: Results, page, targets) -> None:
+    """The destinations the server writes are filled here instead.
+
+    img2img and Inpaint were always finishable in the browser: their picture
+    goes in a hidden textbox on the page. Extras and the two ImageStitch
+    galleries hold their value in the component, and the server fills them
+    by returning a new value - a Gradio event, and so the queue, which is
+    the half of the connection that had stopped. Those three were the sends
+    that kept doing nothing.
+
+    A component that takes uploads will take the same picture from its own
+    file input, and an upload is ordinary HTTP. So the queue is cut, and the
+    gallery has to end up holding the picture anyway.
+    """
+    open_clipboard(page)
+    key = "stitch_txt2img" if "stitch_txt2img" in targets else ("extras" if "extras" in targets else "")
+    elem_id = getattr(targets.get(key), "elem_id", "") or ""
+    if not elem_id:
+        r.check("dead queue: a component destination is on the page to test", False, f"{key!r}")
         return
+    label = {"stitch_txt2img": "ImageStitch (txt2img)", "extras": "Extras"}[key]
+
+    def pictures():
+        return page.evaluate("id => { const h = document.getElementById(id);"
+                             " return h ? h.querySelectorAll('img').length : -1; }", elem_id)
+
+    if not select_first(page):
+        r.check(f"dead queue: a picture is selected before sending to {label}", False, "no selection")
+        return
+    before = pictures()
+    # Only the queue. The upload route, the event stream and the thumbnails
+    # are plain HTTP and were working throughout the reported failure.
     page.route("**/queue/**", lambda route: route.abort())
-    page.route("**/gradio_api/**", lambda route: route.abort())
     try:
         record_toasts(page, reset=True)
-        send_selected(page, "ImageStitch (txt2img)")
-        said = []
+        r.check(f"dead queue: the menu offers {label}", send_selected(page, label) == "clicked")
+        landed, said = False, []
         for _ in range(30):
             time.sleep(1)
+            landed = landed or pictures() > before
             said = recorded_toasts(page)
-            if any("needs the connection back" in one or "never reached" in one for one in said):
+            if landed and said:
                 break
-        r.check("dead queue: a server-written destination says so instead of looking sent",
-                any("needs the connection back" in one or "never reached" in one for one in said), str(said))
+        r.check(f"dead queue: {label} is filled anyway, over the upload route",
+                landed, f"pictures in {elem_id}: {before} -> {pictures()}")
+        r.check("dead queue: and the page says how it got there",
+                any("lost its connection" in one for one in said), str(said))
+        r.check("dead queue: the page offers to reconnect rather than leaving it to be guessed",
+                page.evaluate("() => { const b = document.querySelector('.minipaint-clip-offline');"
+                              " return !!(b && !b.hidden && b.querySelector('.minipaint-clip-offline-reconnect')); }"))
     finally:
         page.unroute("**/queue/**")
-        page.unroute("**/gradio_api/**")
         time.sleep(3)
+
+
+def check_a_render_cannot_take_the_selection(r: Results, page) -> None:
+    """A render must not clear a selection this page made.
+
+    A selection is made in the browser and reaches the server as a Gradio
+    event, so while the queue is not delivering, the server's idea of what
+    is selected stays empty - and every render carries that back. Adopting
+    it took the picture out from under the user: the Send menu came up with
+    every destination greyed out and "Select an image first" at the top,
+    with a picture plainly selected on the grid, and a send already waiting
+    on its fallback lost the asset it was about to send.
+    """
+    open_clipboard(page)
+    if not select_first(page):
+        r.check("a render cannot take the selection: a picture is selected first", False, "no selection")
+        return
+    chosen = page.evaluate("() => window.minipaintClipboard.debug().selected")
+    # What a render from a server that never heard about the selection looks
+    # like when it lands: the box emptied, then the page told to re-read it.
+    page.evaluate("""() => {
+        const host = document.getElementById('minipaint_clipboard_selected');
+        const t = host && host.querySelector('textarea,input');
+        if (t) { t.value = ''; t.dispatchEvent(new Event('input', {bubbles: true})); }
+        window.minipaintClipboard.afterRender();
+    }""")
+    time.sleep(0.5)
+    kept = page.evaluate("() => window.minipaintClipboard.debug().selected")
+    r.check("a render saying nothing is selected does not clear the selection",
+            kept == chosen and bool(kept), f"{chosen!r} -> {kept!r}")
+    r.check("and the tile is still shown as the selected one",
+            page.evaluate("() => { const el = document.querySelector('.minipaint-clip-item.minipaint-clip-selected');"
+                          " return el ? el.dataset.asset : ''; }") == chosen)
+    page.evaluate("() => window.minipaintClipboard.toggleMenu()")
+    time.sleep(0.4)
+    menu_click(page, "Send selected to")
+    time.sleep(0.4)
+    offered = page.evaluate(MENU_ITEMS_JS)
+    r.check("and the send menu still offers its destinations",
+            any(one.startswith("img2img") and "[disabled]" not in one for one in offered), str(offered))
+    page.evaluate("() => window.minipaintClipboard.closeMenu()")
+    time.sleep(0.3)
 
 
 def check_recovers_after_the_interruption(r: Results, page, targets) -> None:
@@ -544,7 +683,8 @@ def run() -> Results:
                 check_tab_switching_survives_reordering(r, page)
                 check_recovers_after_the_interruption(r, page, targets)
                 check_send_survives_a_dead_queue(r, page, targets)
-                check_backend_destination_is_honest(r, page)
+                check_a_component_destination_fills_without_the_queue(r, page, targets)
+                check_a_render_cannot_take_the_selection(r, page)
             finally:
                 browser.close()
     finally:

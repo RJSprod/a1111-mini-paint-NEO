@@ -29,17 +29,30 @@ The answer:
      "backend": false, "instruction": "img2img", "box": "uuid_...",
      "payload": "data:image/png;base64,..."}
 
-`payload` and `box` are present for `img2img` and `inpaint` only. Those two
-are delivered by the browser writing the host canvas's hidden textbox - which
-is browser work however the send was carried - so they finish completely with
-no server events at all. `box` is named by the server because only it knows
-which canvas the host registered for that tab, and because ForgeCanvas gives
-its background and scribble boxes the same id and tells them apart by class.
+`payload` is present for every destination but `minipaint`, with one of two
+ways to place it:
 
-`backend: true` marks a destination the server has to write itself - the
-Extras image, the ImageStitch galleries. There is no payload for those and the
-browser is told so plainly, rather than being handed something it cannot
-deliver and reporting a send that did not happen.
+* `box` - `img2img` and `inpaint`. The browser writes the host canvas's hidden
+  textbox, which is browser work however the send was carried. `box` is named
+  by the server because only it knows which canvas the host registered for
+  that tab, and because ForgeCanvas gives its background and scribble boxes
+  the same id and tells them apart by class.
+
+* `elem` - the Extras image and the two ImageStitch galleries, which hold
+  their value in the component rather than in a box on the page. The server
+  fills those by returning a new value, which is a Gradio event and so the
+  queue; the browser fills the same component by handing its file input the
+  picture, which is the ordinary upload route and is not. `adds: true` says
+  the component keeps what is already in it (the galleries) where the
+  server's write replaces the lot, so the page can say which happened.
+
+        {"ok": true, "target": "stitch_txt2img", "elem": "script_txt2img_…_ref_latent",
+         "adds": true, "backend": false, "payload": "data:image/png;base64,…"}
+
+`backend: true` is left only when no component can be named - the destination
+is not on this page at all. There is no payload for that, and the browser is
+told so plainly rather than being handed something it cannot deliver and
+reporting a send that did not happen.
 
 Both this route and the tab's own Gradio path decide what a send means in one
 place, `ui.send_plan`, so they cannot drift apart. The route answers from the

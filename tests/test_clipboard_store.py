@@ -395,9 +395,41 @@ def send_route_checks(r: Results, base) -> None:
             "box" in body, str(sorted(body)))
     r.check("and is not marked as one the server has to finish", body.get("backend") is False, str(body.get("backend")))
 
-    stitched = client.post(routes.SEND_ROUTE, json={"target": "stitch_txt2img", "asset": asset.asset_id}).json()
-    r.check("a destination the server writes says so and hands over no payload",
-            stitched.get("ok") and stitched.get("backend") is True and not stitched.get("payload"), str(stitched)[:160])
+    # The stitch galleries hold their value in the component. When this
+    # process has no component to name, there is nothing the browser could
+    # fill and the plan says so rather than handing over a payload it
+    # cannot place.
+    from minipaint_neo.canvas import host as canvas_host
+
+    class _Component:
+        def __init__(self, elem_id):
+            self.elem_id = elem_id
+
+    held = clip_ui._current.get("tab")
+    clip_ui._current["tab"] = None
+    canvas_host.reset_capture()
+    try:
+        stitched = client.post(routes.SEND_ROUTE, json={"target": "stitch_txt2img", "asset": asset.asset_id}).json()
+        r.check("a destination with no component on this page says so and hands over no payload",
+                stitched.get("ok") and stitched.get("backend") is True and not stitched.get("payload"),
+                str(stitched)[:160])
+
+        # And when there is one: its id and the picture, which is all the
+        # browser needs to hand it the file over the upload route - the half
+        # of the connection that still works when the queue does not.
+        canvas_host._captured["stitch_txt2img"] = _Component("script_txt2img_imagestitch_integrated_ref_latent")
+        canvas_host._captured["stitch_txt2img_enable"] = _Component("script_txt2img_imagestitch_integrated-checkbox")
+        named = client.post(routes.SEND_ROUTE, json={"target": "stitch_txt2img", "asset": asset.asset_id}).json()
+        r.check("a destination with a component names it and carries the picture",
+                named.get("ok") and named.get("backend") is False
+                and named.get("elem") == "script_txt2img_imagestitch_integrated_ref_latent"
+                and str(named.get("payload", "")).startswith("data:image/"),
+                str({k: (v[:24] if k == "payload" else v) for k, v in named.items()})[:200])
+        r.check("and says a gallery keeps what is already in it, where the server's write replaces it",
+                named.get("adds") is True, str(named.get("adds")))
+    finally:
+        canvas_host.reset_capture()
+        clip_ui._current["tab"] = held
 
     unknown = client.post(routes.SEND_ROUTE, json={"target": "nowhere", "asset": asset.asset_id})
     r.check("a destination that is not one is refused", unknown.status_code == 400 and not unknown.json().get("ok"))

@@ -27,11 +27,9 @@ checkout to run.
 
 from __future__ import annotations
 
-import json
 import os
 import pathlib
 import sys
-import threading
 import time
 
 for _key in ("no_proxy", "NO_PROXY"):
@@ -278,39 +276,81 @@ def check_send(r: Results, page, targets) -> None:
         open_clipboard(page)
 
 
-def check_send_reports_a_dead_connection(r: Results, page) -> None:
-    """A send that never reaches the server must say so.
+def check_send_survives_a_dead_queue(r: Results, page, targets) -> None:
+    """A send finishes even when the Gradio queue stops delivering.
 
-    This is the failure the user hit and the reason it was so hard to place:
-    the menu item worked, the hidden box was written, the note about it
-    reached the server over plain HTTP - and the Gradio event carrying the
-    send never arrived. Nothing appeared, nothing failed, and nothing in the
-    page or the log said which of the two had happened.
+    This is the failure the user hit. The menu worked, the hidden box was
+    written, the note about it reached the server over plain HTTP - and the
+    Gradio event carrying the send never arrived, so nothing happened and
+    nothing said why. Everything else the tab does for a running job rides
+    ordinary HTTP and kept working; only the actions were tied to the queue.
+
+    So the queue is cut here while HTTP is left alone, which is the shape of
+    the real failure, and the send has to finish anyway.
     """
-    context = page.context
-    before = box(page, "minipaint_clipboard_send_ack")
     if not select_first(page):
-        r.check("offline: a picture is selected before the connection drops", False, "no selection")
+        r.check("dead queue: a picture is selected first", False, "no selection")
         return
-    context.set_offline(True)
+
+    box_id = getattr(targets.get("img2img"), "elem_id", "") or ""
+    def host_value():
+        return page.evaluate("id => { const h = document.querySelector('.logical_image_background[id=\"' + id + '\"]');"
+                             " const t = h && h.querySelector('textarea,input'); return t ? String(t.value || '').length : -1; }", box_id)
+
+    # Cut only Gradio's queue. Plain HTTP - the event stream, the routes -
+    # is untouched, exactly as in the report.
+    # Empty the destination first. An earlier send in this run put the same
+    # picture there, and the same picture is the same number of bytes - so a
+    # test that watches the length would pass without anything happening.
+    page.evaluate("""id => {
+        const h = document.querySelector('.logical_image_background[id="' + id + '"]');
+        const t = h && h.querySelector('textarea,input');
+        if (t) { t.value = ''; t.dispatchEvent(new Event('input', {bubbles: true})); }
+    }""", box_id)
+    time.sleep(1)
+    r.check("dead queue: the destination starts empty", host_value() == 0, str(host_value()))
+
+    page.route("**/queue/**", lambda route: route.abort())
+    page.route("**/gradio_api/**", lambda route: route.abort())
     try:
-        r.check("offline: the send is actually attempted", send_selected(page, "img2img") == "clicked")
-        r.check("offline: the request box is still written", bool(box(page, "minipaint_clipboard_send_request")))
-        # The watchdog waits SEND_TIMEOUT_MS (12s) for the receipt.
-        spoke = ""
-        for _ in range(20):
+        r.check("dead queue: the send is attempted", send_selected(page, "img2img") == "clicked")
+        landed, said = False, ""
+        for _ in range(26):
             time.sleep(1)
-            spoke = toast(page)
-            if spoke:
+            said = toast(page) or said
+            if host_value() > 0:
+                landed = True
                 break
-        r.check("offline: the page says the send never reached the server",
-                "never reached the server" in spoke, repr(spoke))
-        r.check("offline: and no receipt arrived to contradict it",
-                box(page, "minipaint_clipboard_send_ack") == before,
-                repr(box(page, "minipaint_clipboard_send_ack")))
+        r.check("dead queue: the picture still reaches img2img, over plain HTTP",
+                landed, f"host textbox length {host_value()}")
+        r.check("dead queue: and the page says how it got there",
+                "lost its connection" in said or said.startswith("Sent "), repr(said))
     finally:
-        context.set_offline(False)
-        time.sleep(6)
+        page.unroute("**/queue/**")
+        page.unroute("**/gradio_api/**")
+        time.sleep(3)
+
+
+def check_backend_destination_is_honest(r: Results, page) -> None:
+    """A destination the server writes cannot be finished without it."""
+    if not select_first(page):
+        return
+    page.route("**/queue/**", lambda route: route.abort())
+    page.route("**/gradio_api/**", lambda route: route.abort())
+    try:
+        send_selected(page, "ImageStitch (txt2img)")
+        said = ""
+        for _ in range(26):
+            time.sleep(1)
+            said = toast(page)
+            if said:
+                break
+        r.check("dead queue: a server-written destination says so instead of looking sent",
+                "needs the connection back" in said or "never reached" in said, repr(said))
+    finally:
+        page.unroute("**/queue/**")
+        page.unroute("**/gradio_api/**")
+        time.sleep(3)
 
 
 def check_recovers_after_the_interruption(r: Results, page, targets) -> None:
@@ -329,6 +369,110 @@ def check_recovers_after_the_interruption(r: Results, page, targets) -> None:
             repr(box(page, "minipaint_clipboard_send_ack")))
 
 
+def check_tab_switching_survives_reordering(r: Results, page) -> None:
+    """Tabs get reordered and hidden; a send must still land on the right one.
+
+    The switch used to fall back to counting - the panel's index among the
+    panels, then the button at that index - which only works while every
+    panel has a button and both lists are in the same order. Reorder the
+    tabs, or hide one, and it lands a tab over: a picture sent to Extras
+    opened PNG Info.
+    """
+    def visible_panel():
+        return page.evaluate("() => (Array.from(document.querySelectorAll('#tabs > .tabitem'))"
+                             ".filter(i => getComputedStyle(i).display !== 'none')[0] || {}).id || ''")
+
+    ours = {"canvas": "tab_minipaint", "clipboard": "tab_minipaint_clipboard"}
+    for name, panel in ours.items():
+        page.evaluate("n => window.minipaintCanvas.switchTo(n)", name)
+        time.sleep(1.2)
+        r.check(f"switchTo({name}) shows its own tab, in the page's natural order",
+                visible_panel() == panel, f"{visible_panel()} (wanted {panel})")
+
+    # Reverse the tab buttons. Nothing about which button controls which panel
+    # changes - only their order - so every switch must still be exact.
+    page.evaluate("""() => {
+        const nav = document.querySelector('#tabs > .tab-nav');
+        Array.from(nav.children).reverse().forEach(b => nav.appendChild(b));
+    }""")
+    time.sleep(0.5)
+    for name, panel in ours.items():
+        page.evaluate("n => window.minipaintCanvas.switchTo(n)", name)
+        time.sleep(1.2)
+        r.check(f"switchTo({name}) still shows its own tab with the tabs reversed",
+                visible_panel() == panel, f"{visible_panel()} (wanted {panel})")
+
+    # A tab that is not on the page is not a tab to guess at. This page has
+    # no WanGP tab, and the old positional fallback would have counted its
+    # way onto whichever tab happened to sit at that index.
+    r.check("the page really has no WanGP tab to find",
+            not page.evaluate("() => !!document.querySelector('#tab_minipaint_wangp')"))
+    page.evaluate("() => window.minipaintCanvas.switchTo('canvas')")
+    time.sleep(1.2)
+    was = visible_panel()
+    page.evaluate("() => window.minipaintCanvas.switchTo('wangp')")
+    time.sleep(1.2)
+    r.check("a switch to a tab that is not on the page moves nothing, rather than guessing",
+            visible_panel() == was, f"{was} -> {visible_panel()}")
+    page.reload(wait_until="load")
+    page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
+    time.sleep(2)
+
+    # A host that does not label its buttons with aria-controls leaves only
+    # counting, and counting is sound only while every panel has a button.
+    # Take one button away and the lists slide past each other - which is
+    # exactly when the old code opened the tab next door.
+    page.evaluate("""() => {
+        document.querySelectorAll('#tabs > .tab-nav button').forEach(b => b.removeAttribute('aria-controls'));
+    }""")
+    page.evaluate("() => window.minipaintCanvas.switchTo('canvas')")
+    time.sleep(1.2)
+    r.check("without aria-controls, counting still finds the tab while the lists line up",
+            visible_panel() == "tab_minipaint", visible_panel())
+
+    page.evaluate("""() => {
+        const nav = document.querySelector('#tabs > .tab-nav');
+        if (nav.firstElementChild) { nav.firstElementChild.remove(); }
+    }""")
+    time.sleep(0.4)
+    settled = visible_panel()
+    page.evaluate("() => window.minipaintCanvas.switchTo('clipboard')")
+    time.sleep(1.2)
+    r.check("but with a button missing it refuses to count, rather than opening the tab next door",
+            visible_panel() in (settled, "tab_minipaint_clipboard"),
+            f"{settled} -> {visible_panel()}")
+    r.check("and it certainly does not land on an unrelated tab",
+            visible_panel() not in ("tab_txt2img", "tab_extras", "tab_pnginfo", "tab_settings", "tab_extensions"),
+            visible_panel())
+    page.reload(wait_until="load")
+    page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
+    time.sleep(2)
+
+
+def check_hidden_tab_is_not_offered(r: Results, targets) -> None:
+    """A destination whose tab the user hid is not offered at all.
+
+    Forge does not build a hidden tab, so its components are never captured
+    and the menu cannot list it - which is the right answer, and worth a
+    check because the alternative (offering it and sending into nothing) is
+    exactly the kind of quiet half-success this tab has had enough of.
+    """
+    import forge_like
+    from modules import script_callbacks, shared
+    from minipaint_neo import router, settings
+    from minipaint_neo.canvas import host
+
+    shared.opts.data[settings.USE_OLD_UI] = False
+    script_callbacks.callbacks["after_component"][:] = [host.on_after_component]
+    host.reset_capture()
+    forge_like.build_host(lambda: router.on_ui_tabs() or [], hidden_tabs=("Extras",))
+    hidden = host.destinations()
+    r.check("with the Extras tab hidden, Extras is not a destination",
+            "extras" not in hidden, str(sorted(hidden)))
+    r.check("and the tabs that are still there still are",
+            "img2img" in hidden and "inpaint" in hidden, str(sorted(hidden)))
+
+
 def run() -> Results:
     r = Results("browser clipboard")
     from playwright.sync_api import sync_playwright  # noqa: F401  (ImportError -> run.py skips)
@@ -343,6 +487,8 @@ def run() -> Results:
     demo.queue().launch(server_name="127.0.0.1", server_port=PORT, prevent_thread_lock=True,
                         quiet=True, allowed_paths=[str(ROOT)])
     assets.install(demo.app)
+    from minipaint_neo.clipboard import routes as clip_routes
+    clip_routes.install(demo.app)
     targets = host.destinations()
     try:
         with sync_playwright() as p:
@@ -359,8 +505,10 @@ def run() -> Results:
                 r.check("a picture can be selected", select_first(page),
                         repr(box(page, "minipaint_clipboard_selected")))
                 check_send(r, page, targets)
-                check_send_reports_a_dead_connection(r, page)
+                check_send_survives_a_dead_queue(r, page, targets)
+                check_backend_destination_is_honest(r, page)
                 check_recovers_after_the_interruption(r, page, targets)
+                check_tab_switching_survives_reordering(r, page)
             finally:
                 browser.close()
     finally:

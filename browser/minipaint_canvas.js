@@ -2631,6 +2631,73 @@ window.minipaintCanvas = (function () {
      * click its native tab button, the same thing the host's helpers do for
      * theirs, found by the panel it controls. One switcher, one table.
      */
+    /**
+     * Put a picture into one of the host's own canvases, from the browser.
+     *
+     * This is what the Gradio step does when the queue is working: the
+     * host's canvas takes its picture from a hidden textbox, and writing
+     * that textbox is browser work either way. Doing it directly is what
+     * lets a send finish while the queue is not delivering anything - see
+     * sendOverHttp in the Clipboard bundle.
+     *
+     * The box is named by the server, not found by guesswork: ForgeCanvas
+     * gives its background and scribble textboxes the same id and tells them
+     * apart by class, and only the server knows which canvas the host
+     * registered for a given tab.
+     */
+    function deliverToHost(instruction, payload, boxId) {
+        const name = String(instruction || "").split(":")[0];
+        const id = String(boxId || "");
+        if (!id || !payload) { return false; }
+        const root = app();
+        const host = root.querySelector('.logical_image_background[id="' + id + '"]')
+            || root.querySelector('[id="' + id + '"].logical_image_background');
+        const field = host ? host.querySelector("textarea, input") : null;
+        if (!field) { return false; }
+        field.value = String(payload);
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        // Inpaint carries a mask layer, and the queued path clears it in the
+        // same breath as the picture. A new picture under the previous
+        // picture's mask is not the same send, so it is cleared here too.
+        if (name === "inpaint") {
+            const mask = root.querySelector('.logical_image_foreground[id="' + id + '"]')
+                || root.querySelector('[id="' + id + '"].logical_image_foreground');
+            const maskField = mask ? mask.querySelector("textarea, input") : null;
+            if (maskField) {
+                maskField.value = "";
+                maskField.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+        }
+        switchTo(name);
+        return true;
+    }
+
+    //: The host's own tab panels, for the fallback below. The helper is
+    //: still preferred: it is the host's, and it knows about sub-tabs.
+    const HOST_PANELS = {
+        txt2img: "tab_txt2img", img2img: "tab_img2img", inpaint: "tab_img2img",
+        extras: "tab_extras", stitch_txt2img: "tab_txt2img", stitch_img2img: "tab_img2img"
+    };
+
+    /**
+     * Show the tab a picture was just sent to.
+     *
+     * NEVER BY POSITION.
+     *
+     * This used to fall back to counting: find the panel's index among the
+     * tab panels, then click the button at that index. The two lists only
+     * line up when every panel has a button and both are in the same order,
+     * and neither holds on a real install - tabs get reordered, and a tab
+     * the user has hidden leaves a panel with no button (or a button with no
+     * panel). Then the counting quietly lands one tab over: a picture sent
+     * to Extras opened PNG Info, and the send looked broken because the user
+     * was looking at the wrong tab.
+     *
+     * Every lookup here is by identity - the button that controls this
+     * panel - so the order of the tabs does not matter and cannot matter.
+     * Where identity finds nothing, this does nothing and says so: a tab
+     * that is not on the page is not a tab to guess at.
+     */
     function switchTo(target) {
         const helpers = {
             txt2img: "switch_to_txt2img", img2img: "switch_to_img2img", inpaint: "switch_to_inpaint", extras: "switch_to_extras",
@@ -2639,22 +2706,40 @@ window.minipaintCanvas = (function () {
         const ours = { canvas: TAB_PANEL_ID, wangp: WANGP_TAB_PANEL_ID, clipboard: CLIPBOARD_TAB_PANEL_ID };
         const name = String(target || "").split(":")[0];
         if (name in helpers) {
-            if (typeof window[helpers[name]] === "function") { window[helpers[name]](); }
+            if (typeof window[helpers[name]] === "function") { window[helpers[name]](); return; }
+            // A host without that global, or one whose tab set this build
+            // does not have: fall back to the panel, still by identity.
+            if (!showTab(HOST_PANELS[name])) {
+                console.warn("MiniPaint: no " + name + " tab on this page to switch to.");
+            }
             return;
         }
-        const panelId = ours[name];
-        if (!panelId) { return; }
-        const nav = app().querySelector("#tabs > .tab-nav");
-        if (!nav) { return; }
+        if (!showTab(ours[name])) {
+            if (ours[name]) { console.warn("MiniPaint: no " + name + " tab on this page to switch to."); }
+        }
+    }
+
+    /** Click the tab button that controls this panel. True if there was one. */
+    function showTab(panelId) {
+        if (!panelId) { return false; }
+        const root = app();
+        const nav = root.querySelector("#tabs > .tab-nav");
+        if (!nav) { return false; }
         let button = nav.querySelector('button[aria-controls="' + panelId + '"]');
         if (!button) {
-            const panel = app().querySelector("#" + panelId);
-            const panels = Array.from(app().querySelectorAll("#tabs > .tabitem"));
-            const index = panels.indexOf(panel);
-            const buttons = nav.querySelectorAll("button");
-            if (index >= 0 && buttons[index]) { button = buttons[index]; }
+            const panels = Array.from(root.querySelectorAll("#tabs > .tabitem"));
+            const buttons = Array.from(nav.querySelectorAll("button"));
+            const index = panels.indexOf(root.querySelector("#" + panelId));
+            // Only when the lists line up one for one. Otherwise there is no
+            // honest way to say which button belongs to this panel.
+            if (index >= 0 && panels.length === buttons.length) { button = buttons[index]; }
         }
-        if (button && !button.classList.contains("selected")) { button.click(); }
+        if (!button) { return false; }
+        // A hidden tab has a button that cannot be pressed; treat it as absent
+        // rather than clicking something the user cannot see the result of.
+        if (button.disabled || button.offsetParent === null) { return false; }
+        if (!button.classList.contains("selected")) { button.click(); }
+        return true;
     }
 
     /* ------------------------------------------------------------------ */
@@ -2685,6 +2770,7 @@ window.minipaintCanvas = (function () {
         detach: detach,
         attachedTo: attachedTo,
         gripFraction: gripFraction,
+        deliverToHost: deliverToHost,
         attached: attached,
         mark: mark,
         waitForImage: waitForImage,

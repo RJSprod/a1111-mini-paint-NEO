@@ -243,10 +243,48 @@ _ROOTED = re.compile(
     re.VERBOSE,
 )
 
+#: The characters a *name* is made of, shared by the two rules below so they
+#: cannot drift apart again - they already had, and the narrower one was the
+#: leak. See the note on ``_BARE_WORD``.
+_NAME_CHARS = r"\w.~%+&'()\[\]!#@$^=-"
+
+#: The same, minus the quotes, for the two positions where a quote is a
+#: delimiter rather than a letter: the first character of a path, and the
+#: first character after a space the match steps over.
+#:
+#: A folder really can be called "Ray's", and the apostrophe there sits in
+#: the middle of a word - so ``_PATH_CHARS`` keeps it. What a quote must not
+#: do is let a match *begin* across one: "Lora 'loras\..." would then match
+#: from "Lora", and a whole clause ("The user loaded lora '...") would go
+#: into a single <path> with the words that said what happened. A quote
+#: right after a space is a log putting quotes around a path; a quote inside
+#: a word is a name. This is the difference between the two.
+_PATH_EDGE = r"\w.~%+&()\[\]!#@$^=-"
+
+#: One character inside a relative path, plus a space where a separator still
+#: follows it before the next whitespace. That last clause is the same rule
+#: ``_INSIDE`` applies to a rooted path, and it is here for the same reason:
+#: "loras\Ray Personal\portrait.safetensors" is one path, and a rule that
+#: stopped at the space printed the first half of somebody's name.
+_REL_INSIDE = (
+    r"(?:[" + _NAME_CHARS + r"]"
+    + r"|[ ](?=[" + _PATH_EDGE + r"][ " + _NAME_CHARS + r"]*[\\/]))"
+)
+
 #: A relative path, recognised only when it ends in a filename with an
 #: extension. Without that condition "1.2it/s" in a progress bar reads as a
 #: path, and a log full of <path> where the speed used to be helps nobody.
-_RELATIVE = r"[\w.~%+-]+[\\/](?:[\w.~%+-]+[\\/])*[\w.~%+-]+\.[A-Za-z0-9]{1,12}\b"
+#:
+#: A DIRECTORY SOMEBODY NAMED IS AS MUCH A NAME AS THE FILE IN IT. This used
+#: to be spelled with a narrower class than the filename rule, so a folder
+#: called "Ray Personal" or "!favourites" ended the match and was printed:
+#: "loras\Ray <path>/*.safetensors". The file was protected and the person
+#: was not.
+_RELATIVE = (
+    r"[" + _PATH_EDGE + r"]" + _REL_INSIDE + r"*"
+    + r"(?:[\\/]" + _REL_INSIDE + r"*)+"
+    + r"\.[A-Za-z0-9]{1,12}\b"
+)
 
 #: Both shapes in one expression, substituted in one pass. That is not tidying:
 #: ``re.sub`` never looks at what it has just written, so a single pass is what
@@ -261,7 +299,29 @@ _PATH = re.compile(
 #: are sentence rather than name. Whether it is redacted at all is decided by
 #: the extension, so ``wgp.py`` in a traceback survives and
 #: ``a photo of Sarah.mp4`` does not.
-_BARE_WORD = r"[\w.~%+&'()\[\]-]+"
+#: What a word of a filename may be made of.
+#:
+#: AN ALLOWLIST OF CHARACTERS FAILS OPEN, AND THIS ONE DID.
+#:
+#: Every character not on the list ends the match, and the rule then starts
+#: again *after* it - so the part of the name before it is handed back
+#: unredacted. ``SMACK! Bass Slap v2.safetensors`` came out as
+#: ``SMACK! <file>.safetensors``: the extension was recognised, the tail was
+#: taken, and the word the user chose was printed. ``!`` is not exotic in a
+#: LoRA folder either - it is how people sort one to the top.
+#:
+#: So the ones that turn up in names people choose are on the list: ``!``
+#: for sorting, ``#`` and ``@`` in a tag, ``$``, ``^`` and ``=`` in a
+#: version. Deliberately absent, and each for a reason rather than an
+#: oversight: ``,`` and ``;`` are what Wan2GP writes *between* LoRAs and
+#: between phases, so a word that could contain one would swallow the whole
+#: list as a single name; ``{}<>|*?"`` and the separators are log structure
+#: and cannot occur in a Windows filename anyway.
+#:
+#: Widening this cannot leak by absorbing a sentence: the match must still
+#: end in a content extension, and ``_replace_bare`` hands back every
+#: leading word that is sentence rather than name.
+_BARE_WORD = r"[" + _NAME_CHARS + r"]+"
 _CONTENT_ALTERNATION = "|".join(
     re.escape(suffix[1:]) for suffix in sorted(CONTENT_SUFFIXES, key=len, reverse=True)
 )

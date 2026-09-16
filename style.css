@@ -1011,6 +1011,118 @@
     background: var(--block-background-fill, transparent);
 }
 
+/* The browser draws the grid and the row under it, into the element the
+   server used to fill. One wrapper so the two are laid out together and the
+   grid keeps its own scroll box. */
+#minipaint_clipboard_root .minipaint-clip-mount {
+    display: flex;
+    flex-direction: column;
+    gap: var(--minipaint-clip-gap, 8px);
+    min-width: 0;
+}
+
+/* One row, and it does not change width as you move through it: the ends
+   are disabled rather than hidden, and the count sits at the far end where
+   it is read rather than scanned. */
+#minipaint_clipboard_root .minipaint-clip-pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--minipaint-clip-gap, 8px);
+    font-size: var(--text-sm, 0.85em);
+    color: var(--body-text-color, inherit);
+}
+
+#minipaint_clipboard_root .minipaint-clip-pager[hidden] {
+    display: none;
+}
+
+#minipaint_clipboard_root .minipaint-clip-pager button {
+    min-height: var(--minipaint-clip-target, 32px);
+    padding: 0 10px;
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    border-radius: var(--radius-sm, 6px);
+    background: var(--button-secondary-background-fill, transparent);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-pager button:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+#minipaint_clipboard_root .minipaint-clip-pager-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-pager-number {
+    width: 4.5em;
+    min-height: var(--minipaint-clip-target, 32px);
+    padding: 0 6px;
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    border-radius: var(--radius-sm, 6px);
+    background: var(--input-background-fill, transparent);
+    color: inherit;
+    font: inherit;
+    text-align: center;
+}
+
+/* The whole library's count, at the far end of the row. */
+#minipaint_clipboard_root .minipaint-clip-pager-count {
+    margin-left: auto;
+    color: var(--body-text-color-subdued, inherit);
+}
+
+/* Where the selection is, when you have paged away from it. Quiet: being
+   told is useful, being moved is not. */
+#minipaint_clipboard_root .minipaint-clip-pager-mark {
+    font-size: inherit;
+    opacity: 0.85;
+}
+
+#minipaint_clipboard_root .minipaint-clip-pager-mark[hidden] {
+    display: none;
+}
+
+/* A sort that has been asked for and not yet arrived. The tiles are the
+   ones that were right when they were drawn, and they stay until the new
+   order lands - subdued, so the page says it is working without lying about
+   what it is showing. */
+#minipaint_clipboard_root .minipaint-clip-grid[aria-busy="true"] {
+    opacity: 0.55;
+    transition: opacity 120ms ease-out;
+}
+
+/* A thumbnail that 404s costs that tile its picture and nothing else. */
+#minipaint_clipboard_root .minipaint-clip-item-missing .minipaint-clip-thumb::after {
+    content: "?";
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    border: 1px dashed var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    border-radius: var(--radius-sm, 6px);
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 1.4em;
+}
+
+#minipaint_clipboard_root .minipaint-clip-item-missing img {
+    display: none;
+}
+
+/* The empty and unconfigured states, drawn where the tiles would be. */
+#minipaint_clipboard_root .minipaint-clip-nothing {
+    grid-column: 1 / -1;
+    margin: 0;
+    padding: 12px;
+    color: var(--body-text-color-subdued, inherit);
+}
+
 #minipaint_clipboard_root .minipaint-clip-empty {
     display: block;
     color: var(--body-text-color-subdued, inherit);

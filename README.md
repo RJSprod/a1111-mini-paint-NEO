@@ -423,6 +423,21 @@ and *Send selected to* Mini Paint, img2img, Inpaint, Extras or ImageStitch by th
 routes the Canvas takes. A Forge PNG keeps every byte, so its generation parameters
 survive.
 
+The grid **pages, sixty pictures at a time**, with Back / Next / go-to under it and the
+whole library's count beside them; the selection is yours and survives paging, because a
+send names a picture by its id. It is drawn by the browser from an index the server
+answers over plain HTTP, and it keeps up by being told rather than by asking: a picture
+imported from anywhere adds one tile to the page you are on without moving you, without
+disturbing the rest of it, and without re-downloading a thumbnail whose file has not
+changed. Thumbnails are cached in the server's memory, on its disk — so a restart does not
+re-encode what you look at — and immutably in the browser.
+
+**Send to a destination never needs it opened first.** The picture is placed in the
+destination's own component while its tab is hidden, checked to have actually landed, and
+only then is that tab shown — which is how Forge's own result buttons behave. A send that
+fails leaves you here and says why; a picture that landed in a tab that would not open
+says that, and is never sent twice.
+
 **With Mini Paint.** The Canvas's *Send to* menu now offers **Clipboard**; *Send selected
 to Mini Paint* lands on the Canvas as Layer 1 over a Background, one Undo away; and the
 menu's **Intercept "Send to Mini Paint"** switch makes the gallery's 🖌️ button put the
@@ -432,6 +447,14 @@ through to the Canvas, with the reason, when Clipboard cannot take it.
 **Themed.** Every part of the tab is an ordinary Gradio component and every colour is a
 theme variable; there is no fixed white or black anywhere in it, so a night-mode theme
 reaches the grid, the cards, the menu and the history alike.
+
+**No live connection required.** Browsing, paging, sorting, selecting, sending, queueing
+and reading the Queue all ride ordinary HTTP, so they keep working when the framework's
+event channel does not — a backgrounded tab, a forgotten session, a Forge that restarted.
+What still needs that channel is named in `docs/clipboard/NO_LIVE_CONNECTION_WHAT_WAS_BUILT_AND_V2.md`,
+and the page says which parts are stale rather than claiming the whole tab is offline. The
+only line that says the server is gone is the one raised when the server actually stops
+answering.
 
 **For other extensions.** `await window.minipaintInterop.wangp.enqueue({ prompt, images:
 { start, end, references }, start: "auto" })` with handles from `stageImage(blob)`
@@ -669,14 +692,16 @@ javascript/main.js               legacy bridge, parent-frame side, and the loade
 browser/minipaint_canvas.js      attaches the canvas; crop frame, touch gestures, tools, the rail's height, the layer list, the held mask, focus mode
 browser/minipaint_wangp.js       the WanGP iframe: handshake, receiver query, verified send, queue, confirm and track
 browser/minipaint_interop.js     window.minipaintInterop: the public queue API (v1, minipaint.wangp.queue/v1): enqueue, the event stream, sync, cancelAll
-browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid, the menu, paste and drop, Add to Queue, the page's model
+browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid and its pager, the queue list and the history,
+                                 the menu, paste and drop, Add to Queue, the page's model, and the one standing notice
                                  (browser/ is not auto-loaded: each tab fetches its own bundle from /minipaint-assets/js/, cached by content)
 wan2gp_bridge/                   the companion plugin, installed into your WanGP
 style.css                        legacy rules, rules scoped to the Canvas root, then to the Clipboard root (theme variables only)
 miniPaint/                       the legacy editor itself
 docs/wangp/                      the WanGP operator's guide, the Phase 0 checklist, the module contracts,
                                  and SERVER_EXECUTION.md: press Add to Queue and walk away, what it rests on, what is still inferred
-docs/clipboard/                  the Clipboard tab and the public queue API: the guide and the contracts
+docs/clipboard/                  the Clipboard tab and the public queue API: the guide, the contracts,
+                                 the no-live-connection design intent and what of it is built
 tests/                           see tests/README.md
 ```
 

@@ -893,7 +893,7 @@ window.minipaintInterop = (function () {
         stream.source = source;
         stream.lastFrameAt = Date.now();
         source.addEventListener("open", function () { stream.retry = STREAM_RETRY_MS; });
-        for (const kind of ["hello", "job", "enhance", "handoff", "runtime", "wangp", "reset", "heartbeat", "claim_ready"]) {
+        for (const kind of ["hello", "job", "enhance", "handoff", "runtime", "wangp", "library", "reset", "heartbeat", "claim_ready"]) {
             source.addEventListener(kind, function (event) { onFrame(kind, event); });
         }
         source.addEventListener("error", function () { reopenStream(); });

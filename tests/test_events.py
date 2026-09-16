@@ -211,6 +211,98 @@ def privacy_checks(r: Results) -> None:
             records[-1]["payload"]["state"] == "pending", str(records[-1]))
 
 
+def library_checks(r: Results) -> None:
+    """LIBRARY publishes on the operations that change the library, and no others.
+
+    The event is the grid's whole reason to re-fetch, so what publishes one
+    is a contract rather than an implementation detail: too few and a page
+    goes quietly stale; too many and every page re-reads the index because
+    an unrelated job moved.
+    """
+    import pathlib as _pathlib
+    import tempfile as _tempfile
+
+    from PIL import Image
+
+    from minipaint_neo.clipboard import config as clip_config
+    from minipaint_neo.clipboard import store as clip_store
+    from minipaint_neo.wangp import config as wangp_config
+
+    r.check("LIBRARY is a durable kind, beside the job and runtime ones",
+            events.LIBRARY == "library" and events.LIBRARY in events.DURABLE)
+
+    with _tempfile.TemporaryDirectory(prefix="minipaint-events-") as scratch:
+        base = _pathlib.Path(scratch)
+        wangp_config.use_config_dir(base / "data")
+        clip_config.use_config_dir(base / "data")
+        clip_store.reset_for_tests()
+        events.reset_for_tests(epoch="5555bbbb")
+        try:
+            root = base / "library"
+            root.mkdir()
+            library = clip_store.store()
+
+            def published():
+                records, _ = events.replay("5555bbbb:0")
+                return [one for one in records if one["kind"] == events.LIBRARY]
+
+            def since(count):
+                return published()[count:]
+
+            library.set_root(str(root))
+            r.check("choosing a folder publishes one: a different folder is a different library",
+                    len(published()) == 1, str(len(published())))
+
+            seen = len(published())
+            library.assets()
+            library.refresh()
+            routes_answer = library.revision()
+            r.check("reading it publishes nothing", published()[seen:] == [] and routes_answer)
+
+            (root / "one.png").write_bytes(b"")
+            Image.new("RGBA", (6, 4), (1, 2, 3, 255)).save(root / "one.png")
+            library.refresh()
+            r.check("a refresh that found a difference publishes one", len(since(seen)) == 1, str(len(since(seen))))
+            seen = len(published())
+            library.refresh()
+            r.check("and a refresh that found none publishes nothing", since(seen) == [])
+
+            payload = published()[-1]["payload"]
+            r.check("the event carries the library's own revision and the total, and nothing else",
+                    set(payload) == {"revision", "total"} and payload["total"] == 1
+                    and payload["revision"] == library.revision(), str(payload))
+
+            seen = len(published())
+            asset = library.import_bytes((root / "one.png").read_bytes(), "two.png", "upload")
+            r.check("an import publishes one", len(since(seen)) == 1)
+            seen = len(published())
+            library.rename(asset.asset_id, "three")
+            r.check("a rename publishes one", len(since(seen)) == 1)
+            seen = len(published())
+            library.delete(asset.asset_id)
+            r.check("a delete publishes one", len(since(seen)) == 1)
+
+            # THE WHOLE REASON THE LIBRARY KEEPS ITS OWN COUNTER. Job,
+            # enhancement, runtime and WanGP events advance this module's
+            # revision constantly; a browser holding one of those as "the
+            # library I drew" would re-fetch the grid every time an unrelated
+            # job moved.
+            seen = len(published())
+            held = library.revision()
+            for _ in range(5):
+                events.publish(events.JOB, {"job_id": "abcd1234", "state": "queued"})
+            events.publish(events.RUNTIME, {"state": "running"})
+            r.check("and a job or a runtime change publishes NONE: the library did not move",
+                    since(seen) == [] and library.revision() == held, str(len(since(seen))))
+            r.check("so the library's revision is not the spine's, and is behind it by everything else that happened",
+                    held.startswith(events.epoch() + ":") and held != events.cursor()
+                    and int(held.rsplit(":", 1)[1]) < events.revision(), f"{held} vs {events.cursor()}")
+        finally:
+            clip_store.reset_for_tests()
+            clip_config.use_config_dir(None)
+            wangp_config.use_config_dir(None)
+
+
 def run() -> Results:
     r = Results("events")
     try:
@@ -222,6 +314,7 @@ def run() -> Results:
         overflow_checks(r)
         presence_checks(r)
         privacy_checks(r)
+        library_checks(r)
     finally:
         events.reset_for_tests()
         events.use_clock(None)

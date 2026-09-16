@@ -27,6 +27,7 @@ Inpaint tab's canvas. See ``surface.py`` and ``javascript/minipaint_canvas.js``.
 
 from __future__ import annotations
 
+import collections
 import html as html_escape
 import json
 import os.path
@@ -113,6 +114,15 @@ ASPECT_JS = f"(choice, w, h, original) => {{ if ({_JS}) {_JS}.setAspect(choice, 
 TOOL_JS = f"(tool) => {{ if ({_JS}) {_JS}.setTool(tool); }}"
 SIZE_JS = f"(size) => {{ if ({_JS}) {_JS}.setBrushSize(size); }}"
 SWITCH_JS = f"(target) => {{ if ({_JS}) {_JS}.switchTo(target); }}"
+#: What a receive writes into its receipt box. Only the first means the
+#: picture is on the Canvas and the tab is worth showing.
+RECEIVED = "landed"
+NOT_RECEIVED = "failed"
+
+
+def _receipt_key(values: typing.Sequence[typing.Any]) -> str:
+    """The trigger that caused one receive, as one string."""
+    return "\x1f".join(str(value or "") for value in values)
 # The WanGP half of a send, which only the browser can do: the picture is
 # already a file on disk, and the one page that can be asked to take it is the
 # WanGP iframe in this document. It switches tabs only on a verified
@@ -121,6 +131,17 @@ WANGP_DELIVER_JS = (
     f"async (target, payload) => {{ if ({_JS}) {{ await {_JS}.deliverWanGP(target, payload); }} }}"
 )
 SWITCH_CANVAS_JS = f"async () => {{ {_AWAIT_READY}if ({_JS}) {_JS}.switchTo('canvas'); }}"
+# The same switch, after a receive that said whether it landed.
+#
+# A send is deliver, prove, then show, and the third step is not owed to a
+# delivery that did not happen: a picture Clipboard could not hand over must
+# leave the user in Clipboard with the reason, not on an empty Canvas. The
+# receipt is written by the step before this one, for this receive and no
+# other - see ``CanvasTab.receive_from``.
+SWITCH_CANVAS_IF_RECEIVED_JS = (
+    f"async (receipt) => {{ {_AWAIT_READY}"
+    f"if (String(receipt || '') === '{RECEIVED}' && {_JS}) {{ {_JS}.switchTo('canvas'); }} }}"
+)
 # After a gallery receive: the tab the receive landed in - the Canvas, or
 # Clipboard when the intercept is on - as the server said it.
 SWITCH_TO_JS = f"async (target) => {{ {_AWAIT_READY}if ({_JS}) {_JS}.switchTo(target); }}"
@@ -762,7 +783,7 @@ class TouchCanvas:
         log_quietly({"destination": f"{label} -> Canvas", "outcome": f"received {doc.image.width}x{doc.image.height}"})
         return self._commit(doc, "crop", f"Received from {label}.", notes)
 
-    def receive_from(self, event, provider, inputs, origin: str = "clipboard", label: str = "Clipboard"):
+    def receive_from(self, event, provider, inputs, origin: str = "clipboard", label: str = "Clipboard", receipt=None):
         """Wire an outside trigger into the receive chain, and the tab switch.
 
         ``provider`` is handed the values of ``inputs`` and returns the PIL
@@ -770,6 +791,13 @@ class TouchCanvas:
         gallery send takes - image, wait for the canvas, mask layer - and it
         ends by switching to the Canvas tab. Only for a Canvas that has been
         built: before ``build`` there is nothing to wire into.
+
+        ``receipt`` is a hidden textbox the caller owns, and passing one buys
+        the send contract the rest of the destinations already keep: the
+        picture is handed over first, the receive says whether it landed, and
+        the Canvas tab is shown only then. Without it the switch follows the
+        chain unconditionally, which is the old behaviour and is kept for the
+        callers that have no receipt to give.
         """
         chain = self._structural
         if chain is None:
@@ -777,14 +805,40 @@ class TouchCanvas:
 
         def fn(*values):
             state, mode = values[-2], values[-1]
+            key = _receipt_key(values[:-2])
             try:
                 image = provider(*values[:-2])
             except Exception as error:
                 code = str(getattr(error, "code", "") or type(error).__name__)
+                self._remember_receipt(key, False)
                 return self._unchanged(document.ensure(state), mode, f"{label} could not hand the picture over ({code}).")
+            self._remember_receipt(key, image is not None)
             return self.receive_picture(image, state, mode, origin, label)
 
-        return chain(event, fn, list(inputs) + [self.state, self.mode_state]).then(None, js=SWITCH_CANVAS_JS)
+        chained = chain(event, fn, list(inputs) + [self.state, self.mode_state])
+        if receipt is None:
+            return chained.then(None, js=SWITCH_CANVAS_JS)
+        # Acknowledge, then show. The receipt is read back for the exact
+        # trigger value that caused this receive, so two pages sending at
+        # once cannot read each other's outcome.
+        return chained.then(
+            self._receipt_for, inputs=list(inputs), outputs=[receipt], show_progress="hidden"
+        ).then(None, js=SWITCH_CANVAS_IF_RECEIVED_JS, inputs=[receipt], outputs=None)
+
+    #: How many receive outcomes are remembered. A receipt is read by the
+    #: step chained immediately after the one that wrote it, so one would
+    #: nearly always do; a few covers two pages handing pictures in at once.
+    _RECEIPTS_KEPT = 8
+
+    def _remember_receipt(self, key: str, landed: bool) -> None:
+        self._receipts[key] = RECEIVED if landed else NOT_RECEIVED
+        self._receipts.move_to_end(key)
+        while len(self._receipts) > self._RECEIPTS_KEPT:
+            self._receipts.popitem(last=False)
+
+    def _receipt_for(self, *values) -> str:
+        """What the receive this chain just ran made of its picture."""
+        return self._receipts.pop(_receipt_key(values), NOT_RECEIVED)
 
     def open_file(self, file, state, mode):
         doc = document.ensure(state)
@@ -1498,6 +1552,9 @@ class TouchCanvas:
         self.state = None
         self.mode_state = None
         self._structural = None
+        #: What each recent receive made of its picture, by the trigger value
+        #: that caused it. See ``receive_from``.
+        self._receipts: "collections.OrderedDict[str, str]" = collections.OrderedDict()
 
         with gr.Row(elem_id=_id("root"), elem_classes=["minipaint-canvas-root"], equal_height=False):
             with gr.Column(elem_id=_id("work"), elem_classes=["minipaint-work"], scale=1, min_width=320):

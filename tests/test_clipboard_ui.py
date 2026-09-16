@@ -39,7 +39,7 @@ from minipaint_neo import clipboard as clipboard_package  # noqa: E402
 from minipaint_neo import router  # noqa: E402
 from minipaint_neo.canvas import document, host  # noqa: E402
 from minipaint_neo.canvas import ui as canvas_ui  # noqa: E402
-from minipaint_neo.clipboard import config, history, outbox, store  # noqa: E402
+from minipaint_neo.clipboard import config, history, outbox, routes, store  # noqa: E402
 from minipaint_neo.clipboard import ui as clipboard_ui  # noqa: E402
 from minipaint_neo.wangp import config as wangp_config  # noqa: E402
 from minipaint_neo.wangp import errors, process_log, protocol  # noqa: E402
@@ -91,8 +91,50 @@ def _skipped(value) -> bool:
     return isinstance(value, dict) and "value" not in value and value.get("__type__") == "update"
 
 
-def _ids_in(grid_html: str) -> list:
-    return re.findall(r'data-asset="([0-9a-f]{32})"', grid_html)
+def _queued(tab, *args, **keywords) -> tuple:
+    """Add to Queue's answer, as the four things the press decides.
+
+    The press is a route now, so its answer is JSON rather than four Gradio
+    updates; these checks read the same four facts out of it.
+    """
+    answer = tab.add_to_queue(*args, **keywords)
+    return (answer.get("instruction") or None, answer.get("status", ""),
+            answer.get("jobs") or [], answer.get("queue_button") or {})
+
+
+def _queue_view(tab, page) -> tuple:
+    answer = tab.queue_answer(page)
+    return answer["jobs"], answer["status"], answer["history"], answer["queue_button"]
+
+
+def _job(view, job_id) -> dict:
+    return next((job for job in view if job["job_id"] == job_id), {})
+
+
+def _verbs(view, job_id) -> list:
+    return [action["verb"] for action in _job(view, job_id).get("actions", [])]
+
+
+def _states(view) -> list:
+    return [job["state_label"] for job in view]
+
+
+def _flat(view) -> str:
+    return json.dumps(view)
+
+
+def _listed(sort: str = "", page: int = 0, size: int = 500, selected: str = "") -> dict:
+    """What the browser's grid would draw: the index route's own answer.
+
+    The grid is not markup the server renders any more, so what these checks
+    read is the thing that replaced it. ``routes.library_page`` is what the
+    route hands out, and the route is a thin signed-in wrapper over it.
+    """
+    return routes.library_page(sort, page, size, selected)
+
+
+def _ids(sort: str = "", page: int = 0, size: int = 500) -> list:
+    return [item["id"] for item in _listed(sort, page, size)["items"]]
 
 
 def build_page():
@@ -122,7 +164,20 @@ def build_page():
 #: every ``gr.update(visible=False)`` a callback returns as if it were a
 #: declaration, which is how the figure this workstream started from came
 #: out a fifth too high.
-CLIPBOARD_HIDDEN_CEILING = 34
+#:
+#: THE CEILING COMES DOWN, AND NEVER GOES BACK UP. Every hidden component is
+#: a message channel the browser writes or a control its menu presses, and
+#: every one of those is a purchased dependency on a transport whose failures
+#: are invisible. So as rows of this tab move onto plain HTTP the number here
+#: is lowered to what is left - which is what stops the tab quietly keeping
+#: both doors open for ever once the interesting part of a move is done.
+#:
+#: 34 before the grid, the pager, the queue list and the history moved;
+#: 26 after. What went: the queue instruction box and its acknowledgement
+#: watcher, the hidden queue refresh, the job-action box, and the page-id box
+#: the three of them carried. What came: one receipt box, so a picture handed
+#: to Mini Paint is acknowledged before its tab is shown.
+CLIPBOARD_HIDDEN_CEILING = 26
 
 
 def page_checks(r: Results, base: pathlib.Path):
@@ -154,6 +209,10 @@ def page_checks(r: Results, base: pathlib.Path):
               and c["type"] not in ("column", "row", "tab", "tabitem", "group", "accordion")]
     r.check(f"the Clipboard tab carries {len(hidden)} hidden components, at or below its ceiling",
             len(hidden) <= CLIPBOARD_HIDDEN_CEILING, f"{len(hidden)} > {CLIPBOARD_HIDDEN_CEILING}")
+    r.check("and the ones a moved row used to need are gone, not merely unused",
+            not [c for c in hidden if str(c["props"].get("elem_id")).split("minipaint_clipboard_")[-1]
+                 in ("queue_instruction", "outbox_action", "outbox_refresh", "page_id")],
+            str([c["props"].get("elem_id") for c in hidden]))
 
     needed = [
         "root", "body", "browser", "composer", "toolbar", "menu", "to_first", "to_last", "to_ref", "sort", "thumb",
@@ -163,7 +222,7 @@ def page_checks(r: Results, base: pathlib.Path):
         "delete_open", "paste_open", "history_open", "selected", "sort_request", "slot_action", "send_request", "send_press", "send_backend",
         "history_action", "menu_state", "switch", "payload", "to_canvas", "mask_clear", "wangp_line", "cards",
         "card_first", "card_last", "card_ref", "slot_upload_first", "slot_upload_last", "slot_upload_ref", "prompt",
-        "queue", "queue_status", "queue_instruction", "page_id", "outbox_action", "outbox_refresh", "outbox_list",
+        "queue", "queue_status", "outbox_list",
         "history_panel", "history_list", "history_close",
         # prompt enhancement, and the whole line's cancel
         "enhance_panel", "enhance_line", "enhance_toggle", "sp_variant", "sp_mode", "system_prompt", "sp_state", "sp_apply", "sp_restore", "sp_reload",
@@ -181,7 +240,10 @@ def page_checks(r: Results, base: pathlib.Path):
     root = component_of(page, "minipaint_clipboard_root")
     r.check("the root carries the class the theme rules are scoped to", "minipaint-clipboard" in (root["props"].get("elem_classes") or []))
     kinds = {component_of(page, f"minipaint_clipboard_{name}")["type"] for name in ("grid", "card_first", "card_last", "card_ref", "history_list")}
-    r.check("the grid, the cards and the history are server-rendered HTML components", kinds == {"html"}, str(kinds))
+    r.check("the grid's mount, the cards and the history are HTML components", kinds == {"html"}, str(kinds))
+    r.check("but the grid is a MOUNT and not a render: the server ships no tiles",
+            component_of(page, "minipaint_clipboard_grid")["props"].get("value", "") == "",
+            repr(component_of(page, "minipaint_clipboard_grid")["props"].get("value", ""))[:80])
     for name, kind in (("sort", "dropdown"), ("thumb", "slider"), ("prompt", "textbox"), ("queue", "button"), ("upload", "uploadbutton"), ("paste", "image"), ("status", "markdown")):
         component = component_of(page, f"minipaint_clipboard_{name}")
         r.check(f"{name} is a Gradio {kind}", component["type"] == kind, component["type"])
@@ -192,15 +254,17 @@ def page_checks(r: Results, base: pathlib.Path):
     queue = component_of(page, "minipaint_clipboard_queue")["props"]
     r.check("Add to Queue is the primary button", queue.get("value") == "Add to Queue" and queue.get("variant") == "primary", str(queue))
     r.check("and it is enabled before anything is composed, WanGP running", queue.get("interactive") is not False and queue.get("visible") is not False)
-    r.check("the queue list is on the page, empty", "No request has been sent" in component_of(page, "minipaint_clipboard_outbox_list")["props"].get("value", ""))
+    r.check("the queue list is a mount too, drawn by the browser from the route",
+            component_of(page, "minipaint_clipboard_outbox_list")["props"].get("value", "") == ""
+            and component_of(page, "minipaint_clipboard_history_list")["props"].get("value", "") == "")
     for name in ("selected", "sort_request", "slot_action", "send_request", "send_press", "send_backend", "history_action", "menu_state", "switch", "payload",
-                 "to_canvas", "mask_clear", "queue_instruction", "page_id", "model", "outbox_action", "outbox_refresh", "refresh", "upload", "intercept", "folder_open",
+                 "to_canvas", "mask_clear", "receive_receipt", "model", "refresh", "upload", "intercept", "folder_open",
                  "rename_open", "delete_open", "paste_open", "history_open", "slot_upload_first", "slot_upload_last", "slot_upload_ref"):
         if component_of(page, f"minipaint_clipboard_{name}")["props"].get("visible") is not False:
             r.check(f"{name} is hidden - the menu and the cards are its face", False)
-    r.check("no storage folder yet: the folder panel is open and the grid says so",
+    r.check("no storage folder yet: the folder panel is open, and the index says why",
             component_of(page, "minipaint_clipboard_folder_panel")["props"].get("visible") is True
-            and "No storage folder yet" in component_of(page, "minipaint_clipboard_grid")["props"].get("value", ""))
+            and _listed()["reason"] == "unconfigured" and _listed()["total"] == 0, str(_listed()["reason"]))
     r.check("the three cards start as Use WanGP", all(
         "minipaint-clip-card-inherit" in component_of(page, f"minipaint_clipboard_card_{slot}")["props"].get("value", "") for slot in ("first", "last", "ref")))
     r.check("a card carries the unsupported badge, hidden until the live page says otherwise", all(
@@ -225,29 +289,25 @@ def page_checks(r: Results, base: pathlib.Path):
         return steps
 
     click = targeting("queue", "click")
-    r.check("Add to Queue is one backend event that arms the browser first",
-            len(click) == 1 and click[0]["backend_fn"] and "armQueue" in (click[0].get("js") or ""), str(len(click)))
-    r.check("with the prompt, the page's identity and the page's WanGP model as its inputs, and the instruction, the status, the queue list and the button as outputs",
-            click and click[0]["inputs"][:3] == [cid("prompt"), cid("page_id"), cid("model")]
-            and click[0]["outputs"] == [cid("queue_instruction"), cid("queue_status"), cid("outbox_list"), cid("queue")], str(click[0]["outputs"] if click else None))
+    r.check("Add to Queue reaches the server over this tab's own route, not over the framework",
+            len(click) == 1 and not click[0]["backend_fn"] and ".addToQueue(" in (click[0].get("js") or ""), str(len(click)))
     # The switch is an input of the press, not a setting the press looks up.
     # It used to be looked up, and the two drifted: the box said off while the
     # press enhanced, because the value on screen and the value on disk are
     # only ever reconciled by a change event and one had been lost.
-    r.check("and the enhancement switch travels with the press, so what is on screen is what happens",
-            click and click[0]["inputs"][3:] == [cid("enhance_toggle")], str(click[0]["inputs"] if click else None))
-    handoff = targeting("queue_instruction", "change")
-    r.check("the instruction's change hands it to the browser script and to nothing on the server",
-            len(handoff) == 1 and not handoff[0]["backend_fn"] and ".queue(" in (handoff[0].get("js") or "") and handoff[0]["outputs"] == [], str(handoff))
-    refreshed = targeting("outbox_refresh", "click")
-    r.check("the hidden queue refresh is the backend step that re-renders the list, records history and sets the button",
-            len(refreshed) == 1 and refreshed[0]["backend_fn"] and refreshed[0]["inputs"] == [cid("page_id")]
-            and refreshed[0]["outputs"] == [cid("outbox_list"), cid("queue_status"), cid("history_list"), cid("queue")], str(refreshed))
-    acted = targeting("outbox_action", "input")
-    r.check("a job's buttons write one hidden box the backend reads", len(acted) == 1 and acted[0]["backend_fn"] and acted[0]["inputs"] == [cid("outbox_action"), cid("page_id")])
-    r.check("every refresh also sets the button from WanGP's state", cid("queue") in targeting("refresh", "click")[0]["outputs"])
+    r.check("and the prompt and the enhancement switch travel with the press, so what is on screen is what happens",
+            click and click[0]["inputs"] == [cid("prompt"), cid("enhance_toggle")], str(click[0]["inputs"] if click else None))
+    r.check("Cancel everything is the browser's too",
+            all(not d["backend_fn"] and ".cancelAll(" in (d.get("js") or "") for d in targeting("cancel_all", "click"))
+            and targeting("cancel_all", "click"))
+    r.check("and no event on this page renders the queue list or the history",
+            all(cid("outbox_list") not in d["outputs"] and cid("history_list") not in d["outputs"] for d in deps))
+    r.check("every refresh still sets the button from WanGP's state", cid("queue") in targeting("refresh", "click")[0]["outputs"])
     r.check("the menu button is browser-only", all(not d["backend_fn"] and "toggleMenu" in (d.get("js") or "") for d in targeting("menu", "click")) and targeting("menu", "click"))
-    r.check("the grid's re-render tells the browser script", any(".afterRender" in (d.get("js") or "") for d in targeting("grid", "change")))
+    r.check("the grid is drawn by the browser, so no event names it at all",
+            not targeting("grid", "change") and all(cid("grid") not in d["outputs"] for d in page["dependencies"]))
+    r.check("every server render carries a nonce the browser can see land",
+            any(".menuStateChanged" in (d.get("js") or "") for d in targeting("menu_state", "change")))
     r.check("the thumbnail slider resizes in the browser as it moves and is saved when released",
             any("setThumbnailSize" in (d.get("js") or "") for d in targeting("thumb", "change")) and any(d["backend_fn"] for d in targeting("thumb", "release")))
     r.check("the prompt is saved into the draft when the box loses focus", any(d["backend_fn"] for d in targeting("prompt", "blur")))
@@ -351,57 +411,69 @@ def page_checks(r: Results, base: pathlib.Path):
 def browser_checks(r: Results, base: pathlib.Path, tab) -> dict:
     """The folder, the files, and every operation the menu offers on them."""
     out = tab.refresh("")
-    r.check("before a folder is chosen, Refresh says to choose one", "Choose a storage folder" in out[1] and "No storage folder yet" in out[0])
+    r.check("before a folder is chosen, Refresh says to choose one",
+            "Choose a storage folder" in out[0] and _listed()["reason"] == "unconfigured", str(out[0]))
 
     library_root = base / "library"
     folder_status, panel, *rest = tab.choose_folder(str(library_root), False)
     r.check("a folder that does not exist is not used behind the user's back", folder_status.startswith("**Not used.**") and "Create it" in folder_status and _visible(panel) and not library_root.exists())
-    folder_status, panel, grid, status, selected, menu_state, *cards = tab.choose_folder(str(library_root), True)
+    folder_status, panel, status, selected, menu_state, *cards = tab.choose_folder(str(library_root), True)
     r.check("and is used once created on request", folder_status.startswith("**Using**") and not _visible(panel) and library_root.is_dir() and "0 images" in status, folder_status)
     r.check("the menu learns the folder is configured", json.loads(menu_state)["configured"] is True)
-    r.check("the empty folder invites an upload, a paste, a send or the intercept", "No images yet" in grid and "Intercept" in grid)
+    r.check("the empty folder says so as a state of the index, not of the transport",
+            _listed()["reason"] == "empty" and _listed()["total"] == 0 and _listed()["configured"] is True, str(_listed()["reason"]))
 
     a = _write(base / "in" / "a.png", "PNG")
     b = _write(base / "in" / "b.jpg", "JPEG", (32, 24), (200, 10, 30))
-    grid, status, selected, menu_state, *cards = tab.upload([a, b], "")
+    status, selected, menu_state, *cards = tab.upload([a, b], "")
     r.check("Upload takes several files and says how many", status.startswith("Imported 2 images."), status)
-    ids = _ids_in(grid)
-    r.check("both are in the grid with opaque ids", len(ids) == 2 and all(protocol.valid_handoff_id(i) for i in ids) and 'data-count="2"' in grid, str(ids))
+    listed = _listed()
+    ids = [item["id"] for item in listed["items"]]
+    r.check("both are in the index with opaque ids", len(ids) == 2 and all(protocol.valid_handoff_id(i) for i in ids) and listed["total"] == 2, str(ids))
+    r.check("and each carries the version of its bytes, so the browser can cache it for ever",
+            all(item["v"] and item["v"].count("-") == 1 for item in listed["items"]), str([i["v"] for i in listed["items"]]))
     r.check("the last import is selected", selected == ids[0] or selected in ids, selected)
-    r.check("nothing on the page names the host folder", str(base) not in grid and str(base) not in status and str(base) not in menu_state and str(base) not in "".join(c for c in cards if isinstance(c, str)))
+    r.check("nothing on the page names the host folder", str(base) not in json.dumps(listed) and str(base) not in status and str(base) not in menu_state and str(base) not in "".join(c for c in cards if isinstance(c, str)))
     assets = {asset.filename: asset for asset in tab.library.assets()}
     r.check("the files keep their names and bytes", set(assets) == {"a.png", "b.jpg"} and (library_root / "b.jpg").read_bytes() == pathlib.Path(b).read_bytes(), str(sorted(assets)))
     id_a, id_b = assets["a.png"].asset_id, assets["b.jpg"].asset_id
 
     text = base / "in" / "notes.txt"
     text.write_text("not an image", encoding="utf-8")
-    grid, status, selected, menu_state, *cards = tab.upload([str(text)], id_a)
+    status, selected, menu_state, *cards = tab.upload([str(text)], id_a)
     r.check("a file that is not an image is refused with a sentence, and the selection is kept",
             status.startswith("Nothing was imported.") and "<small>" in status and selected == id_a, status)
 
-    grid, menu_state = tab.sort_changed("name_asc", id_b)
-    r.check("the sort dropdown reorders the grid and is remembered", _ids_in(grid) == [id_a, id_b] and config.load().sort == "name_asc" and 'minipaint-clip-selected' in grid)
-    dropdown, grid, menu_state = tab.sort_request("name_desc:nonce", id_b)
-    r.check("the menu's Sort submenu does the same and updates the dropdown", _value(dropdown) == "name_desc" and _ids_in(grid) == [id_b, id_a])
-    dropdown, grid, menu_state = tab.sort_request("sideways", id_b)
+    menu_state = tab.sort_changed("name_asc", id_b)
+    r.check("the sort dropdown reorders the whole library and is remembered",
+            _ids() == [id_a, id_b] and config.load().sort == "name_asc", str(_ids()))
+    dropdown, menu_state = tab.sort_request("name_desc:nonce", id_b)
+    r.check("the menu's Sort submenu does the same and updates the dropdown", _value(dropdown) == "name_desc" and _ids() == [id_b, id_a])
+    dropdown, menu_state = tab.sort_request("sideways", id_b)
     r.check("an unknown sort changes nothing", _value(dropdown) == "name_desc" and config.load().sort == "name_desc")
+    r.check("and the index falls back to the stored sort rather than refusing an unknown one",
+            _listed("sideways")["sort"] == "name_desc", _listed("sideways")["sort"])
     r.check("the thumbnail size is saved, clamped", json.loads(tab.thumbnail_changed(200))["thumbnail"] == 200 and json.loads(tab.thumbnail_changed(5000))["thumbnail"] == config.THUMBNAIL_MAX)
 
     panel, textbox, status = tab.open_rename("")
     r.check("Rename with nothing selected says so", not _visible(panel) and "Select an image" in status)
     panel, textbox, status = tab.open_rename(id_a)
     r.check("Rename opens on the stem of the selected file", _visible(panel) and _value(textbox) == "a" and _skipped(status))
-    panel, grid, status, *cards = tab.rename(id_a, "bad/name")
+    panel, status, *cards = tab.rename(id_a, "bad/name")
     r.check("a name with a separator is refused and the panel stays", _visible(panel) and status.startswith("Not renamed:"), status)
-    panel, grid, status, *cards = tab.rename(id_a, "renamed")
+    was = next(item["v"] for item in _listed()["items"] if item["id"] == id_a)
+    panel, status, *cards = tab.rename(id_a, "renamed")
     r.check("a good name renames the file, keeps its id and extension, and closes the panel",
             not _visible(panel) and status == "Renamed to renamed.png." and tab.library.get(id_a).filename == "renamed.png" and (library_root / "renamed.png").is_file())
+    r.check("and the caption moves while the picture's version does not, so nothing is re-fetched",
+            next(item["name"] for item in _listed()["items"] if item["id"] == id_a) == "renamed.png"
+            and next(item["v"] for item in _listed()["items"] if item["id"] == id_a) == was)
 
     paste = _write(base / "in" / "pasted.jpg", "JPEG", (20, 20), (1, 2, 3))
-    grid, status, selected, menu_state, *cards, image, panel = tab.pasted(paste, "")
+    status, selected, menu_state, *cards, image, panel = tab.pasted(paste, "")
     r.check("a paste through Gradio's own surface lands as a PNG, selected, and the panel closes",
-            status.startswith("Pasted paste-") and status.endswith(".png.") and selected in _ids_in(grid) and _value(image) is None and not _visible(panel), status)
-    grid, status, selected, menu_state, *cards, image, panel = tab.pasted("", id_a)
+            status.startswith("Pasted paste-") and status.endswith(".png.") and selected in _ids() and _value(image) is None and not _visible(panel), status)
+    status, selected, menu_state, *cards, image, panel = tab.pasted("", id_a)
     r.check("an empty paste is a sentence and the selection is kept", status.startswith("Nothing was pasted.") and selected == id_a)
     pasted_id = next(asset.asset_id for asset in tab.library.assets() if asset.filename.startswith("paste-"))
 
@@ -409,9 +481,9 @@ def browser_checks(r: Results, base: pathlib.Path, tab) -> dict:
     r.check("Delete with nothing selected says so", not _visible(panel) and "Select an image" in status)
     panel, status = tab.open_delete(pasted_id)
     r.check("Delete asks first", _visible(panel) and _skipped(status))
-    panel, grid, status, selected, menu_state, *cards = tab.delete(pasted_id)
+    panel, status, selected, menu_state, *cards = tab.delete(pasted_id)
     r.check("and then removes the file, clears the selection and says so",
-            not _visible(panel) and status.startswith("Deleted paste-") and selected == "" and pasted_id not in _ids_in(grid) and not (library_root / "paste").exists(), status)
+            not _visible(panel) and status.startswith("Deleted paste-") and selected == "" and pasted_id not in _ids() and not (library_root / "paste").exists(), status)
 
     menu_state, status = tab.toggle_intercept()
     r.check("the intercept switch turns on from the menu", json.loads(menu_state)["intercept"] is True and config.load().intercept is True and "Clipboard" in status)
@@ -419,8 +491,9 @@ def browser_checks(r: Results, base: pathlib.Path, tab) -> dict:
     r.check("and off again", json.loads(menu_state)["intercept"] is False and config.load().intercept is False and "Mini Paint again" in status)
 
     (base / "library" / "dropped.png").write_bytes(pathlib.Path(a).read_bytes())
-    grid, status, selected, menu_state, *cards = tab.refresh(id_a)
-    r.check("a file dropped into the folder by hand appears on Refresh", "3 images" in status and "dropped.png" in grid, status)
+    status, selected, menu_state, *cards = tab.refresh(id_a)
+    r.check("a file dropped into the folder by hand appears on Refresh",
+            "3 images" in status and "dropped.png" in [item["name"] for item in _listed()["items"]], status)
     return {"a": id_a, "b": id_b, "root": library_root}
 
 
@@ -448,9 +521,9 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
     r.check("the draft on disk follows", draft["first_asset_id"] == "" and draft["last_asset_id"] == id_b and draft["reference_asset_ids"] == [])
 
     chosen = _write(base / "in" / "ref.png", "PNG", (16, 16), (5, 5, 5))
-    grid, status, selected, menu_state, first, last, ref, _button = tab.slot_upload("ref", chosen, "")
+    status, selected, menu_state, first, last, ref, _button = tab.slot_upload("ref", chosen, "")
     r.check("Choose a file on a card imports the file first and then assigns it",
-            "minipaint-clip-card-override" in ref and status.startswith("Reference: ref.png.") and "imported into the folder first" in status and selected in _ids_in(grid), status)
+            "minipaint-clip-card-override" in ref and status.startswith("Reference: ref.png.") and "imported into the folder first" in status and selected in _ids(), status)
     ref_id = history.load_draft()["reference_asset_ids"][0]
     r.check("the reference slot holds that new asset", tab.library.get(ref_id).filename == "ref.png")
 
@@ -458,9 +531,9 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
 
     # -- Add to Queue: a job in the server's outbox, run by this page
     page_id = "c" * 16
-    instruction, status, listing, button = tab.prepare_queue(" a prompt ", page_id)
+    instruction, status, listing, button = _queued(tab, " a prompt ", page_id)
     r.check("Add to Queue appends a job and says so", instruction and status.startswith("Queued for WanGP.") and "it goes next" in status, status)
-    parsed = json.loads(instruction)
+    parsed = instruction
     job = outbox.jobs()[-1]
     request = job["request"]
     r.check("the instruction names the job for the browser's pump", parsed.get("nonce") and parsed.get("job_id") == job["job_id"], str(parsed)[:80])
@@ -471,8 +544,10 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
             and request["images"]["end"] == {"kind": "clipboard_asset", "id": id_b}
             and request["images"]["references"] == [{"kind": "clipboard_asset", "id": ref_id}], json.dumps(request))
     r.check("and never a path", str(base) not in json.dumps(request) and "/" not in json.dumps(request["images"]))
-    r.check("the list shows it waiting, with Cancel", 'data-job="' + job["job_id"] in listing and "Waiting" in listing and 'data-outbox-action="cancel:' in listing and str(base) not in listing)
-    r.check("the button stays a button", _value(button) == clipboard_ui.QUEUE_BUTTON_LABEL and button.get("interactive") is True)
+    r.check("the list shows it waiting, with Cancel",
+            _job(listing, job["job_id"]).get("state_label") == "Waiting" and _verbs(listing, job["job_id"]) == ["cancel"]
+            and str(base) not in _flat(listing), _flat(listing)[:120])
+    r.check("the button stays a button", button.get("label") == clipboard_ui.QUEUE_BUTTON_LABEL and button.get("enabled") is True)
 
 
     # -- the page runs it: claim, admitted, confirmed queued -> history
@@ -484,9 +559,10 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
         "applied": {"prompt": True, "start": False, "end": True, "references": 1}, "inherited": ["start"], "ignored": [],
         "model": {"type": "video", "label": "A video model"},
     })
-    listing, status, history_listing, button = tab.refresh_outbox(page_id)
+    listing, status, history_listing, button = _queue_view(tab, page_id)
     r.check("the refresh says it was added", status.startswith("Added to WanGP queue."), status)
-    r.check("and the list shows it queued", "Queued" in listing and 'data-outbox-action' not in listing.split('data-job="' + job["job_id"])[1].split("</div></div>")[0])
+    r.check("and the list shows it queued, with nothing left to press on it",
+            _job(listing, job["job_id"]).get("state_label") == "Queued" and _verbs(listing, job["job_id"]) == [])
     records = history.load_history()
     r.check("and records one history entry", len(records) == 1 and records[0]["request_id"] == request["request_id"], str(len(records)))
     record = records[0] if records else {}
@@ -495,56 +571,65 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
             and record.get("last_mode") == "override" and record.get("last_asset_id") == id_b and record.get("reference_mode") == "override"
             and record.get("reference_asset_ids") == [ref_id] and record.get("tasks_added") == 1 and record.get("model_label") == "A video model", json.dumps(record))
     r.check("the history list shows it, by id and name, never by path",
-            'data-history="' in history_listing and "b.jpg" in history_listing and "A video model" in history_listing and str(base) not in history_listing)
-    r.check("a second refresh records nothing twice", tab.refresh_outbox(page_id) and len(history.load_history()) == 1)
+            history_listing and history_listing[0]["history_id"] and "b.jpg" in _flat(history_listing)
+            and "A video model" in _flat(history_listing) and str(base) not in _flat(history_listing))
+    r.check("a second refresh records nothing twice", tab.queue_answer(page_id) and len(history.load_history()) == 1)
 
     # -- a started job, with an ignored field
-    instruction, status, listing, button = tab.prepare_queue("", page_id)
+    instruction, status, listing, button = _queued(tab, "", page_id)
     job2 = outbox.jobs()[-1]
     r.check("an empty prompt is omitted from the request, not sent as empty", "prompt" not in job2["request"])
     claimed = outbox.claim(page_id)
     outbox.report(job2["job_id"], claimed["lease"], "done", {"ok": True, "status": "started", "request_id": job2["request"]["request_id"], "tasks_added": 2, "queue_depth": 0, "route": "generate",
                                                              "applied": {"end": True}, "inherited": ["prompt", "start"], "ignored": [{"field": "references", "code": "RECEIVER_DISABLED"}], "model": {}})
-    listing, status, history_listing, button = tab.refresh_outbox(page_id)
+    listing, status, history_listing, button = _queue_view(tab, page_id)
     r.check("a started job says WanGP is generating it, and names the field the model did not use",
             status.startswith("WanGP started generating it.") and "reference was not used by the current model" in status.lower(), status)
     newest = history.load_history()[0]
     r.check("and the record says so", newest["reference_mode"] == "ignored" and newest["prompt_mode"] == "inherit" and newest["tasks_added"] == 2, json.dumps(newest))
-    r.check("the list shows Generating", "Generating" in listing)
+    r.check("the list shows Generating", "Generating" in _states(listing), str(_states(listing)))
 
     # -- refusals and doubts record nothing, and offer Retry
     before = len(history.load_history())
-    instruction, status, listing, button = tab.prepare_queue("x", page_id)
+    instruction, status, listing, button = _queued(tab, "x", page_id)
     job3 = outbox.jobs()[-1]
     claimed = outbox.claim(page_id)
     outbox.report(job3["job_id"], claimed["lease"], "done", {"ok": False, "status": "refused", "code": "QUEUE_BUSY"})
-    listing, status, history_listing, button = tab.refresh_outbox(page_id)
+    listing, status, history_listing, button = _queue_view(tab, page_id)
     r.check("a refusal shows the code's sentence, records nothing, and offers Retry",
-            status.startswith(errors.message(errors.QUEUE_BUSY)) and len(history.load_history()) == before and 'data-outbox-action="retry:' + job3["job_id"] in listing, status)
-    instruction, status, listing, button = tab.prepare_queue("x", page_id)
+            status.startswith(errors.message(errors.QUEUE_BUSY)) and len(history.load_history()) == before
+            and _verbs(listing, job3["job_id"]) == ["retry"], status)
+    instruction, status, listing, button = _queued(tab, "x", page_id)
     job4 = outbox.jobs()[-1]
     claimed = outbox.claim(page_id)
     outbox.report(job4["job_id"], claimed["lease"], "sent")
     outbox.report(job4["job_id"], claimed["lease"], "done", {"ok": False, "status": "unconfirmed"})
-    listing, status, history_listing, button = tab.refresh_outbox(page_id)
+    listing, status, history_listing, button = _queue_view(tab, page_id)
     r.check("an unconfirmed admission is reported as unconfirmed with Retry anyway, never as queued",
-            status.startswith(errors.message(errors.ADMISSION_UNCONFIRMED)) and len(history.load_history()) == before and "Retry anyway" in listing, status)
+            status.startswith(errors.message(errors.ADMISSION_UNCONFIRMED)) and len(history.load_history()) == before
+            and "Retry anyway" in _flat(listing), status)
 
     # -- the buttons on a job
-    instruction, status, listing, button = tab.prepare_queue("to cancel", page_id)
+    instruction, status, listing, button = _queued(tab, "to cancel", page_id)
     job5 = outbox.jobs()[-1]
-    listing, status = tab.outbox_action(f"cancel:{job5['job_id']}:{page_id}:1", page_id)
-    r.check("Cancel cancels a pending job", status.startswith("Cancelled.") and outbox.get(job5["job_id"])["state"] == "cancelled" and "Cancelled" in listing)
-    listing, status = tab.outbox_action(f"retry:{job3['job_id']}:{page_id}:2", page_id)
+    acted = tab.outbox_action(f"cancel:{job5['job_id']}:{page_id}", page_id)
+    listing, status = acted["jobs"], acted["status"]
+    r.check("Cancel cancels a pending job", status.startswith("Cancelled.") and outbox.get(job5["job_id"])["state"] == "cancelled"
+            and _job(listing, job5["job_id"]).get("state_label") == "Cancelled")
+    acted = tab.outbox_action(f"retry:{job3['job_id']}:{page_id}", page_id)
+    listing, status = acted["jobs"], acted["status"]
     retried = outbox.jobs()[-1]
     r.check("Retry sends a refused job again as a new request for this page",
             status.startswith("Sent again") and retried["retry_of"] == job3["job_id"] and retried["page"] == page_id and retried["state"] == "pending", status)
     other = outbox.submit({"prompt": "from elsewhere"}, "d" * 16, "clipboard")
-    listing = tab._outbox(page_id)
-    r.check("a job composed on another page is marked so and offers Run from this page", "composed on another page" in listing and 'data-outbox-action="adopt:' + other["job_id"] in listing)
-    listing, status = tab.outbox_action(f"adopt:{other['job_id']}:{page_id}:3", page_id)
+    listing = tab._outbox_view(page_id)
+    r.check("a job composed on another page is marked so and offers Run from this page",
+            "composed on another page" in _flat(listing) and "adopt" in _verbs(listing, other["job_id"]), _flat(listing)[:120])
+    acted = tab.outbox_action(f"adopt:{other['job_id']}:{page_id}", page_id)
+    listing, status = acted["jobs"], acted["status"]
     r.check("Run from this page adopts it", "This page will run it" in status and outbox.get(other["job_id"])["page"] == page_id)
-    listing, status = tab.outbox_action("cancel:0000000000000000:" + page_id + ":4", page_id)
+    acted = tab.outbox_action("cancel:0000000000000000:" + page_id, page_id)
+    listing, status = acted["jobs"], acted["status"]
     r.check("a job that is gone says so", status.startswith(errors.message(errors.QUEUE_JOB_UNKNOWN)))
     for job in outbox.jobs():
         if job["state"] == "pending":
@@ -555,17 +640,19 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
     button = tab._queue_button()
     r.check("with WanGP not running the button is off and says why", button.get("interactive") is False and _value(button) == clipboard_ui.QUEUE_BUTTON_BLOCKED)
     r.check("every refresh sets it so", tab.refresh("")[-1].get("interactive") is False)
+    r.check("and the route says the same two facts about it",
+            tab._queue_button_view() == {"label": clipboard_ui.QUEUE_BUTTON_BLOCKED, "enabled": False}, str(tab._queue_button_view()))
     count = len(outbox.jobs())
-    instruction, status, listing, button = tab.prepare_queue("while off", page_id)
+    instruction, status, listing, button = _queued(tab, "while off", page_id)
     r.check("a press while WanGP is not running is refused with the sentence, and nothing is stored",
-            instruction == "" and status.startswith(errors.message(errors.WANGP_NOT_RUNNING)) and len(outbox.jobs()) == count and button.get("interactive") is False, status)
+            instruction is None and status.startswith(errors.message(errors.WANGP_NOT_RUNNING)) and len(outbox.jobs()) == count and button.get("enabled") is False, status)
     outbox.use_running(lambda: True)
     r.check("and comes back when WanGP does", tab._queue_button().get("interactive") is True)
 
     # -- the composer with nothing in it still asks
     tab.slot_action("clear:last")
     tab.slot_action("clear:ref")
-    instruction, status, listing, button = tab.prepare_queue("", page_id)
+    instruction, status, listing, button = _queued(tab, "", page_id)
     empty = outbox.jobs()[-1]["request"]
     r.check("an empty composer still produces a request: the live WanGP page, as it is",
             instruction and set(empty) == {"request_id", "images", "start"} and empty["images"] == {}, json.dumps(empty))
@@ -576,36 +663,38 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
     (ids["root"] / "renamed.png").unlink()
     tab.library.refresh()
     count = len(outbox.jobs())
-    instruction, status, listing, button = tab.prepare_queue("", page_id)
+    instruction, status, listing, button = _queued(tab, "", page_id)
     r.check("a missing image refuses before storing anything and keeps the draft",
-            instruction == "" and status.startswith("First Frame: the image is no longer in the folder") and "nothing was asked of WanGP" in status
+            instruction is None and status.startswith("First Frame: the image is no longer in the folder") and "nothing was asked of WanGP" in status
             and history.load_draft()["first_asset_id"] == id_a and len(outbox.jobs()) == count, status)
     first, last, ref = tab._cards(missing=["first"])
     r.check("the card can say Missing image", "minipaint-clip-card-missing" in first and "Missing image" in first)
-    grid, status, selected, menu_state, first, last, ref, _button = tab.refresh("")
+    status, selected, menu_state, first, last, ref, _button = tab.refresh("")
     r.check("Refresh puts the slot back to Use WanGP and says why",
             "minipaint-clip-card-inherit" in first and "First Frame: the image is no longer in the folder" in status and history.load_draft()["first_asset_id"] == "", status)
 
     # -- history: load fills the composer, queues nothing; delete removes the record
-    panel, listing = tab.show_history()
-    r.check("Queue Send History opens with its list", _visible(panel) and 'data-history-action="load:' in listing)
+    panel = tab.show_history()
+    listing = tab._history_view()
+    r.check("Queue Send History opens, and its list comes from the route",
+            _visible(panel) and listing and all(entry.get("history_id") for entry in listing), _flat(listing)[:120])
     record = history.load_history()[-1]  # the first one queued: prompt "a prompt" (as sent), end b, ref
     before = len(history.load_history())
-    prompt, first, last, ref, status, listing = tab.history_action(f"load:{record['history_id']}", "")
+    prompt, first, last, ref, status = tab.history_action(f"load:{record['history_id']}", "")
     r.check("Load puts the recipe back into the composer and queues nothing",
             prompt == "a prompt" and "minipaint-clip-card-override" in last and "minipaint-clip-card-override" in ref and status.startswith("Recipe loaded. Nothing was queued.")
             and history.load_draft()["last_asset_id"] == id_b and len(history.load_history()) == before, status)
-    prompt, first, last, ref, status, listing = tab.history_action(f"delete:{record['history_id']}", "")
+    prompt, first, last, ref, status = tab.history_action(f"delete:{record['history_id']}", "")
     r.check("Delete removes the record and touches no file",
             status.startswith("History entry deleted.") and len(history.load_history()) == before - 1 and (ids["root"] / "b.jpg").is_file())
-    prompt, first, last, ref, status, listing = tab.history_action("load:nope", "")
+    prompt, first, last, ref, status = tab.history_action("load:nope", "")
     r.check("a record that is gone says so", "gone" in status and _skipped(prompt))
     tab.library.delete(id_b)
     remaining = history.load_history()[0]
-    listing = tab._history()
+    listing = tab._history_view()
     r.check("a record whose image was deleted says Missing image and still loads what it can",
-            "Missing image" in listing and remaining["last_asset_id"] == id_b)
-    prompt, first, last, ref, status, listing = tab.history_action(f"load:{remaining['history_id']}", "")
+            any(slot.get("state") == "missing" for entry in listing for slot in entry["slots"]) and remaining["last_asset_id"] == id_b)
+    prompt, first, last, ref, status = tab.history_action(f"load:{remaining['history_id']}", "")
     r.check("with the missing slot back to Use WanGP, and named", "Missing image" not in last and "minipaint-clip-card-inherit" in last and "last" in status.lower())
 
 
@@ -615,7 +704,7 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
 def send_checks(r: Results, base: pathlib.Path, tab) -> None:
     """A picture leaves the browser the way it leaves the Canvas."""
     picture = _write(base / "in" / "send.png", "PNG", (40, 30), (9, 8, 7))
-    grid, status, selected, *_rest = tab.upload([picture], "")
+    status, selected, *_rest = tab.upload([picture], "")
     n = 0  # send() names no other tab's components at all now; see send_backend
     if not selected:
         r.check("an upload to send", False, status)
@@ -790,7 +879,7 @@ def enhance_switch_checks(r: Results, base: pathlib.Path, tab) -> None:
     page_id = "e" * 16
     clipboard_enhance.set_enabled(True)
     r.check("the stored setting can be on while the box on screen says off", clipboard_enhance.enabled() is True)
-    tab.prepare_queue("another prompt", page_id, None, False)
+    tab.add_to_queue("another prompt", page_id, None, False)
     queued = outbox.jobs()[-1]
     r.check("a press with the switch off is not enhanced, whatever the stored setting says",
             queued["enhance_requested"] is False and queued["enhance"] is None, str(queued["enhance_requested"]))
@@ -803,7 +892,7 @@ def enhance_switch_checks(r: Results, base: pathlib.Path, tab) -> None:
     original_enabled = clipboard_enhance.enabled
     clipboard_enhance.enabled = lambda: asked.setdefault("consulted", True) or False
     try:
-        tab.prepare_queue("a third prompt", page_id, None, False)
+        tab.add_to_queue("a third prompt", page_id, None, False)
     finally:
         clipboard_enhance.enabled = original_enabled
     r.check("a press that carries the switch never falls back to the stored setting to decide",
@@ -884,6 +973,9 @@ def theming_checks(r: Results) -> None:
         # Gradio's typography and radius tokens, used by the enhancement panel
         # and the job cards' lines; a theme sets all three.
         "--font-mono", "--radius-sm", "--text-sm",
+        # The pager's go-to-page box is a text input, and a theme fills one
+        # the same way Gradio fills its own.
+        "--input-background-fill",
     }
     used = set(re.findall(r"var\((--[\w-]+)", block))
     r.check("every variable is Gradio's own theme variable or the tab's own size",

@@ -454,6 +454,475 @@ def check_a_hostile_page_cannot_move_a_picture(r: Results, page) -> None:
 # Sending out
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Paging, patching, and the sort that does not disturb anything
+# --------------------------------------------------------------------------
+
+#: The identity of every tile on screen, and enough about it to tell one
+#: render from another. The stamp is written onto the element once and never
+#: again, so a tile that survived a patch carries the stamp it was built
+#: with and a tile that was rebuilt does not.
+STAMP_TILES_JS = """() => {
+    let n = 0;
+    return Array.from(document.querySelectorAll('.minipaint-clip-item')).map(el => {
+        if (!el.dataset.stamp) { el.dataset.stamp = 'tile-' + (n++) + '-' + Math.random().toString(16).slice(2); }
+        return { asset: el.dataset.asset, name: el.dataset.name, stamp: el.dataset.stamp };
+    });
+}"""
+
+READ_TILES_JS = """() => Array.from(document.querySelectorAll('.minipaint-clip-item')).map(el => (
+    { asset: el.dataset.asset, name: el.dataset.name, stamp: el.dataset.stamp || '' }))"""
+
+
+def library_state(page):
+    return page.evaluate("() => window.minipaintClipboard.libraryState()")
+
+
+def show_page(page, options):
+    page.evaluate("o => window.minipaintClipboard.library(o)", options)
+    time.sleep(1.2)
+
+
+def pager(page):
+    return page.evaluate("""() => {
+        const row = document.querySelector('.minipaint-clip-pager');
+        if (!row) { return null; }
+        const box = row.querySelector('.minipaint-clip-pager-number');
+        const back = row.querySelector('.minipaint-clip-pager-back');
+        const next = row.querySelector('.minipaint-clip-pager-next');
+        const mark = row.querySelector('.minipaint-clip-pager-mark');
+        return {
+            hidden: !!row.hidden,
+            number: box ? box.value : '',
+            of: (row.querySelector('.minipaint-clip-pager-of') || {}).textContent || '',
+            count: (row.querySelector('.minipaint-clip-pager-count') || {}).textContent || '',
+            backOff: !!(back && back.disabled), nextOff: !!(next && next.disabled),
+            mark: mark && !mark.hidden ? mark.textContent : ''
+        };
+    }""")
+
+
+def check_paging(r: Results, page, library) -> None:
+    """A page of the library, its row of controls, and the ends of it.
+
+    Enough pictures are put in the folder to page through at the smallest
+    size the route allows - the clamp is part of the contract, so the test
+    works inside it rather than around it - and taken out again afterwards.
+    """
+    from PIL import Image
+
+    made = []
+    for number in range(18):
+        name = f"page-{number:02d}.png"
+        Image.new("RGB", (40, 30), (number * 10 % 255, 60, 120)).save(library / name)
+        made.append(library / name)
+    open_clipboard(page)
+    show_page(page, {"size": 10, "page": 0, "sort": "name_asc", "refresh": True})
+    try:
+        state = library_state(page)
+        r.check("a page shows exactly `size` tiles", state["shown"] == 10, str(state["shown"]))
+        r.check("and the answer's totals describe the whole library, not the page",
+                state["total"] == 24 and state["pages"] == 3 and state["page"] == 0, str(state))
+        row = pager(page)
+        r.check("the pager says where you are and how many there are",
+                row and not row["hidden"] and row["number"] == "1" and row["of"].strip() == "of 3", str(row))
+        r.check("and the count is the whole library, because that is the number a person wants",
+                row and row["count"].startswith("24 picture"), str(row and row["count"]))
+        r.check("Back is disabled at the start, and Next is not - disabled rather than hidden, so the row does not change width",
+                row and row["backOff"] is True and row["nextOff"] is False, str(row))
+
+        first = [t["name"] for t in page.evaluate(READ_TILES_JS)]
+        page.evaluate("() => document.querySelector('.minipaint-clip-pager-next').click()")
+        time.sleep(1.4)
+        second = [t["name"] for t in page.evaluate(READ_TILES_JS)]
+        r.check("Next reaches the next pictures, and only them",
+                len(second) == 10 and not set(second) & set(first), f"{first[:3]} -> {second[:3]}")
+
+        page.evaluate("() => document.querySelector('.minipaint-clip-pager-next').click()")
+        time.sleep(1.4)
+        row = pager(page)
+        r.check("and at the end Next is disabled and Back is not",
+                row and row["nextOff"] is True and row["backOff"] is False and row["number"] == "3", str(row))
+        r.check("the last page is what is left over", len(page.evaluate(READ_TILES_JS)) == 4,
+                str(len(page.evaluate(READ_TILES_JS))))
+
+        page.evaluate("() => document.querySelector('.minipaint-clip-pager-back').click()")
+        page.evaluate("() => document.querySelector('.minipaint-clip-pager-back').click()")
+        time.sleep(1.6)
+        r.check("Back comes back to exactly the pictures that were there",
+                [t["name"] for t in page.evaluate(READ_TILES_JS)] == first, str(first[:3]))
+
+        page.evaluate("""() => {
+            const box = document.querySelector('.minipaint-clip-pager-number');
+            box.value = '99';
+            box.dispatchEvent(new Event('change', {bubbles: true}));
+        }""")
+        time.sleep(1.4)
+        r.check("go-to is clamped rather than refused: a page past the end is the last one that exists",
+                library_state(page)["page"] == 2, str(library_state(page)["page"]))
+
+        page.evaluate("""() => {
+            const grid = document.querySelector('.minipaint-clip-grid');
+            grid.focus();
+            grid.dispatchEvent(new KeyboardEvent('keydown', {key: 'PageUp', bubbles: true}));
+        }""")
+        time.sleep(1.4)
+        r.check("PageUp moves a page while the grid has focus, because a listbox is expected to",
+                library_state(page)["page"] == 1, str(library_state(page)["page"]))
+
+        # -- a selection is browser state and does not belong to a page
+        page.evaluate("() => { const c = document.querySelector('.minipaint-clip-item'); if (c) { c.click(); } }")
+        time.sleep(0.6)
+        chosen = page.evaluate("() => window.minipaintClipboard.debug().selected")
+        r.check("paging: a picture on this page is selected", bool(chosen), repr(chosen))
+        page.evaluate("() => document.querySelector('.minipaint-clip-pager-next').click()")
+        time.sleep(1.4)
+        r.check("and it is still selected a page away, because the send path names it by id",
+                page.evaluate("() => window.minipaintClipboard.debug().selected") == chosen, chosen)
+        r.check("and the pager marks the page that is holding it",
+                "selection on page 2" in (pager(page) or {}).get("mark", ""), str(pager(page)))
+        # A library that shrinks to one page hides the row; one that grows
+        # past it must show a row with its buttons still in it.
+        show_page(page, {"size": 60, "page": 0})
+        r.check("with one page the row is hidden entirely", (pager(page) or {}).get("hidden") is True, str(pager(page)))
+        show_page(page, {"size": 10, "page": 0})
+        row = pager(page)
+        r.check("and when the library grows past one page again the row comes back WITH its controls",
+                row and not row["hidden"] and row["number"] == "1" and row["of"].strip() == "of 3"
+                and row["count"].startswith("24 picture"), str(row))
+        show_page(page, {"size": 10, "page": 1})
+
+        r.check("so the Send menu is still live, rather than greyed out with a picture plainly chosen",
+                page.evaluate("""() => { window.minipaintClipboard.toggleMenu();
+                    const items = () => Array.from(document.querySelectorAll('.minipaint-clip-menu .minipaint-clip-menu-item'));
+                    const send = items().filter(b => b.textContent.indexOf('Send selected') === 0)[0];
+                    if (send) { send.click(); }
+                    const on = items().filter(b => !b.disabled && b.textContent.indexOf('\u2039') !== 0
+                                                   && b.textContent !== 'Cancel').length;
+                    window.minipaintClipboard.closeMenu();
+                    return on; }""") >= 1)
+    finally:
+        for one in made:
+            try:
+                one.unlink()
+            except OSError:
+                pass
+        show_page(page, {"size": 60, "page": 0, "sort": "name_asc", "refresh": True})
+
+
+def check_patching(r: Results, page, library) -> None:
+    """An import that lands on your page adds ONE node, and nothing else moves.
+
+    Asserted by element identity: a stamp is written onto each tile once and
+    never again, so a tile that survived the patch carries the stamp it was
+    built with and a tile that was rebuilt does not. Markup equality would
+    pass for a grid that was torn out and rebuilt, which is exactly the thing
+    that loses a scroll position and a decoded picture.
+    """
+    from PIL import Image
+
+    open_clipboard(page)
+    show_page(page, {"size": 60, "page": 0, "sort": "name_asc", "refresh": True})
+    before = page.evaluate(STAMP_TILES_JS)
+    r.check("patching: the grid is drawn and stamped", len(before) == 6, str(len(before)))
+
+    page.evaluate("() => { const g = document.querySelector('.minipaint-clip-grid'); g.scrollTop = 24; }")
+    scrolled = page.evaluate("() => document.querySelector('.minipaint-clip-grid').scrollTop")
+
+    # THE PAGE IS NOT TOLD TO LOOK. A picture goes into the library through
+    # the same import route a paste or a drop takes, the server says the
+    # library moved, and the grid re-asks and patches on its own. Calling
+    # library() here instead would prove the drawing and skip the half that
+    # keeps every other open page correct.
+    landed = page.evaluate("""async () => {
+        const id = document.querySelector('.minipaint-clip-item').dataset.asset;
+        const blob = await (await fetch('/minipaint-clipboard/image/' + id,
+                                        { credentials: 'same-origin' })).blob();
+        const answer = await fetch('/minipaint-clipboard/import?source=paste', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': blob.type || 'image/png', 'X-MiniPaint-Filename': 'aaa-new.png' },
+            body: blob
+        });
+        return (await answer.json()).ok === true;
+    }""")
+    r.check("patching: a picture is imported from outside the grid", landed is True, str(landed))
+    for _ in range(20):
+        time.sleep(0.5)
+        if len(page.evaluate(READ_TILES_JS)) == 7:
+            break
+
+    after = page.evaluate(READ_TILES_JS)
+    kept = [t for t in after if t["stamp"]]
+    fresh = [t for t in after if not t["stamp"]]
+    r.check("one picture in means one node in, from the event alone",
+            len(after) == 7 and len(fresh) == 1, f"{len(after)} tiles, {len(fresh)} new")
+    r.check("AND THE OTHER SIX ARE THE SAME ELEMENTS, not new ones that look the same",
+            sorted(t["stamp"] for t in kept) == sorted(t["stamp"] for t in before), str(len(kept)))
+    r.check("the new one is in its place in the order, not appended",
+            after[0]["name"] == "aaa-new.png", str([t["name"] for t in after]))
+    r.check("and the scroll position survives the patch",
+            page.evaluate("() => document.querySelector('.minipaint-clip-grid').scrollTop") == scrolled,
+            str(page.evaluate("() => document.querySelector('.minipaint-clip-grid').scrollTop")))
+
+    # And out again the same way: the menu's Delete is a server action, and
+    # the grid hears about it rather than being handed new markup.
+    page.evaluate("""() => {
+        const doomed = Array.from(document.querySelectorAll('.minipaint-clip-item'))
+            .filter(t => t.dataset.name === 'aaa-new.png')[0];
+        if (doomed) { doomed.click(); }
+    }""")
+    time.sleep(0.8)
+    page.evaluate("() => document.getElementById('minipaint_clipboard_delete_now').click()")
+    for _ in range(24):
+        time.sleep(0.5)
+        if len(page.evaluate(READ_TILES_JS)) == 6:
+            break
+    left = page.evaluate(READ_TILES_JS)
+    r.check("a picture out means one node out, and the rest are still the same elements",
+            len(left) == 6 and len([t for t in left if t["stamp"]]) == 6,
+            f"{len(left)} tiles, {len([t for t in left if t['stamp']])} kept")
+    r.check("and the ones that survived are the ones that were there before",
+            sorted(t["name"] for t in left) == sorted(t["name"] for t in before),
+            str(sorted(t["name"] for t in left)))
+
+
+def check_the_failure_modes_have_answers(r: Results, page, library) -> None:
+    """Every failure in section 15 has a defined thing the page says.
+
+    The whole cost of the last six builds was a fault with no symptom, so
+    "it went quiet" is not an outcome any of these is allowed to have.
+    """
+    from PIL import Image
+
+    open_clipboard(page)
+    show_page(page, {"size": 60, "page": 0, "sort": "name_asc", "refresh": True})
+
+    # -- a selection gives way to truth, and only to truth
+    page.evaluate("() => { const c = document.querySelector('.minipaint-clip-item'); if (c) { c.click(); } }")
+    time.sleep(0.6)
+    chosen = page.evaluate("() => window.minipaintClipboard.debug().selected")
+    name = page.evaluate("() => (document.querySelector('.minipaint-clip-item') || {}).dataset.name")
+    r.check("failure modes: a picture is selected", bool(chosen) and bool(name), repr(chosen))
+    copy = (library / name).read_bytes()
+    (library / name).unlink()
+    page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
+    time.sleep(2.5)
+    r.check("the selected picture being deleted clears the selection - a selection gives way to truth",
+            page.evaluate("() => window.minipaintClipboard.debug().selected") == "",
+            repr(page.evaluate("() => window.minipaintClipboard.debug().selected")))
+    (library / name).write_bytes(copy)
+    page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
+    time.sleep(2.5)
+
+    # -- a thumbnail that will not load costs that tile its picture, and
+    #    nothing else on the page anything at all
+    before = page.evaluate(READ_TILES_JS)
+    # A real 404 from the real route, rather than a stubbed one: an id the
+    # library has never minted is exactly what a tile holds when the file
+    # behind it has gone.
+    page.evaluate("""() => {
+        const tile = document.querySelectorAll('.minipaint-clip-item')[1];
+        tile.querySelector('img').src = '/minipaint-clipboard/image/' + '0'.repeat(32) + '?thumb=1&v=1-1';
+    }""")
+    time.sleep(2.5)
+    r.check("a thumbnail that 404s marks its tile and leaves its name readable",
+            page.evaluate("""() => {
+                const tile = document.querySelectorAll('.minipaint-clip-item')[1];
+                return tile.classList.contains('minipaint-clip-item-missing') && !!tile.dataset.name;
+            }"""))
+    r.check("and the page is otherwise unaffected",
+            len(page.evaluate(READ_TILES_JS)) == len(before), f"{len(before)} -> {len(page.evaluate(READ_TILES_JS))}")
+
+    # -- the index route unreachable: keep what is on screen, say so, retry
+    held = [t["name"] for t in page.evaluate(READ_TILES_JS)]
+    page.route("**/minipaint-clipboard/library*", lambda route: route.abort())
+    try:
+        page.evaluate("() => window.minipaintClipboard.library({})")
+        time.sleep(2.5)
+        r.check("an index that cannot be reached keeps the tiles that were right when they were drawn",
+                [t["name"] for t in page.evaluate(READ_TILES_JS)] == held, str(held))
+        r.check("and the page says FORGE IS NOT ANSWERING - the one line that means the server is gone",
+                page.evaluate("() => window.minipaintClipboard.debug().offline.server") is True)
+        r.check("in those words, and not in the retired ones about a live connection",
+                page.evaluate("""() => { const bar = document.querySelector('.minipaint-clip-offline');
+                    return bar && !bar.hidden ? bar.textContent : ''; }""").startswith("Forge is not answering"),
+                page.evaluate("""() => { const bar = document.querySelector('.minipaint-clip-offline');
+                    return bar ? bar.textContent.slice(0, 60) : 'NO BAR'; }"""))
+        r.check("and it is trying again by itself rather than only offering a button",
+                page.evaluate("() => window.minipaintClipboard.debug().retrying") is True)
+    finally:
+        page.unroute("**/minipaint-clipboard/library*")
+    # -- and while it stays down, it is asked a handful of times and not a storm
+    #
+    # Every failure says the server is still silent, and the notice that
+    # re-renders on the way asks for a retry of its own. Guarded only by "is
+    # a timer pending" - which the attempt has just cleared - each round
+    # armed a second timer beside the one it was about to arm AND reset the
+    # backoff, so a server that stayed down was asked exponentially more
+    # often the longer it was gone. Counted, because a page that hammers a
+    # server it says is down is worse than the fault it is reporting.
+    asked = []
+    page.route("**/minipaint-clipboard/library*", lambda route: (asked.append(1), route.abort()))
+    try:
+        page.evaluate("() => window.minipaintClipboard.library({})")
+        time.sleep(2.5)
+        r.check("the line is up again with the server still refusing",
+                page.evaluate("() => window.minipaintClipboard.debug().offline.server") is True)
+        asked.clear()
+        first = page.evaluate("() => window.minipaintClipboard.debug().retryDelay")
+        time.sleep(32)
+        later = page.evaluate("() => window.minipaintClipboard.debug().retryDelay")
+        r.check("a server that stays down is asked a handful of times over half a minute, not scores of them",
+                len(asked) <= 4, f"{len(asked)} request(s) in 32s")
+        # Only once the cycle has actually gone round twice is there a second
+        # wait to be longer than the first; a page the browser backgrounded
+        # is allowed to have made no attempt at all, which is the design.
+        if len(asked) >= 2:
+            r.check("because each wait is longer than the last, rather than being reset by the failure",
+                    later > first, f"{first}ms -> {later}ms after {len(asked)} attempts")
+    finally:
+        page.unroute("**/minipaint-clipboard/library*")
+
+    page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
+    time.sleep(2.5)
+    r.check("and the line goes by itself the moment the server answers",
+            page.evaluate("() => window.minipaintClipboard.debug().offline.server") is False)
+    r.check("leaving no retry cycle behind on a page that is fine",
+            page.evaluate("() => window.minipaintClipboard.debug().retrying") is False)
+
+
+def check_the_queue_section_is_the_browsers(r: Results, page) -> None:
+    """The one screen that answers "I closed the browser and came back".
+
+    The jobs already survived that - the outbox is work Forge owns - but the
+    VIEW of them did not: the list was server-rendered markup delivered over
+    the framework's channel, so a page that came back needed that channel to
+    show a job that had run perfectly well without it.
+    """
+    open_clipboard(page)
+    time.sleep(1.5)
+    r.check("the queue list is drawn by the browser, into the block the server used to fill",
+            page.evaluate("""() => {
+                const host = document.getElementById('minipaint_clipboard_outbox_list');
+                return !!(host && host.querySelector('.minipaint-clip-outbox'));
+            }"""))
+    r.check("and says so when nothing has been sent from here yet",
+            "No request has been sent" in page.evaluate("""() => {
+                const host = document.getElementById('minipaint_clipboard_outbox_list');
+                return host ? host.textContent : ''; }"""),
+            page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_outbox_list');
+                return h ? h.textContent.slice(0, 80) : 'NO HOST'; }"""))
+
+    # Add to Queue is a press to this tab's own route now. Whether WanGP is
+    # there to take it is not what is being checked: that the press reaches
+    # the server and comes back with a sentence and a button is.
+    before = page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_queue_status');
+        return h ? h.textContent.trim() : ''; }""")
+    page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_queue');
+        const b = h && (h.tagName === 'BUTTON' ? h : h.querySelector('button'));
+        if (b) { b.click(); } }""")
+    said = ""
+    for _ in range(12):
+        time.sleep(1)
+        said = page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_queue_status');
+            return h ? h.textContent.trim() : ''; }""")
+        if said and said != before:
+            break
+    r.check("Add to Queue reaches the server over that route and comes back with a sentence",
+            bool(said) and said != before, repr(said))
+
+    r.check("the history list is the browser's too",
+            page.evaluate("""() => {
+                const items = () => Array.from(document.querySelectorAll('.minipaint-clip-menu .minipaint-clip-menu-item'));
+                window.minipaintClipboard.toggleMenu();
+                const entry = items().filter(b => b.textContent.indexOf('Queue Send History') >= 0)[0];
+                if (entry) { entry.click(); }
+                return true; }"""))
+    time.sleep(2.5)
+    r.check("and is drawn, with its own words, into the panel the menu opens",
+            page.evaluate("""() => {
+                const host = document.getElementById('minipaint_clipboard_history_list');
+                return !!(host && host.querySelector('.minipaint-clip-history'));
+            }"""),
+            page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_history_list');
+                return h ? h.innerHTML.slice(0, 120) : 'NO HOST'; }"""))
+
+
+def check_sorting_is_separate_from_drawing(r: Results, page) -> None:
+    """Changing the sort does not touch a tile until the new order arrives.
+
+    And a sort that cannot be fetched leaves the grid exactly as it was AND
+    SAYS SO - where a failed round trip used to leave it stale with nothing
+    to indicate the sort did not take.
+    """
+    open_clipboard(page)
+    show_page(page, {"size": 60, "page": 0, "sort": "name_asc"})
+    before = [t["name"] for t in page.evaluate(READ_TILES_JS)]
+
+    # Asked for and read back in the SAME turn of the browser's own loop, so
+    # what is asserted is the state the sort leaves the page in before any
+    # answer can possibly have arrived - rather than a state that depends on
+    # how long a stubbed network was told to take.
+    asked = page.evaluate("""() => {
+        window.minipaintClipboard.setSort('name_desc');
+        return {
+            busy: document.querySelector('.minipaint-clip-grid').getAttribute('aria-busy'),
+            names: Array.from(document.querySelectorAll('.minipaint-clip-item')).map(e => e.dataset.name)
+        };
+    }""")
+    r.check("the moment a sort is asked for, the grid is marked busy", asked["busy"] == "true", str(asked["busy"]))
+    r.check("and not one tile has moved: the order on screen is the one that arrived last",
+            asked["names"] == before, str(asked["names"]))
+    time.sleep(3.0)
+    r.check("and when the new order lands, it is the one on screen",
+            [t["name"] for t in page.evaluate(READ_TILES_JS)] == list(reversed(before)),
+            str([t["name"] for t in page.evaluate(READ_TILES_JS)]))
+
+    page.route("**/minipaint-clipboard/library*", lambda route: route.abort())
+    try:
+        held = [t["name"] for t in page.evaluate(READ_TILES_JS)]
+        page.evaluate("() => window.minipaintClipboard.library({sort: 'name_asc'})")
+        time.sleep(2.0)
+        r.check("a sort that cannot be fetched leaves the grid exactly as it was",
+                [t["name"] for t in page.evaluate(READ_TILES_JS)] == held, str(held))
+        r.check("and says so, rather than leaving a stale grid with nothing to show for it",
+                page.evaluate("""() => { const s = document.getElementById('minipaint_clipboard_status');
+                    return s ? s.textContent : ''; }""").find("could not be re-read") >= 0
+                or page.evaluate("() => window.minipaintClipboard.debug().offline.server") is True)
+    finally:
+        page.unroute("**/minipaint-clipboard/library*")
+    page.evaluate("() => window.minipaintClipboard.library({sort: 'name_asc', refresh: true})")
+    time.sleep(2.0)
+
+
+def check_a_thumbnail_is_fetched_once(r: Results, page) -> None:
+    """A tile whose version has not changed does not ask for its picture again.
+
+    From PerformanceObserver, which this page already carries: what the
+    browser actually put on the wire, rather than what the code meant to.
+    """
+    open_clipboard(page)
+    page.evaluate("""() => {
+        window.__minipaintImageRequests = [];
+        const observer = new PerformanceObserver(list => {
+            for (const entry of list.getEntries()) {
+                if (String(entry.name).indexOf('/minipaint-clipboard/image/') !== -1) {
+                    window.__minipaintImageRequests.push(entry.name);
+                }
+            }
+        });
+        observer.observe({ type: 'resource', buffered: false });
+    }""")
+    time.sleep(0.5)
+    page.evaluate("() => window.minipaintClipboard.library({refresh: true, quiet: true})")
+    time.sleep(2.5)
+    asked = page.evaluate("() => window.__minipaintImageRequests.length")
+    r.check("a re-draw of the same pictures puts NO thumbnail request on the wire",
+            asked == 0, f"{asked} request(s)")
+    r.check("because every tile's URL carries the version of its bytes",
+            page.evaluate("""() => Array.from(document.querySelectorAll('.minipaint-clip-item img'))
+                .every(i => i.src.indexOf('v=') !== -1)"""))
+
 def check_send(r: Results, page, targets) -> None:
     """Each destination takes the picture, and the server says so.
 
@@ -670,10 +1139,10 @@ def check_a_picture_handed_in_arrives_without_the_queue(r: Results, page, librar
     time.sleep(0.4)
     r.check("handed in: the intercept can be turned on", menu_click(page, "Intercept") == "clicked")
     time.sleep(2.5)
+    # The page's own answer, not a hidden box's: the switch is saved over
+    # this tab's route now, so what the menu is acting on is what matters.
     r.check("handed in: and the page knows it is on",
-            page.evaluate("() => { const h = document.getElementById('minipaint_clipboard_menu_state');"
-                          " const t = h && h.querySelector('textarea,input');"
-                          " try { return !!JSON.parse(t.value || '{}').intercept; } catch (e) { return false; } }"))
+            page.evaluate("() => window.minipaintClipboard.debug().intercept") is True)
 
     before = len(list(library.glob("*")))
     page.route("**/queue/**", lambda route: route.abort())
@@ -1010,6 +1479,317 @@ def check_recovers_after_the_interruption(r: Results, page, targets) -> None:
             repr(box(page, "minipaint_clipboard_send_ack")))
 
 
+# --------------------------------------------------------------------------
+# The Send-to contract: deliver, prove, then show
+# --------------------------------------------------------------------------
+
+#: Which of the host's tab panels is on screen. By identity, never by
+#: position: the panels and their buttons only line up while every panel has
+#: one, and a picture sent to Extras once opened PNG Info because of it.
+VISIBLE_PANEL_JS = ("() => (Array.from(document.querySelectorAll('#tabs > .tabitem'))"
+                    ".filter(i => getComputedStyle(i).display !== 'none')[0] || {}).id || ''")
+
+#: The panel each destination is expected to open.
+DESTINATION_PANELS = {
+    "img2img": "tab_img2img", "inpaint": "tab_img2img", "extras": "tab_extras",
+    "stitch_txt2img": "tab_txt2img", "stitch_img2img": "tab_img2img",
+}
+
+
+def visible_panel(page):
+    return page.evaluate(VISIBLE_PANEL_JS)
+
+
+def hold_delivery(page):
+    """Take over the transfer, so this test decides when a picture lands.
+
+    The alternative is stalling the network and hoping the timing holds,
+    which is how a check ends up proving that a stub was slow. What the
+    contract actually says is about ORDER - deliver, prove, then show - and
+    order is what a held promise can assert exactly.
+    """
+    page.evaluate("""() => {
+        const canvas = window.minipaintCanvas;
+        window.__sendCalls = 0;
+        window.__realDeliver = window.__realDeliver || canvas.deliverToHost;
+        window.__release = null;
+        canvas.deliverToHost = function () {
+            window.__sendCalls += 1;
+            return new Promise(function (resolve) { window.__release = resolve; });
+        };
+    }""")
+
+
+def answer_delivery(page, answer):
+    page.evaluate("a => { if (window.__release) { const f = window.__release; window.__release = null; f(a); } }", answer)
+
+
+def stub_delivery(page, answer):
+    """Every delivery answers with this, at once."""
+    page.evaluate("""a => {
+        const canvas = window.minipaintCanvas;
+        window.__sendCalls = 0;
+        window.__realDeliver = window.__realDeliver || canvas.deliverToHost;
+        canvas.deliverToHost = function () { window.__sendCalls += 1; return Promise.resolve(a); };
+    }""", answer)
+
+
+def restore_delivery(page):
+    page.evaluate("""() => {
+        if (window.__realDeliver) { window.minipaintCanvas.deliverToHost = window.__realDeliver; window.__realDeliver = null; }
+        window.__release = null;
+    }""")
+
+
+def check_a_destination_is_never_pre_opened(r: Results, page, targets) -> None:
+    """From a fresh page: open only Clipboard, send, and arrive at the target.
+
+    FORGE'S OWN RESULT BUTTONS ESTABLISH THE RULE. connect_paste_params_buttons
+    binds the source image to the destination component AND binds the same
+    press to switch_to_<tabname>, so a user on txt2img sends to img2img or
+    Extras without first visiting either, and the destination becomes the
+    visible tab. Being visible is an OUTCOME of the send, not a precondition
+    for it - and a send that only works after the user has visited the target
+    is a bug.
+    """
+    page.reload(wait_until="load")
+    page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
+    time.sleep(2.5)
+    open_clipboard(page)
+    time.sleep(1.5)
+    r.check("no destination has been opened on this page: Clipboard is the only tab visited",
+            visible_panel(page) == "tab_minipaint_clipboard", visible_panel(page))
+
+    for key, label in (("img2img", "img2img"), ("inpaint", "Inpaint"), ("extras", "Extras"),
+                       ("stitch_txt2img", "ImageStitch (txt2img)"), ("stitch_img2img", "ImageStitch (img2img)")):
+        if key not in targets:
+            continue
+        open_clipboard(page)
+        if not select_first(page):
+            r.check(f"no pre-open: a picture is selected for {key}", False, "no selection")
+            continue
+        r.check(f"no pre-open: the menu offers {key} although its tab has never been opened",
+                send_selected(page, label) == "clicked")
+        # Polled rather than slept: the page places the picture itself and
+        # then verifies it, and a gallery's upload takes as long as it takes.
+        # What is asserted is the outcome, never the latency.
+        for _ in range(25):
+            time.sleep(1)
+            if visible_panel(page) == DESTINATION_PANELS[key]:
+                break
+        landed = page.evaluate("""id => {
+            const host = id ? document.getElementById(id) : null;
+            if (host && host.querySelectorAll('img').length) { return true; }
+            return Array.from(document.querySelectorAll('textarea,input'))
+                .filter(t => String(t.value || '').indexOf('data:image') === 0)
+                .some(t => { const h = t.closest('[id]'); return h && h.id.indexOf('minipaint_clipboard') !== 0; });
+        }""", getattr(targets.get(key), "elem_id", "") or "")
+        r.check(f"no pre-open: the picture lands in {key} through its already-built component", landed)
+        r.check(f"a verified send to {key} SHOWS that destination, with the picture already there",
+                visible_panel(page) == DESTINATION_PANELS[key],
+                f"{visible_panel(page)} (wanted {DESTINATION_PANELS[key]})")
+    open_clipboard(page)
+
+
+def check_navigation_is_never_what_makes_a_send_work(r: Results, page, targets) -> None:
+    """Held open: the user stays in Clipboard until the picture is proved there."""
+    open_clipboard(page)
+    if not select_first(page):
+        r.check("held delivery: a picture is selected first", False, "no selection")
+        return
+    hold_delivery(page)
+    try:
+        send_selected(page, "img2img")
+        time.sleep(2.5)
+        r.check("with the transfer held open, the page has not moved: Clipboard is still the visible tab",
+                visible_panel(page) == "tab_minipaint_clipboard", visible_panel(page))
+        r.check("and the delivery was attempted exactly once",
+                page.evaluate("() => window.__sendCalls") == 1, str(page.evaluate("() => window.__sendCalls")))
+        answer_delivery(page, {"ok": True, "switched": True, "switchReason": ""})
+        time.sleep(1.5)
+    finally:
+        restore_delivery(page)
+
+
+def settle_sends(page) -> None:
+    """Let any watcher armed by an earlier send expire before the next one.
+
+    A send that went unanswered tries once more from the page twelve seconds
+    later, which is the right behaviour and the wrong thing to have running
+    underneath a check that counts deliveries.
+    """
+    time.sleep(14)
+
+
+def check_a_failed_send_leaves_you_in_clipboard(r: Results, page, targets) -> None:
+    """A destination that cannot take the picture does not get the user sent to it."""
+    settle_sends(page)
+    open_clipboard(page)
+    if not select_first(page):
+        r.check("failed send: a picture is selected first", False, "no selection")
+        return
+    # Nothing must deliver: the page's own transfer is broken here, and the
+    # framework's path is cut, so a switch could only be navigation used as
+    # evidence that delivery worked.
+    stub_delivery(page, {"ok": False, "reason": "the destination is broken", "switched": False, "switchReason": ""})
+    page.route("**/queue/**", lambda route: route.abort())
+    page.route("**/gradio_api/**", lambda route: route.abort())
+    try:
+        record_toasts(page, reset=True)
+        r.check("failed send: the send is attempted", send_selected(page, "img2img") == "clicked")
+        said = []
+        for _ in range(18):
+            time.sleep(1)
+            said = recorded_toasts(page)
+            if said:
+                break
+        r.check("a send that failed leaves the user in Clipboard, not in an empty destination",
+                visible_panel(page) == "tab_minipaint_clipboard", visible_panel(page))
+        r.check("and names the failure rather than going quiet",
+                any("did not reach" in one for one in said), str(said))
+    finally:
+        page.unroute("**/queue/**")
+        page.unroute("**/gradio_api/**")
+        restore_delivery(page)
+        time.sleep(1.5)
+
+
+def check_delivery_and_navigation_are_separate_facts(r: Results, page, targets) -> None:
+    """Proved to have landed, and the tab would not open: say so, never resend.
+
+    The picture is where it was sent. Sending it again to make the view
+    follow would put a second one in a gallery, which is the one thing a
+    destination that appends cannot be given twice.
+    """
+    settle_sends(page)
+    open_clipboard(page)
+    if not select_first(page):
+        r.check("switch failure: a picture is selected first", False, "no selection")
+        return
+    stub_delivery(page, {"ok": True, "reason": "", "switched": False,
+                         "switchReason": "there is no img2img tab on this page to open"})
+    try:
+        record_toasts(page, reset=True)
+        r.check("switch failure: the send is attempted", send_selected(page, "img2img") == "clicked")
+        said = []
+        for _ in range(18):
+            time.sleep(1)
+            said = recorded_toasts(page)
+            if said:
+                break
+        r.check("a delivery whose tab would not open says exactly that",
+                any("but could not open that tab" in one for one in said), str(said))
+        r.check("and the user is left where they were rather than on a tab that did not open",
+                visible_panel(page) == "tab_minipaint_clipboard", visible_panel(page))
+        time.sleep(14)
+        r.check("AND THE PICTURE IS NEVER SENT AGAIN: one delivery, one picture",
+                page.evaluate("() => window.__sendCalls") == 1,
+                str(page.evaluate("() => window.__sendCalls")))
+    finally:
+        restore_delivery(page)
+        time.sleep(1.5)
+
+
+def check_mini_paint_keeps_the_same_contract(r: Results, page) -> None:
+    """Mini Paint's transport is still the framework's. Its UX is not different.
+
+    Section 13 names Mini Paint's DELIVERY as the one thing that stays on
+    Gradio until the Canvas is migrated. It does not grant Mini Paint a
+    different Send-to experience: it still does not have to be opened first,
+    a receive that landed shows it, and a receive that did not stays here.
+    """
+    open_clipboard(page)
+    offered = page.evaluate("""() => { window.minipaintClipboard.toggleMenu();
+        const items = () => Array.from(document.querySelectorAll('.minipaint-clip-menu .minipaint-clip-menu-item'));
+        const send = items().filter(b => b.textContent.indexOf('Send selected') === 0)[0];
+        if (send) { send.click(); }
+        const names = items().map(b => b.textContent.trim());
+        window.minipaintClipboard.closeMenu();
+        return names; }""")
+    if not any("Mini Paint" in one for one in offered):
+        r.check("Mini Paint is not a destination on this page, so its contract is not checked here",
+                True, str(offered))
+        return
+
+    if not select_first(page):
+        r.check("Mini Paint: a picture is selected first", False, "no selection")
+        return
+    r.check("Mini Paint has never been opened on this page", visible_panel(page) == "tab_minipaint_clipboard")
+    r.check("Mini Paint: the send is offered anyway", send_selected(page, "Mini Paint") == "clicked")
+    landed = False
+    for _ in range(20):
+        time.sleep(1)
+        if visible_panel(page) == "tab_minipaint":
+            landed = True
+            break
+    r.check("a receive that landed shows Mini Paint, without it having been visited first", landed,
+            visible_panel(page))
+
+    open_clipboard(page)
+    if not select_first(page):
+        return
+    page.route("**/queue/**", lambda route: route.abort())
+    page.route("**/gradio_api/**", lambda route: route.abort())
+    try:
+        record_toasts(page, reset=True)
+        send_selected(page, "Mini Paint")
+        said = []
+        for _ in range(18):
+            time.sleep(1)
+            said = recorded_toasts(page)
+            if said:
+                break
+        r.check("with the framework's channel cut, that receive fails visibly", any(said), str(said))
+        r.check("and does not navigate: a failed receive leaves the user in Clipboard",
+                visible_panel(page) == "tab_minipaint_clipboard", visible_panel(page))
+    finally:
+        page.unroute("**/queue/**")
+        page.unroute("**/gradio_api/**")
+        time.sleep(1.5)
+
+
+def check_the_whole_tab_works_with_the_channel_cut(r: Results, page, targets) -> None:
+    """Browse, page, sort, select, send, come back, and read the queue - with
+    the framework's channel delivering nothing at all."""
+    open_clipboard(page)
+    page.route("**/queue/**", lambda route: route.abort())
+    page.route("**/gradio_api/**", lambda route: route.abort())
+    try:
+        page.evaluate("() => window.minipaintClipboard.library({refresh: true, sort: 'name_asc', page: 0})")
+        time.sleep(2.0)
+        state = library_state(page)
+        r.check("cut: the library is read and drawn", state["shown"] > 0 and state["total"] > 0, str(state))
+        page.evaluate("() => window.minipaintClipboard.setSort('name_desc')")
+        time.sleep(2.0)
+        r.check("cut: the sort takes, and is remembered", library_state(page)["sort"] == "name_desc",
+                str(library_state(page)["sort"]))
+        r.check("cut: a picture can still be selected", select_first(page))
+        r.check("cut: and sent to a destination that has never been opened",
+                send_selected(page, "img2img") == "clicked")
+        # The page places the picture itself and verifies it, which is a
+        # round trip and a re-encode rather than an instant; what is being
+        # checked is that it happens at all with the channel dead, not how
+        # quickly.
+        arrived = False
+        for _ in range(25):
+            time.sleep(1)
+            if visible_panel(page) == "tab_img2img":
+                arrived = True
+                break
+        r.check("cut: which is where the user now is", arrived, visible_panel(page))
+        open_clipboard(page)
+        queued = page.evaluate("""() => fetch('/minipaint-clipboard/queue?page=' + window.minipaintClipboard.pageId(),
+            {credentials: 'same-origin', cache: 'no-store'}).then(res => res.json()).then(a => !!(a && a.ok === true))""")
+        r.check("cut: and the queue list is readable - which is what 'I closed the browser and came back' means",
+                queued is True, str(queued))
+        r.check("cut: the notice, if it is up at all, is the one about the framework's channel and not about Forge",
+                page.evaluate("() => window.minipaintClipboard.debug().offline.server") is False)
+    finally:
+        page.unroute("**/queue/**")
+        page.unroute("**/gradio_api/**")
+        page.evaluate("() => window.minipaintClipboard.library({refresh: true, sort: 'name_asc', page: 0})")
+        time.sleep(1.5)
+
 def check_tab_switching_survives_reordering(r: Results, page) -> None:
     """Tabs get reordered and hidden; a send must still land on the right one.
 
@@ -1020,8 +1800,7 @@ def check_tab_switching_survives_reordering(r: Results, page) -> None:
     opened PNG Info.
     """
     def visible_panel():
-        return page.evaluate("() => (Array.from(document.querySelectorAll('#tabs > .tabitem'))"
-                             ".filter(i => getComputedStyle(i).display !== 'none')[0] || {}).id || ''")
+        return page.evaluate(VISIBLE_PANEL_JS)
 
     ours = {"canvas": "tab_minipaint", "clipboard": "tab_minipaint_clipboard"}
     for name, panel in ours.items():
@@ -1196,6 +1975,13 @@ def run() -> Results:
     assets.install(demo.app)
     from minipaint_neo.clipboard import routes as clip_routes
     clip_routes.install(demo.app)
+    # The event spine, which this page now needs rather than merely uses: the
+    # grid is told that the library moved and re-asks. Without these routes a
+    # page draws once and then quietly stops keeping up, which is the whole
+    # failure this suite exists to catch - so the suite serves what Forge
+    # serves rather than a subset of it.
+    from minipaint_neo import interop as interop_routes
+    interop_routes.install(demo.app)
     targets = host.destinations()
     try:
         with sync_playwright() as p:
@@ -1209,6 +1995,12 @@ def run() -> Results:
                 r.check("the clipboard adapter attached",
                         page.evaluate("() => !!(window.minipaintClipboard && window.minipaintClipboard.debug)"))
                 check_grid(r, page)
+                check_paging(r, page, library)
+                check_patching(r, page, library)
+                check_sorting_is_separate_from_drawing(r, page)
+                check_the_failure_modes_have_answers(r, page, library)
+                check_the_queue_section_is_the_browsers(r, page)
+                check_a_thumbnail_is_fetched_once(r, page)
                 r.check("a picture can be selected", select_first(page),
                         repr(box(page, "minipaint_clipboard_selected")))
                 check_send(r, page, targets)
@@ -1226,9 +2018,17 @@ def run() -> Results:
                 check_the_page_can_say_why_a_send_was_silent(r, page)
                 check_the_notice_takes_itself_down(r, page)
                 check_a_picture_handed_in_arrives_without_the_queue(r, page, library)
-                # Last: it removes a picture from the library the checks above
-                # count.
+                # Before the Send-to contract, because its Delete is a
+                # framework event and the checks below cut that channel.
                 check_the_toolbar_pastes_and_deletes(r, page)
+                # Last: the first of these reloads the page to prove no
+                # destination was opened beforehand.
+                check_a_destination_is_never_pre_opened(r, page, targets)
+                check_navigation_is_never_what_makes_a_send_work(r, page, targets)
+                check_a_failed_send_leaves_you_in_clipboard(r, page, targets)
+                check_delivery_and_navigation_are_separate_facts(r, page, targets)
+                check_mini_paint_keeps_the_same_contract(r, page)
+                check_the_whole_tab_works_with_the_channel_cut(r, page, targets)
             finally:
                 browser.close()
     finally:

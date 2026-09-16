@@ -3,8 +3,8 @@
 This describes what the extension does when the **Clipboard** tab is used and when
 another extension calls the public queue API: what it shows, what it writes, what it
 refuses to write, and what you can check for yourself. It is written against the code in
-`minipaint_neo/clipboard/`, `minipaint_neo/interop.py`, `javascript/minipaint_clipboard.js`,
-`javascript/minipaint_interop.js`, the queue half of `wan2gp_bridge/` and the registration
+`minipaint_neo/clipboard/`, `minipaint_neo/interop.py`, `browser/minipaint_clipboard.js`,
+`browser/minipaint_interop.js`, the queue half of `wan2gp_bridge/` and the registration
 in `scripts/mini_paint.py`. The WanGP tab it builds on has its own guide,
 `docs/wangp/README.md`; the two design documents it implements are kept for the record
 (the Clipboard design intent, and `docs/wangp/START_AND_OUTBOX.txt`, which is marked
@@ -27,8 +27,14 @@ Mini Paint* button, which then keeps its old behaviour.
 Everything on the page is an ordinary Gradio component, coloured by the host theme's own
 variables and by nothing else. No fixed white, no fixed black: a night-mode theme (the Lobe
 theme, for one) reaches every corner of the tab, including the thumbnail grid, the cards,
-the menu, the toast, the queue and the history list, which are server-rendered HTML the
-browser script only listens to.
+the menu, the toast, the queue and the history list.
+
+The grid, its pager, the queue and the history are drawn **by the browser**, from routes
+this extension serves over plain HTTP; the composer's three slot cards are still
+server-rendered HTML the browser script listens to. What that division buys, what it cost
+and what is left of it is
+`docs/clipboard/NO_LIVE_CONNECTION_WHAT_WAS_BUILT_AND_V2.md`, beside the design intent it
+implements.
 
 ## The one rule
 
@@ -319,7 +325,8 @@ They are not any more:
   on its own request, so the page can tell "refused" from "never heard" -
   which it could not before, and which is why the failure was so hard to
   place. That receipt is now diagnostic rather than something the user waits
-  on: when it does not arrive, the page says the live connection is gone.
+  on: when it does not arrive, the page says the composer's live channel is
+  down, and names which parts of the tab that leaves stale.
 
 * The delivery goes over `POST /minipaint-clipboard/send`, and **every
   destination finishes**.
@@ -346,15 +353,33 @@ They are not any more:
 * The line offers to **check again**, never to reload. It offered a reload
   once, and on a Forge behind its own TLS front end reloading took the whole
   WebUI page with it - the session gone, for a line that is only ever
-  advisory. Checking presses Refresh and clears the line if the server
-  answers.
+  advisory. Checking asks the server for the library over HTTP and presses
+  Refresh, and clears the line if either answers.
 
-* The first send to go unanswered says so and leaves a line standing -
-  *"This page has lost its live connection to Forge"* - with a **Reconnect**
-  button, because the state it is reporting lasts until the page is reloaded.
-  Sends after that one stop waiting twelve seconds for an answer that is not
-  coming: they try the direct route after two and a half. The first
-  acknowledgement to arrive clears both.
+* The first send to go unanswered says so and leaves a line standing. It no
+  longer says *"This page has lost its live connection to Forge"*, which was
+  raised whenever a framework's event stream sulked - constantly, on a
+  machine where Forge is running, and meaning almost nothing. There are two
+  sentences now and no third: **Forge is not answering**, raised only when an
+  HTTP request to this extension's own routes actually fails; and **the
+  composer's live channel to Forge is down on this page**, which says that
+  browsing, paging, sorting, selecting, sending and the queue list all still
+  work - they do not use it - and names the parts that will not update until
+  it comes back. Sends after an unanswered one stop waiting twelve seconds
+  for an answer that is not coming: they try the direct route after two and a
+  half. The first acknowledgement to arrive clears both.
+
+* **A destination never has to be opened first, and a verified send opens it.**
+  The picture goes into the destination's own component while its tab is
+  hidden - hidden is not absent - the transfer is checked to have actually
+  landed, and only then is that tab shown. That is how Forge's own result
+  buttons behave. A send that fails leaves you in Clipboard with the reason;
+  a picture proved to have landed in a tab that would not open says
+  *"Sent x.png to img2img, but could not open that tab."* and is **never sent
+  again**, because sending it twice is one picture too many in a gallery that
+  appends. Mini Paint keeps the same contract although its delivery is still
+  a Gradio event: it does not have to be visited first, a receive that landed
+  shows it, and one that did not leaves you here.
 
 * A picture handed **in** from another tab arrives too. The button under a
   txt2img, img2img or Extras result picks its picture in the browser and

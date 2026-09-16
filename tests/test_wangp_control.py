@@ -108,6 +108,9 @@ class FakeService:
         #: Tasks Wan2GP's unpacker would have thrown away. Never empty by
         #: accident: a skipped task is a job that will wait forever.
         self.skipped = []
+        #: Tasks that reached the worker and were refused by Python before
+        #: a frame was generated. Same rule: never empty by accident.
+        self.dispatch_errors = []
         self.gate = threading.Event()
         self.gate.set()
         self.unload_gate = threading.Event()
@@ -145,7 +148,9 @@ class FakeService:
 
         So this mirrors the real rule, including the requirement that makes
         the failure visible: a task whose params have no ``model_type`` is
-        skipped rather than quietly queued.
+        skipped rather than quietly queued, and ``plugin_data`` is read off
+        the *entry* rather than out of params, because that is the only
+        place ``_parse_task_manifest`` looks for it.
         """
         self.commands.append((name, dict(payload or {})))
         gen = self._state["gen"]
@@ -158,13 +163,39 @@ class FakeService:
                     # Wan2GP: "Settings must contain 'model_type'. Skipping."
                     self.skipped.append(params)
                     continue
-                gen["queue"].append({"id": len(gen["queue"]) + 1, "params": params})
+                plugin_data = (entry or {}).get("plugin_data") or {}
+                gen["queue"].append({"id": len(gen["queue"]) + 1, "params": params, "plugin_data": plugin_data})
         return self.start_generation()
 
     def abort(self):
         self.aborted += 1
 
     # -- what the worker does
+    @staticmethod
+    def _generate_media(task, send_cmd, plugin_data=None, **settings):
+        """Wan2GP's generation entry point, in the one respect that matters.
+
+        It takes ``plugin_data`` as a named parameter and the settings as
+        the rest. That is the whole reason params and plugin_data cannot be
+        the same dict, and it is a property of the *call*, so modelling the
+        signature is enough to make Python enforce it here exactly as it
+        does there.
+        """
+        return True
+
+    def _dispatch(self, task):
+        """The two lines of ``queue_worker_func`` that decide it runs.
+
+        Wan2GP filters params down to the arguments ``generate_media`` names
+        and splats them beside an explicit ``plugin_data=`` popped off the
+        task. ``plugin_data`` is one of those names, so a copy of it left
+        inside params is not filtered out and not ignored - it arrives
+        twice, and Python refuses the call before anything is generated.
+        """
+        params = dict(task.get("params") or {})
+        plugin_data = dict(task).pop("plugin_data", {})
+        return self._generate_media(task, None, plugin_data=plugin_data, **params)
+
     def _run_generation(self):
         self.loop_entries += 1
         gen = self._state["gen"]
@@ -173,7 +204,15 @@ class FakeService:
             while gen["queue"]:
                 self.gate.wait()
                 task = gen["queue"][0]
-                gen.setdefault("file_list", []).append(f"/out/{task['params'].get('client_id', 'x')}.mp4")
+                try:
+                    self._dispatch(task)
+                except TypeError as error:
+                    # Wan2GP reports this one and abandons the task. Kept
+                    # here instead so the rest of the queue still drains and
+                    # the refusal is something a check can read.
+                    self.dispatch_errors.append(str(error))
+                else:
+                    gen.setdefault("file_list", []).append(f"/out/{task['params'].get('client_id', 'x')}.mp4")
                 gen["queue"].pop(0)
         finally:
             gen["in_progress"] = False
@@ -511,6 +550,29 @@ def manifest_shape_checks(r: Results) -> None:
     r.check("settings that name no model are refused here, not skipped silently there",
             refused == protocol.MODEL_UNAVAILABLE, refused)
     r.check("and nothing was left in WanGP's queue for it", not gen["queue"], str(gen["queue"]))
+
+    # ``plugin_data`` is a sibling of params, and a base that carries it
+    # inside them is not hypothetical: the composed base is a snapshot of
+    # the user's committed form, Wan2GP's own recorder pops the key before
+    # storing one, but another plugin that captures the form for itself may
+    # record it with the key still on. Every bridge job on that install then
+    # died in the worker - "got multiple values for keyword argument
+    # 'plugin_data'" - after the bridge had reported the job handed over,
+    # which is the same silent-complete failure this function opens with.
+    runner, service, gen, _book = _executor()
+    service.gate.clear()
+    _submit(runner, "c" * 32, settings=_settings(plugin_data={"api": {"return_audio": True}}), model_type="t2v")
+    entry = gen["queue"][-1] if gen["queue"] else {}
+    r.check("a base that carries plugin_data still queues the task",
+            gen["queue"] and not service.skipped, f"queued {len(gen['queue'])}, skipped {len(service.skipped)}")
+    r.check("plugin_data is lifted out of params, where Wan2GP would pass it to generate_media twice",
+            "plugin_data" not in (entry.get("params") or {}), str(sorted(entry.get("params") or {})[:8]))
+    r.check("and put beside them, where Wan2GP's unpacker reads it, so the plugin's data is carried not dropped",
+            (entry.get("plugin_data") or {}) == {"api": {"return_audio": True}}, str(entry.get("plugin_data")))
+    service.gate.set()
+    _drain(service, gen)
+    r.check("so the worker generates instead of refusing the call", not service.dispatch_errors,
+            "; ".join(service.dispatch_errors))
 
 
 def ledger_checks(r: Results) -> None:

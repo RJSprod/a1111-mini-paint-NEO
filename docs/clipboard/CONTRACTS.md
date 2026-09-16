@@ -679,7 +679,7 @@ def image_url(asset_id, thumb=True, version="")
 # ui.py
 PREFIX = "minipaint_clipboard"; SLOTS = (("first", "First Frame", "start"), ("last", "Last Frame", "end"), ("ref", "Reference", "references"))
 QUEUE_BUTTON_LABEL = "Add to Queue"; QUEUE_BUTTON_BLOCKED = "WanGP is not running"; OUTBOX_LABELS (+ Enhancing); ENHANCE_LABELS; WANGP_LABELS; NO_PAGE = "00000000"; OUTBOX_SHOWN = 40
-SP_VARIANT_CHOICES; SP_MODE_CHOICES; QUEUE_JS (prompt, switch -> addToQueue); CANCEL_ALL_JS; MENU_STATE_JS; GRID_MOUNT = ""; LIST_MOUNT = ""
+SP_VARIANT_CHOICES; SP_MODE_CHOICES; QUEUE_JS (prompt, switch -> addToQueue); CANCEL_ALL_JS; MENU_STATE_JS; OPEN_PROMPT_EDITOR_JS (passes its inputs through); CLOSE_PROMPT_EDITOR_JS; GRID_MOUNT = ""; LIST_MOUNT = ""
 def card_html(slot, label, field, assets, missing=False)                              # the one server-rendered section left; see the V2 list
 def outbox_view(jobs, page) -> [dict]; def history_view(records, asset_of) -> [dict]   # content, not nodes: the browser draws it
 def job_sentence(job) -> str; def enhance_sentence(job) -> str; def wangp_sentence(job) -> str; def enhance_line_html(availability, enabled) -> str
@@ -689,6 +689,8 @@ class ClipboardTab:
     prompt_changed(prompt)
     toggle_enhance(flag, model) -> enhance line; model_changed(model) -> enhance line
     system_prompt_selected(variant, mode) -> (box, state); apply_override(variant, mode, text) -> (box, state, status); restore_default(variant, mode) -> (box, state, status)
+    open_prompt_editor(model, variant, mode) -> (variant, mode, box, state)            # the full-window editor's one backend half: pick the pair a press would use, then read it
+    _draft_has_picture_for(variant) -> bool                                            # a picture that variant's model reads (enhance.SLOTS_FOR), resolved through the library exactly as a press does
     cancel_all(page) -> {ok, cancelled, jobs, status}                                   # outbox.cancel_all()
     add_to_queue(prompt, page, model=None, enhance_wanted=None) -> {ok, instruction {nonce, job_id, executor, state} | None, status, jobs, queue_button}
     queue_answer(page) -> {ok, page, jobs, history, status, queue_button, running}      # records history for unrecorded positive Clipboard jobs, once
@@ -724,7 +726,18 @@ enhance_toggle])`, `cancel_all.click(js: cancelAll)`,
 `enhance_toggle.input(toggle_enhance, [enhance_toggle, model] ->
 [enhance_line])`, `model.input(model_changed)`, the selectors' and Reload's
 `system_prompt_selected`, `sp_apply.click(apply_override)`,
-`sp_restore.click(restore_default)`.
+`sp_restore.click(restore_default)`, and `sp_open.click(open_prompt_editor,
+[model, sp_variant, sp_mode] -> [sp_variant, sp_mode, system_prompt,
+sp_state], js: openPromptEditor)`.
+
+The system prompts have **no accordion and no shape on the tab**: the panel
+carries `minipaint-clip-enhance-panel`, which the stylesheet gives
+`display: none` until the browser puts `minipaint-clip-fullscreen` on it, and
+`sp_open` is the only door. `sp_close.click` is browser-only
+(`closePromptEditor`, no backend fn), because closing is a class the page
+removes. `openPromptEditor`'s `js=` runs before its fn, so the view is already
+open when the fresh variant, mode, box and state land in it; the fn's reload is
+why an unapplied edit does not survive a close and re-open.
 
 The tab's browser side, `browser/minipaint_clipboard.js`
 (`window.minipaintClipboard`): `attach` (mounts the grid, fetches the library
@@ -744,7 +757,12 @@ failed" and "the answer never came back" in the log), `reportTiles` (says when
 a thumbnail is *drawn* off-centre, measured through `object-fit` rather than
 from the `<img>` box, which is centred whatever the picture does),
 `refreshCapabilities` (throttled, never on a timer), `pressHidden`,
-`menuStateChanged`, `showOffline`, `debug()`. Job buttons call the queue
+`menuStateChanged`, `showOffline`, `openPromptEditor` / `closePromptEditor`
+(the full-window system-prompt view: the class, the Escape key, the focus, and
+`markEditorChain`, which puts `minipaint-clip-grow` on every wrapper Gradio
+built between the panel and the textarea so the box can take the height - the
+chain is marked rather than selected because Gradio writes `flex-grow` and
+`display` inline), `debug()` (its `editorOpen` says whether the view is up). Job buttons call the queue
 route; retry and adopt kick the pump. It sets no colour of its own and
 journals no prompt and no filename.
 

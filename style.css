@@ -1760,6 +1760,102 @@
 #minipaint_clipboard_root .minipaint-clip-enhance-line[data-state="model"] { color: var(--body-text-color-subdued, inherit); }
 #minipaint_clipboard_root .minipaint-clip-system-prompt textarea { font-family: var(--font-mono, monospace); font-size: var(--text-sm, 0.85em); }
 #minipaint_clipboard_root .minipaint-clip-sp-state { color: var(--body-text-color-subdued, inherit); font-size: var(--text-sm, 0.85em); }
+
+/* -- the system prompt editor, full window -------------------------------
+
+   THE SAME PANEL, IN A SECOND SHAPE. A system prompt is a page of prose and
+   the composer is a third of the window wide, so the panel is promoted to
+   fill the window rather than an editor being built beside it: one class,
+   the components that were already there, and nothing to drift.
+
+   The Close button exists only in this shape, and the button that gets you
+   here only in the other one, so neither is ever offered where it would do
+   nothing. */
+#minipaint_clipboard_root .minipaint-clip-sp-close { display: none; }
+
+/* ON THE TAB THERE IS A BUTTON AND NOTHING ELSE. The panel is on the page -
+   its controls are the real ones, wired once - but it has no shape until it
+   is filling the window. A collapsed section that a press expands in place
+   is what this replaced: it still took a third of the composer to say its
+   own name. */
+#minipaint_clipboard_root .minipaint-clip-enhance-panel { display: none; }
+
+#minipaint_clipboard_root .minipaint-clip-enhance-panel.minipaint-clip-fullscreen {
+    display: flex !important;
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    margin: 0;
+    max-width: none;
+    /* Its own ground: it is over the tab, not part of it, and a panel you
+       can read the grid through is a panel nobody can read. */
+    background: var(--background-fill-primary, var(--body-background-fill, inherit));
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 16px;
+    overflow: auto;
+}
+
+/* Gradio renders an accordion as its label button and then one wrapper for
+   the content; the wrapper has to flex too, or the box inside it has nothing
+   to grow into. */
+#minipaint_clipboard_root .minipaint-clip-enhance-panel.minipaint-clip-fullscreen > * {
+    flex: 0 0 auto;
+    min-height: 0;
+}
+
+/* MOSTLY THE FIELD BEING EDITED. Everything else in the view is a line or a
+   row; the box takes what is left, which on any ordinary window is most of
+   it.
+
+   The framework nests each component in two or three divs and sets flex-grow
+   and display on some of them INLINE, so a rule about ".the box" cannot
+   reach it: an inline flex-grow:0 three wrappers up stops everything below
+   from growing however the box is styled. The browser marks the chain it is
+   promoting - see markEditorChain - and this is the rule about that chain. */
+#minipaint_clipboard_root .minipaint-clip-enhance-panel.minipaint-clip-fullscreen .minipaint-clip-grow {
+    /* Every step: a column that grows. A wrapper left as a block is a step
+       where the flex stops, and the box below it goes back to the ten lines
+       the framework gave it. */
+    display: flex !important;
+    flex-direction: column;
+    flex: 1 1 auto !important;
+    min-height: 0;
+}
+
+/* The panel's own content wrapper is the top of that chain, and it is the
+   one that has to become a column first. */
+#minipaint_clipboard_root .minipaint-clip-enhance-panel.minipaint-clip-fullscreen > .minipaint-clip-grow {
+    display: flex !important;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px 12px 12px;
+    overflow: auto;
+}
+
+/* The framework sizes a textarea from its row count and keeps the number in
+   an inline style, so this is one of the few places in this file that has to
+   insist. */
+#minipaint_clipboard_root .minipaint-clip-enhance-panel.minipaint-clip-fullscreen .minipaint-clip-system-prompt textarea {
+    flex: 1 1 auto !important;
+    height: auto !important;
+    /* A floor for a short window, not a ceiling: the flex above is what
+       makes it take the rest. */
+    min-height: 30vh !important;
+    max-height: none !important;
+    resize: none;
+    overflow-y: auto;
+}
+
+#minipaint_clipboard_root .minipaint-clip-enhance-panel.minipaint-clip-fullscreen .minipaint-clip-sp-close {
+    display: block;
+}
+
+/* The way in is not offered from inside. */
+#minipaint_clipboard_root .minipaint-clip-enhance-panel.minipaint-clip-fullscreen .minipaint-clip-sp-open {
+    display: none;
+}
+
 #minipaint_clipboard_root .minipaint-clip-cancel-all { margin-top: 4px; }
 #minipaint_clipboard_root .minipaint-clip-job-enhancing { border-left-color: var(--border-color-accent-subdued, var(--color-accent, #ff7c00)); }
 #minipaint_clipboard_root .minipaint-clip-job-line {

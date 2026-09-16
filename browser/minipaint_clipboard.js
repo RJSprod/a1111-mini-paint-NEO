@@ -1267,6 +1267,73 @@ window.minipaintClipboard = (function () {
      * controls that drift, and this tab has spent enough builds on doors
      * that disagree with each other.
      */
+    //: The custom property the stylesheet reads for where a full-window panel
+    //: starts. Set on the root element rather than on a panel, because both
+    //: panels read it and a theme that moves its header moves both at once.
+    const TOP_INSET_PROPERTY = "--minipaint-clip-top";
+
+    /**
+     * How much of the top of the window the WebUI's own header is using.
+     *
+     * MEASURED, BECAUSE THE HEADER BELONGS TO A THEME THIS DOES NOT SHIP.
+     *
+     * A full-window panel used to start at the top of the viewport, which is
+     * above whatever the theme has pinned there: with the Lobe theme that is
+     * the tab bar, so a video played from View Outputs covered the way out of
+     * the tab. A selector for one theme's markup would be a selector that is
+     * wrong for the next one, and this extension runs under several.
+     *
+     * What is true of a header whatever draws it is that it is pinned to the
+     * top of the window. So that is what is asked: the elements really at the
+     * top edge, of which the pinned ones are asked how far down they reach.
+     * Nothing pinned there means nothing to avoid, and the answer is 0.
+     *
+     * Capped at a third of the window, because a full-height fixed sidebar is
+     * also pinned and also crosses the top edge, and treating one as a header
+     * would leave the panel nowhere to be.
+     */
+    function headerInset() {
+        if (typeof document.elementsFromPoint !== "function") { return 0; }
+        let found;
+        try {
+            found = document.elementsFromPoint(Math.round(window.innerWidth / 2), 1) || [];
+        } catch (e) { return 0; }
+        const limit = Math.round(window.innerHeight / 3);
+        let bottom = 0;
+        for (let i = 0; i < found.length; i += 1) {
+            const node = found[i];
+            if (!node || node === document.body || node === document.documentElement) { continue; }
+            // A panel of ours is pinned to the top as well. Measuring one of
+            // those would push the next one that opened further down, and the
+            // one after that further still.
+            if (node.closest && node.closest("." + EDITOR_OPEN_CLASS)) { continue; }
+            let style;
+            try { style = window.getComputedStyle(node); } catch (e) { continue; }
+            if (!style || (style.position !== "fixed" && style.position !== "sticky")) { continue; }
+            const box = node.getBoundingClientRect();
+            if (box.top <= 1 && box.bottom > bottom && box.bottom <= limit) { bottom = box.bottom; }
+        }
+        return Math.max(0, Math.round(bottom));
+    }
+
+    /** Publish the inset for the stylesheet. Never fatal: a panel that cannot
+     *  be told where the header is still opens, at the top of the window. */
+    function applyHeaderInset() {
+        try {
+            document.documentElement.style.setProperty(TOP_INSET_PROPERTY, headerInset() + "px");
+        } catch (e) { /* a page that will not take a custom property still opens */ }
+    }
+
+    /** Re-measure while a panel is open: a header's height is a function of
+     *  the window's width on every theme that wraps its tabs. */
+    function watchHeaderInset() {
+        if (S.headerWatch) { return; }
+        S.headerWatch = function () {
+            if (outputsOpen() || editorOpen()) { applyHeaderInset(); }
+        };
+        window.addEventListener("resize", S.headerWatch);
+    }
+
     function editorPanel() { return byId(ENHANCE_PANEL_ID); }
 
     function editorOpen() {
@@ -1291,6 +1358,9 @@ window.minipaintClipboard = (function () {
         // The panel has no shape on the tab at all - the stylesheet gives it
         // none until this class is on it. There is nothing to expand and
         // nothing left behind in the composer when it goes away again.
+        // Before the class, so the measurement does not find this panel.
+        applyHeaderInset();
+        watchHeaderInset();
         panel.classList.add(EDITOR_OPEN_CLASS);
         markEditorChain(panel, true);
         if (!S.editorKey) {
@@ -1519,6 +1589,9 @@ window.minipaintClipboard = (function () {
     function openOutputs() {
         const panel = outputsPanel();
         if (!panel) { return false; }
+        // Before the class, so the measurement does not find this panel.
+        applyHeaderInset();
+        watchHeaderInset();
         panel.classList.add(EDITOR_OPEN_CLASS);
         if (S.outputsKey) { document.removeEventListener("keydown", S.outputsKey, true); }
         S.outputsKey = function (event) {

@@ -26,7 +26,7 @@ place in WanGP is tracked only by the page that queued it; and nothing
 written down carries a prompt.
 """
 
-from harness import Results, setup_path
+from harness import Results, setup_path, value_of as _value
 
 setup_path()
 
@@ -623,6 +623,54 @@ def tab_checks(r: Results, fake: FakeApi, clock: _Clock, base: pathlib.Path) -> 
     r.check("a blank override is refused with the sentence", "cannot be blank" in status and state.startswith("**Override saved**"))
     box, state, status = tab.restore_default("ref2va", "image")
     r.check("Restore default forgets it and shows the default again", box["value"] == "DEFAULT ref2va image instructions" and state.startswith("**Default**") and enhance.override("ref2va", "image") == "")
+
+    # -- the editor opens on the pair a press would actually use
+    #
+    # Which of the four sets the writer runs under is a lookup, not a menu:
+    # the variant is whichever H3 model WanGP is on, and the picture half is
+    # whether the composer is holding one that variant reads. Opening on the
+    # pair chosen last means editing one set and finding out at the next
+    # press that another was used.
+    library = clipboard_store.store()
+    history.save_draft(history.normalize_draft({}))
+    variant, mode, box, _state = tab.open_prompt_editor(json.dumps(FL2VA_MODEL), "ref2va", "image")
+    r.check("with WanGP on FL2VA and nothing attached, the editor opens on FL2VA without a picture",
+            _value(variant) == "fl2va" and _value(mode) == "text" and box["value"] == "DEFAULT fl2va text instructions",
+            f"{_value(variant)}/{_value(mode)}")
+    variant, mode, box, _state = tab.open_prompt_editor(json.dumps(REF2VA_MODEL), "fl2va", "text")
+    r.check("and follows WanGP to Ref2VA rather than staying where it was",
+            _value(variant) == "ref2va" and _value(mode) == "text", f"{_value(variant)}/{_value(mode)}")
+
+    picture = library.import_bytes(_png(), "attached.png", "upload")
+    draft = history.load_draft()
+    draft["reference_asset_ids"] = [picture.asset_id]
+    history.save_draft(draft)
+    variant, mode, box, _state = tab.open_prompt_editor(json.dumps(REF2VA_MODEL), "fl2va", "text")
+    r.check("a reference attached is a picture Ref2VA reads, so the picture instructions open",
+            _value(variant) == "ref2va" and _value(mode) == "image", f"{_value(variant)}/{_value(mode)}")
+    variant, mode, _box, _state = tab.open_prompt_editor(json.dumps(FL2VA_MODEL), "ref2va", "image")
+    r.check("but the same reference is not one FL2VA reads, so that pair opens without a picture",
+            _value(variant) == "fl2va" and _value(mode) == "text", f"{_value(variant)}/{_value(mode)}")
+
+    draft = history.load_draft()
+    draft["reference_asset_ids"] = []
+    draft["first_asset_id"] = picture.asset_id
+    history.save_draft(draft)
+    variant, mode, _box, _state = tab.open_prompt_editor(json.dumps(FL2VA_MODEL), "ref2va", "image")
+    r.check("a first frame is one FL2VA reads", _value(variant) == "fl2va" and _value(mode) == "image",
+            f"{_value(variant)}/{_value(mode)}")
+
+    variant, mode, _box, _state = tab.open_prompt_editor("", "ref2va", "text")
+    r.check("a WanGP that has not said its model keeps the variant on screen rather than guessing one",
+            _value(variant) == "ref2va", _value(variant))
+    variant, _mode, _box, _state = tab.open_prompt_editor(json.dumps(VIDEO_MODEL), "ref2va", "text")
+    r.check("and so does a model that is neither variant", _value(variant) == "ref2va", _value(variant))
+
+    library.delete(picture.asset_id)
+    _variant, mode, _box, _state = tab.open_prompt_editor(json.dumps(FL2VA_MODEL), "fl2va", "image")
+    r.check("a slot whose file has left the folder is not a picture anybody is going to send",
+            _value(mode) == "text", _value(mode))
+    history.save_draft(history.normalize_draft({}))
 
     tab.prompt_changed("typed in the tab")
     answer = tab.add_to_queue("typed in the tab", page_id, json.dumps(FL2VA_MODEL))

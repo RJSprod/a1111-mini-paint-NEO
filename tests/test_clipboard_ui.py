@@ -226,6 +226,7 @@ def page_checks(r: Results, base: pathlib.Path):
         "history_panel", "history_list", "history_close",
         # prompt enhancement, and the whole line's cancel
         "enhance_panel", "enhance_line", "enhance_toggle", "sp_variant", "sp_mode", "system_prompt", "sp_state", "sp_apply", "sp_restore", "sp_reload",
+        "sp_open", "sp_close",
         "model", "cancel_all",
     ]
     missing = [name for name in needed if f"minipaint_clipboard_{name}" not in ids]
@@ -297,6 +298,28 @@ def page_checks(r: Results, base: pathlib.Path):
     # only ever reconciled by a change event and one had been lost.
     r.check("and the prompt and the enhancement switch travel with the press, so what is on screen is what happens",
             click and click[0]["inputs"] == [cid("prompt"), cid("enhance_toggle")], str(click[0]["inputs"] if click else None))
+    # -- the system prompt editor's second shape
+    opened = targeting("sp_open", "click")
+    r.check("the editor fills the window from the browser AND is loaded by the server in one press",
+            len(opened) == 1 and opened[0]["backend_fn"] and ".openPromptEditor(" in (opened[0].get("js") or ""),
+            str(len(opened)))
+    r.check("it is told the page's WanGP model and what is selected, and it sets both selectors and the box",
+            opened and opened[0]["inputs"] == [cid("model"), cid("sp_variant"), cid("sp_mode")]
+            and opened[0]["outputs"] == [cid("sp_variant"), cid("sp_mode"), cid("system_prompt"), cid("sp_state")],
+            str(opened[0]["outputs"] if opened else None))
+    r.check("and closing it is the browser's alone, because which shape a panel is in is not the server's business",
+            all(not d["backend_fn"] and ".closePromptEditor(" in (d.get("js") or "") for d in targeting("sp_close", "click"))
+            and targeting("sp_close", "click"))
+    # The panel is PROMOTED, not copied: one set of controls, so there is no
+    # second editor to drift from the first.
+    r.check("there is one system prompt box on the page, not one per shape",
+            len([c for c in page["components"]
+                 if str(c["props"].get("elem_id") or "") == "minipaint_clipboard_system_prompt"]) == 1)
+    hints = " ".join(str(c["props"].get("value") or "") for c in page["components"] if c["type"] == "markdown")
+    r.check("and the paragraph explaining what the switch does is gone from the page",
+            "Off by default" not in hints and "a page on another model is refused" not in hints,
+            hints[:120])
+
     r.check("Cancel everything is the browser's too",
             all(not d["backend_fn"] and ".cancelAll(" in (d.get("js") or "") for d in targeting("cancel_all", "click"))
             and targeting("cancel_all", "click"))

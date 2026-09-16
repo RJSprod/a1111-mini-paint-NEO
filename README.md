@@ -404,13 +404,15 @@ asking the bridge where its task is and the card says so: *In WanGP's queue, 2 a
 it*, *WanGP is generating it*, *Left WanGP's queue*.
 
 **Enhanced prompts** (off by default). With the *SD-Neo-ModelSwitchRefiner* extension
-installed and its LLM Studio set up, the switch under the prompt sends the typed prompt -
-and the pictures the model reads - to its MiniMax H3 writer first, for whichever H3 model
+installed and its LLM Studio set up, the enhancement switch sends the typed prompt - and the
+pictures the model reads - to its MiniMax H3 writer first, for whichever H3 model
 (FL2VA or Ref2VA) the WanGP page is on, and WanGP gets the written prompt. The job waits in
 the Queue as *Enhancing* with the writer's own progress, and goes to WanGP in press order
-once its prompt exists; a page on any other model is refused, not enhanced. The same panel
-shows the four system prompts the writer runs under (each variant, with and without a
-picture), takes an override that is kept across sessions, and restores the default.
+once its prompt exists; a page on any other model is refused, not enhanced. One button under
+the prompt opens a view that fills the window and holds the switch and the four system
+prompts the writer runs under (each variant, with and without a picture), opened on the pair
+the next press would use; it takes an override that is kept across sessions, and restores
+the default.
 **Cancel everything** empties the whole line - the writer's requests and the pending jobs -
 in one press; jobs already being sent finish, and nothing in WanGP's own queue is touched.
 

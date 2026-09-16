@@ -40,6 +40,18 @@ window.minipaintClipboard = (function () {
     const OUTBOX_LIST_ID = "minipaint_clipboard_outbox_list";
     const HISTORY_LIST_ID = "minipaint_clipboard_history_list";
     const WANGP_LINE_ID = "minipaint_clipboard_wangp_line";
+    const ENHANCE_PANEL_ID = "minipaint_clipboard_enhance_panel";
+    //: What the stylesheet keys the full-window shape off. One class, on the
+    //: panel that was already there - the editor is not moved, copied or
+    //: rebuilt, so every control in it stays the one control it has been.
+    const EDITOR_OPEN_CLASS = "minipaint-clip-fullscreen";
+    //: Marked on every wrapper between the panel and the box being edited.
+    //: The framework puts each component in two or three nested divs and
+    //: sets flex-grow and display on some of them INLINE, so "the box fills
+    //: what is left" cannot be said from the stylesheet alone - it has to be
+    //: said about the particular chain, and the browser is what knows which
+    //: chain that is.
+    const EDITOR_GROW_CLASS = "minipaint-clip-grow";
     const TAB_PANEL_ID = "tab_minipaint_clipboard";
     //: Matches the stylesheet's own default for --minipaint-clip-thumb.
     const DEFAULT_THUMB = 144;
@@ -137,6 +149,9 @@ window.minipaintClipboard = (function () {
         toastTimer: null,
         //: The debounce on remembering the thumbnail size. See setThumbnailSize.
         thumbSave: 0,
+        //: The Escape listener that belongs to the full-window editor, held
+        //: only while it is open.
+        editorKey: null,
         //: When the grid was last re-drawn. A page that has just drawn is a
         //: page whose selection and sizes need re-applying.
         renderedAt: 0,
@@ -1222,6 +1237,76 @@ window.minipaintClipboard = (function () {
         if (S.library.pages <= 1) { return; }
         event.preventDefault();
         stepPage(event.key === "PageDown" ? 1 : -1);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* The system prompt editor, full window                                 */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * A system prompt is a page of prose, and this column is a third of the
+     * window wide.
+     *
+     * So the panel gets a second shape rather than a second home: one class,
+     * and the same components fill the window with the text box taking
+     * nearly all of it. Nothing is duplicated, which is the whole reason it
+     * is done this way - a second editor beside the first is two sets of
+     * controls that drift, and this tab has spent enough builds on doors
+     * that disagree with each other.
+     */
+    function editorPanel() { return byId(ENHANCE_PANEL_ID); }
+
+    function editorOpen() {
+        const panel = editorPanel();
+        return !!(panel && panel.classList.contains(EDITOR_OPEN_CLASS));
+    }
+
+    /** Mark, or unmark, the wrappers between the panel and the text box. */
+    function markEditorChain(panel, on) {
+        const box = panel.querySelector(".minipaint-clip-system-prompt textarea");
+        if (!box) { return; }
+        let node = box.parentElement;
+        while (node && node !== panel) {
+            node.classList.toggle(EDITOR_GROW_CLASS, !!on);
+            node = node.parentElement;
+        }
+    }
+
+    function openPromptEditor() {
+        const panel = editorPanel();
+        if (!panel) { return false; }
+        // The panel has no shape on the tab at all - the stylesheet gives it
+        // none until this class is on it. There is nothing to expand and
+        // nothing left behind in the composer when it goes away again.
+        panel.classList.add(EDITOR_OPEN_CLASS);
+        markEditorChain(panel, true);
+        if (!S.editorKey) {
+            // Captured, so Escape closes the editor rather than whatever
+            // else on the page is listening for it.
+            S.editorKey = function (event) {
+                if (event.key !== "Escape" || !editorOpen()) { return; }
+                event.stopPropagation();
+                event.preventDefault();
+                closePromptEditor();
+            };
+            document.addEventListener("keydown", S.editorKey, true);
+        }
+        // The box is what the view is for, so it is where the cursor goes -
+        // after a frame, because the panel has just changed shape.
+        const box = panel.querySelector(".minipaint-clip-system-prompt textarea");
+        if (box) { setTimeout(function () { try { box.focus(); } catch (e) { /* not worth an exception */ } }, 60); }
+        note("system prompts: opened full screen");
+        return true;
+    }
+
+    function closePromptEditor() {
+        const panel = editorPanel();
+        if (panel) {
+            panel.classList.remove(EDITOR_OPEN_CLASS);
+            markEditorChain(panel, false);
+        }
+        if (S.editorKey) { document.removeEventListener("keydown", S.editorKey, true); S.editorKey = null; }
+        return true;
     }
 
     /* ------------------------------------------------------------------ */
@@ -2507,6 +2592,7 @@ window.minipaintClipboard = (function () {
                  model: S.lastModel, retrying: S.retrying || !!S.retryTimer || S.retryPending,
                  retryDelay: S.retryDelay,
                  offline: { server: S.offline.server, queue: S.offline.queue },
+                 editorOpen: editorOpen(),
                  intercept: !!menuState().intercept,
                  sort: menuState().sort || S.library.sort,
                  library: { revision: S.library.revision, page: S.library.page, pages: S.library.pages,
@@ -2517,6 +2603,8 @@ window.minipaintClipboard = (function () {
         attach: attach,
         afterRender: afterRender,
         menuStateChanged: menuStateChanged,
+        openPromptEditor: openPromptEditor,
+        closePromptEditor: closePromptEditor,
         library: fetchLibrary,
         goToPage: goToPage,
         setSort: setSort,

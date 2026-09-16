@@ -175,9 +175,13 @@ A press does this, in order:
 
 ## Enhanced prompts (ModelSwitchRefiner)
 
-Under the prompt box, a panel: **Prompt enhancement (ModelSwitchRefiner MiniMax H3)**. It
-is off by default and does nothing until three things are true, and its first line says
-which of them is not: the *SD-Neo-ModelSwitchRefiner* extension is installed in this Forge
+Under the prompt box, one button: **⤢ Prompt enhancement and system prompts**. It opens a
+view that fills the window; the panel has no shape on the tab itself, so the composer stays
+the composer, and everything this section describes lives in that view - the switch, the
+variant and *Instructions used* selectors, the prompt box with its state line, **Apply
+override**, **Restore default**, **Reload**, and **Close** (Escape closes it too). The switch
+is off by default and does nothing until three things are true, and the view's first line
+says which of them is not: the *SD-Neo-ModelSwitchRefiner* extension is installed in this Forge
 (its external LLM API, `mc_llm_api`, is imported straight from that extension's folder -
 there is no URL, port or token to configure), its **LLM Studio** is switched on with a
 language model set up, and the WanGP page is on a **MiniMax H3** model - `minimax_h3_fl2va`
@@ -206,9 +210,15 @@ A picture at all needs a language model that can see; one that cannot refuses th
 (`ENHANCE_NO_VISION`), and the line says so beforehand.
 
 **The system prompt.** The writer runs under one of four instruction sets - each variant,
-with and without a picture - and the panel shows them: pick the variant and *Instructions
+with and without a picture - and the view shows them: pick the variant and *Instructions
 used*, and the box holds the text with its provenance under it (*Default, as
-ModelSwitchRefiner ships it* or *Override saved*). Edit it and **Apply override** to replace
+ModelSwitchRefiner ships it* or *Override saved*). **Opening the view picks the pair the next
+press would use**: the variant of whichever H3 model the WanGP page is on, and the picture
+half when the draft holds a picture that model reads - a First or Last Frame for FL2VA, a
+Reference for Ref2VA - which are the same two questions a press asks. A page on no H3 model
+leaves the selectors where they were. Each open re-reads the effective prompt, so an edit
+left unapplied is gone the next time the view opens, exactly as *Reload* would leave it.
+Edit it and **Apply override** to replace
 that set for every enhanced press from then on, on every page, after a restart too
 (`clipboard-enhance.json`); **Restore default** forgets the override and shows the default
 again; **Reload** re-reads whichever is current. A blank override is refused, not saved.

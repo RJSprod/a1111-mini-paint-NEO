@@ -848,6 +848,146 @@ def check_the_queue_section_is_the_browsers(r: Results, page) -> None:
                 return h ? h.innerHTML.slice(0, 120) : 'NO HOST'; }"""))
 
 
+def check_the_prompt_editor_fills_the_window(r: Results, page) -> None:
+    """A system prompt is a page of prose; the composer is a third of a window.
+
+    So the panel gets a second shape rather than a second home. What has to
+    be true: the press fills the window, the box being edited takes most of
+    it, every control that was in the panel is still in it, and there is one
+    of each - a second editor beside the first is two sets of controls that
+    drift.
+    """
+    open_clipboard(page)
+    time.sleep(1.0)
+    r.check("the editor is not on the tab at all until it is asked for",
+            page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False)
+    # THE TAB KEEPS ONE BUTTON AND NOTHING ELSE. Not a collapsed section that
+    # still takes a third of the composer to say its own name: the panel has
+    # no shape here, and none of its controls is measurable on the page.
+    hidden = page.evaluate("""() => {
+        const panel = document.getElementById('minipaint_clipboard_enhance_panel');
+        const names = ['enhance_line', 'enhance_toggle', 'sp_variant', 'sp_mode',
+                       'system_prompt', 'sp_state', 'sp_apply', 'sp_restore', 'sp_reload', 'sp_close'];
+        return {
+            panel: panel ? Math.round(panel.getBoundingClientRect().height) : -1,
+            showing: names.filter(n => {
+                const el = document.getElementById('minipaint_clipboard_' + n);
+                return !!el && el.getBoundingClientRect().height > 0;
+            })
+        };
+    }""")
+    r.check("the enhancement panel takes no room on the tab", hidden["panel"] == 0, str(hidden["panel"]))
+    r.check("and not one of its controls is on the tab either", not hidden["showing"], str(hidden["showing"]))
+    r.check("the button that opens it is, though",
+            page.evaluate("""() => {
+                const b = document.getElementById('minipaint_clipboard_sp_open');
+                return !!b && b.getBoundingClientRect().height > 0;
+            }"""))
+
+    pressed = page.evaluate("""() => {
+        const host = document.getElementById('minipaint_clipboard_sp_open');
+        const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
+        if (!b) { return false; }
+        b.click();
+        return true;
+    }""")
+    r.check("the editor has a way in", pressed is True)
+    time.sleep(2.0)
+
+    shape = page.evaluate("""() => {
+        const panel = document.getElementById('minipaint_clipboard_enhance_panel');
+        const box = panel && panel.querySelector('.minipaint-clip-system-prompt textarea');
+        const p = panel ? panel.getBoundingClientRect() : null;
+        const t = box ? box.getBoundingClientRect() : null;
+        return {
+            open: !!(panel && panel.classList.contains('minipaint-clip-fullscreen')),
+            panelW: p ? Math.round(p.width) : 0, panelH: p ? Math.round(p.height) : 0,
+            boxH: t ? Math.round(t.height) : 0, boxW: t ? Math.round(t.width) : 0,
+            windowW: window.innerWidth, windowH: window.innerHeight,
+            text: box ? String(box.value || '').length : 0
+        };
+    }""")
+    r.check("the press fills the window", shape["open"] is True
+            and shape["panelW"] >= shape["windowW"] * 0.9 and shape["panelH"] >= shape["windowH"] * 0.9,
+            f"{shape['panelW']}x{shape['panelH']} of {shape['windowW']}x{shape['windowH']}")
+    r.check("with MOSTLY the box being edited, which is what the view is for",
+            shape["boxH"] >= shape["windowH"] * 0.45 and shape["boxW"] >= shape["panelW"] * 0.8,
+            f"box {shape['boxW']}x{shape['boxH']} in {shape['panelW']}x{shape['panelH']}")
+    # What is IN the box is the server's answer, and this page has no
+    # ModelSwitchRefiner to read a default from - the unit suite checks the
+    # loading against a fake one. What has to be true here is that the box is
+    # the thing the view puts you in front of.
+    r.check("the cursor is already in the box, because typing in it is what the view is for",
+            page.evaluate("""() => {
+                const box = document.querySelector('#minipaint_clipboard_system_prompt textarea');
+                return !!box && document.activeElement === box;
+            }"""))
+    page.keyboard.type("edited in the full window")
+    time.sleep(0.4)
+    r.check("and it takes what is typed into it",
+            page.evaluate("""() => {
+                const box = document.querySelector('#minipaint_clipboard_system_prompt textarea');
+                return box ? String(box.value || '') : '';
+            }""") == "edited in the full window")
+
+    controls = page.evaluate("""() => {
+        const panel = document.getElementById('minipaint_clipboard_enhance_panel');
+        const on = id => {
+            const host = document.getElementById(id);
+            if (!host || !panel.contains(host)) { return false; }
+            return getComputedStyle(host).display !== 'none' && host.getBoundingClientRect().height > 0;
+        };
+        return {
+            toggle: on('minipaint_clipboard_enhance_toggle'),
+            variant: on('minipaint_clipboard_sp_variant'),
+            mode: on('minipaint_clipboard_sp_mode'),
+            prompt: on('minipaint_clipboard_system_prompt'),
+            apply: on('minipaint_clipboard_sp_apply'),
+            restore: on('minipaint_clipboard_sp_restore'),
+            reload: on('minipaint_clipboard_sp_reload'),
+            close: on('minipaint_clipboard_sp_close')
+        };
+    }""")
+    missing = [name for name, there in controls.items() if not there]
+    r.check("every control the panel had is in the view, and Close with them", not missing, str(missing))
+    hint = page.evaluate("""() => {
+        const panel = document.getElementById('minipaint_clipboard_enhance_panel');
+        return panel ? panel.textContent : '';
+    }""")
+    r.check("the paragraph about what the switch does is not in the view either",
+            "Off by default" not in hint and "is refused, not enhanced" not in hint, hint[:140])
+
+    page.evaluate("""() => document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))""")
+    time.sleep(1.0)
+    r.check("Escape puts it away", page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False)
+    r.check("leaving the panel back in the column, with what was typed still in it",
+            page.evaluate("""() => {
+                const panel = document.getElementById('minipaint_clipboard_enhance_panel');
+                const box = document.querySelector('#minipaint_clipboard_system_prompt textarea');
+                return !!panel && getComputedStyle(panel).position !== 'fixed'
+                    && !!box && String(box.value || '').indexOf('edited in the full window') === 0;
+            }"""))
+
+    page.evaluate("""() => {
+        const host = document.getElementById('minipaint_clipboard_sp_open');
+        const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
+        if (b) { b.click(); }
+    }""")
+    time.sleep(1.5)
+    r.check("and opening it again re-reads the instructions rather than keeping an unapplied edit",
+            page.evaluate("""() => {
+                const box = document.querySelector('#minipaint_clipboard_system_prompt textarea');
+                return box ? String(box.value || '').indexOf('edited in the full window') : -1;
+            }""") != 0)
+    page.evaluate("""() => {
+        const host = document.getElementById('minipaint_clipboard_sp_close');
+        const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
+        if (b) { b.click(); }
+    }""")
+    time.sleep(1.5)
+    r.check("and Close puts it away too", page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False)
+
+
 def check_sorting_is_separate_from_drawing(r: Results, page) -> None:
     """Changing the sort does not touch a tile until the new order arrives.
 
@@ -2000,6 +2140,7 @@ def run() -> Results:
                 check_sorting_is_separate_from_drawing(r, page)
                 check_the_failure_modes_have_answers(r, page, library)
                 check_the_queue_section_is_the_browsers(r, page)
+                check_the_prompt_editor_fills_the_window(r, page)
                 check_a_thumbnail_is_fetched_once(r, page)
                 r.check("a picture can be selected", select_first(page),
                         repr(box(page, "minipaint_clipboard_selected")))

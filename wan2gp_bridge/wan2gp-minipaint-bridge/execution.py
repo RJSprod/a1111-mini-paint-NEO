@@ -343,7 +343,34 @@ class Executor:
         #
         # A list is passed through as the manifest verbatim, so this is the
         # shape the parser actually reads: one entry, its params the settings.
-        entry: typing.Dict[str, typing.Any] = {"id": 0, "params": dict(settings)}
+        #
+        # ``plugin_data`` is a SIBLING OF params, never a member of it, and
+        # the difference is a crash rather than a stray value. Wan2GP's
+        # worker filters params down to the arguments ``generate_media``
+        # names and splats them - and ``plugin_data`` is one of those names,
+        # so a copy left inside params survives the filter and is passed a
+        # second time beside the one the worker pops off the task:
+        #
+        #     plugin_data = task.pop('plugin_data', {})
+        #     generate_media(task, send_cmd, plugin_data=plugin_data, **filtered_params)
+        #     TypeError: generate_media() got multiple values for keyword argument 'plugin_data'
+        #
+        # Nothing here puts it there. The composed base is whatever the user
+        # last committed for the model, and Wan2GP's own recorder pops the
+        # key before it stores that - but another plugin capturing the form
+        # for its own purposes may record it with the key still on, and then
+        # every bridge job on that install dies before its first frame. So
+        # the entry is built the way Wan2GP builds its own (``add_video_task``
+        # pops it out of the inputs and writes it beside them), which both
+        # removes the collision and carries the plugin's data through to the
+        # generation instead of dropping it on the floor.
+        params = dict(settings)
+        plugin_data = params.pop(compatibility.PLUGIN_DATA_KEY, None)
+        entry: typing.Dict[str, typing.Any] = {
+            "id": 0,
+            "params": params,
+            compatibility.PLUGIN_DATA_KEY: plugin_data if isinstance(plugin_data, dict) else {},
+        }
         gen[compatibility.INLINE_QUEUE_KEY] = [entry]
         try:
             service.command(compatibility.LOAD_QUEUE_COMMAND, {"client_id": execution_id})

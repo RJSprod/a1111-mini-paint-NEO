@@ -396,6 +396,17 @@ SERVICE_HOLDERS: typing.Tuple[str, ...] = ("__main__", "wgp", SERVICE_MODULE)
 #: not a re-implementation of the chain around it.
 INLINE_QUEUE_KEY = "inline_queue"
 LOAD_QUEUE_COMMAND = "load_queue_trigger"
+#: Plugin state, which travels BESIDE a task's params and never inside them.
+#: Wan2GP's queue entries are ``{id, params, plugin_data, ...}``; its unpacker
+#: reads this key off the manifest entry, and its worker passes what it finds
+#: to ``generate_media`` as an explicit keyword *while also* splatting params.
+#: ``generate_media`` names the same parameter, so a copy of this key left
+#: inside params is not ignored - it is passed twice, and the task dies with
+#: "got multiple values for keyword argument 'plugin_data'" before it has
+#: generated anything. Named here because the composed base is a form
+#: snapshot, and what a third-party plugin records into one is not ours to
+#: predict.
+PLUGIN_DATA_KEY = "plugin_data"
 #: The shared generation record, and the three fields of it that may be read
 #: without going stale. ``main_process_running`` and ``process_status`` are
 #: deliberately absent: the first is set one line before a call that can

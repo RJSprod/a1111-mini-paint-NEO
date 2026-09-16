@@ -152,6 +152,10 @@ window.minipaintClipboard = (function () {
         retryDelay: 0,
         retryPending: false,
         retryVisibility: null,
+        //: Whether a retry CYCLE is open, which is not the same as a timer
+        //: being pending: an attempt in flight has no timer and must not let
+        //: a second cycle start beside it. See retryConnection.
+        retrying: false,
         //: What the menu has been told since the page was built, over this
         //: tab's own route rather than through a Gradio render.
         menuOverride: null,
@@ -413,65 +417,89 @@ window.minipaintClipboard = (function () {
     }
 
     function retryConnection() {
-        if (S.retryTimer) { return; }
+        // ONE CYCLE AT A TIME, AND IT IS THE GUARD THAT MATTERS.
+        //
+        // Everything that notices the server is still silent asks for a
+        // retry, and the failure a retry causes is itself one of those
+        // things: the fetch fails, says so, the notice is re-rendered, and
+        // the re-render asks for a retry. Guarded only by "is a timer
+        // pending" - which the attempt has just zeroed - that armed a second
+        // timer beside the one the attempt was about to arm, and reset the
+        // backoff to five seconds while doing it. A server that stayed down
+        // doubled its pending timers every round. A page asking for its
+        // library hundreds of times a minute is the exact opposite of what
+        // this is for, and "nothing polls" is a rule this was breaking.
+        if (S.retrying) { return; }
+        S.retrying = true;
         S.retryDelay = RETRY_FIRST_MS;
-        const attempt = function () {
-            S.retryTimer = 0;
-            if (!noticeShowing()) { return; }
-            if (document.visibilityState === "hidden") {
-                // Nothing is thrown away: coming back on screen re-arms it,
-                // and the deadline was never going to be honoured here.
-                S.retryPending = true;
-                return;
-            }
-            const again = function () {
-                if (!noticeShowing()) { return; }
-                S.retryDelay = Math.min(S.retryDelay * 2, RETRY_LIMIT_MS);
-                S.retryTimer = setTimeout(attempt, S.retryDelay);
-            };
-            // A server that is not answering is asked over the transport
-            // this tab actually uses. The route clears the line itself when
-            // it answers, so there is nothing to poll for here.
-            if (S.offline.server) {
-                fetchLibrary({ quiet: true }).then(function () {
-                    if (!S.offline.server) {
-                        note("server: answered again after " + Math.round(S.retryDelay / 1000) + "s");
-                        toast("Forge is answering again.");
-                        return;
-                    }
-                    again();
-                }, again);
-                return;
-            }
-            const before = S.gradioSeenAt;
-            pressHidden(PRESS.refresh);
-            setTimeout(function () {
-                if (!noticeShowing()) { return; }
-                if (S.gradioSeenAt !== before) {
-                    S.queueDown = false;
-                    connectionNotice(false);
-                    toast("The connection is back.");
-                    note("connection: came back on its own after " + Math.round(S.retryDelay / 1000) + "s");
-                    return;
-                }
-                again();
-            }, 3000);
-        };
-        S.retryTimer = setTimeout(attempt, S.retryDelay);
+        armRetry();
         if (!S.retryVisibility) {
             S.retryVisibility = function () {
                 if (document.visibilityState !== "visible" || !noticeShowing() || !S.retryPending) { return; }
                 S.retryPending = false;
-                if (S.retryTimer) { clearTimeout(S.retryTimer); }
-                S.retryTimer = setTimeout(attempt, 250);
+                S.retryDelay = RETRY_FIRST_MS;
+                armRetry();
             };
             document.addEventListener("visibilitychange", S.retryVisibility);
         }
     }
 
+    /** The one pending attempt. Replaces any other, never joins it. */
+    function armRetry() {
+        if (S.retryTimer) { clearTimeout(S.retryTimer); }
+        S.retryTimer = setTimeout(retryAttempt, S.retryDelay);
+    }
+
+    /** Still nothing: wait longer, and keep waiting longer. */
+    function retryAgain() {
+        if (!noticeShowing()) { stopRetrying(); return; }
+        S.retryDelay = Math.min(S.retryDelay * 2, RETRY_LIMIT_MS);
+        armRetry();
+    }
+
+    function retryAttempt() {
+        S.retryTimer = 0;
+        if (!noticeShowing()) { stopRetrying(); return; }
+        if (document.visibilityState === "hidden") {
+            // Nothing is thrown away: coming back on screen re-arms it, and
+            // the deadline was never going to be honoured here. The cycle
+            // stays open, so nothing else arms a second one meanwhile.
+            S.retryPending = true;
+            return;
+        }
+        // A server that is not answering is asked over the transport this
+        // tab actually uses. The route takes the line down itself when it
+        // answers, so there is nothing to poll for here.
+        if (S.offline.server) {
+            fetchLibrary({ quiet: true }).then(function () {
+                if (!S.offline.server) {
+                    note("server: answered again after " + Math.round(S.retryDelay / 1000) + "s");
+                    toast("Forge is answering again.");
+                    return;
+                }
+                retryAgain();
+            }, retryAgain);
+            return;
+        }
+        const before = S.gradioSeenAt;
+        pressHidden(PRESS.refresh);
+        setTimeout(function () {
+            if (!noticeShowing()) { stopRetrying(); return; }
+            if (S.gradioSeenAt !== before) {
+                S.queueDown = false;
+                connectionNotice(false);
+                toast("The connection is back.");
+                note("connection: came back on its own after " + Math.round(S.retryDelay / 1000) + "s");
+                return;
+            }
+            retryAgain();
+        }, 3000);
+    }
+
     function stopRetrying() {
         if (S.retryTimer) { clearTimeout(S.retryTimer); S.retryTimer = 0; }
         S.retryPending = false;
+        S.retrying = false;
     }
 
     /**
@@ -1087,9 +1115,16 @@ window.minipaintClipboard = (function () {
                 }
                 return answer;
             }, function (error) {
-                if (ticket !== S.library.ticket) { throw error; }
+                // A superseded request's failure is not news: the page that
+                // replaced it is the one being waited on, and its own
+                // handler will say whether the server answered.
+                if (ticket !== S.library.ticket) { return null; }
                 setBusy(false);
                 S.library.inflight = null;
+                // Whatever asked for a re-read while this was in flight is
+                // answered by the retry the notice arms, not by a flag held
+                // over a fetch that never landed.
+                S.library.pending = false;
                 // The tiles it has are kept: they were right when they were
                 // drawn and nothing has said otherwise.
                 note("library: could not be re-read (" + ((error && error.message) || error) + ")");
@@ -1390,6 +1425,10 @@ window.minipaintClipboard = (function () {
             note("receive: put into the library over the direct route without the queue");
             toast("Put " + ((asset && asset.filename) || "the picture") + " in Clipboard "
                   + "(the page had lost its connection).");
+            // For the composer's cards and the menu, which the server still
+            // renders. The GRID hears about this from the library event the
+            // import published, so it patches whether or not this press
+            // reaches anything.
             pressHidden(PRESS.refresh);
             return true;
         } catch (error) {
@@ -1463,6 +1502,7 @@ window.minipaintClipboard = (function () {
             if (slot && asset && asset.asset_id) {
                 sendInput(BOXES.slotAction, "assign:" + slot + ":" + asset.asset_id + ":" + Date.now());
             }
+            // For the cards and the menu; the grid patches from the event.
             pressHidden(PRESS.refresh);
             toast(slot ? "Imported and placed in the slot." : "Imported into Clipboard.");
             return asset;
@@ -1525,12 +1565,6 @@ window.minipaintClipboard = (function () {
     //: server answers in well under a second on a working connection; this
     //: is long enough to cover a slow one and short enough to be useful.
     const SEND_TIMEOUT_MS = 12000;
-    //: Once a send has gone unanswered, the queue is not carrying anything
-    //: and every send after it would sit through the same wait for the same
-    //: answer. The page stops giving it as long: the direct route is tried
-    //: almost at once, and the first acknowledgement to arrive puts the
-    //: patient deadline back.
-    const SEND_RETRY_TIMEOUT_MS = 2500;
 
     /**
      * Send the selected picture to another tab, and never do it silently.
@@ -1597,13 +1631,19 @@ window.minipaintClipboard = (function () {
         const recorded = await recordRequest(request);
         const written = sendInput(BOXES.sendRequest, request);
         const pressed = pressHidden(PRESS.send);
-        // A destination only the server can fill gets its own press, and
-        // only now that the page knows it could not fill it. That event is
-        // the one whose outputs name another tab's component - the one thing
-        // an event can name that may not be on this page - so it is kept off
-        // the path every other send takes. If it cannot run, this one
-        // destination fails and the rest are untouched.
-        if (outcome && outcome.backend) { pressHidden(PRESS.sendBackend); }
+        // A destination the server can write gets its own press whenever the
+        // page did not place the picture itself - not only when it never
+        // could. It used to be the second of those, and the difference is a
+        // silent non-delivery: a page whose transfer library did not load
+        // can NAME the component for Extras or a stitch gallery and still
+        // fail to fill it, and nobody was then asked to. The picture went
+        // nowhere while the status said it had been sent.
+        //
+        // That event is the one whose outputs name another tab's component -
+        // the one thing an event can name that may not be on this page - so
+        // it is kept off the path every other send takes. If it cannot run,
+        // this one destination fails and the rest are untouched.
+        if (outcome && !outcome.ok && outcome.server) { pressHidden(PRESS.sendBackend); }
         if (!written || !pressed) {
             // Half-built tab: say which half is missing rather than "it did
             // not work", and only give up if the picture did not go either.
@@ -1800,15 +1840,19 @@ window.minipaintClipboard = (function () {
                      code: (plan && plan.code) || "" };
         }
         const label = plan.label || target;
+        // Whether this destination is one the SERVER can write, which is not
+        // the same question as whether the browser just failed to. It is the
+        // one the fallback press turns on: see sendTo.
+        const server = !!plan.backend || !!plan.elem;
         if (plan.backend || !plan.payload) {
             // Nothing on this page to put it in: the server has to do it,
             // through its own event. See sendTo, which presses it.
-            return { ok: false, backend: true, label: label, filename: plan.filename,
+            return { ok: false, backend: true, server: server, label: label, filename: plan.filename,
                      reason: label + " can only be filled in by the server" };
         }
         const canvas = window.minipaintCanvas;
         if (!canvas || typeof canvas.deliverToHost !== "function") {
-            return { ok: false, label: label, filename: plan.filename,
+            return { ok: false, server: server, label: label, filename: plan.filename,
                      reason: "the adapter this page delivers through is not loaded" };
         }
         // One delivery for every destination: the hidden box of a host
@@ -1821,6 +1865,7 @@ window.minipaintClipboard = (function () {
         });
         return {
             ok: !!(delivered && delivered.ok),
+            server: server,
             reason: (delivered && delivered.reason) || "",
             // Delivery and navigation are separate facts. A picture proved
             // to have landed in a tab that would not open is a send that
@@ -2081,7 +2126,18 @@ window.minipaintClipboard = (function () {
     function drawQueue(answer) {
         const mount = listMount(queueHost(), "minipaint-clip-outbox");
         if (!mount) { return; }
-        const jobs = Array.isArray(answer.jobs) ? answer.jobs : [];
+        // An answer that carries no list is an answer about something else -
+        // a press this tab refused before it stored anything, say. It must
+        // leave the list alone: emptying it would tell the user that the
+        // queue they can see had gone, which is a different and untrue thing
+        // from what just happened.
+        if (!Array.isArray(answer.jobs)) {
+            if (answer.history !== undefined) { drawHistory(answer.history); }
+            if (answer.queue_button) { applyQueueButton(answer.queue_button); }
+            if (answer.status) { setQueueStatus(answer.status); }
+            return;
+        }
+        const jobs = answer.jobs;
         // Redrawn wholesale, and that is fine HERE in a way it was not
         // before: this list is short, bounded and rebuilt from one small
         // answer, and it is not the thing whose scroll position and decoded
@@ -2448,7 +2504,8 @@ window.minipaintClipboard = (function () {
     function debug() {
         return { attached: S.attached, selected: S.selected, menuOpen: !!(S.menu && !S.menu.hidden), menuSection: S.menuSection,
                  capabilities: S.capabilities, lastInstruction: S.lastInstruction.slice(0, 40), page: pageId(),
-                 model: S.lastModel, retrying: !!S.retryTimer || S.retryPending,
+                 model: S.lastModel, retrying: S.retrying || !!S.retryTimer || S.retryPending,
+                 retryDelay: S.retryDelay,
                  offline: { server: S.offline.server, queue: S.offline.queue },
                  intercept: !!menuState().intercept,
                  sort: menuState().sort || S.library.sort,

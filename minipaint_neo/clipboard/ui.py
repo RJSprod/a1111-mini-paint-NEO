@@ -618,10 +618,6 @@ class ClipboardTab:
         self.image_targets = [key for key in canvas_ui.BACKEND_TARGETS if key in self.targets]
         self.stitch_targets = [key for key in canvas_ui.STITCH_TARGETS if key in self.targets]
         self.canvas = canvas_ui.current()
-        #: The last markup sent for each repeatedly re-rendered section, so an
-        #: update that would change nothing on screen is not sent at all. See
-        #: ``_unchanged``.
-        self._rendered: typing.Dict[str, typing.Any] = {}
         #: The send requests already answered, newest last, so no event that
         #: carries one can deliver the same picture twice. See ``send``.
         self._answered: "collections.OrderedDict[str, None]" = collections.OrderedDict()
@@ -995,7 +991,9 @@ class ClipboardTab:
         if missing:
             labels = ", ".join(title for name, title, _field in SLOTS if name in missing)
             self._journal(f"queue clicked; refused before storing - {labels.lower()} missing from the folder")
-            return {"ok": False, "instruction": None, "jobs": None,
+            # No ``jobs``: nothing was stored, so the queue is whatever it
+            # already was and the page must keep showing it.
+            return {"ok": False, "instruction": None,
                     "status": _status(f"{labels}: the image is no longer in the folder. Press Refresh, then try again.",
                                       ["nothing was asked of WanGP; the rest of the draft is kept"]),
                     "queue_button": self._queue_button_view()}
@@ -1296,8 +1294,14 @@ class ClipboardTab:
             instruction = target
             if target == "img2img":
                 payload = imaging.to_data_url(image)
-        notes = ["the page places it; this event only records it"] if target in self.image_targets else []
-        return (instruction, payload, "", _status(f"Sent {asset.filename} to {label}.", notes), ack)
+        if target in self.image_targets:
+            # The page could not place this one and has just asked the server
+            # to, through the event beside this. Saying "Sent" here would be
+            # this tab's oldest fault said in a new place: the only thing
+            # that knows whether the picture arrived is the event that puts
+            # it there, and it writes this same line when it is done.
+            return (instruction, payload, "", _status(f"Placing {asset.filename} in {label}…"), ack)
+        return (instruction, payload, "", _status(f"Sent {asset.filename} to {label}."), ack)
 
     def send_backend(self, request, selected):
         """Write a destination the browser cannot write itself.
@@ -1340,7 +1344,11 @@ class ClipboardTab:
         target = parts[0] if parts else ""
         if target not in self.image_targets:
             return (*skips, gr.skip())
-        asset = self._asset(_hex(parts[1]) if len(parts) > 1 else "" or selected)
+        # Bracketed, because it read as ``... else ("" or selected)``: a
+        # request whose asset field was present but not an id fell through to
+        # nothing at all rather than to the selection, where ``send`` beside
+        # it falls back correctly.
+        asset = self._asset((_hex(parts[1]) if len(parts) > 1 else "") or selected)
         if asset is None:
             return (*skips, _status("Select an image in the browser first."))
         try:

@@ -752,10 +752,43 @@ def check_the_failure_modes_have_answers(r: Results, page, library) -> None:
                 page.evaluate("() => window.minipaintClipboard.debug().retrying") is True)
     finally:
         page.unroute("**/minipaint-clipboard/library*")
+    # -- and while it stays down, it is asked a handful of times and not a storm
+    #
+    # Every failure says the server is still silent, and the notice that
+    # re-renders on the way asks for a retry of its own. Guarded only by "is
+    # a timer pending" - which the attempt has just cleared - each round
+    # armed a second timer beside the one it was about to arm AND reset the
+    # backoff, so a server that stayed down was asked exponentially more
+    # often the longer it was gone. Counted, because a page that hammers a
+    # server it says is down is worse than the fault it is reporting.
+    asked = []
+    page.route("**/minipaint-clipboard/library*", lambda route: (asked.append(1), route.abort()))
+    try:
+        page.evaluate("() => window.minipaintClipboard.library({})")
+        time.sleep(2.5)
+        r.check("the line is up again with the server still refusing",
+                page.evaluate("() => window.minipaintClipboard.debug().offline.server") is True)
+        asked.clear()
+        first = page.evaluate("() => window.minipaintClipboard.debug().retryDelay")
+        time.sleep(32)
+        later = page.evaluate("() => window.minipaintClipboard.debug().retryDelay")
+        r.check("a server that stays down is asked a handful of times over half a minute, not scores of them",
+                len(asked) <= 4, f"{len(asked)} request(s) in 32s")
+        # Only once the cycle has actually gone round twice is there a second
+        # wait to be longer than the first; a page the browser backgrounded
+        # is allowed to have made no attempt at all, which is the design.
+        if len(asked) >= 2:
+            r.check("because each wait is longer than the last, rather than being reset by the failure",
+                    later > first, f"{first}ms -> {later}ms after {len(asked)} attempts")
+    finally:
+        page.unroute("**/minipaint-clipboard/library*")
+
     page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
     time.sleep(2.5)
     r.check("and the line goes by itself the moment the server answers",
             page.evaluate("() => window.minipaintClipboard.debug().offline.server") is False)
+    r.check("leaving no retry cycle behind on a page that is fine",
+            page.evaluate("() => window.minipaintClipboard.debug().retrying") is False)
 
 
 def check_the_queue_section_is_the_browsers(r: Results, page) -> None:

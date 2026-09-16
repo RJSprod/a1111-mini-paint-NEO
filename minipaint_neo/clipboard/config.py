@@ -41,6 +41,13 @@ CONFIG_NAME = "clipboard.json"
 INDEX_NAME = "clipboard-index.json"
 DRAFT_NAME = "clipboard-draft.json"
 HISTORY_NAME = "clipboard-history.json"
+#: What WanGP made for this tab's requests, and where each file is.
+#:
+#: A document rather than a field on a job, because a job is swept
+#: from the queue minutes after it finishes and a video outlives the
+#: session that asked for it. This is the only thing that makes View
+#: Outputs still full after a restart.
+OUTPUTS_NAME = "clipboard-outputs.json"
 
 #: The sort orders the browser offers, and how the menu names them.
 SORT_MODES = ("name_asc", "name_desc", "newest", "oldest", "largest", "smallest")
@@ -173,6 +180,10 @@ class Config:
     intercept: bool = DEFAULT_INTERCEPT
     sort: str = DEFAULT_SORT
     thumbnail: int = THUMBNAIL_DEFAULT
+    #: Where WanGP writes its videos. Empty means "work it out from the
+    #: WanGP root", which is right on every install that has not been
+    #: repointed; this is the way out for one that has.
+    outputs_folder: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -182,6 +193,7 @@ class Config:
             "intercept": bool(self.intercept),
             "sort": self.sort if self.sort in SORT_MODES else DEFAULT_SORT,
             "thumbnail": clamp_thumbnail(self.thumbnail),
+            "outputs_folder": str(self.outputs_folder or ""),
         }
 
     @classmethod
@@ -198,6 +210,7 @@ class Config:
             root_id=root_id,
             intercept=bool(data.get("intercept", DEFAULT_INTERCEPT)),
             sort=sort if sort in SORT_MODES else DEFAULT_SORT,
+            outputs_folder=str(data.get("outputs_folder") or "") if isinstance(data.get("outputs_folder"), str) else "",
             thumbnail=clamp_thumbnail(data.get("thumbnail", THUMBNAIL_DEFAULT)),
         )
 
@@ -239,6 +252,7 @@ __all__ = [
     "DRAFT_NAME",
     "HISTORY_NAME",
     "INDEX_NAME",
+    "OUTPUTS_NAME",
     "SORT_LABELS",
     "SORT_MODES",
     "THUMBNAIL_DEFAULT",

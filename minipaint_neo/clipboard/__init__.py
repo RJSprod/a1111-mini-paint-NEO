@@ -103,6 +103,21 @@ def _on_app_started(_demo: typing.Any, app: typing.Any) -> None:
     except Exception:
         pass
 
+    # AFTER the recovery, and this order matters too: a claim left open by
+    # a Forge that went away mid-generation is closed here, and recovery is
+    # what has just decided whether its job is alive or gone. Closing first
+    # would finish a claim whose job is about to resume.
+    #
+    # This is the whole of "closing the WebUI does not empty View Outputs":
+    # nothing told this extension that WanGP wrote a file while it was not
+    # running, so it goes and looks, once, at the start of every session.
+    try:
+        from . import outputs
+
+        outputs.sync()
+    except Exception as error:  # pragma: no cover - a gallery is never worth the tab
+        scrub.console(f"the output ledger could not be reconciled ({type(error).__name__}).", _LOG_PREFIX)
+
 
 def register(script_callbacks: typing.Any) -> None:
     """Add the tab and the routes to the host. The only thing the entry point calls.

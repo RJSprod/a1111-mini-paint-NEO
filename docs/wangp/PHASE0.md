@@ -459,8 +459,17 @@ and exercised against a fake shaped like it; none of it has met the real `mc_llm
   while a job is enhancing here: the card must read *Cancelled* with the reason naming LLM
   Studio, within a couple of seconds, with no page pumping (the watcher thread).
 * [ ] **Tracking.** After a queued job, watch its card: *In WanGP's queue, N ahead of it*
-  counting down, *WanGP is generating it*, then *Left WanGP's queue*. Reload the Forge page
-  while a task is still waiting: the card must say *no longer tracked*, not *finished*.
+  counting down, *WanGP is generating it*, and then the card must **leave the queue** - a
+  queue lists what is still to happen, and the video is in *View Outputs*. Reload the Forge
+  page while a task is still waiting: the card must say *no longer tracked*, not
+  *finished*, and must stay.
+* [ ] **Dismiss.** Make a job fail (stop WanGP and press *Add to Queue*): the card must
+  read *Refused* and must still be there after several minutes - a failure waits for a
+  person. Press *Dismiss*: it goes, and nothing else on the queue moves.
+* [ ] **View Outputs.** After a generation, open it under the queue: the video must be
+  there, must play, and the scrub bar must seek (not just play from the start). Restart
+  Forge and open it again: the same video must still be listed. Generate one by hand in
+  WanGP's own tab, with nothing queued from here, and confirm it does **not** appear.
 * [ ] **The model moved.** Enhance on FL2VA, then switch WanGP to another model before the
   job is sent: the card must read `MODEL_CHANGED`, nothing must be written into the WanGP
   form, and Retry must write the prompt again for the new model (or refuse it, if that

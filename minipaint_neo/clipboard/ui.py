@@ -102,6 +102,11 @@ def _attach_with_bundles_js() -> str:
 
 ATTACH_WITH_BUNDLES_JS = _attach_with_bundles_js()
 MENU_JS = f"() => {{ if ({_JS}) {_JS}.toggleMenu(); }}"
+#: The toolbar's two flyouts. Each opens the menu straight at one
+#: section, anchored under its own button and with no "Back" row,
+#: because there is nothing behind a list that opened by itself.
+SORT_MENU_JS = f'() => {{ if ({_JS}) {_JS}.openToolbarMenu("sort"); }}'
+SEND_MENU_JS = f'() => {{ if ({_JS}) {_JS}.openToolbarMenu("send"); }}'
 THUMB_JS = f"(size) => {{ if ({_JS}) {_JS}.setThumbnailSize(size); }}"
 # Add to Queue: the press goes to this tab's own route carrying what only
 # the browser holds - the prompt as typed and the switch as it stands - and
@@ -119,6 +124,10 @@ MENU_STATE_JS = f"(state) => {{ if ({_JS}) {_JS}.menuStateChanged(state); }}"
 OPEN_PROMPT_EDITOR_JS = (f"(model, variant, mode) => {{ if ({_JS}) {{ {_JS}.openPromptEditor(); }} "
                          "return [model, variant, mode]; }")
 CLOSE_PROMPT_EDITOR_JS = f"() => {{ if ({_JS}) {_JS}.closePromptEditor(); }}"
+#: The gallery of what WanGP made. Browser-only in both directions:
+#: the view is drawn from /minipaint-clipboard/outputs and the press
+#: has nothing for the server to decide.
+OPEN_OUTPUTS_JS = f"() => {{ if ({_JS}) {_JS}.openOutputs(); }}"
 #: The toolbar's Paste. Reading the system clipboard is the browser's to do
 #: and needs its permission, so this has no server half at all.
 PASTE_JS = f"() => {{ if ({_JS}) {_JS}.pasteFromClipboard(); }}"
@@ -369,7 +378,16 @@ def enhance_sentence(job: typing.Mapping[str, typing.Any]) -> str:
 
 
 def wangp_sentence(job: typing.Mapping[str, typing.Any]) -> str:
-    """Where a queued job's task is inside WanGP, as the page last saw it."""
+    """Where a queued job's task is inside WanGP, as the page last saw it.
+
+    ``WANGP_FINISHED`` is still spelled out here and is no longer reached
+    from the queue: a job whose task has left WanGP's queue is a job the
+    queue has stopped listing (see ``job_is_over``), so the card carrying
+    the sentence is gone before it could say it. The branch stays because
+    this function answers "where is it" about any job it is handed, and a
+    version of it that could not say the true thing about a finished one
+    would be wrong rather than smaller.
+    """
     if job.get("state") not in outbox.POSITIVE:
         return ""
     seen = job.get("wangp") or {}
@@ -391,6 +409,35 @@ def enhance_line_html(availability: typing.Mapping[str, typing.Any], enabled: bo
             f'<b>{head}</b> {_escape(availability.get("text") or "")}</div>')
 
 
+def job_is_over(job: typing.Mapping[str, typing.Any]) -> bool:
+    """Whether the queue has stopped listing this job.
+
+    A queue is a queue and not a record. Work that went well leaves it the
+    moment it is done - the Queue Send History has the recipe and View
+    Outputs has the video, so nothing is lost by the card going. Work that
+    did not go well stays until somebody presses it away, because it is the
+    one card here that wants a decision.
+
+    "Done" is a different sentence for each executor, and both are read
+    here rather than guessed: a server-executed job is done when WanGP has
+    generated it (COMPLETED), and a browser-executed one when the task it
+    was given has left WanGP's queue, which is as far as a page can ever
+    see. A job merely handed over is still in flight and still listed.
+
+    This hides the card; it does not delete the record. The record lives
+    its grace out behind the view, because a page waiting on this job and a
+    caller of the public API both still have to be able to ask.
+    """
+    if job.get("dismissed"):
+        return True
+    state = job.get("state")
+    if state == outbox.COMPLETED:
+        return True
+    if state in (outbox.QUEUED, outbox.STARTED):
+        return (job.get("wangp") or {}).get("state") == outbox.WANGP_FINISHED
+    return False
+
+
 def outbox_view(jobs: typing.Sequence[dict], page: str) -> typing.List[dict]:
     """The queue as facts and sentences, newest first, for the browser to draw.
 
@@ -405,7 +452,7 @@ def outbox_view(jobs: typing.Sequence[dict], page: str) -> typing.List[dict]:
     wording lives; what crosses to the browser is content rather than nodes.
     """
     view = []
-    for job in list(reversed(list(jobs)))[:OUTBOX_SHOWN]:
+    for job in [one for one in reversed(list(jobs)) if not job_is_over(one)][:OUTBOX_SHOWN]:
         state = job.get("state", outbox.PENDING)
         mine = job.get("page") == page
         summary = job.get("summary") or {}
@@ -444,6 +491,10 @@ def outbox_view(jobs: typing.Sequence[dict], page: str) -> typing.List[dict]:
         elif state == outbox.UNCONFIRMED:
             actions.append({"verb": "retry", "label": "Retry anyway",
                             "title": "WanGP may already hold this task; check its queue first"})
+        if outbox.failed_state(state):
+            # The other half of every failure: this card waits for a person,
+            # and letting it go has to be as easy as trying again.
+            actions.append({"verb": "dismiss", "label": "Dismiss", "title": "Take this off the queue"})
         badges = []
         if state in outbox.WAITING and not mine:
             badges.append({"text": "composed on another page"})
@@ -876,17 +927,19 @@ class ClipboardTab:
         count = len(assets)
         return self._refresh_outputs(f"{count} image{'s' if count != 1 else ''} in the folder.", chosen, notes)
 
-    def sort_changed(self, mode, selected):
-        if mode in config.SORT_MODES:
-            config.update(sort=mode)
-        return self._menu_state()
-
     def sort_request(self, value, selected):
-        """The menu's Sort submenu: the mode, then a nonce so a repeat still counts."""
+        """A sort press: the mode, then a nonce so a repeat still counts.
+
+        The one write path the sort has. It was the menu submenu's; it is now
+        the toolbar flyout's too, and there is no dropdown left to answer -
+        the browser already redrew the grid from its own request before this
+        arrived, and the menu state is what tells the page which mode is
+        ticked the next time the list opens.
+        """
         mode = str(value or "").split(":", 1)[0]
         if mode in config.SORT_MODES:
             config.update(sort=mode)
-        return gr.update(value=config.load().sort), self._menu_state()
+        return self._menu_state()
 
     def thumbnail_changed(self, size):
         config.update(thumbnail=config.clamp_thumbnail(size))
@@ -1197,7 +1250,7 @@ class ClipboardTab:
         }
 
     def outbox_action(self, value, page):
-        """A button on a job: ``cancel:<job>``, ``retry:<job>``, ``adopt:<job>``, with the page after."""
+        """A button on a job: ``cancel:<job>``, ``retry:<job>``, ``adopt:<job>``, ``dismiss:<job>``, with the page after."""
         parts = str(value or "").split(":")
         verb = parts[0] if parts else ""
         job_id = parts[1] if len(parts) > 1 else ""
@@ -1214,6 +1267,9 @@ class ClipboardTab:
             elif verb == "adopt":
                 job = outbox.adopt(job_id, page_id)
                 message = "This page will run it, with this page's WanGP settings."
+            elif verb == "dismiss":
+                job = outbox.dismiss(job_id)
+                message = "Dismissed."
             else:
                 return {"ok": False, "jobs": self._outbox_view(page_id), "status": ""}
         except IntegrationError as error:
@@ -1498,9 +1554,23 @@ class ClipboardTab:
                         to_first = gr.Button("+First", elem_id=_id("to_first"), elem_classes=["minipaint-clip-action", "minipaint-clip-role"], min_width=0)
                         to_last = gr.Button("+Last", elem_id=_id("to_last"), elem_classes=["minipaint-clip-action", "minipaint-clip-role"], min_width=0)
                         to_ref = gr.Button("+Ref", elem_id=_id("to_ref"), elem_classes=["minipaint-clip-action", "minipaint-clip-role"], min_width=0)
-                        sort = gr.Dropdown(
-                            [(config.SORT_LABELS[mode], mode) for mode in config.SORT_MODES], value=current.sort,
-                            label="Sort", show_label=False, container=False, elem_id=_id("sort"), elem_classes=["minipaint-clip-sort"], min_width=120,
+                        # Sort and Send to are flyouts, not a dropdown and a
+                        # menu entry. Both open the same compact list the
+                        # menu's own sections draw, anchored under whichever
+                        # button was pressed - so there is one list per verb
+                        # and one place it is drawn from, rather than a
+                        # dropdown here and a submenu over there drifting
+                        # apart. Neither has a backend fn: the sort writes the
+                        # hidden sort_request the menu already wrote, and the
+                        # send presses the hidden send box a destination press
+                        # already presses.
+                        sort_btn = gr.Button(
+                            "Sort", elem_id=_id("sort_open"), min_width=0,
+                            elem_classes=["minipaint-clip-action", "minipaint-clip-icon", "minipaint-clip-icon-sort"],
+                        )
+                        send_btn = gr.Button(
+                            "Send selection to", elem_id=_id("send_open"), min_width=0,
+                            elem_classes=["minipaint-clip-action", "minipaint-clip-icon", "minipaint-clip-icon-send"],
                         )
                         thumb = gr.Slider(
                             config.THUMBNAIL_MIN, config.THUMBNAIL_MAX, value=current.thumbnail, step=8,
@@ -1662,6 +1732,14 @@ class ClipboardTab:
                     # the one screen that says what ran while the browser was
                     # closed no longer needs the channel a closed browser loses.
                     outbox_list = gr.HTML(LIST_MOUNT, elem_id=_id("outbox_list"), elem_classes=["minipaint-clip-outbox-host"])
+                    # Under the queue, because that is what it is the other
+                    # end of: the queue says what was asked for, this says
+                    # what came back. Browser-only - the gallery is drawn
+                    # from this tab's own route, and the press is a class.
+                    outputs_open = gr.Button("▶ View Outputs", elem_id=_id("outputs_open"),
+                                             elem_classes=["minipaint-clip-outputs-open"])
+                    outputs_panel = gr.HTML(LIST_MOUNT, elem_id=_id("outputs_panel"),
+                                            elem_classes=["minipaint-clip-outputs-panel"])
                     with gr.Column(visible=False, elem_id=_id("history_panel"), elem_classes=["minipaint-clip-panel"]) as history_panel:
                         gr.Markdown("**Queue Send History** - recipes confirmed queued from here. Load puts one back into the composer; it queues nothing.", elem_classes=["minipaint-clip-hint"])
                         history_list = gr.HTML(LIST_MOUNT, elem_id=_id("history_list"), elem_classes=["minipaint-clip-history-host"])
@@ -1670,7 +1748,8 @@ class ClipboardTab:
         self._wire(
             grid=grid, status=status, selected_box=selected_box, menu_state=menu_state,
             cards=(card_first, card_last, card_ref), menu_btn=menu_btn, paste_btn=paste_btn, delete_btn=delete_btn, roles=(to_first, to_last, to_ref),
-            sort=sort, sort_request=sort_request, thumb=thumb, refresh_btn=refresh_btn, upload_btn=upload_btn,
+            sort_btn=sort_btn, send_btn=send_btn, sort_request=sort_request, thumb=thumb, refresh_btn=refresh_btn, upload_btn=upload_btn,
+            outputs_open=outputs_open, outputs_panel=outputs_panel,
             intercept_btn=intercept_btn, folder_open=folder_open, folder_panel=folder_panel, folder_text=folder_text,
             folder_use=folder_use, folder_create=folder_create, folder_close=folder_close, folder_status=folder_status,
             rename_open=rename_open, rename_panel=rename_panel, rename_text=rename_text, rename_ok=rename_ok, rename_cancel=rename_cancel,
@@ -1723,8 +1802,12 @@ class ClipboardTab:
 
         # -- the browser
         p["refresh_btn"].click(self.refresh, inputs=[selected], outputs=refresh_outputs, **quiet)
-        p["sort"].input(self.sort_changed, inputs=[p["sort"], selected], outputs=[p["menu_state"]], **quiet)
-        p["sort_request"].input(self.sort_request, inputs=[p["sort_request"], selected], outputs=[p["sort"], p["menu_state"]], **quiet)
+        p["sort_request"].input(self.sort_request, inputs=[p["sort_request"], selected], outputs=[p["menu_state"]], **quiet)
+        # Browser-only, both of them: a flyout is a list the page draws, and
+        # neither press has anything for the server to decide.
+        p["sort_btn"].click(None, js=SORT_MENU_JS)
+        p["outputs_open"].click(None, js=OPEN_OUTPUTS_JS)
+        p["send_btn"].click(None, js=SEND_MENU_JS)
         p["thumb"].change(None, js=THUMB_JS, inputs=[p["thumb"]])
         p["thumb"].release(self.thumbnail_changed, inputs=[p["thumb"]], outputs=[p["menu_state"]], **quiet)
         p["intercept_btn"].click(self.toggle_intercept, inputs=[], outputs=[p["menu_state"], p["status"]], **quiet)

@@ -935,6 +935,18 @@
     --minipaint-clip-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='3 6 5 6 21 6'/%3E%3Cpath d='M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6'/%3E%3Cpath d='M10 11v6M14 11v6'/%3E%3Cpath d='M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2'/%3E%3C/svg%3E");
 }
 
+/* Sort: the three descending bars every list control has used for
+   decades, which reads as "order" without a word. */
+#minipaint_clipboard_root .minipaint-clip-icon-sort {
+    --minipaint-clip-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 7h13M4 12h9M4 17h5'/%3E%3Cpath d='M17 13l3 3 3-3'/%3E%3Cpath d='M20 16V6'/%3E%3C/svg%3E");
+}
+
+/* Send selection to: an arrow leaving a box. Not a share glyph - nothing
+   here leaves the machine, and a share icon would say it did. */
+#minipaint_clipboard_root .minipaint-clip-icon-send {
+    --minipaint-clip-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3'/%3E%3Cpath d='M14 4h6v6'/%3E%3Cpath d='M20 4l-9 9'/%3E%3C/svg%3E");
+}
+
 #minipaint_clipboard_root .minipaint-clip-role[disabled],
 #minipaint_clipboard_root .minipaint-clip-role button[disabled],
 #minipaint_clipboard_root .minipaint-clip-icon[disabled],
@@ -943,7 +955,6 @@
     cursor: default;
 }
 
-#minipaint_clipboard_root .minipaint-clip-sort,
 #minipaint_clipboard_root .minipaint-clip-thumb-size {
     flex: 1 1 140px;
     min-width: 120px;
@@ -1855,6 +1866,189 @@
 #minipaint_clipboard_root .minipaint-clip-enhance-panel.minipaint-clip-fullscreen .minipaint-clip-sp-open {
     display: none;
 }
+
+
+/* ------------------------------------------------------------------------
+   View Outputs: what WanGP made, over the whole window.
+
+   The same shape as the system-prompt editor above - no shape on the tab
+   until a class puts it over everything - because they are the same idea
+   reached from one button each. What differs is the inside: a stage that
+   takes whatever height is left, and a filmstrip of a fixed height under
+   it, so the picture is the page and the strip is the way through it.
+   ---------------------------------------------------------------------- */
+#minipaint_clipboard_root .minipaint-clip-outputs-panel { display: none; }
+
+#minipaint_clipboard_root .minipaint-clip-outputs-panel.minipaint-clip-fullscreen {
+    display: flex !important;
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    margin: 0;
+    max-width: none;
+    background: var(--background-fill-primary, var(--body-background-fill, inherit));
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 16px;
+    overflow: hidden;
+}
+
+/* The stage takes the room. Everything else in here is a fixed band, so
+   this is the one thing that grows, and min-height: 0 is what lets it
+   shrink inside a flex column rather than pushing the strip off-screen. */
+#minipaint_clipboard_root .minipaint-clip-output-stage {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    /* The theme's own recessed surface. A player's letterbox is
+       conventionally black, but a colour of our own is a colour a night
+       theme cannot reach, and this tab's rule is that it reaches all of
+       them - so the darkest surface the theme offers is what it gets. */
+    background: var(--background-fill-secondary, var(--block-background-fill, transparent));
+    border-radius: var(--block-radius, 8px);
+    overflow: hidden;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-stage-media {
+    max-width: 100%;
+    max-height: 100%;
+    min-height: 0;
+    flex: 1 1 auto;
+    object-fit: contain;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-caption {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    width: 100%;
+    padding: 4px 10px 6px;
+    box-sizing: border-box;
+    color: var(--body-text-color, inherit);
+    font-size: var(--text-sm, 0.85em);
+    overflow: hidden;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-name { flex: 0 0 auto; font-weight: 600; }
+
+#minipaint_clipboard_root .minipaint-clip-output-prompt {
+    flex: 1 1 auto;
+    min-width: 0;
+    opacity: 0.75;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-guess-note {
+    flex: 0 0 auto;
+    opacity: 0.6;
+    font-style: italic;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-empty {
+    color: var(--body-text-color-subdued, inherit);
+    padding: 24px;
+    text-align: center;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-bar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-status {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--body-text-color-subdued, inherit);
+    font-size: var(--text-sm, 0.85em);
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-pager {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-count {
+    font-size: var(--text-sm, 0.85em);
+    color: var(--body-text-color-subdued, inherit);
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-page,
+#minipaint_clipboard_root .minipaint-clip-output-close {
+    border: 1px solid var(--border-color-primary, #888);
+    background: var(--button-secondary-background-fill, transparent);
+    color: var(--button-secondary-text-color, inherit);
+    border-radius: var(--radius-sm, 4px);
+    padding: 4px 12px;
+    cursor: pointer;
+    font: inherit;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-page[disabled] { opacity: 0.45; cursor: default; }
+
+/* The filmstrip. One row, scrolled sideways, at a height that leaves the
+   stage the rest - the point of this view is the picture, not the strip. */
+#minipaint_clipboard_root .minipaint-clip-output-strip {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 6px;
+    height: 92px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 4px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-tile {
+    position: relative;
+    flex: 0 0 auto;
+    width: 132px;
+    height: 100%;
+    padding: 0;
+    border: 2px solid transparent;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--background-fill-secondary, var(--block-background-fill, transparent));
+    cursor: pointer;
+    overflow: hidden;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-chosen {
+    border-color: var(--color-accent, #ff7c00);
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-thumb {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+/* A file this tab matched to a request rather than was told about. Marked
+   quietly, and said in full in the caption and the tooltip: the gallery
+   never presents a guess as a fact. */
+#minipaint_clipboard_root .minipaint-clip-output-guess {
+    position: absolute;
+    top: 2px;
+    right: 4px;
+    color: var(--body-text-color, inherit);
+    background: var(--background-fill-primary, var(--block-background-fill, transparent));
+    border-radius: 3px;
+    padding: 0 4px;
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+#minipaint_clipboard_root .minipaint-clip-outputs-open { margin-top: 4px; }
 
 #minipaint_clipboard_root .minipaint-clip-cancel-all { margin-top: 4px; }
 #minipaint_clipboard_root .minipaint-clip-job-enhancing { border-left-color: var(--border-color-accent-subdued, var(--color-accent, #ff7c00)); }

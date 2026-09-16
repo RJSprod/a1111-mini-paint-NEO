@@ -215,7 +215,7 @@ def page_checks(r: Results, base: pathlib.Path):
             str([c["props"].get("elem_id") for c in hidden]))
 
     needed = [
-        "root", "body", "browser", "composer", "toolbar", "menu", "to_first", "to_last", "to_ref", "sort", "thumb",
+        "root", "body", "browser", "composer", "toolbar", "menu", "to_first", "to_last", "to_ref", "sort_open", "send_open", "thumb",
         "paste_now", "delete_now", "grid", "status", "folder_panel", "folder", "folder_use", "folder_create", "folder_close", "folder_status",
         "rename_panel", "rename_text", "rename_ok", "rename_cancel", "delete_panel", "delete_ok", "delete_cancel",
         "paste_panel", "paste", "paste_close", "refresh", "upload", "intercept", "folder_open", "rename_open",
@@ -227,6 +227,8 @@ def page_checks(r: Results, base: pathlib.Path):
         # prompt enhancement, and the whole line's cancel
         "enhance_panel", "enhance_line", "enhance_toggle", "sp_variant", "sp_mode", "system_prompt", "sp_state", "sp_apply", "sp_restore", "sp_reload",
         "sp_open", "sp_close",
+        # the gallery of what WanGP made
+        "outputs_open", "outputs_panel",
         "model", "cancel_all",
     ]
     missing = [name for name in needed if f"minipaint_clipboard_{name}" not in ids]
@@ -245,7 +247,7 @@ def page_checks(r: Results, base: pathlib.Path):
     r.check("but the grid is a MOUNT and not a render: the server ships no tiles",
             component_of(page, "minipaint_clipboard_grid")["props"].get("value", "") == "",
             repr(component_of(page, "minipaint_clipboard_grid")["props"].get("value", ""))[:80])
-    for name, kind in (("sort", "dropdown"), ("thumb", "slider"), ("prompt", "textbox"), ("queue", "button"), ("upload", "uploadbutton"), ("paste", "image"), ("status", "markdown")):
+    for name, kind in (("sort_open", "button"), ("send_open", "button"), ("thumb", "slider"), ("prompt", "textbox"), ("queue", "button"), ("upload", "uploadbutton"), ("paste", "image"), ("status", "markdown")):
         component = component_of(page, f"minipaint_clipboard_{name}")
         r.check(f"{name} is a Gradio {kind}", component["type"] == kind, component["type"])
 
@@ -319,6 +321,26 @@ def page_checks(r: Results, base: pathlib.Path):
     r.check("and the paragraph explaining what the switch does is gone from the page",
             "Off by default" not in hints and "a page on another model is refused" not in hints,
             hints[:120])
+
+    # -- the toolbar's two flyouts, and the gallery
+    for name, opener in (("sort_open", ".openToolbarMenu(\"sort\")"), ("send_open", ".openToolbarMenu(\"send\")")):
+        pressed = targeting(name, "click")
+        r.check(f"{name} opens its list in the browser and asks the server nothing",
+                len(pressed) == 1 and not pressed[0]["backend_fn"] and opener in (pressed[0].get("js") or ""),
+                str(pressed[0].get("js") if pressed else None))
+    r.check("there is no Sort dropdown left, so one verb has one door",
+            not [c for c in page["components"]
+                 if str(c["props"].get("elem_id") or "") == "minipaint_clipboard_sort"])
+    r.check("and the sort's one write path answers the menu state alone",
+            all(d["outputs"] == [cid("menu_state")] for d in targeting("sort_request", "input")),
+            str([d["outputs"] for d in targeting("sort_request", "input")]))
+    opened = targeting("outputs_open", "click")
+    r.check("View Outputs is the browser's alone: the gallery is drawn from this tab's own route",
+            len(opened) == 1 and not opened[0]["backend_fn"] and ".openOutputs(" in (opened[0].get("js") or ""),
+            str(opened[0].get("js") if opened else None))
+    r.check("and its panel is a MOUNT, shipped empty, like the grid and the queue",
+            component_of(page, "minipaint_clipboard_outputs_panel")["props"].get("value", "") == "")
+    r.check("no event renders the gallery either", all(cid("outputs_panel") not in d["outputs"] for d in deps))
 
     r.check("Cancel everything is the browser's too",
             all(not d["backend_fn"] and ".cancelAll(" in (d.get("js") or "") for d in targeting("cancel_all", "click"))
@@ -467,13 +489,18 @@ def browser_checks(r: Results, base: pathlib.Path, tab) -> dict:
     r.check("a file that is not an image is refused with a sentence, and the selection is kept",
             status.startswith("Nothing was imported.") and "<small>" in status and selected == id_a, status)
 
-    menu_state = tab.sort_changed("name_asc", id_b)
-    r.check("the sort dropdown reorders the whole library and is remembered",
+    # One write path, whichever flyout pressed it: the toolbar's Sort button
+    # and the menu's Sort submenu both write this box. There is no dropdown
+    # left to answer, so the menu state is the whole reply.
+    menu_state = tab.sort_request("name_asc:nonce", id_b)
+    r.check("a sort press reorders the whole library and is remembered",
             _ids() == [id_a, id_b] and config.load().sort == "name_asc", str(_ids()))
-    dropdown, menu_state = tab.sort_request("name_desc:nonce", id_b)
-    r.check("the menu's Sort submenu does the same and updates the dropdown", _value(dropdown) == "name_desc" and _ids() == [id_b, id_a])
-    dropdown, menu_state = tab.sort_request("sideways", id_b)
-    r.check("an unknown sort changes nothing", _value(dropdown) == "name_desc" and config.load().sort == "name_desc")
+    r.check("and the reply is the menu state alone, which is what ticks the list next time it opens",
+            json.loads(menu_state)["sort"] == "name_asc", str(menu_state)[:80])
+    menu_state = tab.sort_request("name_desc:nonce", id_b)
+    r.check("a second press with a fresh nonce sorts the other way", _ids() == [id_b, id_a])
+    menu_state = tab.sort_request("sideways", id_b)
+    r.check("an unknown sort changes nothing", config.load().sort == "name_desc")
     r.check("and the index falls back to the stored sort rather than refusing an unknown one",
             _listed("sideways")["sort"] == "name_desc", _listed("sideways")["sort"])
     r.check("the thumbnail size is saved, clamped", json.loads(tab.thumbnail_changed(200))["thumbnail"] == 200 and json.loads(tab.thumbnail_changed(5000))["thumbnail"] == config.THUMBNAIL_MAX)
@@ -586,6 +613,15 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
     r.check("the refresh says it was added", status.startswith("Added to WanGP queue."), status)
     r.check("and the list shows it queued, with nothing left to press on it",
             _job(listing, job["job_id"]).get("state_label") == "Queued" and _verbs(listing, job["job_id"]) == [])
+    # Handed over is not finished: the card stays until WanGP's own queue
+    # has let the task go, which is the furthest a browser-run job can see.
+    outbox.track(job["job_id"], page_id, {"state": "generating", "position": 0, "queue_depth": 0})
+    r.check("a job WanGP is still generating is still listed",
+            bool(_job(tab._outbox_view(page_id), job["job_id"])))
+    outbox.track(job["job_id"], page_id, {"state": "finished", "position": None, "queue_depth": None})
+    r.check("and the moment it leaves WanGP's queue the card goes, though the record is still there to ask about",
+            not _job(tab._outbox_view(page_id), job["job_id"]) and outbox.get(job["job_id"])["state"] == "queued",
+            str(outbox.get(job["job_id"]).get("wangp")))
     records = history.load_history()
     r.check("and records one history entry", len(records) == 1 and records[0]["request_id"] == request["request_id"], str(len(records)))
     record = records[0] if records else {}
@@ -621,7 +657,7 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
     listing, status, history_listing, button = _queue_view(tab, page_id)
     r.check("a refusal shows the code's sentence, records nothing, and offers Retry",
             status.startswith(errors.message(errors.QUEUE_BUSY)) and len(history.load_history()) == before
-            and _verbs(listing, job3["job_id"]) == ["retry"], status)
+            and _verbs(listing, job3["job_id"]) == ["retry", "dismiss"], status)
     instruction, status, listing, button = _queued(tab, "x", page_id)
     job4 = outbox.jobs()[-1]
     claimed = outbox.claim(page_id)
@@ -651,6 +687,38 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
     acted = tab.outbox_action(f"adopt:{other['job_id']}:{page_id}", page_id)
     listing, status = acted["jobs"], acted["status"]
     r.check("Run from this page adopts it", "This page will run it" in status and outbox.get(other["job_id"])["page"] == page_id)
+
+    # -- every verb a card can offer is a verb the route will take
+    #
+    # Written as a property rather than a list, because a list here is a
+    # second copy of the one in routes.py and the two drift silently: a
+    # button drawn on a card that the route answers with "not a queue
+    # action" looks, from the tab, exactly like a press that did nothing.
+    # That is the shape of the fault this check exists for.
+    import inspect
+
+    from minipaint_neo.clipboard import routes as clip_routes
+
+    source = inspect.getsource(clip_routes._queue)
+    offered = set()
+    for view in (tab._outbox_view(page_id),):
+        for card in view:
+            offered.update(action["verb"] for action in card.get("actions", []))
+    r.check("every button a job card offers is a verb the queue route accepts",
+            offered and all(f'"{verb}"' in source for verb in offered), str(sorted(offered)))
+
+    # -- Dismiss: the other half of every failure
+    r.check("a cancelled job offers Dismiss beside Retry, because it is waiting for a person",
+            _verbs(tab._outbox_view(page_id), job5["job_id"]) == ["retry", "dismiss"],
+            str(_verbs(tab._outbox_view(page_id), job5["job_id"])))
+    acted = tab.outbox_action(f"dismiss:{job5['job_id']}:{page_id}", page_id)
+    r.check("Dismiss takes the card off the queue at once", acted["ok"] and not _job(acted["jobs"], job5["job_id"]),
+            str(acted.get("status")))
+    r.check("but the record is still there, so a page or an API caller waiting on it still gets an answer",
+            outbox.get(job5["job_id"])["state"] == "cancelled" and outbox.get(job5["job_id"])["dismissed"] is True)
+    acted = tab.outbox_action(f"dismiss:{other['job_id']}:{page_id}", page_id)
+    r.check("and a job that has not failed cannot be dismissed - it is refused, not quietly ignored",
+            not acted["ok"] and bool(_job(tab._outbox_view(page_id), other["job_id"])), str(acted.get("code")))
     acted = tab.outbox_action("cancel:0000000000000000:" + page_id, page_id)
     listing, status = acted["jobs"], acted["status"]
     r.check("a job that is gone says so", status.startswith(errors.message(errors.QUEUE_JOB_UNKNOWN)))

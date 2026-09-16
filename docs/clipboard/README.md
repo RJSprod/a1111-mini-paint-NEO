@@ -87,7 +87,8 @@ Refresh, and every card and history entry that used it says so.
   the page switches to this tab. Off, the button does what it always did. The switch is
   saved on the Forge host, so a second browser and a Reload UI see the same setting.
 * **Refresh** — read the folder again.
-* **Sort ›** — by name, newest, oldest, largest, smallest. Also the dropdown on the toolbar.
+* **Sort ›** — by name, newest, oldest, largest, smallest. The same list the toolbar's own
+  sort button opens.
 * **Paste image** — reads your clipboard when the browser lets the page do that; otherwise
   a small panel opens with an ordinary paste box (Ctrl+V into it, or drop a file on it).
   Ctrl+V anywhere on the tab does the same.
@@ -97,12 +98,18 @@ Refresh, and every card and history entry that used it says so.
   dot, a reserved name or nothing before the extension; two files that want one name become
   `name` and `name (2)`. A delete asks first, removes the file, and leaves history entries
   that used it saying *Missing image*.
-* **Send selected to ›** — Mini Paint, img2img, Inpaint, Extras, ImageStitch: the same
-  routes the Canvas's own *Send to* takes, one picture at a time.
 * **Queue Send History** — see below.
 
-The toolbar has **+First**, **+Last**, **+Ref** (the selected picture into that card) and a
-thumbnail-size slider (72–320 px, remembered). Tap a thumbnail to select it; drop one on a
+Sending is not in this list: it is a button on the toolbar, and there is only the one.
+
+The toolbar has **+First**, **+Last**, **+Ref** (the selected picture into that card), two
+flyout buttons and a thumbnail-size slider (72–320 px, remembered). The flyouts each open a
+compact list under the button that was pressed, and pressing that button again closes it:
+
+* **Sort** — the six orders above.
+* **Send selection to** — Mini Paint, img2img, Inpaint, Extras, ImageStitch: the same routes
+  the Canvas's own *Send to* takes, one picture at a time. Greyed with *Select an image
+  first* when nothing is chosen. Tap a thumbnail to select it; drop one on a
 card to assign it; drop a file from your desktop on a card to import it into the folder and
 assign it in one go. Only PNG, JPEG and WebP are library files — an animated file, a text
 file, or anything over the handoff ceilings (64 MiB, 16384 px on a side, 64 megapixels) is
@@ -258,7 +265,22 @@ where its enhancement is (**LLM:**) and, once WanGP has it, where its task is in
 WanGP's queue (finished, or removed there)*, or *no longer tracked* when the page that
 queued it was reloaded - a new WanGP session cannot vouch for the old one's tasks). The
 page that queued a job asks the bridge every few seconds while its task is still in
-WanGP's queue, and stops when it has left. And what a person may still do:
+WanGP's queue, and stops when it has left.
+
+**What is finished is not listed.** A queue is a queue and not a record: the moment a job
+is done it leaves this list - when WanGP has generated it (an unattended job), or when its
+task has left WanGP's queue (a job a page ran, which is as far as a page can see). Nothing
+is lost by the card going: the recipe is in *Queue Send History* below and the video is in
+*View Outputs*. A job that did **not** go well is the exception and stays until you press
+**Dismiss**, because it is the one card here that wants a decision; only a machine left
+running for a week clears one by itself.
+
+The record behind a finished card lives a little longer than the card does. A page waiting
+on that job, and any extension holding a promise from the public queue API, still has to be
+able to ask what happened - so the list stops showing it at once and the record ages out
+quietly behind the view.
+
+And what a person may still do:
 
 * **Cancel** — a waiting job, its enhancement with it. A job being sent is not ours to stop.
 * **Cancel everything** — every waiting job at once, from every page (above).
@@ -271,6 +293,8 @@ WanGP's queue, and stops when it has left. And what a person may still do:
   or not asking). A job is normally run only by the page that composed it, so that it
   inherits the WanGP settings its user is looking at; taking it over means it inherits
   *this* page's instead, which is why a person decides.
+* **Dismiss** — a refused, unconfirmed or cancelled job, off the list. It touches no file
+  and cancels nothing; the job had already ended.
 
 What that buys you with more than one browser: each page has its own identity (kept per
 browser tab, so a reload resumes its jobs), all pages share one line at the server, one
@@ -279,6 +303,47 @@ others up, and no page holds a queue of its own — a refresh, a closed tab or a
 browser cannot lose or duplicate work. A job whose page went away mid-send is marked
 unconfirmed when the overlay had already been written and returned to waiting when it had
 not; a job in flight when WanGP restarts is marked unconfirmed (`WANGP_RESTARTED`).
+
+## View Outputs
+
+Under the queue, one button opens a gallery of what WanGP made for this tab's requests,
+over the whole window: a large playback area with the filmstrip of everything else under
+it. Tap a tile to play it; tap the picture itself to hide the video controls and tap again
+to bring them back. It pages at 60, the same as the picture grid, and **Close** or Escape
+puts it away. Scrubbing works - the file is served with byte ranges, so the player can ask
+for the middle of a video rather than only playing it from the start.
+
+**It survives a restart.** The gallery is not read out of the queue, which forgets a job
+minutes after it finishes; it is its own document (`clipboard-outputs.json`), written as
+requests complete and re-read at every start. Close the WebUI, come back next week, and
+last week's videos are still listed. Only the list is kept - the videos themselves stay
+exactly where WanGP wrote them, and nothing here ever moves, copies or deletes one.
+
+**How a file comes to be in it**, which the gallery is careful to distinguish:
+
+* **Because WanGP said so**, for a job that ran unattended. WanGP's own control surface
+  hands back the paths it wrote and they are recorded as they arrive. Nothing is guessed.
+* **Because it appeared while the request was running**, for a job a browser page ran.
+  That path has no execution record - a page can see WanGP take its task and later let it
+  go, and nothing in between - so the files that turned up in WanGP's output folder
+  between those two moments, and were not already claimed by another request, are taken as
+  that request's. These are marked with a **~** on the tile and *matched to a request by
+  when it was written* under the player, because a match is not a fact. A file that was
+  already in the folder when the request started is never claimed.
+
+A file is only ever claimed once, so two requests running back to back cannot both show
+the same video. A claim that a shut-down left open is finished at the next start, which is
+what makes a video written while Forge was not running turn up anyway.
+
+**Where it looks.** `<WanGP root>/outputs` and everything under it, unless the
+`outputs_folder` setting names somewhere else. Videos (`.mp4`, `.webm`, `.mkv`, `.mov`,
+`.m4v`) play; pictures (`.png`, `.jpg`, `.webp`, `.gif`) are shown. A file the user has
+since deleted stops being listed rather than becoming a broken tile. Filmstrip posters are
+the frame at one second, asked for with a media fragment — nothing is thumbnailed on the
+server and there is no second copy of anything on disk.
+
+Nothing here names a path to the browser: every output is fetched by an opaque id, exactly
+as a library thumbnail is.
 
 ## Queue Send History
 
@@ -551,12 +616,13 @@ it was ignored" case.
 
 | what | where |
 | --- | --- |
-| the folder, the intercept switch, the sort and the thumbnail size | `<Forge data_path>/a1111-mini-paint-NEO/clipboard.json` |
+| the folder, the intercept switch, the sort, the thumbnail size and the outputs folder | `<Forge data_path>/a1111-mini-paint-NEO/clipboard.json` |
 | the index: id, filename, size, dimensions, digest, source per file | `…/clipboard-index.json` (rebuilt from the folder on Refresh) |
 | the composer's draft | `…/clipboard-draft.json` |
-| the queue outbox: every press as a job, with its request, its state, its enhancement and its place in WanGP | `…/clipboard-outbox.json` (schema 2; terminal jobs kept a week, the list capped) |
+| the queue outbox: every press as a job, with its request, its state, its enhancement and its place in WanGP | `…/clipboard-outbox.json` (schema 3; a finished job kept two minutes, a failure until it is dismissed, the list capped) |
 | the enhanced-prompts switch and the system prompt overrides | `…/clipboard-enhance.json` |
 | Queue Send History | `…/clipboard-history.json` |
+| View Outputs: which files WanGP made for which request, and where each one is | `…/clipboard-outputs.json` (paths only; the videos are never moved or copied) |
 | the pictures | the storage folder you chose, and only there |
 | thumbnails | in memory, rebuilt as needed; never on disk |
 | images staged through the public API | `…/runtime/staging/<32 hex>.png`, swept after 30 minutes |
@@ -584,6 +650,10 @@ afresh, and the console says so; nothing is ever half-written (every write is at
   says an override was applied or went with a request, never its text. What the writer
   itself keeps (its *Saved prompts*) is that extension's own, filed exactly as a run from
   its panel would be, under the origin `minipaint-clipboard`.
+* An **output's path** is in `clipboard-outputs.json` and is resolved on the server alone.
+  The gallery is given an opaque id, a filename, a size and a time; the console and the log
+  get a count and never a name, which is the same rule the WanGP log is scrubbed under. The
+  shared event stream carries neither.
 
 ## Reading a failure code
 

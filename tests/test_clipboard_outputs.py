@@ -16,6 +16,7 @@ from harness import Results, setup_path
 setup_path()
 
 import json  # noqa: E402
+import os  # noqa: E402
 import pathlib  # noqa: E402
 import tempfile  # noqa: E402
 
@@ -97,6 +98,86 @@ def exact_checks(r: Results, clock: _Clock, folder: pathlib.Path) -> None:
     listed = outputs.files(refresh=False)
     r.check("a file the user deleted stops being listed rather than becoming a broken tile",
             _names(listed) == ["b.mp4"], str(_names(listed)))
+
+
+# ----------------------------------------------------------- relative paths --
+
+
+def _set_wangp_root(root) -> None:
+    """A WanGP config naming a root, the way a finished setup leaves one."""
+    wangp_config.atomic_write(
+        wangp_config.config_path(),
+        json.dumps(wangp_config.Config(initialized=True, wangp_root=str(root)).as_dict()),
+    )
+
+
+def relative_checks(r: Results, clock: _Clock, base: pathlib.Path) -> None:
+    """A path WanGP spelled relative to its own directory still finds its file.
+
+    THE FAILURE: A SUCCESSFUL JOB, A VIDEO ON THE DISK, AN EMPTY GALLERY.
+
+    WanGP's ``save_path`` is a setting, and an install that has not
+    repointed it holds the relative string ``outputs``. The paths it hands
+    back are then relative to the directory WanGP runs in, which is not
+    this process's - WanGP is a child started with ``cwd=<wangp root>`` and
+    Forge is elsewhere. Stored verbatim, such a path stats as missing the
+    first moment ``files`` looks at it, and the file is dropped as one the
+    user deleted: the tab says "Nothing yet" about a video that exists.
+
+    Only the exact half could ever carry one, because the window half
+    matches files it walked ``folder()`` for and those are absolute by
+    construction. Newer bridges resolve their own paths before sending
+    them; this is what makes the ones already written come back.
+    """
+    outputs.reset_for_tests()
+    root = base / "wangp-root"
+    made = root / "outputs"
+    made.mkdir(parents=True)
+    config.update(outputs_folder=str(made))
+    _set_wangp_root(root)
+    relative = os.path.join("outputs", "rel.mp4")
+    written = _wrote(made, "rel.mp4", clock.now)
+
+    outputs.remember("3" * 16, [relative], request_id="r3", model="A video model")
+    listed = outputs.files(refresh=False)
+    r.check("a relative path is resolved against WanGP's own root, not dropped as a missing file",
+            _names(listed) == ["rel.mp4"], str(_names(listed)))
+    # Read defensively: when the check above fails there is nothing in the
+    # list, and a test that raises there reports one failure as a crash and
+    # takes every check after it down with it.
+    served = outputs.path_of(listed[0]["id"]) if listed else None
+    r.check("and the id behind it serves the real file", served == written, str(served))
+    entries = config.read_document(config.OUTPUTS_NAME, {}).get("entries") or [{}]
+    stored = ((entries[0].get("files") or [{}])[0]).get("path") or ""
+    r.check("what is written down is the absolute form, so nothing downstream has to resolve it again",
+            os.path.isabs(stored), stored)
+
+    outputs.remember("4" * 16, [str(written)], request_id="r4")
+    r.check("the same file under its other spelling is not claimed a second time",
+            len(outputs.files(refresh=False)) == 1, str(len(outputs.files(refresh=False))))
+
+    # What an older bridge already wrote into the document, repaired on the
+    # way in rather than left to fail at each reader.
+    outputs.reset_for_tests()
+    config.write_document(config.OUTPUTS_NAME, {"schema": outputs.SCHEMA, "entries": [{
+        "entry_id": "e" * 16, "job_id": "5" * 16, "request_id": "r5",
+        "opened_at": clock.now, "closed_at": clock.now, "floor": 0.0, "exact": True,
+        "model": "A video model",
+        "files": [{"file_id": "f" * 16, "path": relative, "name": "rel.mp4", "size": 0, "at": clock.now}],
+    }]})
+    r.check("a record written before this still lists its file rather than being swept as deleted",
+            _names(outputs.files(refresh=False)) == ["rel.mp4"], str(_names(outputs.files(refresh=False))))
+
+    # And with no root to resolve against, it stays exactly as it was: a
+    # wrong guess would list somebody else's video under this job.
+    wangp_config.config_path().unlink()
+    r.check("with no WanGP root known the path is left alone and simply does not list",
+            outputs.files(refresh=False) == [], str(outputs.files(refresh=False)))
+    _set_wangp_root(root)
+    r.check("and comes back the moment the root is known again",
+            _names(outputs.files(refresh=False)) == ["rel.mp4"], str(_names(outputs.files(refresh=False))))
+    wangp_config.config_path().unlink()
+    outputs.reset_for_tests()
 
 
 # ------------------------------------------------------------- the window way --
@@ -290,6 +371,7 @@ def run() -> Results:
                 folders[name] = base / name
                 folders[name].mkdir()
             exact_checks(r, clock, folders["exact"])
+            relative_checks(r, clock, base)
             window_checks(r, clock, folders["window"])
             restart_checks(r, clock, folders["restart"])
             page_checks(r, clock, folders["page"])

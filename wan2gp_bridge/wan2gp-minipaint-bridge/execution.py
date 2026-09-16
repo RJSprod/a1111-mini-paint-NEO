@@ -605,6 +605,23 @@ class Executor:
         after the job was submitted. A build whose record cannot be read
         returns nothing, and the job is still a success - an empty list with
         the reason beside it is honest, and inventing paths is not.
+
+        ABSOLUTE, BECAUSE THESE PATHS LEAVE THE PROCESS THAT CAN READ THEM.
+
+        Wan2GP's ``save_path`` is a setting, and an install that has not
+        repointed it holds the relative string ``outputs`` - so the paths it
+        records are relative to the directory Wan2GP runs in. That works
+        perfectly here, inside that process, and not at all in Forge, which
+        is a different process with a different working directory: the path
+        arrives, stats as missing, and the gallery drops the file as one the
+        user deleted. Forge can guess at the directory when it started the
+        child itself, and does, for the records written before this - but a
+        Wan2GP somebody launched independently leaves it nothing to guess
+        with, and a guess is not what a path should be.
+
+        This process is the one that knows for certain, so this is where it
+        is settled. The same working directory resolved the ``getmtime``
+        above, so the absolute form names the file that was just checked.
         """
         if not isinstance(gen, dict):
             return []
@@ -615,14 +632,19 @@ class Executor:
                 continue
             for item in listed:
                 path = item if isinstance(item, str) else (item.get("path") if isinstance(item, dict) else None)
-                if not isinstance(path, str) or not path or path in found:
+                if not isinstance(path, str) or not path:
                     continue
                 try:
                     if os.path.getmtime(path) + 1.0 < since:
                         continue
                 except OSError:
                     continue
-                found.append(path)
+                # Deduplicated on the absolute form, not the recorded one,
+                # so two spellings of one file collapse instead of both
+                # being reported.
+                resolved = os.path.abspath(path)
+                if resolved not in found:
+                    found.append(resolved)
             if found:
                 break
         return found[:64]

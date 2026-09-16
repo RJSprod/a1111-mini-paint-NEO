@@ -36,6 +36,9 @@ setup_path()
 
 import importlib  # noqa: E402
 import json  # noqa: E402
+import os  # noqa: E402
+import pathlib  # noqa: E402
+import shutil  # noqa: E402
 import socket  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
@@ -1164,11 +1167,59 @@ def manifest_checks(r: Results) -> None:
             {"unattended_execution", "settings_flush"} <= set(manifest["capabilities"]), str(manifest["capabilities"]))
 
 
+def output_path_checks(r: Results) -> None:
+    """What a finished job reports, and the one property it must have.
+
+    Wan2GP's ``save_path`` is a setting. An install that has not repointed
+    it holds the relative string ``outputs``, so the paths in the shared
+    record are relative to the directory Wan2GP runs in - which is this
+    process's directory and nothing else's. Forge reads them from its own
+    process, stats them against its own working directory, finds nothing,
+    and drops the file from the gallery as one the user deleted. The job
+    succeeded, the video is on the disk, and the tab says "Nothing yet".
+
+    So the shape asserted here is not "some paths": it is that every path
+    that leaves this process is absolute.
+    """
+    _compatibility, _compose, _control, execution, ledger, _protocol = _modules()
+    runner, _service, _gen, _book = _executor()
+    scratch = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-outputs-"))
+    (scratch / "outputs").mkdir()
+    fresh = scratch / "outputs" / "fresh.mp4"
+    fresh.write_bytes(b"video")
+    stale = scratch / "outputs" / "stale.mp4"
+    stale.write_bytes(b"older")
+    os.utime(str(stale), (1_000.0, 1_000.0))
+    since = 2_000.0
+    os.utime(str(fresh), (since + 10, since + 10))
+
+    was = os.getcwd()
+    try:
+        # The bridge lives inside Wan2GP, so its working directory IS the
+        # one a relative save_path resolves against. That is the whole
+        # reason it can settle this and Forge cannot.
+        os.chdir(str(scratch))
+        found = runner._outputs({"file_list": [os.path.join("outputs", "fresh.mp4")]}, since)
+        r.check("a path Wan2GP recorded relative to its own directory comes back absolute",
+                found == [str(fresh.resolve())], str(found))
+        absolute = runner._outputs({"file_list": [str(fresh)]}, since)
+        r.check("one that was already absolute is unchanged", absolute == [str(fresh.resolve())], str(absolute))
+        both = runner._outputs({"file_list": [os.path.join("outputs", "fresh.mp4"), str(fresh)]}, since)
+        r.check("and two spellings of one file are one file, not two",
+                both == [str(fresh.resolve())], str(both))
+        old_file = runner._outputs({"file_list": [os.path.join("outputs", "stale.mp4")]}, since)
+        r.check("a file that was already there before the job is still not the job's", old_file == [], str(old_file))
+    finally:
+        os.chdir(was)
+        shutil.rmtree(str(scratch), ignore_errors=True)
+
+
 def run() -> Results:
     r = Results("wangp control")
     identity_checks(r)
     inheritance_checks(r)
     manifest_shape_checks(r)
+    output_path_checks(r)
     ledger_checks(r)
     idempotency_checks(r)
     surface_checks(r)

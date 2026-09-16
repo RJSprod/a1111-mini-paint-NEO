@@ -129,6 +129,54 @@ def folder() -> typing.Optional[pathlib.Path]:
     return path if path.is_dir() else None
 
 
+def _wangp_root() -> typing.Optional[pathlib.Path]:
+    """The directory WanGP runs in, which is what its own paths are relative to.
+
+    The child is started with ``cwd=<wangp root>`` - see ``wangp.runtime`` -
+    so this is not an approximation of WanGP's working directory on an
+    install this extension set up, it is that working directory.
+    """
+    try:
+        from ..wangp import config as wangp_config
+
+        found = wangp_config.load()
+        root = str(getattr(found, "wangp_root", "") or "").strip()
+        return pathlib.Path(root).expanduser() if root else None
+    except Exception:
+        # No config, an unreadable one, or a root that will not expand.
+        # All three mean the same thing here: nothing to resolve against.
+        return None
+
+
+def _absolute(path: str, root: typing.Optional[pathlib.Path]) -> str:
+    """One recorded path, rooted where this process can find it.
+
+    WHY A STORED PATH CAN BE RELATIVE AT ALL.
+
+    WanGP's ``save_path`` is a setting, and an install that has not
+    repointed it holds the relative string ``outputs`` - so the paths WanGP
+    records are relative to the directory *it* runs in. Forge is a
+    different process with a different working directory, so such a path
+    stats as missing here and ``files`` drops the file the first time it
+    looks, as though the user had deleted it. The gallery then says
+    "Nothing yet" about a video that is sitting on the disk.
+
+    Only the exact half could carry one: the window half matches files it
+    found itself, by walking ``folder()``, so its paths were always
+    absolute. Newer bridges resolve their own before sending them, which is
+    where it belongs - this repairs what the older ones already wrote, and
+    costs a string test on anything that never needed it.
+
+    A root that is not known leaves the path exactly as it was: a wrong
+    guess would claim a different file, and a missing one is at least
+    honest about being missing.
+    """
+    text = str(path or "")
+    if not text or root is None or os.path.isabs(text):
+        return text
+    return str(root / text)
+
+
 def _media_in(where: pathlib.Path) -> typing.List[typing.Tuple[pathlib.Path, float, int]]:
     """Every media file under ``where``, with when it was written and how big.
 
@@ -159,12 +207,16 @@ def _media_in(where: pathlib.Path) -> typing.List[typing.Tuple[pathlib.Path, flo
 # ---------------------------------------------------------------- document --
 
 
-def _normalize_file(raw: typing.Any) -> typing.Optional[dict]:
+def _normalize_file(raw: typing.Any, root: typing.Optional[pathlib.Path] = None) -> typing.Optional[dict]:
     if not isinstance(raw, dict):
         return None
     path = raw.get("path")
     if not isinstance(path, str) or not path:
         return None
+    # Here rather than at each reader: ``files``, ``path_of`` and the
+    # claim set all compare or stat this string, and two of them agreeing
+    # on a spelling the third does not is how one file becomes two claims.
+    path = _absolute(path, root)
     file_id = raw.get("file_id")
     return {
         "file_id": file_id if isinstance(file_id, str) and len(file_id) == 16 else _id(),
@@ -175,14 +227,14 @@ def _normalize_file(raw: typing.Any) -> typing.Optional[dict]:
     }
 
 
-def _normalize_entry(raw: typing.Any) -> typing.Optional[dict]:
+def _normalize_entry(raw: typing.Any, root: typing.Optional[pathlib.Path] = None) -> typing.Optional[dict]:
     if not isinstance(raw, dict):
         return None
     job_id = raw.get("job_id")
     if not isinstance(job_id, str) or not job_id:
         return None
     files = raw.get("files")
-    kept = [one for one in (_normalize_file(item) for item in files) if one] if isinstance(files, (list, tuple)) else []
+    kept = [one for one in (_normalize_file(item, root) for item in files) if one] if isinstance(files, (list, tuple)) else []
     entry_id = raw.get("entry_id")
     return {
         "entry_id": entry_id if isinstance(entry_id, str) and len(entry_id) == 16 else _id(),
@@ -202,7 +254,10 @@ def _normalize_entry(raw: typing.Any) -> typing.Optional[dict]:
 def _load() -> typing.List[dict]:
     raw = config.read_document(config.OUTPUTS_NAME, {})
     entries = raw.get("entries") if isinstance(raw, dict) else None
-    listed = [one for one in (_normalize_entry(item) for item in entries) if one] if isinstance(entries, (list, tuple)) else []
+    # Read once for the whole document: it comes off the disk, and a
+    # gallery page normalises every file in every entry.
+    root = _wangp_root()
+    listed = [one for one in (_normalize_entry(item, root) for item in entries) if one] if isinstance(entries, (list, tuple)) else []
     listed.sort(key=lambda entry: (entry["opened_at"], entry["entry_id"]))
     return listed[-MAX_ENTRIES:]
 
@@ -263,8 +318,12 @@ def remember(job_id: typing.Any, paths: typing.Sequence[typing.Any], request_id:
         if model:
             entry["model"] = str(model)[:120]
         taken = _claimed_paths(entries)
+        # The paths already in the document were rooted as they were read;
+        # these have just arrived, so they are rooted the same way before
+        # anything compares them or stats them.
+        root = _wangp_root()
         for one in wanted:
-            path = pathlib.Path(one)
+            path = pathlib.Path(_absolute(one, root))
             if str(path) in taken:
                 continue
             entry["files"].append(_file_record(path))
@@ -380,6 +439,13 @@ def files(refresh: bool = True) -> typing.List[dict]:
     A file the user has deleted is dropped rather than shown as a broken
     tile, and dropping it is written back - the document is a record of
     what exists, not of what once did.
+
+    A path that could not be *rooted* is a different answer and is kept. It
+    says nothing about whether the file exists: it says this process has
+    not been told where to look, which is what a relative path with no
+    WanGP root configured means. Sweeping those would turn "ask me again
+    once setup is finished" into "the user deleted it", permanently, on a
+    read - and the videos are still on the disk either way.
     """
     if refresh:
         sync()
@@ -394,7 +460,14 @@ def files(refresh: bool = True) -> typing.List[dict]:
                 try:
                     stat = path.stat()
                 except OSError:
-                    changed = True
+                    # Absolute and missing is a file that is gone. Relative
+                    # is a path nothing has been able to resolve, so it is
+                    # held rather than swept, and listed the moment it can
+                    # be. See the note above.
+                    if path.is_absolute():
+                        changed = True
+                    else:
+                        kept.append(one)
                     continue
                 kept.append(one)
                 listed.append({

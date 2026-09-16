@@ -1266,6 +1266,46 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
         r.check("and the next page holds the rest", paged["items"] == 3 and paged["page"] == 1, str(paged))
         page.evaluate("() => window.minipaintClipboard.closeOutputs()")
         time.sleep(0.3)
+
+        # And it starts BELOW whatever the theme has pinned to the top.
+        #
+        # "Over the whole window" used to mean the viewport, which includes
+        # the WebUI's own header: under the Lobe theme a video played here
+        # covered the tab bar, and with it the way out of the tab. The header
+        # is a theme's, not this extension's, so what is put on the page is
+        # the only thing every theme's header has in common - something
+        # pinned to the top edge - and the panel has to clear it without
+        # being told it is there.
+        page.evaluate("""() => {
+            const bar = document.createElement('div');
+            bar.id = 'a-theme-header';
+            bar.style.cssText = 'position:fixed;top:0;left:0;right:0;height:64px;z-index:9999;background:#123';
+            document.body.appendChild(bar);
+        }""")
+        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
+        time.sleep(0.5)
+        placed = page.evaluate("""() => {
+            const panel = document.getElementById('minipaint_clipboard_outputs_panel');
+            const media = panel.querySelector('.minipaint-clip-output-stage-media');
+            const bar = document.getElementById('a-theme-header');
+            const p = panel.getBoundingClientRect();
+            const m = media ? media.getBoundingClientRect() : null;
+            return { top: Math.round(p.top), bottom: Math.round(p.bottom),
+                     mediaTop: m ? Math.round(m.top) : -1,
+                     header: Math.round(bar.getBoundingClientRect().bottom),
+                     vh: window.innerHeight }; }""")
+        r.check("the panel starts under the theme's header rather than over it",
+                placed["top"] >= placed["header"], str(placed))
+        r.check("and the video with it, which is what covered the tab bar",
+                placed["mediaTop"] >= placed["header"], str(placed))
+        r.check("it still reaches the bottom of the window, so the room is taken not lost",
+                placed["bottom"] >= placed["vh"] - 2, str(placed))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        page.evaluate("""() => { const bar = document.getElementById('a-theme-header');
+            if (bar) { bar.remove(); }
+            document.documentElement.style.removeProperty('--minipaint-clip-top'); }""")
+        time.sleep(0.3)
     finally:
         from minipaint_neo.clipboard import config as clip_config
         from minipaint_neo.clipboard import outputs

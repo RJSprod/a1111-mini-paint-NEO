@@ -1794,7 +1794,14 @@
 #minipaint_clipboard_root .minipaint-clip-enhance-panel.minipaint-clip-fullscreen {
     display: flex !important;
     position: fixed;
-    inset: 0;
+    /* Below whatever the theme has pinned to the top of the window, not
+       over it. ``inset: 0`` is the viewport, and the viewport includes the
+       WebUI's own header -- with the Lobe theme that is the tab bar, so a
+       video played from View Outputs covered the way out of the tab. The
+       browser measures the header and publishes the number, because it
+       belongs to a theme this extension does not ship and cannot name; 0 is
+       the honest answer when there is nothing pinned up there. */
+    inset: var(--minipaint-clip-top, 0px) 0 0 0;
     z-index: 40;
     margin: 0;
     max-width: none;
@@ -1882,7 +1889,14 @@
 #minipaint_clipboard_root .minipaint-clip-outputs-panel.minipaint-clip-fullscreen {
     display: flex !important;
     position: fixed;
-    inset: 0;
+    /* Below whatever the theme has pinned to the top of the window, not
+       over it. ``inset: 0`` is the viewport, and the viewport includes the
+       WebUI's own header -- with the Lobe theme that is the tab bar, so a
+       video played from View Outputs covered the way out of the tab. The
+       browser measures the header and publishes the number, because it
+       belongs to a theme this extension does not ship and cannot name; 0 is
+       the honest answer when there is nothing pinned up there. */
+    inset: var(--minipaint-clip-top, 0px) 0 0 0;
     z-index: 40;
     margin: 0;
     max-width: none;

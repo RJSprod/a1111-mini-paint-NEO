@@ -75,6 +75,19 @@ LEAKS = (
     ("authorization: Bearer eyJhbGciOiJIUzI1NiJ9.QQQQQQQQQQQQ", "eyJhbGci"),
     ("Authorization = Basic cm9zYWxpbmQ6aHVudGVyMg==", "cm9zYWxpbmQ"),
     ("cookie: session=abc; hf_token=QQQQQQQQQQQQQQQQQQQQ", "hf_token=Q"),
+    # A RELATIVE path, which is what Wan2GP writes when save_path and the
+    # LoRA folder are left at their defaults - and the half of the rule that
+    # was spelled as an allowlist of characters. Anything not on that list
+    # ended the match, and the match restarted *after* it, so whatever came
+    # before was printed: a folder called "Rosalind Carter" came out as
+    # "loras\\Rosalind <path>", and "SMACK! ..." kept its first word. The
+    # file was protected and the person was not.
+    (r"Lora 'loras\Rosalind Carter\portrait.safetensors' was loaded", "Rosalind"),
+    (r"Lora 'loras\Rosalind's folder\portrait.safetensors' was loaded", "Rosalind"),
+    (r"Lora 'loras\Rosalind!favs\portrait.safetensors' was loaded", "Rosalind"),
+    (r"Lora 'loras\minimax_h3\Rosalind! face v2.safetensors' was loaded", "Rosalind"),
+    (r"Loaded image: inputs\rosalind@home #1.png", "rosalind"),
+    (r"Video file saved to Path: outputs\Rosalind! a photo.mp4", "Rosalind"),
 )
 
 #: What a failure is actually diagnosed from. None of it identifies anybody,
@@ -93,6 +106,13 @@ KEPT = (
     ("wrote a photo of Rosalind.mp4", "wrote"),
     (f"Saving video to {WANGP_ROOT}/outputs/a.mp4", ".mp4"),
     ("Loaded 3 models in 4.2 seconds", "3 models in 4.2 seconds"),
+    # The other side of widening the path rule. Letting a match cross the
+    # quote a log puts *around* a path would have taken the clause in front
+    # of it with the words that said what happened, which is the failure the
+    # header of this file calls "a log that gets turned off".
+    ("The user loaded lora 'loras/x/y.safetensors' just now", "The user loaded lora"),
+    (r"Lora 'loras\minimax_h3\Rosalind! face v2.safetensors' was loaded", "was loaded"),
+    ("Skipped Steps:1/4", "Skipped Steps:1/4"),
 )
 
 

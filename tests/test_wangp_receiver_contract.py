@@ -29,7 +29,7 @@ the registry takes its clock, ``send_verified`` takes the function that would
 have talked to the bridge, and the log takes the appender.
 """
 
-from harness import Results, setup_path
+from harness import Results, ROOT, setup_path
 
 setup_path()
 
@@ -37,6 +37,7 @@ import hashlib  # noqa: E402
 import json  # noqa: E402
 import pathlib  # noqa: E402
 import tempfile  # noqa: E402
+import time  # noqa: E402
 import typing  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
@@ -970,7 +971,7 @@ def client_log_checks(r: Results) -> None:
 
     recorded = []
     original = wangp_ui.journal.note
-    wangp_ui.journal.note = lambda source, message: recorded.append((source, message))
+    wangp_ui.journal.note = lambda source, message, at=None: recorded.append((source, message))
     try:
         wangp_ui._client_log_seen.clear()
         first = _json.dumps({"p": "page1", "n": 2, "lines": [{"s": 1, "line": "one"}, {"s": 2, "line": "two"}]})
@@ -990,6 +991,94 @@ def client_log_checks(r: Results) -> None:
     finally:
         wangp_ui.journal.note = original
         wangp_ui._client_log_seen.clear()
+
+
+def client_log_time_checks(r: Results) -> None:
+    """A browser line keeps the time it happened, not the time it arrived.
+
+    A backgrounded tab queues its lines and posts the backlog in one burst
+    when it comes back - one stretch in a real report was 208 seconds. Every
+    line in that burst used to be stamped on arrival, so an incident that
+    took minutes was written as one second of file: a request asked for, and
+    the same request timing out ten seconds later, on adjacent lines bearing
+    the same stamp. That was the log of the one incident it was needed for.
+
+    What the page sends is an AGE rather than a clock reading. Its clock is
+    the user's - minutes off this one, in its own timezone, and free to jump
+    while the tab sleeps - but how long ago something happened is the same
+    number on any clock, so the server counts back from its own.
+    """
+    from minipaint_neo.wangp import ui as wangp_ui
+    from minipaint_neo.wangp import process_log
+    import json as _json
+
+    recorded = []
+    original = wangp_ui.journal.note
+    wangp_ui.journal.note = lambda source, message, at=None: recorded.append((message, at))
+    try:
+        wangp_ui._client_log_seen.clear()
+        arrived = time.time()
+        wangp_ui.record_client_log(_json.dumps({"p": "p", "n": 2, "lines": [
+            {"s": 1, "line": "asked", "ms": 95000},
+            {"s": 2, "line": "timed out", "ms": 85000},
+        ]}))
+        when = dict(recorded)
+        r.check("a line written 95s ago is dated 95s ago rather than now",
+                when.get("asked") is not None and 90 <= arrived - when["asked"] <= 100, str(recorded))
+        r.check("and the burst spreads back out instead of collapsing into one second",
+                when.get("timed out") is not None
+                and round(when["timed out"] - when["asked"]) == 10, str(recorded))
+
+        recorded.clear()
+        wangp_ui._client_log_seen.clear()
+        wangp_ui.record_client_log(_json.dumps({"p": "q", "n": 1, "lines": [{"s": 1, "line": "no age"}]}))
+        r.check("a line that says nothing about when it happened gets the arrival time, as before",
+                recorded == [("no age", None)], str(recorded))
+
+        # The page is a writer like any other on this route, and an age it
+        # could not have measured is not an argument about what it meant.
+        for bad, why in ((-1, "before the line was written"),
+                         ("5000", "a string rather than a number"),
+                         (True, "a boolean"),
+                         (7 * 60 * 60 * 1000, "further back than the bound allows")):
+            recorded.clear()
+            wangp_ui._client_log_seen.clear()
+            wangp_ui.record_client_log(_json.dumps({"p": "r", "n": 1, "lines": [{"s": 1, "line": "x", "ms": bad}]}))
+            r.check(f"an age that is {why} is ignored rather than believed",
+                    recorded == [("x", None)], f"{bad!r} -> {recorded}")
+    finally:
+        wangp_ui.journal.note = original
+        wangp_ui._client_log_seen.clear()
+
+    # And what a person actually opens: one batch that arrived at once,
+    # written as two stamps an hour apart.
+    base = tempfile.TemporaryDirectory()
+    try:
+        process_log.use_log_dir(pathlib.Path(base.name) / "logs")
+        wangp_ui._client_log_seen.clear()
+        wangp_ui.record_client_log(_json.dumps({"p": "file", "n": 2, "lines": [
+            {"s": 1, "line": "the page went to the background", "ms": 3600000},
+            {"s": 2, "line": "back on screen", "ms": 0},
+        ]}))
+        stamps = [line[1:20] for line in process_log.LOG_PATH.read_text(encoding="utf-8").splitlines()
+                  if "background" in line or "back on screen" in line]
+        r.check("the file shows the two of them at the times they happened",
+                len(stamps) == 2 and stamps[0] != stamps[1], str(stamps))
+    finally:
+        process_log.use_log_dir(None)
+        wangp_ui._client_log_seen.clear()
+        base.cleanup()
+
+    # The other half of it, which no page here can be driven into: the age
+    # has to be MEASURED on the browser, and measured on a clock that does
+    # not move under it. A page that quietly stopped sending one would leave
+    # every check above passing, because arrival time is the correct fallback
+    # for a browser too old to have sent it.
+    source = (ROOT / "browser" / "minipaint_wangp.js").read_text(encoding="utf-8")
+    r.check("the browser sends an age with every line it batches",
+            "ms: Math.max(0, Math.round(sending - entry.at))" in source)
+    r.check("measured on the monotonic clock, not the wall clock a sleeping tab may have jumped",
+            "window.performance.now()" in source and "function logClock()" in source)
 
 
 def client_log_route_checks(r: Results) -> None:
@@ -1018,7 +1107,7 @@ def client_log_route_checks(r: Results) -> None:
     recorded = []
     original = wangp_ui.journal.note
     allowed = {"ok": True}
-    wangp_ui.journal.note = lambda source, message: recorded.append((source, message))
+    wangp_ui.journal.note = lambda source, message, at=None: recorded.append((source, message))
     # The gate itself, not a stand-in module: ``_client_log_allowed`` resolves
     # ``proxy`` through the package, so a replacement in sys.modules would
     # never be the one it reaches.
@@ -1487,6 +1576,7 @@ def run() -> Results:
         tab_checks(r)
         handoff_release_checks(r)
         client_log_checks(r)
+        client_log_time_checks(r)
         client_log_route_checks(r)
         session_record_checks(r)
         wizard_checks(r)

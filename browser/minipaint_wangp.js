@@ -781,6 +781,24 @@ window.minipaintWanGP = (function () {
     let logFlush = 0;
 
     /**
+     * When a line was written, on a clock the server can use.
+     *
+     * Not ``Date.now()``: this page's wall clock is the user's, which may be
+     * minutes off the server's and is free to jump while the tab is asleep -
+     * and asleep is exactly the case this exists for. ``performance.now()``
+     * is monotonic and cares about none of that, so what travels is not a
+     * time at all but an age, and the server counts back from its own clock.
+     */
+    function logClock() {
+        try {
+            if (window.performance && typeof window.performance.now === "function") {
+                return window.performance.now();
+            }
+        } catch (e) { /* fall through to the wall clock */ }
+        return Date.now();
+    }
+
+    /**
      * Hand the batch to the server.
      *
      * The window and the sequence numbers are kept exactly as they were: the
@@ -795,7 +813,17 @@ window.minipaintWanGP = (function () {
     function flushLog() {
         logFlush = 0;
         if (!logLines.length) { return Promise.resolve(); }
-        const body = JSON.stringify({ p: LOG_PAGE, n: logSeq, lines: logLines.slice(-LOG_WINDOW) });
+        // The age of each line AT THIS MOMENT, which is the moment the server
+        // will count back from. A backgrounded tab holds its lines for as
+        // long as the browser holds the tab - one stretch in a real report
+        // was 208 seconds - and stamping them on arrival put a whole
+        // incident's worth of lines in the same second, including a request
+        // being asked for and timing out ten seconds later.
+        const sending = logClock();
+        const batch = logLines.slice(-LOG_WINDOW).map(function (entry) {
+            return { s: entry.s, line: entry.line, ms: Math.max(0, Math.round(sending - entry.at)) };
+        });
+        const body = JSON.stringify({ p: LOG_PAGE, n: logSeq, lines: batch });
         try {
             return fetch(CLIENT_LOG_ROUTE, {
                 method: "POST",
@@ -823,7 +851,7 @@ window.minipaintWanGP = (function () {
     async function reportFrames() {
         try {
             logSeq += 1;
-            logLines.push({ s: logSeq, line: String(frameTimerNote()).slice(0, 300) });
+            logLines.push({ s: logSeq, line: String(frameTimerNote()).slice(0, 300), at: logClock() });
             if (logLines.length > LOG_WINDOW) { logLines.splice(0, logLines.length - LOG_WINDOW); }
             if (logFlush) { clearTimeout(logFlush); logFlush = 0; }
             await flushLog();
@@ -836,7 +864,7 @@ window.minipaintWanGP = (function () {
             if (typeof console !== "undefined" && console.debug) {
                 console.debug("MiniPaint WanGP:", message);
             }
-            logLines.push({ s: logSeq, line: String(message).slice(0, 300) });
+            logLines.push({ s: logSeq, line: String(message).slice(0, 300), at: logClock() });
             if (logLines.length > LOG_WINDOW) { logLines.splice(0, logLines.length - LOG_WINDOW); }
             if (!logFlush) { logFlush = setTimeout(flushLog, LOG_FLUSH_MS); }
         } catch (e) { /* a log line is never worth an exception */ }

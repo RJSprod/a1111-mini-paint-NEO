@@ -610,9 +610,10 @@ is not a mode; `plugin_info.json` said 1.3.0, protocol 4, capability `start`.
 
 ## The tab's own routes — everything that used to need Gradio
 
-Five doors, all under `/minipaint-clipboard/`, all gated by the same
+Seven doors, all under `/minipaint-clipboard/`, all gated by the same
 `_signed_in` the picture route uses, all answering `Cache-Control: no-store`
-and their own `status` sentence for the status line. They exist because every
+and their own `status` sentence for the status line (the two byte-serving
+ones answer bytes and a revalidated cache header instead). They exist because every
 one of this tab's events was a request with a response and none was ever a
 push: what made them fragile was the transport, not the interaction.
 
@@ -639,11 +640,31 @@ the same identity both thumbnail caches are keyed by.
       -> {ok, status, sort, thumbnail, intercept, menu: {...}}
 
     GET  /minipaint-clipboard/queue?page=<page id>
-    POST /minipaint-clipboard/queue      {action: add|cancel|retry|adopt|cancel_all, ...}
+    POST /minipaint-clipboard/queue      {action: add|cancel|retry|adopt|dismiss|cancel_all, ...}
       -> {ok, jobs: [...], history: [...], status, queue_button: {label, enabled}, instruction?}
+
+The action list here and the verbs `outbox_view` puts on a card are one thing
+in two places, and `tests/test_clipboard_ui.py` holds them together as a
+property rather than a second list: a button drawn on a card that this route
+answers with "not a queue action" looks, from the tab, exactly like a press
+that did nothing.
 
     GET  /minipaint-clipboard/enhance-settings?variant&mode
     POST /minipaint-clipboard/enhance-settings  {action: toggle|override|restore, ...}
+
+    GET  /minipaint-clipboard/outputs?page&size
+      -> {ok, total, page, pages, size, reason: ""|"empty"|"unconfigured", status,
+          items: [{id, name, kind: "video"|"image", size, at, exact, prompt, url}]}
+    GET  /minipaint-clipboard/output/{file_id}     (also HEAD)
+      -> the bytes, or 206 + Content-Range for a Range request
+
+`Accept-Ranges: bytes` is on every answer and **206 is the point of the
+route**: a `<video>` served without ranges plays but cannot seek, so the
+scrub bar does nothing. One range per request, up to `RANGE_CHUNK`; a header
+asking for anything else is answered whole, which is always a correct answer
+to a range request. `exact` says whether WanGP named the file or this tab
+matched it to the request by when it was written, and the gallery says so on
+screen - a match is never presented as a fact.
 
     POST /minipaint-clipboard/send       (as before)
 
@@ -668,23 +689,42 @@ class Store:
 # import_bytes / import_image / rename / delete / set_root / a refresh that found a difference all call moved()
 
 # routes.py
-LIBRARY_ROUTE; SETTINGS_ROUTE; QUEUE_ROUTE; ENHANCE_SETTINGS_ROUTE; PAGE_SIZE = 60; PAGE_SIZE_MIN = 10; PAGE_SIZE_MAX = 250
-IMMUTABLE_CACHE; REVALIDATED_CACHE
+LIBRARY_ROUTE; SETTINGS_ROUTE; QUEUE_ROUTE; ENHANCE_SETTINGS_ROUTE; OUTPUTS_ROUTE; OUTPUT_FILE_ROUTE; PAGE_SIZE = 60; PAGE_SIZE_MIN = 10; PAGE_SIZE_MAX = 250
+IMMUTABLE_CACHE; REVALIDATED_CACHE; RANGE_CHUNK = 4 MiB
 def library_page(sort, page, size, selected="", refresh=False) -> dict; def apply_settings(changes) -> dict
+def outputs_page(page=0, size=PAGE_SIZE) -> dict                                      # the gallery; syncs the ledger first, joins the prompt on from the history
+def output_url(file_id) -> str; def _byte_range(header, size) -> (start, end) | None  # single-range only; anything else is answered whole
 def clamp_size(value) -> int; def page_of(value, pages) -> int                        # zero-based; the pager shows page + 1
 def image_url(asset_id, thumb=True, version="")
+
+# outputs.py: the durable ledger behind View Outputs - one entry per request that reached WanGP
+VIDEO_SUFFIXES (.mp4 .webm .mkv .mov .m4v); IMAGE_SUFFIXES (.png .jpg .jpeg .webp .gif)   # a GIF is an image: a <video> renders nothing from one
+MAX_ENTRIES = 2000; CLOSE_GRACE_SECONDS = 180; CLAIM_MAX_SECONDS = 24h; MAX_SCANNED = 5000; SCHEMA = 1
+def folder() -> Path | None                                                           # the outputs_folder setting, else <wangp root>/outputs; absent is not an error
+def remember(job_id, paths, request_id="", model="") -> entry                         # the EXACT half: WanGP named these. Called from executor while the job still holds them
+def sync()                                                                            # the PULL half: open a claim per admitted request, close the ones whose jobs are done or gone
+def files(refresh=True) -> [{id, name, kind, size, at, job_id, request_id, exact}]     # newest first; a file that has left the disk is dropped from the document
+def path_of(file_id) -> Path | None                                                   # the only place an id becomes a path
+def forget_all() -> int; def use_clock(clock); def reset_for_tests()
+# An entry: {entry_id, job_id, request_id, opened_at, closed_at, floor, exact, model, files: [{file_id, path, name, size, at}]}
+# floor = the newest file already in the folder when the claim opened. A window claims
+# what is strictly newer than that, never what it found - which beats "after the request"
+# on a folder full of copied, restored or touched files whose times nobody can vouch for.
 
 # history.py: a record also carries enhanced (bool) and enhanced_prompt (the written prompt; the typed one stays the recipe); make_record(draft, result, enhanced_prompt="")
 
 # ui.py
 PREFIX = "minipaint_clipboard"; SLOTS = (("first", "First Frame", "start"), ("last", "Last Frame", "end"), ("ref", "Reference", "references"))
 QUEUE_BUTTON_LABEL = "Add to Queue"; QUEUE_BUTTON_BLOCKED = "WanGP is not running"; OUTBOX_LABELS (+ Enhancing); ENHANCE_LABELS; WANGP_LABELS; NO_PAGE = "00000000"; OUTBOX_SHOWN = 40
-SP_VARIANT_CHOICES; SP_MODE_CHOICES; QUEUE_JS (prompt, switch -> addToQueue); CANCEL_ALL_JS; MENU_STATE_JS; OPEN_PROMPT_EDITOR_JS (passes its inputs through); CLOSE_PROMPT_EDITOR_JS; GRID_MOUNT = ""; LIST_MOUNT = ""
+SP_VARIANT_CHOICES; SP_MODE_CHOICES; QUEUE_JS (prompt, switch -> addToQueue); CANCEL_ALL_JS; MENU_STATE_JS; OPEN_PROMPT_EDITOR_JS (passes its inputs through); CLOSE_PROMPT_EDITOR_JS
+SORT_MENU_JS; SEND_MENU_JS (the toolbar's two flyouts); OPEN_OUTPUTS_JS; GRID_MOUNT = ""; LIST_MOUNT = ""
 def card_html(slot, label, field, assets, missing=False)                              # the one server-rendered section left; see the V2 list
 def outbox_view(jobs, page) -> [dict]; def history_view(records, asset_of) -> [dict]   # content, not nodes: the browser draws it
 def job_sentence(job) -> str; def enhance_sentence(job) -> str; def wangp_sentence(job) -> str; def enhance_line_html(availability, enabled) -> str
+def job_is_over(job) -> bool     # what the queue stops LISTING: COMPLETED, a browser job whose task left WanGP's queue, or a dismissed one. Never what it stops storing
 class ClipboardTab:
-    refresh; sort_changed; sort_request; thumbnail_changed; toggle_intercept          # every refresh output ends with the button's state
+    refresh; sort_request; thumbnail_changed; toggle_intercept                        # every refresh output ends with the button's state
+                                                                                      # sort_changed is gone with the dropdown: one verb, one write path
     assign(slot, selected); slot_action("clear:<slot>" | "assign:<slot>:<id>"); slot_upload(slot, file, selected); upload(files, selected); pasted(path, selected)
     prompt_changed(prompt)
     toggle_enhance(flag, model) -> enhance line; model_changed(model) -> enhance line
@@ -694,7 +734,7 @@ class ClipboardTab:
     cancel_all(page) -> {ok, cancelled, jobs, status}                                   # outbox.cancel_all()
     add_to_queue(prompt, page, model=None, enhance_wanted=None) -> {ok, instruction {nonce, job_id, executor, state} | None, status, jobs, queue_button}
     queue_answer(page) -> {ok, page, jobs, history, status, queue_button, running}      # records history for unrecorded positive Clipboard jobs, once
-    outbox_action("cancel|retry|adopt:<job>:<page>", page) -> {ok, jobs, status, queue_button?}
+    outbox_action("cancel|retry|adopt|dismiss:<job>:<page>", page) -> {ok, jobs, status, queue_button?}
     show_history() -> gr.update(visible=True); history_action("load:<id>" | "delete:<id>", prompt)
     _queue_button_view(running=None) -> {label, enabled}                                # the same decision as _queue_button, as facts
     send("<target>:<asset id>:<nonce>", selected)          # minipaint | img2img | inpaint | extras | stitch_*
@@ -757,7 +797,14 @@ failed" and "the answer never came back" in the log), `reportTiles` (says when
 a thumbnail is *drawn* off-centre, measured through `object-fit` rather than
 from the `<img>` box, which is centred whatever the picture does),
 `refreshCapabilities` (throttled, never on a timer), `pressHidden`,
-`menuStateChanged`, `showOffline`, `openPromptEditor` / `closePromptEditor`
+`menuStateChanged`, `showOffline`, `openToolbarMenu(section)` (the toolbar's
+Sort and Send flyouts: the same list the menu's own sections draw, anchored
+under the button that asked and standing alone, so no Back row and a second
+press closes it), `openOutputs` / `closeOutputs` / `askOutputs(page)` (the
+gallery: the stage, the filmstrip, tap-to-hide the controls, and a pager at
+the grid's own 60 - `closeOutputs` clears the player's `src`, because a
+`<video>` left with a source keeps downloading the largest file this
+extension touches), `openPromptEditor` / `closePromptEditor`
 (the full-window system-prompt view: the class, the Escape key, the focus, and
 `markEditorChain`, which puts `minipaint-clip-grow` on every wrapper Gradio
 built between the panel and the textarea so the box can take the height - the
@@ -813,6 +860,10 @@ queued, the depth, the fail-safe direction), `tests/test_interop.py`
 shaped like its document: the loader off a folder, the variant and slot
 rules, the overrides on disk, the enhancing stage in the line, how a run
 ends, cancel everything, retry, tracking, the routes and the tab's panel),
+`tests/test_clipboard_outputs.py` (the ledger and the gallery's two routes:
+the exact half against WanGP's own paths, the window half against a folder
+whose files appear while a job runs, a claim a shutdown left open finished at
+the next sync, exclusive claiming, the 60-page, and the byte route's ranges),
 `tests/test_clipboard_ui.py` (the tab on a Forge-shaped page, every event,
 the outbox flow, the blocked button, the intercept, Send to Clipboard, the
 fallback, the theming rules), `tests/test_queue_e2e.py` (a WanGP-shaped

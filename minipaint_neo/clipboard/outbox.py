@@ -210,6 +210,15 @@ MAX_PENDING = 200
 #: because a page that was waiting on the job still has to be told what
 #: happened, and history has to be written from the job before it goes.
 KEEP_TERMINAL_SECONDS = 120.0
+#: How long a FAILED job stays if nobody ever dismisses it.
+#:
+#: A failure is not swept on a timer the way a success is: it is the one
+#: thing in this queue that wants a person to look at it, and a card that
+#: deletes itself after two minutes is a card nobody reads. So it waits for
+#: a press. This is only the backstop under that - a machine left running
+#: for a month with a failing setup should not carry every card of it - and
+#: it is a week because that is how long "I was away" lasts.
+KEEP_FAILED_SECONDS = 7 * 24 * 60 * 60.0
 
 PAGE_RE = re.compile(r"\A[0-9a-f]{8,32}\Z")
 PHASE_SENT = "sent"
@@ -606,6 +615,9 @@ def _normalize(raw: typing.Any) -> typing.Optional[dict]:
         "error": raw.get("error") if isinstance(raw.get("error"), dict) else None,
         "retry_of": str(raw.get("retry_of") or "")[:16],
         "history_recorded": bool(raw.get("history_recorded")),
+        #: Pressed away by a person. Only a failure is ever waiting for this:
+        #: a success leaves the list by finishing.
+        "dismissed": bool(raw.get("dismissed")),
         "model": _model(raw.get("model")),
         "enhance_requested": bool(raw.get("enhance_requested")),
         "enhance": enhance,
@@ -697,6 +709,7 @@ def public(job: typing.Mapping[str, typing.Any]) -> dict:
         # The count crosses; the paths do not. Section 6.4's rule holds for a
         # job document read over a route exactly as it does for an event.
         "generated_count": len(job.get("generated_files") or []),
+        "dismissed": bool(job.get("dismissed")),
         # One of five fixed words, so it carries nothing of the user's and
         # crosses freely. It is the other half of the snapshot's ``source``:
         # together they say whether the base this job ran at is the one its
@@ -753,6 +766,7 @@ def _blank(job_id: str, now: float) -> dict:
         "snapshot": None,
         "inputs": {},
         "generated_files": [],
+        "dismissed": False,
         "child_instance": "",
         "inputs_released": False,
         "settings_flush": "",
@@ -875,19 +889,41 @@ def _sweep(jobs: typing.List[dict], now: float) -> bool:
     return changed
 
 
+def failed_state(state: typing.Any) -> bool:
+    """Whether a terminal state is one a person would want to see.
+
+    The line the queue is now drawn along. A job that went well leaves by
+    finishing; a job that did not waits to be dismissed, because it is the
+    one thing here somebody has to decide about - retry it, or let it go.
+    """
+    return state in (FAILED, CANCELLED, UNCONFIRMED, EXECUTION_UNKNOWN)
+
+
 def _finished_with(job: dict, now: float) -> bool:
     """Whether a finished job has been in the list long enough to go.
 
     The grace is not politeness: a page waiting on this job still has to be
     told what happened, and a caller of the public API is holding a promise
     that resolves from this record. Dropping it the instant it goes terminal
-    turns "your job finished" into QUEUE_JOB_UNKNOWN.
+    turns "your job finished" into QUEUE_JOB_UNKNOWN. That is why the queue
+    stops *listing* a finished job at once but the record lives its grace
+    out behind the view: what the browser draws and what the API can still
+    answer are two questions, and only one of them is about the screen.
 
     ``history_recorded`` deliberately does NOT shorten this, tempting as it
     looks. It is set when a job is handed to WanGP, not when it comes back -
     so a job would leave the queue at the moment it started running.
+
+    A failure is the exception in the other direction: it waits for a
+    person. Dismissing it starts the same grace every other terminal job
+    gets, so the press is not a way to break the promise either.
     """
-    return job["state"] in TERMINAL and now - job["updated_at"] > KEEP_TERMINAL_SECONDS
+    if job["state"] not in TERMINAL:
+        return False
+    age = now - job["updated_at"]
+    if failed_state(job["state"]) and not job.get("dismissed"):
+        return age > KEEP_FAILED_SECONDS
+    return age > KEEP_TERMINAL_SECONDS
 
 
 def _find(jobs: typing.List[dict], job_id: typing.Any) -> dict:
@@ -1393,6 +1429,33 @@ def _cancel_in_child(job: typing.Mapping[str, typing.Any]) -> str:
     if record["state"] == protocol.EXEC_DONE:
         return "Cancelled after WanGP had already finished it."
     return "Cancelled here; WanGP reported " + (record["state"] or "nothing") + "."
+
+
+def dismiss(job_id: typing.Any) -> dict:
+    """Press a failed job away: it stops being listed and ages out normally.
+
+    Only a failure can be dismissed, because only a failure is waiting to
+    be. Pressing this on anything else is refused rather than quietly doing
+    nothing, so a caller that got the state wrong hears about it.
+    """
+    with _lock:
+        listed = _load()
+        now = _now()
+        changed = _sweep(listed, now)
+        job = _find(listed, job_id)
+        if not failed_state(job["state"]):
+            raise IntegrationError(errors.REQUEST_INVALID,
+                                   f"job {job['job_id'][:8]} is {job['state']}, which is not a job to dismiss")
+        if not job.get("dismissed"):
+            job["dismissed"] = True
+            # Its grace starts now, not when it failed: a job dismissed a
+            # week later would otherwise be gone before the press returned.
+            job["updated_at"] = now
+            changed = True
+            _journal(f"job {job['job_id'][:8]}: dismissed")
+        if changed:
+            _save(listed)
+        return public(job)
 
 
 def cancel(job_id: typing.Any) -> dict:
@@ -1970,6 +2033,7 @@ __all__ = [
     "TERMINAL", "UNCONFIRMED", "WAITING", "WAITING_FOR_CARD", "WAITING_TURN", "WAIT_BUSY_MS",
     "WAIT_ENHANCE_MS", "WAIT_TURN_MS", "WANGP_ACCEPTED", "WANGP_FINISHED", "WANGP_GENERATING",
     "WANGP_STATES", "WANGP_UNKNOWN", "WANGP_WAITING", "adopt", "attempt", "cancel", "cancel_all",
+    "dismiss", "failed_state",
     "chosen_executor", "claim", "counts", "fail", "get", "input_ids", "jobs", "mark_recorded",
     "next_executable", "on_wangp_restart", "pending_count", "public", "record_execution",
     "record_snapshot", "recover", "refresh", "report", "reset_for_tests", "retry", "sanitize_result",

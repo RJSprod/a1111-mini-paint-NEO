@@ -34,6 +34,8 @@ window.minipaintClipboard = (function () {
     const BROWSER_ID = "minipaint_clipboard_browser";
     const GRID_ID = "minipaint_clipboard_grid";
     const MENU_ID = "minipaint_clipboard_menu";
+    const SORT_BUTTON_ID = "minipaint_clipboard_sort_open";
+    const SEND_BUTTON_ID = "minipaint_clipboard_send_open";
     const STATUS_ID = "minipaint_clipboard_status";
     const QUEUE_STATUS_ID = "minipaint_clipboard_queue_status";
     const QUEUE_BUTTON_ID = "minipaint_clipboard_queue";
@@ -136,6 +138,17 @@ window.minipaintClipboard = (function () {
         thumb: 0,
         menu: null,
         menuSection: null,
+        //: The element the flyout is drawn under. The menu button when the
+        //: menu opened it, a toolbar button when one of those did.
+        menuAnchor: null,
+        //: The gallery's own working set: what this page of it holds, which
+        //: one is in the stage, and the element playing it.
+        outputs: { items: [], page: 0, pages: 1, chosen: "", stage: null, strip: null, player: null },
+        outputsKey: null,
+        //: A flyout a toolbar button opened is the whole list: there is
+        //: nothing behind it, so it shows no Back row and Escape closes it
+        //: rather than stepping up a level that does not exist.
+        menuStandalone: false,
         menuOutside: null,
         menuKey: null,
         queued: {},
@@ -1309,6 +1322,221 @@ window.minipaintClipboard = (function () {
         return true;
     }
 
+
+    /* ------------------------------------------------------------------ */
+    /* View Outputs: what WanGP made, as a gallery                          */
+    /* ------------------------------------------------------------------ */
+
+    const OUTPUTS_PANEL_ID = "minipaint_clipboard_outputs_panel";
+    const OUTPUTS_ROUTE = "/minipaint-clipboard/outputs";
+
+    function outputsPanel() { return byId(OUTPUTS_PANEL_ID); }
+
+    function outputsOpen() {
+        const panel = outputsPanel();
+        return !!(panel && panel.classList.contains(EDITOR_OPEN_CLASS));
+    }
+
+    /**
+     * Stop the player and let go of the file.
+     *
+     * Clearing ``src`` is not tidiness: a <video> left with a source goes on
+     * downloading it after the view is closed, and these are the largest
+     * files this extension ever touches.
+     */
+    function stopPlayer() {
+        const video = S.outputs.player;
+        if (!video) { return; }
+        try {
+            video.pause();
+            video.removeAttribute("src");
+            video.load();
+        } catch (e) { /* a player the page is already tearing down */ }
+    }
+
+    function outputTile(item, chosen) {
+        const tile = el("button", "minipaint-clip-output-tile" + (chosen ? " minipaint-clip-output-chosen" : ""));
+        tile.type = "button";
+        tile.dataset.output = item.id;
+        tile.title = item.name + (item.exact ? "" : " — matched to a request by when it was written");
+        let media;
+        if (item.kind === "video") {
+            // The poster is the frame at one second, asked for with a media
+            // fragment. No ffmpeg, no server-side thumbnailing, no second
+            // copy of the file on disk: the browser already decodes video,
+            // and metadata is all it has to fetch to draw this.
+            media = el("video", "minipaint-clip-output-thumb");
+            media.preload = "metadata";
+            media.muted = true;
+            media.playsInline = true;
+            media.src = item.url + "#t=1";
+        } else {
+            media = el("img", "minipaint-clip-output-thumb");
+            media.loading = "lazy";
+            media.alt = "";
+            media.src = item.url;
+        }
+        tile.appendChild(media);
+        if (!item.exact) { tile.appendChild(el("span", "minipaint-clip-output-guess", "~")); }
+        return tile;
+    }
+
+    /** Put one output in the stage. Videos play; pictures just show. */
+    function showOutput(item) {
+        const stage = S.outputs.stage;
+        if (!stage || !item) { return; }
+        S.outputs.chosen = item.id;
+        stopPlayer();
+        stage.innerHTML = "";
+        S.outputs.player = null;
+        let media;
+        if (item.kind === "video") {
+            media = el("video", "minipaint-clip-output-stage-media");
+            media.src = item.url;
+            media.controls = true;
+            media.autoplay = true;
+            media.playsInline = true;
+            S.outputs.player = media;
+        } else {
+            media = el("img", "minipaint-clip-output-stage-media");
+            media.alt = item.name;
+            media.src = item.url;
+        }
+        stage.appendChild(media);
+        const caption = el("div", "minipaint-clip-output-caption");
+        caption.appendChild(el("span", "minipaint-clip-output-name", item.name));
+        if (item.prompt) {
+            const prompt = el("span", "minipaint-clip-output-prompt", item.prompt);
+            prompt.title = item.prompt;
+            caption.appendChild(prompt);
+        }
+        if (!item.exact) {
+            const guess = el("span", "minipaint-clip-output-guess-note",
+                             "matched to a request by when it was written");
+            caption.appendChild(guess);
+        }
+        stage.appendChild(caption);
+        const strip = S.outputs.strip;
+        if (strip) {
+            for (const tile of Array.from(strip.querySelectorAll(".minipaint-clip-output-tile"))) {
+                tile.classList.toggle("minipaint-clip-output-chosen", tile.dataset.output === item.id);
+            }
+            const chosen = strip.querySelector(".minipaint-clip-output-chosen");
+            if (chosen && chosen.scrollIntoView) { chosen.scrollIntoView({ block: "nearest", inline: "nearest" }); }
+        }
+    }
+
+    function drawOutputs(answer) {
+        const panel = outputsPanel();
+        if (!panel) { return; }
+        const items = (answer && answer.items) || [];
+        S.outputs.items = items;
+        S.outputs.page = (answer && answer.page) || 0;
+        S.outputs.pages = (answer && answer.pages) || 1;
+        panel.innerHTML = "";
+
+        const stage = el("div", "minipaint-clip-output-stage");
+        // Tap to hide and show the controls, which is what the picture under
+        // them is for. The press has to miss the controls themselves, or
+        // pressing pause would also hide the pause button.
+        stage.addEventListener("click", function (event) {
+            const video = S.outputs.player;
+            if (!video || event.target !== stage) { return; }
+            video.controls = !video.controls;
+        });
+        S.outputs.stage = stage;
+        panel.appendChild(stage);
+
+        const bar = el("div", "minipaint-clip-output-bar");
+        bar.appendChild(el("span", "minipaint-clip-output-status", (answer && answer.status) || ""));
+        if (S.outputs.pages > 1) {
+            const pager = el("div", "minipaint-clip-output-pager");
+            const back = el("button", "minipaint-clip-output-page", "‹");
+            back.type = "button";
+            back.disabled = S.outputs.page <= 0;
+            back.addEventListener("click", function () { askOutputs(S.outputs.page - 1); });
+            const forward = el("button", "minipaint-clip-output-page", "›");
+            forward.type = "button";
+            forward.disabled = S.outputs.page >= S.outputs.pages - 1;
+            forward.addEventListener("click", function () { askOutputs(S.outputs.page + 1); });
+            pager.appendChild(back);
+            pager.appendChild(el("span", "minipaint-clip-output-count",
+                                 "Page " + (S.outputs.page + 1) + " of " + S.outputs.pages));
+            pager.appendChild(forward);
+            bar.appendChild(pager);
+        }
+        const close = el("button", "minipaint-clip-output-close", "Close");
+        close.type = "button";
+        close.addEventListener("click", closeOutputs);
+        bar.appendChild(close);
+        panel.appendChild(bar);
+
+        const strip = el("div", "minipaint-clip-output-strip");
+        strip.addEventListener("click", function (event) {
+            const tile = event.target && event.target.closest ? event.target.closest("[data-output]") : null;
+            if (!tile) { return; }
+            const wanted = (S.outputs.items || []).filter(function (one) { return one.id === tile.dataset.output; })[0];
+            if (wanted) { showOutput(wanted); }
+        });
+        S.outputs.strip = strip;
+        for (const item of items) { strip.appendChild(outputTile(item, false)); }
+        panel.appendChild(strip);
+
+        if (items.length) {
+            showOutput(items[0]);
+        } else {
+            stage.appendChild(el("div", "minipaint-clip-output-empty",
+                                 (answer && answer.status) || "Nothing here yet."));
+        }
+    }
+
+    function askOutputs(page) {
+        const wanted = Math.max(0, page || 0);
+        return fetch(OUTPUTS_ROUTE + "?page=" + encodeURIComponent(wanted),
+                     { credentials: "same-origin", cache: "no-store" })
+            .then(function (response) { return response.json(); })
+            .then(function (answer) {
+                if (!answer || answer.ok !== true) { throw new Error((answer && answer.message) || "outputs"); }
+                serverSilent(false);
+                drawOutputs(answer);
+                return answer;
+            }, function (error) {
+                note("outputs: could not be read (" + ((error && error.message) || error) + ")");
+                serverSilent(true, "the outputs");
+                drawOutputs({ items: [], page: 0, pages: 1, status: "The outputs could not be read." });
+                return null;
+            });
+    }
+
+    /**
+     * Open the gallery over the whole window.
+     *
+     * The same shape as the system-prompt editor - a panel with no shape on
+     * the tab until a class puts it over everything - because they are the
+     * same idea: a thing that wants the screen, reached from one button, and
+     * closed by Escape or its own Close.
+     */
+    function openOutputs() {
+        const panel = outputsPanel();
+        if (!panel) { return false; }
+        panel.classList.add(EDITOR_OPEN_CLASS);
+        if (S.outputsKey) { document.removeEventListener("keydown", S.outputsKey, true); }
+        S.outputsKey = function (event) {
+            if (event.key === "Escape") { event.stopPropagation(); closeOutputs(); }
+        };
+        document.addEventListener("keydown", S.outputsKey, true);
+        askOutputs(0);
+        return true;
+    }
+
+    function closeOutputs() {
+        const panel = outputsPanel();
+        stopPlayer();
+        if (panel) { panel.classList.remove(EDITOR_OPEN_CLASS); }
+        if (S.outputsKey) { document.removeEventListener("keydown", S.outputsKey, true); S.outputsKey = null; }
+        return true;
+    }
+
     /* ------------------------------------------------------------------ */
     /* The menu                                                              */
     /* ------------------------------------------------------------------ */
@@ -1333,15 +1561,16 @@ window.minipaintClipboard = (function () {
     function menuItems(section) {
         const state = menuState();
         const tick = function (on) { return on ? "✓ " : ""; };
+        const back = S.menuStandalone ? [] : [{ menu: "back", label: "‹ Back" }];
         if (section === "sort") {
-            const list = [{ menu: "back", label: "‹ Back" }];
+            const list = back.slice();
             for (const pair of state.sorts || []) {
                 list.push({ menu: "sort", value: pair[0], label: tick(state.sort === pair[0]) + pair[1] });
             }
             return list;
         }
         if (section === "send") {
-            const list = [{ menu: "back", label: "‹ Back" }];
+            const list = back.slice();
             if (!S.selected) { list.push({ menu: "status", label: "Select an image first" }); }
             for (const pair of state.destinations || []) {
                 list.push({ menu: "send", value: pair[0], label: pair[1], disabled: !S.selected });
@@ -1359,7 +1588,6 @@ window.minipaintClipboard = (function () {
             { menu: "press", value: PRESS.folder, label: "Choose storage folder…" },
             { menu: "press", value: PRESS.rename, label: "Rename selected…", disabled: !S.selected },
             { menu: "press", value: PRESS.remove, label: "Delete selected…", disabled: !S.selected },
-            { menu: "section", value: "send", label: "Send selected to ›" },
             { menu: "press", value: PRESS.history, label: "Queue Send History" }
         ];
     }
@@ -1406,24 +1634,28 @@ window.minipaintClipboard = (function () {
     }
 
     function positionMenu() {
-        const button = byId(MENU_ID);
+        const button = S.menuAnchor || byId(MENU_ID);
         const column = byId(BROWSER_ID);
         if (!button || !column || !S.menu) { return; }
         const b = button.getBoundingClientRect();
         const c = column.getBoundingClientRect();
         S.menu.style.top = (b.bottom - c.top + 4) + "px";
-        S.menu.style.left = Math.max(0, b.left - c.left) + "px";
+        // Kept inside the column: a button near its right edge would
+        // otherwise hang the list off the side of the tab.
+        const left = Math.min(b.left - c.left, Math.max(0, c.width - S.menu.offsetWidth));
+        S.menu.style.left = Math.max(0, left) + "px";
     }
 
-    function openMenu() {
+    function openMenu(section) {
         if (!S.menu) { return; }
-        renderMenu(null);
+        renderMenu(section || null);
         S.menu.hidden = false;
         positionMenu();
         S.menuOutside = function (event) {
             const target = event.target;
             if (S.menu.contains(target)) { return; }
             if (target && target.closest && target.closest("#" + MENU_ID)) { return; }
+            if (S.menuAnchor && target && S.menuAnchor.contains(target)) { return; }
             closeMenu();
         };
         document.addEventListener("pointerdown", S.menuOutside, true);
@@ -1437,6 +1669,8 @@ window.minipaintClipboard = (function () {
         if (!S.menu) { return; }
         S.menu.hidden = true;
         S.menuSection = null;
+        S.menuAnchor = null;
+        S.menuStandalone = false;
         if (S.menuOutside) { document.removeEventListener("pointerdown", S.menuOutside, true); S.menuOutside = null; }
         if (S.menuKey) { document.removeEventListener("keydown", S.menuKey, true); S.menuKey = null; }
     }
@@ -1444,7 +1678,29 @@ window.minipaintClipboard = (function () {
     function toggleMenu() {
         if (!S.menu) { buildMenu(); }
         if (!S.menu) { return; }
-        if (S.menu.hidden) { openMenu(); } else { closeMenu(); }
+        const was = !S.menu.hidden && !S.menuStandalone;
+        if (!S.menu.hidden) { closeMenu(); }
+        if (was) { return; }
+        S.menuAnchor = byId(MENU_ID);
+        S.menuStandalone = false;
+        openMenu(null);
+    }
+
+    /**
+     * One of the toolbar's own flyouts: the same list the menu draws for that
+     * section, anchored under the button that asked for it and standing on
+     * its own. Pressing the same button again closes it, the way a menu does.
+     */
+    function openToolbarMenu(section) {
+        if (!S.menu) { buildMenu(); }
+        if (!S.menu) { return; }
+        const anchor = byId(section === "send" ? SEND_BUTTON_ID : SORT_BUTTON_ID);
+        const again = !S.menu.hidden && S.menuStandalone && S.menuSection === section;
+        if (!S.menu.hidden) { closeMenu(); }
+        if (again) { return; }
+        S.menuAnchor = anchor;
+        S.menuStandalone = true;
+        openMenu(section);
     }
 
     /* ------------------------------------------------------------------ */
@@ -2588,11 +2844,15 @@ window.minipaintClipboard = (function () {
 
     function debug() {
         return { attached: S.attached, selected: S.selected, menuOpen: !!(S.menu && !S.menu.hidden), menuSection: S.menuSection,
+                 menuStandalone: S.menuStandalone,
                  capabilities: S.capabilities, lastInstruction: S.lastInstruction.slice(0, 40), page: pageId(),
                  model: S.lastModel, retrying: S.retrying || !!S.retryTimer || S.retryPending,
                  retryDelay: S.retryDelay,
                  offline: { server: S.offline.server, queue: S.offline.queue },
                  editorOpen: editorOpen(),
+                 outputsOpen: outputsOpen(),
+                 outputs: { page: S.outputs.page, pages: S.outputs.pages,
+                            items: S.outputs.items.length, chosen: S.outputs.chosen },
                  intercept: !!menuState().intercept,
                  sort: menuState().sort || S.library.sort,
                  library: { revision: S.library.revision, page: S.library.page, pages: S.library.pages,
@@ -2615,6 +2875,10 @@ window.minipaintClipboard = (function () {
                      selectedPage: S.library.selectedPage };
         },
         toggleMenu: toggleMenu,
+        openToolbarMenu: openToolbarMenu,
+        openOutputs: openOutputs,
+        closeOutputs: closeOutputs,
+        askOutputs: askOutputs,
         closeMenu: closeMenu,
         select: select,
         setThumbnailSize: setThumbnailSize,

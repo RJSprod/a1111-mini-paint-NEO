@@ -742,8 +742,11 @@ def run_checks(r: Results, base: pathlib.Path) -> None:
         view = tab.queue_answer(page_id)
         listing, text_line, history_listing = json.dumps(view["jobs"]), view["status"], json.dumps(view["history"])
         record = history.load_history()[0]
-        r.check("the tab shows it left WanGP's queue and the history keeps the typed prompt with the written one",
-                "Left WanGP" in listing and record["prompt_override"] == "a rough idea for the H3 model" and record["enhanced_prompt"].startswith("ENHANCED"), json.dumps(record)[:200])
+        r.check("the tab takes the card off the queue once WanGP's queue has let the task go",
+                job["job_id"] not in listing, listing[-400:])
+        r.check("and the history keeps the typed prompt with the written one, which is where the press survives",
+                record["prompt_override"] == "a rough idea for the H3 model" and record["enhanced_prompt"].startswith("ENHANCED"),
+                json.dumps(record)[:200])
         interop.release(wire["handoff_ids"])
 
         # the page moves to another model: a request composed for the H3 one is refused untouched

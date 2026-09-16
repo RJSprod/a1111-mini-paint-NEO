@@ -63,6 +63,9 @@ SUITES = [
     # The server executor: press, walk away, come back to a generated file.
     # Ahead of the tab, because the tab is one of its screens.
     "test_clipboard_executor",
+    # What WanGP made, kept where a restart can find it. After the executor,
+    # because the exact half of it is the executor's own record.
+    "test_clipboard_outputs",
     "test_clipboard_ui",
     "test_queue_e2e",
     # The Canvas startup contract, in a real browser, over the real asset

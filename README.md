@@ -416,6 +416,15 @@ the default.
 **Cancel everything** empties the whole line - the writer's requests and the pending jobs -
 in one press; jobs already being sent finish, and nothing in WanGP's own queue is touched.
 
+**View Outputs** (under the queue). What WanGP made for this tab's requests, over the whole
+window: a player with a filmstrip of everything else under it, tap to hide the controls,
+paged at 60, scrubbable because the file is served with byte ranges. It is its own document,
+not a view of the queue, so closing the WebUI does not empty it — last week's videos are
+still there next week. A job the server ran is tied to its files exactly, by the paths WanGP
+handed back; a job a browser page ran is matched to the files that appeared while it was
+running, and the gallery marks those as a match rather than a fact. The videos are never
+moved, copied or deleted.
+
 **The browser.** Menu → *Choose storage folder* first: Clipboard keeps its pictures in that
 folder on the machine running Forge and nowhere else, and never names it to the browser —
 every thumbnail is fetched by an opaque id. Upload, paste (Ctrl+V, or the paste panel when
@@ -672,6 +681,7 @@ minipaint_neo/
         executor.py              the coordinator that advances those jobs with nobody watching: cold WanGP, the enhancer, the card, the generation
         job_inputs.py            the pictures a queued job owns, pinned until it is done and no sweeper's to take
         enhance.py               enhanced prompts: ModelSwitchRefiner's MiniMax H3 writer (mc_llm_api), the switch, the four system prompts and their overrides
+        outputs.py               what WanGP made for this tab's requests, kept where a restart can find it: View Outputs reads this, not the queue
         routes.py                a picture by its id, and bytes in
         ui.py                    the tab: the browser, the composer, the enhancement panel, Add to Queue through the public API
     wangp/                       the WanGP tab, all of it (see docs/wangp/README.md)

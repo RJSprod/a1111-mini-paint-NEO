@@ -345,7 +345,9 @@ def document_checks(r: Results, base: pathlib.Path) -> None:
     r.check("and an unknown sort falls back", config.Config.from_dict({"sort": "sideways"}).sort == config.DEFAULT_SORT)
     r.check("update changes one field and keeps the rest", config.update(intercept=False).sort == "largest" and config.load().intercept is False)
     written = config.path_of(config.CONFIG_NAME).read_text(encoding="utf-8")
-    r.check("the file holds exactly the declared keys", set(json.loads(written)) == {"schema_version", "storage_root", "root_id", "intercept", "sort", "thumbnail"})
+    r.check("the file holds exactly the declared keys",
+            set(json.loads(written)) == {"schema_version", "storage_root", "root_id", "intercept", "sort", "thumbnail", "outputs_folder"},
+            str(sorted(json.loads(written))))
 
 
 def send_route_checks(r: Results, base) -> None:

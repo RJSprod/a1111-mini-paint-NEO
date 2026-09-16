@@ -25,13 +25,14 @@ host has one.
 
 from __future__ import annotations
 
+import mimetypes
 import time
 import typing
 
 from .. import scrub
 from ..wangp import errors
 from ..wangp.errors import IntegrationError
-from . import config
+from . import config, history, outputs
 from . import store as store_module
 
 ROUTE_PREFIX = "/minipaint-clipboard"
@@ -42,6 +43,8 @@ LIBRARY_ROUTE = ROUTE_PREFIX + "/library"
 SETTINGS_ROUTE = ROUTE_PREFIX + "/settings"
 QUEUE_ROUTE = ROUTE_PREFIX + "/queue"
 ENHANCE_SETTINGS_ROUTE = ROUTE_PREFIX + "/enhance-settings"
+OUTPUTS_ROUTE = ROUTE_PREFIX + "/outputs"
+OUTPUT_FILE_ROUTE = ROUTE_PREFIX + "/output/{file_id}"
 
 #: How many pictures one page of the grid carries.
 #:
@@ -374,7 +377,7 @@ async def _queue(request: typing.Any) -> typing.Any:
                                       body.get("enhance") if isinstance(body.get("enhance"), bool) else None)
         elif action == "cancel_all":
             answer = tab.cancel_all(page)
-        elif action in ("cancel", "retry", "adopt"):
+        elif action in ("cancel", "retry", "adopt", "dismiss"):
             answer = tab.outbox_action(f"{action}:{body.get('job') or ''}:{page}", page)
         else:
             return _json({"ok": False, "code": errors.REQUEST_INVALID, "message": f"{action} is not a queue action."}, 400)
@@ -382,6 +385,172 @@ async def _queue(request: typing.Any) -> typing.Any:
         scrub.console(f"a queue action failed ({type(error).__name__}).", _LOG_PREFIX)
         return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
     return _json(dict({"ok": True}, **answer))
+
+
+def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
+    """One page of what WanGP made for this tab, newest first.
+
+    The same shape and the same page size as the picture index, because it
+    is the same pager drawing it: a gallery that counted its pages
+    differently from the grid beside it would be a second thing to learn
+    for no reason.
+
+    A prompt is joined on from the history rather than copied into the
+    ledger. The recipe already lives there, keyed by the request that made
+    it, and one copy of a prompt is enough.
+    """
+    listed = outputs.files()
+    wanted = clamp_size(size)
+    total = len(listed)
+    pages = max(1, -(-total // wanted))
+    index = page_of(page, pages)
+    shown = listed[index * wanted:(index + 1) * wanted]
+    prompts = {}
+    if shown:
+        wanted_ids = {item["request_id"] for item in shown if item["request_id"]}
+        if wanted_ids:
+            for record in history.load_history():
+                found = record.get("request_id")
+                if found in wanted_ids and found not in prompts:
+                    prompts[found] = record.get("enhanced_prompt") or record.get("prompt_override") or ""
+    where = outputs.folder()
+    if where is None:
+        reason = "unconfigured"
+        status = "WanGP has no output folder here yet. Launch it once, or set the folder in Clipboard's settings."
+    elif not total:
+        reason = "empty"
+        status = "Nothing yet. A video appears here after WanGP finishes a request made from this tab."
+    else:
+        reason = ""
+        status = f"{total} output{'s' if total != 1 else ''} from this tab."
+    return {
+        "ok": True,
+        "total": total,
+        "page": index,
+        "pages": pages,
+        "size": wanted,
+        "reason": reason,
+        "status": status,
+        "items": [
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "kind": item["kind"],
+                "size": item["size"],
+                "at": item["at"],
+                # Whether WanGP named this file itself or it was matched to
+                # the request by when it was written. The gallery says so,
+                # because a match is not a fact and pretending otherwise is
+                # how a user comes to trust the wrong video.
+                "exact": item["exact"],
+                "prompt": str(prompts.get(item["request_id"], ""))[:400],
+                "url": output_url(item["id"]),
+            }
+            for item in shown
+        ],
+    }
+
+
+def output_url(file_id: str) -> str:
+    """The address of one output. Opaque: the path never leaves the server."""
+    return f"{OUTPUT_FILE_ROUTE.replace('{file_id}', str(file_id))}"
+
+
+async def _outputs(request: typing.Any) -> typing.Any:
+    """What WanGP made, paged. Reconciles the ledger first - see ``outputs.sync``."""
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    params = request.query_params
+    try:
+        answer = outputs_page(page=params.get("page", 0), size=params.get("size", PAGE_SIZE))
+    except Exception as error:
+        scrub.console(f"the outputs index could not be read ({type(error).__name__}).", _LOG_PREFIX)
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    return _json(answer)
+
+
+def _byte_range(header: typing.Any, size: int) -> typing.Optional[typing.Tuple[int, int]]:
+    """``bytes=start-end`` against a file of ``size``, or ``None``.
+
+    Only the single-range form, which is the only one a media element ever
+    sends. A header that asks for something else is not an error worth a
+    416: it is answered with the whole file, which is always a correct
+    answer to a range request.
+    """
+    text = str(header or "").strip()
+    if not text.lower().startswith("bytes=") or "," in text:
+        return None
+    spec = text[6:].strip()
+    start_text, _, end_text = spec.partition("-")
+    try:
+        if not start_text:
+            # A suffix range: the last N bytes.
+            length = int(end_text)
+            if length <= 0:
+                return None
+            return max(0, size - length), size - 1
+        start = int(start_text)
+        end = int(end_text) if end_text else size - 1
+    except (TypeError, ValueError):
+        return None
+    if start < 0 or start >= size or end < start:
+        return None
+    return start, min(end, size - 1)
+
+
+#: How much of a file one range answer will carry. A media element asks for
+#: what it needs, but a request for "everything from here" on a two-gigabyte
+#: file should not become a two-gigabyte read into memory.
+RANGE_CHUNK = 4 * 1024 * 1024
+
+
+async def _output_file(request: typing.Any) -> typing.Any:
+    """One output, by its opaque id, with byte ranges.
+
+    RANGES ARE THE WHOLE POINT. A ``<video>`` element will play a file
+    served without them, but it cannot seek in one: the browser has no way
+    to ask for the middle, so the scrub bar does nothing. That is the
+    difference between a gallery and a list of things that play from the
+    start, so this answers 206 with ``Content-Range`` rather than only 200.
+    """
+    from starlette.responses import Response
+
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    path = outputs.path_of(request.path_params.get("file_id", ""))
+    if path is None:
+        return _json({"ok": False, "code": errors.CLIPBOARD_ASSET_UNKNOWN, "message": "That output is no longer there."}, 404)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return _json({"ok": False, "code": errors.CLIPBOARD_ASSET_UNKNOWN, "message": "That output is no longer there."}, 404)
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    common = {
+        # Said on every answer, range or not: a browser decides whether to
+        # bother asking for one from this.
+        "Accept-Ranges": "bytes",
+        "Cache-Control": REVALIDATED_CACHE,
+    }
+    if request.method == "HEAD":
+        return Response(status_code=200, media_type=mime,
+                        headers=dict(common, **{"Content-Length": str(size)}))
+    span = _byte_range(request.headers.get("range"), size)
+    try:
+        with path.open("rb") as handle:
+            if span is None:
+                data = handle.read()
+                return Response(content=data, media_type=mime, headers=dict(common, **{"Content-Length": str(len(data))}))
+            start, end = span
+            end = min(end, start + RANGE_CHUNK - 1)
+            handle.seek(start)
+            data = handle.read(end - start + 1)
+    except OSError:
+        return _json({"ok": False, "code": errors.CLIPBOARD_ASSET_UNKNOWN, "message": "That output could not be read."}, 404)
+    return Response(content=data, status_code=206, media_type=mime,
+                    headers=dict(common, **{
+                        "Content-Range": f"bytes {start}-{start + len(data) - 1}/{size}",
+                        "Content-Length": str(len(data)),
+                    }))
 
 
 async def _enhance_settings(request: typing.Any) -> typing.Any:
@@ -573,6 +742,8 @@ def install(app: typing.Any) -> None:
             Route(SETTINGS_ROUTE, endpoint=_settings, methods=["POST"]),
             Route(QUEUE_ROUTE, endpoint=_queue, methods=["GET", "POST"]),
             Route(ENHANCE_SETTINGS_ROUTE, endpoint=_enhance_settings, methods=["GET", "POST"]),
+            Route(OUTPUTS_ROUTE, endpoint=_outputs, methods=["GET"]),
+            Route(OUTPUT_FILE_ROUTE, endpoint=_output_file, methods=["GET", "HEAD"]),
             Route(IMPORT_ROUTE, endpoint=_import, methods=["POST"]),
             Route(SEND_ROUTE, endpoint=_send, methods=["POST"]),
         ]

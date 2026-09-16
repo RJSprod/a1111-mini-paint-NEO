@@ -699,7 +699,16 @@ def tab_checks(r: Results, fake: FakeApi, clock: _Clock, base: pathlib.Path) -> 
     outbox.track(job["job_id"], page_id, {"state": "finished"})
     view = tab.queue_answer(page_id)
     listing = _flat(view["jobs"])
-    r.check("a finished task is said to have left WanGP's queue", "Left WanGP's queue" in listing, listing[-600:])
+    # A queue is a queue: the card goes the moment WanGP's queue has let the
+    # task go, which is as far as a page can see. What it was is not lost -
+    # the recipe and both prompts are in the history, and the video is in
+    # View Outputs.
+    r.check("a finished task leaves the queue rather than sitting in it saying it is finished",
+            job["job_id"] not in listing, listing[-600:])
+    r.check("and its history record is untouched by the card going, both prompts and all",
+            history.load_history()[0]["enhanced_prompt"] == "ENHANCED: typed in the tab, at length")
+    r.check("while the record itself is still there to be asked about, for a page or an API caller waiting on it",
+            outbox.get(job["job_id"]) is not None and outbox.get(job["job_id"])["wangp"]["state"] == "finished")
 
     clock.now += 1
     tab.add_to_queue("one more", page_id, json.dumps(FL2VA_MODEL))

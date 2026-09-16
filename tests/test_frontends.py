@@ -205,20 +205,24 @@ def run() -> Results:
     css = (config_of(demo) and (pathlib.Path(__file__).resolve().parents[1] / "style.css").read_text(encoding="utf-8"))
     r.check("no sticky rules in the stylesheet", "sticky" not in css)
     # A rule that lifts something out of the flow can put it over the canvas,
-    # so each one is named here rather than counted. Two are deliberate: focus
-    # mode, which is the canvas filling the window on purpose, and the
-    # Clipboard's full-window system prompt editor - which cannot reach this
-    # canvas at all, because every selector in it is under the Clipboard tab's
-    # own root. Anything else arriving in this list is the thing this check
-    # exists to catch.
+    # so every one is held to a rule rather than to a count - a count has to
+    # be raised each time the Clipboard grows another full-window view, and a
+    # check that is routinely edited is a check nobody reads.
+    #
+    # Exactly two shapes are allowed. Focus mode, which is this canvas filling
+    # the window on purpose; and anything under the Clipboard tab's own root,
+    # which cannot reach this canvas at all because the selector cannot match
+    # outside that tab. A fixed rule that is neither is the thing this check
+    # exists to catch, and it is named in the failure.
     fixed_blocks = [block for block in css.split("}") if "position: fixed" in block]
     selectors = [block.split("{")[0].strip() for block in fixed_blocks]
-    allowed = [
-        any("minipaint-focus" in one for one in selectors),
-        any("minipaint-clip-fullscreen" in one and "#minipaint_clipboard_root" in one for one in selectors),
-    ]
-    r.check("every fixed rule is one of the two that mean to be, and the Clipboard's is scoped to its own tab",
-            len(fixed_blocks) == 2 and all(allowed), str(selectors))
+    def deliberate(one):
+        return "minipaint-focus" in one or "#minipaint_clipboard_root" in one
+    stray = [one for one in selectors if not deliberate(one)]
+    r.check("every fixed rule is either focus mode or scoped inside the Clipboard tab, so none can cover the canvas",
+            bool(selectors) and not stray, str(stray or selectors))
+    r.check("and focus mode is still one of them, so the check is watching a live stylesheet",
+            any("minipaint-focus" in one for one in selectors), str(selectors))
 
     # the shell: a work column and the rail, side by side, nothing else at the top level
     def row_children(elem_id):

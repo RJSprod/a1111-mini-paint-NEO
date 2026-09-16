@@ -191,8 +191,25 @@ def outbox_checks(r: Results, clock: _Clock) -> None:
     r.check("a flood of pending requests is refused as busy rather than stored", _refused(outbox.submit, _request(), PAGE_A) == errors.QUEUE_BUSY and len(outbox.jobs()) == before)
     outbox.MAX_PENDING = saved
     clock.now += outbox.KEEP_TERMINAL_SECONDS + 1
-    r.check("terminal jobs older than the keep window are pruned; pending ones stay",
-            all(job["state"] in ("pending", "sending") for job in outbox.jobs()) and outbox.jobs(), str(outbox.counts()))
+    r.check("jobs that went well are pruned once the keep window is past; pending ones stay",
+            not any(job["state"] in ("queued", "started", "completed") for job in outbox.jobs()) and outbox.jobs(), str(outbox.counts()))
+    # A failure is the one thing here that wants a person, so it does not
+    # delete itself out from under them while they are away.
+    failures = [job for job in outbox.jobs() if outbox.failed_state(job["state"])]
+    r.check("but a failure is still there, however long the keep window has been past", bool(failures), str(outbox.counts()))
+    r.check("a job that has not failed cannot be dismissed",
+            _refused(outbox.dismiss, next(job["job_id"] for job in outbox.jobs() if job["state"] == "pending")) == errors.REQUEST_INVALID)
+    outbox.dismiss(failures[0]["job_id"])
+    r.check("dismissing one marks it, and keeps the record for the grace every terminal job gets",
+            outbox.get(failures[0]["job_id"])["dismissed"] is True and outbox.get(failures[0]["job_id"]) is not None)
+    clock.now += outbox.KEEP_TERMINAL_SECONDS + 1
+    r.check("after which it goes, and the failures nobody dismissed are still there",
+            outbox.get(failures[0]["job_id"]) is None
+            and len([job for job in outbox.jobs() if outbox.failed_state(job["state"])]) == len(failures) - 1,
+            str(outbox.counts()))
+    clock.now += outbox.KEEP_FAILED_SECONDS + 1
+    r.check("and a week later even an undismissed failure has gone, so a broken setup cannot pile up forever",
+            not any(outbox.failed_state(job["state"]) for job in outbox.jobs()), str(outbox.counts()))
 
     # -- a broken document is moved aside and the outbox starts again
     path = config.config_dir() / outbox.OUTBOX_NAME

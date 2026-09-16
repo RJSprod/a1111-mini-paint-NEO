@@ -674,12 +674,37 @@ def _stage_tracking(job: dict) -> bool:
         control.forget([execution_id])
         if settled["state"] == outbox.COMPLETED:
             _journal(f"job {job['job_id'][:8]}: completed with {settled.get('generated_count', 0)} file(s)")
+            # Copy the paths somewhere durable while they are still here.
+            # They live on the job, and the job is swept out of the queue
+            # two minutes after this - so a viewer opened any later would
+            # find nothing, and these are the only exact ones there are.
+            _remember_outputs(job, record)
         return True
     _pause(POLL_SECONDS)
     return True
 
 
 # ----------------------------------------------------------------- helpers --
+
+
+def _remember_outputs(job: typing.Mapping[str, typing.Any], record: typing.Mapping[str, typing.Any]) -> None:
+    """Hand this job's output paths to the durable ledger. Never fatal.
+
+    A generation that succeeded must not be turned into a failure by a
+    document that would not write, so every way this can go wrong ends in a
+    line rather than an exception.
+    """
+    try:
+        from . import outputs
+
+        outputs.remember(
+            job["job_id"],
+            (record or {}).get("generated_files") or [],
+            request_id=str((job.get("request") or {}).get("request_id") or ""),
+            model=str((job.get("model") or {}).get("label") or ""),
+        )
+    except Exception as error:  # noqa: BLE001 - a ledger is never worth a failed job
+        _journal(f"job {job['job_id'][:8]}: the output ledger could not be written ({type(error).__name__})")
 
 
 def _snapshot_settings(job: typing.Mapping[str, typing.Any]) -> typing.Optional[dict]:

@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import os
 import pathlib
+import shutil
 import sys
+import tempfile
 import time
 
 for _key in ("no_proxy", "NO_PROXY"):
@@ -286,9 +288,8 @@ def select_first(page):
 
 
 def send_selected(page, label):
-    page.evaluate("() => window.minipaintClipboard.toggleMenu()")
-    time.sleep(0.4)
-    menu_click(page, "Send selected to")
+    """The toolbar's Send selection to button, which is the only door now."""
+    page.evaluate("() => window.minipaintClipboard.openToolbarMenu('send')")
     time.sleep(0.4)
     return menu_click(page, label)
 
@@ -593,10 +594,8 @@ def check_paging(r: Results, page, library) -> None:
         show_page(page, {"size": 10, "page": 1})
 
         r.check("so the Send menu is still live, rather than greyed out with a picture plainly chosen",
-                page.evaluate("""() => { window.minipaintClipboard.toggleMenu();
+                page.evaluate("""() => { window.minipaintClipboard.openToolbarMenu('send');
                     const items = () => Array.from(document.querySelectorAll('.minipaint-clip-menu .minipaint-clip-menu-item'));
-                    const send = items().filter(b => b.textContent.indexOf('Send selected') === 0)[0];
-                    if (send) { send.click(); }
                     const on = items().filter(b => !b.disabled && b.textContent.indexOf('\u2039') !== 0
                                                    && b.textContent !== 'Cancel').length;
                     window.minipaintClipboard.closeMenu();
@@ -806,12 +805,31 @@ def check_the_queue_section_is_the_browsers(r: Results, page) -> None:
                 const host = document.getElementById('minipaint_clipboard_outbox_list');
                 return !!(host && host.querySelector('.minipaint-clip-outbox'));
             }"""))
+    # A failure does not age out of this list any more - it waits for a
+    # person, which is what Dismiss is. So clear whatever the checks above
+    # left before asserting what an empty queue says, and use the button to
+    # do it: that is the press being checked.
+    def queue_text():
+        return page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_outbox_list');
+            return h ? h.textContent : ''; }""")
+
+    dismissed = 0
+    for _ in range(12):
+        pressed = page.evaluate("""() => {
+            const buttons = Array.from(document.querySelectorAll(
+                '#minipaint_clipboard_outbox_list .minipaint-clip-job-actions button'));
+            const one = buttons.filter(b => b.textContent.trim() === 'Dismiss')[0];
+            if (!one) { return false; }
+            one.click();
+            return true; }""")
+        if not pressed:
+            break
+        dismissed += 1
+        time.sleep(1.2)
+    r.check("a failure the checks above left offers Dismiss, and pressing it takes the card off the queue",
+            dismissed == 0 or "Refused" not in queue_text(), queue_text()[:80])
     r.check("and says so when nothing has been sent from here yet",
-            "No request has been sent" in page.evaluate("""() => {
-                const host = document.getElementById('minipaint_clipboard_outbox_list');
-                return host ? host.textContent : ''; }"""),
-            page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_outbox_list');
-                return h ? h.textContent.slice(0, 80) : 'NO HOST'; }"""))
+            "No request has been sent" in queue_text(), queue_text()[:80] or "NO HOST")
 
     # Add to Queue is a press to this tab's own route now. Whether WanGP is
     # there to take it is not what is being checked: that the press reaches
@@ -1033,6 +1051,228 @@ def check_sorting_is_separate_from_drawing(r: Results, page) -> None:
         page.unroute("**/minipaint-clipboard/library*")
     page.evaluate("() => window.minipaintClipboard.library({sort: 'name_asc', refresh: true})")
     time.sleep(2.0)
+
+
+def check_the_toolbar_flyouts_are_the_one_door(r: Results, page) -> None:
+    """Sort and Send selection to are buttons on the bar, not a dropdown and
+    a submenu.
+
+    What has to be true: each button opens its own list under itself, the
+    list has no Back row because there is nothing behind it, pressing the
+    same button again closes it, and the Send entry is gone from the menu -
+    one verb, one door.
+    """
+    open_clipboard(page)
+    time.sleep(0.6)
+    r.check("there is no Sort dropdown on the toolbar any more",
+            page.evaluate("() => !document.querySelector('#minipaint_clipboard_sort')"))
+    for name in ("sort_open", "send_open"):
+        r.check(f"{name} is a button on the toolbar, and it is drawn",
+                page.evaluate("""n => { const b = document.getElementById('minipaint_clipboard_' + n);
+                    if (!b) { return false; }
+                    const r = b.getBoundingClientRect();
+                    return r.width > 8 && r.height > 8; }""", name))
+
+    page.evaluate("() => window.minipaintClipboard.openToolbarMenu('sort')")
+    time.sleep(0.4)
+    state = page.evaluate("() => window.minipaintClipboard.debug()")
+    r.check("the Sort button opens the sort list, standing on its own",
+            state["menuOpen"] and state["menuSection"] == "sort" and state["menuStandalone"] is True, str(state["menuSection"]))
+    labels = page.evaluate("""() => Array.from(document.querySelectorAll(
+        '.minipaint-clip-menu .minipaint-clip-menu-item')).map(b => b.textContent.trim())""")
+    r.check("with every sort in it and no Back row, because nothing is behind it",
+            len(labels) >= 6 and not any(one.startswith("‹") for one in labels), str(labels))
+    under = page.evaluate("""() => { const b = document.getElementById('minipaint_clipboard_sort_open').getBoundingClientRect();
+        const m = document.querySelector('.minipaint-clip-menu').getBoundingClientRect();
+        return { below: m.top >= b.bottom - 1, near: Math.abs(m.left - b.left) < 400 }; }""")
+    r.check("and it is drawn under the button that opened it, not under the menu button",
+            under["below"] and under["near"], str(under))
+
+    page.evaluate("() => window.minipaintClipboard.openToolbarMenu('send')")
+    time.sleep(0.4)
+    state = page.evaluate("() => window.minipaintClipboard.debug()")
+    r.check("the Send button opens the destinations instead, without closing and reopening by hand",
+            state["menuOpen"] and state["menuSection"] == "send", str(state["menuSection"]))
+    page.evaluate("() => window.minipaintClipboard.openToolbarMenu('send')")
+    time.sleep(0.3)
+    r.check("pressing the same button again closes it, the way a menu does",
+            page.evaluate("() => window.minipaintClipboard.debug().menuOpen") is False)
+
+    page.evaluate("() => window.minipaintClipboard.toggleMenu()")
+    time.sleep(0.4)
+    labels = page.evaluate("""() => Array.from(document.querySelectorAll(
+        '.minipaint-clip-menu .minipaint-clip-menu-item')).map(b => b.textContent.trim())""")
+    r.check("and the menu no longer offers Send selected to, so there is no second door to it",
+            not any(one.startswith("Send selected") for one in labels), str(labels))
+    r.check("but the menu still opens as the menu, not as a section",
+            page.evaluate("() => window.minipaintClipboard.debug().menuStandalone") is False)
+    page.evaluate("() => window.minipaintClipboard.closeMenu()")
+    time.sleep(0.2)
+
+
+def _seed_outputs(folder, count, kind="mp4"):
+    """Put ``count`` files in ``folder`` and hand them to the ledger.
+
+    The .mp4 bytes are not a video and are not meant to be: what is being
+    checked here is the gallery - the shape it takes, the strip, the way the
+    controls hide - and none of that is the codec's business. The .png is a
+    real picture, so at least one tile in this suite is one the browser
+    genuinely decodes and draws.
+    """
+    from PIL import Image
+
+    from minipaint_neo.clipboard import config as clip_config
+    from minipaint_neo.clipboard import outputs
+
+    outputs.reset_for_tests()
+    folder.mkdir(parents=True, exist_ok=True)
+    clip_config.update(outputs_folder=str(folder))
+    made = []
+    for index in range(count):
+        if kind == "png":
+            path = folder / f"shot{index:03d}.png"
+            Image.new("RGB", (64, 36), (20, 40 + index, 90)).save(path)
+        else:
+            path = folder / f"clip{index:03d}.mp4"
+            path.write_bytes(b"not really a video" * 8)
+        made.append(str(path))
+    outputs.remember("f" * 16, made, request_id="seeded", model="A video model")
+    return made
+
+
+def check_view_outputs_is_a_gallery(r: Results, page) -> None:
+    """What WanGP made, over the whole window: a stage and a strip.
+
+    What has to be true: the panel has no shape on the tab, the button
+    fills the window with it, the stage is the biggest thing in it, every
+    output has a tile in the strip, choosing one puts it in the stage,
+    tapping the stage hides and shows the controls, and it pages at 60 like
+    the grid does.
+    """
+    folder = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-gallery-"))
+    try:
+        _seed_outputs(folder, 3)
+        open_clipboard(page)
+        time.sleep(0.6)
+
+        r.check("the gallery is not on the tab at all until it is asked for",
+                page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is False)
+        r.check("and its panel takes no room on the tab",
+                page.evaluate("""() => { const p = document.getElementById('minipaint_clipboard_outputs_panel');
+                    return p ? p.getBoundingClientRect().height : -1; }""") == 0)
+        r.check("the way in is a button under the queue, and it is drawn",
+                page.evaluate("""() => { const b = document.getElementById('minipaint_clipboard_outputs_open');
+                    if (!b) { return false; }
+                    const r = b.getBoundingClientRect();
+                    return r.width > 8 && r.height > 8; }"""))
+
+        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
+        time.sleep(0.5)
+        shape = page.evaluate("""() => {
+            const panel = document.getElementById('minipaint_clipboard_outputs_panel');
+            const stage = panel.querySelector('.minipaint-clip-output-stage');
+            const strip = panel.querySelector('.minipaint-clip-output-strip');
+            const p = panel.getBoundingClientRect();
+            const s = stage ? stage.getBoundingClientRect() : {width: 0, height: 0};
+            const t = strip ? strip.getBoundingClientRect() : {width: 0, height: 0};
+            return { pw: p.width, ph: p.height, sw: s.width, sh: s.height, tw: t.width, th: t.height,
+                     vw: window.innerWidth, vh: window.innerHeight,
+                     tiles: panel.querySelectorAll('.minipaint-clip-output-tile').length,
+                     media: !!panel.querySelector('.minipaint-clip-output-stage-media') }; }""")
+        r.check("the press fills the window",
+                shape["pw"] >= shape["vw"] * 0.9 and shape["ph"] >= shape["vh"] * 0.9, str(shape))
+        r.check("the stage is the biggest thing in it, which is the point of the view",
+                shape["sh"] >= shape["vh"] * 0.45 and shape["sw"] >= shape["pw"] * 0.8, str(shape))
+        r.check("the filmstrip is under it, one row and not half the screen",
+                0 < shape["th"] <= shape["vh"] * 0.25, str(shape))
+        r.check("every output has a tile in the strip", shape["tiles"] == 3, str(shape["tiles"]))
+        r.check("and the first one is already in the stage", shape["media"])
+
+        kinds = page.evaluate("""() => { const p = document.getElementById('minipaint_clipboard_outputs_panel');
+            return { stage: p.querySelector('.minipaint-clip-output-stage-media').tagName,
+                     thumb: p.querySelector('.minipaint-clip-output-thumb').tagName }; }""")
+        r.check("a video is played in a video element, in the stage and in the strip",
+                kinds["stage"] == "VIDEO" and kinds["thumb"] == "VIDEO", str(kinds))
+        r.check("and the strip's poster is asked for as one frame, so no thumbnail has to be made anywhere",
+                page.evaluate("""() => { const t = document.querySelector('.minipaint-clip-output-thumb');
+                    return (t.getAttribute('src') || '').indexOf('#t=') > 0; }"""))
+
+        first = page.evaluate("() => window.minipaintClipboard.debug().outputs.chosen")
+        page.evaluate("""() => { const tiles = document.querySelectorAll('.minipaint-clip-output-tile');
+            tiles[tiles.length - 1].click(); }""")
+        time.sleep(0.4)
+        second = page.evaluate("() => window.minipaintClipboard.debug().outputs.chosen")
+        r.check("choosing a tile puts that one in the stage", second and second != first, f"{first} -> {second}")
+        r.check("and the strip marks which one is playing",
+                page.evaluate("() => document.querySelectorAll('.minipaint-clip-output-chosen').length") == 1)
+
+        # Tap to hide, tap to show. The press has to land on the stage and
+        # not on the controls, or pausing would also hide the pause button.
+        before = page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').controls")
+        page.evaluate("""() => { const s = document.querySelector('.minipaint-clip-output-stage');
+            s.dispatchEvent(new MouseEvent('click', { bubbles: true })); }""")
+        time.sleep(0.3)
+        after = page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').controls")
+        r.check("tapping the stage hides the controls", before is True and after is False, f"{before} -> {after}")
+        page.evaluate("""() => { const s = document.querySelector('.minipaint-clip-output-stage');
+            s.dispatchEvent(new MouseEvent('click', { bubbles: true })); }""")
+        time.sleep(0.3)
+        r.check("and tapping again brings them back",
+                page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').controls") is True)
+
+        page.keyboard.press("Escape")
+        time.sleep(0.4)
+        r.check("Escape closes it", page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is False)
+        r.check("and the player lets go of the file, rather than going on downloading it behind a closed view",
+                page.evaluate("""() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
+                    return !v || !v.getAttribute('src'); }"""))
+
+        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
+        time.sleep(0.3)
+        page.evaluate("""() => { const b = Array.from(document.querySelectorAll('.minipaint-clip-output-close'))[0];
+            if (b) { b.click(); } }""")
+        time.sleep(0.4)
+        r.check("and so does its own Close", page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is False)
+
+        # A picture is not played, it is shown - and this one is a real PNG,
+        # so the tile below is one the browser actually decoded.
+        _seed_outputs(folder / "shots", 1, kind="png")
+        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
+        time.sleep(0.5)
+        drawn = page.evaluate("""() => { const p = document.getElementById('minipaint_clipboard_outputs_panel');
+            const img = p.querySelector('.minipaint-clip-output-stage-media');
+            return { tag: img.tagName, w: img.naturalWidth, h: img.naturalHeight }; }""")
+        r.check("a picture is shown in an image element, and the browser really decoded it",
+                drawn["tag"] == "IMG" and drawn["w"] == 64 and drawn["h"] == 36, str(drawn))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        time.sleep(0.3)
+
+        # And the pager, at the same 60 the picture grid uses.
+        _seed_outputs(folder / "many", 63)
+        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=15000)
+        time.sleep(0.6)
+        paged = page.evaluate("() => window.minipaintClipboard.debug().outputs")
+        r.check("a page of the gallery is 60, the same as the grid's, and it says how many there are",
+                paged["items"] == 60 and paged["pages"] == 2, str(paged))
+        page.evaluate("""() => { const b = Array.from(document.querySelectorAll('.minipaint-clip-output-page'));
+            b[b.length - 1].click(); }""")
+        page.wait_for_function("() => window.minipaintClipboard.debug().outputs.page === 1", timeout=8000)
+        time.sleep(0.4)
+        paged = page.evaluate("() => window.minipaintClipboard.debug().outputs")
+        r.check("and the next page holds the rest", paged["items"] == 3 and paged["page"] == 1, str(paged))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        time.sleep(0.3)
+    finally:
+        from minipaint_neo.clipboard import config as clip_config
+        from minipaint_neo.clipboard import outputs
+
+        outputs.reset_for_tests()
+        clip_config.update(outputs_folder="")
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def check_a_thumbnail_is_fetched_once(r: Results, page) -> None:
@@ -1592,9 +1832,7 @@ def check_a_render_cannot_take_the_selection(r: Results, page) -> None:
     r.check("and the tile is still shown as the selected one",
             page.evaluate("() => { const el = document.querySelector('.minipaint-clip-item.minipaint-clip-selected');"
                           " return el ? el.dataset.asset : ''; }") == chosen)
-    page.evaluate("() => window.minipaintClipboard.toggleMenu()")
-    time.sleep(0.4)
-    menu_click(page, "Send selected to")
+    page.evaluate("() => window.minipaintClipboard.openToolbarMenu('send')")
     time.sleep(0.4)
     offered = page.evaluate(MENU_ITEMS_JS)
     r.check("and the send menu still offers its destinations",
@@ -2141,6 +2379,8 @@ def run() -> Results:
                 check_the_failure_modes_have_answers(r, page, library)
                 check_the_queue_section_is_the_browsers(r, page)
                 check_the_prompt_editor_fills_the_window(r, page)
+                check_the_toolbar_flyouts_are_the_one_door(r, page)
+                check_view_outputs_is_a_gallery(r, page)
                 check_a_thumbnail_is_fetched_once(r, page)
                 r.check("a picture can be selected", select_first(page),
                         repr(box(page, "minipaint_clipboard_selected")))

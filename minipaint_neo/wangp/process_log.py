@@ -81,8 +81,20 @@ def use_log_dir(directory: typing.Optional[typing.Any]) -> None:
         _state["broken"] = False
 
 
-def _stamp() -> str:
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def _stamp(at: typing.Optional[float] = None) -> str:
+    """When a line happened, which is not always when it arrived here.
+
+    A writer in the same process says nothing and gets the clock. A writer
+    that had to travel - the browser - can say when the thing it is
+    describing actually happened, because the two can be minutes apart: a
+    backgrounded tab queues its lines and posts the backlog in one burst
+    when it comes back, and stamping those on arrival collapsed the whole
+    burst into one second. A log that says a request was asked for and timed
+    out after ten seconds in the same second is a log nobody can reason
+    from, and that was the log of the one incident it was needed for.
+    """
+    when = datetime.datetime.now() if at is None else datetime.datetime.fromtimestamp(at)
+    return when.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _shut() -> None:
@@ -150,19 +162,25 @@ def _write(text: str) -> None:
     _state["size"] = _state.get("size", 0) + len(text.encode("utf-8", "replace"))
 
 
-def note(source: typing.Any, message: typing.Any) -> None:
+def note(source: typing.Any, message: typing.Any, at: typing.Optional[float] = None) -> None:
     """One line, scrubbed, timestamped and tagged with who said it.
 
     ``source`` is the half of the integration the line came from - ``wangp``
     for the child's own words, ``runtime``, ``proxy``, ``browser`` - and it is
     the first thing worth knowing when a log is read back, because the four
     halves fail in completely different ways.
+
+    ``at`` is when the line happened, for a writer that did not arrive the
+    moment it spoke; see ``_stamp``. The file stays append-only, so a line
+    carrying an older time sits after lines that are newer than it. That is
+    the honest shape: reading it in order shows when each half learned
+    things, and sorting by the stamp shows when they happened.
     """
     try:
         line = scrub.private(message, limit=MAX_LINE)
         if not line.strip():
             return
-        entry = f"[{_stamp()}] {str(source)[:16]:<16} {line}\n"
+        entry = f"[{_stamp(at)}] {str(source)[:16]:<16} {line}\n"
         with _lock:
             if _state["broken"]:
                 return

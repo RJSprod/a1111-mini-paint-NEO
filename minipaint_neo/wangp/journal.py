@@ -54,10 +54,16 @@ _lock = threading.Lock()
 _lines: typing.Deque[str] = collections.deque(maxlen=MAX_LINES)
 
 
-def note(source: str, message: typing.Any) -> None:
-    """Record one step. Never raises: a journal is never worth an exception."""
+def note(source: str, message: typing.Any, at: typing.Optional[float] = None) -> None:
+    """Record one step. Never raises: a journal is never worth an exception.
+
+    ``at`` is when it happened rather than when it got here, for the one
+    writer where those differ by more than a moment - see
+    ``process_log._stamp``.
+    """
     try:
-        stamp = datetime.datetime.now().strftime("%H:%M:%S")
+        when = datetime.datetime.now() if at is None else datetime.datetime.fromtimestamp(at)
+        stamp = when.strftime("%H:%M:%S")
         line = f"[{stamp}] {str(source)[:16]:<16} {scrub(message)}"
         with _lock:
             _lines.append(line)
@@ -65,7 +71,7 @@ def note(source: str, message: typing.Any) -> None:
         pass
     # Outside the lock, and after the in-memory copy: the tab must not wait on
     # a disk, and a disk that refuses must not cost the tab its line.
-    process_log.note(source, message)
+    process_log.note(source, message, at)
 
 
 def lines() -> typing.List[str]:

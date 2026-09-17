@@ -44,6 +44,7 @@ import html
 import re
 import json
 import threading
+import time
 import typing
 
 import gradio as gr
@@ -820,6 +821,40 @@ _client_log_seen: typing.Dict[str, int] = {}
 _CLIENT_LOG_INSTALLED = "_minipaint_wangp_client_log_installed"
 _CLIENT_LOG_PAGES = 32
 _CLIENT_LOG_LINES = 64
+#: How far back a browser line may claim to be, in seconds. A throttled tab
+#: really does sit on a backlog for minutes at a time, and the whole point of
+#: the age is to let it say so - but the page is a writer like any other, and
+#: an unbounded one could date a line anywhere in the file. Six hours is well
+#: past any throttle and well short of being useful to anybody abusing it.
+_CLIENT_LOG_MAX_AGE = 6 * 60 * 60.0
+
+
+def _client_log_time(entry: typing.Any, arrived: float) -> typing.Optional[float]:
+    """When a browser line happened, from how long ago it says it was.
+
+    AN AGE, NOT A CLOCK READING, AND THAT IS THE WHOLE TRICK.
+
+    The page cannot usefully tell us the time: its clock is the user's, which
+    may be minutes off this one and is free to jump while the tab is asleep.
+    What it can measure without any of that mattering is how long ago the
+    line was written, from a monotonic clock. Subtracting that here turns it
+    into a time on *this* clock, which is what the rest of the file is
+    stamped from.
+
+    Anything that is not a plain non-negative number inside the bound is not
+    an argument about what the page meant - it is a line that gets the
+    arrival time, exactly as before.
+    """
+    age = entry.get("ms") if isinstance(entry, dict) else None
+    if isinstance(age, bool) or not isinstance(age, (int, float)):
+        return None
+    try:
+        seconds = float(age) / 1000.0
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not 0.0 <= seconds <= _CLIENT_LOG_MAX_AGE:
+        return None
+    return arrived - seconds
 
 
 def record_client_log(text: typing.Any) -> None:
@@ -836,10 +871,14 @@ def record_client_log(text: typing.Any) -> None:
         payload = json.loads(text) if isinstance(text, str) and text.strip() else None
         if not isinstance(payload, dict):
             return
+        # Read once, before any line is journaled: every age in this batch was
+        # measured at the same instant on the page, so they all count back
+        # from the same instant here, and the order within the batch survives.
+        arrived = time.time()
         lines = payload.get("lines")
         if not isinstance(lines, list):
             if payload.get("line"):
-                journal.note("browser", payload["line"])
+                journal.note("browser", payload["line"], _client_log_time(payload, arrived))
             return
         page = str(payload.get("p") or "")[:16]
         if page not in _client_log_seen and len(_client_log_seen) >= _CLIENT_LOG_PAGES:
@@ -852,7 +891,7 @@ def record_client_log(text: typing.Any) -> None:
             line = entry.get("line")
             if not isinstance(number, int) or isinstance(number, bool) or number <= seen or not isinstance(line, str) or not line:
                 continue
-            journal.note("browser", line[:300])
+            journal.note("browser", line[:300], _client_log_time(entry, arrived))
             seen = number
         _client_log_seen[page] = seen
     except Exception:

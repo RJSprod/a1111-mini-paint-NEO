@@ -226,18 +226,33 @@ ended by anything short of the driver letting go, and the restart report now
 says exactly that when it happens.
 
 ================================================================================
-6. WHAT IS LEFT, AND IT IS STRUCTURAL
+6. THE STRUCTURAL CURE, AND WHAT IS LEFT AFTER IT
 ================================================================================
 
 The budget is the problem, and only the transport can change the budget.
 
-    a)  HTTP/2 in front of Forge. Browsers speak HTTP/2 only over TLS, and
-        multiplex every stream and request over ONE connection with no
-        six-stream rule. uvicorn does not speak it; a terminating proxy does
-        (Caddy by default; nginx with http2). The auto-TLS extension is the
-        natural place, because it already owns the TLS side. This is the
-        cure; everything in section 4 is the mitigation that makes the
-        disease survivable.
+    a)  HTTP/2 in front of Forge. SHIPPED the same day, in the auto-TLS
+        extension (RJSprod/NEO-webui-auto-tls-https, pull requests 2 and 3),
+        because that extension already owns the TLS side and browsers speak
+        HTTP/2 only over TLS. It wraps Gradio's own ``start_server`` and, when
+        Gradio asks for TLS, serves the same ASGI app through Hypercorn with
+        ALPN h2 and http/1.1; every request and stream of a page then shares
+        ONE connection and no six-stream rule applies. Without TLS, with
+        ``--autotls-http1``, or if Hypercorn cannot start, Gradio's own server
+        runs and says so.
+
+        Two things that fell out of shipping it, both worth remembering.
+        Only Hypercorn's public serve()/Config API survives across releases -
+        the first host to run it had the Hypercorn 0.13 that the old certipie
+        dependency pinned years ago, which has none of the internals and which
+        an installer asking only "is it installed?" never upgraded. And a
+        certificate pair the server cannot load has to be caught before a
+        socket is bound, because ssl.SSLError is an OSError and a port scan
+        reads that as "taken".
+
+        This is the cure; everything in section 4 is the mitigation that keeps
+        a page alive when the cure is not in place - an older auto-TLS, a
+        launch without TLS at all, or a browser that negotiated http/1.1.
 
     b)  A second origin for the WanGP proxy - another port on the same host
         - doubles the budget and puts the iframe's streams in their own.

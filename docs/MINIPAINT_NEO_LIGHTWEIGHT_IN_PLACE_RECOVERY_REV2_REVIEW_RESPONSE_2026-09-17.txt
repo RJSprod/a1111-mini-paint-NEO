@@ -1,0 +1,482 @@
+MINIPAINT NEO - LIGHTWEIGHT IN-PLACE WANGP RECOVERY
+REVIEW RESPONSE TO REVISION 2
+
+Repository target: RJSprod/a1111-mini-paint-NEO
+Code baseline:     3970da4df3f25d3d71d169d4ffd110f06b8b4273 (main, 2026-09-17)
+Reviews:           MINIPAINT_NEO_LIGHTWEIGHT_IN_PLACE_RECOVERY_DESIGN_INTENT_REV2_2026-09-17.txt
+Revision date:     2026-09-17
+Status:            Review response. No code written.
+
+Note on provenance: this response reviews the author's REV2, which was written
+in parallel with the reviewer's own R2
+(MINIPAINT_NEO_LIGHTWEIGHT_IN_PLACE_RECOVERY_DESIGN_INTENT_R2_2026-09-17.txt).
+The two agree on every structural decision. Where they differ, this document
+says which is better and why, and three of the differences go the author's way.
+
+================================================================================
+0. VERDICT
+================================================================================
+
+ADOPT REV2. It is the better of the two R2 documents.
+
+Three of its additions are improvements on the reviewer's own revision, and
+each was checked rather than accepted:
+
+    section 3   expectsIframe() as a PRE-gate           better than a
+                                                        post-repaint read
+    section 9   one-shot absence grace                  catches a race a
+                                                        synchronous re-check
+                                                        cannot
+    section 22  S.watcherRoot                           more precise than
+                                                        "if the observed root
+                                                        is disconnected"
+
+One correction is required before Phase 1 ships, and it is a sequencing error
+rather than a design error:
+
+    SECTION 14 IS PHASE 1 WORK, NOT PHASE 3 WORK.
+
+    It also describes a bug that exists at HEAD today, on a reachable path,
+    with a duplicate generation at the end of it. Phase 1 as scheduled adds a
+    new way to reach that path. Section 1 below traces it.
+
+One claim should be retired:
+
+    Section 21 and test 27.17 assume deep_hash can prevent the repaint. It
+    cannot. This is now verified against the pinned wheel rather than argued
+    from memory, and the same read sharpens Phase 4 considerably. Section 3.
+
+================================================================================
+1. THE ONE CORRECTION: SECTION 14 IS PHASE 1
+================================================================================
+
+REV2 section 14 is right, and more important than its placement suggests. It
+is scheduled in Phase 3 ("Uncertainty + warning polish"). It is not polish.
+
+1.1 The path, traced
+
+Three links, all at HEAD:
+
+    browser/minipaint_wangp.js:643
+        function abandon(failureCode) {
+            const waiting = Array.from(S.pending.keys());
+            for (const requestId of waiting) { settle(requestId, failure(failureCode)); }
+            S.query = null;
+        }
+
+Every in-flight promise is settled with failure(code) — an {ok:false, code,
+message} object. S.pending holds mutating asks as well as queries.
+
+    browser/minipaint_wangp.js:1677, queueAndConfirm
+        if (!asked.ok) {
+            return Object.assign(base, { ok: false, status: "refused",
+                                         code: asked.code || QUEUE_REQUEST_REFUSED, ... });
+        }
+
+An initial ask that did not come back ok becomes status "refused" — a
+definitive statement that WanGP declined the request.
+
+    minipaint_neo/clipboard/outbox.py:1317-1322
+        elif result["status"] == UNCONFIRMED:
+            job["state"] = UNCONFIRMED
+            ...
+        else:
+            job["state"] = FAILED
+
+UNCONFIRMED is the safe terminal: never retried by the machine, shown, a
+person decides (outbox.py:36-38). Everything else that is not ok becomes
+FAILED — which is offered for retry (outbox.py:899, OUTBOX_RETRY_ROUTE).
+
+So: a frame retired while the initial queue() ask is in flight produces a job
+marked FAILED for a request that may already have been delivered to the WanGP
+page and queued. The user is shown a failure and invited to press again. That
+is a second generation on the card.
+
+1.2 What is already safe, and why the hole is narrow
+
+The confirmation loop is already correct. When it breaks on
+BRIDGE_SESSION_MISMATCH, WANGP_RESTARTED or REQUEST_INVALID it falls through
+to:
+
+    status: "unconfirmed", code: ADMISSION_UNCONFIRMED
+
+which maps to the UNCONFIRMED branch of report() and is exactly right.
+
+The hole is only the initial ask — the window between sending the queue
+request and receiving its admission answer. That window is short, which is
+why this has not been a common failure.
+
+1.3 Why Phase 1 widens it
+
+Today abandon() is reached from two places: a fresh handshake
+(minipaint_wangp.js:670) and a session change (:1107). Both are relatively
+rare.
+
+Phase 1 adds detachFrame(), and REV2 section 7 requires it to "retire/abandon
+browser-local pending bridge promises". Phase 1 also adds a new trigger for
+it: unexpected iframe disappearance, from the root observer and from
+verifyOnResume.
+
+That is a new and more frequent caller on the same path. Shipping Phase 1
+with section 14 deferred to Phase 3 does not leave the risk where it was; it
+increases it, in the exact scenario this project is trying to fix.
+
+1.4 The fix
+
+detachFrame() must not settle in-flight MUTATING requests the way abandon()
+settles queries.
+
+The distinction that needs making is not "which code" but "who answered":
+
+    WanGP answered and declined          -> refused. A real answer.
+    the browser stopped waiting          -> unconfirmed. No answer.
+
+Concretely, queueAndConfirm's `if (!asked.ok)` branch must not map every
+not-ok to "refused". A settlement that originated in abandon()/detachFrame —
+rather than in a reply from the bridge — must produce
+status: "unconfirmed", code: ADMISSION_UNCONFIRMED, so report() takes the
+UNCONFIRMED branch.
+
+Implementation latitude is fine; the invariant is not:
+
+    NO BROWSER-SIDE GIVE-UP MAY EVER PRODUCE outbox state FAILED FOR A
+    MUTATING REQUEST THAT WAS ALREADY SENT.
+
+REV2's section 14.2 states the principle. This is the mechanism it has to
+reach, and it belongs in the same phase as the code that newly reaches it.
+
+Move section 14 into Phase 1, alongside detachFrame. Test 27.12 moves with
+it, and it is the test that proves Phase 1 did not make things worse.
+
+================================================================================
+2. WHERE REV2 BEATS THE REVIEWER'S OWN R2
+================================================================================
+
+Recorded so the better of the two survives.
+
+2.1 expectsIframe() as a pre-gate (section 3)
+
+The reviewer's R2 pressed Refresh first and read #wangp_state afterwards to
+interpret the outcome. REV2 reads it first and does not press at all when the
+view is legitimately not iframe. That is strictly better: fewer Gradio events,
+no repaint on a tab that is deliberately showing a setup or error card, and
+the decision costs one JSON parse.
+
+Verified:
+
+    minipaint_neo/wangp/ui.py:283-290
+        def _view(view, state, code, actions) -> dict:
+            return {"view": view, "state": state, "code": code, ...}
+
+    minipaint_neo/wangp/ui.py:88
+        VIEW_IFRAME = "iframe"
+
+So `state.view === "iframe"` in section 3's helper is exactly the right test,
+against exactly the right key. The value reaches the box through
+paint()'s eleventh output, gr.update(value=json.dumps(view)), ui.py:1408.
+
+Two implementation notes:
+
+    box() already exists — browser/minipaint_wangp.js:437 — so section 3's
+    `box(STATE_ELEM_ID)` is a real call. What does not exist is the constant:
+    there are zero references to wangp_state in any browser file. Add
+    STATE_ELEM_ID = "wangp_state" beside the other element ids at
+    minipaint_wangp.js:198-208.
+
+    Returning false on parse failure, as section 3 specifies, is the correct
+    default. It fails toward doing nothing, which is the right direction for a
+    gate that can otherwise cause a reload.
+
+2.2 The one-shot absence grace (section 9)
+
+This is the addition the reviewer's R2 did not have, and it is better than
+what R2 used instead.
+
+R2 required the absence check and the press to be one synchronous block. That
+prevents pressing when the replacement has ALREADY landed. It does nothing
+when the replacement lands 20 ms later — the synchronous check still sees
+absence, presses, and the page gets two repaints: the natural one and the
+recovery one. Both are WanGP reloads (see 4.1), so the cost of guessing wrong
+is real.
+
+A 50-150 ms one-shot re-check catches that case. Keep it.
+
+Keep R2's synchronicity requirement as well — they solve different halves.
+After the grace expires, section 10's steps 1, 2 and 5 (confirm expectsIframe,
+confirm absence, press) must still be one synchronous block with nothing
+awaited between them, or the same race reopens inside the repair cycle.
+
+2.3 S.watcherRoot (section 22)
+
+R2 said "if the currently observed root is disconnected" without saying how
+the browser would know which node it observed. REV2 stores the reference.
+That is the missing half, and it makes 27.15 writable.
+
+================================================================================
+3. THE CLAIM TO RETIRE: DEEP_HASH CANNOT BLOCK THE REPAINT
+================================================================================
+
+REV2 section 21 keeps the hedge:
+
+    "If deep_hash prevents the existing WanGP refresh event from repainting
+     the iframe: lightweight recovery may be exhausted -> warn once"
+
+and test 27.17 exercises it. The path does not exist. This was asserted in the
+reviewer's earlier response from knowledge of Gradio; it has now been checked
+against the pinned wheel.
+
+3.1 What the code does
+
+gradio 4.40.0, gradio/blocks.py:1981
+
+    def get_state_ids_to_track(self, block_fn, state):
+        if state is None:
+            return [], []
+        state_ids_to_track = []
+        hashed_values = []
+        for block in block_fn.outputs:
+            if block.stateful and any(
+                (block._id, "change") in fn.targets for fn in self.fns.values()
+            ):
+                value = state[block._id]
+                state_ids_to_track.append(block._id)
+                hashed_values.append(utils.deep_hash(value))
+        return state_ids_to_track, hashed_values
+
+deep_hash is reached only for a component that satisfies all three:
+
+    1. it is in THIS dependency's outputs — not the session's state at large;
+    2. it is stateful, i.e. a gr.State;
+    3. it has a .change() listener registered somewhere.
+
+The refresh dependency:
+
+    inputs  : shell["channel"]                          Textbox
+    outputs : painted, ui.py:1381-1393                  4 Columns, 1 Markdown,
+                                                        2 HTML, 2 Buttons,
+                                                        2 Textboxes
+
+No stateful component, so the loop body never runs and deep_hash is never
+called. The repaint cannot raise RecursionError through this path, in this
+version.
+
+3.2 What to do instead
+
+    - Section 21: replace the hedge with the fact. The repaint is immune to
+      this bug; what can still stop it is the page's Gradio queue/SSE channel
+      not delivering the event, which is a different failure and is what
+      section 16.2's warning is for.
+
+    - Test 27.17: re-aim at that reachable cause — the event channel is dead,
+      the state box does not change, the deadline expires, one warning.
+
+    - Add a standing requirement, because the immunity is one line from being
+      lost: `painted` must never gain a gr.State. Strictly the danger needs a
+      .change() listener too, but that second condition is non-local and not
+      something a future editor of ui.py can see, so write the conservative
+      form as a comment at ui.py:1381.
+
+3.3 A free finding that sharpens Phase 4
+
+The same read settles what the offending state must look like.
+
+gradio 4.40.0, gradio/utils.py:1396
+
+    def deep_hash(obj):
+        hasher = hashlib.sha256()
+        if isinstance(obj, (int, float, str, bytes)):
+            items = obj
+        elif isinstance(obj, dict):
+            items = tuple([(k, deep_hash(v)) for k, v in sorted(...)])
+        elif isinstance(obj, (list, tuple)):
+            items = tuple(deep_hash(x) for x in obj)
+        elif isinstance(obj, set):
+            items = tuple(deep_hash(x) for x in sorted(obj, key=hash))
+        else:
+            items = str(id(obj)).encode("utf-8")
+        hasher.update(repr(items).encode("utf-8"))
+        return hasher.hexdigest()
+
+No cycle detection. No depth limit. But note the final branch: anything that
+is NOT a dict, list, tuple, set or scalar terminates immediately on
+str(id(obj)).
+
+That inverts the advice carried in the earlier design intent (its section
+15.4: "never place model objects, queues, locks, callbacks into gr.State").
+For deep_hash specifically those are the SAFE cases — they hash by identity
+and stop the recursion. They may be bad for other reasons; they are not this
+bug.
+
+The offender must be one of exactly two things:
+
+    a reference CYCLE among plain containers — a dict or list that contains
+    itself, directly or transitively;  or
+    a legitimately enormous nesting depth, thousands of levels.
+
+A cycle is overwhelmingly the likelier. So Phase 4's diagnostic should look
+for a container cycle reachable from a gr.State that is an output with a
+.change() listener — not for heavyweight objects.
+
+The shape to look at first is Wan2GP's own per-page state, which this
+repository already records:
+
+    tests/test_queue_e2e.py:265
+        gr.State({"model_type": "video", "gen": {"queue": [], "queue_errors": {}}})
+    wan2gp_bridge/.../compatibility.py:251
+        "Wan2GP: the per-page gr.State; get_state_model_type(state) is this
+        page's model"
+
+A queue entry holding a back-reference to gen, or to state, is a cycle and an
+instant RecursionError. That is a normal thing for such code to do and it is
+the first place to look.
+
+================================================================================
+4. SMALLER NOTES
+================================================================================
+
+4.1 Why the grace and the absence check matter: a repaint is a reload
+
+Worth carrying in REV2 explicitly, because both section 9 and section 10 exist
+to serve it and neither says it:
+
+    minipaint_neo/wangp/ui.py:1861-1863
+        # The three iframe outputs are skipped, not re-sent, when nothing
+        # about the frame changed: Gradio re-renders an HTML component it is
+        # handed, even the same string, and a re-rendered iframe is a reload.
+
+    minipaint_neo/wangp/ui.py:404-408
+        "every pass rewrote the iframe. Each rewrite reloaded WanGP inside it
+        - the 'flash' a user sees"
+
+This is also the confirmation that the whole design works: iframe_html()
+ignores its channel argument, so the string is a constant, and a frontend that
+skipped an unchanged value would make the repair a silent no-op. Gradio does
+not skip it. The project established that as a bug before this design needed
+it as a feature.
+
+4.2 Section 24.2 reinstates a contingency that is not needed
+
+    "Potentially a tiny supporting change in minipaint_neo/wangp/ui.py only if
+     the existing refresh control needs a clearer browser-facing hook."
+
+It does not. #wangp_refresh_request is a stable elem_id on a real gr.Button
+(ui.py:1348) wired to show() (ui.py:1452), and #wangp_state is a stable
+elem_id carrying the view (ui.py:67, written at ui.py:1408). Both are adequate
+as they stand.
+
+The one Python edit worth making is documentation, not behaviour: the comment
+at ui.py:1381 required by 3.2.
+
+4.3 Section 7's IntersectionObserver is mostly already handled
+
+    browser/minipaint_wangp.js:1570
+        function watchOnScreen(frame) {
+            ...
+            if (P.observer) { P.observer.disconnect(); }
+
+The previous observer is disconnected whenever a new frame is attached. The
+case detachFrame adds is frame-gone-with-no-replacement, where P.observer
+stays bound to a removed node. That is harmless — an IntersectionObserver on a
+detached element never fires — but disconnecting is tidy and costs a line.
+Keep the bullet; it is not load-bearing.
+
+4.4 Test 27.10 passes at HEAD
+
+    browser/minipaint_wangp.js:1022
+        if (!S.frame || event.source !== S.frame.contentWindow) {
+
+An exact window-identity check, before protocol and before channel. Write
+27.10 as a regression guard and do not read a green run as evidence that new
+code works. Same for acceptance criterion 17.
+
+Criteria 10, 16 and 29 likewise hold at HEAD: the server executor is the
+default and submits with no browser in the path (outbox.py:269-276,
+control.py:1-12); deadlines already spend only on-screen time
+(minipaint_wangp.js:560-578); and the repaint touches no device because
+health() takes its lock non-blocking and does no HTTP to the child
+(runtime.py:740, 732-738).
+
+4.5 Keep a post-repaint state read as well as the pre-gate
+
+Section 3's gate is checked before the press. The view can change between that
+check and the repaint's result — WanGP dying in that window is precisely the
+scenario section 13's resume path exists for. Without a second read after the
+repaint, a correct "not serving" answer runs the deadline out and produces the
+warning that section 16.2 is trying to avoid, on top of the server's own error
+card.
+
+It is the same box() call, at the other end of the cycle:
+
+    no iframe, and the state box now says a non-iframe view
+        -> the repaint SUCCEEDED and the answer is "not serving"
+        -> log, no warning
+
+    no iframe, and the state box still says iframe
+        -> the repaint did not land
+        -> warn once
+
+Cheap, and it closes the last gap between the two documents.
+
+4.6 Section 25's log vocabulary is good
+
+"recovery: mutating request acknowledgement lost; outcome remains unconfirmed"
+is the line that would have made section 1's bug visible the first time it
+happened. Keep it, and make sure it is emitted from the code path that decides
+the outcome rather than from the caller.
+
+================================================================================
+5. REVISED PHASING
+================================================================================
+
+    PHASE 1 — Exact incident repair, and the uncertainty it touches
+
+        - expectsIframe(), and the STATE_ELEM_ID constant;
+        - detachFrame();
+        - unexpected-absence branch in the root observer;
+        - one-shot absence grace;
+        - single-flight repair, with the synchronous confirm-and-press block;
+        - the existing visibility-aware deadline;
+        - post-repaint state read, three exits;
+        - attach + existing handshake;
+        - SECTION 14: mutating requests abandoned by frame loss resolve
+          unconfirmed, never refused;
+        - concise logs.
+
+        Tests: 27.1, 27.2, 27.3, 27.5, 27.8, 27.9, 27.12, 27.18, plus the
+        "not serving" case.
+
+    PHASE 2 — Resume / root hardening
+
+        - verifyOnResume();
+        - S.watcherRoot and observer rebinding.
+
+        Tests: 27.6, 27.13, 27.14, 27.15.
+
+    PHASE 3 — Warning
+
+        - the browser-rendered notice of section 16.3;
+        - one per page, removed on a later successful recovery.
+
+        Tests: 27.7 and the re-aimed 27.17 assert it appears; 27.16 and the
+        "not serving" case assert it does not.
+
+    PHASE 4 — Upstream diagnostics if still needed
+
+        - look for a container cycle reachable from a gr.State that is an
+          output with a .change() listener, per 3.3;
+        - start at Wan2GP's per-page state, not at this extension's.
+
+The only change from REV2's own phasing is that section 14 moves from Phase 3
+to Phase 1. Everything else is REV2's order.
+
+================================================================================
+6. RECOMMENDATION
+================================================================================
+
+Build REV2 as written, with section 14 moved forward and section 21 corrected.
+
+The design is settled. Both independent revisions converged on the same
+architecture — press the existing painter, let show() decide the view, keep
+the outbox authoritative, warn once and stop — and the remaining differences
+were about sequencing and about one Gradio behaviour that has now been read
+rather than assumed.

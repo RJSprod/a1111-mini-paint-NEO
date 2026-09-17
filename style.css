@@ -842,6 +842,30 @@
     background: rgba(128, 128, 128, 0.18);
 }
 
+/* The one notice the browser half writes for itself.
+
+   Everything else on this tab is painted by ui.py through a Gradio event.
+   This is not, and cannot be: it says that the WanGP iframe could not be
+   brought back, and both ways of reaching that conclusion involve the Gradio
+   round trip either failing or being unsafe to ask for. So the browser
+   appends a div inside #wangp_iframe_root - a sibling of the gr.HTML the tab
+   owns, which is why a repaint leaves it standing and the browser has to take
+   it away again itself.
+
+   Theme variables with plain fallbacks, like the rest of this file: a notice
+   nobody can read against their own background is not a notice. */
+#wangp_iframe_root .minipaint-wangp-recovery {
+    margin: 0.75em 0;
+    padding: 0.75em 1em;
+    border-radius: 8px;
+    border-left: 4px solid var(--error-text-color, #d9534f);
+    background: var(--background-fill-secondary, rgba(128, 128, 128, 0.12));
+    color: var(--body-text-color, inherit);
+    font-size: 0.95em;
+    line-height: 1.45;
+    max-width: 70ch;
+}
+
 /* --------------------------------------------------------------------
  * Clipboard tab
  *

@@ -2225,6 +2225,1181 @@ def queue_request_checks(r: Results) -> None:
             * 3 < protocol.MAX_ENVELOPE_BYTES)
 
 
+# ----------------------------------------------------------- recovery ------
+
+#: The DOM stub the recovery checks drive. It is richer than the flush stub
+#: above because the thing under test is a set of distinctions, and each one
+#: needs a shape the stub can actually express: an iframe present or absent, a
+#: root present or absent, a state box that says one of four views - or that is
+#: NOT IN THE PAGE, which is the case that really happens - a hidden Refresh
+#: whose presses can be counted, and the browser's own notice.
+#:
+#: Time is virtual. The recovery budget is twelve seconds of on-screen time and
+#: the handshake's schedule is longer again, so a suite on the real clock would
+#: spend minutes finding out what it could have known at once.
+_RECOVERY_HARNESS = r"""// A Node DOM stub rich enough to express the shapes recovery has to tell
+// apart: an iframe that is there or not, a root that is there or not, a state
+// box that says one of four views or is missing altogether, a hidden Refresh
+// whose presses can be counted, and a notice element that can be looked for.
+//
+// Time is virtual. The recovery budget is twelve seconds of on-screen time
+// and the handshake's schedule is longer still, so a suite on real timers
+// would spend minutes waiting to find out what it already knows.
+const fs = require("fs");
+
+const SOURCE = fs.readFileSync(process.argv[2], "utf8");
+const realSetImmediate = global.setImmediate;
+// The page writes a journal line for everything it does, through console.debug
+// on its way to the batched log route. Taken here rather than out of the route:
+// the route only ever carries the last few lines, and section 25 makes promises
+// about lines that a long scenario would have pushed out of that window long
+// before it ended. Nothing is printed - the one JSON line is the output.
+const realDateNow = Date.now;
+
+function settle() { return new Promise(function (r) { realSetImmediate(r); }); }
+
+function clock() {
+    let now = 1600000000000;
+    let seq = 0;
+    const timers = new Map();
+    return {
+        now: function () { return now; },
+        set: function (fn, ms) {
+            seq += 1;
+            timers.set(seq, { at: now + Math.max(0, Number(ms) || 0), seq: seq, fn: fn });
+            return seq;
+        },
+        clear: function (id) { timers.delete(id); },
+        advance: async function (ms) {
+            const until = now + Math.max(0, Number(ms) || 0);
+            for (;;) {
+                let next = null;
+                for (const entry of timers.values()) {
+                    if (entry.at > until) { continue; }
+                    if (!next || entry.at < next.at || (entry.at === next.at && entry.seq < next.seq)) { next = entry; }
+                }
+                if (!next) { break; }
+                timers.delete(next.seq);
+                now = next.at;
+                try { next.fn(); } catch (e) { /* the page's business */ }
+                await settle();
+                await settle();
+            }
+            now = until;
+            await settle();
+        }
+    };
+}
+
+// ------------------------------------------------------------------ nodes --
+
+function node(tag, id) {
+    return {
+        tagName: tag,
+        id: id || "",
+        className: "",
+        textContent: "",
+        value: "",
+        dataset: {},
+        style: {},
+        children: [],
+        parentNode: null,
+        isConnected: true,
+        attributes: {},
+        setAttribute: function (name, value) { this.attributes[name] = String(value); },
+        getAttribute: function (name) {
+            if (name === "src" && this.src !== undefined) { return this.src; }
+            return this.attributes[name] === undefined ? null : this.attributes[name];
+        },
+        addEventListener: function (kind, fn) {
+            this.on = this.on || {};
+            (this.on[kind] = this.on[kind] || []).push(fn);
+        },
+        appendChild: function (child) {
+            child.parentNode = this;
+            mark(child, this.isConnected);
+            this.children.push(child);
+            return child;
+        },
+        removeChild: function (child) {
+            const at = this.children.indexOf(child);
+            if (at !== -1) { this.children.splice(at, 1); }
+            child.parentNode = null;
+            mark(child, false);
+            return child;
+        },
+        querySelector: function (selector) { return search(this.children, selector); },
+        closest: function () { return null; }
+    };
+}
+
+function mark(element, connected) {
+    element.isConnected = !!connected;
+    for (const child of element.children) { mark(child, connected); }
+}
+
+function matches(element, selector) {
+    const parts = String(selector).trim().split(/\s+/);
+    if (parts.length > 1) { return false; }
+    const one = parts[0];
+    if (one.charAt(0) === "#") { return element.id === one.slice(1); }
+    if (one.charAt(0) === ".") { return String(element.className).split(/\s+/).indexOf(one.slice(1)) !== -1; }
+    return element.tagName.toLowerCase() === one.toLowerCase();
+}
+
+/** querySelector over the fake tree. Supports "tag", "#id", ".class" and the
+ * one descendant form this file uses, "#id tag". */
+function search(roots, selector) {
+    const parts = String(selector).trim().split(/\s+/);
+    if (parts.length === 2) {
+        const host = search(roots, parts[0]);
+        return host ? search(host.children, parts[1]) : null;
+    }
+    for (const element of roots) {
+        if (matches(element, selector)) { return element; }
+        const deeper = search(element.children, selector);
+        if (deeper) { return deeper; }
+    }
+    return null;
+}
+
+function walk(roots, fn) {
+    for (const element of roots) { fn(element); walk(element.children, fn); }
+}
+
+// ------------------------------------------------------------------ world --
+
+function world(options) {
+    options = options || {};
+    const tick = clock();
+    const listeners = {};
+    const watchers = [];
+    const screens = [];
+    const seen = { presses: 0, hellos: 0, frames: 0 };
+
+    function boxNode(id, value) {
+        const host = node("DIV", id);
+        const area = node("TEXTAREA", "");
+        area.value = value === undefined ? "" : value;
+        host.appendChild(area);
+        return host;
+    }
+
+    function iframe(name) {
+        const frame = node("IFRAME", "wangp_iframe");
+        frame.src = "/wan2gp/";
+        frame.name = name || "one";
+        frame.speaks = true;
+        frame.contentWindow = {
+            postMessage: function (message) {
+                posted.push(message);
+            bound = message.channel_id || bound;
+            if (message.type !== "WANGP_BRIDGE_HELLO") { return; }
+                seen.hellos += 1;
+                if (!frame.speaks) { return; }
+                tick.set(function () {
+                    deliver(frame, "WANGP_BRIDGE_READY", message.request_id, {
+                        bridge_session: frame.session || "abcdef0123456789abcdef0123456789",
+                        instance_id: "inst-1", version: "1.6.4", ready: true, receivers: [],
+                        state_revision: "r1", capabilities: { queue: true, start: true, track: true }
+                    }, message.channel_id);
+                }, 0);
+            }
+        };
+        return frame;
+    }
+
+    const page = node("DIV", "wangp_page");
+    let root = node("DIV", "wangp_iframe_root");
+    let restoreAtLookup = 0;
+    //: The channel the page is actually speaking on. A reply sent on any
+    //: other one is dropped before anything else is looked at, which would
+    //: make every delivery below a silent no-op.
+    let bound = "";
+    const lines = [];
+    const posted = [];
+    const refresh = node("DIV", "wangp_refresh_request");
+    const button = node("BUTTON", "");
+    button.click = function () { seen.presses += 1; };
+    refresh.appendChild(button);
+
+    const stateBox = boxNode("wangp_state", options.state === undefined
+        ? JSON.stringify({ view: "iframe", state: "READY" }) : options.state);
+    const channelBox = boxNode("wangp_channel", "");
+    const checkBox = boxNode("wangp_browser_check", "");
+    const sessionBox = boxNode("wangp_session", "");
+    const logBox = boxNode("wangp_client_log", "");
+
+    page.appendChild(channelBox);
+    if (options.state !== null) { page.appendChild(stateBox); }
+    page.appendChild(checkBox);
+    page.appendChild(sessionBox);
+    page.appendChild(logBox);
+    if (options.refresh !== false) { page.appendChild(refresh); }
+    if (options.root !== false) { page.appendChild(root); }
+
+    let frame = null;
+
+    function addFrame(name) {
+        const built = iframe(name || ("n" + (seen.frames + 1)));
+        root.appendChild(built);
+        frame = built;
+        seen.frames += 1;
+        return built;
+    }
+
+    if (options.iframe !== false) { addFrame("one"); }
+
+    function fire(kind, event) { for (const fn of (listeners[kind] || []).slice()) { fn(event); } }
+
+    function deliver(from, type, requestId, payload, channelId) {
+        fire("message", {
+            origin: "http://forge.test",
+            source: from.contentWindow,
+            data: { protocol: 5, type: type, channel_id: channelId || bound, request_id: requestId, payload: payload }
+        });
+    }
+
+    const doc = {
+        readyState: "complete",
+        visibilityState: "visible",
+        addEventListener: function (kind, fn) { (listeners[kind] = listeners[kind] || []).push(fn); },
+        getElementById: function (id) {
+            let found = null;
+            walk([page], function (element) { if (!found && element.id === id) { found = element; } });
+            // The one thing a synchronous block cannot be tested without: a
+            // frame that turns up BETWEEN two lookups. Counted down here so a
+            // scenario can put it back exactly in the gap between the grace's
+            // question and the press's.
+            if (id === "wangp_iframe" && restoreAtLookup > 0) {
+                restoreAtLookup -= 1;
+                if (restoreAtLookup === 0) { addFrame("race"); }
+            }
+            return found;
+        },
+        querySelector: function (selector) { return search([page], selector); },
+        querySelectorAll: function () { return []; },
+        createElement: function (tag) { return node(String(tag).toUpperCase(), ""); },
+        documentElement: { classList: { contains: function () { return false; } }, style: {}, getAttribute: function () { return null; } },
+        body: { classList: { contains: function () { return false; } } },
+        head: { appendChild: function () {} }
+    };
+
+    const win = {
+        location: { href: "http://forge.test/", origin: "http://forge.test" },
+        addEventListener: function (kind, fn) { (listeners[kind] = listeners[kind] || []).push(fn); },
+        document: doc,
+        matchMedia: function () { return { matches: false, addEventListener: function () {} }; },
+        MutationObserver: function (fn) {
+            this.fn = fn; this.dead = false; this.target = null;
+            this.observe = function (target) { this.target = target; };
+            this.disconnect = function () { this.dead = true; };
+            watchers.push(this);
+        },
+        IntersectionObserver: function (fn) {
+            this.fn = fn; this.dead = false;
+            this.observe = function () {};
+            this.disconnect = function () { this.dead = true; };
+            screens.push(this);
+        },
+        requestAnimationFrame: function (fn) { return tick.set(fn, 0); },
+        crypto: {
+            getRandomValues: function (bytes) {
+                for (let i = 0; i < bytes.length; i++) { bytes[i] = (world.entropy = (world.entropy || 0) + 7) % 256; }
+                return bytes;
+            }
+        }
+    };
+
+    return {
+        tick: tick, doc: doc, win: win, page: page, root: root, refresh: refresh,
+        stateBox: stateBox, seen: seen, watchers: watchers, screens: screens,
+        frame: function () { return frame; },
+        iframe: iframe,
+        fire: fire,
+        deliver: deliver,
+        /** Deliver a mutation batch to every live observer, exactly as a
+         * browser would: only observers still bound to a connected node. */
+        mutate: function (records) {
+            for (const watcher of watchers.slice()) {
+                if (watcher.dead || !watcher.target || !watcher.target.isConnected) { continue; }
+                try { watcher.fn(records || []); } catch (e) { /* contained, as in a browser */ }
+            }
+        },
+        removeFrame: function () {
+            if (frame && frame.parentNode) { frame.parentNode.removeChild(frame); }
+            frame = null;
+        },
+        addFrame: addFrame,
+        restoreAtLookup: function (count) { restoreAtLookup = count; },
+        posted: posted,
+        lines: lines,
+        said: function (fragment) { return lines.some(function (line) { return line.indexOf(fragment) !== -1; }); },
+        note: function (line) { lines.push(line); },
+        rootNode: function () { return root; },
+        setState: function (value) {
+            const area = search([page], "#wangp_state textarea");
+            if (area) { area.value = value; }
+        },
+        dropState: function () { if (stateBox.parentNode) { stateBox.parentNode.removeChild(stateBox); } },
+        restoreState: function (value) {
+            const area = search([stateBox], "textarea");
+            if (area) { area.value = value; }
+            if (!stateBox.parentNode) { page.appendChild(stateBox); }
+        },
+        dropRoot: function () { if (root.parentNode) { root.parentNode.removeChild(root); } frame = null; },
+        restoreRoot: function () { if (!root.parentNode) { page.appendChild(root); } },
+        replaceRoot: function () {
+            if (root.parentNode) { root.parentNode.removeChild(root); }
+            root = node("DIV", "wangp_iframe_root");
+            frame = null;
+            page.appendChild(root);
+            return root;
+        },
+        notice: function () { return search([page], "#minipaint-wangp-recovery-notice"); },
+        hidden: function (yes) {
+            doc.visibilityState = yes ? "hidden" : "visible";
+            fire("visibilitychange", {});
+        }
+    };
+}
+
+async function load(w) {
+    global.window = w.win;
+    global.document = w.doc;
+    global.setTimeout = function (fn, ms) { return w.tick.set(fn, ms); };
+    global.clearTimeout = function (id) { w.tick.clear(id); };
+    global.setInterval = function () { return 0; };
+    global.clearInterval = function () {};
+    global.fetch = function () {
+        return Promise.resolve({ ok: true, status: 204, type: "basic", json: () => Promise.resolve({}), text: () => Promise.resolve("") });
+    };
+    // Bare `new MutationObserver(...)` resolves to the global, not to
+    // window's, so the page's own observer is never built without this.
+    global.MutationObserver = w.win.MutationObserver;
+    global.IntersectionObserver = w.win.IntersectionObserver;
+    console.debug = function (prefix, message) { w.note(String(message === undefined ? prefix : message)); };
+    Date.now = w.tick.now;
+    w.win.setTimeout = global.setTimeout;
+    w.win.clearTimeout = global.clearTimeout;
+    w.win.fetch = global.fetch;
+    new Function("window", "document", "fetch", SOURCE)(w.win, w.doc, global.fetch);
+    await w.tick.advance(0);
+    return w.win.minipaintWanGP;
+}
+
+function restore() { Date.now = realDateNow; }
+
+module.exports = { world: world, load: load, restore: restore, settle: settle,
+                   realSetTimeout: global.setTimeout, realClearTimeout: global.clearTimeout };
+"""
+
+
+#: One scenario per behaviour the design promises, run in one Node process
+#: against a fresh page each time. Each returns a small record; the assertions
+#: are in Python, next to the sentence of the design they belong to.
+_RECOVERY_SCENARIOS = r"""const H = require("./harness.js");
+
+const S = {};
+const VIEW_IFRAME = JSON.stringify({ view: "iframe", state: "READY" });
+const VIEW_ERROR = JSON.stringify({ view: "error", state: "ERROR" });
+const VIEW_SETUP = JSON.stringify({ view: "setup", state: "SETUP_REQUIRED" });
+const VIEW_DEGRADED = JSON.stringify({ view: "iframe", state: "DEGRADED", degraded: true });
+
+async function healthy(options) {
+    const w = H.world(options || {});
+    const api = await H.load(w);
+    await w.tick.advance(400);
+    return { w: w, api: api };
+}
+
+async function snap(w, api, extra) {
+    // The journal is written in batches on a timer, and these scenarios end
+    // long before one would fire. This is the page's own "put it on the wire
+    // now, and wait until it is there", which is exactly what it exists for.
+    await api.reportFrames();
+    const state = api.state();
+    return Object.assign({
+        presses: w.seen.presses,
+        notice: !!w.notice(),
+        ready: state.ready,
+        attached: state.attached,
+        recovery: state.recovery,
+        queued: w.posted.filter(function (m) { return m.type === "WANGP_QUEUE_REQUEST"; }).length
+    }, extra || {});
+}
+
+// 27.1 -- an iframe that goes while the tab is idle and still wants one.
+S["idle removal"] = async function () {
+    const { w, api } = await healthy();
+    w.removeFrame();
+    w.mutate([]);
+    const atOnce = w.seen.presses;
+    await w.tick.advance(150);
+    const afterGrace = w.seen.presses;
+    w.addFrame("two");
+    w.mutate([]);
+    await w.tick.advance(400);
+    return await snap(w, api, { atOnce: atOnce, afterGrace: afterGrace, saidRepaint: w.said("recovery: repaint requested") });
+};
+
+// 27.2 -- the tab changed view on purpose, so the absence is not a fault.
+S["view changed"] = async function () {
+    const { w, api } = await healthy();
+    w.setState(VIEW_ERROR);
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(600);
+    return await snap(w, api, { saidNoAction: w.said("does not expect one; no action") });
+};
+
+// 3.4 -- a DEGRADED but serving tab is still an iframe tab, and its frame is
+// repaired like any other. Keying off the state field would refuse this.
+S["degraded still repairs"] = async function () {
+    const { w, api } = await healthy();
+    w.setState(VIEW_DEGRADED);
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(150);
+    return await snap(w, api);
+};
+
+// 27.3 -- an ordinary Gradio replacement, landing inside the grace.
+S["replacement in the grace"] = async function () {
+    const { w, api } = await healthy();
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(50);
+    w.addFrame("two");
+    await w.tick.advance(500);
+    return await snap(w, api, { saidGrace: w.said("replacement appeared during grace") });
+};
+
+// 27.19 -- the frame comes back between the grace's question and the press.
+S["frame returns at the last instant"] = async function () {
+    const { w, api } = await healthy();
+    w.removeFrame();
+    w.mutate([]);
+    // Absent when the grace asks, back before the press asks: two lookups.
+    w.restoreAtLookup(2);
+    await w.tick.advance(150);
+    await w.tick.advance(400);
+    return await snap(w, api, { saidSkipped: w.said("skipped the press; the iframe came back first") });
+};
+
+// 27.5 -- the repaint is slow. One press, and the budget waits.
+S["repaint is slow"] = async function () {
+    const { w, api } = await healthy();
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(150);
+    const pressed = w.seen.presses;
+    await w.tick.advance(8000);
+    const stillOne = w.seen.presses;
+    w.addFrame("two");
+    w.mutate([]);
+    await w.tick.advance(400);
+    return await snap(w, api, { pressed: pressed, stillOne: stillOne });
+};
+
+// 27.7 / 27.17 -- the press lands nowhere. The state still says iframe.
+S["repaint never arrives"] = async function () {
+    const { w, api } = await healthy();
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(150);
+    const pressed = w.seen.presses;
+    await w.tick.advance(13000);
+    return await snap(w, api, {
+        pressed: pressed,
+        notices: w.rootNode().children.filter(function (c) { return c.id === "minipaint-wangp-recovery-notice"; }).length,
+        text: (w.notice() || {}).textContent || "",
+        saidFailed: w.said("iframe did not return within 12000 ms on screen")
+    });
+};
+
+// 27.6 -- backgrounded while the repair is waiting. Hidden time is not spent.
+S["hidden while repairing"] = async function () {
+    const { w, api } = await healthy();
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(150);
+    w.hidden(true);
+    await w.tick.advance(120000);
+    const whileAway = !!w.notice();
+    w.hidden(false);
+    await w.tick.advance(200);
+    const onReturn = !!w.notice();
+    w.addFrame("two");
+    w.mutate([]);
+    await w.tick.advance(400);
+    return await snap(w, api, { whileAway: whileAway, onReturn: onReturn });
+};
+
+// 27.8 -- a stale S.frame with a perfectly good iframe in the page.
+S["stale frame reference"] = async function () {
+    const { w, api } = await healthy();
+    w.removeFrame();
+    w.addFrame("two");
+    api.attach(null);
+    await w.tick.advance(400);
+    return await snap(w, api);
+};
+
+// 27.9 / 27.12 -- a queue request in flight when the frame is replaced.
+S["replaced under a queue request"] = async function () {
+    const { w, api } = await healthy();
+    const pending = api.queueAndConfirm({ prompt: "a cat" });
+    await w.tick.advance(10);
+    w.removeFrame();
+    w.addFrame("two");
+    w.mutate([]);
+    await w.tick.advance(400);
+    const result = await pending;
+    return await snap(w, api, {
+        status: result.status, code: result.code, ok: result.ok,
+        saidUnconfirmed: w.said("acknowledgement lost; outcome remains unconfirmed")
+    });
+};
+
+// 27.12 -- the same, by removal rather than replacement. THIS IS THE ONE THAT
+// MUST FAIL AGAINST UNPATCHED HEAD: it read "refused" there.
+S["queue request loses its answer"] = async function () {
+    const { w, api } = await healthy();
+    const pending = api.queueAndConfirm({ prompt: "a cat" });
+    await w.tick.advance(10);
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(50);
+    const result = await pending;
+    return await snap(w, api, { status: result.status, code: result.code, ok: result.ok });
+};
+
+// 14.6 -- a non-mutating query keeps today's behaviour exactly.
+S["a query keeps its refusal"] = async function () {
+    const { w, api } = await healthy();
+    const pending = api.receivers();
+    await w.tick.advance(10);
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(50);
+    const result = await pending;
+    return await snap(w, api, { code: result.code, unconfirmed: !!result.unconfirmed });
+};
+
+// 27.10 -- a retired iframe speaking after a new one was bound.
+S["late reply from the old frame"] = async function () {
+    const { w, api } = await healthy();
+    const old = w.frame();
+    w.removeFrame();
+    const two = w.addFrame("two");
+    two.session = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    w.mutate([]);
+    await w.tick.advance(400);
+    const bound = api.state().bridge_session;
+    w.deliver(old, "WANGP_BRIDGE_READY", "cccccccccccccccccccccccccccccccc", {
+        bridge_session: "cccccccccccccccccccccccccccccccc", instance_id: "inst-1",
+        version: "1.6.4", ready: true, receivers: [], state_revision: "r1"
+    });
+    await w.tick.advance(50);
+    return await snap(w, api, { bound: bound, after: api.state().bridge_session });
+};
+
+// 27.11 -- a session change while the iframe is present presses nothing.
+S["session mismatch"] = async function () {
+    const { w, api } = await healthy();
+    w.deliver(w.frame(), "WANGP_BRIDGE_READY", "dddddddddddddddddddddddddddddddd", {
+        bridge_session: "cccccccccccccccccccccccccccccccc", instance_id: "inst-1",
+        version: "1.6.4", ready: true, receivers: [], state_revision: "r1"
+    });
+    await w.tick.advance(100);
+    return await snap(w, api, { session: api.state().bridge_session });
+};
+
+// 27.13 -- a tab put aside and brought back with nothing wrong.
+S["hidden and back, healthy"] = async function () {
+    const { w, api } = await healthy();
+    w.hidden(true);
+    await w.tick.advance(120000);
+    w.hidden(false);
+    await w.tick.advance(2000);
+    return await snap(w, api, { hellos: w.seen.hellos });
+};
+
+// 27.14 -- a tab brought back to find the iframe gone.
+S["hidden and back, frame gone"] = async function () {
+    const { w, api } = await healthy();
+    w.hidden(true);
+    w.removeFrame();
+    await w.tick.advance(60000);
+    w.hidden(false);
+    await w.tick.advance(200);
+    const pressed = w.seen.presses;
+    w.addFrame("two");
+    w.mutate([]);
+    await w.tick.advance(400);
+    return await snap(w, api, { pressed: pressed, saidResumed: w.said("page resumed; iframe missing, repairing") });
+};
+
+// 27.15 -- the root node itself replaced, which the observer cannot see.
+S["root node replaced"] = async function () {
+    const { w, api } = await healthy();
+    w.replaceRoot();
+    w.mutate([]);
+    const blind = w.seen.presses;
+    w.hidden(true);
+    w.hidden(false);
+    await w.tick.advance(200);
+    const afterRebind = w.seen.presses;
+    w.addFrame("two");
+    w.mutate([]);
+    await w.tick.advance(400);
+    const readyAgain = api.state().ready;
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(150);
+    return await snap(w, api, { blind: blind, afterRebind: afterRebind, readyAgain: readyAgain,
+                          saidRebind: w.said("root was replaced; rebinding the observer") });
+};
+
+// 27.16 -- WanGP is genuinely not serving. The repaint LANDS and says so.
+S["wangp is not serving"] = async function () {
+    const { w, api } = await healthy();
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(150);
+    const pressed = w.seen.presses;
+    w.setState(VIEW_ERROR);
+    await w.tick.advance(13000);
+    return await snap(w, api, { pressed: pressed, saidAnswered: w.said("repaint answered view=error") });
+};
+
+// 27.18 -- a burst of mutations is one cycle and one press.
+S["mutation burst"] = async function () {
+    const { w, api } = await healthy();
+    w.removeFrame();
+    for (let i = 0; i < 6; i++) { w.mutate([]); }
+    await w.tick.advance(150);
+    for (let i = 0; i < 6; i++) { w.mutate([]); }
+    await w.tick.advance(150);
+    return await snap(w, api);
+};
+
+// 16.3 -- the notice this file writes must not retrigger the observer that
+// would write it again.
+S["the notice does not retrigger"] = async function () {
+    const { w, api } = await healthy();
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(150);
+    await w.tick.advance(13000);
+    const afterWarning = w.seen.presses;
+    const notice = w.notice();
+    w.mutate([{ addedNodes: [notice], removedNodes: [] }]);
+    await w.tick.advance(400);
+    return await snap(w, api, { afterWarning: afterWarning });
+};
+
+// 27.20 -- UNKNOWN before any press, with the root still there. The element is
+// ABSENT, which is the cause that actually occurs; the box is born populated.
+S["unknown before the press"] = async function () {
+    const { w, api } = await healthy();
+    w.dropState();
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(200);
+    return await snap(w, api, { saidUnknown: w.said("state unknown after grace; refresh not pressed") });
+};
+
+// 27.21 -- UNKNOWN that becomes IFRAME inside the grace may be pressed.
+S["unknown becomes iframe"] = async function () {
+    const { w, api } = await healthy();
+    w.dropState();
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(50);
+    w.restoreState(VIEW_IFRAME);
+    await w.tick.advance(150);
+    return await snap(w, api);
+};
+
+// 27.22 / 27.25 -- UNKNOWN that becomes NON_IFRAME presses nothing, and takes
+// a notice an earlier episode left behind away with it.
+S["unknown becomes non-iframe"] = async function () {
+    const { w, api } = await healthy();
+    w.dropState();
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(200);
+    const warned = !!w.notice();
+    w.restoreState(VIEW_SETUP);
+    w.mutate([]);
+    await w.tick.advance(200);
+    return await snap(w, api, { warned: warned, saidCleared: w.said("recovery: warning cleared") });
+};
+
+// 27.23 -- the state goes missing AFTER a press. Unprovable, so warned.
+S["unknown after the press"] = async function () {
+    const { w, api } = await healthy();
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(150);
+    const pressed = w.seen.presses;
+    w.dropState();
+    await w.tick.advance(13000);
+    return await snap(w, api, { pressed: pressed, saidUnprovable: w.said("repaint outcome unknown") });
+};
+
+// 27.24 -- a later handshake takes the notice away, with no Gradio round trip
+// having replaced anything.
+S["warning clears on a later handshake"] = async function () {
+    const { w, api } = await healthy();
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(150);
+    await w.tick.advance(13000);
+    const warned = !!w.notice();
+    w.addFrame("two");
+    w.mutate([]);
+    await w.tick.advance(400);
+    return await snap(w, api, { warned: warned });
+};
+
+// 27.26 -- UNKNOWN with the root gone as well. No surface, so no notice: this
+// is the observer-rebind case, not a recovery failure.
+S["unknown with no root"] = async function () {
+    const { w, api } = await healthy();
+    w.hidden(true);
+    w.dropState();
+    w.dropRoot();
+    w.hidden(false);
+    await w.tick.advance(300);
+    const mid = await snap(w, api, {});
+    // The tab is drawn again. The bounded ladder finds it and binds, and a
+    // later removal is detected normally.
+    w.restoreState(VIEW_IFRAME);
+    w.restoreRoot();
+    await w.tick.advance(3000);
+    w.addFrame("two");
+    w.mutate([]);
+    await w.tick.advance(400);
+    const readyAgain = api.state().ready;
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(150);
+    return await snap(w, api, {
+        midPresses: mid.presses, midNotice: mid.notice, midWarningShown: mid.recovery.warning_shown,
+        readyAgain: readyAgain, saidNoSurface: w.said("state unknown and the root is gone")
+    });
+};
+
+// 27.4 (browser half) / acceptance 18 -- recovery never submits anything.
+S["recovery submits nothing"] = async function () {
+    const { w, api } = await healthy();
+    const before = w.posted.filter(function (m) { return m.type === "WANGP_QUEUE_REQUEST"; }).length;
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(150);
+    w.addFrame("two");
+    w.mutate([]);
+    await w.tick.advance(400);
+    return await snap(w, api, { before: before });
+};
+
+// The refresh control itself missing: no press, and no pretence of one.
+S["no refresh control"] = async function () {
+    const { w, api } = await healthy({ refresh: false });
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(200);
+    return await snap(w, api, { saidNoControl: w.said("Refresh control is not in the page") });
+};
+
+// An unrecognised view from a build newer than this file reads as UNKNOWN.
+S["a fifth view"] = async function () {
+    const { w, api } = await healthy();
+    w.setState(JSON.stringify({ view: "hologram", state: "READY" }));
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(200);
+    return await snap(w, api);
+};
+
+// Malformed JSON reads as UNKNOWN too, and presses nothing.
+S["malformed state"] = async function () {
+    const { w, api } = await healthy();
+    w.setState("{not json");
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(200);
+    return await snap(w, api);
+};
+
+/** A scenario that never finishes is a result, not a hang: a build whose
+ * promises are left unsettled is exactly what several of these check for, and
+ * it must be reported rather than quietly ending the process. Measured on the
+ * real clock, which the scenario's virtual one has no say over. */
+function bounded(name, run) {
+    let timer = 0;
+    return Promise.race([
+        Promise.resolve().then(run).then(
+            function (value) { H.realClearTimeout(timer); return value; },
+            function (error) { H.realClearTimeout(timer); return { error: String((error && error.stack) || error).slice(0, 400) }; }
+        ),
+        new Promise(function (resolve) {
+            timer = H.realSetTimeout(function () { resolve({ error: "did not finish: " + name }); }, 5000);
+        })
+    ]);
+}
+
+async function main() {
+    const out = {};
+    for (const name of Object.keys(S)) {
+        out[name] = await bounded(name, S[name]);
+        H.restore();
+    }
+    console.log(JSON.stringify(out));
+    process.exit(0);
+}
+
+main().catch(function (e) { console.error("ERR", (e && e.stack) || e); process.exit(1); });
+"""
+
+
+#: Every mutation below reverts one decision and names the check that must then
+#: fail. This is the project's convention written down as code rather than as a
+#: promise: a check that does not fail when its behaviour is taken away is not
+#: checking anything, and these are cheap enough - the whole set runs in under a
+#: second - that there is no reason to take that on trust.
+#:
+#: An anchor that no longer matches is itself a failure. It means the code moved
+#: and nobody came back to ask whether the check still bites.
+_RECOVERY_MUTATIONS = (
+    (
+        "the observer only ever handled arrival",
+        """            const frame = frameElement();
+            if (frame) {
+                if (frame !== S.frame) { attachAndSettle(); }
+                return;
+            }""",
+        """            const frame = frameElement();
+            if (frame) {
+                if (frame !== S.frame) { attachAndSettle(); }
+            }
+            return;""",
+        "idle removal", "presses", 1, 0,
+    ),
+    (
+        "a browser give-up settles a mutating request as a refusal",
+        "if (giveUp && entry && MUTATING_REPLIES.indexOf(entry.type) !== -1) {",
+        "if (false && giveUp && entry && MUTATING_REPLIES.indexOf(entry.type) !== -1) {",
+        "queue request loses its answer", "status", "unconfirmed", "refused",
+    ),
+    (
+        "an unreadable state authorises the press",
+        "const pressed = !frame && view === WAN_VIEW_IFRAME && pressHidden(REFRESH_ELEM_ID);",
+        "const pressed = !frame && view !== WAN_VIEW_NON_IFRAME && pressHidden(REFRESH_ELEM_ID);",
+        "unknown before the press", "presses", 0, 1,
+    ),
+    (
+        "the press does not re-check for a live frame",
+        "const pressed = !frame && view === WAN_VIEW_IFRAME && pressHidden(REFRESH_ELEM_ID);",
+        "const pressed = view === WAN_VIEW_IFRAME && pressHidden(REFRESH_ELEM_ID);",
+        "frame returns at the last instant", "presses", 0, 1,
+    ),
+    (
+        "there is no grace before the press",
+        "S.recovery.graceTimer = setTimeout(afterAbsenceGrace, ABSENCE_GRACE_MS);",
+        "afterAbsenceGrace();",
+        "replacement in the grace", "presses", 0, 1,
+    ),
+    (
+        "the state field is read instead of the view field",
+        'view = state && typeof state.view === "string" ? state.view : "";',
+        'view = state && typeof state.state === "string" ? state.state : "";',
+        "degraded still repairs", "presses", 1, 0,
+    ),
+    (
+        "repair is not single-flight",
+        "        if (S.recovery.active) { return false; }\n        S.recovery.active = true;",
+        "        S.recovery.active = true;",
+        "mutation burst", "presses", 1, 12,
+    ),
+    (
+        "the root observer is never rebound",
+        "if (!S.watcherRoot || S.watcherRoot.isConnected) { return false; }",
+        "if (!S.watcherRoot || true) { return false; }",
+        "root node replaced", "readyAgain", True, False,
+    ),
+    (
+        "the notice waits for Gradio to remove it",
+        "    function clearRecoveryWarning() {\n        const notice = noticeElement();",
+        "    function clearRecoveryWarning() {\n        if (true) { return; }\n        const notice = noticeElement();",
+        "warning clears on a later handshake", "notice", False, True,
+    ),
+)
+
+#: The one mutation that takes two edits: warning on an unreadable state
+#: whether or not there is anything to render the warning into, AND counting
+#: that no-op as a warning shown. Together they are the implementation 27.26
+#: exists to rule out - the one that suppresses the next real warning.
+_RECOVERY_WARN_ANYWAY = (
+    (
+        '            if (!rootElement()) {\n'
+        '                say("recovery: state unknown and the root is gone; rebinding the observer");',
+        '            if (false && !rootElement()) {\n'
+        '                say("recovery: state unknown and the root is gone; rebinding the observer");',
+    ),
+    (
+        '        if (!root || typeof root.appendChild !== "function") { return false; }',
+        '        if (!root || typeof root.appendChild !== "function") { S.recovery.warningShown = true; return false; }',
+    ),
+)
+
+
+def _run_recovery(node, scratch, source_path):
+    """Every scenario against one copy of the browser file, as a dict."""
+    import json as _json
+    import subprocess
+
+    run = subprocess.run([node, str(scratch / "scenarios.js"), str(source_path)],
+                         capture_output=True, text=True, timeout=180, check=False, cwd=str(scratch))
+    lines = run.stdout.strip().splitlines()
+    if not lines:
+        return {"__error__": (run.stderr or "no output")[-400:]}
+    try:
+        return _json.loads(lines[-1])
+    except ValueError:
+        return {"__error__": lines[-1][-400:]}
+
+
+def recovery_checks(r: Results) -> None:
+    """In-place repair of a WanGP iframe that went away on its own.
+
+    WHAT THIS EXISTS TO CATCH.
+
+    The failure is not the one it looks like. ``#wangp_iframe_root`` is still
+    in the page, ``#wangp_iframe`` is not, and the server carries on admitting
+    and generating the whole time - so an absent iframe is evidence that the
+    browser lost its control surface, not that WanGP died, and the two call for
+    opposite responses. The iframe is server-rendered into a gr.HTML the tab
+    owns and the root observer only ever handled its ARRIVAL, so once it was
+    gone nothing in the file would ever ask for another one: the absence lasted
+    for the life of the page and a user restarted a browser over a generation
+    that was running perfectly well.
+
+    The repair is deliberately small, and almost every check here is about a
+    line it must NOT cross. The tab clears the iframe on purpose whenever it
+    paints setup, starting or error, so absence alone never authorises
+    anything; a repaint is a WanGP page RELOAD, so pressing Refresh at the
+    wrong moment is the damage this exists to prevent; and a request that may
+    already have reached WanGP is never reported as refused because nobody
+    answered it - that is how a job that was running comes back with a retry
+    button under it.
+
+    Driven through Node against a stubbed window, on a virtual clock, for the
+    same reason the flush checks are: the logic is this file's, and half of
+    what is asserted - which of three states was read, whether a button was
+    pressed, whether a promise settled as a refusal or as unconfirmed - leaves
+    no trace a static read of the source could find.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        r.check("node is available for the recovery checks (skipped)", True)
+        return
+
+    source = BROWSER_COPY.read_text(encoding="utf-8")
+    with tempfile.TemporaryDirectory(prefix="minipaint-wangp-recovery-") as scratch_dir:
+        scratch = pathlib.Path(scratch_dir)
+        (scratch / "harness.js").write_text(_RECOVERY_HARNESS, encoding="utf-8")
+        (scratch / "scenarios.js").write_text(_RECOVERY_SCENARIOS, encoding="utf-8")
+        try:
+            got = _run_recovery(node, scratch, BROWSER_COPY)
+        except subprocess.TimeoutExpired:
+            got = {"__error__": "the recovery harness did not finish"}
+        if "__error__" in got:
+            r.check("the recovery harness runs", False, got["__error__"])
+            return
+        broken = [name for name, answer in got.items() if "error" in answer]
+        if not r.check("every recovery scenario finished", not broken, ", ".join(broken)[:300]):
+            return
+
+        def check(name, scenario, key, expected):
+            answer = got.get(scenario) or {}
+            r.check(name, answer.get(key) == expected, f"{scenario}.{key}={answer.get(key)!r}")
+
+        # -- the incident itself ---------------------------------------------
+        check("an iframe that goes while the view still wants one is repaired",
+              "idle removal", "presses", 1)
+        check("and nothing is pressed before the grace has run",
+              "idle removal", "atOnce", 0)
+        check("and the repaint is what the journal says it asked for",
+              "idle removal", "saidRepaint", True)
+        check("and the replacement is attached and shakes hands",
+              "idle removal", "ready", True)
+        check("and a repair that worked shows the user nothing",
+              "idle removal", "notice", False)
+
+        # -- absence that is not a fault --------------------------------------
+        check("a view that changed on purpose presses nothing",
+              "view changed", "presses", 0)
+        check("and warns about nothing", "view changed", "notice", False)
+        check("and says so once, rather than every re-render",
+              "view changed", "saidNoAction", True)
+        check("a DEGRADED but serving tab is still an iframe tab, and is repaired",
+              "degraded still repairs", "presses", 1)
+        check("an unrecognised view presses nothing", "a fifth view", "presses", 0)
+        check("and neither does a state box that will not parse",
+              "malformed state", "presses", 0)
+
+        # -- the two halves of the race ---------------------------------------
+        check("a replacement that lands inside the grace is taken, not pressed over",
+              "replacement in the grace", "presses", 0)
+        check("and the journal says the grace is what caught it",
+              "replacement in the grace", "saidGrace", True)
+        check("a frame that returns between the grace and the press is not pressed over",
+              "frame returns at the last instant", "presses", 0)
+        check("and the journal says the press was skipped",
+              "frame returns at the last instant", "saidSkipped", True)
+        check("a burst of mutations is one cycle and one press",
+              "mutation burst", "presses", 1)
+        check("and the notice the browser writes does not restart the cycle",
+              "the notice does not retrigger", "afterWarning", 1)
+
+        # -- bounded, and only in on-screen time ------------------------------
+        check("a slow repaint is waited for rather than pressed again",
+              "repaint is slow", "stillOne", 1)
+        check("and it attaches when it finally lands", "repaint is slow", "ready", True)
+        check("a repair that is waiting spends no budget while the page is hidden",
+              "hidden while repairing", "whileAway", False)
+        check("and none of the catching-up either", "hidden while repairing", "onReturn", False)
+        check("and still finishes when the replacement arrives",
+              "hidden while repairing", "ready", True)
+
+        # -- the two ways it ends badly ---------------------------------------
+        check("a repaint that never arrives stops, rather than pressing again",
+              "repaint never arrives", "presses", 1)
+        check("and warns exactly once", "repaint never arrives", "notices", 1)
+        check("and the warning does not claim the server's job failed",
+              "repaint never arrives", "text",
+              "The WanGP controls in this page could not be reconnected automatically. "
+              "Any job already accepted by the server may still be running. Avoid restarting "
+              "WanGP or Forge while it is working. If the controls remain unavailable, "
+              "refresh this browser page only as a last resort.")
+        check("an unreadable state never authorises a press",
+              "unknown before the press", "presses", 0)
+        check("and stops and warns instead", "unknown before the press", "notice", True)
+        check("an unreadable state that becomes iframe inside the grace may be pressed",
+              "unknown becomes iframe", "presses", 1)
+        check("one that becomes a non-iframe view may not",
+              "unknown becomes non-iframe", "presses", 0)
+        check("and takes an earlier notice away with it",
+              "unknown becomes non-iframe", "notice", False)
+        check("a state that goes missing after the press is unproved, not a success",
+              "unknown after the press", "notice", True)
+        check("and it is still only one press", "unknown after the press", "presses", 1)
+        check("a tab with no Refresh control left presses nothing",
+              "no refresh control", "presses", 0)
+
+        # -- the server answering is a success, not a failure ------------------
+        check("a repaint that lands and says WanGP is not serving presses no further",
+              "wangp is not serving", "presses", 1)
+        check("and shows no warning over the server's own card",
+              "wangp is not serving", "notice", False)
+        check("and the journal records which view answered",
+              "wangp is not serving", "saidAnswered", True)
+
+        # -- the notice is the browser's to remove ----------------------------
+        check("a later handshake takes the notice away without Gradio's help",
+              "warning clears on a later handshake", "notice", False)
+        check("having actually shown it first",
+              "warning clears on a later handshake", "warned", True)
+
+        # -- a request whose answer was lost ----------------------------------
+        check("a queue request abandoned by frame loss is unconfirmed, never refused",
+              "queue request loses its answer", "status", "unconfirmed")
+        check("and carries the code the outbox spends on its safe branch",
+              "queue request loses its answer", "code", "ADMISSION_UNCONFIRMED")
+        check("the same when the frame is replaced rather than removed",
+              "replaced under a queue request", "status", "unconfirmed")
+        check("and the journal says so from the code that decided it",
+              "replaced under a queue request", "saidUnconfirmed", True)
+        check("a query keeps today's refusal exactly",
+              "a query keeps its refusal", "code", "BRIDGE_SESSION_MISMATCH")
+        check("and is not dressed up as unconfirmed",
+              "a query keeps its refusal", "unconfirmed", False)
+        check("recovery never submits a queue request of its own",
+              "recovery submits nothing", "queued", 0)
+
+        # -- what was already true, kept true ---------------------------------
+        check("a stale frame reference is discarded without a press",
+              "stale frame reference", "presses", 0)
+        check("and the live iframe is attached instead",
+              "stale frame reference", "ready", True)
+        check("a retired iframe cannot answer for the current one",
+              "late reply from the old frame", "after", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        check("a session change with the iframe present presses nothing",
+              "session mismatch", "presses", 0)
+        check("and is accepted as the new session",
+              "session mismatch", "session", "cccccccccccccccccccccccccccccccc")
+        check("a healthy tab put aside and brought back does nothing at all",
+              "hidden and back, healthy", "presses", 0)
+        check("and does not shake hands again either",
+              "hidden and back, healthy", "hellos", 1)
+
+        # -- resume, and the root that was replaced ---------------------------
+        check("a tab that comes back to a missing iframe repairs it",
+              "hidden and back, frame gone", "pressed", 1)
+        check("and says that is why", "hidden and back, frame gone", "saidResumed", True)
+        check("a replaced root is invisible to the observer bound to the old one",
+              "root node replaced", "blind", 0)
+        check("the next integrity check notices and rebinds",
+              "root node replaced", "saidRebind", True)
+        check("and a removal under the new root is detected normally",
+              "root node replaced", "readyAgain", True)
+
+        # -- no surface is not a recovery failure ------------------------------
+        check("an unreadable state with no root presses nothing",
+              "unknown with no root", "midPresses", 0)
+        check("and creates no notice, because there is nowhere to put one",
+              "unknown with no root", "midNotice", False)
+        check("and does not record one either, so a later real failure can warn",
+              "unknown with no root", "midWarningShown", False)
+        check("it rebinds the observer instead",
+              "unknown with no root", "saidNoSurface", True)
+        check("and a tab drawn again is picked up by the bounded ladder",
+              "unknown with no root", "readyAgain", True)
+
+        # -- and every one of those checks actually bites ----------------------
+        for name, old, new, scenario, key, well, ill in _RECOVERY_MUTATIONS:
+            if not r.check(f"the check for '{name}' still points at live code", source.count(old) == 1,
+                           f"{source.count(old)} matches"):
+                continue
+            broken_path = scratch / "mutated.js"
+            broken_path.write_text(source.replace(old, new), encoding="utf-8")
+            answer = (_run_recovery(node, scratch, broken_path).get(scenario) or {})
+            r.check(f"'{scenario}' fails when {name}",
+                    answer.get(key) == ill and well != ill, f"{key}={answer.get(key)!r}")
+
+        mutated = source
+        anchored = True
+        for old, new in _RECOVERY_WARN_ANYWAY:
+            if mutated.count(old) != 1:
+                anchored = False
+                break
+            mutated = mutated.replace(old, new)
+        if r.check("the check for warning without a surface still points at live code", anchored):
+            broken_path = scratch / "mutated.js"
+            broken_path.write_text(mutated, encoding="utf-8")
+            answer = (_run_recovery(node, scratch, broken_path).get("unknown with no root") or {})
+            r.check("'unknown with no root' fails when an unreadable state warns wherever it is",
+                    answer.get("midWarningShown") is True, str(answer.get("midWarningShown")))
+
+
 def run() -> Results:
     r = Results("wangp protocol")
     copy_checks(r)
@@ -2239,6 +3414,7 @@ def run() -> Results:
     switch_apply_checks(r)
     frame_fallback_checks(r)
     proactive_flush_checks(r)
+    recovery_checks(r)
     page_head_checks(r)
     session_isolation_checks(r)
     loader_checks(r)

@@ -202,10 +202,66 @@ window.minipaintWanGP = (function () {
     // and "where do the bytes go" stay two separate facts. The attributes are
     // the fallback for a page that hands it over some other way.
     const CHANNEL_ELEM_ID = "wangp_channel";
+    // The tab's own opinion of which of its four views is showing, as JSON.
+    // The tab writes it on every repaint, so it is how this side learns what
+    // the server decided without asking over a second channel.
+    const STATE_ELEM_ID = "wangp_state";
+    // The tab's hidden Refresh, wired to ui.py show(): repaint from what is
+    // true now, and start nothing. Never Open, which starts a process.
+    const REFRESH_ELEM_ID = "wangp_refresh_request";
     const BROWSER_CHECK_ELEM_ID = "wangp_browser_check";
     const SESSION_ELEM_ID = "wangp_session";
     const CHANNEL_ATTRIBUTE = "data-minipaint-channel";
     const INSTANCE_ATTRIBUTE = "data-minipaint-instance";
+
+    /* What the tab's state box says about whether an iframe belongs on the
+     * page at all. Three answers and not two: the tab clears the iframe on
+     * purpose whenever it paints setup, starting or error, so a missing
+     * iframe is only a fault when the tab still says it wants one - and a
+     * state this side cannot read is not permission to guess either way. */
+    const WAN_VIEW_IFRAME = "iframe";
+    const WAN_VIEW_NON_IFRAME = "non_iframe";
+    const WAN_VIEW_UNKNOWN = "unknown";
+    //: The views ui.py can paint. Anything else is a build newer than this
+    //: file, and is read as UNKNOWN rather than forced into one of these.
+    const NON_IFRAME_VIEWS = ["setup", "starting", "error"];
+
+    // The element the browser writes its one recovery notice into, and the
+    // class the stylesheet dresses it with. One id, so clearing it is exact.
+    const RECOVERY_NOTICE_ID = "minipaint-wangp-recovery-notice";
+    const RECOVERY_NOTICE_CLASS = "minipaint-wangp-recovery";
+    //: The only text that notice ever carries. Never a server string, never a
+    //: message payload, never an error detail - see section 23.
+    const RECOVERY_NOTICE_TEXT =
+        "The WanGP controls in this page could not be reconnected automatically. "
+        + "Any job already accepted by the server may still be running. Avoid restarting "
+        + "WanGP or Forge while it is working. If the controls remain unavailable, "
+        + "refresh this browser page only as a last resort.";
+
+    /* Which replies belong to a request that may have CHANGED something on
+     * the WanGP side by the time this page stopped waiting for the answer.
+     *
+     * The distinction is not which error code comes back, it is who answered.
+     * WanGP declining is an answer and a refusal; this page giving up is not
+     * an answer at all, and reporting it as a refusal invites the user to
+     * press again on work that may already be queued. So a give-up settles
+     * these two with an explicit unconfirmed marker instead. See section 14.
+     *
+     * FORM_FLUSHED is deliberately not here: it writes the live form, but it
+     * admits no task, starts no generation, and nothing downstream turns its
+     * result into a terminal outbox state. If that ever changes it joins this
+     * list. */
+    const MUTATING_REPLIES = [QUEUE_RESULT, RECEIVE_RESULT];
+
+    /* What an abandoned one of those says to a person. The code is
+     * ADMISSION_UNCONFIRMED either way - it is the word the server already
+     * knows and the one the outbox spends on its safe branch - but the
+     * sentence is the operation's own, because "added to the queue" describes
+     * nothing that an image send was doing. */
+    const UNCONFIRMED_SENTENCES = {};
+    UNCONFIRMED_SENTENCES[QUEUE_RESULT] = MESSAGES.ADMISSION_UNCONFIRMED;
+    UNCONFIRMED_SENTENCES[RECEIVE_RESULT] =
+        "WanGP did not confirm the image, and it may still have arrived. Check the WanGP page before sending it again.";
 
     // How often the container is looked for before this file gives up on the
     // page having a WanGP tab at all, in milliseconds. Six lookups and then
@@ -237,6 +293,23 @@ window.minipaintWanGP = (function () {
         helloStep: 0,
         listening: false,
         watcher: null,
+        //: The node S.watcher is bound to. Kept so that a root Forge REPLACED
+        //: rather than emptied can be noticed: an observer on a detached node
+        //: never fires again and never says so. See rebindRoot().
+        watcherRoot: null,
+        //: One repair cycle's worth of bookkeeping, and nothing that outlives
+        //: the page. No storage, no coordinator, no state machine: while the
+        //: tab is healthy every one of these stays at its resting value and
+        //: nothing reads them.
+        recovery: {
+            active: false,      //: single-flight: one cycle, never two
+            reason: "",         //: why this one started, for the log line
+            startedAt: 0,       //: for duration_ms
+            pressed: false,     //: whether this cycle pressed Refresh
+            warningShown: false,//: one notice per unresolved episode
+            graceTimer: 0,      //: the one-shot absence grace
+            deadline: null      //: the visibility-aware arrival budget
+        },
         lastCode: "",
         theme: "",
         // Whether the bridge in this page can take a queue request at all: the
@@ -393,7 +466,7 @@ window.minipaintWanGP = (function () {
         const scope = app();
         const direct = scope.getElementById ? scope.getElementById(IFRAME_ID) : null;
         if (direct && direct.tagName === "IFRAME") { return direct; }
-        const root = scope.querySelector ? scope.querySelector("#" + IFRAME_ROOT_ID) : null;
+        const root = rootElement();
         return root ? root.querySelector("iframe") : null;
     }
 
@@ -437,6 +510,57 @@ window.minipaintWanGP = (function () {
     function box(elementId) {
         const scope = app();
         return scope.querySelector ? scope.querySelector("#" + elementId + " textarea") : null;
+    }
+
+    /**
+     * Which of its four views the tab says it is showing, as one of three
+     * answers.
+     *
+     * Three and not two, because a missing iframe is not by itself a fault.
+     * The tab clears the iframe on purpose every time it paints setup,
+     * starting or error - that is what those views ARE - so "the iframe is
+     * gone" only means something once this side knows whether the tab still
+     * wants one. And when the answer cannot be read at all, that is its own
+     * third case rather than a guess: pressing Refresh on a page whose state
+     * is unreadable reloads whatever WanGP was doing inside a frame that may
+     * have been perfectly healthy, and calling it NON_IFRAME instead would
+     * claim the server made a decision nobody saw it make.
+     *
+     * The VIEW field, never the STATE field. They sit side by side in the
+     * same JSON and only one of them answers this question: a WanGP that a
+     * bridge complaint has degraded is state DEGRADED and view iframe,
+     * because the frame is genuinely usable and only the intelligent Send is
+     * switched off. Reading STATE would file that tab as unrecognised, refuse
+     * to repair its iframe, and warn a user whose tab was working.
+     *
+     * Pure, cheap, and safe to call as often as the cycle needs to.
+     */
+    function readWanGpView() {
+        const raw = box(STATE_ELEM_ID);
+        // Not an empty value: the box is born holding the real view's JSON
+        // (ui.py builds it that way), so in practice this is the element
+        // being absent from the DOM altogether - which is also the shape that
+        // says the whole WanGP subtree went, not just the frame.
+        if (!raw || !raw.value) { return WAN_VIEW_UNKNOWN; }
+        let view = "";
+        try {
+            const state = JSON.parse(raw.value);
+            view = state && typeof state.view === "string" ? state.view : "";
+        } catch (e) {
+            return WAN_VIEW_UNKNOWN;
+        }
+        if (view === WAN_VIEW_IFRAME) { return WAN_VIEW_IFRAME; }
+        if (NON_IFRAME_VIEWS.indexOf(view) !== -1) { return WAN_VIEW_NON_IFRAME; }
+        // A fifth view from a build newer than this file. Not a case today,
+        // and deliberately read as "cannot prove it is safe" rather than as
+        // either of the two answers that authorise an action.
+        return WAN_VIEW_UNKNOWN;
+    }
+
+    /** The tab's iframe container, if the tab is still in the page at all. */
+    function rootElement() {
+        const scope = app();
+        return scope.querySelector ? scope.querySelector("#" + IFRAME_ROOT_ID) : null;
     }
 
     /** Write one of those the way a user would, so Gradio sees the change. */
@@ -603,6 +727,19 @@ window.minipaintWanGP = (function () {
                 } else {
                     S.pending.delete(requestId);
                 }
+                // The same rule abandon() follows, for the same reason and in
+                // the other half of the same window: the envelope crossed into
+                // the iframe - post() said so - and then nothing came back.
+                // That is this page giving up, not WanGP declining, and for a
+                // request that may already have changed something over there
+                // the difference is a job left for a person to judge instead
+                // of a job offered straight back for a retry.
+                if (MUTATING_REPLIES.indexOf(expects) !== -1) {
+                    say("recovery: mutating request acknowledgement lost; outcome remains unconfirmed ("
+                        + requestId.slice(0, 8) + ", " + expects + ")");
+                    resolve(unconfirmed(kind, UNCONFIRMED_SENTENCES[expects]));
+                    return;
+                }
                 resolve(failure(RECEIVER_QUERY_TIMEOUT, kind));
             });
             S.pending.set(requestId, entry);
@@ -627,7 +764,11 @@ window.minipaintWanGP = (function () {
         if (result && result.ok) {
             say(entry.type + ": answered after " + waited + " ms" + (entry.expired ? " (late, taken)" : ""));
         } else {
-            say(entry.type + ": refused after " + waited + " ms - " + ((result && result.code) || "?")
+            // "refused" is a claim about what WanGP did, so it is only said
+            // when WanGP is the one who answered. A settlement this side
+            // decided says so instead - see unconfirmed().
+            say(entry.type + ": " + (result && result.unconfirmed ? "unconfirmed" : "refused")
+                + " after " + waited + " ms - " + ((result && result.code) || "?")
                 + ((result && result.detail) ? " (" + result.detail + ")" : "") + (entry.expired ? " (late)" : ""));
         }
         if (entry.expired) {
@@ -638,11 +779,57 @@ window.minipaintWanGP = (function () {
         return true;
     }
 
-    /** Every request still waiting is failed. Called when the page it was
-     * prepared for stops being the page that would answer it. */
-    function abandon(failureCode) {
+    /**
+     * What a request settles with when this page stopped waiting rather than
+     * the bridge answering. Deliberately not failure(): a caller that reads
+     * only ``ok`` still sees a non-success, and a caller that has to decide
+     * what to tell a person - or what state to write down - can tell the two
+     * apart by the marker.
+     */
+    function unconfirmed(reason, line) {
+        S.lastCode = ADMISSION_UNCONFIRMED;
+        return {
+            ok: false,
+            unconfirmed: true,
+            code: ADMISSION_UNCONFIRMED,
+            message: line || sentence(ADMISSION_UNCONFIRMED),
+            detail: text(reason, 200)
+        };
+    }
+
+    /**
+     * Every request still waiting is settled. Called when the page it was
+     * prepared for stops being the page that would answer it.
+     *
+     * ``giveUp`` says this side stopped waiting rather than the bridge
+     * answering, and it is the whole of the difference that matters here.
+     * No acknowledgement is not the same fact as a refusal: a queue request
+     * or an image send may already have crossed into WanGP and been acted on
+     * by the time the frame holding the answer went away, and the outbox
+     * spends the two on opposite branches - unconfirmed is shown and left for
+     * a person to judge, failed is offered straight back for a retry. A retry
+     * of a generation that is already running is the one outcome the whole
+     * recovery path exists to avoid, so a give-up never produces one.
+     *
+     * Non-mutating requests - the queries and the probes - are unchanged:
+     * nothing downstream turns their answer into a terminal record, and a
+     * caller is free to ask again once the bridge is back.
+     */
+    function abandon(failureCode, giveUp) {
         const waiting = Array.from(S.pending.keys());
-        for (const requestId of waiting) { settle(requestId, failure(failureCode)); }
+        for (const requestId of waiting) {
+            const entry = S.pending.get(requestId);
+            if (giveUp && entry && MUTATING_REPLIES.indexOf(entry.type) !== -1) {
+                // Said here, where the outcome is decided, rather than by
+                // whoever reads it later: this is the line that would have
+                // made a lost admission visible the first time it happened.
+                say("recovery: mutating request acknowledgement lost; outcome remains unconfirmed ("
+                    + requestId.slice(0, 8) + ", " + entry.type + ")");
+                settle(requestId, unconfirmed(failureCode, UNCONFIRMED_SENTENCES[entry.type]));
+                continue;
+            }
+            settle(requestId, failure(failureCode));
+        }
         S.query = null;
     }
 
@@ -666,8 +853,9 @@ window.minipaintWanGP = (function () {
         if (fresh) {
             // A reload is a new session: the old channel cannot be reused,
             // and nothing that was waiting on it may be answered by the page
-            // that just replaced it.
-            abandon(BRIDGE_SESSION_MISMATCH);
+            // that just replaced it. A give-up, not an answer - the page that
+            // could have said yes or no is the one that just went away.
+            abandon(BRIDGE_SESSION_MISMATCH, true);
             S.ready = false;
             S.queue = false;
             S.start = false;
@@ -702,6 +890,10 @@ window.minipaintWanGP = (function () {
                 "did not run."
             );
             report(false, "the WanGP page in this browser did not answer the handshake");
+            // A frame that arrived and then would not speak is exactly as
+            // unusable as one that never arrived, so a repair cycle waiting on
+            // this handshake ends here rather than at the arrival budget.
+            handshakeSettledUnusable("no reply to " + HELLO_DELAYS.length + " offers");
             return;
         }
         const wait = HELLO_DELAYS[S.helloStep];
@@ -925,13 +1117,23 @@ window.minipaintWanGP = (function () {
             flushProactively("the page went to the background");
         };
 
+        // Coming back is also the moment to find out whether anything went
+        // away while nobody was looking. A page that is hidden for an hour can
+        // return to a Forge that re-rendered the whole tab underneath it, and
+        // until this ran there was nothing anywhere that would notice.
+        // Healthy is free: one state read and two lookups, then nothing.
+        const check = function (why) {
+            try { verifyOnResume(why); } catch (e) { /* never worth breaking the lifecycle over */ }
+        };
+
         const back = function (why) {
-            if (!awaySince) { say("lifecycle: " + why); return; }
+            if (!awaySince) { say("lifecycle: " + why); check(why); return; }
             const away = Math.round((Date.now() - awaySince) / 100) / 10;
             awaySince = 0;
             resumeDeadlines();
             say("lifecycle: back on screen after " + away + "s (" + why + ")"
                 + "; deadlines resume with what they had left");
+            check(why);
         };
 
         try {
@@ -1099,12 +1301,15 @@ window.minipaintWanGP = (function () {
             S.lastCode = refused;
             say("handshake: the bridge answered but refused - " + refused + " (it named no session for this page)");
             report(false, "the bridge answered but refused: " + refused);
+            handshakeSettledUnusable(refused);
             return;
         }
         const instance = text(payload.instance_id, 128);
         const restarted = !!S.instanceId && !!instance && instance !== S.instanceId;
         if (S.bridgeSession && S.bridgeSession !== session) {
-            abandon(restarted ? WANGP_RESTARTED : BRIDGE_SESSION_MISMATCH);
+            // The bridge named a different session, which answers "who is
+            // speaking now" and not "what became of that request".
+            abandon(restarted ? WANGP_RESTARTED : BRIDGE_SESSION_MISMATCH, true);
         }
         stopHandshake();
         S.bridgeSession = session;
@@ -1141,6 +1346,13 @@ window.minipaintWanGP = (function () {
         if (declared) { flushProactively("the WanGP page became ready"); }
         // Presentation only, and never a reason a picture cannot be sent.
         try { theme(S.theme || detectTheme()); } catch (e) { /* section 27.1 */ }
+        // A bridge that introduced itself is the whole definition of the
+        // controls being back. The cycle ends silently, and any notice a
+        // previous episode left behind is taken away explicitly - a repaint
+        // replaces the HTML inside the container, never the container, so
+        // nothing else would have removed it.
+        if (S.recovery.active) { finishIframeRepair(REPAIR_READY, ""); }
+        else { clearRecoveryWarning(); }
     }
 
     /** The bridge saying the process behind it changed state. Advisory: it can
@@ -1152,13 +1364,15 @@ window.minipaintWanGP = (function () {
             S.bridgeSession = "";
             S.receivers = [];
             S.revision = "";
-            abandon(WANGP_RESTARTED);
+            // An advisory about the process, not a verdict on the requests
+            // that were in flight when it restarted.
+            abandon(WANGP_RESTARTED, true);
             beginHandshake(true);
             return;
         }
         if (payload.state && payload.state !== "READY") {
             S.ready = false;
-            abandon(WANGP_RESTARTED);
+            abandon(WANGP_RESTARTED, true);
         }
     }
 
@@ -1652,7 +1866,14 @@ window.minipaintWanGP = (function () {
             + "; start " + (payload.start || "auto") + (payload.model_type ? "; for model " + payload.model_type : ""));
         return ask(QUEUE_REQUEST, payload, QUEUE_REQUEST_TIMEOUT_MS, QUEUE_RESULT).then(function (answer) {
             if (answer && answer.ok) { return answer; }
-            return Object.assign({ admission: "refused", request_id: requestId }, answer);
+            // "refused" is the bridge's word, so it is only supplied for an
+            // answer that came from the bridge. A settlement this side decided
+            // carries no admission at all - nothing was observed, and the
+            // three-value vocabulary has no word for that on purpose.
+            const base = answer && answer.unconfirmed
+                ? { request_id: requestId }
+                : { admission: "refused", request_id: requestId };
+            return Object.assign(base, answer);
         });
     }
 
@@ -1694,6 +1915,19 @@ window.minipaintWanGP = (function () {
             queue_depth: null
         };
         if (!asked.ok) {
+            // The ask did not come back ok, and the two reasons it might not
+            // are not interchangeable. The bridge declining is a fact about
+            // the request and reports as a refusal; this page giving up while
+            // the ask was in flight is a fact about this page, and the request
+            // may already be queued inside WanGP. Reporting the second as the
+            // first is how a job that was running came back as a failure with
+            // a retry button under it. The confirmation loop below already
+            // reaches "unconfirmed" correctly; this is the one window it never
+            // covered, because it is the window before it starts.
+            if (asked.unconfirmed) {
+                return Object.assign(base, { ok: false, status: "unconfirmed", code: ADMISSION_UNCONFIRMED,
+                                             message: sentence(ADMISSION_UNCONFIRMED), detail: asked.detail || "" });
+            }
             return Object.assign(base, { ok: false, status: "refused", code: asked.code || QUEUE_REQUEST_REFUSED,
                                          message: sentence(asked.code || QUEUE_REQUEST_REFUSED), detail: asked.detail || "" });
         }
@@ -1758,6 +1992,477 @@ window.minipaintWanGP = (function () {
     }
 
     /* ------------------------------------------------------------------ */
+    /* Recovery: an iframe that went away without the tab meaning it to       */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * The failure this whole section exists for is narrow and it is not the
+     * one it looks like.
+     *
+     * #wangp_iframe_root is still there, #wangp_iframe is not, and the server
+     * is meanwhile carrying on perfectly well - admitting the job, composing
+     * it, submitting it, generating. So an absent iframe is not evidence that
+     * WanGP died; it is evidence that the browser lost its control surface,
+     * and the two call for opposite responses. The iframe is server-rendered
+     * into a gr.HTML the tab owns, and the observer below only ever handled
+     * its ARRIVAL, so once it was gone nothing in this file would ever ask
+     * for another one and the absence lasted for the life of the page. That
+     * is what makes a user restart a browser over a working generation.
+     *
+     * What is added is the smallest thing that repairs it: notice the
+     * absence, ask the tab whether it still wants a frame, give an ordinary
+     * Gradio re-render a moment to land on its own, and otherwise press the
+     * tab's own hidden Refresh - the one wired to show(), which repaints from
+     * what is true now and starts nothing. Then attach and shake hands the
+     * way this file already does.
+     *
+     * What is deliberately NOT added: no iframe built in JavaScript, no
+     * process restart, no page reload, no polling, no storage, no second
+     * bridge protocol, and no retry of a generation whose answer was lost.
+     */
+
+    //: One short re-check before anything is pressed, to let an ordinary
+    //: Gradio DOM replacement finish. Not polling - it runs once per cycle
+    //: and only while something is already wrong.
+    const ABSENCE_GRACE_MS = 100;
+    //: How long a replacement iframe has to appear after the press, in
+    //: ON-SCREEN milliseconds. It rides the same visibility-aware deadline
+    //: every bridge request uses, so a page in somebody's pocket is not
+    //: reported as a failed repair.
+    const REPAINT_ARRIVAL_MS = 12000;
+    //: The whole of the handshake's own bounded schedule, plus a moment. Not
+    //: a second handshake timer and never expected to fire: it is the backstop
+    //: for the one case that schedule cannot settle by itself - a replacement
+    //: frame that goes away again mid-offer, which stops the offers and would
+    //: otherwise leave a cycle holding the single-flight flag for good.
+    const HANDSHAKE_BUDGET_MS = HELLO_DELAYS.reduce(function (total, wait) { return total + wait; }, 0) + 2000;
+
+    //: How one repair cycle ended.
+    const REPAIR_READY = "ready";               //: the bridge answered; silent
+    const REPAIR_NOT_WANTED = "not-wanted";     //: the tab does not want a frame; silent
+    const REPAIR_UNPROVEN = "unproven";         //: state unreadable, nothing pressed
+    const REPAIR_FAILED = "failed";             //: pressed, and it did not become usable
+    const REPAIR_NO_SURFACE = "no-surface";     //: the whole tab subtree is gone
+    const REPAIR_ABANDONED = "abandoned";       //: the frame went again; the next cycle judges
+
+    /** The raw view word the tab wrote, for a log line only. "" when there is
+     * nothing readable to quote. */
+    function wanGpViewName() {
+        const raw = box(STATE_ELEM_ID);
+        if (!raw || !raw.value) { return ""; }
+        try {
+            const state = JSON.parse(raw.value);
+            return state && typeof state.view === "string" ? text(state.view, 40) : "";
+        } catch (e) { return ""; }
+    }
+
+    /** Press a hidden Gradio button by its id. Gradio wraps a Button in a
+     * div, so the element the id names is usually not the clickable one -
+     * which is the part of this that is easy to get wrong. */
+    function pressHidden(elementId) {
+        const scope = app();
+        const element = scope.getElementById ? scope.getElementById(elementId)
+            : (scope.querySelector ? scope.querySelector("#" + elementId) : null);
+        if (!element) { return false; }
+        const button = element.tagName === "BUTTON" ? element
+            : (element.querySelector ? element.querySelector("button") : null);
+        if (!button || typeof button.click !== "function") { return false; }
+        button.click();
+        return true;
+    }
+
+    /** The one notice this file ever renders, if it is on the page. */
+    function noticeElement() {
+        const scope = app();
+        const direct = scope.getElementById ? scope.getElementById(RECOVERY_NOTICE_ID) : null;
+        if (direct) { return direct; }
+        return scope.querySelector ? scope.querySelector("#" + RECOVERY_NOTICE_ID) : null;
+    }
+
+    /**
+     * Say, once, that the controls could not be brought back.
+     *
+     * Written by the browser rather than painted by the tab, and that is not
+     * a preference: the tab's own error surface is only reachable through a
+     * Gradio event, and both paths that end here exist precisely because that
+     * channel either did not produce a usable result or could not safely be
+     * asked. A notice that needs the machinery it is reporting on is a notice
+     * that never appears.
+     *
+     * It goes inside #wangp_iframe_root, as a sibling of the gr.HTML the tab
+     * owns - a repaint replaces that child and leaves this alone, which is
+     * exactly why clearing it has to be explicit. Returns false when there is
+     * no container to render into, and the caller must then NOT record that a
+     * warning was shown: a silent no-op that counted as one would suppress
+     * the next real warning.
+     */
+    function showRecoveryWarning() {
+        const root = rootElement();
+        if (!root || typeof root.appendChild !== "function") { return false; }
+        if (S.recovery.warningShown && noticeElement()) { return true; }
+        let notice = noticeElement();
+        if (!notice) {
+            try {
+                notice = document.createElement("div");
+            } catch (e) {
+                return false;
+            }
+            notice.id = RECOVERY_NOTICE_ID;
+            notice.className = RECOVERY_NOTICE_CLASS;
+            try { notice.setAttribute("role", "status"); } catch (e) { /* presentation only */ }
+            try { root.appendChild(notice); } catch (e) { return false; }
+        }
+        // textContent, and a constant: nothing a server said, nothing a
+        // message payload carried, nothing from an error detail.
+        notice.textContent = RECOVERY_NOTICE_TEXT;
+        S.recovery.warningShown = true;
+        say("recovery: warning shown");
+        return true;
+    }
+
+    /**
+     * Take it away again, explicitly.
+     *
+     * A Gradio repaint updates the gr.HTML inside the container; it does not
+     * rewrite the container. So a notice appended beside that HTML survives
+     * the very repaint that fixed the problem, and without this the user
+     * would read "could not be reconnected automatically" next to a working
+     * iframe. Correctness must not depend on somebody else's side effect.
+     */
+    function clearRecoveryWarning() {
+        const notice = noticeElement();
+        if (notice && notice.parentNode && typeof notice.parentNode.removeChild === "function") {
+            try { notice.parentNode.removeChild(notice); } catch (e) { /* already gone */ }
+        }
+        if (notice || S.recovery.warningShown) { say("recovery: warning cleared"); }
+        S.recovery.warningShown = false;
+    }
+
+    /**
+     * Retire the browser's half of a frame that no longer exists.
+     *
+     * Browser-local, and that is the whole of it. A detached promise and a
+     * running server job are separate facts: nothing here cancels an outbox
+     * job, stops a generation, unloads a model or restarts a process, because
+     * the job was accepted by the server over a loopback control surface with
+     * no browser anywhere in the path and it is still going.
+     *
+     * S.watcher is deliberately untouched - the root observer outlives any one
+     * frame, and it is the thing that will notice the replacement.
+     */
+    function detachFrame(reason) {
+        say("recovery: retiring the browser's side of the old iframe (" + text(reason, 120) + ")");
+        stopHandshake();
+        S.helloStep = 0;
+        if (P.observer) {
+            // An IntersectionObserver on a removed element never fires again,
+            // so this changes no behaviour - it just leaves no observer bound
+            // to a node nobody can reach.
+            try { P.observer.disconnect(); } catch (e) { /* nothing to undo */ }
+            P.observer = null;
+            P.onScreen = null;
+        }
+        // Section 14: a queue admission or an image send that was in flight is
+        // retired UNCONFIRMED, never as a refusal. This is the new and more
+        // frequent caller that made that distinction urgent.
+        abandon(BRIDGE_SESSION_MISMATCH, true);
+        S.frame = null;
+        S.ready = false;
+        S.bridgeSession = "";
+        S.bridgeVersion = "";
+        S.receivers = [];
+        S.revision = "";
+        S.query = null;
+        S.queue = false;
+        S.start = false;
+        S.track = false;
+        S.generationRunning = null;
+        // A cycle past its grace is waiting on this frame - for it to arrive,
+        // or for its bridge to speak. Losing the frame is the end of both, so
+        // the cycle ends here rather than holding the single-flight flag until
+        // its backstop expires. It ends without a verdict: every caller of this
+        // follows with either a fresh repair or a clear, and warning on a frame
+        // that is about to be repaired again would put a notice on screen for
+        // the length of one grace.
+        if (S.recovery.active && !S.recovery.graceTimer) {
+            say("recovery: the iframe went away again before the bridge answered");
+            finishIframeRepair(REPAIR_ABANDONED, "");
+        }
+        return true;
+    }
+
+    /**
+     * Section 22. An observer bound to a node that was REPLACED rather than
+     * emptied never fires again and never says so, which would silently cost
+     * this file every one of the detections above. Three references to
+     * S.watcher existed and none of them ever disconnected it, so this is a
+     * pre-existing gap that the rest of this section now depends on.
+     *
+     * The fix is to notice and bind again, re-running the bounded lookup
+     * ladder that bound it the first time. Not a document-wide observer.
+     */
+    function rebindRoot(reason) {
+        if (!S.watcherRoot || S.watcherRoot.isConnected) { return false; }
+        say("recovery: the WanGP root was replaced; rebinding the observer (" + text(reason, 80) + ")");
+        if (S.watcher) {
+            try { S.watcher.disconnect(); } catch (e) { /* the node is gone anyway */ }
+        }
+        S.watcher = null;
+        S.watcherRoot = null;
+        watchRoot(0);
+        return true;
+    }
+
+    /** The cycle is over, whatever it ended as. One place, so the grace and
+     * the deadline are always cancelled and the single-flight flag is always
+     * released. */
+    function finishIframeRepair(outcome, detail) {
+        if (S.recovery.graceTimer) { clearTimeout(S.recovery.graceTimer); S.recovery.graceTimer = 0; }
+        if (S.recovery.deadline) { S.recovery.deadline.cancel(); S.recovery.deadline = null; }
+        const took = S.recovery.startedAt ? Date.now() - S.recovery.startedAt : 0;
+        const pressed = S.recovery.pressed;
+        S.recovery.active = false;
+        S.recovery.reason = "";
+        S.recovery.pressed = false;
+        S.recovery.startedAt = 0;
+        if (outcome === REPAIR_READY) {
+            say("recovery: bridge ready after repaint in " + took + " ms");
+            clearRecoveryWarning();
+            return;
+        }
+        if (outcome === REPAIR_NOT_WANTED) {
+            // The repaint LANDED and the answer is a legitimate server view.
+            // The tab has already painted the card that explains it, and a
+            // recovery warning on top of that card would contradict it.
+            say(pressed
+                ? "recovery: repaint answered view=" + (detail || "(unreadable)") + "; WanGP is not serving, no warning"
+                : "recovery: iframe absent but current WanGP view does not expect one; no action");
+            clearRecoveryWarning();
+            return;
+        }
+        if (outcome === REPAIR_NO_SURFACE || outcome === REPAIR_ABANDONED) {
+            // Neither of these is a verdict. NO_SURFACE is section 22 - there
+            // is no container to render a notice into and the observer is what
+            // needs attention. ABANDONED is a frame that went away again while
+            // the cycle was waiting on it, and the absence it left behind is
+            // about to be classified from the top. Both leave warningShown
+            // exactly where they found it, so a later real failure can still
+            // say something.
+            return;
+        }
+        showRecoveryWarning();
+    }
+
+    /**
+     * Press the tab's own Refresh, and only when pressing it is provably the
+     * right thing to do.
+     *
+     * The three checks below are one synchronous block with nothing between
+     * them, and the reason is specific: a repaint is a WanGP iframe RELOAD.
+     * Gradio re-renders an HTML component it is handed even when the string
+     * is identical, which is what makes this repair work at all - and it is
+     * also what makes a press at the wrong moment destructive. A mutation
+     * burst can put the frame back in the gap between deciding and pressing,
+     * and pressing after that reloads the WanGP page out from under somebody
+     * who is using it.
+     */
+    function requestIframeRepaint(reason) {
+        // ---------------- one synchronous block, section 10.1 --------------
+        const view = readWanGpView();
+        const frame = frameElement();
+        const pressed = !frame && view === WAN_VIEW_IFRAME && pressHidden(REFRESH_ELEM_ID);
+        // ------------------------- end of the block ------------------------
+        if (pressed) {
+            S.recovery.pressed = true;
+            say("recovery: requesting existing WanGP repaint (reason=" + text(reason, 120) + ")");
+            say("recovery: repaint requested");
+            return true;
+        }
+        if (frame) {
+            say("recovery: skipped the press; the iframe came back first");
+            attachAndSettle();
+            return false;
+        }
+        if (view === WAN_VIEW_NON_IFRAME) {
+            finishIframeRepair(REPAIR_NOT_WANTED, wanGpViewName());
+            return false;
+        }
+        if (view === WAN_VIEW_UNKNOWN) {
+            if (!rootElement()) {
+                say("recovery: state unknown and the root is gone; rebinding the observer");
+                finishIframeRepair(REPAIR_NO_SURFACE, "");
+                rebindRoot("the state and the root are both missing");
+                return false;
+            }
+            // Not a repaint failure: a safety stop. The extension will not
+            // reload a WanGP page that may be perfectly healthy on the
+            // strength of a state it could not read.
+            say("recovery: state unknown after grace; refresh not pressed");
+            finishIframeRepair(REPAIR_UNPROVEN, "");
+            return false;
+        }
+        // The view says iframe, the frame is absent, and the control that
+        // would repaint it is not in the page either. Pressing nothing is not
+        // a repair, and there is nothing smaller left to try.
+        say("recovery: the tab's Refresh control is not in the page; no press");
+        finishIframeRepair(rootElement() ? REPAIR_FAILED : REPAIR_NO_SURFACE, "");
+        return false;
+    }
+
+    /**
+     * Bind to a frame the cycle was waiting for, and make sure the cycle ends
+     * whatever attach() made of it.
+     *
+     * A new binding hands the cycle on to the handshake, which settles it. Any
+     * other answer - already bound, or a frame that stopped being findable in
+     * between - leaves nothing that would ever settle it, and a cycle holding
+     * the single-flight flag with nothing left to end it blocks every repair
+     * this page would otherwise have made for the rest of its life.
+     */
+    function attachAndSettle() {
+        attach(null);
+        if (S.recovery.active && !S.recovery.graceTimer && !S.recovery.deadline) {
+            finishIframeRepair(S.ready ? REPAIR_READY : REPAIR_ABANDONED, "");
+        }
+    }
+
+    /** The replacement never came. Section 10.2's three outcomes, decided on
+     * what the tab says NOW rather than on what it said before the press. */
+    function repaintDeadlineExpired() {
+        S.recovery.deadline = null;
+        if (!S.recovery.active) { return; }
+        if (frameElement()) {
+            // It landed in the same instant the budget ran out. Take it.
+            attachAndSettle();
+            return;
+        }
+        const view = readWanGpView();
+        if (view === WAN_VIEW_NON_IFRAME) {
+            finishIframeRepair(REPAIR_NOT_WANTED, wanGpViewName());
+            return;
+        }
+        say("recovery: repair failed; iframe did not return within " + REPAINT_ARRIVAL_MS + " ms on screen");
+        if (view === WAN_VIEW_UNKNOWN) {
+            // Grouped with failure on purpose. An unreadable state AFTER a
+            // press is not evidence that the server chose a non-iframe view;
+            // it is evidence that the outcome cannot be proved.
+            say("recovery: repaint outcome unknown; no further automatic action");
+        }
+        finishIframeRepair(rootElement() ? REPAIR_FAILED : REPAIR_NO_SURFACE, "");
+    }
+
+    /** What happens once the grace has run and the frame is still missing. */
+    function afterAbsenceGrace() {
+        S.recovery.graceTimer = 0;
+        if (!S.recovery.active) { return; }
+        if (frameElement()) {
+            // An ordinary Gradio replacement, arriving exactly as it should.
+            // This is what the grace is for, and no press is issued.
+            say("recovery: replacement appeared during grace; attaching");
+            attachAndSettle();
+            return;
+        }
+        if (requestIframeRepaint(S.recovery.reason)) {
+            S.recovery.deadline = deadline(REPAINT_ARRIVAL_MS, repaintDeadlineExpired);
+        }
+    }
+
+    /**
+     * One repair cycle, start to finish, and never two at once.
+     *
+     * Single-flight matters more than it sounds: DOM mutation bursts are
+     * ordinary, and a cycle per mutation would be a Refresh press per
+     * mutation - each one a WanGP reload.
+     */
+    function requestIframeRepair(reason) {
+        if (S.recovery.active) { return false; }
+        S.recovery.active = true;
+        S.recovery.reason = text(reason, 120);
+        S.recovery.startedAt = Date.now();
+        S.recovery.pressed = false;
+        say("recovery: unexpected iframe disappearance; waiting for replacement grace (reason="
+            + S.recovery.reason + ")");
+        S.recovery.graceTimer = setTimeout(afterAbsenceGrace, ABSENCE_GRACE_MS);
+        return true;
+    }
+
+    /** A replacement bound while a cycle was running. The arrival budget is
+     * over; the cycle is not, because the handshake decides it. */
+    function noteReplacementArrived() {
+        if (!S.recovery.active) { return; }
+        if (S.recovery.graceTimer) { clearTimeout(S.recovery.graceTimer); S.recovery.graceTimer = 0; }
+        if (S.recovery.deadline) { S.recovery.deadline.cancel(); S.recovery.deadline = null; }
+        const took = S.recovery.startedAt ? Date.now() - S.recovery.startedAt : 0;
+        say("recovery: replacement iframe found after " + took + " ms");
+        say("recovery: attached to replacement iframe");
+        S.recovery.deadline = deadline(HANDSHAKE_BUDGET_MS, handshakeBackstop);
+    }
+
+    /** Nothing settled the handshake. In practice step() always does, and this
+     * exists so that "in practice" is not what the single-flight flag rests on. */
+    function handshakeBackstop() {
+        S.recovery.deadline = null;
+        if (!S.recovery.active) { return; }
+        if (S.ready) { finishIframeRepair(REPAIR_READY, ""); return; }
+        handshakeSettledUnusable("the handshake never settled");
+    }
+
+    /** The handshake settled without a usable bridge. The cycle ends here,
+     * not at the arrival deadline: a frame that arrived and then would not
+     * speak is exactly as unusable as one that never arrived. */
+    function handshakeSettledUnusable(why) {
+        if (!S.recovery.active) { return; }
+        say("recovery: repair failed; bridge did not answer handshake (" + text(why, 80) + ")");
+        finishIframeRepair(rootElement() ? REPAIR_FAILED : REPAIR_NO_SURFACE, "");
+    }
+
+    /**
+     * Section 13. The page came back from hidden or frozen: check that what
+     * this side believes is still true, and do nothing whatsoever if it is.
+     *
+     * Order matters. The observer rebind comes first because a root that was
+     * replaced while the page was away makes every question below it
+     * meaningless - readWanGpView() would answer UNKNOWN for a reason that
+     * has nothing to do with the server.
+     *
+     * A healthy resume costs one state read and two DOM lookups. No request,
+     * no press, no health endpoint, no poll, and no line in the journal
+     * beyond the one lifecycle already writes.
+     */
+    function verifyOnResume(reason) {
+        rebindRoot(reason);
+        const view = readWanGpView();
+        if (view === WAN_VIEW_NON_IFRAME) {
+            if (S.frame || S.ready || S.bridgeSession) {
+                detachFrame("the WanGP view changed while the page was away");
+            }
+            clearRecoveryWarning();
+            return;
+        }
+        if (S.frame && !S.frame.isConnected) {
+            detachFrame("frame detached while away");
+            // Said only when a cycle actually starts. A resume that lands on
+            // top of a repair already in flight is not news.
+            if (requestIframeRepair(reason)) { say("recovery: page resumed; iframe missing, repairing"); }
+            return;
+        }
+        const frame = frameElement();
+        if (!frame) {
+            if (S.frame || S.ready || S.bridgeSession) { detachFrame(reason); }
+            if (requestIframeRepair(reason)) { say("recovery: page resumed; iframe missing, repairing"); }
+            return;
+        }
+        if (frame !== S.frame) {
+            attachAndSettle();
+            return;
+        }
+        // The frame is the one we know and it is still in the page. If the
+        // bridge never finished introducing itself, offer once more - the
+        // existing bounded schedule, not a new one.
+        if (!S.ready) { rearm(); }
+    }
+
+    /* ------------------------------------------------------------------ */
     /* The public side                                                       */
     /* ------------------------------------------------------------------ */
 
@@ -1783,6 +2488,10 @@ window.minipaintWanGP = (function () {
             return true;
         }
         S.frame = frame;
+        // If a repair cycle is running, this is the replacement it was waiting
+        // for: the arrival budget is over, the cycle is not - the handshake
+        // below decides how it ends.
+        noteReplacementArrived();
         watchOnScreen(frame);
         if (!frame.dataset.minipaintWangp) {
             frame.dataset.minipaintWangp = "1";
@@ -1802,6 +2511,11 @@ window.minipaintWanGP = (function () {
 
     function ensure() {
         if (S.frame && S.frame.isConnected) { return true; }
+        // Only reached when there is no live frame, so this costs a healthy
+        // page nothing: it is the cheapest existing moment to notice that the
+        // root was replaced and the observer is watching a node nobody can
+        // reach any more.
+        rebindRoot("a caller found no live frame");
         return attach(null);
     }
 
@@ -1846,7 +2560,17 @@ window.minipaintWanGP = (function () {
             start: S.start,
             track: S.track,
             generation_running: S.generationRunning,
-            code: S.lastCode
+            code: S.lastCode,
+            // What the repair cycle is doing, if anything. All four are at
+            // rest on a healthy page; they are here because "the controls
+            // came back on their own" and "nobody noticed they had gone" look
+            // identical in a bug report without them.
+            recovery: {
+                active: S.recovery.active,
+                reason: S.recovery.reason,
+                pressed: S.recovery.pressed,
+                warning_shown: S.recovery.warningShown
+            }
         };
     }
 
@@ -1978,8 +2702,7 @@ window.minipaintWanGP = (function () {
      */
     function watchRoot(step_) {
         if (S.watcher) { return; }
-        const scope = app();
-        const root = scope.querySelector ? scope.querySelector("#" + IFRAME_ROOT_ID) : null;
+        const root = rootElement();
         if (!root) {
             const next = ROOT_LOOKUPS[step_ + 1];
             if (next !== undefined) { setTimeout(function () { watchRoot(step_ + 1); }, next); }
@@ -1992,11 +2715,57 @@ window.minipaintWanGP = (function () {
         // Kept rather than disconnected after the first iframe: the tab
         // re-renders that element whenever it mints a new channel, and each
         // new element is a new session to shake hands with.
-        S.watcher = new MutationObserver(function () {
+        S.watcher = new MutationObserver(function (records) {
+            // The notice this file writes lives inside the node being watched,
+            // so putting it there or taking it away is itself a mutation here.
+            // Acting on that would press Refresh because of a message saying
+            // Refresh did not work.
+            if (onlyTheNotice(records)) { return; }
             const frame = frameElement();
-            if (frame && frame !== S.frame) { attach(null); }
+            if (frame) {
+                if (frame !== S.frame) { attachAndSettle(); }
+                return;
+            }
+            // The iframe is gone, and whether that is a fault is not a DOM
+            // question. The tab clears it on purpose every time it paints
+            // setup, starting or error - that is what those views are - so
+            // ask the tab before touching anything.
+            const view = readWanGpView();
+            if (view === WAN_VIEW_NON_IFRAME) {
+                if (S.frame || S.ready || S.bridgeSession) {
+                    // Said only when there was something to retire. A tab
+                    // sitting on its setup card re-renders like any other, and
+                    // a line per render would be chatter on a healthy page.
+                    say("recovery: iframe absent but current WanGP view does not expect one; no action");
+                    detachFrame("the iframe no longer belongs to the current WanGP view");
+                }
+                if (S.recovery.active) { finishIframeRepair(REPAIR_NOT_WANTED, wanGpViewName()); }
+                clearRecoveryWarning();
+                return;
+            }
+            if (S.frame || S.ready || S.bridgeSession) { detachFrame("iframe removed"); }
+            // IFRAME and UNKNOWN both enter the cycle; only IFRAME is ever
+            // allowed to press, and that is decided after the grace.
+            requestIframeRepair("root mutation");
         });
         S.watcher.observe(root, { childList: true, subtree: true });
+        S.watcherRoot = root;
+    }
+
+    /** Whether a mutation batch is nothing but this file's own notice being
+     * added or removed. Anything else - including a batch with no added or
+     * removed nodes at all - is the page's business and is acted on. */
+    function onlyTheNotice(records) {
+        if (!records || !records.length) { return false; }
+        for (const record of records) {
+            const added = (record && record.addedNodes) || [];
+            const removed = (record && record.removedNodes) || [];
+            if (!added.length && !removed.length) { return false; }
+            for (const node of Array.prototype.slice.call(added).concat(Array.prototype.slice.call(removed))) {
+                if (!node || node.id !== RECOVERY_NOTICE_ID) { return false; }
+            }
+        }
+        return true;
     }
 
     /**

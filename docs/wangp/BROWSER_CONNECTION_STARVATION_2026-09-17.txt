@@ -1,0 +1,264 @@
+MINIPAINT NEO - THE DAY THE BROWSER FROZE
+INCIDENT REPORT AND CHANGE RECORD: CONNECTION STARVATION UNDER THE WANGP TAB
+
+Repository target: RJSprod/a1111-mini-paint-NEO
+Code baseline:     35c534a (main, 2026-09-17), the merge of PR #87
+Logs read:         send-log.txt, wangp-log.txt (the WanGP tab's journal),
+                   llama-server.log and model_chain.log from
+                   SD-Neo-ModelSwitchRefiner, all of 2026-09-17
+Revision date:     2026-09-17
+Status:            Incident report, with what was built in answer to it.
+                   Section 6 is what is left, and it is structural.
+
+================================================================================
+0. VERDICT
+================================================================================
+
+What froze was the browser, not the server.
+
+A browser allows six persistent HTTP/1.1 connections to one origin. Every tab
+of this WebUI shares that budget with everything else on the same origin, and
+by the afternoon of the 17th five of the six were long-lived streams: Forge's
+own heartbeat, Forge's queue, this extension's event spine, and the WanGP
+iframe's heartbeat and queue, the last two carried through our reverse proxy
+on the Forge origin. When the WanGP child stopped answering, the two proxied
+streams stayed open on a server that would never speak again - the proxy had
+no idle bound on a stream, on purpose - and the sixth connection was a proxied
+request waiting on the same server. From that moment every request the page
+made queued in the browser behind them: the Clipboard's queue polls, the
+text-to-image generation, the "Restart WanGP now" button, this tab's own
+journal. The server was fine the whole time. It finished jobs for nine minutes
+after the browser's last line, and the one thing that freed the page was
+restarting the browser, which is the one thing that drops every connection.
+
+The in-place recovery specification implemented in PR #87 did not fall short
+of what it set out to do; it set out to do something else. It answers an
+iframe that GOES AWAY while the tab still wants one. On the 17th the iframe
+never went anywhere: it stayed in the page, its document alive, holding the
+connections. Section 3 has the one assumption of that design this incident
+showed to be wrong, and the fix.
+
+================================================================================
+1. WHAT HAPPENED
+================================================================================
+
+From the WanGP tab's journal and the extension's send log, all local time:
+
+    00:00:31  RecursionError inside a WanGP tab event (the cyclic per-page
+    00:03:25  gr.State that Gradio hashes before every call). Again at
+    00:04:00  09:18:03 and 12:44:36. Nuisance, not cause: each fails one
+              press and nothing else.
+    09:16:25  A burst of 24 queue polls fails with NetworkError, then the
+              page reloads at 09:16:36. The same shape at 12:40:34/12:40:39
+              and 16:57:44/16:57:47: requests aborted by a reload, not a
+              server refusing them.
+    12:47:55  Forge restarted; WanGP running again at 12:51:19.
+    15:29:24  Forge restarted; WanGP running again at 15:31:05.
+    16:35:03  The browser's last line. From here nothing this page sends
+              reaches the server.
+    16:44:04  The server's executor completes its last job of the day. It
+              was never stuck.
+    ~16:50    "Restart WanGP now" pressed; the panel spins past 130 s. The
+              press never left the browser.
+    16:57:47  The browser is restarted. WanGP and the WebUI work at once, with
+              no restart of either.
+
+Every page load in that journal landed on a WanGP tab painted when Forge was
+BUILT: the card, the state box and the iframe are rendered once at build time
+and nothing repainted them until a button was pressed. "Start WanGP" over a
+WanGP that had been serving for an hour was the ordinary look of the tab
+after a reload, and the user pressed Start or Check again after every one.
+
+On the ModelSwitchRefiner side, llama-server ran its model on the CPU with 16
+threads - every core of the machine - for nine minutes of the afternoon, and
+its GPU placement pointed at GPU 0, the card WanGP owns. That starves WanGP
+of CPU while it generates and competes for its memory. It did not cause the
+freeze, and it makes WanGP slower to answer, which is how the streams above
+come to be silent long enough for any of this to matter.
+
+================================================================================
+2. WHY: THE SIX-CONNECTION BUDGET
+================================================================================
+
+Firefox and LibreWolf: network.http.max-persistent-connections-per-server,
+default 6. Chromium, and so Via on Android: six per host. Both count a
+server-sent-events stream as a connection for as long as it is open, because
+it is one.
+
+What one loaded page of this WebUI holds on the Forge origin:
+
+    1  /heartbeat/<session>            Forge's page, for its whole life
+    2  /queue/data?session_hash=       Forge's page, while anything is queued
+    3  /minipaint-interop/events       this extension's event spine
+    4  /wan2gp/heartbeat/<session>     the WanGP iframe, through the proxy
+    5  /wan2gp/queue/data              the WanGP iframe, through the proxy
+    6  everything else, one at a time
+
+"Everything else" is every button press, every file, every poll, every
+thumbnail, and every request the WanGP page itself makes. It serialises
+through one connection, and any single request that stalls stalls all of it.
+The proxy allowed a proxied response 120 seconds and a proxied stream for
+ever; a wedged WanGP therefore held connections 4 and 5 for ever and 6 for
+two minutes at a time. That is the freeze.
+
+HTTPS through the auto-TLS extension changes nothing here. uvicorn speaks
+HTTP/1.1 over TLS; the six-connection rule is per origin and the same either
+way. Section 6 says what would change it.
+
+================================================================================
+3. WHY THE RECOVERY DESIGN DID NOT COVER IT, AND THE ASSUMPTION IT GOT WRONG
+================================================================================
+
+The recovery design watches for the iframe ELEMENT to leave the DOM and, when
+the tab still wants one, presses the tab's hidden Refresh so the server paints
+another. On the 17th the element never left. A page cannot see a connection
+budget; what it can see is the one thing that came for free - the event spine
+going silent while the server was, in fact, speaking - and nothing listened
+for that. Section 4.3 is that listener.
+
+The assumption: the design, and a comment in the wizard's own code, held that
+Gradio re-renders an HTML component it is handed even when the string is the
+one it already holds, and that a repaint is therefore always a WanGP page
+load. It is not. Gradio 4.40's frontend applies an output through Svelte's
+safe_not_equal, and two equal strings are not a change: innerHTML is left
+alone, and a missing iframe stays missing. Every paint whose purpose is a new
+iframe now stamps it with a paint token (a data attribute the browser never
+reads), so the string is new and the element is re-created. The hidden
+Refresh, the restart paths and the management panel's paints use it; every
+other paint deliberately does not, so an iframe that is showing is left alone.
+
+================================================================================
+4. WHAT WAS BUILT
+================================================================================
+
+4.1  The proxy (minipaint_neo/wangp/proxy.py)
+     STREAM_IDLE_TIMEOUT is 60 seconds where it was None. Gradio's own
+     streams are never quiet - /heartbeat pings and /queue/data heartbeats
+     every 15 seconds - so a minute of silence is a child whose event loop is
+     not running, not a slow generation. Cutting it gives the connection back;
+     Gradio's client reconnects on its own.
+
+4.2  The event spine in the browser (browser/minipaint_interop.js)
+     The stream's watchdog says what it sees, on the document, as the one
+     "minipaint:outbox" event with kind "stream": "silent" after 40 seconds
+     with no frame, at which point it sends one plain snapshot request;
+     "answered" when that request comes back, however it comes back; "open"
+     when the stream is up again. A request that never comes back says
+     nothing, which is the whole signal.
+
+4.3  The WanGP tab (browser/minipaint_wangp.js)
+     A transport breaker. On "silent" it waits 20 seconds of ON-SCREEN time
+     (the same visibility-aware deadline every other budget in the file
+     uses) for "answered" or "open". If neither comes, nothing from this page
+     is getting a connection, and the tab gives back the two that are its
+     own: the iframe is navigated to about:blank, which needs no connection
+     and unloads the WanGP document, and with it every stream and request
+     that document held. The browser side of the bridge is retired the way a
+     lost frame retires it (in-flight mutating requests settle UNCONFIRMED,
+     never as refusals). WanGP is loaded again in the same element, at the
+     same path, the moment the spine says the transport is back - Forge's
+     queued requests get the freed connections first - and after 15 seconds
+     on screen regardless, because a blank tab is not a recovery. A page on a
+     card has nothing to shed and says so. Nothing binds to the blank frame
+     in between.
+
+     A boot repaint. The first time the tab's root is found with no iframe
+     under it, the hidden Refresh is pressed once: the card was painted when
+     Forge started, and this paints what is true now. It starts nothing.
+
+     Runtime frames. The runtime announces every change of state on the spine
+     (4.5). A page whose tab disagrees - WanGP serving under a card, or gone
+     under an iframe - presses Refresh, once per burst, judged again at the
+     moment of pressing against the latest frame and the tab as it is then.
+     The snapshot's runtime summary counts the same way.
+
+4.4  The Clipboard tab (browser/minipaint_clipboard.js)
+     One read of the queue route at a time: a second ask while one is out
+     gets the same answer. Every ask, read or write, is bounded at 25 seconds
+     by an AbortController, and the slot is released however the read ends.
+     The day it mattered, 24 reads of this route were in flight at once.
+
+4.5  The runtime (minipaint_neo/wangp/runtime.py)
+     Every transition - ready, stopped, crashed, a failed start - is published
+     on the event spine as {state, running} and nothing else. The emergency
+     restart's escalation, which was a POSIX-only branch that did nothing on
+     Windows, now ends each surviving pid its own way (SIGKILL, or
+     TerminateProcess through a handle opened for exactly that right); a pid
+     that survives even that is reported as stuck in a driver call, which is
+     what it is, rather than as this extension's failure. nvidia-smi is not
+     asked a second time when it did not answer the first.
+
+4.6  Tests
+     wangp protocol 497 (twenty new scenarios on the virtual-clock DOM
+     harness: the breaker armed, disarmed, starved, hidden, with no frame,
+     never answered; the boot repaint; runtime frames agreeing, disagreeing,
+     bursting, and caught up; eight new mutations, each reverting one
+     decision and named for the check that must then fail), interop browser
+     32 (a stream that goes quiet says "silent" then "answered" and reopens;
+     one whose request never returns never says "answered"), wangp runtime
+     146 (the spine announcements; the escalation by pid; the survivor's
+     wording; _force_exit on a real child and on a pid that is nobody's),
+     wangp proxy 181 (the idle bound clears several heartbeats and is still a
+     bound), receiver contract 345 (a stamped paint is a different string
+     that points at the same path), browser clipboard 244 (three asks over
+     one held read open no second connection).
+
+================================================================================
+5. THE SAME DAY, REPLAYED
+================================================================================
+
+WanGP wedges mid-generation. Its two proxied streams go quiet; at 60 seconds
+the proxy cuts them and the browser has two connections back. Any proxied
+request still waiting is cut at 120 seconds. If the budget was already spent,
+this extension's spine goes quiet too: at 40 seconds the interop layer says
+so and sends one snapshot request; if that comes back, the silence was the
+stream's alone and nothing more happens; if it does not come back in 20
+seconds on screen, the WanGP tab unloads its iframe. The freed connections
+carry Forge's queued requests - the generation that was pressed, the Restart
+button, the snapshot - and the moment the snapshot answers, WanGP is loaded
+again. If the child is still wedged, that load shows the proxy's own error
+page inside the tab, and "Restart WanGP now" works, because it is Forge's
+request and Forge's connections are free. Nothing in this asks the user to
+do anything, and the Canvas, the Clipboard and the queue are untouched.
+
+What is still true: a WanGP process stuck inside the GPU driver cannot be
+ended by anything short of the driver letting go, and the restart report now
+says exactly that when it happens.
+
+================================================================================
+6. WHAT IS LEFT, AND IT IS STRUCTURAL
+================================================================================
+
+The budget is the problem, and only the transport can change the budget.
+
+    a)  HTTP/2 in front of Forge. Browsers speak HTTP/2 only over TLS, and
+        multiplex every stream and request over ONE connection with no
+        six-stream rule. uvicorn does not speak it; a terminating proxy does
+        (Caddy by default; nginx with http2). The auto-TLS extension is the
+        natural place, because it already owns the TLS side. This is the
+        cure; everything in section 4 is the mitigation that makes the
+        disease survivable.
+
+    b)  A second origin for the WanGP proxy - another port on the same host
+        - doubles the budget and puts the iframe's streams in their own.
+        Cookies are host-scoped so sign-in carries over, but the bridge's
+        postMessage origin checks and the proxy's Origin gate would both
+        have to learn the second origin. Smaller than (a) in infrastructure,
+        larger in this code.
+
+    c)  On the host, LibreWolf's network.http.max-persistent-connections-per-
+        server can be raised in about:config. Via on Android cannot be
+        changed, which is why (c) is not an answer on its own.
+
+A session that lasts days is a browser that is never starved, plus a page
+that can be told what changed rather than asking. The second half is what
+the event spine and the runtime announcements are for; the first half is
+(a). Until (a), the breaker above is the guarantee: the page frees itself
+within about a minute of the budget being spent, without a reload and
+without losing what the server holds.
+
+On the ModelSwitchRefiner side: cap llama-server's threads below the core
+count when its model runs on the CPU, keep it off the GPU WanGP owns (the
+MiniPaint config names that card by UUID under gpu.uuid), and do not run a
+CPU model while a video is generating. None of that is this repository's to
+change; it is written here because the logs made the interaction visible.

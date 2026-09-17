@@ -892,7 +892,12 @@ window.minipaintInterop = (function () {
         try { source = new EventSource(url, { withCredentials: true }); } catch (e) { return false; }
         stream.source = source;
         stream.lastFrameAt = Date.now();
-        source.addEventListener("open", function () { stream.retry = STREAM_RETRY_MS; });
+        source.addEventListener("open", function () {
+            stream.retry = STREAM_RETRY_MS;
+            // The transport is back. Anything that armed itself on the
+            // silence below stands down on this.
+            emit("stream", null, { state: "open" });
+        });
         for (const kind of ["hello", "job", "enhance", "handoff", "runtime", "wangp", "library", "reset", "heartbeat", "claim_ready"]) {
             source.addEventListener(kind, function (event) { onFrame(kind, event); });
         }
@@ -924,8 +929,22 @@ window.minipaintInterop = (function () {
             stream.watchdog = 0;
             if (!stream.wanted) { return; }
             if (Date.now() - stream.lastFrameAt < STREAM_DEAD_MS) { armWatchdog(); return; }
-            note("stream: no frame for " + Math.round((Date.now() - stream.lastFrameAt) / 1000) + "s; reconnecting");
-            sync().then(function () { reopenStream(); }, function () { reopenStream(); });
+            const silent = Date.now() - stream.lastFrameAt;
+            note("stream: no frame for " + Math.round(silent / 1000) + "s; reconnecting");
+            // Said out loud, because a silent stream is the one signal this
+            // page gets for free that its transport to Forge may be gone -
+            // the server heartbeats every fifteen seconds, so silence is
+            // never the server having nothing to say. The snapshot below is
+            // the test of it: if that plain request comes back, the page can
+            // still reach Forge and the silence was the stream's alone; if it
+            // does not come back either, nothing from this page is getting a
+            // connection, and whoever is holding them has to let go. The
+            // WanGP tab listens for exactly that pair.
+            emit("stream", null, { state: "silent", silent_ms: silent });
+            sync().then(
+                function () { emit("stream", null, { state: "answered" }); reopenStream(); },
+                function () { emit("stream", null, { state: "answered" }); reopenStream(); }
+            );
         }, STREAM_DEAD_MS);
     }
 

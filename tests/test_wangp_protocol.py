@@ -3035,6 +3035,198 @@ S["malformed state"] = async function () {
     return await snap(w, api);
 };
 
+// ------------------------------------------------------------------------
+// The transport breaker: the day the browser, not the server, froze.
+// ------------------------------------------------------------------------
+const STREAM = function (state, extra) { return { detail: Object.assign({ kind: "stream", state: state }, extra || {}) }; };
+const RUNTIME = function (running, state) {
+    return { detail: { kind: "runtime", detail: { running: running, state: state || (running ? "READY" : "STOPPED") } } };
+};
+function frameSrc(w) { const f = w.doc.getElementById("wangp_iframe"); return f ? String(f.src) : null; }
+
+// The spine went quiet and Forge answered the plain request: the silence was
+// the stream's alone, and nothing this tab holds is in anybody's way.
+S["transport silent then answered"] = async function () {
+    const { w, api } = await healthy();
+    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
+    await w.tick.advance(10000);
+    const waiting = api.state().transport.waiting;
+    w.fire("minipaint:outbox", STREAM("answered"));
+    await w.tick.advance(30000);
+    return await snap(w, api, { waiting: waiting, sheds: api.state().transport.sheds, src: frameSrc(w) });
+};
+
+// Nothing answered: the iframe is unloaded to give its connections back,
+// and loaded again the moment the transport is back.
+S["transport starved"] = async function () {
+    const { w, api } = await healthy();
+    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
+    await w.tick.advance(19000);
+    const early = frameSrc(w);
+    await w.tick.advance(1500);
+    const shed = frameSrc(w);
+    const attachedWhileShed = api.state().attached;
+    w.fire("minipaint:outbox", STREAM("answered"));
+    await w.tick.advance(500);
+    return await snap(w, api, {
+        early: early, shed: shed, attachedWhileShed: attachedWhileShed, back: frameSrc(w),
+        sheds: api.state().transport.sheds,
+        saidShed: w.said("unloading the WanGP iframe to give its connections back"),
+        saidReload: w.said("loading WanGP again in the shed iframe")
+    });
+};
+
+// The budget is on-screen time, like every other budget in this file.
+S["transport starved while hidden"] = async function () {
+    const { w, api } = await healthy();
+    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
+    w.hidden(true);
+    await w.tick.advance(60000);
+    const whileAway = frameSrc(w);
+    w.hidden(false);
+    await w.tick.advance(21600);
+    return await snap(w, api, { whileAway: whileAway, after: frameSrc(w) });
+};
+
+// A tab on a card holds no connection worth giving back.
+S["transport starved with no frame"] = async function () {
+    const { w, api } = await healthy();
+    w.setState(VIEW_ERROR);
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(200);
+    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
+    await w.tick.advance(21000);
+    return await snap(w, api, { sheds: api.state().transport.sheds, saidNothing: w.said("no WanGP iframe to shed") });
+};
+
+// A blank tab is not a recovery: with no answer at all, WanGP is loaded again anyway.
+S["reload after shed does not wait for ever"] = async function () {
+    const { w, api } = await healthy();
+    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
+    await w.tick.advance(20100);
+    const shed = frameSrc(w);
+    await w.tick.advance(14000);
+    const stillShed = frameSrc(w);
+    await w.tick.advance(1500);
+    return await snap(w, api, { shed: shed, stillShed: stillShed, back: frameSrc(w),
+                          saidRegardless: w.said("loading WanGP again regardless") });
+};
+
+// The shed frame is still in the page, and it is not a bridge to bind to.
+S["a shed frame is not bound while blank"] = async function () {
+    const { w, api } = await healthy();
+    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
+    await w.tick.advance(20100);
+    w.hidden(true);
+    w.hidden(false);
+    await w.tick.advance(500);
+    return await snap(w, api, { src: frameSrc(w) });
+};
+
+// ------------------------------------------------------------------------
+// The tab painted when Forge started, and the runtime frames that correct it.
+// ------------------------------------------------------------------------
+S["boot with a stale card"] = async function () {
+    const w = H.world({ iframe: false, state: VIEW_SETUP });
+    const api = await H.load(w);
+    await w.tick.advance(400);
+    return await snap(w, api, { saidBoot: w.said("boot: the tab was painted when Forge started") });
+};
+
+S["boot without a refresh control"] = async function () {
+    const w = H.world({ iframe: false, state: VIEW_SETUP, refresh: false });
+    const api = await H.load(w);
+    await w.tick.advance(400);
+    return await snap(w, api);
+};
+
+S["boot with an iframe presses nothing"] = async function () {
+    const { w, api } = await healthy();
+    return await snap(w, api, { saidBoot: w.said("boot:") });
+};
+
+S["runtime says serving, tab shows a card"] = async function () {
+    const { w, api } = await healthy();
+    w.setState(VIEW_ERROR);
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(200);
+    const before = w.seen.presses;
+    w.fire("minipaint:outbox", RUNTIME(true));
+    await w.tick.advance(3100);
+    const pressed = w.seen.presses - before;
+    // The press lands: the server paints the iframe view back.
+    w.setState(VIEW_IFRAME);
+    w.addFrame("two");
+    w.mutate([]);
+    await w.tick.advance(400);
+    return await snap(w, api, { pressed: pressed, saidRuntime: w.said("runtime: WanGP is serving and the tab shows no iframe") });
+};
+
+S["runtime says stopped, tab shows an iframe"] = async function () {
+    const { w, api } = await healthy();
+    const before = w.seen.presses;
+    w.fire("minipaint:outbox", RUNTIME(false, "CRASHED"));
+    await w.tick.advance(3100);
+    const pressed = w.seen.presses - before;
+    // The press lands: the server paints the error card.
+    w.setState(VIEW_ERROR);
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(600);
+    return await snap(w, api, { pressed: pressed, saidRuntime: w.said("WanGP is not serving (CRASHED)") });
+};
+
+S["runtime frames coalesce"] = async function () {
+    const { w, api } = await healthy();
+    w.setState(VIEW_ERROR);
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(200);
+    const before = w.seen.presses;
+    for (let i = 0; i < 6; i += 1) { w.fire("minipaint:outbox", RUNTIME(true)); await w.tick.advance(40); }
+    await w.tick.advance(3500);
+    return await snap(w, api, { pressed: w.seen.presses - before });
+};
+
+S["a runtime frame that agrees presses nothing"] = async function () {
+    const { w, api } = await healthy();
+    w.fire("minipaint:outbox", RUNTIME(true));
+    await w.tick.advance(3500);
+    return await snap(w, api);
+};
+
+S["a snapshot carries the same truth"] = async function () {
+    const { w, api } = await healthy();
+    w.setState(VIEW_ERROR);
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(200);
+    const before = w.seen.presses;
+    w.fire("minipaint:outbox", { detail: { kind: "synced", runtime: { running: true, state: "READY" } } });
+    await w.tick.advance(3500);
+    return await snap(w, api, { pressed: w.seen.presses - before });
+};
+
+// Gradio paints the iframe on its own before the press falls due.
+S["a tab that caught up is left alone"] = async function () {
+    const { w, api } = await healthy();
+    w.setState(VIEW_ERROR);
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(200);
+    const before = w.seen.presses;
+    w.fire("minipaint:outbox", RUNTIME(true));
+    await w.tick.advance(100);
+    w.setState(VIEW_IFRAME);
+    w.addFrame("two");
+    w.mutate([]);
+    await w.tick.advance(3500);
+    return await snap(w, api, { pressed: w.seen.presses - before });
+};
+
+
 /** A scenario that never finishes is a result, not a hang: a build whose
  * promises are left unsettled is exactly what several of these check for, and
  * it must be reported rather than quietly ending the process. Measured on the
@@ -3136,6 +3328,56 @@ _RECOVERY_MUTATIONS = (
         "    function clearRecoveryWarning() {\n        const notice = noticeElement();",
         "    function clearRecoveryWarning() {\n        if (true) { return; }\n        const notice = noticeElement();",
         "warning clears on a later handshake", "notice", False, True,
+    ),
+    # -- the transport breaker --
+    (
+        "the breaker never arms",
+        "S.transport.deadline = deadline(TRANSPORT_STARVED_MS, transportStarved);",
+        "S.transport.deadline = null;",
+        "transport starved", "shed", "about:blank", "/wan2gp/",
+    ),
+    (
+        "Forge answering does not stand the breaker down",
+        'if (state !== "answered" && state !== "open") { return; }',
+        'if (true) { return; }',
+        "transport silent then answered", "sheds", 0, 1,
+    ),
+    (
+        "the breaker spends its budget while the page is hidden",
+        "S.transport.deadline = deadline(TRANSPORT_STARVED_MS, transportStarved);",
+        "S.transport.deadline = { cancel: (function (id) { return function () { clearTimeout(id); }; })(setTimeout(transportStarved, TRANSPORT_STARVED_MS)) };",
+        "transport starved while hidden", "whileAway", "/wan2gp/", "about:blank",
+    ),
+    (
+        "a shed frame is never loaded again on its own",
+        'reloadAfterShed("nobody answered within " + RELOAD_AFTER_SHED_MS',
+        'void ("nobody answered within " + RELOAD_AFTER_SHED_MS',
+        "reload after shed does not wait for ever", "back", "/wan2gp/", "about:blank",
+    ),
+    (
+        "a blank, shed frame is bound to like any other",
+        'if (S.transport.shed && (frame.getAttribute("src") || "") === "about:blank") {',
+        'if (false) {',
+        "a shed frame is not bound while blank", "attached", False, True,
+    ),
+    # -- boot and runtime frames --
+    (
+        "the boot repaint reloads an iframe that is showing",
+        "if (!frameElement() && pressHidden(REFRESH_ELEM_ID)) {",
+        "if (pressHidden(REFRESH_ELEM_ID)) {",
+        "boot with an iframe presses nothing", "presses", 0, 1,
+    ),
+    (
+        "runtime frames are not coalesced",
+        "        if (S.runtimePress.timer) { return; }\n        const wait = ",
+        "        const wait = ",
+        "runtime frames coalesce", "pressed", 1, 6,
+    ),
+    (
+        "the press is not judged again against the tab as it is then",
+        "if (S.runtimePress.running === null || S.runtimePress.running === !!frameElement()) { return; }",
+        "if (S.runtimePress.running === null) { return; }",
+        "a tab that caught up is left alone", "pressed", 0, 1,
     ),
 )
 
@@ -3373,6 +3615,70 @@ def recovery_checks(r: Results) -> None:
               "unknown with no root", "saidNoSurface", True)
         check("and a tab drawn again is picked up by the bounded ladder",
               "unknown with no root", "readyAgain", True)
+
+        # -- the transport breaker: the day the browser froze ------------------
+        # Six connections to one origin, five of them streams, and a WanGP
+        # that stopped answering held two of those for ever. Everything the
+        # page then asked for queued in the browser behind them; the server
+        # was fine, and only restarting the browser freed the page. This is
+        # the tab giving back the two connections that are its own to give,
+        # and only once it is sure that nothing else is getting through.
+        check("a silent spine that Forge then answers sheds nothing",
+              "transport silent then answered", "sheds", 0)
+        check("and leaves the iframe exactly where it was", "transport silent then answered", "src", "/wan2gp/")
+        check("having waited on the silence rather than acted on it",
+              "transport silent then answered", "waiting", True)
+        check("a silent spine that nothing answers has the iframe unloaded",
+              "transport starved", "shed", "about:blank")
+        check("and not a moment before the budget has run", "transport starved", "early", "/wan2gp/")
+        check("and nothing stays bound to the unloaded frame", "transport starved", "attachedWhileShed", False)
+        check("and the journal says what was done and why", "transport starved", "saidShed", True)
+        check("Forge answering loads WanGP again in the same frame", "transport starved", "back", "/wan2gp/")
+        check("and says so", "transport starved", "saidReload", True)
+        check("and the bridge is shaken hands with again", "transport starved", "ready", True)
+        check("and the shed is counted, for the bug report", "transport starved", "sheds", 1)
+        check("the budget is on-screen time only", "transport starved while hidden", "whileAway", "/wan2gp/")
+        check("and runs out once the page is back", "transport starved while hidden", "after", "about:blank")
+        check("a tab on a card has nothing to shed", "transport starved with no frame", "sheds", 0)
+        check("and says so", "transport starved with no frame", "saidNothing", True)
+        check("a shed frame is loaded again even when nobody ever answers",
+              "reload after shed does not wait for ever", "back", "/wan2gp/")
+        check("but not before the answer has had its chance",
+              "reload after shed does not wait for ever", "stillShed", "about:blank")
+        check("and the journal says it stopped waiting", "reload after shed does not wait for ever", "saidRegardless", True)
+        check("a blank, shed frame is not bound to on resume", "a shed frame is not bound while blank", "attached", False)
+        check("and is still the blank frame", "a shed frame is not bound while blank", "src", "about:blank")
+
+        # -- the tab painted when Forge started ------------------------------
+        # The card under the root is painted once, when Forge builds the UI,
+        # and nothing repaints it until something presses one of its buttons.
+        # A page loaded an hour later showed "Start WanGP" over a WanGP that
+        # had been serving since, and the user pressed Start after every
+        # reload. One press of the tab's own Refresh at boot, and only when
+        # there is no iframe to disturb.
+        check("a page that loads onto a card presses Refresh once", "boot with a stale card", "presses", 1)
+        check("and says that is why", "boot with a stale card", "saidBoot", True)
+        check("a page that loads onto an iframe presses nothing", "boot with an iframe presses nothing", "presses", 0)
+        check("and does not claim to have", "boot with an iframe presses nothing", "saidBoot", False)
+        check("a tab with no Refresh control is left as it is", "boot without a refresh control", "presses", 0)
+
+        # -- runtime frames ----------------------------------------------------
+        # The server says on the spine when the process changes. A page that
+        # hears it and disagrees with itself presses Refresh; the server, not
+        # the page, decides what the tab then shows.
+        check("WanGP serving under a card is repainted", "runtime says serving, tab shows a card", "pressed", 1)
+        check("and the journal says which disagreement", "runtime says serving, tab shows a card", "saidRuntime", True)
+        check("and the iframe that answers is attached", "runtime says serving, tab shows a card", "ready", True)
+        check("WanGP gone under an iframe is repainted", "runtime says stopped, tab shows an iframe", "pressed", 1)
+        check("naming the state the server gave", "runtime says stopped, tab shows an iframe", "saidRuntime", True)
+        check("and the card that answers is not treated as a fault",
+              "runtime says stopped, tab shows an iframe", "notice", False)
+        check("and nothing stays bound to the retired iframe", "runtime says stopped, tab shows an iframe", "attached", False)
+        check("and that was the only press", "runtime says stopped, tab shows an iframe", "presses", 1)
+        check("a burst of runtime frames is one press", "runtime frames coalesce", "pressed", 1)
+        check("a frame that agrees with the tab presses nothing", "a runtime frame that agrees presses nothing", "presses", 0)
+        check("a snapshot's runtime summary counts the same", "a snapshot carries the same truth", "pressed", 1)
+        check("a tab that caught up before the press is left alone", "a tab that caught up is left alone", "pressed", 0)
 
         # -- and every one of those checks actually bites ----------------------
         for name, old, new, scenario, key, well, ill in _RECOVERY_MUTATIONS:

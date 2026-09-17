@@ -159,6 +159,12 @@ window.minipaintClipboard = (function () {
         pasteListener: null,
         outboxListener: null,
         outboxRefreshTimer: null,
+        //: The one read of the queue route in flight, if any. Reads are
+        //: coalesced: a second ask while one is out gets the same answer,
+        //: because two identical questions to a server that is slow to
+        //: answer the first are two held connections for one answer - and
+        //: the browser has six to this origin in total. See askQueue.
+        queueRead: null,
         toastTimer: null,
         //: The debounce on remembering the thumbnail size. See setThumbnailSize.
         thumbSave: 0,
@@ -2649,16 +2655,43 @@ window.minipaintClipboard = (function () {
         statusTarget(host).innerHTML = String(text);
     }
 
-    /** One call for every way the queue section changes. */
+    //: How long one ask of the queue route may hold a connection before the
+    //: page gives up on it. Generous for a server that is merely busy, and a
+    //: hard bound for one that is not answering: a request that waits for
+    //: ever is a browser connection held for ever, and a page has six.
+    const QUEUE_ASK_TIMEOUT_MS = 25000;
+
+    /** One call for every way the queue section changes.
+
+     * Reads coalesce and everything is bounded, and the day that mattered
+     * is why: a server that stopped answering left twenty-four reads of this
+     * route in flight at once, each holding one of the six connections a
+     * browser allows to an origin, and every later request from the page -
+     * a generation, a button, this tab's own journal - queued behind them
+     * until the browser was restarted. One read at a time, for at most
+     * QUEUE_ASK_TIMEOUT_MS, is a page that can still say "the server is not
+     * answering" and then ask again when it is. */
     function askQueue(body) {
+        if (!body && S.queueRead) { return S.queueRead; }
+        let controller = null;
+        let cutoff = 0;
+        try {
+            controller = typeof AbortController === "function" ? new AbortController() : null;
+        } catch (e) { controller = null; }
+        if (controller) {
+            cutoff = setTimeout(function () {
+                try { controller.abort(); } catch (e) { /* already settled */ }
+            }, QUEUE_ASK_TIMEOUT_MS);
+        }
+        const signal = controller ? { signal: controller.signal } : {};
         const request = body
-            ? fetch(QUEUE_ROUTE, {
+            ? fetch(QUEUE_ROUTE, Object.assign({
                 method: "POST", credentials: "same-origin", cache: "no-store",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(Object.assign({ page: pageId() }, body))
-            })
-            : fetch(QUEUE_ROUTE + "?page=" + encodeURIComponent(pageId()), { credentials: "same-origin", cache: "no-store" });
-        return request.then(function (response) {
+            }, signal))
+            : fetch(QUEUE_ROUTE + "?page=" + encodeURIComponent(pageId()), Object.assign({ credentials: "same-origin", cache: "no-store" }, signal));
+        const drawn = request.then(function (response) {
             return response.json().then(function (answer) { return { response: response, answer: answer }; });
         }).then(function (pair) {
             const answer = pair.answer || {};
@@ -2669,10 +2702,26 @@ window.minipaintClipboard = (function () {
             drawQueue(answer);
             return answer;
         }, function (error) {
-            note("queue: could not be read (" + ((error && error.message) || error) + ")");
+            const aborted = !!(error && (error.name === "AbortError"));
+            note("queue: could not be read (" + (aborted ? "no answer within " + QUEUE_ASK_TIMEOUT_MS + " ms" : ((error && error.message) || error)) + ")");
             serverSilent(true, "the queue");
             return null;
         });
+        // Whatever became of it - answered, refused, aborted, or a drawing
+        // that threw - the read is over: the timer goes and the slot is
+        // free. A slot left set by a rejection would make every later ask
+        // return that same dead promise, and the section would never read
+        // again for the life of the page.
+        const finish = function () {
+            if (cutoff) { clearTimeout(cutoff); }
+            if (!body && S.queueRead === settled) { S.queueRead = null; }
+        };
+        const settled = drawn.then(
+            function (answer) { finish(); return answer; },
+            function (error) { finish(); throw error; }
+        );
+        if (!body) { S.queueRead = settled; }
+        return settled;
     }
 
     /**

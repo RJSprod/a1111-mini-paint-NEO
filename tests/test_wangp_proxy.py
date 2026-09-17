@@ -451,8 +451,14 @@ def sync_checks(r: Results) -> None:
     ordinary = proxy.timeout_for("/theme.css")
     streamed = proxy.timeout_for("/queue/join")
     r.check("an ordinary response has a bounded read timeout", ordinary.read == proxy.RESPONSE_TIMEOUT)
-    r.check("a queue stream is never cut for being quiet", streamed.read is None)
-    r.check("an event-stream accept header is enough", proxy.timeout_for("/x", "text/event-stream").read is None)
+    # A stream is allowed to be quiet for longer than a response, and no
+    # longer than a wedged child can hold a browser connection: Gradio's own
+    # streams heartbeat every 15 seconds, so the idle bound has to clear
+    # several of those and still be a bound. See STREAM_IDLE_TIMEOUT.
+    r.check("a queue stream is cut only after several missed heartbeats",
+            streamed.read is not None and 45.0 <= streamed.read <= 120.0, str(streamed.read))
+    r.check("and the idle bound is not the ordinary response bound", streamed.read == proxy.STREAM_IDLE_TIMEOUT)
+    r.check("an event-stream accept header is enough", proxy.timeout_for("/x", "text/event-stream").read == proxy.STREAM_IDLE_TIMEOUT)
     r.check("connecting is the short one", ordinary.connect == proxy.CONNECT_TIMEOUT < proxy.RESPONSE_TIMEOUT)
 
     # ---- the upstream comes from the runtime and nowhere else (12.5)

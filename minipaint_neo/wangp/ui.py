@@ -1378,6 +1378,17 @@ def create_ui() -> None:
 
     # -- what every handler paints -----------------------------------------
     # One list, one order, one description of "the tab looks like this now".
+    #
+    # NOTHING STATEFUL MAY BE ADDED HERE. Not a gr.State, not for convenience,
+    # not "just this one". Gradio tracks state components that are among a
+    # dependency's outputs by hashing their values on every call, and that
+    # hash walks plain containers with no cycle detection and no depth limit -
+    # so one gr.State holding a structure that refers back to itself turns
+    # every repaint into a RecursionError. This list has no stateful component
+    # in it, which is the whole reason the browser's iframe recovery can lean
+    # on the hidden Refresh below: the repaint it presses is structurally
+    # unable to hit that bug. The immunity is one line from being lost, and
+    # losing it would break the repair quietly, on someone else's page.
     painted = [
         shell["setup_root"],
         shell["starting_root"],

@@ -1,0 +1,284 @@
+MINIPAINT NEO - LIGHTWEIGHT IN-PLACE WANGP RECOVERY
+REVIEW RESPONSE TO REVISION 4
+
+Repository target: RJSprod/a1111-mini-paint-NEO
+Code baseline:     3970da4df3f25d3d71d169d4ffd110f06b8b4273 (main, 2026-09-17)
+Reviews:           MINIPAINT_NEO_LIGHTWEIGHT_IN_PLACE_RECOVERY_DESIGN_INTENT_REV4_2026-09-17.txt
+Revision date:     2026-09-17
+Status:            Review response. No code written.
+
+================================================================================
+0. VERDICT
+================================================================================
+
+ADOPT REV4. Build it.
+
+Both changes are correct. The second one corrects a mistake in the reviewer's
+own REV3, and the correction is recorded as such in section 1 rather than
+quietly absorbed.
+
+    section 16.3  explicit clearRecoveryWarning()   REV3 WAS WRONG. REV4 is
+                                                    right, and for the right
+                                                    reason.
+
+    section 3     tri-state readWanGpView()         Sound. Mechanics verified;
+                                                    the view enumeration is
+                                                    complete; the degraded case
+                                                    is handled correctly, and
+                                                    narrowly. See 2 and 3.
+
+One refinement is required, and it is small:
+
+    UNKNOWN is far rarer than REV4 assumes, and its one realistic cause is
+    also the case where the warning has nowhere to render. Section 4.
+
+Nothing else. This is the last correction the reviewer has.
+
+================================================================================
+1. SECTION 16.3 — REV3 WAS WRONG, REV4 IS RIGHT
+================================================================================
+
+REV3 section 16.3 stated:
+
+    "the next successful repaint rewrites that container, so the notice clears
+     itself without separate clearing logic"
+
+That is false, and REV4's replacement reasoning is exact:
+
+    "the warning is appended by browser JavaScript inside the root, while
+     Gradio owns specific child components. Updating the gr.HTML does not
+     provide a strong enough contract that an arbitrary sibling appended by
+     browser code will always be destroyed."
+
+The structure confirms it:
+
+    minipaint_neo/wangp/ui.py:1374
+        with gr.Column(visible=..., elem_id=IFRAME_ROOT_ID) as shell["iframe_root"]:
+    minipaint_neo/wangp/ui.py:1375
+            shell["iframe"] = gr.HTML(...)
+
+A repaint updates shell["iframe"] — the seventh output of paint(), ui.py:1405 —
+which is a CHILD of the Column. It does not rewrite the Column. A <div> that
+browser code appends to the Column, as a sibling of that gr.HTML, is untouched
+by the update.
+
+So REV3's design would have left a stale "could not be reconnected
+automatically" notice sitting beside a freshly restored, perfectly working
+WanGP iframe. The user would be told recovery failed while looking at the
+thing that proves it succeeded.
+
+REV4's explicit clearRecoveryWarning(), and the three call sites section 16.3
+requires for it, are necessary rather than defensive. Acceptance criteria 28,
+29 and 30 are the right way to pin it.
+
+================================================================================
+2. THE TRI-STATE MECHANICS, VERIFIED
+================================================================================
+
+2.1 box() returns the value-bearing element
+
+    browser/minipaint_wangp.js:437-440
+        /** A hidden textbox of the WanGP tab, by id. Values, never URLs. */
+        function box(elementId) {
+            const scope = app();
+            return scope.querySelector ? scope.querySelector("#" + elementId + " textarea") : null;
+        }
+
+It resolves to the <textarea> inside the Gradio wrapper, not the wrapper. So
+`raw.value` in readWanGpView() is the string the server wrote, and
+`!raw || !raw.value` is a correct guard.
+
+2.2 The state box is built exactly like the channel box that already works
+
+    minipaint_neo/wangp/ui.py:1334
+        shell["channel"] = gr.Textbox("", visible=False, elem_id=CHANNEL_ELEM_ID)
+    minipaint_neo/wangp/ui.py:1335
+        shell["state"]   = gr.Textbox(json.dumps(view), visible=False, elem_id=STATE_ELEM_ID)
+
+Same constructor, same visibility, same shape. box() already reads the channel
+box in production — the bridge handshake depends on it — so the selector is
+proven against this exact construction. readWanGpView() inherits that proof.
+
+2.3 The view enumeration is complete
+
+Four constants, and every _view() call site uses one of them:
+
+    minipaint_neo/wangp/ui.py:85-88
+        VIEW_SETUP = "setup"
+        VIEW_STARTING = "starting"
+        VIEW_ERROR = "error"
+        VIEW_IFRAME = "iframe"
+
+    call sites, decide_view():
+        ui.py:258   _view(VIEW_SETUP, ...)
+        ui.py:260   _view(VIEW_ERROR, ...)
+        ui.py:270   _view(VIEW_IFRAME, STATE_DEGRADED, ...)
+        ui.py:273   _view(VIEW_ERROR, ...)
+        ui.py:276   _view(VIEW_IFRAME, STATE_READY, ...)
+        ui.py:278   _view(VIEW_STARTING, STATE_STARTING, ...)
+        ui.py:279   _view(VIEW_STARTING, STATE_STOPPED, ...)
+
+Seven call sites, four distinct views, no fifth. REV4 section 3's list is
+exhaustive at this revision, and the "unrecognized -> UNKNOWN" arm is a guard
+against a future fifth view rather than a live case.
+
+================================================================================
+3. A NEAR MISS WORTH WRITING DOWN: THE DEGRADED VIEW
+================================================================================
+
+REV4 keys on `state.view`. That is correct, and it is correct in a way that is
+easy to break later.
+
+    minipaint_neo/wangp/ui.py:262-271
+        if error_code:
+            # A bridge complaint against a WanGP that is still serving pages is
+            # the DEGRADED state: the iframe is genuinely usable, and it is only
+            # the intelligent Send that has to be switched off.
+            view = _view(VIEW_IFRAME, STATE_DEGRADED, error_code, ...)
+            view["degraded"] = True
+
+The degraded case carries view == "iframe" and state == "DEGRADED". Because
+readWanGpView() reads the VIEW field, it returns WAN_VIEW_IFRAME — which is
+right: a degraded WanGP has a usable iframe, and if that iframe vanishes it
+should be repaired like any other.
+
+Had the helper keyed off the STATE field instead — an easy and plausible
+"simplification", since the field is right there in the same JSON and the
+constant is named STATE_ELEM_ID — then STATE_DEGRADED would have fallen into
+the unrecognized arm, returned UNKNOWN, refused to repair, and warned the user
+on a tab that was working.
+
+Recommend one sentence in section 3 recording that the helper reads `view` and
+not `state`, and why. The two fields are adjacent, similarly named, and only
+one of them is safe to branch on.
+
+================================================================================
+4. THE ONE REFINEMENT: UNKNOWN IS RARER THAN REV4 ASSUMES, AND ITS REAL CAUSE
+   HAS NOWHERE TO PUT THE WARNING
+================================================================================
+
+4.1 What can actually produce UNKNOWN
+
+REV4 treats missing, malformed and unrecognized as three comparable causes.
+At this revision they are not comparable at all.
+
+    minipaint_neo/wangp/ui.py:1335
+        shell["state"] = gr.Textbox(json.dumps(view), visible=False, elem_id=STATE_ELEM_ID)
+
+The box is INITIALIZED AT BUILD TIME with the real view's JSON. It is never
+empty on a built page — there is no window between page construction and the
+first paint in which it holds "".
+
+    malformed        json.dumps() of a dict from _view(). Not reachable.
+    unrecognized     four views, all mapped (section 2.3). Not reachable
+                     until someone adds a fifth.
+    empty value      never written; the box is born populated.
+
+That leaves exactly one realistic cause:
+
+    box() returned null, because #wangp_state is not in the DOM.
+
+4.2 Why that matters
+
+If #wangp_state is not in the DOM, the WanGP tab's component subtree is
+missing or has been replaced. That subtree also contains #wangp_iframe_root —
+which section 16.3 designates as the container the warning is written into.
+
+So REV4 section 9 step 6 and section 16.2 Path A can be asked to render a
+notice into an element that does not exist. Depending on implementation that is
+either a silent no-op (the user is told nothing, and recovery.warningShown is
+set, suppressing a later legitimate warning) or a thrown exception inside the
+observer callback.
+
+Neither is what the document intends.
+
+4.3 The guard
+
+Warn on UNKNOWN only when the root is present:
+
+    UNKNOWN, iframe absent, #wangp_iframe_root PRESENT
+        -> no press;
+        -> stop automatic mutation;
+        -> show the warning once.
+           This is REV4's Path A, and it is right.
+
+    UNKNOWN, iframe absent, #wangp_iframe_root ABSENT
+        -> this is not a recovery failure, it is the section 22 case;
+        -> do not warn: there is no surface to warn on and no user reading it;
+        -> do not set recovery.warningShown;
+        -> disconnect the stale observer, clear S.watcherRoot, and re-run the
+           bounded watchRoot ladder (ROOT_LOOKUPS,
+           browser/minipaint_wangp.js:214);
+        -> the next successful bind re-enters the normal cycle.
+
+Section 13 already orders this correctly for the resume path — it rebinds the
+observer BEFORE reading the view. Section 9 should say the same thing, because
+the observer path can reach step 6 without passing through section 13.
+
+4.4 Test to add
+
+    27.27 UNKNOWN with the root also absent
+
+        Setup:    iframe absent; #wangp_state absent; #wangp_iframe_root
+                  absent.
+        Expected: no press; NO warning element created;
+                  recovery.warningShown remains false; the observer-rebind
+                  path of section 22 runs; a later successful bind detects a
+                  subsequent iframe removal normally.
+
+Mutation-check it against an implementation that warns unconditionally on
+UNKNOWN: that implementation must fail this test.
+
+4.5 A smaller wording note
+
+Acceptance criterion 3 reads:
+
+    "Missing, malformed or unrecognized wangp_state is represented as UNKNOWN,
+     not collapsed into either IFRAME or NON_IFRAME."
+
+Correct as a contract. Worth adding, from 4.1, that "missing" means the ELEMENT
+is absent rather than the value being empty — the value cannot be empty on a
+built page, and an implementer who tests only the empty-string case will not
+have tested the case that actually occurs.
+
+================================================================================
+5. WHAT IS UNCHANGED AND STILL CORRECT
+================================================================================
+
+Confirmed carried through REV4 without regression, and not re-litigated here:
+
+    section 2.2.1   show() is the right lever; open_tab() would start a process
+    section 2.2.2   a repaint is a reload; Gradio does not skip an unchanged
+                    string
+    section 2.2.3   `painted` must never gain a gr.State
+    section 9/10.1  the grace and the synchronous press block, both needed
+    section 11      the visibility-aware deadline
+    section 14      mutating-request uncertainty, correctly placed in Phase 1
+    section 21      deep_hash cannot reach the repaint; Phase 4 hunts a
+                    container cycle
+    section 22      S.watcherRoot and observer rebinding
+    section 24.2    no behavioural Python change; one comment at ui.py:1381
+
+Acceptance criteria 15, 21, 22 and 40 remain ALREADY TRUE at HEAD and are
+correctly marked as regression guards rather than new work.
+
+================================================================================
+6. COSMETIC
+================================================================================
+
+Several section headers lost their ==== rule in REV4: sections 4, 6, 9, 10, 13,
+14, 27, 28 and 29 open without one. Harmless to a reader, noisy in a diff, and
+this document has now been revised four times and will be revised again.
+
+================================================================================
+7. RECOMMENDATION
+================================================================================
+
+Build REV4, with section 4's guard folded into sections 9 and 16.2 and test
+27.27 added.
+
+The design has been stable across three revisions. The remaining changes have
+been about what the browser is allowed to conclude from incomplete evidence,
+which is the right thing for the last round of a recovery spec to be about.
+
+Nothing further from this reviewer. Ship Phase 1.

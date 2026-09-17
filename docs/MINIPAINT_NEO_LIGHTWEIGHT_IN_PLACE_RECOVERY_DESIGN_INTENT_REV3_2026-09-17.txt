@@ -12,9 +12,27 @@ Reviewed exact revision:
     2026-09-17
 
 Status:
-    Implementation-grade. Settled. Every mechanism named below was verified
-    against the revision above, and the two Gradio behaviours the design
-    depends on were read from the pinned wheel rather than assumed.
+    SUPERSEDED by
+    MINIPAINT_NEO_LIGHTWEIGHT_IN_PLACE_RECOVERY_DESIGN_INTENT_REV4_2026-09-17.txt.
+    Build from REV4, not from this document.
+
+    Two things in here are corrected there, and one of them is an error rather
+    than a refinement:
+
+      * Section 16.3 claims the recovery notice "clears itself" because the
+        next repaint rewrites its container. IT DOES NOT. A repaint updates
+        the gr.HTML component (paint()'s seventh output, ui.py:1405), which is
+        a CHILD of the Column; a div appended to the Column as that
+        component's sibling survives. REV4 requires an explicit
+        clearRecoveryWarning(), and is right to.
+
+      * Section 3's boolean expectsIframe() is replaced in REV4 by a tri-state
+        readWanGpView(). A boolean cannot serve both the pre-press gate and
+        the post-press interpretation safely.
+
+    Everything else below was verified against the revision above, and the two
+    Gradio behaviours the design depends on were read from the pinned wheel
+    rather than assumed.
 
 Supersedes:
     MINIPAINT_NEO_LIGHTWEIGHT_IN_PLACE_RECOVERY_DESIGN_INTENT_REV2_2026-09-17.txt
@@ -1216,7 +1234,7 @@ A browser-rendered notice inside the existing WanGP root.
 
 Reason, and it is not a preference:
 
-    The WanGP error surface is error_body, painted by paint() (ui.py:1403,
+    The WanGP error surface is error_body, painted by paint() (ui.py:1404,
     the sixth output). Every route to it runs through a Gradio event. The
     precondition for showing this warning is that a Gradio event — the
     repaint — did not produce a result. Asking the failed channel to render

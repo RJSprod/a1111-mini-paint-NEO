@@ -32,6 +32,7 @@ import pathlib
 import shutil
 import sys
 import tempfile
+import json
 import time
 
 for _key in ("no_proxy", "NO_PROXY"):
@@ -864,6 +865,66 @@ def check_the_queue_section_is_the_browsers(r: Results, page) -> None:
             }"""),
             page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_history_list');
                 return h ? h.innerHTML.slice(0, 120) : 'NO HOST'; }"""))
+
+
+def check_queue_reads_are_one_at_a_time(r: Results, page) -> None:
+    """A queue read that has not come back is not asked again beside itself.
+
+    The day this mattered, a server that had stopped answering left
+    twenty-four reads of this route in flight at once, each holding one of
+    the six connections a browser allows to an origin, and everything the
+    page asked for afterwards - a generation, a button, this tab's own
+    journal - queued in the browser behind them. One read at a time is the
+    rule; this holds a read on the wire and asks again to see that the
+    rule holds.
+    """
+    held = []
+
+    def hold(route):
+        if route.request.method == "GET":
+            held.append(route)
+        else:
+            route.continue_()
+
+    page.route("**/minipaint-clipboard/queue*", hold)
+    # Waited for with the page's own clock rather than time.sleep: a route
+    # handler is only ever run while this thread is inside a Playwright call,
+    # so a sleep here would be a request the browser has paused and nobody
+    # has looked at yet.
+    try:
+        page.evaluate("() => window.minipaintClipboard.refreshQueue()")
+        for _ in range(50):
+            if held:
+                break
+            page.wait_for_timeout(100)
+        r.check("(a queue read is on the wire and held there)", len(held) == 1, str(len(held)))
+        # Three more asks while it is out, each past the refresh debounce so
+        # that each one reaches the read itself rather than the timer.
+        for _ in range(3):
+            page.evaluate("() => window.minipaintClipboard.refreshQueue()")
+            page.wait_for_timeout(500)
+        r.check("asking again while a read is out opens no second connection", len(held) == 1, str(len(held)))
+        held[0].fulfill(status=200, content_type="application/json",
+                        body=json.dumps({"ok": True, "jobs": [], "running": False, "counts": {}}))
+        page.wait_for_timeout(500)
+        page.evaluate("() => window.minipaintClipboard.refreshQueue()")
+        for _ in range(50):
+            if len(held) >= 2:
+                break
+            page.wait_for_timeout(100)
+        r.check("and once the answer is in, the next ask is a new read", len(held) == 2, str(len(held)))
+    finally:
+        # Answered before the route goes: a handler still holding a request
+        # when it is unrouted is a cancelled future Playwright complains about.
+        for route in held:
+            try:
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"ok": True, "jobs": [], "running": False, "counts": {}}))
+            except Exception:
+                pass  # already answered
+        page.wait_for_timeout(300)
+        page.unroute("**/minipaint-clipboard/queue*")
+        page.wait_for_timeout(300)
 
 
 def check_the_prompt_editor_fills_the_window(r: Results, page) -> None:
@@ -2418,6 +2479,7 @@ def run() -> Results:
                 check_sorting_is_separate_from_drawing(r, page)
                 check_the_failure_modes_have_answers(r, page, library)
                 check_the_queue_section_is_the_browsers(r, page)
+                check_queue_reads_are_one_at_a_time(r, page)
                 check_the_prompt_editor_fills_the_window(r, page)
                 check_the_toolbar_flyouts_are_the_one_door(r, page)
                 check_view_outputs_is_a_gallery(r, page)

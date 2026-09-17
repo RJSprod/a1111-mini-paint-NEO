@@ -43,6 +43,7 @@ import contextlib
 import html
 import re
 import json
+import secrets
 import threading
 import time
 import typing
@@ -330,7 +331,7 @@ def current_view() -> dict:
 # ------------------------------------------------------------- the iframe --
 
 
-def iframe_html(channel_id: str = "") -> str:
+def iframe_html(channel_id: str = "", paint: str = "") -> str:
     """The one iframe, pointed at the public path and nothing else.
 
     ``channel_id`` is not put in the URL, in a query string or in a fragment;
@@ -338,19 +339,35 @@ def iframe_html(channel_id: str = "") -> str:
     ``/wan2gp/``. The browser reads the channel from its own hidden textbox,
     which keeps "which session is this" and "where do the bytes go" as two
     separate facts that cannot be conflated by a copied link.
+
+    ``paint`` is a token that makes THIS string differ from the last one.
+    Gradio's frontend applies an output that equals what a component already
+    holds as no change at all - the same string leaves the DOM exactly as it
+    was - so a repaint whose purpose is a NEW iframe element (the browser's
+    recovery, a restart, the tab painting after the process changed) has to
+    hand Gradio a string it has not seen. It rides in a data attribute, which
+    the browser does not read; the token is not a channel, not a session and
+    not a secret, and an empty one means "the same iframe as before", which
+    is what every ordinary paint wants.
     """
     # The size is inline rather than in style.css because style.css belongs to
     # the Mini Paint tab: a WanGP that only fills its frame when a stylesheet
     # in another part of the extension has loaded is a WanGP that is 150 pixels
     # tall on the day that file is edited. The class is still there for anyone
     # who wants to restyle it.
+    stamp = f' data-minipaint-paint="{html.escape(str(paint), quote=True)}"' if paint else ""
     return (
         f'<iframe id="{IFRAME_ELEM_ID}" class="minipaint-wangp-frame" title="WanGP" '
-        f'src="{html.escape(PUBLIC_PATH, quote=True)}" '
+        f'src="{html.escape(PUBLIC_PATH, quote=True)}"{stamp} '
         'style="width:100%;height:80vh;min-height:480px;border:0;display:block" '
         'referrerpolicy="same-origin" allow="clipboard-read; clipboard-write; fullscreen">'
         "</iframe>"
     )
+
+
+def paint_token() -> str:
+    """A token no earlier paint of this Forge used. See ``iframe_html``."""
+    return secrets.token_hex(6)
 
 
 def _new_channel(snapshot: dict) -> str:
@@ -1403,7 +1420,10 @@ def create_ui() -> None:
         shell["state"],
     ]
 
-    def paint(view: dict, channel: str = "") -> tuple:
+    def paint(view: dict, channel: str = "", fresh: bool = False) -> tuple:
+        """The tab as ``view`` describes it. ``fresh`` makes the iframe a NEW
+        element - a WanGP page load - where the default leaves an iframe that
+        is already showing alone. See ``iframe_html``."""
         name = view["view"]
         actions = view.get("actions") or []
         return (
@@ -1413,25 +1433,39 @@ def create_ui() -> None:
             gr.update(visible=name == VIEW_IFRAME),
             gr.update(value=_markdown(view)),
             gr.update(value=_error_html(view)),
-            gr.update(value=iframe_html(channel) if name == VIEW_IFRAME else ""),
+            gr.update(value=iframe_html(channel, paint_token() if fresh else "") if name == VIEW_IFRAME else ""),
             gr.update(visible=ACTION_RESTART in actions),
             gr.update(visible=ACTION_REINITIALIZE in actions),
             gr.update(value=channel),
             gr.update(value=json.dumps(view)),
         )
 
-    def show(channel: str = "") -> tuple:
+    def show(channel: str = "", fresh: bool = False) -> tuple:
         """Repaint from what is true now. Starts nothing.
 
         The channel this page already has is kept when it still belongs to the
         run that is serving: a repaint is not a new iframe load, and minting a
         second channel for the same load would leave the registry holding a
         session no page will ever speak on.
+
+        ``fresh`` is for the callers whose whole point is a new iframe load:
+        the hidden Refresh the browser presses when its iframe is gone or
+        stale, and a restart, after which the page inside the old iframe
+        belongs to a process that no longer exists. Every other repaint
+        leaves a showing iframe exactly where it is.
         """
         view = current_view()
         if view["view"] != VIEW_IFRAME:
             return paint(view, "")
-        return paint(view, _keep_or_mint(channel))
+        return paint(view, _keep_or_mint(channel), fresh=fresh)
+
+    def repaint(channel: str = "") -> tuple:
+        """The hidden Refresh. The browser presses it when the iframe it had
+        is gone, when the card it shows was painted before the process
+        changed, and at boot when the tab was painted before this page
+        loaded; in every one of those the answer has to be an iframe that
+        is actually loaded, not a string Gradio already holds."""
+        return show(channel, fresh=True)
 
     def open_tab(channel: str = "") -> tuple:
         """The tab was opened: section 11.1's one automatic start.
@@ -1450,9 +1484,10 @@ def create_ui() -> None:
     def restart() -> tuple:
         # The error surface's Restart is the same verified restart as the
         # management panel's; its report lands in the panel, where the
-        # management wiring reads it back.
+        # management wiring reads it back. Painted fresh: whatever iframe
+        # was showing holds the page of a process that has just been ended.
         _last_restart["report"] = restart_wangp()
-        return show()
+        return show(fresh=True)
 
     shell["session"].change(fn=record_session, inputs=[shell["channel"], shell["session"]], outputs=[])
     # B7: no event is bound here any more. The browser posts its diagnostic
@@ -1460,7 +1495,7 @@ def create_ui() -> None:
     # trip taken during the send they are describing. The hidden box itself
     # stays until C2 does the component inventory; nothing writes it now.
     open_request.click(fn=open_tab, inputs=[shell["channel"]], outputs=painted)
-    refresh_request.click(fn=show, inputs=[shell["channel"]], outputs=painted)
+    refresh_request.click(fn=repaint, inputs=[shell["channel"]], outputs=painted)
     start_btn.click(fn=open_tab, inputs=[shell["channel"]], outputs=painted)
     recheck_btn.click(fn=show, inputs=[shell["channel"]], outputs=painted)
     shell["restart"].click(fn=restart, inputs=[], outputs=painted)
@@ -1468,7 +1503,10 @@ def create_ui() -> None:
     # The console lives with the diagnostics, but it is the wizard that
     # fills it, so the wizard is handed the box to write into.
     _wire_wizard(wizard, shell, painted, show, manage["console"])
-    _wire_management(manage, shell["error_reinit"], painted, show, error_restart=shell["restart"])
+    # The management panel's paints all follow an ended process - a restart,
+    # a reinitialisation - so each is a fresh iframe load, never a string
+    # Gradio would apply as no change over the old process's page.
+    _wire_management(manage, shell["error_reinit"], painted, repaint, error_restart=shell["restart"])
 
 
 # --------------------------------------------------------------- wizard ----
@@ -1869,8 +1907,11 @@ def _wire_wizard(parts: dict, shell: dict, painted, show, console) -> None:
         journal.note("checks", f"{sum(1 for row in rows if row.get('ok'))}/{len(rows)} rows pass")
 
         # The three iframe outputs are skipped, not re-sent, when nothing
-        # about the frame changed: Gradio re-renders an HTML component it is
-        # handed, even the same string, and a re-rendered iframe is a reload.
+        # about the frame changed. Gradio's frontend applies an identical
+        # string as no change, so re-sending would be harmless today - but
+        # this checklist is polled on a timer, and a paint that MEANS "load
+        # WanGP again" is stamped (see iframe_html); the skip is what keeps
+        # the two apart if somebody ever stamps this one.
         return (
             checklist_html(rows),
             rows,

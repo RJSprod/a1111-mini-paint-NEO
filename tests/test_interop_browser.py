@@ -93,10 +93,14 @@ window.minipaintWanGP = {
     // that out for itself; this is how it is told.
     inheritSettings: function (on) { told.push(on === true); }
 };
+// Everything the bundle says to the rest of the page goes through one
+// document event; recorded, so "the stream said it was silent" can be a
+// fact rather than an impression.
+const emitted = [];
 global.document = {
     visibilityState: "visible",
     addEventListener: function (kind, fn) { (listeners[kind] = listeners[kind] || []).push(fn); },
-    dispatchEvent: function () { return true; },
+    dispatchEvent: function (event) { emitted.push(event && event.detail ? event.detail : { type: event && event.type }); return true; },
     querySelector: function () { return null; },
     createElement: function () { return { addEventListener: function () { }, setAttribute: function () { } }; },
     head: { appendChild: function () { } }
@@ -120,6 +124,10 @@ global.fetch = function (url, options) {
     } else if (text.indexOf("/outbox/claim") !== -1) {
         payload = { ok: true, empty: true, pending: 0 };
     } else if (text.indexOf("/sync") !== -1) {
+        // The starved page: the request is queued in the browser behind
+        // connections something else is holding, and never gets one. Not
+        // refused, not failed - pending, for ever.
+        if (STARVED) { return new Promise(function () {}); }
         payload = { ok: true, server_epoch: EPOCH, revision: SYNC_REVISION, cursor: EPOCH + ":" + SYNC_REVISION, jobs: JOBS.list, unattended: UNATTENDED, inherit_settings: INHERIT };
     } else if (text.indexOf("/outbox") !== -1) {
         payload = { ok: true, jobs: JOBS.list, running: true, counts: {} };
@@ -137,6 +145,45 @@ let SUBMIT_STATE = "admitted";
 let SUBMIT_EXECUTOR = "server";
 let UNATTENDED = true;
 let INHERIT = true;
+let STARVED = false;
+
+// The stream's watchdog is forty seconds of silence, and what it then does
+// is the thing under test in the last two modes - on a virtual clock, because
+// a suite that waits forty real seconds to learn what it already knows is a
+// suite nobody runs. Installed before the bundle loads, and only for those
+// modes: every other mode keeps the real timers it was written against.
+const realSetTimeout = global.setTimeout;
+const realClearTimeout = global.clearTimeout;
+const realNow = Date.now;
+let CLOCK = null;
+function installClock() {
+    let now = 1700000000000;
+    let seq = 0;
+    const timers = new Map();
+    global.setTimeout = function (fn, ms) { seq += 1; timers.set(seq, { at: now + Math.max(0, Number(ms) || 0), seq: seq, fn: fn }); return seq; };
+    global.clearTimeout = function (id) { timers.delete(id); };
+    Date.now = function () { return now; };
+    CLOCK = {
+        advance: async function (ms) {
+            const until = now + ms;
+            for (;;) {
+                let next = null;
+                for (const entry of timers.values()) {
+                    if (entry.at > until) { continue; }
+                    if (!next || entry.at < next.at || (entry.at === next.at && entry.seq < next.seq)) { next = entry; }
+                }
+                if (!next) { break; }
+                timers.delete(next.seq);
+                now = next.at;
+                try { next.fn(); } catch (e) { /* the bundle's business */ }
+                await new Promise(function (r) { realSetTimeout(r, 0); });
+            }
+            now = until;
+            await new Promise(function (r) { realSetTimeout(r, 0); });
+        }
+    };
+}
+if (process.argv[3] === "silence" || process.argv[3] === "starved") { installClock(); }
 
 new Function("window", "document", "fetch", "EventSource", "CustomEvent", "localStorage",
     fs.readFileSync(process.argv[2], "utf8"))(window, document, fetch, FakeEventSource, CustomEvent, localStorage);
@@ -228,7 +275,36 @@ async function resets() {
     report({ syncsOnReset: after - before, syncsOnEpochChange: afterEpoch - after });
 }
 
-(MODE === "reset" ? resets() : MODE === "handback" ? handback() : main()).catch(function (e) {
+// The stream goes quiet. The bundle says so on the document, sends the one
+// plain request that tells a dead stream from a page that cannot reach Forge
+// at all, and says how that came back - or does not, when it never does.
+async function silence() {
+    STARVED = MODE === "starved";
+    api.watch();
+    for (const s of streams) { s.fire("open", {}); }
+    const streamsBefore = streams.length;
+    const syncs = function () { return calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length; };
+    const said = function () { return emitted.filter(function (e) { return e && e.kind === "stream"; }).map(function (e) { return e.state; }); };
+    await CLOCK.advance(41000);
+    await new Promise(function (r) { realSetTimeout(r, 20); });
+    const afterSilence = said();
+    const syncsAfterSilence = syncs();
+    // Long enough for the reconnect that follows an answer. A stream that
+    // reopened and is then quiet again is noticed again, which is why the
+    // whole record is reported and the first silence is judged on its own.
+    await CLOCK.advance(45000);
+    await new Promise(function (r) { realSetTimeout(r, 20); });
+    report({
+        afterSilence: afterSilence,
+        syncsAfterSilence: syncsAfterSilence,
+        streamEvents: said(),
+        syncs: syncs(),
+        reopened: streams.length - streamsBefore
+    });
+}
+
+(MODE === "reset" ? resets() : MODE === "handback" ? handback()
+    : (MODE === "silence" || MODE === "starved") ? silence() : main()).catch(function (e) {
     console.log(JSON.stringify({ error: String(e && e.stack || e) }));
 });
 """
@@ -340,6 +416,30 @@ def run() -> Results:
                 reset.get("syncsOnReset") == 1, str(reset.get("syncsOnReset")))
         r.check("an epoch from another run of Forge produces exactly one more",
                 reset.get("syncsOnEpochChange") == 1, str(reset.get("syncsOnEpochChange")))
+
+    # The stream's silence, said out loud. The server heartbeats every fifteen
+    # seconds, so forty seconds of nothing is never the server having nothing
+    # to say; it is either the stream alone or the page unable to reach Forge
+    # at all, and the one plain request the watchdog sends is what tells the
+    # two apart. The WanGP tab acts on the difference - it unloads its iframe
+    # to give the browser's connections back when NOTHING comes back - so the
+    # three words have to be said, in this order, and the third has to be
+    # absent when the request never returns.
+    silence = _run("silence")
+    r.check("the harness drove a stream that went quiet", silence is not None and "error" not in silence, str(silence)[:300])
+    if silence and "error" not in silence:
+        r.check("a stream that opens says so", (silence.get("streamEvents") or [])[:1] == ["open"], str(silence.get("streamEvents")))
+        r.check("forty seconds of silence is said out loud, and answered with one plain request",
+                silence.get("afterSilence") == ["open", "silent", "answered"] and silence.get("syncsAfterSilence") == 1, str(silence))
+        r.check("and the stream is then opened again", silence.get("reopened", 0) >= 1, str(silence.get("reopened")))
+        r.check("and a stream that is quiet again is noticed again, the same way",
+                (silence.get("streamEvents") or [])[3:5] == ["silent", "answered"] and silence.get("syncs") == 2, str(silence))
+    starved = _run("starved")
+    r.check("the harness drove a page whose request never came back", starved is not None and "error" not in starved, str(starved)[:300])
+    if starved and "error" not in starved:
+        r.check("a request that never comes back is never reported as answered",
+                starved.get("streamEvents") == ["open", "silent"] and starved.get("syncs") == 1, str(starved))
+        r.check("and no second stream is opened over a request still in flight", starved.get("reopened") == 0, str(starved.get("reopened")))
     return r
 
 

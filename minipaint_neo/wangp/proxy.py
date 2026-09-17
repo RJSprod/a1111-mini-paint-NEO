@@ -114,10 +114,24 @@ CONNECT_TIMEOUT = 10.0
 #: wedged backend does not hold a browser connection forever.
 RESPONSE_TIMEOUT = 120.0
 
-#: Idle time inside a queue/event stream. None on purpose: a generation may
-#: emit nothing for as long as it takes, and a proxy that cuts it turns a slow
-#: success into a failure the user cannot distinguish from a crash.
-STREAM_IDLE_TIMEOUT: typing.Optional[float] = None
+#: Idle time inside a queue/event stream, and it is bounded now where it was
+#: None before. The reason it can be: Gradio's own streams are never quiet.
+#: ``/heartbeat/<session>`` pings every 15 seconds and ``/queue/data`` sends a
+#: heartbeat message every 15 seconds whatever the generation is doing
+#: (gradio 4.40, routes.py:650 and :896), so a minute of silence from either
+#: is not a slow generation - it is a WanGP whose server is not running its
+#: event loop at all.
+#:
+#: The reason it must be: a browser allows six connections to one origin under
+#: HTTP/1.1, and the WanGP iframe's two streams come through this proxy on the
+#: same origin as Forge's own page. A stream that is never cut holds one of
+#: those six for as long as the child is wedged - and with two such streams,
+#: Forge's own heartbeat, and this extension's event stream, that left two
+#: for everything else. The day it happened, every click in the WebUI queued
+#: in the browser behind a WanGP that had stopped answering, and the only
+#: thing that freed it was restarting the browser. Cutting a silent stream
+#: gives the connection back; Gradio's client reconnects on its own.
+STREAM_IDLE_TIMEOUT: typing.Optional[float] = 60.0
 
 #: Writing a request body upstream. Uploads are large and the browser may be on
 #: a slow link; this is per write, not for the whole upload.

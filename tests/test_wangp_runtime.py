@@ -493,12 +493,138 @@ def emergency_restart_checks(r: Results, config, handoff) -> None:
         stage["phase"] = "before"
         report = current.emergency_restart(config, gpu_uuid=GPU_UUID, runner=runner, start_async=start_again)
         r.check("with no WanGP running the restart says so and starts one", any("no WanGP of ours was running" in step for step in report["steps"]) and report["started"] == "requested")
+
+        # A process that survives the stop. The escalation used to be a POSIX
+        # branch that did nothing at all on Windows, so a WanGP that survived
+        # the job object was reported and left running; now every platform
+        # ends each surviving pid its own way, and a pid that survives even
+        # that is named for what it is - stuck in the driver, not in us.
+        forced = []
+        original_force = runtime._force_exit
+        runtime._force_exit = lambda pid: (forced.append(pid), True)[1]
+        # The tree is polled for its whole exit budget before anything is
+        # escalated to; the budget is real seconds, and this is not the test
+        # of how long it is.
+        original_budget = runtime.TREE_EXIT_TIMEOUT
+        runtime.TREE_EXIT_TIMEOUT = 0.3
+
+        def alive_until_killed(pids, pgid):
+            # Alive through every poll of the ordinary wait, gone the moment
+            # something is actually sent to it.
+            return [] if forced else list(pids)
+
+        r.check("(a WanGP of ours is running again)", current.state == runtime.READY and bool(current.tree_pids()))
+        survivor = current.tree_pids()[:1]
+        current._still_alive = alive_until_killed
+        try:
+            stage["phase"] = "before"
+            report = current.emergency_restart(config, gpu_uuid=GPU_UUID, runner=runner, start_async=start_again)
+        finally:
+            del current._still_alive
+        r.check("a process that survives the stop is ended by pid, whatever the platform",
+                forced == survivor and survivor, f"forced={forced} tree={survivor}")
+        r.check("and once it is gone the report says the tree has exited",
+                report["remaining"] == [] and report["ok"] is True and any("every process of the tree has exited" in step for step in report["steps"]),
+                json.dumps(report["steps"]))
+
+        def alive_always(pids, pgid):
+            return list(pids)
+
+        forced.clear()
+        current._still_alive = alive_always
+        try:
+            stage["phase"] = "before"
+            report = current.emergency_restart(config, gpu_uuid=GPU_UUID, runner=runner, start_async=start_again)
+        finally:
+            del current._still_alive
+            runtime._force_exit = original_force
+            runtime.TREE_EXIT_TIMEOUT = original_budget
+        r.check("a process that survives being killed is reported, not pretended away",
+                report["remaining"] and report["ok"] is False and report["verified"] is False, json.dumps(report["steps"]))
+        r.check("and the report says what that means rather than blaming this extension",
+                any("would not exit even when killed" in step and "driver" in step for step in report["steps"]), json.dumps(report["steps"]))
     finally:
         vram.shutil.which = saved_which
         with contextlib.suppress(Exception):
             current.stop(timeout=2.0)
         with contextlib.suppress(Exception):
             bridge.registry().invalidate_instance("")
+        listener.close()
+
+
+def force_exit_checks(r: Results) -> None:
+    """Ending one process by pid, the platform's way, and only a process."""
+    import signal
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        r.check("a process of ours is ended the platform's way", runtime._force_exit(child.pid) is True)
+        try:
+            code = child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            code = None
+        r.check("and it is gone", code is not None and (os.name == "nt" or code == -signal.SIGKILL), str(code))
+    finally:
+        with contextlib.suppress(Exception):
+            child.kill()
+        with contextlib.suppress(Exception):
+            child.wait(timeout=5)
+    r.check("a pid that is nobody's is refused rather than raised", runtime._force_exit(unused_pid()) is False)
+    r.check("and so is anything that is not a pid",
+            runtime._force_exit("x") is False and runtime._force_exit(0) is False and runtime._force_exit(-1) is False
+            and runtime._force_exit(None) is False)
+
+
+def announce_checks(r: Results, config, handoff) -> None:
+    """Every change of state is said on the event spine, coarsely.
+
+    The WanGP tab is painted from the runtime's state when Forge builds the
+    UI and never again unless something presses one of its buttons. A page
+    loaded later, or one whose WanGP started for a job another page queued,
+    showed a card that was true at build time and stale ever since. The
+    spine is how every page learns the process changed; this is the runtime
+    holding up its end, with nothing on the frame but the state.
+    """
+    from minipaint_neo import events
+
+    def runtime_records(since):
+        records, _reset = events.replay(events.cursor(since))
+        return [record for record in records if record["kind"] == events.RUNTIME]
+
+    listener = Listener()
+    current = runtime.Runtime()
+    spawns = Spawns()
+    try:
+        since = events.revision()
+        with port_from(listener):
+            current.start(config, spawn=spawns, probe=healthy, gpus=[gpu()], handoff_root=handoff, timeout=20.0)
+        ready = runtime_records(since)
+        r.check("a WanGP that became ready is announced as running",
+                any(rec["payload"] == {"state": runtime.READY, "running": True} for rec in ready), json.dumps(ready))
+        r.check("and the announcement carries the state and nothing else - no port, no pid, no path",
+                ready and all(set(rec["payload"]) == {"state", "running"} for rec in ready), json.dumps(ready))
+
+        since = events.revision()
+        current.stop()
+        stopped = runtime_records(since)
+        r.check("a WanGP that was stopped is announced as not running",
+                any(rec["payload"] == {"state": runtime.STOPPED, "running": False} for rec in stopped), json.dumps(stopped))
+
+        since = events.revision()
+        current.stop()
+        r.check("a stop with nothing to stop announces nothing", runtime_records(since) == [], json.dumps(runtime_records(since)))
+
+        since = events.revision()
+        code = failed(lambda: current.start(config, spawn=spawns, probe=healthy, gpus=[], handoff_root=handoff, timeout=20.0))
+        failed_records = runtime_records(since)
+        r.check("(a start without the chosen GPU fails)", bool(code), code)
+        r.check("a start that failed is announced, as not running",
+                failed_records and all(rec["payload"]["running"] is False for rec in failed_records), json.dumps(failed_records))
+    finally:
+        with contextlib.suppress(Exception):
+            current.stop(timeout=2.0)
         listener.close()
 
 
@@ -774,6 +900,8 @@ def run() -> Results:
         lock_checks(r, base.name)
         vram_checks(r)
         emergency_restart_checks(r, config, handoff)
+        announce_checks(r, config, handoff)
+        force_exit_checks(r)
     finally:
         base.cleanup()
 

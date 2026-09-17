@@ -795,6 +795,20 @@ def tab_checks(r: Results) -> None:
                     f'src="{wangp_ui.PUBLIC_PATH}"' in frame and "://" not in frame, frame)
             r.check("and the channel id is not in the URL it is given",
                     "0123456789abcdef0123456789abcdef" not in frame)
+            # A repaint that MEANS "load WanGP again" has to hand Gradio a
+            # string it does not already hold: the frontend applies an equal
+            # string as no change and leaves the DOM alone, which would leave
+            # a missing iframe missing. The stamp is what changes, and only it.
+            stamped = wangp_ui.iframe_html("0123456789abcdef0123456789abcdef", paint="deadbeef0001")
+            r.check("a stamped repaint is a different string, with the stamp in a data attribute",
+                    stamped != frame and 'data-minipaint-paint="deadbeef0001"' in stamped
+                    and stamped.replace(' data-minipaint-paint="deadbeef0001"', "") == frame, stamped)
+            r.check("and the stamp changes nothing about where the iframe points",
+                    f'src="{wangp_ui.PUBLIC_PATH}"' in stamped and "://" not in stamped
+                    and "0123456789abcdef0123456789abcdef" not in stamped)
+            r.check("every token the tab mints is fresh and is not a channel",
+                    len({wangp_ui.paint_token() for _ in range(64)}) == 64
+                    and all(len(token) == 12 for token in (wangp_ui.paint_token(),)))
 
             # ---- and now the failure this whole shape exists for ----
             print("  (the traceback below is this test breaking the WanGP tab on purpose)")

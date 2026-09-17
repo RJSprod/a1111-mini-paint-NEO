@@ -310,6 +310,23 @@ window.minipaintWanGP = (function () {
             graceTimer: 0,      //: the one-shot absence grace
             deadline: null      //: the visibility-aware arrival budget
         },
+        //: The transport circuit breaker's bookkeeping. See onStreamState.
+        //: At rest on a healthy page: no deadline, nothing shed.
+        transport: {
+            silentSince: 0,     //: when the event spine went quiet; 0 while it speaks
+            deadline: null,     //: the on-screen budget a plain request has to come back in
+            shed: false,        //: whether the iframe is unloaded to give its connections back
+            shedAt: 0,
+            sheds: 0,           //: how many times this page has had to, for a bug report
+            src: "",            //: what the iframe was loading before it was shed
+            reload: null        //: the on-screen budget before it is loaded again regardless
+        },
+        //: Whether the one boot-time press of the tab's Refresh has happened.
+        //: See watchRoot.
+        bootRepainted: false,
+        //: The runtime-frame press: when the last one happened, the timer for
+        //: the next, and what the server said last. See onRuntimeFrame.
+        runtimePress: { at: 0, timer: 0, running: null },
         lastCode: "",
         theme: "",
         // Whether the bridge in this page can take a queue request at all: the
@@ -2259,12 +2276,14 @@ window.minipaintWanGP = (function () {
      *
      * The three checks below are one synchronous block with nothing between
      * them, and the reason is specific: a repaint is a WanGP iframe RELOAD.
-     * Gradio re-renders an HTML component it is handed even when the string
-     * is identical, which is what makes this repair work at all - and it is
-     * also what makes a press at the wrong moment destructive. A mutation
-     * burst can put the frame back in the gap between deciding and pressing,
-     * and pressing after that reloads the WanGP page out from under somebody
-     * who is using it.
+     * The tab's hidden Refresh stamps every iframe it paints with a fresh
+     * paint token, so the string Gradio is handed is never the one it holds
+     * and the element is always re-created - which is what makes this repair
+     * work at all (Gradio's frontend applies an identical string as no change
+     * and would leave a missing iframe missing), and it is also what makes a
+     * press at the wrong moment destructive. A mutation burst can put the
+     * frame back in the gap between deciding and pressing, and pressing after
+     * that reloads the WanGP page out from under somebody who is using it.
      */
     function requestIframeRepaint(reason) {
         // ---------------- one synchronous block, section 10.1 --------------
@@ -2319,8 +2338,8 @@ window.minipaintWanGP = (function () {
      * the single-flight flag with nothing left to end it blocks every repair
      * this page would otherwise have made for the rest of its life.
      */
-    function attachAndSettle() {
-        attach(null);
+    function attachAndSettle(options) {
+        attach(options || null);
         if (S.recovery.active && !S.recovery.graceTimer && !S.recovery.deadline) {
             finishIframeRepair(S.ready ? REPAIR_READY : REPAIR_ABANDONED, "");
         }
@@ -2463,6 +2482,187 @@ window.minipaintWanGP = (function () {
     }
 
     /* ------------------------------------------------------------------ */
+    /* Transport: six connections to one origin, and who is holding them     */
+    /* ------------------------------------------------------------------ */
+
+    //: After the event spine has gone quiet, how long this tab waits - in
+    //: ON-SCREEN milliseconds - for the plain request the interop layer sends
+    //: in answer to that silence to come back, before concluding that nothing
+    //: from this page is getting a connection at all.
+    //:
+    //: The number is about the browser, not the server. A browser holds six
+    //: connections to one origin under HTTP/1.1, and on the day this was
+    //: written five of them were streams: Forge's heartbeat, Forge's queue,
+    //: this extension's event spine, and the WanGP iframe's heartbeat and
+    //: queue through the proxy. When the WanGP child stopped answering, the
+    //: iframe's two were held open on a server that would never speak again,
+    //: the sixth was a proxied request waiting on the same server, and from
+    //: then on every click in the WebUI queued in the browser behind them.
+    //: The server was fine the whole time - it finished jobs for nine minutes
+    //: while the page could not reach it - and the only thing that freed the
+    //: page was restarting the browser. This is the tab noticing in twenty
+    //: seconds instead of never, and giving back the two connections that are
+    //: its own to give.
+    const TRANSPORT_STARVED_MS = 20000;
+    //: After the shed: how long to wait, on screen, for the spine to say the
+    //: transport is back before loading WanGP again regardless. The reload
+    //: waits for that answer on purpose - a WanGP page load takes connections
+    //: too, and Forge's queued requests deserve the freed ones first - and it
+    //: does not wait for ever, because a blank tab is not a recovery.
+    const RELOAD_AFTER_SHED_MS = 15000;
+    //: A runtime frame or snapshot that disagrees with the tab presses the
+    //: tab's Refresh, at most this often. STARTING and READY arrive seconds
+    //: apart, and each would otherwise be a press.
+    const RUNTIME_PRESS_GAP_MS = 3000;
+    //: And never in the same instant as the frame: the burst is judged once,
+    //: at its end, against the last thing the server said.
+    const RUNTIME_PRESS_DEBOUNCE_MS = 300;
+    //: The one event the interop layer dispatches, whatever it is about.
+    const OUTBOX_EVENT = "minipaint:outbox";
+
+    /**
+     * What the interop layer says about its event stream. "silent" is the
+     * stream having had no frame for longer than the server's heartbeat
+     * allows, and the layer answering that by sending one plain request;
+     * "answered" is that request coming back, however it came back; "open"
+     * is the stream itself again. Only the first arms anything, and either
+     * of the other two disarms it.
+     */
+    function onStreamState(detail) {
+        const state = String(detail.state || "");
+        if (state === "silent") {
+            if (S.transport.deadline) { return; }
+            S.transport.silentSince = Date.now();
+            say("transport: the event spine has been silent for " + Math.round(Number(detail.silent_ms || 0) / 1000)
+                + "s; waiting " + TRANSPORT_STARVED_MS + " ms on screen for a plain request to come back");
+            S.transport.deadline = deadline(TRANSPORT_STARVED_MS, transportStarved);
+            return;
+        }
+        if (state !== "answered" && state !== "open") { return; }
+        if (S.transport.deadline) {
+            S.transport.deadline.cancel();
+            S.transport.deadline = null;
+            say("transport: Forge answered (" + state + "); the silence was the stream's alone, nothing shed");
+        }
+        S.transport.silentSince = 0;
+        if (S.transport.shed) { reloadAfterShed("the transport is back (" + state + ")"); }
+    }
+
+    /**
+     * The budget ran out with the request still unanswered - not refused,
+     * not failed, UNANSWERED, which a request that never got a connection is
+     * and a request to a server that is down is not (that one fails, and
+     * failing is an answer). Nothing from this page is getting through, and
+     * the iframe's connections are the two this tab can give back.
+     */
+    function transportStarved() {
+        S.transport.deadline = null;
+        const silent = S.transport.silentSince ? Date.now() - S.transport.silentSince : 0;
+        S.transport.silentSince = 0;
+        // The element in the page, not the one this file remembers: a
+        // remembered frame that Gradio has already replaced holds nothing.
+        const frame = frameElement() || (S.frame && S.frame.isConnected ? S.frame : null);
+        if (!frame) {
+            say("transport: no answer from Forge " + silent + " ms after the spine went silent, and no WanGP iframe to shed;"
+                + " nothing this tab holds is in the way");
+            return;
+        }
+        S.transport.src = (frame.getAttribute("src") || "") || S.transport.src;
+        S.transport.shed = true;
+        S.transport.shedAt = Date.now();
+        S.transport.sheds += 1;
+        say("transport: no answer from Forge " + silent + " ms after the spine went silent; unloading the WanGP iframe"
+            + " to give its connections back (shed " + S.transport.sheds + " of this page)");
+        // Unloading the document is what closes its streams and aborts its
+        // requests. Navigating it to about:blank needs no connection of its
+        // own, which is the property that matters: a navigation to a URL
+        // would wait for a connection behind the very requests it is meant to
+        // free, and the old document would live on until it got one.
+        try { frame.src = "about:blank"; } catch (e) { /* a frame this file cannot navigate is one it cannot shed */ }
+        detachFrame("its connections were shed");
+        S.transport.reload = deadline(RELOAD_AFTER_SHED_MS, function () {
+            S.transport.reload = null;
+            reloadAfterShed("nobody answered within " + RELOAD_AFTER_SHED_MS + " ms on screen; loading WanGP again regardless");
+        });
+    }
+
+    /**
+     * Load WanGP into the shed frame again: the same element, the same path
+     * it was loading, and no server round trip - the shed was the browser's
+     * doing and so is the undoing. When the element itself has gone in the
+     * meantime, the tab's own Refresh paints a new one.
+     */
+    function reloadAfterShed(why) {
+        if (!S.transport.shed) { return; }
+        if (S.transport.reload) { S.transport.reload.cancel(); S.transport.reload = null; }
+        S.transport.shed = false;
+        const frame = frameElement();
+        const src = S.transport.src;
+        if (frame && src && (frame.getAttribute("src") || "") === "about:blank") {
+            say("transport: loading WanGP again in the shed iframe (" + text(why, 120) + ")");
+            try { frame.src = src; } catch (e) { /* then it stays blank, and the line above says so */ }
+            attachAndSettle({ reload: true });
+            return;
+        }
+        if (!frame && readWanGpView() === WAN_VIEW_IFRAME && pressHidden(REFRESH_ELEM_ID)) {
+            say("transport: the shed iframe is gone; asking the tab to paint a new one (" + text(why, 120) + ")");
+            return;
+        }
+        say("transport: nothing to load again (" + text(why, 120) + ")");
+    }
+
+    /**
+     * A runtime frame from the spine, or the runtime summary of a snapshot:
+     * the server saying whether WanGP is serving. The tab was painted from
+     * that same fact when Forge built it and never since, so this is where a
+     * page finds out the fact changed without it - WanGP started for a job
+     * another page queued, or went down under an iframe that still shows it.
+     * The tab's own Refresh paints what is true; nothing here decides what
+     * that is.
+     */
+    function onRuntimeFrame(summary) {
+        if (!summary || typeof summary !== "object" || typeof summary.running !== "boolean") { return; }
+        S.runtimePress.running = summary.running;
+        if (S.transport.shed || S.recovery.active) { return; }
+        if (summary.running === !!frameElement()) { return; }
+        scheduleRuntimePress(summary.running
+            ? "WanGP is serving and the tab shows no iframe"
+            : "WanGP is not serving (" + (text(summary.state, 40) || "state unknown") + ") and the tab still shows an iframe");
+    }
+
+    /** One press for a burst of frames, and never sooner than the gap after
+     * the last. Judged again at the moment of pressing, against the latest
+     * frame: a tab that has caught up in the meantime is left alone. */
+    function scheduleRuntimePress(why) {
+        if (S.runtimePress.timer) { return; }
+        const wait = Math.max(RUNTIME_PRESS_DEBOUNCE_MS, RUNTIME_PRESS_GAP_MS - (Date.now() - S.runtimePress.at));
+        S.runtimePress.timer = setTimeout(function () {
+            S.runtimePress.timer = 0;
+            if (S.transport.shed || S.recovery.active) { return; }
+            if (S.runtimePress.running === null || S.runtimePress.running === !!frameElement()) { return; }
+            S.runtimePress.at = Date.now();
+            if (pressHidden(REFRESH_ELEM_ID)) { say("runtime: " + why + "; asking the tab to paint what is true now"); }
+        }, wait);
+    }
+
+    function onOutboxEvent(event) {
+        const detail = event && event.detail;
+        if (!detail || typeof detail !== "object") { return; }
+        try {
+            if (detail.kind === "stream") { onStreamState(detail); }
+            else if (detail.kind === "runtime") { onRuntimeFrame(detail.detail); }
+            else if (detail.kind === "synced") { onRuntimeFrame(detail.runtime); }
+        } catch (e) { /* never worth breaking the listener chain over */ }
+    }
+
+    /** Listen to the interop layer. It dispatches on the document, so this
+     * costs nothing when that layer is not loaded and needs no handle on it
+     * when it is. */
+    function watchTransport() {
+        try { document.addEventListener(OUTBOX_EVENT, onOutboxEvent); } catch (e) { /* no document, no transport to watch */ }
+    }
+
+    /* ------------------------------------------------------------------ */
     /* The public side                                                       */
     /* ------------------------------------------------------------------ */
 
@@ -2476,6 +2676,10 @@ window.minipaintWanGP = (function () {
         const frame = frameElement();
         if (!frame) {
             say("attach: no iframe found under #" + IFRAME_ROOT_ID + " yet");
+            return false;
+        }
+        if (S.transport.shed && (frame.getAttribute("src") || "") === "about:blank") {
+            say("attach: the iframe is shed; not binding to it until it is loaded again");
             return false;
         }
         say("attach: bound to the iframe, src=" + (frame.getAttribute("src") || "(none)"));
@@ -2570,7 +2774,16 @@ window.minipaintWanGP = (function () {
                 reason: S.recovery.reason,
                 pressed: S.recovery.pressed,
                 warning_shown: S.recovery.warningShown
-            }
+            },
+            // The transport breaker, for the same reason: "the tab went blank
+            // for fifteen seconds" and "the tab shed its iframe on purpose"
+            // are one line apart in a bug report only with these.
+            transport: {
+                waiting: !!S.transport.deadline,
+                shed: S.transport.shed,
+                sheds: S.transport.sheds
+            },
+            boot_repainted: S.bootRepainted
         };
     }
 
@@ -2711,6 +2924,20 @@ window.minipaintWanGP = (function () {
         }
         say("watchRoot: found #" + IFRAME_ROOT_ID + " after " + step_ + " attempt(s)");
         attach(null);
+        // The card under this root was painted when Forge STARTED, not when
+        // this page loaded, and nothing repaints it until something presses
+        // a button on it. A page loaded an hour later therefore shows "Start
+        // WanGP" over a WanGP that has been serving since. One press of the
+        // tab's own Refresh at boot paints what is true now, and starts
+        // nothing. Pressed only when there is no iframe to disturb: a frame
+        // that is present speaks for itself through the handshake, and a
+        // runtime frame corrects a wrong one.
+        if (!S.bootRepainted) {
+            S.bootRepainted = true;
+            if (!frameElement() && pressHidden(REFRESH_ELEM_ID)) {
+                say("boot: the tab was painted when Forge started; asking it to paint what is true now");
+            }
+        }
         if (typeof MutationObserver !== "function") { return; }
         // Kept rather than disconnected after the first iframe: the tab
         // re-renders that element whenever it mints a new channel, and each
@@ -2781,11 +3008,12 @@ window.minipaintWanGP = (function () {
 
     try {
         if (document.readyState === "loading") {
-            document.addEventListener("DOMContentLoaded", function () { startAuthProbe(); watchRoot(0); watchLifecycle(); }, { once: true });
+            document.addEventListener("DOMContentLoaded", function () { startAuthProbe(); watchRoot(0); watchLifecycle(); watchTransport(); }, { once: true });
         } else {
             startAuthProbe();
             watchRoot(0);
             watchLifecycle();
+            watchTransport();
         }
     } catch (e) {
         // A page this file cannot bind to is a Send menu without WanGP lines,

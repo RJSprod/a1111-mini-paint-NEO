@@ -509,6 +509,40 @@ def _attach_job_object(pid: int) -> typing.Optional[int]:
         return None
 
 
+def _force_exit(pid: int) -> bool:
+    """End one process this runtime proved to be its own, the platform's way.
+
+    ``SIGKILL`` where there is one. On Windows ``TerminateProcess`` through a
+    handle opened for exactly that right - the same call ``Popen.kill`` makes,
+    reachable here for a pid that is not the Popen's own, because the leader
+    is not always the process that will not go. Returns whether the request
+    was accepted; whether the process is then gone is the caller's to check.
+    """
+    try:
+        number = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if number <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(number, signal.SIGKILL)
+            return True
+        except Exception:
+            return False
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        handle = kernel32.OpenProcess(_PROCESS_TERMINATE, False, number)
+        if not handle:
+            return False
+        try:
+            return bool(kernel32.TerminateProcess(handle, 1))
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return False
+
+
 def _close_job_object(job: typing.Optional[int]) -> None:
     """Kill the job's remaining processes, then let the handle go."""
     if not job or os.name != "nt":
@@ -754,11 +788,34 @@ class Runtime:
 
     # -- transitions --------------------------------------------------------
 
+    def _announce(self) -> None:
+        """Say on the event spine that the state changed. Best effort.
+
+        The WanGP tab is painted from ``current_view()`` when it is built and
+        again only when something presses one of its buttons, so a page that
+        was reloaded, or that queued a job which started WanGP in the
+        background, sat on a card that was true when the page was built and
+        stale ever since - "Start WanGP" over a WanGP that had been serving
+        for an hour. Every page holds the spine already; one frame on it is
+        how the browser learns the process changed without asking, and the
+        tab's own Refresh is what it then presses.
+
+        The payload is the coarse state and nothing else: no port, no pid, no
+        path, no instance id - the rule every writer to the spine follows.
+        """
+        try:
+            from .. import events
+
+            events.publish(events.RUNTIME, {"state": self.state, "running": self.state == READY})
+        except Exception:
+            pass
+
     def _fail(self, code: str, detail: str = "") -> IntegrationError:
         self.error_code = code
         self.error_detail = _text(detail)
         self.state = _state_for_code(code)
         journal.note("runtime", f"{code}: {_text(detail)} (state {self.state})")
+        self._announce()
         return IntegrationError(code, detail)
 
     def mark(self, code: str, detail: str = "") -> None:
@@ -799,6 +856,7 @@ class Runtime:
         _release_lock()
         self._fail(errors.PROCESS_EXITED, detail)
         self.state = CRASHED
+        self._announce()
         process_log.end(child.instance_id, detail)
         scrub.console(detail, _LOG_PREFIX)
 
@@ -925,6 +983,7 @@ class Runtime:
                     threading.Thread(
                         target=self._watch, args=(child,), name="minipaint-wangp-watch", daemon=True
                     ).start()
+                    self._announce()
                     return self
 
                 # Only ever the child this loop started, never a search for
@@ -1032,8 +1091,11 @@ class Runtime:
             # otherwise offer Restart for a config that cannot start anything.
             settled = self.state if self.state in (REINIT_REQUIRED, INCOMPATIBLE) else STOPPED
             if child is None:
+                changed = self.state != settled
                 self.state = settled
                 _release_lock()
+                if changed:
+                    self._announce()
                 return
             self.state = STOPPING
             self._terminate(child, timeout)
@@ -1042,6 +1104,7 @@ class Runtime:
             if settled == STOPPED:
                 self.error_code = ""
                 self.error_detail = ""
+            self._announce()
 
     def _terminate(self, child: _Child, timeout: float) -> None:
         """End this child's tree, and nothing else on the machine.
@@ -1252,20 +1315,33 @@ class Runtime:
                 remaining = self._still_alive(pids, pgid)
             if remaining:
                 # Escalate to exactly the pids proved to be ours a moment ago,
-                # each checked again for its group before the signal.
+                # each checked again for its group before the signal. On
+                # Windows this used to do nothing at all - the branch was
+                # POSIX-only - so a child that survived the job object's
+                # TerminateJobObject was reported and left running.
                 for pid in remaining:
-                    try:
-                        if os.name != "nt":
-                            os.kill(pid, signal.SIGKILL)
-                    except Exception:
-                        pass
+                    _force_exit(pid)
                 time.sleep(POLL_INTERVAL * 2)
                 remaining = self._still_alive(pids, pgid)
             report["remaining"] = remaining
             if pids:
-                note("every process of the tree has exited" if not remaining else f"{len(remaining)} process(es) of the tree would not exit: {remaining}")
+                if not remaining:
+                    note("every process of the tree has exited")
+                else:
+                    # A process that ignores a kill is not a process this
+                    # extension can end - it is one the kernel cannot end
+                    # either, until the thing it is waiting on lets go. On a
+                    # GPU machine that thing is almost always the driver.
+                    note(
+                        f"{len(remaining)} process(es) of the tree would not exit even when killed: {remaining}. "
+                        "A process that survives a kill is stuck inside a driver call; nothing in this extension "
+                        "can end it, and the card usually needs a driver reset or a reboot before it goes."
+                    )
 
-            after = vram.snapshot(gpu_uuid, runner)
+            # Not read again when it could not be read a moment ago: a driver
+            # that made nvidia-smi hang once will make it hang again, and the
+            # person waiting on this button has waited long enough.
+            after = vram.snapshot(gpu_uuid, runner) if before["available"] else dict(before, processes=[], detail=before["detail"] or "nvidia-smi did not answer before the stop, so it was not asked again")
             report["after"] = after
             ours_after = [entry for entry in after["processes"] if entry["pid"] in pids]
             if before["available"] and after["available"]:

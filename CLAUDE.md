@@ -1,0 +1,127 @@
+# Working on this extension
+
+Mini Paint NEO is a Forge Neo extension: a touch Canvas, a Clipboard tab, and a
+WanGP tab that runs WanGP as a child process behind a reverse proxy on Forge's
+own origin. `docs/` holds the design intent for each part and `tests/README.md`
+holds the whole testing contract - read those two before changing anything;
+this file is only what a session has to know that is written nowhere else,
+because it was learned the hard way.
+
+## Run the checks
+
+```
+pip install -r tests/requirements.txt
+python -m playwright install chromium
+python tests/run.py                    # 26 suites; every one must run
+```
+
+Gradio is pinned to 4.40.0 because that is what the target Forge ships, and the
+event graph differs across majors. `tests/README.md` says why the whole Gradio
+ecosystem is pinned rather than Gradio alone.
+
+## The traps
+
+Each of these cost a day or broke something on a user's machine. None of them
+is visible from the code that depends on it.
+
+**Six connections to one origin.** A browser allows six persistent HTTP/1.1
+connections per origin, and this extension's page spends them on streams that
+never close: Forge's heartbeat and queue, the interop event spine, and the
+WanGP iframe's own heartbeat and queue through our proxy. On 2026-09-17 a
+wedged WanGP held two of them for ever and the whole WebUI froze in the
+browser while the server was fine. Never add another always-open stream on
+Forge's origin without counting what is already there. The structural cure
+now lives in the auto-TLS extension (HTTP/2, see below); the transport breaker
+in `browser/minipaint_wangp.js` is what keeps a page alive without it. The
+whole incident is `docs/wangp/BROWSER_CONNECTION_STARVATION_2026-09-17.txt`.
+
+**Gradio applies an equal string as no change.** Its frontend updates a
+component through Svelte's `safe_not_equal`, so handing an HTML component the
+string it already holds leaves the DOM exactly as it was. A repaint whose
+purpose is a *new* iframe element must therefore differ from the last one:
+`minipaint_neo/wangp/ui.py` stamps those with `paint_token()`. Every other
+paint deliberately does not stamp, because a stamped paint reloads the WanGP
+page out from under whoever is using it.
+
+**A cyclic `gr.State` in an outputs list is a RecursionError.** Gradio 4.40
+walks state components among a dependency's outputs and hashes them *before*
+calling the function, and that walk has no cycle detection and no depth limit.
+WanGP's own per-page state refers back to itself. The WanGP tab's `painted`
+list has no stateful component in it for exactly this reason, and the browser's
+iframe repair leans on that immunity. The comment above `painted` says so; do
+not treat it as decoration.
+
+**The WanGP tab is painted once, when Forge builds the UI.** Nothing repaints
+it until something presses one of its buttons, so a page loaded an hour later
+showed "Start WanGP" over a WanGP that had been serving all along. The browser
+now presses the hidden Refresh once at boot when it finds the root with no
+iframe, and again whenever a runtime frame on the event spine disagrees with
+what the tab shows. `Runtime._announce()` is what publishes those frames.
+
+**A silent stream is the only free signal a page gets.** Forge heartbeats every
+fifteen seconds on both of its streams, so silence never means "nothing to
+say". `minipaint_neo/wangp/proxy.py` therefore bounds a proxied stream's idle
+time (`STREAM_IDLE_TIMEOUT`), and `browser/minipaint_interop.js` says `silent`,
+then `answered` if one plain request comes back. A request that never comes
+back says nothing at all, and that absence is what the WanGP tab acts on. An
+unanswered request is not a failed one; do not collapse the two.
+
+**Windows needs its own kill.** The emergency restart's escalation was a
+POSIX-only branch that silently did nothing on Windows, so a child that
+survived the job object was reported and left running. `runtime._force_exit()`
+now ends a pid the platform's way on both. A process that survives that is
+stuck inside a driver call and nothing in this extension can end it - the
+report says so rather than blaming itself.
+
+**Playwright route handlers only run while the test thread is inside a
+Playwright call.** A `time.sleep()` while waiting for a held request waits for
+ever, because nothing pumps the connection; use `page.wait_for_timeout()`.
+Answer every held route before `page.unroute()`, or the handler dies as a
+cancelled future.
+
+**The Node DOM harness has two sharp edges.** A bare `new MutationObserver`
+resolves to the *global*, not to the stub window's, so `load()` sets both. And
+journal lines are captured through a `console.debug` hook rather than the log
+route, because that route only ever carries the last two dozen lines and a long
+scenario pushes out the line being asserted.
+
+**Every check has a mutation that must break it.** `_RECOVERY_MUTATIONS` in
+`tests/test_wangp_protocol.py` reverts one decision per entry and names the
+check that must then fail; an anchor that no longer matches the live source is
+itself a failure. Moving a line means updating its anchor in the same commit.
+
+**`admission` is three-valued.** An unconfirmed queue request omits the field
+rather than adding a fourth value, because the protocol test holds that
+vocabulary closed.
+
+## The sibling repositories
+
+`RJSprod/NEO-webui-auto-tls-https` gives Forge its certificate and, since
+2026-09-17, serves it over **HTTP/2 through Hypercorn**, which is what removes
+the six-connection limit for everything on Forge's origin. Two things to know
+about it: only Hypercorn's public `serve()`/`Config` API is safe across
+releases (0.13, which the old `certipie` dependency pinned into venvs, has
+none of the internals), and its installer upgrades anything below 0.17.
+
+`RJSprod/SD-Neo-ModelSwitchRefiner` runs a local LLM. Its logs showed
+`llama-server` taking every CPU core for nine minutes with its model on the
+CPU, and its GPU placement pointing at the card WanGP owns. That starves WanGP
+while it generates. Capping its threads below the core count, keeping it off
+WanGP's card, and not running a CPU model during a video generation are that
+repository's to fix; nothing here can.
+
+## The host
+
+Windows, Python 3.13, Forge Neo 2.29, one NVIDIA card, ~96 GB of RAM, launched
+with `--listen` on a non-default port behind the auto-TLS certificate. The
+browsers that matter are LibreWolf on the host and Via on Android; Via cannot
+be configured, which is why per-browser connection limits were never an answer
+and HTTP/2 was.
+
+## What is still open
+
+Nothing from the 2026-09-17 incident is unbuilt, but two things have never
+been exercised on the user's own machine rather than in tests: the HTTP/2 path
+on Windows, and the transport breaker actually shedding an iframe in anger. If
+either misbehaves, `--autotls-http1` puts the old server back with one flag,
+and the breaker's whole state is in `minipaintWanGP.state().transport`.

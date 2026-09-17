@@ -1,0 +1,1621 @@
+MINIPAINT NEO — LIGHTWEIGHT IN-PLACE WANGP RECOVERY
+DESIGN INTENT / IMPLEMENTATION SPECIFICATION — REVISION 2
+
+Repository:
+    RJSprod/a1111-mini-paint-NEO
+
+Reviewed branch:
+    main
+
+Reviewed exact revision:
+    3970da4df3f25d3d71d169d4ffd110f06b8b4273
+    2026-09-17
+
+Status:
+    Implementation-grade. Every mechanism below was verified against the
+    revision named above. Ready to build.
+
+Supersedes:
+    MINIPAINT_NEO_LIGHTWEIGHT_IN_PLACE_RECOVERY_DESIGN_INTENT_2026-09-17.txt
+    MINIPAINT_NEO_GRACEFUL_SESSION_RECOVERY_DESIGN_INTENT_2026-09-17.txt
+    forge_neo_iframe_bridge_recovery_design_intent_2026-09-17.txt
+
+Review of record:
+    MINIPAINT_NEO_LIGHTWEIGHT_IN_PLACE_RECOVERY_REVIEW_RESPONSE_2026-09-17.txt
+
+WHAT CHANGED IN REVISION 2
+
+    Revision 1 was confirmed feasible in every structural decision. R2 folds
+    in the six corrections from the review and removes work that the review
+    found was already done. Nothing in the approach changed.
+
+    1.  The warning surface is now specified. R1 preferred "the existing
+        WanGP status/error surface", which is painted through the same
+        Gradio round trip whose failure is the precondition for warning.
+        See section 14.
+
+    2.  "Repaint failed" and "repaint succeeded, WanGP is not serving" are
+        now distinguished. R1 collapsed them into one warning that
+        contradicts the server's own error card. See sections 9 and 14.
+
+    3.  The "iframe still absent" precondition is now stated as
+        load-bearing and synchronous, because a repaint of a present iframe
+        is a reload. See section 8.
+
+    4.  requestIframeRepair() / requestIframeRepaint() — one name each, for
+        two different things. See section 23.1.
+
+    5.  Root-replacement handling moved from "should be reviewed" to
+        specified work in Phase 2. The gap is total, not intermittent. See
+        section 23.3.
+
+    6.  No Python change is required. R1's contingency in 21.2 is withdrawn;
+        the existing refresh control is an adequate browser-facing hook.
+
+    Struck as already true at HEAD: acceptance criteria 7, 12, 13 and 24,
+    and test 24.7. Re-aimed: test 24.13. Added: three tests, in 24.16–24.18.
+
+PRIMARY PRODUCT REQUIREMENT
+
+    Prevent the condition that currently makes the user feel they must restart
+    the browser.
+
+    Recovery must be lightweight and local. It should repair the existing WanGP
+    iframe/bridge in place whenever that can be done safely.
+
+    It must NOT build a general tab/session recovery system.
+
+    If the browser page itself is genuinely beyond what this extension can repair
+    in place, do not attempt increasingly heavy recovery machinery. Keep server
+    work untouched and warn the user only at that final point.
+
+================================================================================
+0. EXECUTIVE DECISION
+================================================================================
+
+THE FIX IS SMALL, AND THE PAINTER ALREADY EXISTS.
+
+Implement only these recovery capabilities:
+
+    1. Detect when the WanGP iframe disappears while #wangp_iframe_root still
+       exists.
+
+    2. Clear stale browser-side iframe/bridge state.
+
+    3. Ask the EXISTING WanGP Gradio UI painter to render its iframe again, by
+       pressing the hidden Refresh button that already calls it.
+
+    4. Attach to the replacement iframe.
+
+    5. Perform the existing bounded HELLO / READY handshake.
+
+    6. On browser resume/visibility return, re-check the real iframe/bridge state
+       and perform the same bounded repair if necessary.
+
+    7. Keep server-side Clipboard/outbox jobs authoritative and untouched by
+       browser recovery.
+
+    8. If the existing page can no longer complete the repaint/handshake after a
+       bounded repair attempt, stop. Show one clear warning. Do not restart
+       WanGP, Forge, the browser, or the page automatically.
+
+    9. Tell apart "the repaint did not happen" from "the repaint happened and
+       said WanGP is not serving". Only the first is a warning.
+
+DO NOT IMPLEMENT:
+
+    - tab recovery;
+    - session restoration;
+    - Canvas recovery registries;
+    - browser checkpoint transactions;
+    - IndexedDB recovery state;
+    - sessionStorage recovery state;
+    - automatic Forge "Reload UI";
+    - automatic page reload;
+    - cross-tab recovery;
+    - a global recovery coordinator;
+    - a new recovery-status subsystem unless a future failing test proves it is
+      required;
+    - continuous health polling;
+    - background keep-awake hacks;
+    - process restarts triggered by browser symptoms;
+    - a browser-created iframe;
+    - frame epoch numbering (the existing window-identity check is stronger —
+      see 2.1).
+
+The objective is:
+
+    IF THE IFRAME/BRIDGE IS THE THING THAT BROKE, FIX THE IFRAME/BRIDGE.
+
+    IF THE WHOLE PAGE/GRADIO CONTROL CHANNEL IS BROKEN, DO NOT BUILD A SECOND UI
+    FRAMEWORK INSIDE THIS EXTENSION. WARN THE USER ONLY AFTER THE LIGHTWEIGHT
+    REPAIR HAS BEEN EXHAUSTED.
+
+================================================================================
+1. CURRENT FAILURE THAT THIS SPEC TARGETS
+================================================================================
+
+The uploaded 2026-09-17 log demonstrates the key failure:
+
+    #wangp_iframe_root exists
+    but
+    #wangp_iframe is gone
+
+The browser then logs:
+
+    attach: no iframe found under #wangp_iframe_root yet
+
+That condition persists.
+
+At the same time, the server-side Clipboard/outbox path continues:
+
+    job admitted
+    -> ensuring_wangp
+    -> composing
+    -> waiting_for_card
+    -> submitting_wangp
+    -> wangp_waiting
+    -> wangp_generating
+
+This proves:
+
+    IFRAME ABSENCE IS NOT WANGP PROCESS FAILURE.
+
+It is a browser/UI control-plane failure.
+
+1.1 Why it persists (established during review)
+
+The iframe is server-rendered into a gr.HTML that Gradio owns:
+
+    minipaint_neo/wangp/ui.py:1374   gr.Column(visible=..., elem_id=IFRAME_ROOT_ID)
+    minipaint_neo/wangp/ui.py:1375   gr.HTML(iframe_html() if ... else "")
+
+The Column is a structural component and survives; the HTML inside it is
+emptied or replaced on re-render. So "root present, iframe absent" is the
+expected shape of this architecture under a Gradio re-render.
+
+It persists because the browser's observer only handles arrival, not departure:
+
+    browser/minipaint_wangp.js:1995
+        S.watcher = new MutationObserver(function () {
+            const frame = frameElement();
+            if (frame && frame !== S.frame) { attach(null); }
+        });
+
+When the iframe is removed, frameElement() returns null, the guard fails, and
+the callback returns having done nothing. There is no code path in that file
+that creates or requests an iframe, so the absence is permanent for the life of
+the page.
+
+The fix therefore must not:
+
+    - restart WanGP;
+    - reload a model;
+    - restart Forge;
+    - resubmit the job;
+    - tell the user the generation failed.
+
+The same logs also show that a BRIDGE_SESSION_MISMATCH can already recover through
+a fresh HELLO / READY exchange.
+
+Therefore the missing behavior is narrow:
+
+    iframe removed
+        ->
+    ask the painter to repaint
+        ->
+    attach
+        ->
+    handshake
+        ->
+    continue
+
+================================================================================
+2. CURRENT ARCHITECTURE TO PRESERVE
+================================================================================
+
+2.1 browser/minipaint_wangp.js
+
+The current browser bridge already owns:
+
+    - iframe lookup;
+    - postMessage transport;
+    - exact same-origin checking;
+    - exact event.source == current iframe.contentWindow checking;
+    - protocol validation;
+    - channel validation;
+    - bridge_session validation;
+    - request IDs;
+    - bounded handshake retries;
+    - pending request bookkeeping;
+    - session mismatch handling;
+    - visibility-aware deadlines;
+    - lifecycle logs;
+    - iframe-root MutationObserver;
+    - iframe load handling;
+    - bounded receiver / queue / track / form calls.
+
+KEEP ALL OF THAT.
+
+Two of those are stronger than R1 assumed and change the plan:
+
+    The window-identity check is exact and already sufficient.
+
+        browser/minipaint_wangp.js:1022
+            if (!S.frame || event.source !== S.frame.contentWindow) {
+
+    It runs before protocol and before channel. Once detachFrame() clears
+    S.frame the first clause rejects everything; once attach() binds the
+    replacement the second rejects the old window. A reply from a retired
+    iframe cannot satisfy a request belonging to the current one, today,
+    with no new code. Do not add frame epoch numbering — it would be a
+    second and weaker spelling of an identity check the code already makes
+    on the object itself.
+
+    Deadlines already spend only on-screen time.
+
+        browser/minipaint_wangp.js:560-578, reasoning at 509-527
+
+    A backgrounded page holds its deadlines and resumes them with a grace
+    window. Background throttling therefore does not manufacture false
+    request failures, today. Section 11 must not disturb this.
+
+2.2 minipaint_neo/wangp/ui.py
+
+The current WanGP UI already owns the iframe markup.
+
+It has stable concepts for:
+
+    #wangp_iframe_root                  ui.py:64, ui.py:1374
+    #wangp_iframe                       ui.py:65, ui.py:348
+    #wangp_state                        ui.py:67
+    /wan2gp/                            ui.py:82  (PUBLIC_PATH)
+    channel state                       ui.py:372 (_keep_or_mint)
+    show()                              ui.py:1412
+    open_tab()                          ui.py:1425
+    paint()                             ui.py:1395
+    iframe_html()                       ui.py:333
+    wangp_refresh_request               ui.py:69, ui.py:1348, ui.py:1452
+
+KEEP ui.py / gr.HTML AS THE OWNER OF IFRAME CREATION.
+
+Browser JavaScript must not create a competing iframe.
+
+2.2.1 The painter this design presses, and why it is the right one
+
+    minipaint_neo/wangp/ui.py:1452
+        refresh_request.click(fn=show, inputs=[shell["channel"]],
+                              outputs=painted)
+
+    minipaint_neo/wangp/ui.py:1412
+        def show(channel: str = "") -> tuple:
+            """Repaint from what is true now. Starts nothing."""
+
+Four properties make show() the correct lever, all verified:
+
+    (a) It starts nothing. Compare open_tab() at ui.py:1425, which calls
+        request_start(). Pressing the wrong one of these two would launch a
+        process from a browser DOM symptom. Press Refresh, never Open.
+
+    (b) It is view-aware. show() reads current_view() and paints whichever of
+        the four views is true — setup, starting, error or iframe. A repair
+        routed through it cannot paint an iframe over an error card, because
+        show() will not do that. This is why this design needs no browser-side
+        view guard: the decision stays with the component entitled to make it.
+
+    (c) It keeps the channel. show() routes through _keep_or_mint (ui.py:372),
+        which preserves the page's channel while it still names the running
+        instance, and mints a new one only when it does not. The bridge
+        registry entry survives the repaint; a WanGP restart underneath is
+        exactly the case where the channel correctly changes.
+
+    (d) It is cheap. current_view() -> runtime.current().health(), and
+        health() takes its lock with acquire(blocking=False) (runtime.py:740),
+        does no HTTP to the child, no CUDA, no model work. A press costs one
+        Gradio round trip and a process liveness check.
+
+2.2.2 The repaint mechanism, and the one thing that could have broken it
+
+iframe_html() does not use its channel argument — the channel is deliberately
+kept out of the markup (ui.py:333-341) — so the string it returns is a
+constant. Re-sending a component a value it already holds is exactly the case a
+reactive frontend may skip. Had Gradio skipped it, this entire design would be
+a silent no-op that times out and warns on every repair.
+
+It does not skip it, and the project established this from the opposite
+direction:
+
+    minipaint_neo/wangp/ui.py:1861-1863
+        # The three iframe outputs are skipped, not re-sent, when nothing
+        # about the frame changed: Gradio re-renders an HTML component it is
+        # handed, even the same string, and a re-rendered iframe is a reload.
+
+    minipaint_neo/wangp/ui.py:404-408
+        "the setup checks used to mint a channel on every pass, and every pass
+        rewrote the iframe. Each rewrite reloaded WanGP inside it - the 'flash'
+        a user sees"
+
+The gr.skip() guards at ui.py:1866-1869 exist to suppress this behaviour. This
+design wants the behaviour they suppress. Two consequences follow, and both are
+requirements rather than notes:
+
+    A repaint of a PRESENT iframe is a RELOAD of the WanGP page inside it.
+    Section 8's absence precondition is therefore load-bearing.
+
+    The repaint is immune to the Gradio deep_hash RecursionError, structurally.
+    The refresh dependency's inputs and outputs contain zero gr.State
+    (inputs: one Textbox; outputs: `painted`, ui.py:1381-1393 — four Columns,
+    one Markdown, two HTML, two Buttons, two Textboxes), so
+    get_state_ids_to_track() finds nothing and deep_hash is never entered for
+    this event. See section 19.
+
+    REQUIREMENT: `painted` must never gain a gr.State. Add a comment at
+    ui.py:1381 saying so, because that one-line change would silently put the
+    recovery path back inside the recursion.
+
+2.3 Clipboard outbox
+
+The server-side outbox already allows jobs to continue independently of the
+browser page.
+
+KEEP THAT AS THE AUTHORITATIVE EXECUTION STATE.
+
+Browser recovery must never cancel, recreate, or duplicate an outbox job merely
+because the iframe disappeared.
+
+Note for scope: on a default install the server executor is the one in use
+(outbox.py:269-276), and it submits over the loopback control surface with no
+browser in the path (control.py:1-12). A generation already accepted therefore
+survives iframe loss today, before this patch. What this patch restores is the
+user's control surface, not the job.
+
+================================================================================
+3. SCOPE BOUNDARY
+================================================================================
+
+IN SCOPE:
+
+    - missing iframe detection;
+    - stale iframe reference cleanup;
+    - one bounded iframe repaint request;
+    - replacement iframe detection;
+    - reattachment;
+    - bounded bridge re-handshake;
+    - resume-time integrity check;
+    - root observer rebinding when its root was replaced;
+    - stale bridge request cleanup;
+    - safe handling of uncertain acknowledgements;
+    - reading #wangp_state to tell repair failure from "not serving";
+    - concise recovery logging;
+    - one final user warning if in-place recovery fails.
+
+OUT OF SCOPE:
+
+    - restoring arbitrary Forge tab state;
+    - restoring Canvas state after page reload;
+    - restoring Clipboard drafts after page reload;
+    - serializing Gradio state;
+    - rebuilding the Forge UI;
+    - recovering unrelated extensions;
+    - automatically reloading the document;
+    - browser restart automation;
+    - WanGP process restart automation;
+    - Forge process restart automation.
+
+This boundary is intentional.
+
+================================================================================
+4. REQUIRED RECOVERY ORDER
+================================================================================
+
+Always use the smallest possible action.
+
+ORDER:
+
+    1. Reuse the currently connected iframe if it exists and is connected.
+
+    2. If the stored S.frame is stale, forget only the browser-side stale
+       reference.
+
+    3. If #wangp_iframe exists, attach to it. Do not press anything.
+
+    4. If #wangp_iframe_root exists but the iframe does not:
+           request the existing Gradio repaint once.
+
+    5. When the replacement iframe appears:
+           attach and handshake.
+
+    6. If the iframe exists but bridge READY is stale:
+           perform the existing bounded handshake. Do not repaint.
+
+    7. If the repaint produced a non-READY state:
+           the repair succeeded and the answer is "not serving".
+           Log it. Show no recovery warning. The server's own card is the
+           correct surface.
+
+    8. If the repaint/handshake still cannot succeed:
+           stop automatic recovery;
+           keep server jobs untouched;
+           show one final warning.
+
+There is NO next automatic step involving:
+
+    - Reload UI;
+    - location.reload();
+    - browser restart;
+    - process restart.
+
+================================================================================
+5. BROWSER-SIDE STATE CHANGES
+================================================================================
+
+Target:
+    browser/minipaint_wangp.js
+
+Keep the current S object.
+
+Add only the minimum recovery fields required, for example:
+
+    recovery:
+        active: false          // single-flight guard, section 23.2
+        reason: ""
+        pressedAt: 0           // for the duration_ms log line
+        waiter: null           // the one bounded timer
+        warned: false          // one warning per page, section 14.2
+
+Do NOT introduce a large cross-module state machine.
+
+Do NOT introduce a global recovery service.
+
+A few booleans/local handles in the existing WanGP bridge are sufficient.
+
+Note there is no epoch field. Section 2.1 explains why none is needed.
+
+================================================================================
+6. DETACHED FRAME HANDLING
+================================================================================
+
+Add one small helper conceptually equivalent to:
+
+    detachFrame(reason)
+
+Its purpose is only to retire browser state that belongs to a frame that no
+longer exists.
+
+Required behavior:
+
+    - stop the current handshake timer (S.helloTimer, reset S.helloStep);
+    - fail/abandon only browser-local pending bridge promises (S.pending);
+    - clear S.frame;
+    - clear S.ready;
+    - clear S.bridgeSession and S.bridgeVersion;
+    - clear S.receivers and S.revision;
+    - clear S.query;
+    - clear the capability flags S.queue, S.start, S.track, and set
+      S.generationRunning to null;
+    - write one recovery log line.
+
+It MUST NOT:
+
+    - cancel an outbox job;
+    - cancel a WanGP generation;
+    - restart WanGP;
+    - restart Forge;
+    - unload/reload a model;
+    - submit another generation;
+    - disconnect S.watcher (the root observer outlives any one frame).
+
+A detached browser promise and a running server job are separate things.
+
+Clearing S.frame is also what makes the existing acceptable() check at
+minipaint_wangp.js:1022 reject every message from the retired window. No
+further stale-message handling is required.
+
+================================================================================
+7. FIX THE ROOT OBSERVER
+================================================================================
+
+The current observer handles:
+
+    a new iframe exists
+        ->
+    attach()
+
+It must also handle:
+
+    the old iframe disappeared
+        ->
+    requestIframeRepair()
+
+Conceptual behavior:
+
+    const frame = frameElement();
+
+    if (!frame) {
+        if (S.frame || S.ready || S.bridgeSession) {
+            detachFrame("iframe removed");
+        }
+        requestIframeRepair("root mutation");
+        return;
+    }
+
+    if (frame !== S.frame) {
+        attach(null);
+    }
+
+Important:
+
+    requestIframeRepair() must be guarded so a burst of DOM mutations does not
+    press the refresh control repeatedly. See section 23.2.
+
+One missing iframe event should create one repair cycle.
+
+================================================================================
+8. REQUEST THE EXISTING IFRAME PAINTER
+================================================================================
+
+Do NOT use:
+
+    document.createElement("iframe")
+
+Do NOT append /wan2gp/ from JavaScript.
+
+Use the existing WanGP UI refresh control that already calls the Python painter.
+
+Browser helper:
+
+    requestIframeRepair(reason)
+
+Behavior:
+
+    1. if recovery.active, return immediately (single-flight);
+
+    2. confirm #wangp_iframe_root exists;
+
+    3. confirm frameElement() is STILL absent — see 8.1;
+
+    4. locate #wangp_refresh_request and resolve its clickable button;
+
+    5. set recovery.active, record reason and pressedAt;
+
+    6. press the button exactly once for this repair cycle;
+
+    7. start the bounded waiter (section 9);
+
+    8. the root observer sees the replacement iframe and attach() handles the
+       rest;
+
+    9. if no iframe appears inside the bounded window, finish the cycle per
+       section 9.2.
+
+Steps 2, 3 and 6 MUST be one synchronous block. Nothing may be awaited, queued
+or scheduled between the absence check and the press.
+
+8.1 The absence precondition is load-bearing, not hygiene
+
+Because a repaint is a reload (2.2.2), pressing Refresh while a healthy iframe
+exists tears down a working WanGP page and reloads it. If the user is mid-task
+inside the WanGP UI, the recovery feature has caused the exact class of damage
+it exists to prevent.
+
+A mutation burst can restore the frame between the observer firing and any
+deferred press — which is precisely the situation test 24.14 constructs. Hence
+the synchronous-block requirement above.
+
+8.2 Why this path
+
+    ui.py already owns iframe_html();
+    ui.py already owns paint() and show();
+    show() already decides which view is correct;
+    the browser should ask that owner to repaint rather than become a second
+    owner, and must not second-guess which view it returns.
+
+================================================================================
+9. BOUNDED RECOVERY — NO POLLING LOOP
+================================================================================
+
+No permanent interval.
+
+No high-frequency querySelector loop.
+
+Mechanism:
+
+    - the root MutationObserver notices the actual DOM change;
+    - one timeout limits how long the repair cycle is willing to wait.
+
+Budget:
+
+    12 seconds of on-screen time.
+
+Use the project's existing visibility-aware deadline() helper
+(minipaint_wangp.js:548) rather than a bare setTimeout, so a repair started
+just before the tab is backgrounded is not failed by time the page never spent
+on screen. This is the same reasoning the bridge already applies to every
+other request.
+
+Rules:
+
+    - one timer maximum for this recovery cycle;
+    - clear it as soon as the cycle finishes, by any exit;
+    - no automatic immediate second repaint request;
+    - no repeating repaint every N seconds.
+
+If the first repaint request did not restore the iframe, automatic recovery
+should not thrash Gradio.
+
+9.1 The waiter has three exits, not two
+
+    (a) An iframe appeared.
+        attach() runs, the handshake begins, and the cycle ends on the
+        handshake's outcome (section 10).
+
+    (b) No iframe, and #wangp_state does not say READY.
+        The repaint SUCCEEDED. The server answered, correctly, that there is
+        nothing to frame — WanGP is stopped, in error, or awaiting setup — and
+        it has already painted the matching card. End the cycle, log it, show
+        NO recovery warning.
+
+    (c) No iframe, and #wangp_state still says READY.
+        The repaint did not land. This is the genuine failure. End the cycle
+        and warn once (section 14.2).
+
+Exit (b) is the correction R1 was missing. Without it, a WanGP that stopped
+while the tab was backgrounded produces a recovery warning laid on top of the
+server's own error card, contradicting it, and telling the user their controls
+could not be reconnected when the truth is that WanGP is not running.
+
+9.2 Reading the state
+
+    element id:  wangp_state            (ui.py:67)
+    written by:  paint(), ui.py:1408, the eleventh output, on every repaint
+    value:       json.dumps(view); the field to read is view["state"]
+    READY is:    STATE_READY == "READY"  (ui.py:94)
+
+browser/minipaint_wangp.js does not read this textbox today — there are zero
+references to wangp_state in any browser file. This is the one genuinely new
+read the design introduces, and it is a boxValue() call against an id that
+already exists. Treat a missing element or unparseable value as READY, so an
+unreadable state produces the warning rather than silently swallowing a real
+failure.
+
+================================================================================
+10. HANDSHAKE RECOVERY
+================================================================================
+
+Once a replacement iframe is present:
+
+    attach(null)
+        ->
+    beginHandshake(true)
+
+Use the current HELLO_DELAYS bounded retry schedule
+(minipaint_wangp.js:221). Do not add another handshake system.
+
+Success:
+
+    valid WANGP_BRIDGE_READY
+        ->
+    normal bridge state resumes
+        ->
+    clear recovery.active
+        ->
+    clear recovery.warned
+        ->
+    log recovery success with duration_ms
+
+Failure:
+
+    the existing handshake gives up
+        ->
+    final lightweight recovery warning (section 14.2)
+
+The warning is not a process restart trigger.
+
+Note the handshake is bounded by HELLO_DELAYS and runs past the section 9
+waiter. The waiter ends when the iframe appears; the cycle ends when the
+handshake settles. Keep recovery.active set across both so a second repair
+cannot start underneath a handshake in progress.
+
+================================================================================
+11. RESUME / BACKGROUND BEHAVIOR
+================================================================================
+
+Keep current lifecycle behavior exactly as it is:
+
+    hidden   -> hold browser-side deadlines
+    visible  -> resume deadlines with grace
+    freeze   -> hold
+    resume   -> resume
+
+This is already built (minipaint_wangp.js:560-578) and already correct. Do not
+replace it, do not add a timer to it, do not shorten the grace window.
+
+The listeners it hangs on (minipaint_wangp.js:906-954) currently only log. Add
+the integrity check to them:
+
+    verifyOnResume(reason)
+
+        if the observed root is disconnected
+            -> rebind the observer (section 23.3), then continue below
+
+        if S.frame exists but !S.frame.isConnected
+            -> detachFrame("frame detached while away")
+            -> requestIframeRepair(reason)
+
+        else if frameElement() is missing
+            -> detachFrame if any bridge state remains
+            -> requestIframeRepair(reason)
+
+        else if an iframe exists but S.frame differs
+            -> attach(null)
+
+        else if an iframe exists but the bridge is not READY
+            -> rearm the existing bounded handshake
+
+        else
+            -> nothing
+
+Healthy resume must do nothing more: no request, no press, no log line beyond
+what the lifecycle listeners already write.
+
+Do not fetch a health endpoint on every visibilitychange.
+
+Do not poll while the tab is hidden.
+
+A precedent worth following: browser/minipaint_interop.js:1052 already
+implements this shape — visibilitychange, pageshow, freeze, resume, pagehide —
+for the interop event stream. Match its structure rather than inventing one.
+
+================================================================================
+12. REQUEST TIMEOUT SEMANTICS
+================================================================================
+
+Keep the principle:
+
+    no acknowledgement
+        !=
+    operation did not happen
+
+For non-mutating requests:
+
+    receiver query
+    form probe
+    track query
+
+a timeout may be retried only after the bridge is healthy again.
+
+For mutating operations:
+
+    image receive
+    queue request
+    generation-related admission
+
+do not blindly issue the mutation again after timeout.
+
+Use the existing request/job identity and existing confirmation/tracking/outbox
+mechanisms where available. The outbox already names this state
+(EXECUTION_UNKNOWN, outbox.py:117) and already refuses to retry it by machine
+(outbox.py:36-38). Recovery must not introduce a second opinion.
+
+The lightweight recovery patch must not introduce a duplicate-submit path.
+
+================================================================================
+13. SERVER-SIDE JOB CONTINUITY
+================================================================================
+
+The outbox/server remains authoritative.
+
+When iframe recovery occurs during an active Clipboard job:
+
+    - the job remains in its current server state;
+    - browser recovery does not modify it;
+    - generation continues if WanGP already accepted it;
+    - normal Clipboard/outbox event/state paths continue reporting it.
+
+Required invariant:
+
+    IFRAME REPLACEMENT NEVER CREATES A NEW JOB ID.
+
+Required invariant:
+
+    IFRAME REPLACEMENT NEVER CALLS THE GENERATION SUBMIT PATH BY ITSELF.
+
+If the browser temporarily loses visibility of job progress, it must not infer
+that the job failed.
+
+================================================================================
+14. USER WARNING POLICY
+================================================================================
+
+The user should not see recovery noise when automatic repair succeeds.
+
+14.1 Silent success
+
+If:
+
+    iframe disappears
+    ->
+    repaint works
+    ->
+    bridge becomes READY
+
+then:
+
+    no modal;
+    no warning;
+    no toast.
+
+A log line is enough.
+
+Silent also applies to exit (b) of section 9.1: a repaint that correctly
+reports WanGP is not serving is a success, and the server's own card is the
+user-facing surface for it.
+
+14.2 Warning only after no in-place repair remains
+
+Warn only when ALL of these are true:
+
+    - the iframe/bridge is unusable;
+    - the lightweight repaint was attempted;
+    - #wangp_state still says READY (so the server believes it should be
+      framed);
+    - the replacement iframe did not become usable, or the bounded handshake
+      was exhausted;
+    - recovery.warned is false.
+
+Suggested wording:
+
+    "The WanGP controls in this page could not be reconnected automatically.
+     Any job already accepted by the server may still be running. Avoid
+     restarting WanGP or Forge while it is working. If the controls remain
+     unavailable, refresh this browser page only as a last resort."
+
+The exact product wording may be shorter.
+
+Important:
+
+    - do not say the generation failed unless the server says it failed;
+    - do not say WanGP died unless independent runtime evidence says so;
+    - do not tell the user to restart the browser as the normal fix;
+    - do not repeatedly show the same warning — one per page, cleared on the
+      next successful handshake.
+
+14.3 Warning presentation — the surface, specified
+
+R1 preferred "the existing WanGP status/error surface". That surface cannot be
+used for this warning, and the reason is worth stating so it is not
+rediscovered:
+
+    The WanGP error surface is error_body, painted by paint() (ui.py:1403,
+    the sixth output). Every route to it runs through a Gradio event. The
+    precondition for showing this warning is that a Gradio event — the
+    repaint — did not produce a result. Asking the failed channel to render
+    the notice that the channel failed cannot be relied on.
+
+Nor does browser/minipaint_wangp.js have a user-visible surface of its own:
+sentence() (line 297) is a code-to-string lookup and failure() (line 301)
+returns {ok, code, message} to a caller that renders it. That serves a user who
+tried something. It does not serve a notice that must appear unprompted.
+
+So the warning is written into the DOM by the browser:
+
+    - one element, created on demand, inside #wangp_iframe_root;
+    - one textContent write; no innerHTML, no markup from any string that
+      did not originate in this file;
+    - reuse the existing notice styling at style.css:437 or add one rule
+      beside it;
+    - no new panel, no overlay, no modal, no dismiss machinery.
+
+Two properties make the iframe root the right container: it is where the user
+is looking when the frame is missing, and the next successful repaint rewrites
+that container, so the notice clears itself without anyone writing clearing
+logic.
+
+This is the same reasoning the tab already applies to diagnostics:
+
+    minipaint_neo/wangp/ui.py:74-77
+        "A plain route, for the reason ``send_log`` gives for having one: this
+        has to keep working when what failed *is* the Gradio round trip, and a
+        diagnostic line is the last thing that should be riding on the
+        machinery it is there to describe."
+
+A user-facing warning about a broken round trip deserves the same treatment as
+a log line about one.
+
+The recovery feature should not add a new UI subsystem, and one element with
+one text write is not one.
+
+================================================================================
+15. NO TAB RECOVERY
+================================================================================
+
+This is an explicit product decision.
+
+Do not implement:
+
+    - active-tab persistence;
+    - returning the user to a previous tab after reload;
+    - cross-tab snapshotting;
+    - reconstructing the Forge UI;
+    - a MiniPaint-specific replacement navigation layer;
+    - tab/session state registries;
+    - page lifecycle restoration across reload.
+
+If a future project separately wants reload/session restoration, it should have a
+separate design and performance review.
+
+It is not part of this corrective change.
+
+================================================================================
+16. NO AUTOMATIC PAGE RELOAD
+================================================================================
+
+This is also explicit.
+
+The extension must not call:
+
+    window.location.reload()
+
+as part of automatic recovery.
+
+It must not automatically invoke Forge "Reload UI".
+
+Reason:
+
+    those mechanisms broaden the failure domain and require state restoration
+    machinery the user does not want in this project.
+
+The lightweight fix ends at:
+
+    repair iframe/bridge in place
+        OR
+    report that the server is not serving
+        OR
+    warn once
+
+================================================================================
+17. NO NEW RECOVERY STORAGE
+================================================================================
+
+Do not add:
+
+    - IndexedDB recovery records;
+    - localStorage recovery records;
+    - sessionStorage recovery records;
+    - Canvas document recovery registries;
+    - serialized Clipboard draft recovery state;
+    - recovery manifests;
+    - recovery checkpoints.
+
+Existing product storage remains unchanged.
+
+This recovery patch adds no persistent state.
+
+================================================================================
+18. NO NEW HEALTH SERVICE
+================================================================================
+
+Do not add a new /recovery/status endpoint in this patch.
+
+The observed problem can be repaired without it, and the review confirmed the
+local evidence is sufficient:
+
+    - frameElement();
+    - S.frame.isConnected;
+    - #wangp_state, the server's own view, refreshed by the very repaint this
+      cycle requested (section 9.2);
+    - current READY/session state;
+    - root MutationObserver;
+    - existing handshake;
+    - existing Clipboard/outbox server ownership;
+    - existing browser journal/logging.
+
+#wangp_state is what makes the endpoint unnecessary. It is written by the same
+event the repair triggers, so the browser learns the server's opinion as a
+side effect of the repair rather than by asking a second time over a second
+channel.
+
+Note also that the extension already owns an authoritative non-Gradio snapshot
+route for job state (/minipaint-interop/sync, interop.py:75) with an SSE spine
+beside it. If a future need arises, extend that rather than mint a new
+endpoint.
+
+Only add a new health endpoint in a future patch if a concrete failing test shows
+that the lightweight repair cannot distinguish two cases that require different
+actions.
+
+Do not add infrastructure speculatively.
+
+================================================================================
+19. GRADIO deep_hash RECURSIONERROR
+================================================================================
+
+The Gradio deep_hash RecursionError remains a separate issue.
+
+19.1 It cannot block this repair
+
+Established during review, and it narrows this section considerably.
+
+deep_hash is reached through get_state_ids_to_track(), which walks a
+dependency's State components. The refresh dependency has none:
+
+    inputs  : shell["channel"]                   Textbox
+    outputs : painted (ui.py:1381-1393)          4 Columns, 1 Markdown,
+                                                 2 HTML, 2 Buttons, 2 Textboxes
+
+Zero gr.State on either side, so there is nothing for deep_hash to be called
+on and the recursion cannot be entered for this event.
+
+This holds only while it holds. See the requirement in 2.2.2: `painted` must
+never gain a gr.State.
+
+19.2 What can still block the repaint
+
+The page's whole Gradio queue/SSE channel being dead. That is a different
+failure from state hashing, it is real, and it is exactly what section 14.2's
+warning is for. Test 24.13 is re-aimed at it.
+
+19.3 For this patch
+
+    - log/localize the RecursionError if it appears;
+    - do not make it part of the iframe recovery architecture;
+    - do not raise Python recursionlimit;
+    - do not globally monkey-patch deep_hash;
+    - do not assume Canvas state is the cause without evidence.
+
+For what it is worth, the extension's own gr.State usage is already four small
+acyclic values (ui.py:1481, ui.py:1482, canvas/ui.py:1561), and the recursive
+shape visible in this repository belongs to Wan2GP's per-page state
+(tests/test_queue_e2e.py:265, compatibility.py:251). Diagnosis, if pursued,
+should start there and is likely to end upstream.
+
+Do not respond by building a whole second session recovery system.
+
+================================================================================
+20. SECURITY
+================================================================================
+
+Preserve current bridge security.
+
+Required:
+
+    - same-origin postMessage target;
+    - exact event.origin validation;
+    - exact event.source validation;
+    - protocol validation;
+    - channel validation;
+    - bridge_session validation;
+    - bounded envelope size;
+    - no wildcard message target;
+    - no backend port exposed to browser;
+    - no secrets added to iframe URL.
+
+The repaint operation uses existing same-page Gradio controls.
+
+No new route is introduced, authenticated or otherwise.
+
+The warning element is written with textContent, never innerHTML, and its text
+comes only from the constant in section 14.2 — never from a server string, a
+message payload, or an error detail.
+
+================================================================================
+21. PERFORMANCE / PROJECT-WEIGHT BUDGET
+================================================================================
+
+This patch is specifically intended to stay small.
+
+21.1 Healthy-state cost
+
+Target:
+
+    effectively zero additional healthy-state CPU/network cost.
+
+Allowed additions:
+
+    - one extra branch in the existing root MutationObserver;
+    - a few recovery booleans;
+    - one bounded recovery deadline, only while broken;
+    - one resume-time DOM/state check;
+    - one boxValue() read of #wangp_state, only while repairing;
+    - a few concise log lines.
+
+Not allowed:
+
+    - permanent recovery interval;
+    - recurring HTTP health request;
+    - document-wide MutationObserver;
+    - new page-level state framework;
+    - storage database;
+    - serialization layer;
+    - generic recovery bus.
+
+21.2 Code locality
+
+All changes are in:
+
+    browser/minipaint_wangp.js
+
+NO PYTHON CHANGE IS REQUIRED. R1 allowed for "a tiny supporting change in
+ui.py ... if the existing refresh control needs a clearer browser-facing hook".
+It does not: #wangp_refresh_request is a stable elem_id on a real button wired
+to show(), and #wangp_state is a stable elem_id carrying the view. Both are
+adequate as they stand.
+
+The single exception is documentation, not behaviour: the comment at ui.py:1381
+required by 2.2.2, recording that `painted` must stay free of gr.State.
+
+Avoid touching Canvas/Clipboard architecture unless a regression test proves the
+iframe fix requires it.
+
+21.3 GPU/model cost
+
+Exactly zero recovery-specific:
+
+    - CUDA calls;
+    - model loads;
+    - model unloads;
+    - GPU probes;
+    - generation queue changes.
+
+Guaranteed by the mechanism rather than by discipline: show() -> current_view()
+-> health(), which acquires its lock non-blocking and touches no device
+(runtime.py:740, 732-738).
+
+================================================================================
+22. OBSERVABILITY
+================================================================================
+
+Add concise recovery lines to the existing browser journal (say()).
+
+Examples:
+
+    recovery: iframe disappeared; requesting repaint
+    recovery: repaint requested (reason=root mutation)
+    recovery: replacement iframe found after 310 ms
+    recovery: attached to replacement iframe
+    recovery: bridge ready after repaint in 842 ms
+    recovery: page resumed; iframe missing, repairing
+    recovery: repaint answered state=STOPPED; WanGP is not serving, no warning
+    recovery: repair failed; iframe did not return within 12000 ms on screen
+    recovery: repair failed; bridge did not answer the handshake
+    recovery: warning shown
+    recovery: skipped; the iframe came back before the press
+
+Do not log recovery chatter while healthy.
+
+Do not include:
+
+    - prompts;
+    - image data;
+    - filesystem paths;
+    - auth data;
+    - full session IDs (the file's existing 8-character prefix convention
+      applies).
+
+================================================================================
+23. IMPLEMENTATION DETAILS
+================================================================================
+
+23.1 Helper responsibilities
+
+A.
+    detachFrame(reason)
+
+    Browser-local cleanup only. Section 6.
+
+B.
+    requestIframeRepair(reason)
+
+    The cycle. Single-flight guard; check root; check frame absence; press
+    once; start the bounded waiter. Sections 8 and 9.
+
+C.
+    finishIframeRepair(outcome, detail)
+
+    Clear the waiter and the guard; log; warn only on outcome (c) of 9.1.
+
+D.
+    verifyOnResume(reason)
+
+    Inspect the real DOM and existing bridge state; rebind the observer if its
+    root died; call attach/rearm/repair only if needed. Section 11.
+
+E.
+    pressHidden(id)
+
+    Press a hidden Gradio button. Eight lines, already written at
+    browser/minipaint_clipboard.js:265-273, including the part that is easy to
+    get wrong — Gradio wraps a Button, so the helper must accept the element
+    OR its descendant button.
+
+    Duplicating it into minipaint_wangp.js is consistent with this codebase
+    (writeBox already exists separately in both files). Promoting it to
+    javascript/main.js is also available, following the
+    `window.minipaintX = window.minipaintX || ...` idiom at main.js:75 with a
+    local fallback at the call site. Either is acceptable; local is cheaper to
+    test.
+
+On naming: "repair" is the cycle; "repaint" is the one step inside it that
+presses the button. R1 used both names for the same function in four places.
+Keep both words, for the two different things.
+
+Keep these inside browser/minipaint_wangp.js unless there is a strong code-quality
+reason to factor tiny generic helpers into main.js.
+
+23.2 Single-flight rule
+
+Conceptually:
+
+    if (recovery.active) {
+        return;
+    }
+
+This guard is mandatory.
+
+DOM mutation storms must not produce repeated Gradio clicks.
+
+The guard is held from the press until the cycle finishes — including across
+the handshake (section 10), not only until the iframe appears.
+
+23.3 Root replacement — specified, not deferred
+
+Forge may rebuild DOM.
+
+The current watchRoot binds once and never rebinds:
+
+    browser/minipaint_wangp.js:1980
+        if (S.watcher) { return; }
+
+S.watcher is assigned at line 1995 and is never disconnected or cleared —
+three references in the file, no fourth. So if the root Column node is
+REPLACED rather than emptied, the observer stays bound to a detached node for
+the life of the page and missing-iframe detection is lost silently.
+
+This is a pre-existing defect that this patch is obliged to fix, because the
+whole design hangs off that observer.
+
+Required:
+
+    on an existing lifecycle/user entry point that already calls
+    ensure()/attach(), if the currently observed root is disconnected:
+        disconnect the watcher;
+        clear S.watcher;
+        re-run the existing bounded watchRoot lookup.
+
+The ladder it re-runs already exists (ROOT_LOOKUPS, minipaint_wangp.js:214).
+
+Do not solve this with a permanent document-wide observer.
+
+================================================================================
+24. TEST PLAN
+================================================================================
+
+The Node DOM stub at tests/test_wangp_protocol.py:1271-1310 already loads the
+real minipaint_wangp.js and fakes document, MutationObserver, visibilityState,
+message delivery and crypto. Most of this plan runs there.
+
+Two stub gaps must be closed first, or several of these tests will pass without
+asserting anything:
+
+    - the stub root returns a frame unconditionally
+      (test_wangp_protocol.py:1287). It must be able to express absence.
+    - the stub has no #wangp_refresh_request and no way to observe a click.
+      Add a button whose click is recorded, so "pressed exactly once" is
+      assertable.
+
+Per project convention every new test must be mutation-checked: revert the
+behaviour and confirm the test fails.
+
+24.1 Iframe removal while idle
+
+    Fault:    remove #wangp_iframe from #wangp_iframe_root.
+    Expected: observer notices absence; detachFrame runs; exactly one press;
+              replacement attaches; HELLO/READY succeeds; no warning; no
+              restart; no model load.
+
+24.2 Iframe removal while generating
+
+    Setup:    one outbox job in WANGP_GENERATING.
+    Expected: same job continues; job id unchanged; iframe repairs; bridge
+              returns; exactly one output; no duplicate submit.
+    Note:     the "job id unchanged" half belongs in
+              tests/test_clipboard_outbox.py, not the DOM stub.
+
+24.3 Repaint is slow
+
+    Expected: one press; the bounded waiter stays armed; no second press;
+              replacement eventually attaches.
+
+24.4 Repaint never completes, state stays READY
+
+    Expected: one press; deadline expires; automatic recovery stops; exactly
+              one warning; active server job untouched; no page reload; no
+              process restart.
+
+24.5 Stale S.frame but iframe already exists
+
+    Expected: stale reference discarded; existing iframe attached; NO press.
+
+24.6 Iframe replaced directly
+
+    Expected: observer sees the new element; attach() switches; old pending
+              promises abandoned; fresh handshake; no warning; no press.
+
+24.7 Old iframe sends a late reply
+
+    Expected: the event.source check rejects it; it cannot satisfy a request
+              belonging to the current frame.
+    Status:   PASSES AT HEAD (minipaint_wangp.js:1022). Write it as a
+              regression guard; do not treat a green run as evidence the new
+              code works.
+
+24.8 Session mismatch
+
+    Expected: existing BRIDGE_SESSION_MISMATCH behaviour; fresh handshake;
+              NO repaint, because the iframe is present.
+    Note:     partly covered already at test_wangp_protocol.py:2052.
+
+24.9 Hidden tab
+
+    Expected: deadlines held; no false timeout storm; on visible, the real DOM
+              is inspected; a healthy frame triggers no press.
+
+24.10 Hidden tab returns with the iframe gone
+
+    Expected: resume check notices; one repair cycle; no polling.
+
+24.11 Network interruption
+
+    Expected: ordinary requests may fail; no duplicate mutating action; no
+              restart; a later user/resume action can rearm the handshake if
+              the frame exists.
+
+24.12 WanGP process actually dead
+
+    Expected: the repaint lands and returns a non-READY state; the cycle ends
+              at exit (b); the server's error card is shown by the server;
+              NO recovery warning; no loop; no restart.
+    Note:     this is the test that proves section 9.1 exit (b).
+
+24.13 Gradio event channel is dead
+
+    Re-aimed from R1, which tested deep_hash blocking the repaint — a path
+    section 19.1 shows cannot occur.
+
+    Fault:    the page's Gradio queue/SSE channel does not deliver the
+              refresh event's result.
+    Expected: one press; state box unchanged and still READY; deadline
+              expires; one warning; no escalation into tab/session recovery.
+
+24.14 Mutation burst
+
+    Fault:    add/remove several unrelated children under the iframe root.
+    Expected: at most one active repair cycle; no repeated presses.
+
+24.15 Performance
+
+    Measure before/after: idle browser CPU; healthy network requests;
+    generation wall time; model load count; bridge latency.
+    Expected: no measurable healthy-state regression.
+    Note:     manual, and the baseline must be captured before Phase 1 lands.
+
+24.16 The press is not issued when the frame is present  (NEW)
+
+    Fault:    the iframe is restored between the observer firing and the press.
+    Expected: no press is issued.
+    Guards:   section 8.1. This is the test that stops recovery from reloading
+              a healthy WanGP page.
+
+24.17 Repaint answers "not serving"  (NEW)
+
+    Setup:    repaint results in #wangp_state carrying a non-READY view.
+    Expected: cycle ends silently; log line; no warning element in the DOM.
+    Guards:   section 9.1 exit (b).
+
+24.18 Root node replaced, not emptied  (NEW)
+
+    Fault:    replace the #wangp_iframe_root node itself.
+    Expected: the stale observer is disconnected; watchRoot re-runs; the new
+              root is observed; a subsequent iframe removal is still detected.
+    Guards:   section 23.3.
+
+================================================================================
+25. ACCEPTANCE CRITERIA
+================================================================================
+
+The patch is acceptable only when all are true. Four are marked ALREADY TRUE:
+they hold at 3970da4 before any work, and are listed so the patch is checked
+for not breaking them rather than for introducing them.
+
+ 1. If #wangp_iframe_root exists and #wangp_iframe disappears, the extension
+    attempts to restore it automatically.
+
+ 2. The replacement iframe is rendered by the existing ui.py/gr.HTML owner.
+
+ 3. Browser JavaScript does not create a competing iframe.
+
+ 4. The repair attempt is single-flight and bounded.
+
+ 5. Healthy state has no recurring recovery timer or HTTP health polling.
+
+ 6. A replacement iframe automatically reattaches and performs the existing
+    bounded handshake.
+
+ 7. A generation already accepted by the server continues through iframe loss.
+    ALREADY TRUE — the server executor is the default and submits with no
+    browser in the path (outbox.py:269-276, control.py:1-12).
+
+ 8. Iframe recovery never creates a duplicate generation.
+
+ 9. Iframe recovery never restarts WanGP.
+
+10. Iframe recovery never restarts Forge.
+
+11. Iframe recovery never restarts or automatically reloads the browser page.
+
+12. Background/frozen time does not create false browser request failures.
+    ALREADY TRUE — deadlines spend only on-screen time
+    (minipaint_wangp.js:560-578).
+
+13. Old iframe messages cannot satisfy requests belonging to the current
+    iframe.
+    ALREADY TRUE — exact window identity check (minipaint_wangp.js:1022).
+
+14. If automatic in-place repair succeeds, the user sees no warning.
+
+15. If automatic in-place repair is exhausted AND the server still believes
+    the tab should be framed, exactly one clear warning is shown.
+
+16. If the repaint succeeds and reports that WanGP is not serving, no recovery
+    warning is shown and the server's own card stands.
+
+17. The warning does not incorrectly claim that a server-side job failed.
+
+18. The warning does not instruct the user to restart WanGP/Forge as the normal
+    remedy.
+
+19. Pressing the refresh control never happens while a usable iframe is
+    present.
+
+20. The root observer survives replacement of the root node.
+
+21. No tab/session recovery framework is introduced.
+
+22. No persistent recovery storage is introduced.
+
+23. No Canvas or Clipboard recovery registry is introduced.
+
+24. No automatic Forge Reload UI is introduced.
+
+25. No automatic page reload is introduced.
+
+26. Existing MiniPaint / Clipboard / WanGP functionality remains intact.
+
+27. Generation throughput and GPU/model behavior are unchanged.
+    ALREADY TRUE by mechanism — see 21.3.
+
+================================================================================
+26. REJECTED SOLUTIONS
+================================================================================
+
+Explicitly reject:
+
+    - tab recovery;
+    - session checkpoint framework;
+    - page reload orchestration;
+    - automatic browser reload;
+    - automatic browser restart;
+    - automatic Forge restart;
+    - automatic WanGP restart;
+    - browser-created replacement iframe;
+    - frame epoch numbering;
+    - permanent health polling;
+    - a new recovery-status endpoint;
+    - document-wide mutation watching;
+    - disabling browser throttling;
+    - keep-awake hacks;
+    - global Gradio monkey-patches;
+    - recursionlimit increase;
+    - duplicate submit after uncertain acknowledgement;
+    - model reload as UI recovery;
+    - pressing Open (open_tab) instead of Refresh (show) — it starts a process.
+
+================================================================================
+27. PHASED IMPLEMENTATION
+================================================================================
+
+PHASE 1 — Exact incident repair
+
+    browser/minipaint_wangp.js
+
+    - detachFrame();
+    - iframe-absence branch in the root observer;
+    - pressHidden();
+    - requestIframeRepair() with the single-flight guard AND the synchronous
+      absence precondition of section 8.1;
+    - the bounded waiter, with all three exits of section 9.1, which means the
+      #wangp_state read lands here;
+    - attach + the existing handshake;
+    - concise logs.
+
+    Tests: 24.1, 24.3, 24.4, 24.5, 24.6, 24.14, 24.16, 24.17.
+
+    Ship and test this first.
+
+    Note on ordering: section 8.1's precondition and section 9.1's exit (b)
+    are Phase 1 work, not polish. Phase 1 is the phase that first presses the
+    button, and pressing it at the wrong moment — or warning when the server
+    already answered — are the only two ways this patch can leave things worse
+    than it found them.
+
+PHASE 2 — Resume hardening
+
+    - verifyOnResume(), hung off the lifecycle listeners that already exist at
+      minipaint_wangp.js:906-954 and currently only log;
+    - root observer rebinding, section 23.3.
+
+    Tests: 24.9, 24.10, 24.18.
+
+PHASE 3 — Warning
+
+    - the DOM notice of section 14.3;
+    - one per page, cleared on the next successful handshake;
+    - wording that preserves uncertainty about active server jobs.
+
+    Tests: 24.4 and 24.13 assert it appears; 24.12 and 24.17 assert it does
+    not.
+
+PHASE 4 — Separate upstream diagnostics if still needed
+
+    - deep_hash localization, starting from Wan2GP's per-page state rather
+      than this extension's (section 19.3);
+    - any Gradio defect that prevents the repaint from being delivered.
+
+    Do NOT expand Phase 4 into a local tab/session recovery system.
+
+================================================================================
+28. DEFINITION OF DONE
+================================================================================
+
+Reproduce the real failure:
+
+    WanGP iframe disappears
+    while
+    Forge/WanGP server-side work is still alive
+
+and observe:
+
+    browser detects missing frame
+        ->
+    browser presses the existing refresh control once
+        ->
+    ui.py's show() repaints from what is true now
+        ->
+    browser attaches
+        ->
+    bridge handshakes
+        ->
+    user continues without restarting anything
+
+If the repaint lands and reports that WanGP is not serving:
+
+    stop;
+    keep server work untouched;
+    let the server's own card explain it;
+    show no recovery warning.
+
+If the repaint cannot land at all because the parent page is no longer capable
+of running the existing Gradio path:
+
+    stop;
+    keep server work untouched;
+    warn once.
+
+That is the intended limit of this patch.
+
+The project stays light, the common failure repairs itself, and no broad
+tab/session recovery framework is added.
+
+================================================================================
+END
+================================================================================

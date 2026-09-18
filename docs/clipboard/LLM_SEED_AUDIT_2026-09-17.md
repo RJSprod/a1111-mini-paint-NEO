@@ -4,8 +4,7 @@ Written 2026-09-17 against this repository at `claude/llm-seeds-audit-3y1dha`
 and against `RJSprod/SD-Neo-ModelSwitchRefiner` at `30a3b27` (2026-09-15),
 which is the extension that owns every language model this project touches.
 
-Two facts frame everything below, and one of them contradicts the question as
-it was asked:
+Two facts frame everything below:
 
 * **There is no network LLM anywhere in either repository.** The "external
   MiniMax API" is `mc_llm_api`, a Python module imported in-process out of the
@@ -20,15 +19,27 @@ it was asked:
   case — Clipboard prompt enhancement — and it consists of handing a prompt and
   some pictures to `mc_llm_api.submit_minimax()` and waiting.
 
-**The headline:** at the head of both repositories, no user-facing writer pass
-runs at a fixed seed. Every one of the five surfaces that writes text draws a
-fresh seed per run, the external API included. What *is* fixed is a short list
-of passes that are deliberately deterministic, plus one that is fixed by
-default and is arguably a bug (§2.3), and three real defects (§3) — one of
-which is this repository dropping the seed on the floor entirely.
+**The headline, in three parts, because "is it random?" has three answers:**
 
-If you are watching identical output come back, §4 ranks what actually causes
-that, and the most likely cause is not a seed at all.
+1. *In the code, for the writers:* nothing is pinned. All five surfaces that
+   write text resolve `-1` to a freshly drawn number per run, the external API
+   included, and no model profile can override it.
+2. *In the code, elsewhere:* five passes are fixed on purpose — Neutralize, the
+   caption passes, the warm-up and the probe calls — and one, the Spatial
+   Composer with no Creative roll behind it, is fixed by default on a *sampled*
+   pass, which is arguably a bug (§2.3).
+3. *On a real machine:* one of those five writers can still be pinned, and
+   probably is. Prompt Studio opens on a **stored** seed, not on the sentinel,
+   and an install that used it before 2026-08-27 has upstream's `7` written
+   into its preferences file by the old build — which the fix never migrated
+   (§3.3). The code draws; the preference stops it.
+
+Four defects are named in §3; one of them is this repository dropping the seed
+on the floor entirely.
+
+If you are watching identical output come back, §4 ranks the causes. Two of
+them are seeds — §3.3 on the writers, §2.3 on the Composer — and the rest are
+passes that are deterministic whatever their seed is.
 
 ---
 
@@ -38,7 +49,7 @@ that, and the most likely cause is not a seed at all.
 |---|---|---|---|
 | 1 | **Clipboard enhancement** (this repo → external API) | not passed; the API draws one per request | **drawn** |
 | 2 | MiniMax H3 panel (LLM Studio) | Seed box, `-1` by default → drawn | **drawn** |
-| 3 | Prompt Studio | Seed box, `-1` by default → drawn | **drawn** |
+| 3 | Prompt Studio | Seed box, **stored value first**, else `-1` → drawn | **drawn — unless a stale `7` is stored (§3.3)** |
 | 4 | Conversation, and voice chat over it | character's seed, `-1` by default → drawn | **drawn** |
 | 5 | Krea panel (LLM Studio) | Seed box, `-1` by default → drawn | **drawn** |
 | 6 | Creative Mode on the image tab | `stable_hash(creative_seed, "llm")`; the Creative seed is drawn per roll unless pinned | **derived** |
@@ -110,7 +121,7 @@ it, and all five let a typed number win:
 
 | Surface | Draws at | Box default |
 |---|---|---|
-| Prompt Studio | `mc_llm_prompt_panel.py:285` | `RANDOM_SEED` (`:153-155`) |
+| Prompt Studio | `mc_llm_prompt_panel.py:285` | `stored.get("seed", RANDOM_SEED)` (`:153-155`) — see §3.3 |
 | Conversation | `mc_llm_chat_panel.py:2031-2033`, applied `:2048` | `RANDOM_SEED` (`:514`; `Character.seed` defaults to it too, `prompt_master/chat/characters.py:81-83`) |
 | MiniMax H3 panel | `mc_llm_minimax_panel.py:351-353` | `RANDOM_SEED` (`:142`) |
 | Krea panel | `mc_llm_krea_panel.py:475-477` | `RANDOM_SEED` (`:123`) |
@@ -209,7 +220,34 @@ so a run whose seed was reported as `0` cannot be reproduced by typing it back
 into those two panels. `is None`/`== RANDOM_SEED` is the test, not truthiness.
 Sibling repository.
 
-**3.3 This repository drops the seed.**
+**3.3 Prompt Studio can still be pinned to 7 on an upgraded install — the
+most likely cause of a fixed seed on a real machine.**
+The seed box does not open on `RANDOM_SEED`. It opens on
+`stored.get("seed", RANDOM_SEED)` (`mc_llm_prompt_panel.py:153-155`), and
+`stored` is `preferences()["prompt_defaults"]` (`:53`), which `_remember()`
+rewrites from the raw control values after *every* generation
+(`:376-383`, values assembled at `:297`). Today that writes back `-1` and the
+draw survives. But until `5b5ebda` (2026-08-27) the box opened on
+`initial("seed", 7)` — upstream's self-test constant — so every generation on
+the old build persisted `prompt_defaults["seed"] = 7`, and **that commit
+changed the fallback without migrating the stored value**. On any installation
+that used Prompt Studio before that date, the stored `7` is read first, "a seed
+somebody actually chose still wins" treats it as a choice, and the panel has
+been running at a fixed 7 ever since — silently, and without contradicting a
+single line of the current code.
+
+Check it on the machine: `<Forge data path>/model_chain_llm/data/preferences.json`,
+key `prompt_defaults.seed`. Anything other than `-1` there is a pin. Typing
+`-1` into the box and generating once clears it. The proper fix belongs in the
+sibling repository: migrate a stored `7` to `RANDOM_SEED` on read, since no
+user chose it. The same shape of trap exists for Conversation — a character
+saved with a seed keeps it for every reply — but there it is genuinely a choice
+somebody made in the flyout, and new characters default to `-1`
+(`prompt_master/chat/characters.py:81-83`). The MiniMax panel, the Krea panel
+and the external API cannot be pinned this way: their defaults are literal
+`RANDOM_SEED`/`None`, read from no stored state.
+
+**3.4 This repository drops the seed.**
 Described in §2.1. The consequence is narrow but real: an enhancement cannot be
 reproduced, retried at the same seed, or reported with one, and the tab cannot
 show what it ran at even though the API offers the number in `status()` and on
@@ -221,28 +259,31 @@ two feed events.
 
 In the order I would check them:
 
-1. **Retry reuses the finished prompt — no LLM runs at all.**
+1. **Prompt Studio pinned to a stored `7`** — §3.3. Read
+   `model_chain_llm/data/preferences.json` before anything else here: the code
+   draws a seed, and a leftover preference from before 2026-08-27 stops it,
+   which is exactly what "every LLM seed is a fixed value" looks like from the
+   outside. Check this first; it is the only entry on this list that is a live
+   defect rather than a design.
+2. **Retry reuses the finished prompt — no LLM runs at all.**
    `outbox.py:1550`: a retry of a job whose enhancement reached `done` carries
    the written prompt over rather than asking for it twice, unless the failure
    was `MODEL_CHANGED`. The UI marks it (`ui.py:368`, `reused_from`). Pressing
    Retry and getting a byte-identical prompt is this, working as designed — and
    it is the single most likely reason an enhancement looks seeded to a
    constant from the Clipboard tab. A *new* Add to Queue press writes again.
-2. **The pass you are looking at may be temperature 0.** Captions and Neutralize
+3. **The pass you are looking at may be temperature 0.** Captions and Neutralize
    are deterministic by construction; their seed changes nothing.
-3. **Smart Spatial with Creative Mode off** really is one constant seed — §2.3.
-4. **A pinned Creative seed** makes everything behind it repeat, by design.
-5. **An older install of the sibling extension.** Prompt Studio's seed box used
-   to open on `7` — upstream's node default — and was changed to draw per run in
-   `5b5ebda`, 2026-08-27 ("A drop-down that decided what to overwrite, a path
-   already known, and a seed of 7"); `docs/07-llm-studio.md` §29.3 is that
-   write-up, and `tests/test_llm_panels.py:3247` is the regression test. The
-   external API has drawn a seed since the day it landed (`d78e160`,
-   2026-09-13). If your Model Chain checkout predates late August, a fixed 7 in
-   Prompt Studio is exactly what you would see. **I could not verify which
-   commit is installed on your machine** — worth checking before anything else
-   here is acted on.
-6. **WanGP's own prompt enhancer**, if you have switched it on in the WanGP
+4. **Smart Spatial with Creative Mode off** really is one constant seed — §2.3.
+5. **A pinned Creative seed** makes everything behind it repeat, by design.
+6. **An install older than the fix itself.** The write-up for the `7` change is
+   `docs/07-llm-studio.md` §29.3 and its regression test is
+   `tests/test_llm_panels.py:3247`. The external API has drawn a seed since the
+   day it landed (`d78e160`, 2026-09-13). **I could not verify which commit is
+   installed on your machine**, and on this one point the fix and the stale
+   preference look identical from the tab — the preferences file tells them
+   apart.
+7. **WanGP's own prompt enhancer**, if you have switched it on in the WanGP
    page, is a different enhancer with its own `prompt_enhancer_randomize_seed`
    setting. Clipboard's enhancement does not go through it; it hands WanGP a
    finished prompt.
@@ -253,7 +294,7 @@ plus the `started` and `done` events. Not in the Clipboard tab, per §3.3.
 
 ---
 
-## 5. What fixing §3.3 in this repository would take
+## 5. What fixing §3.4 in this repository would take
 
 Not applied here; this document is an audit. For the record, the change is
 small and touches five places:

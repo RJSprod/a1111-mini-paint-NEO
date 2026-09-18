@@ -28,11 +28,13 @@ Two facts frame everything below:
    caption passes, the warm-up and the probe calls — and one, the Spatial
    Composer with no Creative roll behind it, is fixed by default on a *sampled*
    pass, which is arguably a bug (§2.3).
-3. *On a real machine:* one of those five writers can still be pinned, and
-   probably is. Prompt Studio opens on a **stored** seed, not on the sentinel,
-   and an install that used it before 2026-08-27 has upstream's `7` written
-   into its preferences file by the old build — which the fix never migrated
-   (§3.3). The code draws; the preference stops it.
+3. *On a real machine:* **the panels are pinned to 7 and the drawing code
+   never runs.** Forge restores every labelled control from its own
+   `ui-config.json` over the value the script asked for, no seed box opts out
+   of that, and a stored `7` has been written back into all three LLM Studio
+   seed boxes ever since one of them shipped that default (§3.3, confirmed from
+   a screenshot). Point 1 above is true of the source and false of the running
+   panel — which is the whole lesson of this audit.
 
 Four defects are named in §3; one of them is this repository dropping the seed
 on the floor entirely.
@@ -47,11 +49,11 @@ passes that are deterministic whatever their seed is.
 
 | # | Use case | Where the seed comes from | Fixed? |
 |---|---|---|---|
-| 1 | **Clipboard enhancement** (this repo → external API) | not passed; the API draws one per request | **drawn** |
-| 2 | MiniMax H3 panel (LLM Studio) | Seed box, `-1` by default → drawn | **drawn** |
-| 3 | Prompt Studio | Seed box, **stored value first**, else `-1` → drawn | **drawn — unless a stale `7` is stored (§3.3)** |
-| 4 | Conversation, and voice chat over it | character's seed, `-1` by default → drawn | **drawn** |
-| 5 | Krea panel (LLM Studio) | Seed box, `-1` by default → drawn | **drawn** |
+| 1 | **Clipboard enhancement** (this repo → external API) | not passed; the API draws one per request. No Gradio control anywhere in this path, so §3.3 cannot reach it | **drawn** |
+| 2 | MiniMax H3 panel (LLM Studio) | Seed box, `-1` in source — **restored to `7` by the host** | **fixed on the machine (§3.3)** |
+| 3 | Prompt Studio | Seed box, stored preference first, else `-1` — **and the host overwrites either** | **fixed on the machine (§3.3)** |
+| 4 | Conversation, and voice chat over it | character's seed, `-1` by default; the per-reply box is a Gradio control too | **drawn, unless the box was restored (§3.3)** |
+| 5 | Krea panel (LLM Studio) | Seed box, `-1` in source — **restored by the host** | **fixed on the machine (§3.3)** |
 | 6 | Creative Mode on the image tab | `stable_hash(creative_seed, "llm")`; the Creative seed is drawn per roll unless pinned | **derived** |
 | 7 | Spatial Composer, after a Creative roll | `stable_hash(creative_seed, "spatial")` | **derived** |
 | 8 | Spatial Composer, with no Creative roll | `stable_hash(image_seed or 0, "spatial")` — and `0` whenever Forge has not settled a seed yet | **fixed** (§2.3) |
@@ -117,7 +119,9 @@ resolution, length, steps, seed, guidance, LoRAs — is always the page's own"
 ### 2.2 The five writers in the sibling extension
 
 All five resolve `-1` (`RANDOM_SEED`) to a drawn seed before the engine sees
-it, and all five let a typed number win:
+it, and all five let a typed number win. **Read this table as what the source
+asks for, not as what the panel shows**: for the four that are Gradio boxes, the
+host can and does overwrite the value before anyone sees it (§3.3).
 
 | Surface | Draws at | Box default |
 |---|---|---|
@@ -220,32 +224,56 @@ so a run whose seed was reported as `0` cannot be reproduced by typing it back
 into those two panels. `is None`/`== RANDOM_SEED` is the test, not truthiness.
 Sibling repository.
 
-**3.3 Prompt Studio can still be pinned to 7 on an upgraded install — the
-most likely cause of a fixed seed on a real machine.**
-The seed box does not open on `RANDOM_SEED`. It opens on
-`stored.get("seed", RANDOM_SEED)` (`mc_llm_prompt_panel.py:153-155`), and
-`stored` is `preferences()["prompt_defaults"]` (`:53`), which `_remember()`
-rewrites from the raw control values after *every* generation
-(`:376-383`, values assembled at `:297`). Today that writes back `-1` and the
-draw survives. But until `5b5ebda` (2026-08-27) the box opened on
-`initial("seed", 7)` — upstream's self-test constant — so every generation on
-the old build persisted `prompt_defaults["seed"] = 7`, and **that commit
-changed the fallback without migrating the stored value**. On any installation
-that used Prompt Studio before that date, the stored `7` is read first, "a seed
-somebody actually chose still wins" treats it as a choice, and the panel has
-been running at a fixed 7 ever since — silently, and without contradicting a
-single line of the current code.
+**3.3 Forge's `ui-config.json` writes a stored seed back over every seed box
+in LLM Studio. This is the reported bug, and it is not fixable from the
+panels' own code.**
+Confirmed from a screenshot of a freshly opened MiniMax H3 panel on the user's
+machine: the Seed box reads **7** while its own hint, built from the same
+constant the box is supposed to hold, reads "-1 draws a fresh seed for every
+prompt". The code says `value=RANDOM_SEED` (`mc_llm_minimax_panel.py:142`) and
+has never said anything else — `5b5ebda`'s own message records that "MiniMax and
+Krea already opened on -1". So the value on screen did not come from the code.
 
-Check it on the machine: `<Forge data path>/model_chain_llm/data/preferences.json`,
-key `prompt_defaults.seed`. Anything other than `-1` there is a pin. Typing
-`-1` into the box and generating once clears it. The proper fix belongs in the
-sibling repository: migrate a stored `7` to `RANDOM_SEED` on read, since no
-user chose it. The same shape of trap exists for Conversation — a character
-saved with a seed keeps it for every reply — but there it is genuinely a choice
-somebody made in the flyout, and new characters default to `-1`
-(`prompt_master/chat/characters.py:81-83`). The MiniMax panel, the Krea panel
-and the external API cannot be pinned this way: their defaults are literal
-`RANDOM_SEED`/`None`, read from no stored state.
+It came from the host. That repository already has this written down, for a
+different control:
+
+> Forge keeps a `ui-config.json` of every component a script builds and writes
+> the saved value back over the one the script asked for — which is exactly
+> right for a slider somebody has tuned, and exactly wrong for this.
+> (`mc_pipeline_panel.py:366-387`, and `docs/10-image-pipeline.md` §16.3)
+
+The opt-out is the host's own, `component.do_not_save_to_config = True`, and
+`mc_pipeline_panel.switch()` sets it on the image-pipeline stage switches. **No
+seed box sets it** — not Prompt Studio's, not MiniMax's, not Krea's. Forge wrote
+a `7` into `ui-config.json` when a seed box first shipped that value, and has
+been restoring it over the code's `-1` on every UI build since. A key built from
+the tab path and the component's label is also why *every* box labelled "Seed"
+in that tab shows the same number: one stored entry, applied to all of them.
+That is the "all LLM seeds are a fixed value" report, exactly.
+
+Two consequences worth stating plainly. The panels are pinned to 7 and the code
+that draws a seed never runs, because the box hands `7` to `_enhance` and `7` is
+not the sentinel. And §2.2's claim that the MiniMax and Krea boxes "cannot be
+pinned this way" was wrong: it was reasoned from source, and source is not where
+this value comes from.
+
+Three things fix it, and the third is the real one:
+
+* **Now, by hand:** `<Forge root>/ui-config.json`, find the entries whose label
+  is `Seed` under the LLM Studio tab, set them to `-1` (or delete them and
+  restart). Typing `-1` into the box also works for the session.
+* **Per install:** the extension's own `prompt_defaults["seed"]`
+  (`model_chain_llm/data/preferences.json`) is a *second*, independent pin on
+  Prompt Studio only — it is read first (`mc_llm_prompt_panel.py:53`, `:153-155`)
+  and an install that used the panel before 2026-08-27 has a `7` in it that
+  `5b5ebda` never migrated. Worth clearing in the same pass.
+* **In the sibling repository:** set `do_not_save_to_config = True` on all three
+  seed boxes, exactly as `mc_pipeline_panel.switch()` does. A seed control is
+  the clearest possible case of a value that must ship as the code wrote it: a
+  box restored to a number nobody chose is a generator that repeats. A
+  regression test belongs with it, since the existing one
+  (`tests/test_llm_panels.py:3247`) checks the value the code *asks* for, which
+  is precisely the half the host overrides.
 
 **3.4 This repository drops the seed.**
 Described in §2.1. The consequence is narrow but real: an enhancement cannot be
@@ -259,12 +287,11 @@ two feed events.
 
 In the order I would check them:
 
-1. **Prompt Studio pinned to a stored `7`** — §3.3. Read
-   `model_chain_llm/data/preferences.json` before anything else here: the code
-   draws a seed, and a leftover preference from before 2026-08-27 stops it,
-   which is exactly what "every LLM seed is a fixed value" looks like from the
-   outside. Check this first; it is the only entry on this list that is a live
-   defect rather than a design.
+1. **The seed box was restored by the host** — §3.3. Read `ui-config.json`
+   before anything else on this list. If a panel's Seed box shows a number you
+   did not type, nothing downstream of it is random, and no amount of reading
+   the extension's source will show you why. This is the one live defect here;
+   everything below it is a design.
 2. **Retry reuses the finished prompt — no LLM runs at all.**
    `outbox.py:1550`: a retry of a job whose enhancement reached `done` carries
    the written prompt over rather than asking for it twice, unless the failure

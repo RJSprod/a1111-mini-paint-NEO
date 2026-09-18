@@ -122,6 +122,8 @@ def run() -> Results:
                    "minipaint_canvas_menu", "minipaint_canvas_status", "minipaint_canvas_open", "minipaint_canvas_undo",
                    "minipaint_canvas_redo", "minipaint_canvas_reset", "minipaint_canvas_save", "minipaint_canvas_save_file",
                    "minipaint_canvas_send_request", "minipaint_canvas_targets", "minipaint_canvas_suggest",
+                   "minipaint_canvas_send_open", "minipaint_canvas_plan", "minipaint_canvas_send_result",
+                   "minipaint_canvas_send_backend",
                    "minipaint_canvas_tool_crop", "minipaint_canvas_tool_mask", "minipaint_canvas_tool_expand", "minipaint_canvas_tool_layers",
                    "minipaint_canvas_crop_apply", "minipaint_canvas_crop_aspect", "minipaint_canvas_expand_apply",
                    "minipaint_canvas_mask_tool", "minipaint_canvas_mask_size", "minipaint_canvas_mask_clear",
@@ -252,7 +254,9 @@ def run() -> Results:
     work_children = row_children("minipaint_canvas_work")
     r.check("the work column is the action row and the canvas, then what the menu presses and the hidden wires",
             [c for c in work_children if c in ("minipaint_canvas_topbar", "minipaint_canvas_surface", "minipaint_canvas_open")] == ["minipaint_canvas_topbar", "minipaint_canvas_surface", "minipaint_canvas_open"], str(work_children))
-    r.check("the action row is the menu button, the four tools and the status line, nothing else", row_children("minipaint_canvas_topbar") == ["minipaint_canvas_menu", "minipaint_canvas_tool_crop", "minipaint_canvas_tool_mask", "minipaint_canvas_tool_expand", "minipaint_canvas_tool_layers", "minipaint_canvas_status"], str(row_children("minipaint_canvas_topbar")))
+    r.check("the action row is the menu button, the four tools, Send to and the status line, nothing else", row_children("minipaint_canvas_topbar") == ["minipaint_canvas_menu", "minipaint_canvas_tool_crop", "minipaint_canvas_tool_mask", "minipaint_canvas_tool_expand", "minipaint_canvas_tool_layers", "minipaint_canvas_send_open", "minipaint_canvas_status"], str(row_children("minipaint_canvas_topbar")))
+    r.check("Send to is drawn like a tool but is not one", "minipaint-send-button" in component("minipaint_canvas_send_open")["props"]["elem_classes"]
+            and component("minipaint_canvas_send_open")["props"]["value"] == "Send to")
     r.check("the menu button is just the menu", component("minipaint_canvas_menu")["props"]["value"] == "☰ Menu")
     r.check("the tools are labelled buttons drawn as icons", all(component(f"minipaint_canvas_tool_{m}")["props"]["value"] == label and "minipaint-tool" in component(f"minipaint_canvas_tool_{m}")["props"]["elem_classes"] for m, label in (("crop", "Crop"), ("mask", "Mask"), ("expand", "Expand"), ("layers", "Layers"))))
     rail_children = row_children("minipaint_canvas_rail")
@@ -261,7 +265,8 @@ def run() -> Results:
     r.check("the rail's panels start with only crop showing", component("minipaint_canvas_panel_crop")["props"].get("visible", True) is True
             and all(component(f"minipaint_canvas_panel_{m}")["props"].get("visible") is False for m in ("mask", "expand", "layers")))
     r.check("the layer list is server-rendered html with no image yet", component("minipaint_canvas_layer_list")["type"] == "html" and "No image yet" in component("minipaint_canvas_layer_list")["props"]["value"])
-    r.check("what the menu presses is hidden", all(component(f"minipaint_canvas_{name}")["props"].get("visible") is False for name in ("open", "undo", "redo", "reset", "save", "send_request", "targets", "suggest")))
+    r.check("what the menu presses is hidden", all(component(f"minipaint_canvas_{name}")["props"].get("visible") is False for name in ("open", "undo", "redo", "reset", "save", "send_request", "targets", "suggest", "plan", "send_result", "send_backend")))
+    r.check("Send to is on the bar, beside the tools and before the status", component("minipaint_canvas_send_open")["props"].get("visible") is not False)
     r.check("the menu reads the destinations this WebUI has, ImageStitch for both tabs, and Clipboard last", json.loads(component("minipaint_canvas_targets")["props"]["value"]) == [["img2img", "img2img"], ["inpaint", "img2img Inpaint"], ["extras", "Extras"], ["stitch_txt2img", "ImageStitch (txt2img)"], ["stitch_img2img", "ImageStitch (img2img)"], ["clipboard", "Clipboard"]])
     r.check("no menu opens inside the rail: every picker there is chips, but the aspect at its top", all(component(f"minipaint_canvas_{name}")["type"] == "radio" for name in ("expand_fill", "expand_snap", "mask_smoothing", "expand_amount", "mask_tool"))
             and component("minipaint_canvas_crop_aspect")["type"] == "dropdown")
@@ -401,31 +406,32 @@ def run() -> Results:
     aspect = deps_targeting(component("minipaint_canvas_crop_aspect")["id"], "change")
     r.check("aspect is browser-only and reads the original size", len(aspect) == 1 and "setAspect" in aspect[0]["js"] and component("minipaint_canvas_original_size")["id"] in aspect[0]["inputs"])
 
-    # -- send: the image into the host's inputs, the tab switch, the mask once Inpaint has the image
+    # -- send: this tab's own boxes out, the browser places the picture, and
+    # the one event that may name another tab's components is the fallback
     send = by_elem("minipaint_canvas_send_request", "input")
-    r.check("Menu -> Send to is one backend event on the request", len(send) == 1 and send[0]["backend_fn"])
+    r.check("Send to is one backend event on the request", len(send) == 1 and send[0]["backend_fn"])
     outputs = set(send[0]["outputs"]) if send else set()
     switch_id = component("minipaint_canvas_switch")["id"]
     payload_id = component("minipaint_canvas_payload")["id"]
+    plan_id = component("minipaint_canvas_plan")["id"]
     inpaint = refs["init_img_with_mask"]
     host_boxes = {refs["init_img"].background._id, inpaint.background._id, inpaint.foreground._id}
-    r.check("the backend never writes the host's hidden image textboxes", not (host_boxes & outputs))
-    r.check("send writes extras from the backend", refs["extras_image"]._id in outputs)
-    r.check("send writes the ImageStitch galleries from the backend", {refs["txt2img_stitch_gallery"]._id, refs["img2img_stitch_gallery"]._id} <= outputs)
+    galleries = {refs["extras_image"]._id, refs["txt2img_stitch_gallery"]._id, refs["img2img_stitch_gallery"]._id}
     stitch_boxes = {refs["txt2img_stitch_enable"]._id, refs["img2img_stitch_enable"]._id}
-    r.check("but never the ImageStitch boxes", not (stitch_boxes & outputs))
-    r.check("send writes the instruction and the image payload", {switch_id, payload_id} <= outputs)
+    elsewhere = host_boxes | galleries | stitch_boxes
+    # THE CHECK THIS WHOLE SECTION IS FOR. A send that names a component of
+    # another tab dies whenever that component is not on the page - after
+    # its function has run, so the send log says it worked - and takes every
+    # step chained behind it with it. One of them stopped this tab sending
+    # anywhere at all. See DELIVER_SEND_JS in canvas/ui.py.
+    r.check("a send names nothing of another tab's: not a canvas, not Extras, not an ImageStitch gallery or its box",
+            not (elsewhere & outputs), str(sorted(elsewhere & outputs)))
+    r.check("send writes the instruction, the image payload and the plan for placing it", {switch_id, payload_id, plan_id} <= outputs)
     follow = followers(send[0]) if send else []
-    ticks = [f for f in follow if set(f["outputs"]) == stitch_boxes]
-    r.check("a browser-only step ticks the ImageStitch box of the tab sent to and leaves the other untouched",
-            len(ticks) == 1 and not ticks[0]["backend_fn"] and "stitch_txt2img" in ticks[0]["js"] and "stitch_img2img" in ticks[0]["js"]
-            and '"__type__": "update"' in ticks[0]["js"] and ticks[0]["inputs"] == [switch_id])
-    deliver = [f for f in follow if set(f["outputs"]) == {refs["init_img"].background._id, inpaint.background._id}]
-    r.check("a browser-only step writes the chosen host textbox and leaves the other untouched",
-            len(deliver) == 1 and not deliver[0]["backend_fn"] and '"__type__": "update"' in deliver[0]["js"] and deliver[0]["inputs"] == [switch_id, payload_id])
-    r.check("send is followed by the tab switch", any("switchTo" in (f.get("js") or "") and not f["backend_fn"] for f in follow))
-    r.check("and by the browser's WanGP delivery step, reading the instruction and payload",
-            any("deliverWanGP" in (f.get("js") or "") and not f["backend_fn"] and f["inputs"] == [switch_id, payload_id] for f in follow))
+    deliver = [f for f in follow if "deliverSend" in (f.get("js") or "")]
+    r.check("one browser step places the picture, reading the instruction, the payload and the plan, and writing nothing",
+            len(deliver) == 1 and not deliver[0]["backend_fn"] and deliver[0]["inputs"] == [switch_id, payload_id, plan_id]
+            and not deliver[0]["outputs"], str(deliver))
     fetch = by_elem("minipaint_canvas_wangp_fetch", "click")
     r.check("the hidden fetch button hands the prepared send over again into the same two boxes, and nothing else",
             len(fetch) == 1 and fetch[0]["backend_fn"] and fetch[0]["outputs"] == [switch_id, payload_id]
@@ -436,9 +442,29 @@ def run() -> Results:
     mask_payload_id = component("minipaint_canvas_mask_payload")["id"]
     r.check("then the mask layer is prepared as a payload", len(after_wait) == 1 and after_wait[0]["outputs"] == [mask_payload_id] and after_wait[0]["backend_fn"])
     after_mask = followers(after_wait[0]) if after_wait else []
-    r.check("and written into Inpaint from the browser", len(after_mask) == 1 and not after_mask[0]["backend_fn"] and after_mask[0]["outputs"] == [inpaint.foreground._id])
-    r.check("no backend event anywhere writes a host image textbox", not any(d["backend_fn"] and (host_boxes & set(d["outputs"])) for d in deps))
-    r.check("no backend event anywhere writes an ImageStitch box", not any(d["backend_fn"] and (stitch_boxes & set(d["outputs"])) for d in deps))
+    r.check("and written into Inpaint by the browser, which names no component either",
+            len(after_mask) == 1 and not after_mask[0]["backend_fn"] and not after_mask[0]["outputs"]
+            and "deliverMask" in (after_mask[0].get("js") or "")
+            and after_mask[0]["inputs"] == [switch_id, mask_payload_id, plan_id], str(after_mask))
+    result = by_elem("minipaint_canvas_send_result", "input")
+    r.check("how a send really ended comes back from the browser into the status line, and nowhere else",
+            len(result) == 1 and result[0]["backend_fn"] and result[0]["outputs"] == [status_id]
+            and component("minipaint_canvas_send_result")["props"].get("visible") is False)
+    # The one event allowed to name them, and the whole reason the rest may not.
+    backend = by_elem("minipaint_canvas_send_backend", "click")
+    r.check("one hidden button asks the server to place a picture the page could not, and it is the only event naming those components",
+            len(backend) == 1 and backend[0]["backend_fn"] and set(backend[0]["outputs"]) == galleries | {status_id, switch_id}
+            and component("minipaint_canvas_send_backend")["props"].get("visible") is False, str(backend))
+    r.check("and the destination's tab is shown only after it answers",
+            len(followers(backend[0])) == 1 and not followers(backend[0])[0]["backend_fn"]
+            and "switchTo(target)" in (followers(backend[0])[0].get("js") or "")
+            and followers(backend[0])[0]["inputs"] == [switch_id])
+    others = [d for d in deps if (elsewhere & set(d["outputs"])) and d["id"] != backend[0]["id"]]
+    r.check("nothing else in the whole page writes a component of another tab", not others,
+            str([(d["id"], sorted(elsewhere & set(d["outputs"]))) for d in others]))
+    opened = by_elem("minipaint_canvas_send_open", "click")
+    r.check("the bar's Send to button opens the same list in the browser, and is one press",
+            len(opened) == 1 and not opened[0]["backend_fn"] and "openSendMenu" in (opened[0].get("js") or ""))
 
     hidden_presses = [by_elem(f"minipaint_canvas_{name}") for name in ("undo", "redo", "reset", "save")]
     r.check("the hidden Undo, Redo, Reset and Save buttons each have one event for the menu to press", all(len(d) == 1 and d[0]["backend_fn"] for d in hidden_presses))

@@ -49,12 +49,15 @@ Extensions → Install from URL → this repository's URL → Install → Reload
 ```
 
 The action row is one **Menu** button, the four tools as icon buttons — **Crop**, **Mask**,
-**Expand**, **Layers**, the current one filled — and the status line, truncated to what
-is left. The menu holds everything that is not a tool's own control: *Open…*, *Edit*
-(Undo, Redo, Reset to original, Save a copy), *Panels* and *Focus* (toggles), and *Send
-to* with every destination this WebUI has and a Cancel. Each list closes on the choice; a
-tap outside or Escape closes it too. Each tool's controls live in the **rail** on the
-right — the panel for the chosen tool is the one showing. The canvas takes whatever height the window has left
+**Expand**, **Layers**, the current one filled — a **Send to** button, and the status
+line, truncated to what is left. The menu holds everything that is not a tool's own
+control: *Open…*, *Edit* (Undo, Redo, Reset to original, Save a copy), *Panels* and
+*Focus* (toggles), and *Send to* with every destination this WebUI has and a Cancel. The
+button on the bar opens that same *Send to* list, under itself, one press instead of two
+— one list, drawn in one place, so a destination cannot appear in one and not the other.
+Each list closes on the choice; a tap outside or Escape closes it too.
+Each tool's controls live in the **rail** on the right — the panel for the chosen tool
+is the one showing. The canvas takes whatever height the window has left
 below the action row; the rail is never taller than that and scrolls inside it, so the
 whole tab is always in view and nothing ever floats over the picture. *Panels* puts the
 rail away for a canvas the full width of the window and brings it back (choosing a tool
@@ -133,7 +136,8 @@ the others keep their place. Sending flattens the visible layers. Every layer st
 Undo away. What does not carry over from miniPaint is rotation, text and filters — the
 Old UI stays the place for those.
 
-**Send.** *Menu → Send to* lists every destination: **img2img**, **img2img Inpaint**
+**Send.** *Send to* on the action row — or *Menu → Send to* — lists every destination:
+**img2img**, **img2img Inpaint**
 (the mask goes with the image), **Extras**, and **ImageStitch** in txt2img or img2img —
 the image replaces whatever reference images the ImageStitch panel of that tab held,
 becomes its only one, the panel is switched on, and the WebUI goes to that tab. The one a
@@ -265,10 +269,25 @@ A few behaviours of the host's canvas shaped the wiring; each has a small answer
   one listener on the tab hands each tap (select, add to the selection, eye, up, down) to
   the server through a fourth hidden textbox, so the list can be replaced wholesale by the
   next reply.
+* **A send names nothing of another tab's, and the browser places the picture.** This
+  is the one rule the whole send path is shaped around, and it was learnt the hard way:
+  an event that names a component the running page does not contain dies *after its
+  function has run*, so the work happens, the send log records a successful send, and
+  the answer never reaches the page — along with every browser step chained behind it.
+  One stale component from another tab therefore stopped the Canvas sending anywhere at
+  all. So the server now flattens the picture, says where it goes and hands both to the
+  browser as a plan, and the browser places it: into a host canvas's hidden textbox, or
+  into a Gradio component through the ordinary upload route, the way a person dropping a
+  file does. The one event that names those components is a hidden button the browser
+  presses only when it has just found out it cannot place the picture itself, so a
+  component that is not on the page costs that destination and nothing else.
+  `docs/CANVAS_SEND_2026-09-18.txt` is the incident and the change.
 * **ImageStitch is reached the way its own buttons reach it.** Its reference gallery is
-  an ordinary Gallery the send writes from the backend, replacing the list; the box that
-  enables the panel is Forge's own InputAccordion checkbox, ticked from the browser so the
-  host's accordion follows it, exactly as when a user ticks it.
+  an ordinary Gallery, emptied and then handed the file — a Gradio gallery that is
+  holding a picture has no upload input until it is cleared, which is also what makes
+  the arriving image its only reference; the box that enables the panel is Forge's own
+  InputAccordion checkbox, ticked from the browser so the host's accordion follows it,
+  exactly as when a user ticks it.
 * **Gradio rebuilds a component after an update output, and under Forge the rebuilt
   copy of a ForgeCanvas textbox reads arrays instead of images.** Any event that answers
   a component with `gr.update()` or `gr.skip()` makes Gradio keep a per-session copy of
@@ -718,6 +737,8 @@ docs/wangp/                      the WanGP operator's guide, the Phase 0 checkli
                                  and SERVER_EXECUTION.md: press Add to Queue and walk away, what it rests on, what is still inferred
 docs/clipboard/                  the Clipboard tab and the public queue API: the guide, the contracts,
                                  the no-live-connection design intent and what of it is built
+docs/CANVAS_SEND_2026-09-18.txt  why every destination of the Canvas's Send to menu stopped working while its
+                                 send log recorded them all as sent, and the shape that cannot do it again
 tests/                           see tests/README.md
 ```
 

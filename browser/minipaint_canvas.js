@@ -74,11 +74,12 @@ window.minipaintCanvas = (function () {
     const WANGP_TAB_PANEL_ID = "tab_wangp";
     const CLIPBOARD_TAB_PANEL_ID = "tab_minipaint_clipboard";
     const WANGP_PREFIX = "wangp.";
-    // The two boxes the server fills when a send is prepared: the instruction
-    // and the prepared file's id. Gradio's chained browser step reads them for
-    // us; the watcher below reads them itself when that step does not come.
-    const WANGP_SWITCH_ID = "minipaint_canvas_switch";
-    const WANGP_PAYLOAD_ID = "minipaint_canvas_payload";
+    // The two boxes the server fills when a send is prepared: the
+    // instruction, and the picture (a data URL) or the prepared file's id
+    // for WanGP. Gradio's chained browser step reads them for us; the two
+    // watchers below read them themselves when that step does not come.
+    const SEND_SWITCH_ID = "minipaint_canvas_switch";
+    const SEND_PAYLOAD_ID = "minipaint_canvas_payload";
     const WANGP_WATCH_MS = 150;
     const WANGP_WATCH_LIMIT_MS = 90000;
     // When the boxes stay empty this long after the click, the hidden fetch
@@ -89,6 +90,25 @@ window.minipaintCanvas = (function () {
     const WANGP_FETCH_EVERY_MS = 5000;
     const HANDOFF_ID_RE = /^[0-9a-f]{32}$/;
     const SEND_REQUEST_ID = "minipaint_canvas_send_request";
+    // A send to anywhere but WanGP: the server says where the picture goes
+    // and this page puts it there. The plan box carries the destination -
+    // the element, the ImageStitch box, the filename - and the result box
+    // carries back anything that did not go to plan. See deliverSend.
+    const SEND_PLAN_ID = "minipaint_canvas_plan";
+    const SEND_RESULT_ID = "minipaint_canvas_send_result";
+    const SEND_BACKEND_ID = "minipaint_canvas_send_backend";
+    const SEND_OPEN_ID = "minipaint_canvas_send_open";
+    //: The one destination with nothing for this page to place: the server
+    //: puts the picture in the Clipboard library itself and the document
+    //: here does not change. Nothing is watched for, and no tab is shown.
+    const CLIPBOARD_TARGET = "clipboard";
+    //: The same watch WanGP's send has, for the same reason and with the
+    //: same shape: the chained browser step is how the plan normally
+    //: arrives, and on a page where it does not arrive, the boxes are read
+    //: here instead. Whichever gets there first delivers; the other finds
+    //: the request already answered and stops.
+    const SEND_WATCH_MS = 200;
+    const SEND_WATCH_LIMIT_MS = 30000;
     const TARGETS_ID = "minipaint_canvas_targets";
     const SUGGEST_ID = "minipaint_canvas_suggest";
     const PRESS_IDS = {
@@ -157,6 +177,13 @@ window.minipaintCanvas = (function () {
         // state the user chose under is what the send has to be checked
         // against, not whatever WanGP happens to show by the time it lands.
         wangp: { token: 0, status: "", items: [], revision: "", session: "", pending: null, failed: false, watch: 0, delivered: "" },
+        //: The send this page is waiting to place: the request it was armed
+        //: with, the last one it finished (so two routes to the same plan
+        //: deliver once), and the watch that reads the boxes itself.
+        send: { request: "", done: "", watch: 0 },
+        //: Which button the flyout is drawn under - the menu button, or the
+        //: bar's Send to.
+        menuAnchor: null,
         menuOutside: null,
         menuKey: null,
         frameGrip: null,
@@ -969,6 +996,8 @@ window.minipaintCanvas = (function () {
             button.setAttribute("aria-pressed", each === mode ? "true" : "false");
             if (!button.title) { button.title = MODE_NAMES[each]; }
         }
+        const send = document.getElementById(SEND_OPEN_ID);
+        if (send && !send.title) { send.title = "Send to"; }
     }
 
     function setTool(tool) {
@@ -1716,14 +1745,14 @@ window.minipaintCanvas = (function () {
     function watchWanGP() {
         const w = S.wangp;
         if (w.watch) { clearInterval(w.watch); w.watch = 0; }
-        const before = boxValue(WANGP_PAYLOAD_ID);
+        const before = boxValue(SEND_PAYLOAD_ID);
         const started = Date.now();
         let fetched = 0;
         w.watch = setInterval(function () {
             const armed = w.pending;
             if (!armed) { clearInterval(w.watch); w.watch = 0; return; }
-            const instruction = boxValue(WANGP_SWITCH_ID);
-            const payload = boxValue(WANGP_PAYLOAD_ID);
+            const instruction = boxValue(SEND_SWITCH_ID);
+            const payload = boxValue(SEND_PAYLOAD_ID);
             if (instruction === "wangp_send:" + armed.receiver && HANDOFF_ID_RE.test(payload) && payload !== before && payload !== w.delivered) {
                 clearInterval(w.watch); w.watch = 0;
                 noteWanGP("deliver: the prepared file was read from the page's own boxes (the chained step had not delivered it)");
@@ -1837,6 +1866,205 @@ window.minipaintCanvas = (function () {
         }));
     }
 
+    /* ------------------------------------------------------------------ */
+    /* Send to: placing the picture                                          */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Finish a send, wherever it is going.
+     *
+     * The server no longer puts the picture anywhere: it flattens it, says
+     * where it goes and hands both over, and this is the half that places
+     * it. That division is not a preference. A Gradio event that names a
+     * component of ANOTHER tab among its outputs dies whenever that
+     * component is not on the page - after its function has run, so the
+     * send log says "sent" - and it takes every step chained behind it with
+     * it, which is how one stale component stopped this tab sending
+     * anywhere at all. See DELIVER_SEND_JS in canvas/ui.py.
+     *
+     * Two routes reach here with the same plan: Gradio's chained browser
+     * step, and the watch below reading the boxes itself. The request the
+     * plan carries is what makes that safe - the first one through records
+     * it, the second finds it recorded and stops.
+     */
+    async function deliverSend(instruction, payload, planText) {
+        const name = String(instruction || "").split(":")[0];
+        if (name === "wangp_send") { return deliverWanGP(instruction, payload); }
+        const plan = parsePlan(planText);
+        if (!plan || !plan.target) { return; }
+        const request = String(plan.request || "");
+        if (request && request === S.send.done) { return; }
+        if (request) { S.send.done = request; }
+        stopSendWatch();
+        await placeSend(instruction, payload, plan);
+    }
+
+    function parsePlan(text) {
+        const raw = String(text || "");
+        if (!raw) { return null; }
+        try { return JSON.parse(raw); } catch (error) { return null; }
+    }
+
+    /** Put the picture where the plan says, then report anything unexpected. */
+    async function placeSend(instruction, payload, plan) {
+        const label = plan.label || plan.target;
+        // The ImageStitch box first: the host's accordion follows it, so the
+        // gallery the picture is about to go into is open, counted, and in
+        // front of whoever pressed Send.
+        if (plan.enable) { tickHostBox(plan.enable); }
+        if (plan.backend || !payload) {
+            return askServerToPlace(plan, plan.backend
+                ? "there is nothing on this page named for " + label
+                : "the server sent no picture with the plan");
+        }
+        let outcome = null;
+        try {
+            outcome = await deliverToHost(instruction, payload, plan.box || "", {
+                elem: plan.elem || "",
+                // A gallery is told apart from an ordinary image because
+                // the two answer "have you taken it yet" differently, and
+                // `replace` is what makes the arriving picture the only one
+                // there - a gallery that is holding something has no way in
+                // at all until it is emptied.
+                adds: !!plan.gallery,
+                replace: plan.replace !== false,
+                filename: plan.filename || "minipaint.png",
+                label: label
+            });
+        } catch (error) {
+            outcome = { ok: false, reason: (error && error.message) || String(error) };
+        }
+        if (outcome && outcome.ok) {
+            // A clean send says nothing: the status the server wrote when it
+            // handed the picture over is already true. Anything else - an
+            // unverified write, a tab that would not open - is reported, or
+            // it is the silence this whole path exists to end.
+            if (outcome.reason || (!outcome.switched && outcome.switchReason)) { reportSend(plan, outcome); }
+            return;
+        }
+        const why = (outcome && outcome.reason) || "the picture could not be placed";
+        // A Gradio component the page could not write is one the server
+        // still can. A host canvas is not: its box is this page's to write.
+        if (plan.server) { return askServerToPlace(plan, why); }
+        reportSend(plan, { ok: false, reason: why });
+        notice(label, why);
+    }
+
+    /**
+     * Ask the server to place the picture, through the one event that names
+     * components of other tabs. Pressed only from here, only when this page
+     * has just found out it cannot do it itself.
+     */
+    function askServerToPlace(plan, why) {
+        const label = plan.label || plan.target;
+        // Only where there is a server-side way in. A host canvas has none:
+        // pressing for one would spend an event to be told nothing, and
+        // leave the page believing the picture was on its way.
+        if (plan.server) {
+            // Said BEFORE the press, and said as a hand-over rather than as
+            // an arrival. The server's own answer replaces this line when it
+            // places the picture; if that answer never comes - which is the
+            // failure this whole path exists for - what is left on the
+            // screen is "still placing", not "sent".
+            reportSend(plan, { ok: false, handoff: true, reason: why });
+            if (pressHidden(SEND_BACKEND_ID)) { return; }
+        }
+        reportSend(plan, { ok: false, reason: why || ("nothing on this page can place a picture in " + label) });
+        notice(label, why || "The picture could not be placed.");
+    }
+
+    /** What really happened, for the status line and the send log. */
+    function reportSend(plan, outcome) {
+        sendInput(SEND_RESULT_ID, JSON.stringify({
+            target: plan.target || "",
+            label: plan.label || "",
+            ok: !!(outcome && outcome.ok),
+            handoff: !!(outcome && outcome.handoff),
+            reason: (outcome && outcome.reason) || "",
+            switched: !!(outcome && outcome.switched),
+            switchReason: (outcome && outcome.switchReason) || "",
+            t: Date.now()
+        }));
+    }
+
+    /**
+     * Tick one of the host's own checkboxes, by clicking it.
+     *
+     * The ImageStitch box is an InputAccordion's hidden checkbox: the
+     * accordion follows it, and so does the script that reads it. A click
+     * is what both are listening for - the value is not ours to assign, and
+     * an assignment is the thing a framework does not hear.
+     */
+    function tickHostBox(elemId) {
+        const id = String(elemId || "");
+        if (!id) { return false; }
+        const block = app().querySelector('[id="' + id + '"]');
+        const box = block ? block.querySelector("input[type='checkbox']") : null;
+        if (!box) { return false; }
+        if (!box.checked) { box.click(); }
+        return true;
+    }
+
+    /**
+     * The mask layer of an Inpaint send, once that canvas has the picture.
+     *
+     * Written into the host canvas's own scribble textbox, which is where
+     * the picture beside it was written from too. An empty string is a
+     * meaningful value here - it clears strokes that belonged to whatever
+     * was on that canvas before - so "no mask" and "an empty mask" are told
+     * apart by the instruction, not by the payload.
+     */
+    function deliverMask(instruction, payload, planText) {
+        if (String(instruction || "").indexOf("inpaint") !== 0) { return false; }
+        const plan = parsePlan(planText);
+        const uuid = String((plan && plan.box) || "");
+        if (!uuid) { return false; }
+        const root = app();
+        const mask = root.querySelector('.logical_image_foreground[id="' + uuid + '"]')
+            || root.querySelector('[id="' + uuid + '"].logical_image_foreground');
+        const field = mask ? mask.querySelector("textarea, input") : null;
+        if (!field) { return false; }
+        writeHostInput(field, String(payload || ""));
+        return true;
+    }
+
+    /** Remember which send this page is waiting to place, and start watching. */
+    function armSend(request) {
+        S.send.request = String(request || "");
+        watchSend();
+    }
+
+    function stopSendWatch() {
+        if (S.send.watch) { clearInterval(S.send.watch); S.send.watch = 0; }
+    }
+
+    /**
+     * Read the plan out of the boxes when the chained step does not bring it.
+     *
+     * The same second route WanGP's send has, and it earns its place the
+     * same way: a send whose outputs never reach the page is silent, and
+     * silence is what made this tab look like a button that did nothing.
+     * Bounded, idle whenever nothing is armed, and stopped by the delivery
+     * whichever route made it.
+     */
+    function watchSend() {
+        stopSendWatch();
+        const started = Date.now();
+        S.send.watch = setInterval(function () {
+            const armed = S.send.request;
+            if (!armed || armed === S.send.done) { stopSendWatch(); return; }
+            const plan = parsePlan(boxValue(SEND_PLAN_ID));
+            if (plan && String(plan.request || "") === armed) {
+                deliverSend(boxValue(SEND_SWITCH_ID), boxValue(SEND_PAYLOAD_ID), boxValue(SEND_PLAN_ID));
+                return;
+            }
+            if (Date.now() - started > SEND_WATCH_LIMIT_MS) {
+                stopSendWatch();
+                console.warn("MiniPaint: the server never said where that picture was to go.");
+            }
+        }, SEND_WATCH_MS);
+    }
+
     function menuItems(section) {
         const tick = function (on) { return on ? "✓ " : ""; };
         if (section === "edit") {
@@ -1911,7 +2139,17 @@ window.minipaintCanvas = (function () {
             case "back": renderMenu(null); return;
             case "close": closeMenu(); return;
             case "press": closeMenu(); pressHidden(value); return;
-            case "send": armWanGP(value); closeMenu(); sendInput(SEND_REQUEST_ID, value + ":" + Date.now()); return;
+            case "send": {
+                // The nonce is what makes a repeat of the same destination a
+                // change the server hears; it is also this send's name, so
+                // the two routes to its plan can tell it from the last one.
+                const request = String(value) + ":" + Date.now();
+                armWanGP(value);
+                if (String(value).indexOf(WANGP_PREFIX) !== 0 && String(value) !== CLIPBOARD_TARGET) { armSend(request); }
+                closeMenu();
+                sendInput(SEND_REQUEST_ID, request);
+                return;
+            }
             case "wangp-refresh": queryWanGP(); renderMenu("send"); return;
             case "status": return;
             case "panels": closeMenu(); setRail(railHidden()); return;
@@ -1921,25 +2159,40 @@ window.minipaintCanvas = (function () {
     }
 
     function positionMenu() {
-        const button = document.getElementById(MENU_ID);
+        const button = document.getElementById(S.menuAnchor || MENU_ID) || document.getElementById(MENU_ID);
         const column = work();
         if (!button || !column || !S.menu) { return; }
         const b = button.getBoundingClientRect();
         const c = column.getBoundingClientRect();
         S.menu.style.top = (b.bottom - c.top + 4) + "px";
-        S.menu.style.left = Math.max(0, b.left - c.left) + "px";
+        // Under its button, but never off the side of the column it is drawn
+        // in. The Menu button is at the left and never pushed anything over;
+        // Send to sits after four tool buttons, and on a phone a list hung
+        // from its left edge would run off the screen.
+        const width = S.menu.getBoundingClientRect().width || 0;
+        const room = Math.max(0, c.width - width);
+        S.menu.style.left = Math.max(0, Math.min(b.left - c.left, room)) + "px";
     }
 
-    function openMenu() {
+    function openMenu(section, anchorId) {
         if (!S.menu) { return; }
-        renderMenu(null);
+        S.menuAnchor = anchorId || MENU_ID;
+        if (section === "send") { queryWanGP(); }
+        renderMenu(section || null);
         S.menu.hidden = false;
         positionMenu();
         // Listened for only while the menu is open, and taken down with it.
         S.menuOutside = function (event) {
             const target = event.target;
             if (S.menu.contains(target)) { return; }
-            if (target && target.closest && target.closest("#" + MENU_ID)) { return; }
+            // Not the button this list was opened from, whichever it is.
+            // This runs on pointerdown and the button's own click runs
+            // after it, so closing here would be undone a moment later by
+            // the press that was meant to close it - the list would blink
+            // and stay open, and the next press of the Menu button would
+            // close the list somebody had just asked for.
+            if (target && target.closest && (target.closest("#" + MENU_ID)
+                || (S.menuAnchor && target.closest("#" + S.menuAnchor)))) { return; }
             closeMenu();
         };
         document.addEventListener("pointerdown", S.menuOutside, true);
@@ -1953,6 +2206,7 @@ window.minipaintCanvas = (function () {
         if (!S.menu) { return; }
         S.menu.hidden = true;
         S.menuSection = null;
+        S.menuAnchor = null;
         // An answer that arrives after this is nobody's: the next opening asks
         // again rather than showing what was true a moment ago.
         S.wangp.token += 1;
@@ -1965,6 +2219,19 @@ window.minipaintCanvas = (function () {
     function toggleMenu() {
         if (!S.menu) { return; }
         if (S.menu.hidden) { openMenu(); } else { closeMenu(); }
+    }
+
+    /**
+     * The destinations, straight from the bar.
+     *
+     * One press instead of two, and the same list: the menu's "Send to ›"
+     * and this open the same section of the same flyout, so a destination
+     * this WebUI has cannot appear in one of them and not the other.
+     */
+    function openSendMenu() {
+        if (!S.menu) { return; }
+        if (!S.menu.hidden && S.menuSection === "send") { closeMenu(); return; }
+        openMenu("send", SEND_OPEN_ID);
     }
 
     /* ------------------------------------------------------------------ */
@@ -2794,9 +3061,16 @@ window.minipaintCanvas = (function () {
             const committed = await Host.set_image_file(wrapper, String(payload), {
                 record: record,
                 filename: opts.filename || "clipboard.png",
-                // A gallery keeps what it has and adds to it, so "the first
-                // preview changed" is the wrong thing to wait for there.
-                accept_more: !!opts.adds
+                // Named as well as handed over: emptying a component that is
+                // full can remount what is inside it, and the library has to
+                // be able to find the way in again afterwards.
+                selector: elem ? '[id="' + elem + '"]' : undefined,
+                // A gallery keeps its pictures in buttons and adds to what
+                // it has, so "the first preview changed" is the wrong thing
+                // to wait for there; one more picture is the right thing.
+                accept_more: !!opts.adds,
+                // And whether what arrives is to be the only thing there.
+                replace: !!opts.replace
             });
             const mode = IMG2IMG_DESTINATIONS[name];
             if (mode && typeof Host.select_img2img_mode === "function") {
@@ -3047,6 +3321,9 @@ window.minipaintCanvas = (function () {
         endTransform: endTransform,
         closeMenu: closeMenu,
         deliverWanGP: deliverWanGP,
+        deliverSend: deliverSend,
+        deliverMask: deliverMask,
+        openSendMenu: openSendMenu,
         refreshOverlays: refreshOverlays,
         onMode: onMode,
         setTool: setTool,

@@ -351,6 +351,29 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     r.check(f"{label}: Send to lists every destination, the suggested one marked, and Cancel", menu_items(page) == ["‹ Back", "img2img  · suggested", "img2img Inpaint", "Extras", "ImageStitch (txt2img)", "ImageStitch (img2img)", "Cancel"], str(menu_items(page)))
     menu_click(page, "Cancel")
     r.check(f"{label}: Cancel closes the menu", wait_for(page, lambda: not debug(page)["menuOpen"], timeout=4))
+    # ---- the bar's own Send to: the same list, one press, under its button ----
+    r.check(f"{label}: Send to sits on the bar between the tools and the status, finger-sized and drawn as an icon", page.evaluate("""() => {
+        const b = document.getElementById('minipaint_canvas_send_open');
+        const last = document.getElementById('minipaint_canvas_tool_layers').getBoundingClientRect();
+        const s = document.querySelector('#minipaint_canvas_status').getBoundingClientRect();
+        if (!b) return 'missing';
+        const box = b.getBoundingClientRect();
+        const icon = getComputedStyle(b, '::before').maskImage || getComputedStyle(b, '::before').webkitMaskImage || '';
+        return {after: box.left >= last.right - 1, before: s.left > box.right, sized: box.width >= 43 && box.height >= 43,
+                icon: icon.indexOf('svg') !== -1, title: b.title, marked: b.classList.contains('minipaint-current')};
+    }""") == {"after": True, "before": True, "sized": True, "icon": True, "title": "Send to", "marked": False},
+        str(page.evaluate("() => { const b = document.getElementById('minipaint_canvas_send_open'); return b ? [b.title, b.getBoundingClientRect().width] : 'missing'; }")))
+    page.locator("#minipaint_canvas_send_open").click()
+    r.check(f"{label}: it opens the destinations themselves, not the top of the menu",
+            wait_for(page, lambda: debug(page)["menuOpen"] and menu_items(page)[:2] == ["‹ Back", "img2img  · suggested"], timeout=4), str(menu_items(page)))
+    r.check(f"{label}: and the list is drawn under that button, not under the menu button", page.evaluate("""() => {
+        const b = document.getElementById('minipaint_canvas_send_open').getBoundingClientRect();
+        const m = document.querySelector('.minipaint-menu').getBoundingClientRect();
+        const menu = document.getElementById('minipaint_canvas_menu').getBoundingClientRect();
+        return m.top >= b.bottom - 1 && m.left >= menu.right;
+    }"""))
+    page.locator("#minipaint_canvas_send_open").click()
+    r.check(f"{label}: pressing it again puts the list away", wait_for(page, lambda: not debug(page)["menuOpen"], timeout=4))
     r.check(f"{label}: the four tools sit on the bar as finger-sized icon buttons, Crop current", page.evaluate("""() => {
         const names = ['crop', 'mask', 'expand', 'layers'];
         const buttons = names.map(n => document.getElementById('minipaint_canvas_tool_' + n));
@@ -766,6 +789,24 @@ def run_flow(r: Results, page, refs, uuid: str, label: str, with_upload: bool) -
     click_tab(page, "Mini Paint")
     menu_pick(page, "Send to", "ImageStitch (txt2img)")
     r.check(f"{label}: a second send replaces the reference rather than adding one", wait_for(page, lambda: visible_panels(page) == ["tab_txt2img"]) and wait_for(page, lambda: page.locator("#script_txt2img_imagestitch_integrated_ref_latent .thumbnail-item").count() == 1, timeout=4) and page.locator("#script_txt2img_imagestitch_integrated_ref_latent .thumbnail-item").count() == 1)
+    click_tab(page, "Mini Paint")
+
+    # ---- send to Extras. Whichever half places it - the page hands the
+    # component the file, or, where the component offers no way in, the one
+    # hidden event that names it does - the picture arrives and the tab is
+    # shown afterwards rather than before. This host's Extras image is an
+    # input to nothing, so Gradio renders it with no upload input and this
+    # is the fallback's own check.
+    menu_pick(page, "Send to", "Extras")
+    r.check(f"{label}: Extras gets the picture", wait_for(page, lambda: page.locator("#extras_image img").count() >= 1, timeout=20),
+            str(page.locator("#extras_image img").count()))
+    r.check(f"{label}: and the WebUI goes to Extras, after it arrived", wait_for(page, lambda: visible_panels(page) == ["tab_extras"]), str(visible_panels(page)))
+    # Read with textContent, not innerText: the Canvas tab is hidden by now
+    # and innerText of a hidden element is empty. Waited for rather than
+    # sampled, because where the server places it the page says "placing"
+    # first and the server's own answer replaces that line.
+    status_of = lambda: page.evaluate("() => (document.querySelector('#minipaint_canvas_status') || {}).textContent || ''")
+    r.check(f"{label}: the status says where it went", wait_for(page, lambda: "Sent to Extras" in status_of(), timeout=15), status_of())
     click_tab(page, "Mini Paint")
 
     # ---- reset from the menu, then a picture opened from the menu and one dropped on the canvas ----

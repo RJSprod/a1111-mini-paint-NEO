@@ -113,7 +113,9 @@ TRANSFORM_DONE_JS = f"() => {{ if ({_JS}) {_JS}.finishTransform(); }}"
 ASPECT_JS = f"(choice, w, h, original) => {{ if ({_JS}) {_JS}.setAspect(choice, w, h, original); }}"
 TOOL_JS = f"(tool) => {{ if ({_JS}) {_JS}.setTool(tool); }}"
 SIZE_JS = f"(size) => {{ if ({_JS}) {_JS}.setBrushSize(size); }}"
-SWITCH_JS = f"(target) => {{ if ({_JS}) {_JS}.switchTo(target); }}"
+#: The action row's Send to button: the same list the menu's "Send to ›"
+#: opens, one press earlier. Browser-only - the menu is drawn there.
+SEND_MENU_JS = f"() => {{ if ({_JS}) {_JS}.openSendMenu(); }}"
 #: What a receive writes into its receipt box. Only the first means the
 #: picture is on the Canvas and the tab is worth showing.
 RECEIVED = "landed"
@@ -123,13 +125,11 @@ NOT_RECEIVED = "failed"
 def _receipt_key(values: typing.Sequence[typing.Any]) -> str:
     """The trigger that caused one receive, as one string."""
     return "\x1f".join(str(value or "") for value in values)
-# The WanGP half of a send, which only the browser can do: the picture is
-# already a file on disk, and the one page that can be asked to take it is the
-# WanGP iframe in this document. It switches tabs only on a verified
-# acknowledgement, so an unproved send leaves the user where they are.
-WANGP_DELIVER_JS = (
-    f"async (target, payload) => {{ if ({_JS}) {{ await {_JS}.deliverWanGP(target, payload); }} }}"
-)
+# The WanGP half of a send is the browser's too, and for a reason of its
+# own: the picture is already a file on disk, and the one page that can be
+# asked to take it is the WanGP iframe in this document. It switches tabs
+# only on a verified acknowledgement, so an unproved send leaves the user
+# where they are. ``deliverSend`` hands a WanGP instruction straight to it.
 SWITCH_CANVAS_JS = f"async () => {{ {_AWAIT_READY}if ({_JS}) {_JS}.switchTo('canvas'); }}"
 # The same switch, after a receive that said whether it landed.
 #
@@ -195,28 +195,54 @@ def _mark_js(input_count: int, keep: bool = False) -> str:
     return f"(...args) => {{ if ({_JS}) {_JS}.mark({flag}); return args.slice(0, {input_count}); }}"
 
 
-# The host's img2img and Inpaint inputs are its own hidden image textboxes.
-# They are written from the browser, as a plain value into exactly the one
-# chosen, and the others are left untouched with an empty update. A backend
-# output would have to answer every target on every send, and an answer of
-# "no change" makes Gradio rebuild a per-session copy of the host's component
-# - which under Forge comes back reading images as arrays (see surface.py).
-_KEEP = '{"__type__": "update"}'
-DELIVER_IMAGE_JS = (
-    f"(target, payload) => {{ const t = String(target || ''); "
-    f"return [t.indexOf('img2img') === 0 ? payload : {_KEEP}, t.indexOf('inpaint') === 0 ? payload : {_KEEP}]; }}"
+# NOTHING OF ANOTHER TAB'S IS IN A SEND'S OUTPUTS. NOT ONE COMPONENT.
+#
+# This is the whole reason the Canvas could not send anything at all, and it
+# is worth the paragraphs because the failure names nothing.
+#
+# A send used to answer with the host's own components: the Extras image and
+# the two ImageStitch galleries, the chosen one carrying the picture and the
+# others ``gr.skip()``. Gradio 4.40 postprocesses a skip as a property
+# update, and a property update is resolved against the session's copy of
+# the component - ``SessionState.__getitem__``, which is ``blocks[id]``.  A
+# component that is not in the page Gradio is serving raises ``KeyError``
+# there. The host builds those components, not us; a script that made one
+# for a tab it never placed it in, or anything that built the interface
+# twice in one process, leaves us holding one that is perfectly real and not
+# on the page.
+#
+# What that does is the part worth remembering. The function has already
+# run: the picture is flattened, the send log says "sent 1024x832", and the
+# user's log file is a list of sends that all worked. The exception is
+# raised afterwards, while the answer is being turned into JSON, so the
+# outputs never reach the page - and every browser step chained behind the
+# send (writing the host canvas, ticking the ImageStitch box, switching
+# tabs, handing WanGP its file) is chained behind an event that failed and
+# never runs either. One stale component, and every destination this tab
+# offers stops working, silently, for ever, with a send log that says they
+# all worked. ``wangp_fetch`` below exists because of it: on the machine
+# this was found on, a send's outputs reached the page three times out of
+# three - never.
+#
+# So a send now answers with this tab's own boxes and nothing else, and the
+# delivery is the browser's, through the same ``deliverToHost`` the
+# Clipboard tab has been delivering through all along (see
+# ``clipboard/ui.py``'s ``send_plan``, which learnt this first). The one
+# destination kind the browser cannot always finish - a Gradio component
+# that must be written from the server - is a hidden button the browser
+# presses only when it has just found out it could not place the picture
+# itself, and THAT event names the components. The blast radius of a
+# component that is not on the page is now that component.
+DELIVER_SEND_JS = (
+    f"async (target, payload, plan) => {{ {_AWAIT_READY}"
+    f"if ({_JS}) {{ await {_JS}.deliverSend(target, payload, plan); }} }}"
 )
+#: The mask layer for an Inpaint send, once that canvas has taken the
+#: picture. Written into the host canvas's own scribble textbox by the
+#: browser, for the same reason as everything else here.
 DELIVER_MASK_JS = (
-    f"(target, payload) => [String(target || '').indexOf('inpaint') === 0 ? (payload || '') : {_KEEP}]"
+    f"async (target, payload, plan) => {{ if ({_JS}) {{ await {_JS}.deliverMask(target, payload, plan); }} }}"
 )
-
-
-def _stitch_enable_js(keys: typing.Sequence[str]) -> str:
-    """Tick the "ImageStitch Integrated" box of the tab an image was just
-    sent to, from the browser: the host's own accordion follows its box, so
-    the references open and count. The other box is left untouched."""
-    values = ", ".join(f"t === '{key}' ? true : {_KEEP}" for key in keys)
-    return f"(target) => {{ const t = String(target || ''); return [{values}]; }}"
 
 
 def _host_wait_js(uuid: str) -> str:
@@ -248,6 +274,11 @@ def _request(value: typing.Any) -> str:
     """The word before the nonce the browser appends so a repeated request
     still counts as a change."""
     return str(value or "").split(":", 1)[0].strip()
+
+
+def _text(value: typing.Any) -> str:
+    """The whole request, nonce and all: what tells one press from the next."""
+    return str(value or "").strip()
 
 
 def suggested_destination(has_mask: bool, has_expansion: bool) -> str:
@@ -1264,25 +1295,90 @@ class TouchCanvas:
         notes.append(f"see-through pixels were filled with rgb{color} for {label}")
         return imaging.flatten(outgoing, color)
 
+    def _plan(self, request: typing.Any, target: str, label: str, filename: str) -> str:
+        """Everything the browser needs to finish this send without Gradio.
+
+        Every destination the Canvas has is something a page can put a
+        picture into: the host's canvases take one through their hidden
+        textbox, and a Gradio component takes one from an upload as readily
+        as from the server. So the plan NAMES the destination - the element
+        the picture goes into, and for ImageStitch the box that opens it -
+        and the browser hands the picture over the ordinary upload route,
+        the way a person dropping a file does.
+
+        Which element that is, is this side's to say and not the page's to
+        guess: ForgeCanvas gives its picture and its scribble the same id
+        and tells them apart by class, and the host registers its components
+        by element id, so a page built twice would otherwise be handed one
+        that nothing on it is listening to.
+
+        ``backend`` is left true only when there is no element to name,
+        which is the one case no amount of browser work can finish; the
+        browser then presses the hidden button that asks the server to place
+        it. See ``send_backend``.
+        """
+        plan: dict = {
+            "request": _text(request),
+            "target": target,
+            "label": label,
+            "filename": filename,
+            "backend": False,
+            "server": False,
+            # What arrives replaces what is there. The send log has said "it
+            # is now the only reference image there" since the first build,
+            # and a gallery that grows a picture every time is a different
+            # promise - so the page empties the destination on its way in.
+            "replace": True,
+            # And whether the destination is a gallery, which is not a
+            # detail of taste: Gradio keeps a gallery's pictures inside
+            # buttons and an ordinary image's outside them, so "has it taken
+            # the picture yet" is a different question for each.
+            "gallery": False,
+        }
+        component = self.targets.get(target)
+        elem = str(getattr(component, "elem_id", "") or "")
+        if target in ("img2img", "inpaint"):
+            # The host canvas's own hidden textbox, by the id ForgeCanvas
+            # gave it. Not "elem": nothing is uploaded into a canvas.
+            plan["box"] = elem
+            plan["backend"] = not elem
+            return json.dumps(plan)
+        if target in BACKEND_TARGETS:
+            plan["elem"] = elem
+            plan["backend"] = not elem
+            # There is a server-side way into this one, so a page that
+            # cannot place it has somewhere to fall back to. A host canvas
+            # has no such thing: its box is the page's to write, and saying
+            # otherwise would send the browser to press a button that would
+            # answer with nothing. See ``askServerToPlace``.
+            plan["server"] = True
+            if target in STITCH_TARGETS:
+                enable = self.targets.get(f"{target}_enable")
+                plan["enable"] = str(getattr(enable, "elem_id", "") or "")
+                plan["gallery"] = True
+            return json.dumps(plan)
+        return json.dumps(plan)
+
     def send(self, foreground, state, mode, request, smoothing):
-        """The handoff, from Menu -> Send to. The image goes to the
-        destination's own input: for Extras straight into its image
-        component, for ImageStitch into its reference gallery (replacing
-        what was there), for img2img and Inpaint as a PNG data URL that the
-        next (browser-side) step writes into the host's hidden image
-        textbox. For Inpaint the mask follows once that canvas has taken the
-        image (``send_mask``). The last two values are the browser's
-        instructions: the target, with the size the Inpaint canvas must
-        reach, and the image payload.
+        """The handoff, from Menu -> Send to, or the action row's Send to.
+
+        This side flattens the picture, says where it is going and hands the
+        browser the bytes and a plan for placing them; the browser places
+        it. For Inpaint the mask follows once that canvas has taken the
+        image (``send_mask``). The last three values are the browser's: the
+        instruction (with the size an Inpaint canvas must reach), the image
+        payload, and the plan.
+
+        Its outputs are this tab's own components and nothing else. See
+        DELIVER_SEND_JS above for why that is not a tidiness rule.
         """
         doc = document.ensure(state)
-        skips = [gr.skip() for _ in self.image_targets]
         receiver = wangp_receiver(_request(request))
         image, mask, notes = self._sync(doc, foreground)
         if image is None:
             if receiver:
                 _journal("send", f"{wangp_label(receiver)}: nothing to send - the Canvas holds no image")
-            return (*skips, *self._info(doc, mode, "There is no image to send."), "", "")
+            return (*self._info(doc, mode, "There is no image to send."), "", "", "")
 
         if receiver:
             return self._send_to_wangp(doc, mode, receiver, notes)
@@ -1290,29 +1386,33 @@ class TouchCanvas:
         target = resolve_destination(_request(request), doc.has_mask, doc.has_expansion)
         label = DESTINATION_LABELS[target]
         if target == CLIPBOARD_TARGET:
-            return (*skips, *self._send_to_clipboard(doc, mode, notes), "", "")
+            return (*self._send_to_clipboard(doc, mode, notes), "", "", "")
         if target not in self.targets:
-            return (*skips, *self._info(doc, mode, f"{label} was not found in this WebUI, so nothing was sent."), "", "")
+            return (*self._info(doc, mode, f"{label} was not found in this WebUI, so nothing was sent."), "", "", "")
 
         outgoing = self._outgoing(doc, target, label, notes)
 
-        payload = ""
         if target == "inpaint":
             if doc.has_mask and smoothing != "Off":
                 notes.append(f"mask edge smoothing: {smoothing}")
             doc.pending_send = {"target": target, "smoothing": smoothing, "size": outgoing.size}
             instruction = f"inpaint:{outgoing.width}x{outgoing.height}"
-            payload = imaging.to_data_url(outgoing)
         else:
             doc.pending_send = None
             instruction = target
-            if target == "img2img":
-                payload = imaging.to_data_url(outgoing)
             if target in STITCH_TARGETS:
                 notes.append("it is now the only reference image there")
             if doc.has_mask:
                 notes.append(f"the mask was not sent: {label} takes an image only")
 
+        stem = os.path.splitext(doc.filename or "")[0] if getattr(doc, "filename", "") else ""
+        plan = self._plan(request, target, label, f"{stem or 'minipaint'}.png")
+        # The picture the browser is about to place, kept for the one event
+        # that may have to place it instead. Recomputing it there would
+        # flatten the document a second time and could answer with a
+        # different picture than the one the user was told about.
+        doc.pending_backend = {"request": _text(request), "target": target, "label": label,
+                               "image": outgoing, "steps": list(notes)}
         doc.last_send = label
         log_quietly(
             {
@@ -1321,13 +1421,101 @@ class TouchCanvas:
                 "steps": notes,
             }
         )
+        return (*self._info(doc, mode, f"Sent to {label}.", notes), instruction, imaging.to_data_url(outgoing), plan)
+
+    def send_backend(self, state, request):
+        """Place a picture the browser could not place itself.
+
+        WHY THIS IS NOT PART OF ``send``.
+
+        Extras and the ImageStitch galleries hold their picture in a Gradio
+        component. The browser can put one there - it hands the component
+        the file the way a person dropping one does - but not on every page
+        and not in every state, and when it cannot, the only other way is
+        for the server to name that component in an event's outputs.
+
+        Those components belong to other tabs, and a component from another
+        tab is the one thing an event can name that may not be on the page
+        at all. An event naming one cannot answer: not "fails for that
+        destination" - the whole event dies, after its function has run, so
+        the send log says it worked. That is what took every destination
+        this tab had with it while these components were among ``send``'s
+        outputs. Here, on an event pressed only when the page has just found
+        out it could not place the picture, what it takes with it is itself.
+        """
+        doc = document.ensure(state)
+        text = _text(request)
+        pending = getattr(doc, "pending_backend", None) or {}
+        skips = [gr.skip() for _ in self.image_targets]
+        target = str(pending.get("target") or "")
+        if not pending or (text and pending.get("request") and text != pending.get("request")):
+            return (*skips, gr.skip(), gr.skip())
+        if target not in self.image_targets:
+            return (*skips, gr.skip(), gr.skip())
+        # Once. A second press for the same picture would put a second copy
+        # in a gallery that appends, and say "sent" about a send already made.
+        doc.pending_backend = None
+        label = str(pending.get("label") or DESTINATION_LABELS.get(target, target))
+        image = pending.get("image")
+        if image is None:
+            return (*skips, _status(f"{label} could not be written: the prepared picture is no longer here."), gr.skip())
         # A gallery takes a list; an Image takes the picture. Either is saved
         # where the host serves it from (see host.staged).
-        if target in self.image_targets:
-            host.staged(outgoing)
-        delivered = [outgoing] if target in STITCH_TARGETS else outgoing
+        host.staged(image)
+        delivered = [image] if target in STITCH_TARGETS else image
         outputs = [delivered if key == target else gr.skip() for key in self.image_targets]
-        return (*outputs, *self._info(doc, mode, f"Sent to {label}.", notes), instruction, payload)
+        steps = list(pending.get("steps") or [])
+        steps.append("the page could not place it, so the server did")
+        log_quietly({"destination": f"Canvas -> {label}", "outcome": f"placed {image.width}x{image.height} from the server", "steps": steps})
+        # And now - only now - the destination is shown. Deliver, prove,
+        # then show, the same order the browser's own path keeps: this
+        # answer reaching the page is the proof, and the step chained
+        # behind it does the showing.
+        return (*outputs, _status(f"Sent to {label}.", ["placed by the server: the page could not"]), target)
+
+    def send_result(self, state, text):
+        """How a send actually ended, as the page saw it.
+
+        A send that went cleanly says nothing here: the status the server
+        wrote when it handed the picture over is already true, and one line
+        in the send log is the right number. This is for the rest - a
+        destination that was not on the page, a write that could not be
+        verified, a tab that would not open - because the alternative is the
+        fault this whole file is about: a log that says "sent" and a user
+        looking at a tab where nothing arrived.
+        """
+        doc = document.ensure(state)
+        try:
+            report = json.loads(str(text or "") or "{}")
+        except ValueError:
+            return gr.skip()
+        if not isinstance(report, dict) or not report.get("target"):
+            return gr.skip()
+        label = str(report.get("label") or DESTINATION_LABELS.get(str(report.get("target")), "the destination"))
+        # The document's own summary stays in front of the message, the way
+        # every other line this tab writes does: a status that drops it
+        # tells the user less than the one it replaced.
+        summary = f"**{doc.describe()}** — "
+        reason = str(report.get("reason") or "")
+        if report.get("handoff"):
+            # The page could not place it and has asked the server to. Said
+            # here rather than after, because the answer that would say
+            # "sent" is the one that may never come: a line that stops at
+            # "placing" is the whole difference between a send that quietly
+            # did not happen and one that says so.
+            log_quietly({"destination": f"Canvas -> {label}",
+                         "outcome": f"the page could not place it ({reason or 'no reason given'}); the server was asked to"})
+            return _status(f"{summary}placing the picture in {label}…", [reason] if reason else [])
+        if report.get("ok"):
+            notes = [reason] if reason else []
+            if not report.get("switched") and report.get("switchReason"):
+                notes.append(str(report.get("switchReason")))
+            if not notes:
+                return gr.skip()
+            log_quietly({"destination": f"Canvas -> {label}", "outcome": f"the page placed it: {'; '.join(notes)}"})
+            return _status(f"{summary}sent to {label}.", notes)
+        log_quietly({"destination": f"Canvas -> {label}", "outcome": f"failed in the page: {reason or 'no reason given'}"})
+        return _status(f"{summary}**{label} did not take the picture.**", [reason] if reason else [])
 
     def _send_to_clipboard(self, doc: document.Document, mode: str, notes: list) -> tuple:
         """The composite into the Clipboard library as a PNG. The document stays.
@@ -1364,13 +1552,12 @@ class TouchCanvas:
         can be asked whether it took the picture, and only its verified
         acknowledgement counts. ``wangp_result`` records how it ended.
         """
-        skips = [gr.skip() for _ in self.image_targets]
         handoff = _wangp("handoff")
         errors = _wangp("errors")
         label = wangp_label(receiver_id)
         if handoff is None:
             _journal("send", f"{label}: the WanGP package is not importable here, so nothing was prepared")
-            return (*skips, *self._info(doc, mode, "WanGP support is not available in this install, so nothing was sent."), "", "")
+            return (*self._info(doc, mode, "WanGP support is not available in this install, so nothing was sent."), "", "", "")
 
         outgoing = self._outgoing(doc, "wangp", label, notes)
         try:
@@ -1380,7 +1567,7 @@ class TouchCanvas:
             sentence = errors.message(code) if errors is not None else "The image could not be prepared for WanGP."
             log_quietly({"destination": f"Canvas -> {label}", "outcome": f"failed: {code}", "steps": list(notes)})
             _journal("send", f"{label}: the picture could not be prepared - {code}")
-            return (*skips, *self._info(doc, mode, sentence, notes), "", "")
+            return (*self._info(doc, mode, sentence, notes), "", "", "")
         # The first half of the record, written now: a send whose second half
         # never arrives then still shows that this side did its part, and the
         # journal shows the browser being handed the file - or not.
@@ -1400,10 +1587,10 @@ class TouchCanvas:
         doc.last_send = label
         notes.append(f"a {outgoing.width}x{outgoing.height} PNG was prepared for {label}")
         return (
-            *skips,
             *self._info(doc, mode, f"Sending to {label}…", notes),
             f"{WANGP_INSTRUCTION}:{receiver_id}",
             prepared.id,
+            "",
         )
 
     def wangp_fetch(self, state):
@@ -1575,6 +1762,18 @@ class TouchCanvas:
                         )
                         for mode in MODES
                     }
+                    # Where a picture goes, one press from the bar rather
+                    # than two from the menu. It opens the same list the
+                    # menu's "Send to ›" opens - one list, drawn in one
+                    # place, so a destination cannot appear in one and not
+                    # the other. The Clipboard tab's bar has had this since
+                    # it was built; this tab hid it a level down.
+                    send_btn = gr.Button(
+                        "Send to",
+                        elem_id=_id("send_open"),
+                        elem_classes=["minipaint-action", "minipaint-tool", "minipaint-send-button"],
+                        min_width=0,
+                    )
                     status = gr.Markdown(
                         "**No image yet.** Open a file (Menu → Open), drop or paste one onto the canvas, or press 🖌️ under a txt2img, img2img or Extras result.",
                         elem_id=_id("status"),
@@ -1609,6 +1808,12 @@ class TouchCanvas:
                 # only side that hears the live WanGP page acknowledge it.
                 wangp_result = gr.Textbox("", visible=False, elem_id=_id("wangp_result"))
                 wangp_fetch = gr.Button("Fetch the prepared WanGP send", visible=False, elem_id=_id("wangp_fetch"))
+                # How an ordinary send ended, written by the browser when it
+                # did not end cleanly. See ``send_result``.
+                send_result = gr.Textbox("", visible=False, elem_id=_id("send_result"))
+                # The one press that asks the server to place a picture in a
+                # component the page could not. See ``send_backend``.
+                send_backend = gr.Button("Place the picture from the server", visible=False, elem_id=_id("send_backend"))
 
                 # Hidden wires between chained events. Values, not DOM.
                 crop_box = gr.Textbox("", visible=False, elem_id=_id("crop_box"))
@@ -1622,6 +1827,10 @@ class TouchCanvas:
                 switch_box = gr.Textbox("", visible=False, elem_id=_id("switch"))
                 event_kind = gr.Textbox("", visible=False, elem_id=_id("event"))
                 payload_box = gr.Textbox("", visible=False, elem_id=_id("payload"))
+                # Where the picture in ``payload`` is to go, and how: the
+                # element, the ImageStitch box to tick, the filename. See
+                # ``TouchCanvas._plan``.
+                plan_box = gr.Textbox("", visible=False, elem_id=_id("plan"))
                 mask_payload_box = gr.Textbox("", visible=False, elem_id=_id("mask_payload"))
                 # The browser drops a dragged layer or a tap in the layer list
                 # here; the server answers with what the next drag needs.
@@ -1651,6 +1860,7 @@ class TouchCanvas:
             mode_state=mode_state,
             status=status,
             menu_btn=menu_btn,
+            send_btn=send_btn,
             open_btn=open_btn,
             layer_add=layer_add,
             undo_btn=undo_btn,
@@ -1664,6 +1874,8 @@ class TouchCanvas:
             pending_mask=pending_mask,
             wangp_result=wangp_result,
             wangp_fetch=wangp_fetch,
+            send_result=send_result,
+            send_backend=send_backend,
             panels={"crop": panel_crop, "mask": panel_mask, "expand": panel_expand, "layers": panel_layers},
             crop=crop,
             mask=mask,
@@ -1675,6 +1887,7 @@ class TouchCanvas:
             switch_box=switch_box,
             event_kind=event_kind,
             payload_box=payload_box,
+            plan_box=plan_box,
             mask_payload_box=mask_payload_box,
         )
 
@@ -1882,6 +2095,8 @@ class TouchCanvas:
 
         # -- the menu: drawn in the browser, pressing the hidden controls below
         parts["menu_btn"].click(None, js=MENU_JS)
+        # Send to, from the bar: the same list, opened where it is.
+        parts["send_btn"].click(None, js=SEND_MENU_JS)
 
         # -- modes: a tool button switches the panels from Python; the browser
         # follows the mode textbox, whichever step changed it
@@ -1975,50 +2190,49 @@ class TouchCanvas:
         # -- save
         parts["save_btn"].click(self.save_copy, inputs=[foreground, state], outputs=[parts["save_file"]], **quiet)
 
-        # -- send: Menu -> Send to writes the destination; the image goes
-        # into the host's own inputs (Extras and the ImageStitch galleries
-        # from the backend, img2img and Inpaint from the browser), the
-        # ImageStitch box is ticked from the browser, then the host's own tab
-        # switch; for Inpaint, the mask layer once that canvas has the image.
+        # -- send: the menu (or the action row's Send to) writes the
+        # destination, this side answers with the picture and a plan for
+        # placing it, and the browser places it - into a host canvas's
+        # hidden textbox, or into a Gradio component through its own upload,
+        # then the ImageStitch box and the tab. For Inpaint the mask layer
+        # follows once that canvas has the picture.
+        #
+        # ONE browser step, and its outputs are nothing at all. Read
+        # DELIVER_SEND_JS before adding a component of another tab's to any
+        # of this: it is what stopped every destination this tab had.
         payload_box = parts["payload_box"]
-        target_components = [self.targets[key] for key in self.image_targets]
+        plan_box = parts["plan_box"]
         sent = parts["send_request"].input(
             self.send,
             inputs=[foreground, state, mode_state, parts["send_request"], mask["smoothing"]],
-            outputs=target_components + info_outputs + [switch_box, payload_box],
+            outputs=info_outputs + [switch_box, payload_box, plan_box],
             **quiet,
         )
-        textbox_targets = [self.targets[key] for key in ("img2img", "inpaint") if key in self.targets]
-        if len(textbox_targets) == 2:
-            sent.then(None, js=DELIVER_IMAGE_JS, inputs=[switch_box, payload_box], outputs=textbox_targets)
-        elif textbox_targets:
-            only = "img2img" if "img2img" in self.targets else "inpaint"
-            sent.then(
-                None,
-                js=f"(target, payload) => [String(target || '').indexOf('{only}') === 0 ? payload : {_KEEP}]",
-                inputs=[switch_box, payload_box],
-                outputs=textbox_targets,
-            )
-        if self.stitch_targets:
-            enables = [self.targets[f"{key}_enable"] for key in self.stitch_targets]
-            sent.then(None, js=_stitch_enable_js(self.stitch_targets), inputs=[switch_box], outputs=enables)
-        sent.then(None, js=SWITCH_JS, inputs=[switch_box], outputs=None)
-        # WanGP: the instruction names no host tab, so the switch above does
-        # nothing for it. The browser hands the prepared file's id to the live
-        # WanGP page and switches only if that page says it took the image;
-        # what it saw comes back through the hidden result box below.
-        sent.then(None, js=WANGP_DELIVER_JS, inputs=[switch_box, payload_box], outputs=None)
+        sent.then(None, js=DELIVER_SEND_JS, inputs=[switch_box, payload_box, plan_box], outputs=None)
+        # How the page says a send really ended. Only ever pressed when it
+        # did not end cleanly - see ``send_result``.
+        parts["send_result"].input(self.send_result, inputs=[state, parts["send_result"]], outputs=[status], **quiet)
+        # The one event that names components of other tabs, pressed by the
+        # browser only when it has just found out it cannot place the
+        # picture itself. See ``send_backend``.
+        if self.image_targets:
+            parts["send_backend"].click(
+                self.send_backend,
+                inputs=[state, parts["send_request"]],
+                outputs=[self.targets[key] for key in self.image_targets] + [status, switch_box],
+                **quiet,
+            ).then(None, js=SWITCH_TO_JS, inputs=[switch_box], outputs=None)
         parts["wangp_result"].input(self.wangp_result, inputs=[state, parts["wangp_result"]], outputs=[status], **quiet)
         # The prepared send, a second time, through an event with two
         # textboxes and nothing else in it - what the browser presses when
         # the send event's own outputs never reached its boxes.
         parts["wangp_fetch"].click(self.wangp_fetch, inputs=[state], outputs=[switch_box, payload_box], **quiet)
-        if "inpaint_mask" in self.targets:
+        if "inpaint" in self.targets:
             inpaint_uuid = getattr(self.targets["inpaint"], "elem_id", "") or ""
             mask_payload_box = parts["mask_payload_box"]
             sent.then(_noop, js=_host_wait_js(inpaint_uuid), inputs=[switch_box], outputs=None, **quiet).then(
                 self.send_mask, inputs=[state, switch_box], outputs=[mask_payload_box], **quiet
-            ).then(None, js=DELIVER_MASK_JS, inputs=[switch_box, mask_payload_box], outputs=[self.targets["inpaint_mask"]])
+            ).then(None, js=DELIVER_MASK_JS, inputs=[switch_box, mask_payload_box, plan_box], outputs=None)
 
         # -- receive: the small button next to "send to extras" in each output
         # panel. The chain ends by switching to the tab the picture landed

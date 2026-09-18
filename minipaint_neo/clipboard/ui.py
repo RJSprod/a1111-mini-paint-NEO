@@ -132,6 +132,36 @@ OPEN_OUTPUTS_JS = f"() => {{ if ({_JS}) {_JS}.openOutputs(); }}"
 #: and needs its permission, so this has no server half at all.
 PASTE_JS = f"() => {{ if ({_JS}) {_JS}.pasteFromClipboard(); }}"
 SWITCH_JS = "(target) => { if (window.minipaintCanvas && window.minipaintCanvas.switchTo) { window.minipaintCanvas.switchTo(target); } }"
+
+# The Gradio half of a send, kept here because this tab is the only thing
+# left that uses it. The Canvas had the same three steps and no longer does:
+# it hands the browser one plan and the browser places the picture (see
+# canvas/ui.py's DELIVER_SEND_JS). This tab's own delivery already happens
+# over plain HTTP before any of this runs - ``sendOverHttp`` in its bundle -
+# and these remain as the second route for a page that could not use the
+# first. Every one of them writes from the BROWSER, into exactly the one
+# component chosen, leaving the others with an empty update: an answer of
+# "no change" from the server would make Gradio rebuild a per-session copy
+# of the host's component, which under Forge comes back reading images as
+# arrays (see canvas/surface.py).
+_KEEP = '{"__type__": "update"}'
+DELIVER_IMAGE_JS = (
+    f"(target, payload) => {{ const t = String(target || ''); "
+    f"return [t.indexOf('img2img') === 0 ? payload : {_KEEP}, t.indexOf('inpaint') === 0 ? payload : {_KEEP}]; }}"
+)
+DELIVER_MASK_JS = (
+    f"(target, payload) => [String(target || '').indexOf('inpaint') === 0 ? (payload || '') : {_KEEP}]"
+)
+
+
+def _stitch_enable_js(keys: typing.Sequence[str]) -> str:
+    """Tick the "ImageStitch Integrated" box of the tab an image was just
+    sent to, from the browser: the host's own accordion follows its box, so
+    the references open and count. The other box is left untouched."""
+    values = ", ".join(f"t === '{key}' ? true : {_KEEP}" for key in keys)
+    return f"(target) => {{ const t = String(target || ''); return [{values}]; }}"
+
+
 CAPABILITIES_JS = f"() => {{ if ({_JS}) {_JS}.refreshCapabilities(); }}"
 
 #: The three slots: the composer's name for each, its card title, and the
@@ -1902,19 +1932,19 @@ class ClipboardTab:
         def after_send(sent):
             """The steps that finish a send, for one of the two triggers."""
             if len(textbox_targets) == 2:
-                sent.then(None, js=canvas_ui.DELIVER_IMAGE_JS, inputs=[switch_box, payload_box], outputs=textbox_targets)
+                sent.then(None, js=DELIVER_IMAGE_JS, inputs=[switch_box, payload_box], outputs=textbox_targets)
             elif textbox_targets:
                 only = "img2img" if "img2img" in self.targets else "inpaint"
-                sent.then(None, js=f"(target, payload) => [String(target || '').indexOf('{only}') === 0 ? payload : {canvas_ui._KEEP}]",
+                sent.then(None, js=f"(target, payload) => [String(target || '').indexOf('{only}') === 0 ? payload : {_KEEP}]",
                           inputs=[switch_box, payload_box], outputs=textbox_targets)
             if self.stitch_targets:
                 enables = [self.targets[f"{key}_enable"] for key in self.stitch_targets]
-                sent.then(None, js=canvas_ui._stitch_enable_js(self.stitch_targets), inputs=[switch_box], outputs=enables)
+                sent.then(None, js=_stitch_enable_js(self.stitch_targets), inputs=[switch_box], outputs=enables)
             sent.then(None, js=SWITCH_JS, inputs=[switch_box], outputs=None)
             if "inpaint_mask" in self.targets:
                 inpaint_uuid = getattr(self.targets["inpaint"], "elem_id", "") or ""
                 sent.then(canvas_ui._noop, js=canvas_ui._host_wait_js(inpaint_uuid), inputs=[switch_box], outputs=None, **quiet).then(
-                    None, js=canvas_ui.DELIVER_MASK_JS, inputs=[switch_box, p["mask_clear"]], outputs=[self.targets["inpaint_mask"]]
+                    None, js=DELIVER_MASK_JS, inputs=[switch_box, p["mask_clear"]], outputs=[self.targets["inpaint_mask"]]
                 )
 
         # Two triggers, one callback. The press is what the browser uses; the

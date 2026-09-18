@@ -168,6 +168,10 @@ class Document:
         # A send into Inpaint writes the mask in a later step; this is what
         # that step needs to know, and it is consumed by it.
         self.pending_send: typing.Optional[dict] = None
+        # The picture of the last send, kept for the one event that puts it
+        # where the page could not. Consumed by that event; see
+        # ``canvas.ui.send_backend``.
+        self.pending_backend: typing.Optional[dict] = None
         #: Where the last gallery receive landed, for the follow-up step that
         #: switches tabs: "canvas", or "clipboard" under the intercept.
         self.pending_switch: str = ""

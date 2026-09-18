@@ -1,0 +1,312 @@
+MINIPAINT NEO - THE SEND LOG SAID IT WORKED
+INCIDENT REPORT AND CHANGE RECORD: EVERY DESTINATION OF THE CANVAS'S SEND MENU
+
+Repository target: RJSprod/a1111-mini-paint-NEO
+Code baseline:     701bc72 (main, 2026-09-17), the merge of PR #90
+Logs read:         send-log.txt, 2026-09-14 to 2026-09-17, from the user's
+                   own machine
+Revision date:     2026-09-18
+Status:            Incident report, with what was built in answer to it.
+
+
+================================================================================
+0. VERDICT
+================================================================================
+
+Nothing was wrong with the picture, the destinations, or the browser.
+
+The Canvas's send answered with the host's own components - the Extras image
+and the two ImageStitch reference galleries - the chosen one carrying the
+picture and the others `gr.skip()`. Gradio 4.40 postprocesses a skip as a
+property update, and a property update is resolved against the session's copy
+of that component:
+
+    # gradio/blocks.py, postprocess_data
+    if utils.is_prop_update(prediction_value):
+        kwargs = state[block._id].constructor_args.copy()
+
+    # gradio/state_holder.py, SessionState.__getitem__
+    block = self.blocks_config.blocks[key]        # KeyError
+
+A component the running page does not contain raises `KeyError` there. The
+number in that error is a Gradio block id: no component name, no extension
+named anywhere in the stack, and nothing to connect it to the tab it came
+from. `canvas/host.py`'s `audit()` was written to turn that number back into
+a name at startup, and `_on_the_page()` to drop a destination Gradio itself
+reports as never rendered. Whatever went wrong on this machine, it got past
+both of them and the sends did not happen.
+
+The important part is WHEN the exception happens: after the function has run.
+By then the composite is flattened and the send log has recorded the send. So
+the user's log file is a list of sends that all worked -
+
+    [2026-09-17 22:58:15] Canvas -> ImageStitch (txt2img) -> sent 1024x832
+        2 layers were flattened for ImageStitch (txt2img)
+        it is now the only reference image there
+
+- and the page did nothing at all. Not "did the wrong thing": nothing. The
+outputs never reached it, and every browser step chained behind that event -
+writing the host canvas's textbox, ticking the ImageStitch box, switching
+tabs, handing WanGP its prepared file - is chained behind an event that
+failed, so none of them ran either.
+
+That is why every destination broke at once rather than one of them. A send
+to img2img is written entirely by the browser and needs nothing from the
+host's components; it failed too, because the event that would have told the
+browser to write it named a component of another tab in its outputs.
+
+WHICH component was stale on that machine is not established from here, and
+the change below does not depend on knowing: it removes the dependence. The
+mechanism is what the evidence in section 1 fixes - a failure after the
+function and before the page, which is the only thing that produces a send
+log full of successful sends and a page where nothing happened. Section 5 is
+what to read if a single destination misbehaves after this.
+
+
+================================================================================
+1. WHAT THE LOG SHOWS
+================================================================================
+
+The user's send log, read as a sequence rather than as entries:
+
+    2026-09-15 08:11:48  Canvas -> ImageStitch (txt2img)  sent 1019x606
+    2026-09-15 08:12:13  Canvas -> Clipboard              sent 1019x606
+
+    2026-09-16 16:31:29  Canvas -> ImageStitch (img2img)  sent 1065x1211
+    2026-09-16 16:31:41  Canvas -> img2img                sent 1065x1211
+    2026-09-16 16:32:32  Canvas -> Clipboard              sent 1065x1211
+
+    2026-09-17 22:58:15  Canvas -> ImageStitch (txt2img)  sent 1024x832
+    2026-09-17 22:58:36  Canvas -> ImageStitch (txt2img)  sent 1024x832
+    2026-09-17 22:58:54  Canvas -> Clipboard              sent 1024x832
+    2026-09-17 23:01:20  Canvas -> ImageStitch (txt2img)  sent 1024x704
+
+The same shape three times: try a destination, try another, fall back to
+Clipboard, carry on working. Twenty-one seconds between two identical sends
+to the same gallery is somebody pressing a button that does nothing.
+
+Clipboard is in that list every time, and it is the discriminator. A send to
+Clipboard puts the picture in the library from INSIDE the function -
+`store.import_image` - so it landed however the answer went. Everything that
+needed the answer did not. That is the signature of a failure after the
+function and before the page, and nothing else has it.
+
+The second piece of evidence was already in the repository. `wangp_fetch`,
+the hidden button the browser presses to ask for a prepared WanGP send a
+second time, carries this comment:
+
+    The browser presses this when the send event's own outputs never
+    reached the page - on one machine they did not, three times out of
+    three, with the file prepared and nothing else wrong.
+
+That is this fault, seen from the WanGP side, on this machine, and answered
+with a workaround for the symptom.
+
+
+================================================================================
+2. WHY THE CLIPBOARD TAB DID NOT HAVE IT
+================================================================================
+
+It did, and it was cured. `ClipboardTab.send_backend` carries the finding in
+full: while Extras and the ImageStitch galleries were among that tab's send
+outputs, "one of them being absent stopped every send this tab made -
+including to img2img, a canvas plainly on the page, which the browser was
+writing perfectly well on its own. That is what a user spent five builds
+reporting."
+
+The cure there was structural, and it is the one adopted here:
+
+  * `send` names nothing but its own tab's boxes, so it can always answer.
+  * The answer is a PLAN - the destination's element id, the picture, the
+    filename - and the browser places the picture itself, through the same
+    upload route a person dropping a file uses.
+  * The outputs that carry the risk are on a separate event, pressed only
+    when the page has just found out it cannot place the picture itself.
+
+The Canvas was never given it. It kept the shape the Clipboard was cured of,
+and `host.audit()` and `_on_the_page()` - both written during that same
+investigation - were the defence it got instead. They are worth keeping and
+they were not enough: they answer "is this component in the finished page"
+and "did Gradio ever render it", and whatever the answer was on this machine,
+the sends still did not happen. A defence that has to be right about which
+component is at fault is a defence that can be wrong; not naming any of them
+cannot be.
+
+
+================================================================================
+3. WHAT WAS BUILT
+================================================================================
+
+3.1 A send answers with its own tab's boxes, and a plan
+
+    minipaint_neo/canvas/ui.py, TouchCanvas.send / TouchCanvas._plan
+
+`send` now returns the Canvas's own information, the instruction, the picture
+as a PNG data URL, and a plan: which element the picture goes into, the
+ImageStitch box to tick beside it, the filename, whether the destination is a
+gallery, and whether there is a server-side way in should the page fail. The
+request string (destination plus the nonce the browser stamped on it) travels
+in the plan, so two routes to the same plan deliver exactly once.
+
+Which element is this side's to say and not the page's to guess: ForgeCanvas
+gives its picture and its scribble textboxes the same id and tells them apart
+by class, and the host registers its components by element id, so a page
+built twice would otherwise be handed one that nothing on it is listening to.
+
+3.2 One browser step places it
+
+    browser/minipaint_canvas.js, deliverSend / placeSend
+
+One chained step, with no outputs at all. It ticks the ImageStitch box first
+(the host's accordion follows it, so the gallery the picture is about to go
+into is open and in front of whoever pressed Send), then hands the picture to
+`deliverToHost` - the same function the Clipboard tab has been delivering
+through all along, which goes through `webui-host.js`: classify the
+destination, prime it, write through the native value setter, read back what
+the WebUI would actually submit, and only then switch tabs.
+
+A WanGP instruction is handed to `deliverWanGP` as before; that half was
+already the browser's, for a different reason (only the live WanGP page can
+say whether it took the picture).
+
+3.3 The fallback names the components, and nothing else does
+
+    minipaint_neo/canvas/ui.py, TouchCanvas.send_backend
+
+A hidden button whose outputs are Extras and the two ImageStitch galleries,
+and the tab switch that follows it. The browser presses it only when it has
+just found out it cannot place the picture itself, and only for a
+destination the plan says the server can write. It places the picture `send`
+prepared - kept on the document, so the composite is not flattened twice and
+cannot come back different from the one the user was told about - once, and
+says who placed it. The destination's tab is shown by a step chained behind
+it rather than by the press: deliver, prove, then show, the same order the
+browser's own path keeps.
+
+Before pressing, the page says what it is doing: the status reads "placing
+the picture in X…", not "sent". If this event is the one that dies, that
+line is what is left on the screen, and it is the difference between a send
+that quietly did not happen and one that says so.
+
+If one of those components is not on the page, this event dies exactly as
+before. The difference is the blast radius: that destination, on a press that
+only happens when the page had already failed.
+
+3.4 The page says how it really went
+
+    minipaint_neo/canvas/ui.py, TouchCanvas.send_result
+
+A send that went cleanly says nothing more: the status the server wrote when
+it handed the picture over is already true, and one line in the send log is
+the right number. Anything else - a destination that was not on the page, a
+write that could not be verified, a tab that would not open - comes back and
+is both shown and logged. The alternative is the fault this whole document is
+about.
+
+3.5 A second route to the plan
+
+    browser/minipaint_canvas.js, armSend / watchSend
+
+The same bounded watch WanGP's send has, for the same reason: a chained step
+that does not arrive is silent, and silence is what made this tab look like a
+button that did nothing. From the click, the plan box is read a few times a
+second until it holds THIS request's plan; whichever route gets there first
+delivers, and the other finds the request already answered and stops. Idle
+whenever nothing is armed, and it gives up after thirty seconds with a line
+in the console rather than waiting for ever.
+
+3.6 A gallery that is holding a picture has no way in
+
+    miniPaint/src/js/libs/webui-host.js, set_image_file / clear_full_component
+
+Found while building 3.2 and confirmed against a real Gradio 4.40 page:
+an interactive `gr.Gallery` swaps its drop zone for its thumbnails as soon as
+it holds one, so the component the browser wrote a moment ago has no
+`input[type=file]` at all and classifies as unsupported. Its Clear button
+puts the drop zone back.
+
+`set_image_file` takes `replace` for a caller that means what arrives to be
+the only thing there - which is exactly what "it is now the only reference
+image there" has always promised - and empties the destination first. A
+caller that did not ask for that keeps the old refusal: clearing a component
+somebody meant to add to would throw away the point of the ask.
+
+The other half of the same difference: a gallery keeps its pictures inside
+buttons and an ordinary `gr.Image` keeps its one outside them, so "has it
+taken the picture yet" is a different question for each. The plan says which
+kind the destination is rather than letting the browser guess.
+
+The Clipboard tab passes no `replace` and is unchanged by any of this. Its
+send to a stitch gallery means "add", finds no way in when the gallery is
+full, and falls back to its own server event, which is what it has always
+done and what the user reports working. The three Gradio steps its send
+still uses moved from `canvas/ui.py` to `clipboard/ui.py` with this change,
+because it is now the only caller of them; nothing about them changed.
+
+3.7 Send to, on the action row
+
+    minipaint_neo/canvas/ui.py (the topbar), browser/minipaint_canvas.js
+
+Asked for alongside the fix, and the Clipboard tab's bar has had it since it
+was built. It opens the same "Send to" section of the same flyout, under
+itself - one list, drawn in one place, so a destination this WebUI has cannot
+appear in one of them and not the other.
+
+Building it found one more bug, in code that predates it: the handler that
+closes the flyout when you press outside it runs on pointerdown, and the
+button's own click runs after. It exempted the Menu button by id, so a second
+press of the Menu button closed the flyout; it knew nothing about any other
+button, so a second press of Send to closed the flyout and the click
+immediately reopened it. The exemption now follows whichever button the
+flyout was opened from.
+
+
+================================================================================
+4. WHAT HOLDS IT
+================================================================================
+
+tests/test_frontends.py, the send section, asserts the rule directly on the
+built page: a send names no component of another tab - not a canvas, not
+Extras, not an ImageStitch gallery or its box - and NOTHING in the whole page
+writes one except the single hidden button that exists for it. That check is
+worth more than the ones around it: it is the one that would have caught
+this.
+
+tests/test_workflow.py covers the plan for each destination, the fallback
+placing a picture once and only for a destination the browser could not
+place, and what the page reports back.
+
+tests/browser_smoke.py drives the whole thing in a real page: the bar's Send
+to button opens the destinations under itself and puts them away again, a
+send to ImageStitch fills that tab's reference gallery with the image alone
+and ticks its box, a second send replaces the reference rather than adding
+one - which is now the browser emptying the gallery and handing it the file,
+the path section 3.6 exists for - and a send to Extras arrives with the tab
+shown afterwards rather than before, whichever half placed it. That last one
+is the fallback's own check on this host: its Extras image is an input to
+nothing, so Gradio gives it no upload input, the page cannot place a picture
+in it, and the hidden button in 3.3 does.
+
+WHAT WAS AND WAS NOT RUN HERE. The 26 suites in `tests/run.py` were run and
+pass. `browser_smoke.py` needs a Forge Neo checkout, and the one available
+in this session was the current `neo` branch rather than the 2.29 the user
+runs: with it, the suite's gallery receive is refused by pydantic before any
+send is reached, identically with and without this change, so the flow
+cannot complete either way. The send path was therefore driven separately in
+the same page with the picture opened onto the canvas instead of received -
+ImageStitch twice (the second emptying the gallery first), Extras through
+the fallback, img2img, and Inpaint with its mask - and every one of them
+landed. Run `browser_smoke.py` against a real Forge Neo before trusting the
+suite's own verdict on this.
+
+
+================================================================================
+5. WHAT IS STILL TRUE OF THE HOST
+================================================================================
+
+This change makes the Canvas survive a destination component that is not on
+the running page; it does not explain which one it was. `host.audit()` still
+prints the name of any destination that is missing from the finished page at
+startup, and it is still the thing to read if a destination stops working:
+the fallback in 3.3 will fail for it, loudly now, and the status line will
+say so rather than leaving a log full of sends that never arrived.

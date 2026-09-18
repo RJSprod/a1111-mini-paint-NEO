@@ -43,6 +43,34 @@ purpose is a *new* iframe element must therefore differ from the last one:
 paint deliberately does not stamp, because a stamped paint reloads the WanGP
 page out from under whoever is using it.
 
+**A component of another tab in an outputs list is a silent, total
+failure.** Gradio 4.40 postprocesses `gr.skip()` as a property update, and a
+property update is resolved against the session's copy of the component -
+`SessionState.__getitem__`, which is `blocks[id]`. A component the running
+page does not contain raises `KeyError` there, *after the function has run*.
+So the work happens, the send log says "sent 1024x832", and the answer never
+reaches the page - and every browser step chained behind that event is
+chained behind an event that failed, so the tab switch, the host canvas, the
+ImageStitch box and the WanGP handover do not happen either. One stale
+component from another tab stopped the Canvas sending anywhere at all, for
+weeks, with a send log full of successful sends. The Clipboard tab was cured
+of it first (`ClipboardTab.send_backend`) and the Canvas on 2026-09-18
+(`canvas/ui.py`'s `DELIVER_SEND_JS`): a send now names only its own tab's
+boxes and hands the browser a plan, and the one event that may name another
+tab's components is a hidden button pressed only when the page has just
+found out it cannot place the picture itself. `docs/CANVAS_SEND_2026-09-18.txt`
+is the whole story. Do not put another tab's component in an outputs list.
+
+**A Gradio gallery that is holding a picture has no upload input.** Gradio 4
+swaps a gallery's drop zone for its thumbnails as soon as it has one, so a
+component the browser wrote perfectly well a moment ago classifies as
+`unsupported` on the next send. Its Clear button puts the drop zone back,
+which is what `set_image_file`'s `replace` option does in
+`miniPaint/src/js/libs/webui-host.js`. A gallery also keeps its pictures
+*inside buttons* where an ordinary `gr.Image` keeps its one outside them, so
+"has it taken the picture yet" is a different question for each - that is
+what `accept_more` is for, and why the plan says which kind a destination is.
+
 **A cyclic `gr.State` in an outputs list is a RecursionError.** Gradio 4.40
 walks state components among a dependency's outputs and hashes them *before*
 calling the function, and that walk has no cycle detection and no depth limit.

@@ -178,7 +178,11 @@ under the canvas.
 
 The mask's colour, opacity and high-contrast checkerboard are the Inpaint tab's own
 settings (Settings → img2img), because that is where the mask is going. The canvas's
-background (checkerboard or plain colour) follows Settings → Forge Canvas.
+background follows Settings → Forge Canvas: a plain colour when that is turned on, and
+otherwise the transparency checkerboard - painted here in the theme's own block colour
+under a translucent neutral, the way the PNG Info tab's image box is painted, rather than
+in the fixed light grey Forge uses. On this tab the pattern fills the window instead of a
+thumbnail, and a fixed light grey is a slab of daylight on a night theme.
 
 `MINIPAINT_OLD_UI=1` in the environment forces the legacy editor for that run without
 touching any setting — the lever for when the UI itself is the problem.

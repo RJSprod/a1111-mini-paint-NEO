@@ -152,15 +152,41 @@ function ForgeCanvas(uuid) {
 #:     .forge-image-container { position: relative; ... }
 #:     .forge-toolbar-static  { position: absolute; top: 0px; left: 0px; ... }
 #:
-#: Everything else in that file is colour, spacing and the checkerboard, none
-#: of which moves the toolbar. What is under test is our override of the
-#: ``left`` and ``transform`` above; the rest of Forge's stylesheet cannot
-#: change whether that centres, and browser_smoke.py runs the same check
-#: against the real file to keep this honest.
+#: Everything else in that file is colour and spacing, none of which moves the
+#: toolbar. What is under test is our override of the ``left`` and
+#: ``transform`` above; the rest of Forge's stylesheet cannot change whether
+#: that centres, and browser_smoke.py runs the same check against the real file
+#: to keep this honest.
 HOST_LAYOUT_CSS = """
 .forge-container { position: relative; width: 100%; height: 512px; overflow: hidden; }
 .forge-image-container { position: relative; width: 100%; height: calc(100% - 6px); overflow: hidden; }
 .forge-toolbar-static { position: absolute; top: 0px; left: 0px; padding: 6px 10px; }
+"""
+
+#: Forge's checkerboard, quoted from the same file, because one check *is*
+#: about colour: the stylesheet re-themes this canvas's paper and has to win
+#: over the host rule it is replacing. Without the rule it replaces on the
+#: page, that check passes against nothing.
+#:
+#: From modules_forge/forge_canvas/canvas.css:
+#:
+#:     .forge-image-container:not(.plain) {
+#:         background-color: #cccccc;
+#:         background-image:
+#:             linear-gradient(45deg, #eee 25%, transparent 25%, transparent 75%, #eee 75%, #eee),
+#:             linear-gradient(45deg, #eee 25%, transparent 25%, transparent 75%, #eee 75%, #eee);
+#:         background-size: 20px 20px;
+#:         background-position: 0 0, 10px 10px;
+#:     }
+HOST_CHECKERBOARD_CSS = """
+.forge-image-container:not(.plain) {
+    background-color: #cccccc;
+    background-image:
+        linear-gradient(45deg, #eee 25%, transparent 25%, transparent 75%, #eee 75%, #eee),
+        linear-gradient(45deg, #eee 25%, transparent 25%, transparent 75%, #eee 75%, #eee);
+    background-size: 20px 20px;
+    background-position: 0 0, 10px 10px;
+}
 """
 
 
@@ -177,6 +203,7 @@ def page_html() -> str:
 <meta charset="utf-8">
 <title>minipaint loading probe</title>
 <style>{HOST_LAYOUT_CSS}</style>
+<style>{HOST_CHECKERBOARD_CSS}</style>
 <style>{(ROOT / "style.css").read_text(encoding="utf-8")}</style>
 <div id="tabs">
   <div id="tab_minipaint" class="tabitem">
@@ -729,6 +756,97 @@ def check_resize_settles(r: Results, p, chromium) -> None:
         browser.close()
 
 
+# ---------------------------------------------------------------------------
+# The canvas's paper follows the theme.
+#
+# Unnumbered: sections 8.1-8.9 are the design intent's startup requirements and
+# this is not one of them - it arrived later, from a night-theme page.
+#
+# Forge draws the transparency checkerboard in #eee over #cccccc. On the
+# img2img box that is a thumbnail-sized patch; this tab is the one place in
+# the WebUI where it fills the window, and on a night theme it is a slab of
+# daylight. The stylesheet replaces it with the pattern the PNG Info tab's
+# image box uses - the theme's own block colour under a translucent neutral.
+#
+# The check lives in the browser rather than in a read of style.css because
+# what is actually in question is which of two rules the page applies: ours
+# carries an id and the host's does not, and nothing but a browser settles
+# that. HOST_CHECKERBOARD_CSS above is the rule being overridden.
+# ---------------------------------------------------------------------------
+
+#: What the host paints, and what must not reach this canvas.
+HOST_PAPER = "rgb(204, 204, 204)"
+HOST_SQUARES = "rgb(238, 238, 238)"
+
+#: The translucent neutral the squares are drawn in, from style.css.
+OUR_SQUARES = "rgba(127, 127, 127, 0.16)"
+
+PAPER_JS = """() => {
+    const box = document.querySelector('#minipaint_canvas_surface .forge-image-container');
+    if (!box) { return null; }
+    const s = getComputedStyle(box);
+    return {color: s.backgroundColor, image: s.backgroundImage, size: s.backgroundSize};
+}"""
+
+
+def check_canvas_paper(r: Results, p, chromium) -> None:
+    CONTROL.clear()
+    browser, page = fresh(p, chromium)
+    try:
+        page.evaluate("async () => await window.__runBootstrap()")
+
+        def paper(block_fill):
+            page.evaluate(
+                """v => { const root = document.documentElement.style;
+                          if (v) { root.setProperty('--block-background-fill', v); }
+                          else { root.removeProperty('--block-background-fill'); } }""",
+                block_fill)
+            return page.evaluate(PAPER_JS)
+
+        bare = paper(None)
+        if bare is None:
+            r.check("paper: the canvas is measurable", False, "no image container on the page")
+            return
+        # No theme variables at all: the fallback still has to be something a
+        # night theme can live with, because that is what a bare page gets.
+        r.check("paper: with no theme variable the canvas does not fall back to the host's daylight",
+                bare["color"] != HOST_PAPER, json.dumps(bare))
+
+        night = paper("rgb(20, 20, 20)")
+        r.check("paper: the canvas takes the theme's block colour, not the host's #cccccc",
+                night["color"] == "rgb(20, 20, 20)", json.dumps(night))
+        r.check("paper: and the host's light squares are gone with it",
+                HOST_SQUARES not in night["image"] and HOST_PAPER not in night["image"], night["image"])
+        r.check("paper: the squares are a translucent neutral, so they shade whatever paper they are on",
+                OUR_SQUARES in night["image"], night["image"])
+        r.check("paper: the pattern keeps Forge's geometry - 10px squares on a 20px tile",
+                "20px 20px" in night["size"], night["size"])
+
+        day = paper("rgb(255, 255, 255)")
+        r.check("paper: and it follows the theme the other way too",
+                day["color"] == "rgb(255, 255, 255)", json.dumps(day))
+
+        # `plain` is the host's own setting for a solid colour (surface.py
+        # marks the container and writes the colour inline). Neither rule
+        # draws a checkerboard over that, ours included.
+        plain = page.evaluate("""() => {
+            const box = document.querySelector('#minipaint_canvas_surface .forge-image-container');
+            box.classList.add('plain');
+            box.style.backgroundColor = '#808080';
+            const s = getComputedStyle(box);
+            const out = {color: s.backgroundColor, image: s.backgroundImage};
+            box.classList.remove('plain');
+            box.style.backgroundColor = '';
+            return out;
+        }""")
+        r.check("paper: the host's plain-colour setting still decides when it is on",
+                plain["color"] == "rgb(128, 128, 128)", json.dumps(plain))
+        r.check("paper: and nothing is checkered over it",
+                plain["image"] == "none", json.dumps(plain))
+    finally:
+        browser.close()
+
+
 def run() -> Results:
     r = Results("browser loading")
     # ImportError, not SystemExit: run.py skips a suite whose optional
@@ -754,6 +872,7 @@ def run() -> Results:
             check_toolbar_geometry(r, p, chromium)
             check_grip_dodges_toolbar(r, p, chromium)
             check_resize_settles(r, p, chromium)
+            check_canvas_paper(r, p, chromium)
     finally:
         server.should_exit = True
     return r

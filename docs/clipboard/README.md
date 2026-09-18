@@ -423,13 +423,20 @@ what the current model reads and naming the ones it dropped; *Pin* keeps an entr
 the cap; *Delete* removes it. Unpinned entries are capped at 100 and the oldest leave
 first; pinned ones stay (up to 500).
 
-**When Gradio's queue is cut.** The button's press is a Gradio event, so when the
-framework's channel is down the page freezes the picture itself through the public API's
-staging route and opens the popup on that token: the same popup, the same request path.
-Everything the popup asks the server is a bounded plain request that comes back or times
-out, and it holds no stream open, so on a Forge served over HTTP/1.1 the six-connection
-budget (`CLAUDE.md`) is untouched, and over HTTP/2 (the auto-TLS extension) there is
-nothing to count.
+**No Gradio event in the chain.** While the setting is WanGP the page takes the 🖌️ button
+over, the way the Clipboard tab's own sends work: the press is stopped before Forge's
+framework handler sees it, the picture the gallery is showing is fetched from the host
+(its original file, metadata and all) and frozen over the public API's staging route, and
+the popup opens on that token. Nothing waits on the framework's queue, and nothing depends
+on how Forge's gallery helper shapes its answer, which is what silently stopped the first
+version of this on Forge Neo. The server-side receive for WanGP remains as the fallback
+for a page whose Clipboard bundle is not attached. Mini Paint and Clipboard keep the
+framework path (the Canvas's document lives on the server, and the library import is that
+path's own job), with the page finishing a Clipboard send itself when the queue is cut, as
+before. Everything the popup asks the server is a bounded plain request that comes back or
+times out, and it holds no stream open, so on a Forge served over HTTP/1.1 the
+six-connection budget (`CLAUDE.md`) is untouched, and over HTTP/2 (the auto-TLS extension)
+there is nothing to count.
 
 ## When the page loses its connection
 
@@ -529,7 +536,8 @@ They are not any more:
   screen would lose. Only with Intercept Options on Clipboard: on Mini Paint
   the picture was going to the Canvas, whose document lives on the server,
   and the page says so rather than putting it somewhere else; on WanGP the
-  page freezes the picture over the staging route and opens the popup on it.
+  press never went through the framework in the first place (see *Send to
+  WanGP from the gallery*).
 
 Reloading the page still makes sending quick again, and the Reconnect button
 is there to do it. The difference is that sending works either way.

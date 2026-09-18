@@ -1246,6 +1246,41 @@ function image_previews(wrapper, in_buttons = false) {
 	return found;
 }
 
+/** Whether a component is showing any picture at all, in a button or not. */
+function holds_pictures(wrapper) {
+	return image_previews(wrapper, true).length > 0;
+}
+
+/**
+ * Empty a component, so that what arrives next is the only thing in it.
+ *
+ * True only when it really is empty afterwards; anything else - no Clear
+ * button, a click that changed nothing - is false, and the caller carries
+ * on with what it has rather than waiting on a component that is never
+ * going to let go of what it is holding.
+ */
+async function clear_full_component(resolve, record) {
+	const wrapper = resolve();
+	const button = wrapper ? clear_button_in(wrapper) : null;
+	if (!button) {
+		return false;
+	}
+	button.click();
+	try {
+		await wait_until(() => !holds_pictures(resolve()), {
+			timeout_ms: 2000,
+			interval_ms: 25,
+			description: 'the destination to empty so it can take a picture',
+		});
+	} catch (e) {
+		return false;
+	}
+	if (record && typeof record.step === 'function') {
+		record.step('emptied it first', 'what arrives is to be the only picture there');
+	}
+	return true;
+}
+
 function clear_button_in(wrapper) {
 	return (
 		wrapper.querySelector("button[aria-label='Remove Image']") ||
@@ -1409,12 +1444,31 @@ export async function set_image_file(target, data_url, options = {}) {
 
 	const resolve = () => (selector ? query(selector) : null) || (typeof target === 'string' ? null : target);
 
-	const wrapper = resolve();
-	const kind = classify_image_target(wrapper);
+	let wrapper = resolve();
+	let kind = classify_image_target(wrapper);
 	const label = selector || `#${(wrapper && wrapper.id) || '(no id)'}`;
 
 	if (kind === 'missing') {
 		throw new Error(`${LOG_PREFIX} destination ${label} was not found in the WebUI`);
+	}
+	// A GALLERY THAT IS HOLDING SOMETHING HAS NO UPLOAD INPUT.
+	//
+	// Gradio 4 swaps a gallery's drop zone for its thumbnails the moment it
+	// has one, so a component that took a picture perfectly well a second
+	// ago now classifies as 'unsupported' and the next send fails - not
+	// because the destination is wrong, but because the way in is only
+	// there while it is empty. Its Clear button puts the drop zone back.
+	//
+	// `replace` is a caller saying that what arrives is to be the only
+	// thing there, which is exactly when emptying it first is right. A
+	// caller that did not say so keeps the refusal: clearing a component
+	// somebody meant to add to would throw away the point of the ask.
+	// Never a ForgeCanvas: it replaces its picture as a matter of course,
+	// and `set_forge_canvas_image` below knows how to do that properly.
+	if (kind !== 'forge-canvas' && options.replace && holds_pictures(wrapper)
+		&& (await clear_full_component(resolve, options.record))) {
+		wrapper = resolve();
+		kind = classify_image_target(wrapper);
 	}
 	if (kind === 'unsupported') {
 		throw new Error(`${LOG_PREFIX} ${label} exists but no upload input was found`);

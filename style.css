@@ -126,6 +126,12 @@
 #minipaint_canvas_root .minipaint-tool-expand { --minipaint-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='15 3 21 3 21 9'/%3E%3Cpolyline points='9 21 3 21 3 15'/%3E%3Cline x1='21' y1='3' x2='14' y2='10'/%3E%3Cline x1='3' y1='21' x2='10' y2='14'/%3E%3C/svg%3E"); }
 #minipaint_canvas_root .minipaint-tool-layers { --minipaint-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='12 2 2 7 12 12 22 7 12 2'/%3E%3Cpolyline points='2 17 12 22 22 17'/%3E%3Cpolyline points='2 12 12 17 22 12'/%3E%3C/svg%3E"); }
 
+/* Send to, on the bar beside the tools: an arrow leaving a box - the same
+   glyph the Clipboard's Send button uses, because it is the same action.
+   Not a share glyph: nothing here leaves the machine. It is drawn like a
+   tool but is never one, so it never takes the current-tool marking. */
+#minipaint_canvas_root .minipaint-send-button { --minipaint-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3'/%3E%3Cpath d='M14 4h6v6'/%3E%3Cpath d='M20 4l-9 9'/%3E%3C/svg%3E"); }
+
 /* The flyout, under the button, over the canvas only while it is open. */
 #minipaint_canvas_root .minipaint-menu {
     position: absolute;

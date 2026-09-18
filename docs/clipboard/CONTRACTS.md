@@ -62,6 +62,15 @@ setter, settles the img2img sub-tab, and then checks what the WebUI will
 submit against what was sent. A page that could not import it still writes
 the canvas textbox directly, and says the send was not verified.
 
+That library is shared with the Canvas, which since 2026-09-18 sends the
+same way (`docs/CANVAS_SEND_2026-09-18.txt`), and it gained one option for
+it: `replace` empties a destination first, so that what arrives is the only
+thing in it. This tab does not pass it and is unchanged - a Gradio gallery
+holding a picture has no upload input at all until it is cleared, so `adds`
+into a full gallery still finds no way in and falls back to the server
+event, which replaces the lot. The Canvas asks to replace because "it is now
+the only reference image there" is what its send has always promised.
+
 The queued event still runs, with `:done` appended to its request
 (`<target>:<asset>:<stamp>:done`), which tells `ClipboardTab.send` to record
 the send and acknowledge it without writing the destination again - a second

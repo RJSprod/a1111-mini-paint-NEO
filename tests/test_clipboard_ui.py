@@ -928,18 +928,19 @@ def integration_checks(r: Results, base: pathlib.Path, tab) -> None:
     r.check("and switches to the Canvas", canvas.after_receive(out[RECEIVE_STATE]) == "canvas")
     config.update(intercept=False)
 
-    # -- Send to Clipboard from the Canvas
-    n = len(canvas.image_targets)
+    # -- Send to Clipboard from the Canvas. The reply is the Canvas's own
+    # information, then the instruction, the payload and the plan - a send
+    # that names no component of any other tab. See canvas/ui.py.
     before = {asset.asset_id for asset in tab.library.assets()}
     out = canvas.send(None, doc, "crop", "clipboard", "Off")
     r.check("Menu -> Send to -> Clipboard puts the composite into the library and says as what",
-            isinstance(out[n + 1], str) and "Sent to Clipboard as minipaint.png." in out[n + 1], str(out[n + 1]))
+            isinstance(out[1], str) and "Sent to Clipboard as minipaint.png." in out[1], str(out[1]))
     arrived = [asset for asset in tab.library.assets() if asset.asset_id not in before]
-    r.check("as a PNG marked as coming from Mini Paint, with no host input written",
-            len(arrived) == 1 and arrived[0].source == "minipaint" and arrived[0].width == 64 and all(_skipped(v) for v in out[:n]) and out[-2] == "" and out[-1] == "")
+    r.check("as a PNG marked as coming from Mini Paint, with nothing for the browser to place",
+            len(arrived) == 1 and arrived[0].source == "minipaint" and arrived[0].width == 64 and out[-3:] == ("", "", ""), str(out[-3:]))
     r.check("the document stays on the Canvas", doc.has_image and doc.last_send == "Clipboard")
     out = canvas.send(None, None, "crop", "clipboard", "Off")
-    r.check("with no image there is nothing to send", "no image to send" in out[n + 1].lower())
+    r.check("with no image there is nothing to send", "no image to send" in out[1].lower())
 
     # -- the way back: a Clipboard picture into the Canvas
     image = tab.library.open_image(arrived[0].asset_id)

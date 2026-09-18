@@ -404,20 +404,27 @@ def run() -> Results:
     act("pick", "Background", doc)
     out = canvas.set_mode("mask", doc)
 
-    # ---- send, from Menu -> Send to: Inpaint gets the image first, the mask once its canvas has it ----
+    # ---- send, from the bar or Menu -> Send to: this side answers with the
+    # picture and a plan for placing it, and NOTHING of another tab's ----
     bg = imaging.to_rgba(doc.image)
     fg = layer(doc.mask, doc.size)
-    # a send reply: Extras and the two ImageStitch galleries, then the information (document first), then the instruction and the image payload
-    T = len(canvas.image_targets)
-    SENT_DOC, SENT_STATUS = T, T + 1
+    # a send reply: the information (document first), then the instruction,
+    # the image payload and the plan.
+    SENT_DOC, SENT_STATUS = 0, 1
     EXTRAS, STITCH_T2I, STITCH_I2I = 0, 1, 2
+
+    def plan_of(reply):
+        return json.loads(reply[-1] or "{}")
+
     out = canvas.send(fg, doc, "mask", "inpaint:1700000001", "Off")
     doc = out[SENT_DOC]
-    instruction, payload = out[-2], out[-1]
+    instruction, payload = out[-3], out[-2]
     r.check("inpaint names the size its canvas must reach", instruction == "inpaint:200x120")
-    r.check("the request's nonce is dropped, and no request at all takes the suggestion", canvas.send(fg, doc, "mask", "", "Off")[-2] == "inpaint:200x120")
-    r.check("extras and the stitch galleries are skipped", skipped(out[EXTRAS]) and skipped(out[STITCH_T2I]) and skipped(out[STITCH_I2I]))
+    r.check("the request's nonce is dropped, and no request at all takes the suggestion", canvas.send(fg, doc, "mask", "", "Off")[-3] == "inpaint:200x120")
     r.check("the image travels as a PNG data URL for the browser to write", payload.startswith("data:image/png;base64,") and decode_data_url(payload).size == (200, 120))
+    r.check("the plan names the host canvas's own box, and no component to upload into",
+            plan_of(out)["box"] == refs["init_img_with_mask"].background.elem_id and not plan_of(out).get("elem") and plan_of(out)["backend"] is False, out[-1])
+    r.check("and carries the request that asked for it, so two routes to it deliver once", plan_of(out)["request"] == "inpaint:1700000001")
     r.check("status says sent", "Sent to img2img Inpaint" in out[SENT_STATUS])
     r.check("the layers are flattened for the destination", "3 layers were flattened" in out[SENT_STATUS])
     mask_out = canvas.send_mask(doc, instruction)
@@ -429,29 +436,68 @@ def run() -> Results:
     # smoothing is applied on the way out only
     out = canvas.send(fg, doc, "mask", "inpaint", "Medium")
     r.check("smoothing note appears", "smoothing: Medium" in out[SENT_STATUS])
-    smoothed = decode_data_url(canvas.send_mask(doc, out[-2]))
+    smoothed = decode_data_url(canvas.send_mask(doc, out[-3]))
     r.check("the smoothed mask still covers the stroke", smoothed.getchannel("A").getpixel((40, 40)) == 255 and doc.mask.getpixel((40, 40)) == 255)
 
     # img2img drops the mask, and says so
     out = canvas.send(fg, doc, "mask", "img2img:1700000002", "Off")
-    r.check("explicit img2img sends the image as a payload for the browser", out[-1].startswith("data:image/png;base64,") and skipped(out[EXTRAS]))
+    r.check("explicit img2img sends the image as a payload for the browser", out[-2].startswith("data:image/png;base64,"))
     r.check("dropping the mask is mentioned", "mask was not sent" in out[SENT_STATUS])
-    r.check("switch goes to img2img", out[-2] == "img2img")
+    r.check("switch goes to img2img", out[-3] == "img2img")
+    r.check("the plan names the img2img canvas", plan_of(out)["box"] == refs["init_img"].background.elem_id)
     r.check("no mask for img2img", canvas.send_mask(doc, "img2img") == "")
 
-    # extras and the ImageStitch galleries are written from the backend
+    # Extras and the ImageStitch galleries: the browser is told which
+    # component to hand the file to, and the picture comes with it.
     out = canvas.send(fg, doc, "mask", "extras", "Off")
-    r.check("extras receives the image itself, with no payload", isinstance(out[EXTRAS], Image.Image) and out[EXTRAS].size == (200, 120) and out[-1] == "" and out[-2] == "extras")
+    r.check("extras is named as a component to upload into, with the picture alongside",
+            plan_of(out)["elem"] == "extras_image" and not plan_of(out).get("box") and out[-2].startswith("data:image/png;base64,") and out[-3] == "extras")
     out = canvas.send(fg, doc, "mask", "stitch_txt2img:1700000003", "Off")
-    r.check("ImageStitch receives the image as the gallery's only entry", isinstance(out[STITCH_T2I], list) and len(out[STITCH_T2I]) == 1 and out[STITCH_T2I][0].size == (200, 120) and skipped(out[STITCH_I2I]) and skipped(out[EXTRAS]))
-    staged = getattr(out[STITCH_T2I][0], "already_saved_as", None)
-    r.check("the picture is saved where the host serves it from, and says so", staged and os.path.isfile(staged) and Image.open(staged).size == (200, 120), str(staged))
-    r.check("Extras got one too", os.path.isfile(getattr(canvas.send(fg, doc, "mask", "extras", "Off")[EXTRAS], "already_saved_as", "")))
-    r.check("the instruction names the stitch, with no payload", out[-2] == "stitch_txt2img" and out[-1] == "")
+    r.check("ImageStitch names its gallery and the box that opens it, says it is a gallery, and replaces rather than adds",
+            plan_of(out)["elem"] == "script_txt2img_imagestitch_integrated_ref_latent"
+            and plan_of(out)["enable"] == refs["txt2img_stitch_enable"].elem_id
+            and plan_of(out)["gallery"] is True and plan_of(out)["replace"] is True, out[-1])
+    r.check("Extras is not a gallery, and is replaced too",
+            plan_of(canvas.send(fg, doc, "mask", "extras", "Off"))["gallery"] is False
+            and plan_of(canvas.send(fg, doc, "mask", "extras", "Off"))["replace"] is True)
+    r.check("the instruction names the stitch", out[-3] == "stitch_txt2img")
     r.check("status says so, and that the mask stayed", "Sent to ImageStitch (txt2img)" in out[SENT_STATUS] and "only reference image" in out[SENT_STATUS] and "mask was not sent" in out[SENT_STATUS])
-    r.check("no mask step for a stitch", canvas.send_mask(doc, out[-2]) == "")
+    r.check("no mask step for a stitch", canvas.send_mask(doc, out[-3]) == "")
     out = canvas.send(fg, doc, "mask", "stitch_img2img", "Off")
-    r.check("the img2img stitch is the other gallery", isinstance(out[STITCH_I2I], list) and skipped(out[STITCH_T2I]) and out[-2] == "stitch_img2img")
+    r.check("the img2img stitch is the other gallery", plan_of(out)["elem"] == "script_img2img_imagestitch_integrated_ref_latent" and out[-3] == "stitch_img2img")
+
+    # ---- and when the page cannot place it, the one event that names those
+    # components does - once, for that destination, and for nothing else ----
+    out = canvas.send(fg, doc, "mask", "stitch_txt2img:1700000004", "Off")
+    placed = canvas.send_backend(doc, "stitch_txt2img:1700000004")
+    r.check("ImageStitch gets the image as the gallery's only entry",
+            isinstance(placed[STITCH_T2I], list) and len(placed[STITCH_T2I]) == 1 and placed[STITCH_T2I][0].size == (200, 120)
+            and skipped(placed[STITCH_I2I]) and skipped(placed[EXTRAS]))
+    staged = getattr(placed[STITCH_T2I][0], "already_saved_as", None)
+    r.check("the picture is saved where the host serves it from, and says so", staged and os.path.isfile(staged) and Image.open(staged).size == (200, 120), str(staged))
+    r.check("and the status says who placed it", "Sent to ImageStitch (txt2img)" in placed[-2] and "the page could not" in placed[-2], str(placed[-2]))
+    r.check("and only now is the destination's tab asked for", placed[-1] == "stitch_txt2img", str(placed[-1]))
+    r.check("a second press places nothing: one picture, once", all(skipped(v) for v in canvas.send_backend(doc, "stitch_txt2img:1700000004")))
+    canvas.send(fg, doc, "mask", "extras:1700000005", "Off")
+    placed = canvas.send_backend(doc, "extras:1700000005")
+    r.check("Extras gets the picture itself, saved where the host serves it from",
+            isinstance(placed[EXTRAS], Image.Image) and os.path.isfile(getattr(placed[EXTRAS], "already_saved_as", "")) and skipped(placed[STITCH_T2I]))
+    canvas.send(fg, doc, "mask", "img2img:1700000006", "Off")
+    r.check("a destination the page writes itself is never placed from here", all(skipped(v) for v in canvas.send_backend(doc, "img2img:1700000006")))
+    canvas.send(fg, doc, "mask", "extras:1700000007", "Off")
+    r.check("nor is a press that names a send this side never prepared", all(skipped(v) for v in canvas.send_backend(doc, "extras:1700000099")))
+
+    # ---- how a send really ended, as the page saw it ----
+    r.check("a send the page finished cleanly says nothing more", skipped(canvas.send_result(doc, json.dumps({"target": "img2img", "label": "img2img", "ok": True}))))
+    said = canvas.send_result(doc, json.dumps({"target": "extras", "label": "Extras", "ok": False, "reason": "#extras_image is not on this page"}))
+    r.check("and one that failed says so where the user is looking", "Extras did not take the picture" in said and "not on this page" in said, str(said))
+    said = canvas.send_result(doc, json.dumps({"target": "img2img", "label": "img2img", "ok": True, "switched": False, "switchReason": "there is no img2img tab on this page to open"}))
+    r.check("a picture that landed on a tab that would not open is still a send, and says both", "sent to img2img" in said and "no img2img tab" in said, str(said))
+    said = canvas.send_result(doc, json.dumps({"target": "extras", "label": "Extras", "ok": False, "handoff": True,
+                                          "reason": "#extras_image exists but no upload input was found"}))
+    r.check("a page that handed the send to the server says so, and stops at placing rather than claiming it arrived",
+            "placing the picture in Extras" in said and "no upload input" in said and "sent to" not in said, str(said))
+    r.check("nonsense from the page changes nothing", skipped(canvas.send_result(doc, "not json")) and skipped(canvas.send_result(doc, "{}")))
 
     # ---- see-through pixels: kept for img2img and the stitches, white for Extras, or filled by the setting ----
     from modules import shared  # noqa: E402
@@ -464,14 +510,15 @@ def run() -> Results:
     r.check("with the Background and the picture hidden the composite has see-through pixels", bg2.getpixel((150, 100))[3] == 0)
     out = canvas.send(fg, holed, "layers", "img2img", "Off")
     r.check("img2img gets them as they are, and the note says who fills them",
-            decode_data_url(out[-1]).getpixel((150, 100))[3] == 0 and "see-through pixels were kept" in out[SENT_STATUS] and "img2img background colour" in out[SENT_STATUS])
+            decode_data_url(out[-2]).getpixel((150, 100))[3] == 0 and "see-through pixels were kept" in out[SENT_STATUS] and "img2img background colour" in out[SENT_STATUS])
     out = canvas.send(fg, holed, "layers", "stitch_txt2img", "Off")
-    r.check("ImageStitch too", out[STITCH_T2I][0].getpixel((150, 100))[3] == 0)
+    r.check("ImageStitch too", decode_data_url(out[-2]).getpixel((150, 100))[3] == 0)
     out = canvas.send(fg, holed, "layers", "extras", "Off")
-    r.check("Extras gets white instead, since it has no background colour of its own", out[EXTRAS].getpixel((150, 100)) == (255, 255, 255, 255) and "filled with rgb(255, 255, 255)" in out[SENT_STATUS])
+    r.check("Extras gets white instead, since it has no background colour of its own",
+            decode_data_url(out[-2]).getpixel((150, 100)) == (255, 255, 255, 255) and "filled with rgb(255, 255, 255)" in out[SENT_STATUS])
     shared.opts.data[settings.SEND_FILL] = "Black"
     out = canvas.send(fg, holed, "layers", "img2img", "Off")
-    r.check("the setting can fill them with a colour instead", decode_data_url(out[-1]).getpixel((150, 100)) == (0, 0, 0, 255) and "filled with rgb(0, 0, 0)" in out[SENT_STATUS])
+    r.check("the setting can fill them with a colour instead", decode_data_url(out[-2]).getpixel((150, 100)) == (0, 0, 0, 255) and "filled with rgb(0, 0, 0)" in out[SENT_STATUS])
     shared.opts.data[settings.SEND_FILL] = settings.KEEP_TRANSPARENT
     holed.set_visible("Background", True)
     holed.set_visible("Layer 1", True)
@@ -479,8 +526,8 @@ def run() -> Results:
     # inpaint without a mask clears the layer there
     plain = canvas.receive([(photo, None)], None, "crop", "txt2img")[STATE]
     out = canvas.send(None, plain, "crop", "inpaint", "Off")
-    r.check("inpaint without a mask still goes to inpaint", out[-2] == "inpaint:640x480")
-    r.check("and clears the layer there", canvas.send_mask(plain, out[-2]) == "")
+    r.check("inpaint without a mask still goes to inpaint", out[-3] == "inpaint:640x480")
+    r.check("and clears the layer there", canvas.send_mask(plain, out[-3]) == "")
     r.check("send without an image says so", "no image to send" in canvas.send(None, None, "crop", "Auto", "Off")[SENT_STATUS].lower())
 
     # ---- expand: new area auto-masked, transparent pixels filled on send ----
@@ -499,14 +546,14 @@ def run() -> Results:
 
     bg = imaging.to_rgba(doc.image)
     out = canvas.send(layer(doc.mask, doc.size), doc, "mask", "", "Off")
-    sent = decode_data_url(out[-1])
+    sent = decode_data_url(out[-2])
     r.check("the expansion is sent see-through by default, for the WebUI to fill", sent.getchannel("A").getextrema()[0] == 0 and "see-through pixels were kept" in out[SENT_STATUS])
     shared.opts.data[settings.SEND_FILL] = "Black"
     out = canvas.send(layer(doc.mask, doc.size), doc, "mask", "", "Off")
-    sent = decode_data_url(out[-1])
+    sent = decode_data_url(out[-2])
     r.check("or filled, by the setting", sent.getchannel("A").getextrema() == (255, 255) and "filled with rgb(0, 0, 0)" in out[SENT_STATUS])
     shared.opts.data[settings.SEND_FILL] = settings.KEEP_TRANSPARENT
-    r.check("mask matches the image size", decode_data_url(canvas.send_mask(doc, out[-2])).size == sent.size)
+    r.check("mask matches the image size", decode_data_url(canvas.send_mask(doc, out[-3])).size == sent.size)
     out = canvas.apply_expand(layer(doc.mask, doc.size), doc, "mask", 0, 0, 0, 0, 0, "Transparent", "8")
     r.check("expanding nothing is refused without touching the canvas", skipped(out[BG]) and skipped(out[PENDING]) and out[STATE].has_mask)
     # the canvas is the truth: strokes that are not on it are not in the document either

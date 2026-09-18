@@ -82,10 +82,13 @@ Refresh, and every card and history entry that used it says so.
 
 **☰ Menu** holds everything the grid does not show:
 
-* **Intercept "Send to Mini Paint"** — a switch. While it is on, the 🖌️ button under a
-  txt2img / img2img / Extras result puts the picture *here* instead of on the Canvas, and
-  the page switches to this tab. Off, the button does what it always did. The switch is
-  saved on the Forge host, so a second browser and a Reload UI see the same setting.
+* **Intercept Options ›** — where the 🖌️ button under a txt2img / img2img / Extras result
+  sends its picture. Three destinations, one ticked: **Mini Paint** (the Canvas, as the
+  button always did), **Clipboard** (the picture is put *here* and the page switches to
+  this tab) and **WanGP** (a compact request popup opens over the gallery; see *Send to
+  WanGP from the gallery* below). The choice is saved on the Forge host, so a second
+  browser and a Reload UI see the same setting; the old on/off switch is read as Mini
+  Paint or Clipboard.
 * **Refresh** — read the folder again.
 * **Sort ›** — by name, newest, oldest, largest, smallest. The same list the toolbar's own
   sort button opens.
@@ -363,11 +366,70 @@ recorded, and a request from another extension is in the Queue but never in this
   status line says as what, and the Canvas keeps its document. It does not switch tabs.
 * **Send selected to › Mini Paint** hands the picture to the Canvas through the Canvas's
   own receive chain (Layer 1 over a Background, one Undo away) and switches to it.
-* With the **intercept** on, the gallery's 🖌️ button imports the original output file when
-  Forge proves which file it is (its generation parameters survive) and the decoded pixels
-  as a PNG otherwise, and switches to the Clipboard tab. If Clipboard cannot take the
-  picture — no folder chosen, a refused file — it goes to the Canvas as before, with the
-  reason on the Canvas's status line.
+* With **Intercept Options** on Clipboard, the gallery's 🖌️ button imports the original
+  output file when Forge proves which file it is (its generation parameters survive) and
+  the decoded pixels as a PNG otherwise, and switches to the Clipboard tab. If Clipboard
+  cannot take the picture — no folder chosen, a refused file — it goes to the Canvas as
+  before, with the reason on the Canvas's status line. On WanGP, the same button opens
+  the request popup instead, and the picture never enters the library.
+
+## Send to WanGP from the gallery
+
+With **Menu → Intercept Options › Send to "WanGP"** ticked, the 🖌️ button under a result
+opens a compact popup over the gallery instead of leaving the tab, so a run of
+generations can be queued without going anywhere: pick the roles, keep or retype the
+prompt, press Generate, and the popup is gone before WanGP has answered. Nothing in it
+knows a model family; it is told which roles the page's model reads and draws those.
+
+What the popup shows, top to bottom:
+
+* **The picture** — the one the button was under, frozen the moment it was pressed. It
+  is a transient: the server holds it under an opaque token in the public API's staging
+  folder, it is never written to the storage folder, never indexed, and never appears in
+  the grid or in Queue Send History. A second press freezes a second copy under a new
+  token even while the first popup is open (the popup moves to the new picture and keeps
+  what you typed); Cancel and Escape release the token at once; a token nobody used is
+  swept with the rest of the staging folder after thirty minutes.
+* **The prompt** — the composer's own: the popup opens with what the Clipboard tab's
+  prompt box holds, and what you type is what the composer holds afterwards, whether or
+  not you generate.
+* **Enhance** — the same switch as the composer's *Enhanced prompts*, saved the same way.
+  The writer gets the system prompt override saved in the tab; the default is used only
+  when no override is saved.
+* **Roles** — where the picture goes in the request: *First frame*, *Last frame*,
+  *Reference*, several at once. Only the roles the page's current model reads are offered
+  (from the page's live inputs, or the enhancer's mapping for the model when the page has
+  not said), and one is ticked by default. What was ticked is checked again at Generate,
+  so a request whose picture has nowhere left to go is refused
+  (`INTERCEPT_NO_IMAGE_ROLE`) rather than sent without it.
+* **Inherit Clipboard inputs** — on by default. On, the composer's own cards fill every
+  role the popup does not override; off, only the roles ticked here go with the request.
+* **The WanGP dot** — not running, idle, generating (the request joins WanGP's queue) or
+  running when the page has not yet said which. Generate follows the composer's own
+  *Add to Queue* rule, so it is a button exactly when a press there would be and greyed
+  with the reason otherwise; a refused press stores nothing.
+* **Cancel** and **Generate**. Escape cancels; Ctrl+Enter generates.
+
+Generate builds the request through the composer's own path (the draft, the public
+request, the outbox), so the job appears in **the Queue** like any other press, marked
+*from the gallery*, runs on whichever executor the setting names, is enhanced when
+asked, and is confirmed, refused or unconfirmed by the same rules. The popup closes the
+moment the outbox has taken the job; the toast and the Queue say the rest.
+
+**History** — the popup's own list, apart from Queue Send History: the recipes sent from
+the gallery (prompt, roles, inherit, enhance and a small preview), newest first with the
+pinned ones on top. *Load* fills the popup from an entry, reconciling its roles against
+what the current model reads and naming the ones it dropped; *Pin* keeps an entry past
+the cap; *Delete* removes it. Unpinned entries are capped at 100 and the oldest leave
+first; pinned ones stay (up to 500).
+
+**When Gradio's queue is cut.** The button's press is a Gradio event, so when the
+framework's channel is down the page freezes the picture itself through the public API's
+staging route and opens the popup on that token: the same popup, the same request path.
+Everything the popup asks the server is a bounded plain request that comes back or times
+out, and it holds no stream open, so on a Forge served over HTTP/1.1 the six-connection
+budget (`CLAUDE.md`) is untouched, and over HTTP/2 (the auto-TLS extension) there is
+nothing to count.
 
 ## When the page loses its connection
 
@@ -464,9 +526,10 @@ They are not any more:
   the library itself when it does not, by fetching the file the host is
   already serving and posting it to the import route. That keeps the
   metadata Forge wrote into a generated PNG, which a re-encode of what is on
-  screen would lose. Only when the intercept is on: with it off the picture
-  was going to the Canvas, whose document lives on the server, and the page
-  says so rather than putting it somewhere else.
+  screen would lose. Only with Intercept Options on Clipboard: on Mini Paint
+  the picture was going to the Canvas, whose document lives on the server,
+  and the page says so rather than putting it somewhere else; on WanGP the
+  page freezes the picture over the staging route and opens the popup on it.
 
 Reloading the page still makes sending quick again, and the Reconnect button
 is there to do it. The difference is that sending works either way.
@@ -616,16 +679,18 @@ it was ignored" case.
 
 | what | where |
 | --- | --- |
-| the folder, the intercept switch, the sort, the thumbnail size and the outputs folder | `<Forge data_path>/a1111-mini-paint-NEO/clipboard.json` |
+| the folder, the intercept destination, the sort, the thumbnail size and the outputs folder | `<Forge data_path>/a1111-mini-paint-NEO/clipboard.json` |
 | the index: id, filename, size, dimensions, digest, source per file | `…/clipboard-index.json` (rebuilt from the folder on Refresh) |
 | the composer's draft | `…/clipboard-draft.json` |
 | the queue outbox: every press as a job, with its request, its state, its enhancement and its place in WanGP | `…/clipboard-outbox.json` (schema 3; a finished job kept two minutes, a failure until it is dismissed, the list capped) |
 | the enhanced-prompts switch and the system prompt overrides | `…/clipboard-enhance.json` |
 | Queue Send History | `…/clipboard-history.json` |
+| the Send to WanGP popup's own history: prompt, roles, inherit, enhance, a small preview per recipe | `…/clipboard-intercept-history.json` (100 unpinned, pinned kept) |
 | View Outputs: which files WanGP made for which request, and where each one is | `…/clipboard-outputs.json` (paths only; the videos are never moved or copied) |
 | the pictures | the storage folder you chose, and only there |
 | thumbnails | in memory, rebuilt as needed; never on disk |
 | images staged through the public API | `…/runtime/staging/<32 hex>.png`, swept after 30 minutes |
+| a gallery picture frozen for the popup | the same staging folder and sweep; released by Cancel, or when a server-run job has adopted it |
 | images prepared for one queue request | `…/runtime/handoff/<32 hex>.png`, released when the request ends |
 | every step, scrubbed | `extensions/a1111-mini-paint-NEO/logs/wangp-log.txt` (`clipboard`, `outbox`, `enhance`, `interop`, `browser` and `wangp` columns) |
 
@@ -666,6 +731,8 @@ tab's own; the tab, the toast and the log say the same thing about the same fail
 | `CLIPBOARD_NOT_CONFIGURED` | no storage folder yet. Menu → Choose storage folder. |
 | `CLIPBOARD_ASSET_UNKNOWN` | that id is not in the index — the file left the folder. Refresh. |
 | `CLIPBOARD_ASSET_OUTSIDE_ROOT` | the indexed entry no longer resolves inside the folder (a symlink, a move). Not used. |
+| `INTERCEPT_IMAGE_EXPIRED` | the picture the popup froze is no longer there - cancelled, swept, or already taken by a server-run job. Press the gallery button again; nothing was queued. |
+| `INTERCEPT_NO_IMAGE_ROLE` | the WanGP page's current model reads no role the picture could fill, so the request was refused rather than sent without it. |
 | `REQUEST_INVALID` | the request is not one the API carries: a bad id, a wrong kind, a start mode that is not `auto` or `never`, an unreadable shape. |
 | `PROMPT_TOO_LONG` | over 12000 characters after cleaning - a typed prompt, or a written one. |
 | `IMAGE_STAGE_INVALID` / `IMAGE_STAGE_EXPIRED` | the bytes were not a PNG/JPEG/WebP within the ceilings, or the staged file was swept. |

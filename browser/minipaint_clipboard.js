@@ -62,6 +62,10 @@ window.minipaintClipboard = (function () {
     const BOXES = {
         selected: "minipaint_clipboard_selected",
         sortRequest: "minipaint_clipboard_sort_request",
+        //: The intercept destination, written after the route has saved it,
+        //: like the sort: the second door, kept so a page whose Gradio is
+        //: alive re-renders its menu state. Nothing waits on it.
+        intercept: "minipaint_clipboard_intercept",
         slotAction: "minipaint_clipboard_slot_action",
         sendRequest: "minipaint_clipboard_send_request",
         sendAck: "minipaint_clipboard_send_ack",
@@ -72,7 +76,6 @@ window.minipaintClipboard = (function () {
     const PRESS = {
         refresh: "minipaint_clipboard_refresh",
         upload: "minipaint_clipboard_upload",
-        intercept: "minipaint_clipboard_intercept",
         folder: "minipaint_clipboard_folder_open",
         rename: "minipaint_clipboard_rename_open",
         remove: "minipaint_clipboard_delete_open",
@@ -702,14 +705,39 @@ window.minipaintClipboard = (function () {
         }, 400);
     }
 
-    /** The gallery's 🖌️ button: into Clipboard, or on to Mini Paint. */
-    function toggleIntercept() {
-        const wanted = !menuState().intercept;
-        postSettings({ intercept: wanted }).then(function (answer) {
+    //: The three places the gallery's 🖌️ button can send, in the menu's
+    //: order, for a page whose menu state predates the third.
+    const INTERCEPTS = [["minipaint", "Mini Paint"], ["clipboard", "Clipboard"], ["wangp", "WanGP"]];
+
+    function interceptTarget() {
+        const state = menuState();
+        if (typeof state.intercept_target === "string" && state.intercept_target) { return state.intercept_target; }
+        return state.intercept ? "clipboard" : "minipaint";
+    }
+
+    /**
+     * The gallery's 🖌️ button: to Mini Paint, into Clipboard, or a WanGP
+     * request. Saved over the tab's own route first, then written to the
+     * hidden box so a live Gradio re-renders the menu state; the answer
+     * is the status line's, and nothing waits on the box.
+     */
+    function setIntercept(target) {
+        const wanted = String(target || "");
+        if (!INTERCEPTS.some(function (pair) { return pair[0] === wanted; })) { return Promise.resolve(false); }
+        return postSettings({ intercept_target: wanted }).then(function (answer) {
             setStatus((answer && answer.status) || "");
+            sendInput(BOXES.intercept, wanted + ":" + Date.now());
+            note("the gallery's send button now goes to " + wanted);
+            return true;
         }, function () {
             setStatus("That setting could not be saved.");
+            return false;
         });
+    }
+
+    /** The older two-way switch, for anything that still calls it. */
+    function toggleIntercept() {
+        return setIntercept(interceptTarget() === "clipboard" ? "minipaint" : "clipboard");
     }
 
     /**
@@ -977,8 +1005,8 @@ window.minipaintClipboard = (function () {
         note.innerHTML = reason === "unconfigured"
             ? "<b>No storage folder yet.</b> Menu → <em>Choose storage folder</em> picks a folder on the machine "
               + "running Forge; Clipboard keeps its pictures there."
-            : "No images yet. Upload or paste one from the menu, send one from Mini Paint, or turn on "
-              + "<em>Intercept “Send to Mini Paint”</em> and press 🖌️ under a result.";
+            : "No images yet. Upload or paste one from the menu, send one from Mini Paint, or point "
+              + "<em>Intercept Options</em> at Clipboard and press 🖌️ under a result.";
         if (!existing) { grid.appendChild(note); }
     }
 
@@ -1658,8 +1686,21 @@ window.minipaintClipboard = (function () {
             list.push({ menu: "close", label: "Cancel" });
             return list;
         }
+        if (section === "intercept") {
+            // Where the gallery's 🖌️ button sends: three mutually exclusive
+            // choices, the current one ticked. The labels come from the
+            // server when it has them, so a fourth destination is a change
+            // there and not here.
+            const list = back.slice();
+            const current = interceptTarget();
+            const choices = Array.isArray(state.intercepts) && state.intercepts.length ? state.intercepts : INTERCEPTS;
+            for (const pair of choices) {
+                list.push({ menu: "intercept", value: pair[0], label: tick(current === pair[0]) + "Send to “" + pair[1] + "”" });
+            }
+            return list;
+        }
         return [
-            { menu: "intercept", label: tick(!!state.intercept) + "Intercept “Send to Mini Paint”" },
+            { menu: "section", value: "intercept", label: "Intercept Options ›" },
             { menu: "press", value: PRESS.refresh, label: "Refresh" },
             { menu: "section", value: "sort", label: "Sort ›" },
             { menu: "paste", label: "Paste image" },
@@ -1701,7 +1742,7 @@ window.minipaintClipboard = (function () {
                 if (value === PRESS.refresh) { fetchLibrary({ refresh: true }); }
                 if (value === PRESS.history) { askQueue(null); }
                 return;
-            case "intercept": closeMenu(); toggleIntercept(); return;
+            case "intercept": closeMenu(); setIntercept(value); return;
             // Over the tab's own route, and the grid re-drawn from the
             // answer. The hidden box still goes so the toolbar dropdown
             // follows on a page whose Gradio is alive; nothing waits on it.
@@ -1823,7 +1864,8 @@ window.minipaintClipboard = (function () {
      */
     async function receiveOverHttp(picked) {
         const state = menuState();
-        if (!state.intercept) {
+        const target = interceptTarget();
+        if (target === "minipaint") {
             note("receive: the picture never arrived, and the Canvas cannot be filled from here");
             toast("That picture did not reach Mini Paint - this page has lost its live connection "
                   + "to the server, and only the server can fill the Canvas.", true);
@@ -1837,6 +1879,23 @@ window.minipaintClipboard = (function () {
             return false;
         }
         connectionNotice(true);
+        if (target === "wangp") {
+            // The same repair for the third destination: the popup's own
+            // bundle freezes the picture over the public API's staging route
+            // and opens on it, with no Gradio event anywhere in the chain.
+            const loader = window.minipaintAssets;
+            const bundle = String(state.intercept_bundle || "");
+            const ok = window.minipaintIntercept ? true
+                : (loader && loader.load && bundle ? await loader.load([bundle]) : false);
+            const popup = window.minipaintIntercept;
+            if (!ok || !popup || typeof popup.stageAndOpen !== "function") {
+                note("receive: the Send to WanGP popup could not be loaded for the direct route");
+                toast("That picture did not reach WanGP - the request popup could not be loaded.", true);
+                return false;
+            }
+            note("receive: freezing the picture over the direct route without the queue");
+            return popup.stageAndOpen(url, "", {});
+        }
         try {
             const response = await fetch(url, { credentials: "same-origin", cache: "no-store" });
             if (!response.ok) { throw new Error("the host would not serve it (" + response.status + ")"); }
@@ -2975,7 +3034,8 @@ window.minipaintClipboard = (function () {
                  outputsOpen: outputsOpen(),
                  outputs: { page: S.outputs.page, pages: S.outputs.pages,
                             items: S.outputs.items.length, chosen: S.outputs.chosen },
-                 intercept: !!menuState().intercept,
+                 intercept: interceptTarget() === "clipboard",
+                 interceptTarget: interceptTarget(),
                  sort: menuState().sort || S.library.sort,
                  library: { revision: S.library.revision, page: S.library.page, pages: S.library.pages,
                             total: S.library.total, shown: S.library.ids.length, busy: S.library.busy } };
@@ -3005,6 +3065,8 @@ window.minipaintClipboard = (function () {
         select: select,
         setThumbnailSize: setThumbnailSize,
         pasteFromClipboard: pasteFromClipboard,
+        setIntercept: setIntercept,
+        interceptTarget: interceptTarget,
         queue: queue,
         addToQueue: addToQueue,
         cancelAll: cancelAll,

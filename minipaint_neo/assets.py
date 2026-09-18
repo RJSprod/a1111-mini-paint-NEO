@@ -57,6 +57,11 @@ BUNDLES: typing.Mapping[str, str] = {
     "wangp": "minipaint_wangp.js",
     "interop": "minipaint_interop.js",
     "clipboard": "minipaint_clipboard.js",
+    # The gallery's Send to WanGP popup. Fetched the first time a gallery
+    # send is routed to WanGP, by the receive chain's own step, and never
+    # otherwise: a session that keeps the button on Mini Paint never parses
+    # it.
+    "intercept": "minipaint_intercept.js",
 }
 
 #: Where they live: a folder of this repository that Forge does not load on

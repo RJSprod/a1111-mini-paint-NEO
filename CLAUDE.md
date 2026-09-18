@@ -12,7 +12,7 @@ because it was learned the hard way.
 ```
 pip install -r tests/requirements.txt
 python -m playwright install chromium
-python tests/run.py                    # 26 suites; every one must run
+python tests/run.py                    # 29 suites; every one must run
 ```
 
 Gradio is pinned to 4.40.0 because that is what the target Forge ships, and the
@@ -60,6 +60,17 @@ boxes and hands the browser a plan, and the one event that may name another
 tab's components is a hidden button pressed only when the page has just
 found out it cannot place the picture itself. `docs/CANVAS_SEND_2026-09-18.txt`
 is the whole story. Do not put another tab's component in an outputs list.
+
+**A chained browser step runs after a failed step, with the box's stale
+value.** Gradio 4.40 runs a `.then` step whether or not the step before it
+succeeded, and a js-only step reads its inputs off the page, so when the
+Canvas's receive event fails (the queue cut, a refused picture) the step that
+opens the Send to WanGP popup is handed the hidden box's *previous* handoff -
+the last picture's token - and would open the popup on a picture nobody just
+pressed. `browser/minipaint_intercept.js` therefore refuses a handoff it has
+already opened once, and the direct route (`stageAndOpen`) always freezes a
+new one. A test that opens the popup twice must use two handoffs; the Node
+harness's `keys` scenario is where that was learned.
 
 **A Gradio gallery that is holding a picture has no upload input.** Gradio 4
 swaps a gallery's drop zone for its thumbnails as soon as it has one, so a

@@ -118,6 +118,15 @@ ENHANCE_API_TOO_NEW = "ENHANCE_API_TOO_NEW"
 #: is visible rather than read as a generic refusal.
 JOB_INPUT_MISSING = "JOB_INPUT_MISSING"
 
+# -- the gallery's Send to WanGP popup ---------------------------------------
+#: The picture the popup froze is no longer staged - swept by age, or a Forge
+#: that restarted in between. Pressing the gallery button again freezes it
+#: afresh; nothing was queued.
+INTERCEPT_IMAGE_EXPIRED = "INTERCEPT_IMAGE_EXPIRED"
+#: The current model takes no image input, so there is no role the picture
+#: could fill. Said rather than sending a request the picture is not in.
+INTERCEPT_NO_IMAGE_ROLE = "INTERCEPT_NO_IMAGE_ROLE"
+
 # -- everything else --------------------------------------------------------
 WANGP_RESTARTED = "WANGP_RESTARTED"
 INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -204,6 +213,8 @@ MESSAGES: dict[str, str] = {
     ENHANCE_NOT_CONFIGURED: "LLM Studio has no enhancement model set up; choose one there first.",
     ENHANCE_API_TOO_NEW: "ModelSwitchRefiner's external LLM API is a newer major version than this extension understands.",
     JOB_INPUT_MISSING: "An image this job owns is no longer on disk, so the job was not run with a picture missing.",
+    INTERCEPT_IMAGE_EXPIRED: "The picture this request froze is no longer there; press the gallery button again. Nothing was queued.",
+    INTERCEPT_NO_IMAGE_ROLE: "The current WanGP model takes no image, so the picture has nowhere to go. Nothing was queued.",
 }
 
 #: Codes that mean "the setup on disk no longer describes reality". The tab

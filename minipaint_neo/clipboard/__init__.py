@@ -9,8 +9,11 @@ behaviour.
 
 The split:
 
-``config``      the storage root, the intercept switch, the sort order and
-                the thumbnail size - what survives a restart.
+``config``      the storage root, the intercept destination, the sort order
+                and the thumbnail size - what survives a restart.
+``intercept``   the gallery's send button pointed at WanGP: the frozen
+                picture, the popup's capabilities, its submission through
+                the outbox, and its own pinned history.
 ``store``       the library: one folder on the Forge host, opaque asset ids,
                 containment, import, refresh, rename, delete, thumbnails.
 ``history``     the composer's draft and the recipes confirmed queued.
@@ -39,8 +42,8 @@ TAB_ID = "minipaint_clipboard"
 _LOG_PREFIX = "MiniPaint Clipboard:"
 
 
-def intercept_enabled() -> bool:
-    """Whether the gallery's Send to Mini Paint goes to Clipboard instead.
+def intercept_target() -> str:
+    """Where the gallery's Send to Mini Paint goes: minipaint, clipboard or wangp.
 
     Read from the host-side config on every call, so Reload UI and a second
     browser see one mode. Never raises: a Clipboard that cannot answer is a
@@ -49,7 +52,21 @@ def intercept_enabled() -> bool:
     try:
         from . import config
 
-        return bool(config.load().intercept)
+        return config.load().intercept_target
+    except Exception:
+        return "minipaint"
+
+
+def intercept_enabled() -> bool:
+    """Whether the gallery's Send to Mini Paint goes to Clipboard instead.
+
+    The older question, kept for its callers: true for the Clipboard
+    destination and for nothing else.
+    """
+    try:
+        from . import config
+
+        return intercept_target() == config.INTERCEPT_CLIPBOARD
     except Exception:
         return False
 
@@ -139,4 +156,4 @@ def register(script_callbacks: typing.Any) -> None:
             scrub.console(f"the {name} could not be registered ({error}).", _LOG_PREFIX)
 
 
-__all__ = ["TAB_ID", "TAB_LABEL", "available", "intercept_enabled", "register"]
+__all__ = ["TAB_ID", "TAB_LABEL", "available", "intercept_enabled", "intercept_target", "register"]

@@ -311,7 +311,7 @@ SERVER_ACTIVE; SERVER_TERMINAL; SERVER_SUBMITTED   # SERVER_SUBMITTED is what a 
 TERMINAL = LEGACY_TERMINAL + (COMPLETED, EXECUTION_UNKNOWN); POSITIVE = (QUEUED, STARTED, COMPLETED)
 STAGE_TEXT                                          # what each stage says to a screen when the job has nothing more specific
 WANGP_ACCEPTED, WANGP_WAITING, WANGP_GENERATING, WANGP_FINISHED, WANGP_UNKNOWN; WANGP_STATES      # a queued job's place inside WanGP
-ORIGIN_CLIPBOARD = "clipboard"; ORIGIN_API = "api"
+ORIGIN_CLIPBOARD = "clipboard"; ORIGIN_API = "api"; ORIGIN_GALLERY = "gallery"   # the popup's presses; the Queue marks them "from the gallery"
 LEASE_SECONDS = 90.0; PAGE_ACTIVE_SECONDS = 15.0; WAIT_BUSY_MS = 400; WAIT_TURN_MS = 250; WAIT_ENHANCE_MS = 1000; WATCH_SECONDS = 2.0
 MAX_JOBS = 500; MAX_PENDING = 200; KEEP_TERMINAL_SECONDS = 7 days; PAGE_RE = 8..32 lowercase hex
 def use_clock(fn); def use_running(fn); def use_watcher(bool); def reset_for_tests()      # seams (tests run without the watcher thread)
@@ -619,7 +619,7 @@ is not a mode; `plugin_info.json` said 1.3.0, protocol 4, capability `start`.
 
 ## The tab's own routes — everything that used to need Gradio
 
-Seven doors, all under `/minipaint-clipboard/`, all gated by the same
+Nine doors, all under `/minipaint-clipboard/`, all gated by the same
 `_signed_in` the picture route uses, all answering `Cache-Control: no-store`
 and their own `status` sentence for the status line (the two byte-serving
 ones answer bytes and a revalidated cache header instead). They exist because every
@@ -645,8 +645,17 @@ that exists, a size outside `PAGE_SIZE_MIN..PAGE_SIZE_MAX` is clamped.
 constantly while the library sits still. `v` is `<mtime_ns>-<size_bytes>` —
 the same identity both thumbnail caches are keyed by.
 
-    POST /minipaint-clipboard/settings   {sort?, thumbnail?, intercept?}
-      -> {ok, status, sort, thumbnail, intercept, menu: {...}}
+    POST /minipaint-clipboard/settings   {sort?, thumbnail?, intercept_target?, intercept?}
+      -> {ok, status, sort, thumbnail, intercept_target, intercept, menu: {...}}
+
+`intercept_target` is `minipaint` | `clipboard` | `wangp` (`config.INTERCEPT_*`).
+The legacy boolean `intercept` is still taken (true is `clipboard`, false is
+`minipaint`) and still answered (true exactly when the target is `clipboard`),
+so a page loaded before the destinations existed keeps working. `menu` is
+`routes.menu_facts(current)`: the current destination and the labels the
+menu's *Intercept Options ›* section draws from; the tab's own `menu_state`
+adds `intercept_bundle`, the URL the page fetches the popup bundle from on the
+first press that needs it.
 
     GET  /minipaint-clipboard/queue?page=<page id>
     POST /minipaint-clipboard/queue      {action: add|cancel|retry|adopt|dismiss|cancel_all, ...}
@@ -660,6 +669,25 @@ that did nothing.
 
     GET  /minipaint-clipboard/enhance-settings?variant&mode
     POST /minipaint-clipboard/enhance-settings  {action: toggle|override|restore, ...}
+
+    POST /minipaint-clipboard/intercept  {action: describe|submit|cancel|draft|history|history_load|history_delete|history_pin,
+                                          handoff?, prompt?, roles?, inherit?, enhance?, page?, model?, inputs?, id?, pinned?}
+      -> {ok, ...} per action; a refusal is {ok: false, code, message} with 409 for WANGP_NOT_RUNNING, QUEUE_BUSY
+         and INTERCEPT_IMAGE_EXPIRED (the world said no) and 400 for everything else (the caller did)
+    GET  /minipaint-clipboard/intercept/image/{token}
+      -> the frozen picture, at most PREVIEW_SIDE (160) px a side, no-store; 404 once it is gone
+
+The Send to WanGP popup's one door, `routes.intercept_action(body) ->
+(answer, status)` as a function. `describe` is what the popup draws itself
+from: the frozen picture's token, tab and size, the shared prompt and enhance
+switch, `capabilities` (the roles the page's model reads and the default),
+the WanGP status, the Generate button's view and the history. `submit` is
+Generate: `intercept.submit()` below, which is the composer's own request
+path with the token in the ticked roles. `cancel` lets the picture go;
+`draft` keeps a prompt edited in the popup shared with the composer when the
+popup closes without generating; the `history_*` verbs are the list's own
+buttons. `model` and `inputs` are what the page's WanGP bridge reports, passed
+through so the server can reconcile roles without a call into the child.
 
     GET  /minipaint-clipboard/outputs?page&size
       -> {ok, total, page, pages, size, reason: ""|"empty"|"unconfigured", status,
@@ -686,7 +714,33 @@ URL must never be blessed immutable.
 ## `minipaint_neo/clipboard/` — the tab
 
 ```python
-# __init__.py / config.py / history.py: as in 1.2.0 (the folder, the intercept, the draft and history)
+# __init__.py / config.py / history.py: as in 1.2.0 (the folder, the intercept, the draft and history), plus the destination:
+# config: INTERCEPT_MINIPAINT | INTERCEPT_CLIPBOARD | INTERCEPT_WANGP; INTERCEPT_TARGETS; INTERCEPT_LABELS; DEFAULT_INTERCEPT_TARGET = minipaint
+#         DEFAULT_INTERCEPT_INHERIT = True; intercept_target_of(value, legacy=None) -> target
+#         Config.intercept_target; Config.intercept_inherit; Config.intercept (bool: == clipboard; setting it maps to a target)
+#         clipboard.json carries intercept_target and the legacy intercept bool side by side; a document with only the bool is migrated on read
+# __init__: intercept_target() -> target (never raises: minipaint when unreadable); intercept_enabled() -> target == clipboard
+
+# intercept.py: Send to WanGP from the gallery - the popup's server half. No model family is named anywhere in it.
+POPUP_PREFIX = "wangp:"; ROLES = ((first_frame, "First frame", "start"), (last_frame, "Last frame", "end"), (reference, "Reference", "references"))
+ROLE_IDS; ROLE_LABELS; ROLE_FIELDS; FIELD_ROLES; FIELD_SLOTS               # role id <-> request field <-> composer card; the enhancer's slot ids reused as generic role ids
+HISTORY_NAME = "clipboard-intercept-history.json"; HISTORY_SCHEMA = 1; MAX_UNPINNED = 100; MAX_PINNED = 500; PREVIEW_SIDE = 160
+STATUS_OFF | STATUS_IDLE | STATUS_BUSY | STATUS_RUNNING | STATUS_UNKNOWN
+def handoff_text(token, width, height, tab="") -> "wangp:<token>:<w>x<h>:<tab>"; def parse_handoff(text) -> {token, width, height, tab} | None
+def stage(image, tab="") -> handoff                                          # interop.stage_image(): the staging folder, swept by age; never the library, never the index
+def staged_exists(token) -> bool; def discard(token) -> bool; def preview(token, side=PREVIEW_SIDE) -> (bytes, mime)
+def capabilities(model=None, inputs=None) -> {roles: [{id, label, ...}], default_roles, ...}   # from the page's inputs, else enhance's mapping for the model; one default
+def reconcile_roles(wanted, caps) -> (kept, dropped)                         # the defaults only when nothing valid remains
+def wangp_status() -> {state, running, generating, text}                     # outbox.wangp_running() and control.last_hello(): never a fresh call into the child
+def generate_button() -> {label, enabled}                                    # ClipboardTab._queue_button_view(): one rule for the popup's button and the composer's
+def load_history() -> [entry] (pinned first, newest first); add_history(entry); delete_history(id) -> bool; pin_history(id, pinned) -> entry | None
+def get_history(id) -> entry | None; trim(entries) -> entries                # MAX_UNPINNED oldest-out, MAX_PINNED likewise; pinned never make room for unpinned
+def history_view(model=None, inputs=None) -> [row]; def recipe(entry_id, model=None, inputs=None) -> {prompt, roles, dropped_roles, inherit, enhance, ...}
+def build_request(prompt, roles, token, inherit) -> request                  # history.public_request(draft) with the staged token in every ticked role; inherit=False leaves the composer's cards out
+def describe(handoff, model=None, inputs=None) -> dict; def save_prompt(prompt) -> dict; def cancel(handoff) -> dict
+def submit(handoff, prompt, roles, inherit, enhance_wanted, page, model=None, inputs=None) -> {ok, instruction, status, notes, roles, dropped_roles, history}
+                                                                             # saves the prompt to the draft, repairs the enhance switch, outbox.submit(..., ORIGIN_GALLERY, ...), records the recipe;
+                                                                             # a job the server runs adopts the token at admission, so the popup's cancel afterwards is a no-op
 
 # store.py
 THUMBNAIL_CACHE_SIZE = 512; THUMBNAIL_DIR_NAME = "clipboard-thumbnails"; THUMBNAIL_DISK_BUDGET = 64 MiB; THUMBNAIL_NAME_RE
@@ -732,7 +786,7 @@ def outbox_view(jobs, page) -> [dict]; def history_view(records, asset_of) -> [d
 def job_sentence(job) -> str; def enhance_sentence(job) -> str; def wangp_sentence(job) -> str; def enhance_line_html(availability, enabled) -> str
 def job_is_over(job) -> bool     # what the queue stops LISTING: COMPLETED, a browser job whose task left WanGP's queue, or a dismissed one. Never what it stops storing
 class ClipboardTab:
-    refresh; sort_request; thumbnail_changed; toggle_intercept                        # every refresh output ends with the button's state
+    refresh; sort_request; thumbnail_changed; set_intercept(target); toggle_intercept   # every refresh output ends with the button's state; the menu writes the target into the hidden intercept box
                                                                                       # sort_changed is gone with the dropdown: one verb, one write path
     assign(slot, selected); slot_action("clear:<slot>" | "assign:<slot>:<id>"); slot_upload(slot, file, selected); upload(files, selected); pasted(path, selected)
     prompt_changed(prompt)
@@ -832,8 +886,13 @@ shrinks as rows move, and when it is empty the second notice stops existing.
 ## The Canvas and the host
 
 `canvas/ui.py`: `CLIPBOARD_TARGET = "clipboard"` in `DESTINATION_LABELS`;
-`current()` (the TouchCanvas of the UI being built); `receive()` intercepts to
-Clipboard when `clipboard.intercept_enabled()` and passes through on failure;
+`current()` (the TouchCanvas of the UI being built); `receive()` reads
+`clipboard.intercept_target()`: on `clipboard` it imports the picture into the
+library, on `wangp` it freezes it through `intercept.stage()` and writes the
+`wangp:<token>:<w>x<h>:<tab>` handoff into the tab box for the chained
+browser step (`_after_receive_js()`: load the popup bundle, open it, and only
+then tell the Canvas's own watch that the picture landed), and either way
+passes through to the Canvas on failure;
 `after_receive(state)` → which tab the follow-up step switches to;
 `receive_picture(image, state, mode, origin, label)`;
 `receive_from(event, provider, inputs, origin="clipboard", label="Clipboard",
@@ -875,7 +934,15 @@ whose files appear while a job runs, a claim a shutdown left open finished at
 the next sync, exclusive claiming, the 60-page, and the byte route's ranges),
 `tests/test_clipboard_ui.py` (the tab on a Forge-shaped page, every event,
 the outbox flow, the blocked button, the intercept, Send to Clipboard, the
-fallback, the theming rules), `tests/test_queue_e2e.py` (a WanGP-shaped
+fallback, the theming rules), `tests/test_clipboard_intercept.py` (Send to
+WanGP from the gallery: the destination setting and its migration, the frozen
+transient, capabilities, describe, submit with and without inheritance, the
+roles checked again at press time, the history and its cap, the routes),
+`tests/test_intercept_browser.py` (the popup bundle in the Node DOM harness:
+open once per handoff, refusals kept open, replace, the shared prompt and
+switch, the keys, the history, the direct route), `tests/browser_intercept.py`
+(the popup in a real page, with the queue alive and then cut),
+`tests/test_queue_e2e.py` (a WanGP-shaped
 Gradio app with Wan2GP's variable names and both triggers, the bridge placed
 by `insert_after`, driven through Gradio's predict endpoint with the test
 playing the browser, the outbox in the middle, an enhanced press on an H3

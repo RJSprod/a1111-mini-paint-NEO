@@ -5,7 +5,8 @@ the same ``<data root>/a1111-mini-paint-NEO/`` the WanGP setup lives in - and
 none of them inside the user's chosen image folder, which stays an ordinary
 directory of pictures:
 
-* ``clipboard.json``            the storage root, the intercept switch, the
+* ``clipboard.json``            the storage root, the intercept destination
+                                (where the gallery's 🖌️ button sends), the
                                 sort order and the thumbnail size;
 * ``clipboard-index.json``      the asset index: opaque ids for the files of
                                 every root Clipboard has known;
@@ -67,8 +68,42 @@ THUMBNAIL_MIN = 72
 THUMBNAIL_MAX = 320
 THUMBNAIL_DEFAULT = 144
 
+#: Where the gallery's 🖌️ button sends a result. The Canvas, as it always
+#: has; the Clipboard library; or a compact WanGP request over Clipboard.
+INTERCEPT_MINIPAINT = "minipaint"
+INTERCEPT_CLIPBOARD = "clipboard"
+INTERCEPT_WANGP = "wangp"
+INTERCEPT_TARGETS = (INTERCEPT_MINIPAINT, INTERCEPT_CLIPBOARD, INTERCEPT_WANGP)
+INTERCEPT_LABELS = {
+    INTERCEPT_MINIPAINT: "Mini Paint",
+    INTERCEPT_CLIPBOARD: "Clipboard",
+    INTERCEPT_WANGP: "WanGP",
+}
 #: Existing installs keep today's behaviour until they opt in.
+DEFAULT_INTERCEPT_TARGET = INTERCEPT_MINIPAINT
+#: The setting's older spelling: a switch that meant "into Clipboard". Kept
+#: as a name because it is still written beside the target, so a build of
+#: this extension from before the target existed reads the same file.
 DEFAULT_INTERCEPT = False
+#: What the WanGP popup's "Inherit Clipboard inputs" starts as: the last
+#: choice made, on by default.
+DEFAULT_INTERCEPT_INHERIT = True
+
+
+def intercept_target_of(value: typing.Any, legacy: typing.Any = None) -> str:
+    """A destination out of whatever a document holds.
+
+    The target when it is one of the three; otherwise the legacy switch,
+    which only ever knew Clipboard from not-Clipboard; otherwise the
+    default. This is the whole migration: ``intercept: false`` reads as
+    Mini Paint and ``intercept: true`` as Clipboard, and neither file has
+    to be rewritten before the tab works.
+    """
+    if value in INTERCEPT_TARGETS:
+        return str(value)
+    if legacy is not None:
+        return INTERCEPT_CLIPBOARD if legacy is True else INTERCEPT_MINIPAINT
+    return DEFAULT_INTERCEPT_TARGET
 
 _LOG_PREFIX = "MiniPaint Clipboard:"
 
@@ -177,23 +212,43 @@ class Config:
     schema_version: int = SCHEMA_VERSION
     storage_root: str = ""
     root_id: str = ""
-    intercept: bool = DEFAULT_INTERCEPT
+    #: Where the gallery's 🖌️ button sends: one of INTERCEPT_TARGETS. The
+    #: older boolean is a view of this, below, so nothing that read or set
+    #: ``intercept`` has to change.
+    intercept_target: str = DEFAULT_INTERCEPT_TARGET
     sort: str = DEFAULT_SORT
     thumbnail: int = THUMBNAIL_DEFAULT
     #: Where WanGP writes its videos. Empty means "work it out from the
     #: WanGP root", which is right on every install that has not been
     #: repointed; this is the way out for one that has.
     outputs_folder: str = ""
+    #: The WanGP popup's last "Inherit Clipboard inputs" choice.
+    intercept_inherit: bool = DEFAULT_INTERCEPT_INHERIT
+
+    @property
+    def intercept(self) -> bool:
+        """The legacy switch: whether the button sends into Clipboard."""
+        return self.intercept_target == INTERCEPT_CLIPBOARD
+
+    @intercept.setter
+    def intercept(self, flag: typing.Any) -> None:
+        self.intercept_target = INTERCEPT_CLIPBOARD if flag else INTERCEPT_MINIPAINT
 
     def as_dict(self) -> dict:
+        target = intercept_target_of(self.intercept_target)
         return {
             "schema_version": SCHEMA_VERSION,
             "storage_root": str(self.storage_root or ""),
             "root_id": str(self.root_id or ""),
-            "intercept": bool(self.intercept),
+            "intercept_target": target,
+            # Still written, so an older build of this extension reading the
+            # same file sees the switch it knows: on exactly when the target
+            # is Clipboard.
+            "intercept": target == INTERCEPT_CLIPBOARD,
             "sort": self.sort if self.sort in SORT_MODES else DEFAULT_SORT,
             "thumbnail": clamp_thumbnail(self.thumbnail),
             "outputs_folder": str(self.outputs_folder or ""),
+            "intercept_inherit": self.intercept_inherit is not False,
         }
 
     @classmethod
@@ -204,14 +259,16 @@ class Config:
         root_id = data.get("root_id")
         root_id = root_id if isinstance(root_id, str) and root_id else (root_id_for(root) if root else "")
         sort = data.get("sort")
+        legacy = data.get("intercept")
         return cls(
             schema_version=SCHEMA_VERSION,
             storage_root=root,
             root_id=root_id,
-            intercept=bool(data.get("intercept", DEFAULT_INTERCEPT)),
+            intercept_target=intercept_target_of(data.get("intercept_target"), legacy if isinstance(legacy, bool) else None),
             sort=sort if sort in SORT_MODES else DEFAULT_SORT,
             outputs_folder=str(data.get("outputs_folder") or "") if isinstance(data.get("outputs_folder"), str) else "",
             thumbnail=clamp_thumbnail(data.get("thumbnail", THUMBNAIL_DEFAULT)),
+            intercept_inherit=data.get("intercept_inherit", DEFAULT_INTERCEPT_INHERIT) is not False,
         )
 
     @property
@@ -248,7 +305,15 @@ __all__ = [
     "CONFIG_NAME",
     "Config",
     "DEFAULT_INTERCEPT",
+    "DEFAULT_INTERCEPT_INHERIT",
+    "DEFAULT_INTERCEPT_TARGET",
     "DEFAULT_SORT",
+    "INTERCEPT_CLIPBOARD",
+    "INTERCEPT_LABELS",
+    "INTERCEPT_MINIPAINT",
+    "INTERCEPT_TARGETS",
+    "INTERCEPT_WANGP",
+    "intercept_target_of",
     "DRAFT_NAME",
     "HISTORY_NAME",
     "INDEX_NAME",

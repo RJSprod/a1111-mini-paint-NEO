@@ -1618,12 +1618,21 @@ def check_a_picture_handed_in_arrives_without_the_queue(r: Results, page, librar
 
     page.evaluate("() => window.minipaintClipboard.toggleMenu()")
     time.sleep(0.4)
-    r.check("handed in: the intercept can be turned on", menu_click(page, "Intercept") == "clicked")
+    # The intercept is a destination now: a section of the menu with three
+    # mutually exclusive choices, the current one ticked.
+    r.check("handed in: the menu offers Intercept Options", menu_click(page, "Intercept Options") == "clicked")
+    time.sleep(0.4)
+    choices = page.evaluate(MENU_ITEMS_JS)
+    r.check("handed in: with Mini Paint, Clipboard and WanGP as its choices, Mini Paint ticked",
+            any("Mini Paint" in item and item.startswith("✓") for item in choices)
+            and any("Clipboard" in item for item in choices) and any("WanGP" in item for item in choices), str(choices))
+    r.check("handed in: the intercept can be pointed at Clipboard", menu_click(page, "Send to “Clipboard”") == "clicked")
     time.sleep(2.5)
     # The page's own answer, not a hidden box's: the switch is saved over
     # this tab's route now, so what the menu is acting on is what matters.
     r.check("handed in: and the page knows it is on",
-            page.evaluate("() => window.minipaintClipboard.debug().intercept") is True)
+            page.evaluate("() => window.minipaintClipboard.debug().intercept") is True
+            and page.evaluate("() => window.minipaintClipboard.debug().interceptTarget") == "clipboard")
 
     before = len(list(library.glob("*")))
     page.route("**/queue/**", lambda route: route.abort())
@@ -1647,7 +1656,9 @@ def check_a_picture_handed_in_arrives_without_the_queue(r: Results, page, librar
         # Put the intercept back: it is stored, and the next suite inherits it.
         page.evaluate("() => window.minipaintClipboard.toggleMenu()")
         time.sleep(0.4)
-        menu_click(page, "Intercept")
+        menu_click(page, "Intercept Options")
+        time.sleep(0.4)
+        menu_click(page, "Send to “Mini Paint”")
         time.sleep(2.0)
         page.evaluate("() => window.minipaintClipboard.closeMenu()")
 

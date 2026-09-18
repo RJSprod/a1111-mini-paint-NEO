@@ -160,9 +160,12 @@ def stitch_panel(tabname: str, refs: dict) -> None:
     refs[f"{tabname}_stitch_enable"] = enable
 
 
-def output_panel(tabname: str, refs: dict) -> None:
+def output_panel(tabname: str, refs: dict, gallery_value=None) -> None:
+    """The result gallery and its button row. ``gallery_value`` puts pictures
+    in the gallery from the start, for a browser check that presses the
+    row's buttons on a page that has never generated anything."""
     with gr.Column(elem_id=f"{tabname}_results"):
-        refs[f"{tabname}_gallery"] = gr.Gallery(label="Output", show_label=False, elem_id=f"{tabname}_gallery", columns=4, preview=True, type="pil", interactive=False, object_fit="contain")
+        refs[f"{tabname}_gallery"] = gr.Gallery(value=gallery_value, label="Output", show_label=False, elem_id=f"{tabname}_gallery", columns=4, preview=True, type="pil", interactive=False, object_fit="contain")
         with gr.Row(elem_id=f"image_buttons_{tabname}", elem_classes="image-buttons"):
             ToolButton("📂", elem_id=f"{tabname}_open_folder")
             ToolButton("🖼️", elem_id=f"{tabname}_send_to_img2img")
@@ -170,8 +173,11 @@ def output_panel(tabname: str, refs: dict) -> None:
             ToolButton("📐", elem_id=f"{tabname}_send_to_extras")
 
 
-def build_host(extension_tabs_fn, extra_head: str = "", hidden_tabs=()):
-    """Build the whole page the way ``modules/ui.py`` does. Returns (demo, refs)."""
+def build_host(extension_tabs_fn, extra_head: str = "", hidden_tabs=(), gallery_value=None):
+    """Build the whole page the way ``modules/ui.py`` does. Returns (demo, refs).
+
+    ``gallery_value`` seeds the txt2img result gallery, so a browser check can
+    press the buttons under a result without generating one."""
     install_patches()
     infotext_utils.paste_fields.clear()
     refs: dict = {}
@@ -180,7 +186,7 @@ def build_host(extension_tabs_fn, extra_head: str = "", hidden_tabs=()):
         refs["txt2img_prompt"] = gr.Textbox(label="Prompt", elem_id="txt2img_prompt")
         refs["txt2img_generate"] = gr.Button("Generate", elem_id="txt2img_generate")
         stitch_panel("txt2img", refs)
-        output_panel("txt2img", refs)
+        output_panel("txt2img", refs, gallery_value)
         infotext_utils.paste_fields["txt2img"] = {"init_img": None, "fields": []}
 
     with gr.Blocks(analytics_enabled=False) as img2img:

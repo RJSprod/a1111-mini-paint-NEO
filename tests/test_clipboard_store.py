@@ -339,15 +339,32 @@ def document_checks(r: Results, base: pathlib.Path) -> None:
     r.check("a broken history is moved aside and read as empty", history.load_history() == [] and any(p.name.startswith("clipboard-history.json.broken-") for p in config.config_dir().iterdir()))
     config.path_of(config.CONFIG_NAME).write_text(json.dumps({"schema_version": 99}), encoding="utf-8")
     r.check("a config from the future is not trusted", not config.load().configured)
-    config.save(config.Config(storage_root="/x", intercept=True, sort="largest", thumbnail=999))
+    config.save(config.Config(storage_root="/x", intercept_target=config.INTERCEPT_CLIPBOARD, sort="largest", thumbnail=999))
     loaded = config.load()
-    r.check("the config keeps the intercept switch, the sort and a clamped thumbnail", loaded.intercept is True and loaded.sort == "largest" and loaded.thumbnail == config.THUMBNAIL_MAX)
+    r.check("the config keeps the intercept destination, the sort and a clamped thumbnail",
+            loaded.intercept_target == config.INTERCEPT_CLIPBOARD and loaded.intercept is True and loaded.sort == "largest" and loaded.thumbnail == config.THUMBNAIL_MAX)
     r.check("and an unknown sort falls back", config.Config.from_dict({"sort": "sideways"}).sort == config.DEFAULT_SORT)
     r.check("update changes one field and keeps the rest", config.update(intercept=False).sort == "largest" and config.load().intercept is False)
     written = config.path_of(config.CONFIG_NAME).read_text(encoding="utf-8")
     r.check("the file holds exactly the declared keys",
-            set(json.loads(written)) == {"schema_version", "storage_root", "root_id", "intercept", "sort", "thumbnail", "outputs_folder"},
+            set(json.loads(written)) == {"schema_version", "storage_root", "root_id", "intercept", "intercept_target", "intercept_inherit",
+                                         "sort", "thumbnail", "outputs_folder"},
             str(sorted(json.loads(written))))
+    # The intercept is a destination now, and the older switch is a view of
+    # it in both directions: an old file reads as the destination it meant,
+    # and a new file still carries the switch an old build reads.
+    r.check("a file that only knows the switch reads as Mini Paint when it is off",
+            config.Config.from_dict({"intercept": False}).intercept_target == config.INTERCEPT_MINIPAINT)
+    r.check("and as Clipboard when it is on",
+            config.Config.from_dict({"intercept": True}).intercept_target == config.INTERCEPT_CLIPBOARD)
+    r.check("a destination the file names wins over the switch beside it",
+            config.Config.from_dict({"intercept": True, "intercept_target": config.INTERCEPT_WANGP}).intercept_target == config.INTERCEPT_WANGP)
+    r.check("and one it does not know falls back to the switch",
+            config.Config.from_dict({"intercept": True, "intercept_target": "sideways"}).intercept_target == config.INTERCEPT_CLIPBOARD)
+    r.check("the switch is written on exactly when the destination is Clipboard",
+            config.update(intercept_target=config.INTERCEPT_WANGP).as_dict()["intercept"] is False
+            and config.update(intercept_target=config.INTERCEPT_CLIPBOARD).as_dict()["intercept"] is True)
+    r.check("and setting the switch moves the destination", config.update(intercept=False).intercept_target == config.INTERCEPT_MINIPAINT)
 
 
 def send_route_checks(r: Results, base) -> None:
@@ -500,7 +517,14 @@ def http_door_checks(r: Results, base: pathlib.Path) -> None:
             and kept["thumbnail"] == config.THUMBNAIL_MAX and kept["intercept"] is True, str(kept)[:160])
     r.check("and answers with the menu the browser draws itself from, so no render is needed",
             kept["menu"]["sort"] == "largest" and kept["menu"]["intercept"] is True
-            and [mode for mode, _label in kept["menu"]["sorts"]] == list(config.SORT_MODES), str(kept["menu"])[:120])
+            and kept["menu"]["intercept_target"] == config.INTERCEPT_CLIPBOARD
+            and [target for target, _label in kept["menu"]["intercepts"]] == list(config.INTERCEPT_TARGETS)
+            and [mode for mode, _label in kept["menu"]["sorts"]] == list(config.SORT_MODES), str(kept["menu"])[:160])
+    pointed = client.post(routes.SETTINGS_ROUTE, json={"intercept_target": "wangp"}).json()
+    r.check("the route takes the destination by name too, and says what the button does now",
+            pointed["intercept_target"] == "wangp" and pointed["intercept"] is False and "WanGP" in pointed["status"], str(pointed)[:160])
+    r.check("and a destination it does not know changes nothing",
+            client.post(routes.SETTINGS_ROUTE, json={"intercept_target": "elsewhere"}).json()["intercept_target"] == "wangp")
     r.check("and says what it did, in the words the tab has always used",
             "Clipboard" in kept["status"], str(kept["status"]))
     nonsense = client.post(routes.SETTINGS_ROUTE, json={"sort": "sideways"}).json()

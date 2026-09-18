@@ -530,6 +530,8 @@ def outbox_view(jobs: typing.Sequence[dict], page: str) -> typing.List[dict]:
             badges.append({"text": "composed on another page"})
         elif job.get("origin") == outbox.ORIGIN_API:
             badges.append({"text": "from another extension"})
+        elif job.get("origin") == outbox.ORIGIN_GALLERY:
+            badges.append({"text": "from the gallery", "title": "Sent with the gallery's 🖌️ button, pointed at WanGP"})
         if job.get("enhance_requested"):
             badges.append({"text": "enhanced prompt"})
         if server:
@@ -600,6 +602,16 @@ def _hex(value: typing.Any) -> str:
 
 def _nonce() -> str:
     return secrets.token_hex(4)
+
+
+def _intercept_bundle_url() -> str:
+    """The URL of the WanGP popup's bundle, or "" when it cannot be named."""
+    try:
+        from .. import assets
+
+        return assets.url_for("intercept")
+    except Exception:
+        return ""
 
 
 #: The ClipboardTab most recently built, so the HTTP send route answers from
@@ -727,14 +739,14 @@ class ClipboardTab:
     # -- what the page shows ------------------------------------------------
 
     def _menu_state(self) -> str:
-        current = config.load()
-        return json.dumps({
-            "intercept": bool(current.intercept),
-            "configured": bool(current.configured),
-            "sort": current.sort,
-            "thumbnail": current.thumbnail,
-            "sorts": [[mode, config.SORT_LABELS[mode]] for mode in config.SORT_MODES],
+        facts = routes.menu_facts(config.load())
+        facts.update({
             "destinations": [[key, label] for key, label in self.destinations],
+            # Where the WanGP popup's own bundle is served from, so a page
+            # that has to open it without the receive chain - the queue
+            # dead, the picture staged over HTTP instead - knows what to
+            # fetch. A URL with the file's digest in it, never a path.
+            "intercept_bundle": _intercept_bundle_url(),
             # A value that differs every time, so a callback returning the
             # same settings as last time still reaches the browser. It is
             # what the page watches to know the framework's channel is
@@ -742,6 +754,7 @@ class ClipboardTab:
             # look identical, which is the fault this whole tab is named for.
             "nonce": _nonce(),
         })
+        return json.dumps(facts)
 
     def _asset(self, asset_id: typing.Any) -> typing.Optional[store.Asset]:
         return self.library.get(asset_id) if _hex(asset_id) else None
@@ -975,11 +988,26 @@ class ClipboardTab:
         config.update(thumbnail=config.clamp_thumbnail(size))
         return self._menu_state()
 
+    def set_intercept(self, value):
+        """The intercept destination, from the hidden box: ``<target>:<nonce>``.
+
+        The menu's Intercept Options section writes it, after saving the
+        same choice over the tab's own route; like the sort, the box is the
+        second door, kept so a page whose Gradio is alive re-renders its
+        menu state, and nothing waits on it. A target that is not one
+        changes nothing.
+        """
+        target = str(value or "").split(":", 1)[0]
+        if target not in config.INTERCEPT_TARGETS:
+            return self._menu_state(), gr.skip()
+        config.update(intercept_target=target)
+        self._journal(f"the gallery's send button now goes to {target}")
+        return self._menu_state(), _status(routes.INTERCEPT_SENTENCES[target])
+
     def toggle_intercept(self):
-        current = config.update(intercept=not config.load().intercept)
-        message = ("The gallery’s 🖌️ button now sends into Clipboard." if current.intercept
-                   else "The gallery’s 🖌️ button sends to Mini Paint again.")
-        return self._menu_state(), _status(message)
+        """The older two-way switch: Clipboard or Mini Paint. Kept for its callers."""
+        target = config.INTERCEPT_MINIPAINT if config.load().intercept else config.INTERCEPT_CLIPBOARD
+        return self.set_intercept(target)
 
     # -- the composer ---------------------------------------------------------
 
@@ -1643,7 +1671,12 @@ class ClipboardTab:
                     # What the menu presses and writes. Hidden: the menu is their face.
                     refresh_btn = gr.Button("Refresh", visible=False, elem_id=_id("refresh"))
                     upload_btn = gr.UploadButton("Upload image(s)", file_types=["image"], file_count="multiple", type="filepath", visible=False, elem_id=_id("upload"))
-                    intercept_btn = gr.Button("Intercept", visible=False, elem_id=_id("intercept"))
+                    # The intercept destination, as the menu's Intercept
+                    # Options section writes it: a box rather than the
+                    # button it was, because there are three choices now and
+                    # a press carries none of them. Same count of hidden
+                    # components; see the ceiling in the checks.
+                    intercept_request = gr.Textbox("", visible=False, elem_id=_id("intercept"))
                     folder_open = gr.Button("Choose storage folder", visible=False, elem_id=_id("folder_open"))
                     rename_open = gr.Button("Rename selected", visible=False, elem_id=_id("rename_open"))
                     delete_open = gr.Button("Delete selected", visible=False, elem_id=_id("delete_open"))
@@ -1780,7 +1813,7 @@ class ClipboardTab:
             cards=(card_first, card_last, card_ref), menu_btn=menu_btn, paste_btn=paste_btn, delete_btn=delete_btn, roles=(to_first, to_last, to_ref),
             sort_btn=sort_btn, send_btn=send_btn, sort_request=sort_request, thumb=thumb, refresh_btn=refresh_btn, upload_btn=upload_btn,
             outputs_open=outputs_open, outputs_panel=outputs_panel,
-            intercept_btn=intercept_btn, folder_open=folder_open, folder_panel=folder_panel, folder_text=folder_text,
+            intercept_request=intercept_request, folder_open=folder_open, folder_panel=folder_panel, folder_text=folder_text,
             folder_use=folder_use, folder_create=folder_create, folder_close=folder_close, folder_status=folder_status,
             rename_open=rename_open, rename_panel=rename_panel, rename_text=rename_text, rename_ok=rename_ok, rename_cancel=rename_cancel,
             delete_open=delete_open, delete_panel=delete_panel, delete_ok=delete_ok, delete_cancel=delete_cancel,
@@ -1840,7 +1873,7 @@ class ClipboardTab:
         p["send_btn"].click(None, js=SEND_MENU_JS)
         p["thumb"].change(None, js=THUMB_JS, inputs=[p["thumb"]])
         p["thumb"].release(self.thumbnail_changed, inputs=[p["thumb"]], outputs=[p["menu_state"]], **quiet)
-        p["intercept_btn"].click(self.toggle_intercept, inputs=[], outputs=[p["menu_state"], p["status"]], **quiet)
+        p["intercept_request"].input(self.set_intercept, inputs=[p["intercept_request"]], outputs=[p["menu_state"], p["status"]], **quiet)
         p["upload_btn"].upload(self.upload, inputs=[p["upload_btn"], selected], outputs=refresh_outputs, **quiet)
         p["paste_open"].click(lambda: gr.update(visible=True), inputs=[], outputs=[p["paste_panel"]], **quiet)
         p["paste_close"].click(lambda: gr.update(visible=False), inputs=[], outputs=[p["paste_panel"]], **quiet)

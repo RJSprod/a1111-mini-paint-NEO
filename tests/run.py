@@ -57,6 +57,9 @@ SUITES = [
     # The browser half of walking away: a page that is told rather than
     # asking, and that can be closed without the job noticing.
     "test_interop_browser",
+    # The gallery's Send to WanGP popup in Node: the rules it keeps with no
+    # page - what it asks, what it sends, what Cancel leaves.
+    "test_intercept_browser",
     "test_clipboard_store",
     "test_clipboard_outbox",
     "test_clipboard_enhance",
@@ -67,6 +70,12 @@ SUITES = [
     # because the exact half of it is the executor's own record.
     "test_clipboard_outputs",
     "test_clipboard_ui",
+    # The gallery's send button pointed at WanGP: the destination setting
+    # and its migration, the frozen picture, Clipboard's capabilities and
+    # request building, the popup's history. After the tab, because the
+    # receive it intercepts is the Canvas's and the request it builds is the
+    # composer's.
+    "test_clipboard_intercept",
     "test_queue_e2e",
     # The Canvas startup contract, in a real browser, over the real asset
     # route. Last because it is the slowest, and listed HERE rather than left
@@ -77,12 +86,17 @@ SUITES = [
     # thumbnail grid. Both failed in the page while its 181 unit checks
     # passed, because both failures live where the graph cannot see.
     "browser_clipboard",
+    # The Send to WanGP popup on a real page: the gallery's own button opens
+    # it on the frozen picture, it is compact and sits under that button,
+    # Generate queues and closes it, Escape queues nothing, and the direct
+    # route opens it when Gradio's queue is dead.
+    "browser_intercept",
 ]
 
 #: Suites that drive a browser. They need Playwright and a Chromium, and they
 #: are the only ones that do; a checkout without them still runs everything
 #: else rather than reporting a failure it cannot act on.
-BROWSER = {"browser_loading", "browser_clipboard"}
+BROWSER = {"browser_loading", "browser_clipboard", "browser_intercept"}
 
 
 #: Third-party names a suite is allowed to be missing. Gradio is the reason

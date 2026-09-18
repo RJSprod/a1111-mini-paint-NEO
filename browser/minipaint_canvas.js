@@ -3331,6 +3331,10 @@ window.minipaintCanvas = (function () {
         setAspect: setAspect,
         cropBox: cropBox,
         pickGalleryImage: pickGalleryImage,
+        // A picture handed in was taken by something other than a tab
+        // switch - the Send to WanGP popup opened on it - so the watch that
+        // would otherwise decide it never arrived stands down.
+        receiveLanded: receiveLanded,
         switchTo: switchTo,
         setFocus: setFocus,
         debug: debug

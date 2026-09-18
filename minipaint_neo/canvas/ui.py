@@ -145,6 +145,54 @@ SWITCH_CANVAS_IF_RECEIVED_JS = (
 # After a gallery receive: the tab the receive landed in - the Canvas, or
 # Clipboard when the intercept is on - as the server said it.
 SWITCH_TO_JS = f"async (target) => {{ {_AWAIT_READY}if ({_JS}) {_JS}.switchTo(target); }}"
+#: The gallery's third destination, as Clipboard's config spells it.
+WANGP_INTERCEPT = "wangp"
+#: What a receive hands the browser for that destination:
+#: ``wangp:<token>:<w>x<h>:<tab>``. Spelled once, in Clipboard's intercept
+#: module, and read here so the two cannot drift.
+WANGP_HANDOFF_PREFIX = "wangp:"
+
+
+def _after_receive_js() -> str:
+    """The step after a gallery receive: switch tabs, or open the WanGP popup.
+
+    One browser step with no outputs, reading the switch box the server
+    just wrote. A tab name switches, as it always did. A WanGP handoff
+    fetches the popup's own bundle - the first time, and never before a
+    gallery send is actually pointed at WanGP - and opens it on the frozen
+    picture; the WanGP bridge and the public queue API go with it, because
+    the popup asks the live page what it takes and, for a job this page has
+    to run, pumps it through that API. Idempotent by URL, like every load.
+
+    The receive is acknowledged only when the popup actually opened. A
+    ``.then`` step runs whether or not the step before it succeeded, so a
+    send that never reached the server hands this step the box's previous
+    value - the last press's handoff - and the popup refuses a handoff it
+    has opened once. Leaving the Canvas's own watch armed in that case is
+    what lets it, twelve seconds later, freeze the picture over the direct
+    route instead.
+    """
+    intercept_url = ""
+    bundles = "{}"
+    try:
+        from .. import assets
+
+        intercept_url = assets.url_for("intercept")
+        bundles = json.dumps({name: assets.url_for(name) for name in ("wangp", "interop")})
+    except Exception:
+        intercept_url = ""
+    return (
+        "async (target) => { const t = String(target || ''); "
+        f"if (t.indexOf('{WANGP_HANDOFF_PREFIX}') === 0) {{ "
+        "const w = window.minipaintAssets; "
+        f"const ok = (w && w.load && {intercept_url!r}) ? await w.load([{intercept_url!r}]) : false; "
+        "const popup = window.minipaintIntercept; "
+        f"const opened = (ok && popup && popup.open) ? popup.open(t, {{ bundles: {bundles} }}) : false; "
+        f"if (opened && {_JS} && {_JS}.receiveLanded) {{ {_JS}.receiveLanded(); }} "
+        "if (!ok) { console.error('MiniPaint: the Send to WanGP popup could not be loaded; the picture was frozen and will be swept.'); } "
+        "return; } "
+        f"{_AWAIT_READY}if ({_JS}) {_JS}.switchTo(t); }}"
+    ).replace("'", '"')
 CROP_JS = (
     f"(fg, state, mode, box) => {{ if ({_JS}) {_JS}.mark(); "
     f"return [fg, state, mode, {_JS} ? {_JS}.cropBox() : '']; }}"
@@ -737,11 +785,15 @@ class TouchCanvas:
     def receive(self, payload, state, mode, tab: str):
         """An image arriving from a txt2img / img2img / Extras gallery.
 
-        With Clipboard's intercept on, the same button puts the picture into
-        the Clipboard library instead - its original file when the host
-        proves which one it is, its pixels otherwise - and the follow-up
-        step switches to that tab. An import that fails says so and passes
-        the picture through to the Canvas, so the send never vanishes.
+        Where it goes is Clipboard's intercept destination. Mini Paint: the
+        Canvas takes it, as it always has. Clipboard: the same button puts
+        the picture into the library instead - its original file when the
+        host proves which one it is, its pixels otherwise - and the
+        follow-up step switches to that tab. WanGP: the picture is frozen
+        for one request and the follow-up step opens the compact popup on
+        it; the Canvas and the library are untouched. A destination that
+        fails says so and passes the picture through to the Canvas, so the
+        send never vanishes.
         """
         doc = document.ensure(state)
         image = host.gallery_image(payload)
@@ -750,7 +802,23 @@ class TouchCanvas:
             return self._unchanged(doc, mode, "Pick an image in the gallery first.")
 
         notes = []
-        if self._intercepting():
+        target = self._intercept_target()
+        if target == WANGP_INTERCEPT:
+            # The third destination: the picture is frozen for one WanGP
+            # request and the browser opens the compact popup for it. The
+            # Canvas keeps its document and the library gets nothing - the
+            # frozen picture is a transient the popup's Cancel lets go.
+            try:
+                handoff = self._stage_for_wangp(image, tab)
+            except Exception as error:
+                code = str(getattr(error, "code", "") or type(error).__name__)
+                notes.append(f"the WanGP request could not be prepared ({code}), so it came here instead")
+                log_quietly({"destination": f"{tab} -> WanGP", "outcome": f"failed: {code}; passed through to the Canvas"})
+            else:
+                doc.pending_switch = handoff
+                log_quietly({"destination": f"{tab} -> WanGP", "outcome": f"staged {image.width}x{image.height} for the request popup"})
+                return self._unchanged(doc, mode, "Handed to the WanGP request popup.")
+        elif target == CLIPBOARD_TARGET:
             try:
                 asset = self._import_to_clipboard(payload, image, tab)
             except Exception as error:
@@ -771,15 +839,39 @@ class TouchCanvas:
         return self._commit(doc, "crop", f"Received from {tab}.", notes)
 
     def after_receive(self, state):
-        """Which tab the receive landed in: what the follow-up step switches to."""
+        """Which tab the receive landed in: what the follow-up step switches to.
+
+        Or, for a send pointed at WanGP, the handoff the popup opens on -
+        ``wangp:<token>:...`` - which the same step recognises by its prefix.
+        """
         doc = document.ensure(state)
         target = getattr(doc, "pending_switch", "") or "canvas"
         doc.pending_switch = ""
         return target
 
     def _intercepting(self) -> bool:
+        return self._intercept_target() == CLIPBOARD_TARGET
+
+    def _intercept_target(self) -> str:
+        """Where the gallery's button sends, as Clipboard's config says now.
+
+        Read per press, never cached: a second browser, or a Reload UI, may
+        have changed it. Without Clipboard at all, the Canvas, as always.
+        """
         clipboard = _clipboard()
-        return bool(clipboard is not None and clipboard.intercept_enabled())
+        if clipboard is None or not hasattr(clipboard, "intercept_target"):
+            return "canvas"
+        try:
+            return str(clipboard.intercept_target() or "")
+        except Exception:
+            return "canvas"
+
+    def _stage_for_wangp(self, image, tab: str) -> str:
+        """Freeze the picked picture for one WanGP request; the handoff string."""
+        intercept = _clipboard("intercept")
+        if intercept is None:
+            raise RuntimeError("the Clipboard intercept module is not available")
+        return intercept.stage(imaging.to_rgba(image), tab)
 
     def _import_to_clipboard(self, payload, image, tab: str):
         """The gallery picture into the Clipboard library, bytes first.
@@ -2236,14 +2328,18 @@ class TouchCanvas:
 
         # -- receive: the small button next to "send to extras" in each output
         # panel. The chain ends by switching to the tab the picture landed
-        # in - the Canvas, or Clipboard when its intercept is on.
+        # in - the Canvas, or Clipboard when its intercept is on - or, when
+        # the button is pointed at WanGP, by opening the compact request
+        # popup on the picture the server froze. One browser step, no
+        # outputs, so nothing of another tab's is ever named here.
+        after_receive_js = _after_receive_js()
         for tab, button, gallery in host.receive_buttons():
             structural(
                 button.click,
                 lambda payload, state, mode, tab=tab: self.receive(payload, state, mode, tab),
                 [gallery, state, mode_state],
                 js=PICK_JS,
-            ).then(self.after_receive, inputs=[state], outputs=[switch_box], **quiet).then(None, js=SWITCH_TO_JS, inputs=[switch_box])
+            ).then(self.after_receive, inputs=[state], outputs=[switch_box], **quiet).then(None, js=after_receive_js, inputs=[switch_box])
 
 
 def create_ui() -> TouchCanvas:

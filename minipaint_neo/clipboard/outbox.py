@@ -164,7 +164,12 @@ STAGE_TEXT = {
 
 ORIGIN_CLIPBOARD = "clipboard"
 ORIGIN_API = "api"
-ORIGINS = (ORIGIN_CLIPBOARD, ORIGIN_API)
+#: A press of the gallery's send button with WanGP as its destination. Its
+#: own origin so the Queue can say where a job came from, and so Queue Send
+#: History - which records the composer's confirmed sends and would file a
+#: frozen gallery picture as "Use WanGP" - leaves these to their own history.
+ORIGIN_GALLERY = "gallery"
+ORIGINS = (ORIGIN_CLIPBOARD, ORIGIN_API, ORIGIN_GALLERY)
 
 #: Where a job's task is inside WanGP once WanGP has it, as the page that
 #: queued it reports (protocol 5's track). "accepted" is the confirmation
@@ -2027,7 +2032,7 @@ __all__ = [
     "EXECUTION_UNKNOWN", "EXECUTORS", "EXECUTOR_BROWSER", "EXECUTOR_SERVER", "FAILED",
     "GENERATION_RUNNING", "GENERATION_WAITING", "LEASE_SECONDS", "LEGACY_TERMINAL", "MAX_JOBS",
     "hand_to_browser", "inherit_settings", "use_inherit",
-    "MAX_PENDING", "ORIGIN_API", "ORIGIN_CLIPBOARD", "OUTBOX_NAME", "PAGE_ACTIVE_SECONDS", "PENDING",
+    "MAX_PENDING", "ORIGIN_API", "ORIGIN_CLIPBOARD", "ORIGIN_GALLERY", "OUTBOX_NAME", "PAGE_ACTIVE_SECONDS", "PENDING",
     "PHASE_DONE", "PHASE_SENT", "POSITIVE", "QUEUED", "SCHEMA", "SENDING", "SERVER_ACTIVE",
     "SERVER_SUBMITTED", "SERVER_TERMINAL", "STAGE_TEXT", "STARTED", "STATES", "SUBMITTING_WANGP",
     "TERMINAL", "UNCONFIRMED", "WAITING", "WAITING_FOR_CARD", "WAITING_TURN", "WAIT_BUSY_MS",

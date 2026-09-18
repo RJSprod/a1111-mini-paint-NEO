@@ -211,15 +211,18 @@ def run() -> Results:
     # be raised each time the Clipboard grows another full-window view, and a
     # check that is routinely edited is a check nobody reads.
     #
-    # Exactly two shapes are allowed. Focus mode, which is this canvas filling
-    # the window on purpose; and anything under the Clipboard tab's own root,
-    # which cannot reach this canvas at all because the selector cannot match
-    # outside that tab. A fixed rule that is neither is the thing this check
-    # exists to catch, and it is named in the failure.
+    # Exactly three shapes are allowed. Focus mode, which is this canvas
+    # filling the window on purpose; anything under the Clipboard tab's own
+    # root, which cannot reach this canvas at all because the selector cannot
+    # match outside that tab; and the gallery's Send to WanGP popup, a
+    # dialog over the page by design - hidden until a gallery send is pointed
+    # at WanGP, one column wide, and matching nothing but its own elements. A
+    # fixed rule that is none of these is the thing this check exists to
+    # catch, and it is named in the failure.
     fixed_blocks = [block for block in css.split("}") if "position: fixed" in block]
     selectors = [block.split("{")[0].strip() for block in fixed_blocks]
     def deliberate(one):
-        return "minipaint-focus" in one or "#minipaint_clipboard_root" in one
+        return "minipaint-focus" in one or "#minipaint_clipboard_root" in one or one.split("\n")[-1].strip().startswith(".minipaint-intercept")
     stray = [one for one in selectors if not deliberate(one)]
     r.check("every fixed rule is either focus mode or scoped inside the Clipboard tab, so none can cover the canvas",
             bool(selectors) and not stray, str(stray or selectors))
@@ -381,8 +384,14 @@ def run() -> Results:
     r.check("receive picks the gallery image in the browser", len(receive) == 1 and "pickGalleryImage" in receive[0]["js"] and refs["txt2img_gallery"]._id in receive[0]["inputs"] and receive[0]["backend_fn"])
     r.check("receive then asks the server where it landed and switches to that tab - the Canvas, or Clipboard under the intercept",
             len(steps) == 3 and steps[1]["backend_fn"] and steps[1]["outputs"] == [component("minipaint_canvas_switch")["id"]]
-            and "switchTo(target)" in (steps[2].get("js") or "") and not steps[2]["backend_fn"]
+            and "switchTo(t)" in (steps[2].get("js") or "") and not steps[2]["backend_fn"]
             and steps[2]["inputs"] == [component("minipaint_canvas_switch")["id"]], str(len(steps)))
+    # The third destination. The same step, the same box: a WanGP handoff in
+    # it opens the request popup on the frozen picture instead of switching,
+    # and names no output, so nothing of another tab's is ever in this chain.
+    r.check("or opens the Send to WanGP popup when the server handed it a frozen picture, with no outputs either way",
+            len(steps) == 3 and 'indexOf("wangp:") === 0' in (steps[2].get("js") or "") and "minipaintIntercept" in (steps[2].get("js") or "")
+            and steps[2]["outputs"] == [], str(steps[2].get("outputs") if len(steps) == 3 else len(steps)))
 
     # -- what the canvas holds: the input event, filtered in the browser
     canvas_input = deps_targeting(background["id"], "input")

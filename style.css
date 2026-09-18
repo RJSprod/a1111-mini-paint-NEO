@@ -913,6 +913,265 @@
 }
 
 /* --------------------------------------------------------------------
+ * Send to WanGP popup
+ *
+ * The compact dialog the gallery's send button opens when it is pointed at
+ * WanGP. Fixed under the button that was pressed, one column wide, never
+ * the whole window. Colours are Gradio's theme variables with neutral
+ * fallbacks, like every other rule in this file, so a night theme reaches
+ * it; only sizes and layout are decided here.
+ * ------------------------------------------------------------------ */
+
+.minipaint-intercept {
+    position: fixed;
+    z-index: 60;
+    width: min(400px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: var(--block-radius, 8px);
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    border-left: 4px solid var(--color-accent, #ff7c00);
+    background: var(--background-fill-primary, rgba(32, 32, 32, 0.98));
+    color: var(--body-text-color, inherit);
+    box-shadow: var(--shadow-drop-lg, 0 8px 24px rgba(0, 0, 0, 0.35));
+    font-size: 13px;
+    line-height: 1.35;
+}
+.minipaint-intercept[hidden] { display: none; }
+.minipaint-intercept-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.minipaint-intercept-thumb {
+    flex: 0 0 auto;
+    width: 48px;
+    height: 48px;
+    object-fit: contain;
+    border-radius: 4px;
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.15));
+}
+.minipaint-intercept-titles {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.minipaint-intercept-sub {
+    color: var(--body-text-color-subdued, inherit);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.minipaint-intercept-close {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+}
+.minipaint-intercept-close:hover,
+.minipaint-intercept-close:focus-visible {
+    background: var(--button-secondary-background-fill-hover, rgba(127, 127, 127, 0.25));
+}
+.minipaint-intercept-prompt {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    min-height: 56px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm, 4px);
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    background: var(--input-background-fill, transparent);
+    color: inherit;
+    font: inherit;
+    line-height: 1.35;
+}
+.minipaint-intercept-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-height: 24px;
+}
+.minipaint-intercept-check { cursor: pointer; }
+.minipaint-intercept-check input,
+.minipaint-intercept-role input {
+    margin: 0;
+    accent-color: var(--color-accent, #ff7c00);
+}
+.minipaint-intercept-label { color: var(--body-text-color-subdued, inherit); }
+.minipaint-intercept-roles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.minipaint-intercept-role {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+}
+.minipaint-intercept-note {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 12px;
+}
+.minipaint-intercept-note[data-state="blocked"],
+.minipaint-intercept-note[data-state="model"] {
+    color: var(--error-text-color, inherit);
+}
+.minipaint-intercept-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.minipaint-intercept-dot {
+    flex: 0 0 auto;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--border-color-primary, rgba(127, 127, 127, 0.5));
+}
+.minipaint-intercept-dot[data-state="idle"],
+.minipaint-intercept-dot[data-state="running"] { background: var(--color-accent, #ff7c00); }
+.minipaint-intercept-dot[data-state="busy"] {
+    background: var(--color-accent, #ff7c00);
+    box-shadow: 0 0 0 3px var(--border-color-accent-subdued, rgba(127, 127, 127, 0.3));
+    animation: minipaint-intercept-pulse 1.2s ease-in-out infinite;
+}
+.minipaint-intercept-dot[data-state="off"] { background: var(--error-text-color, #d9534f); }
+@keyframes minipaint-intercept-pulse { 50% { opacity: 0.4; } }
+.minipaint-intercept-status-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--body-text-color-subdued, inherit);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.minipaint-intercept-actions button,
+.minipaint-intercept-entry-actions button,
+.minipaint-intercept-history-toggle {
+    min-height: 30px;
+    padding: 0 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    background: var(--button-secondary-background-fill, transparent);
+    color: var(--button-secondary-text-color, inherit);
+    font: inherit;
+    cursor: pointer;
+}
+.minipaint-intercept-actions button:hover,
+.minipaint-intercept-entry-actions button:hover,
+.minipaint-intercept-history-toggle:hover {
+    background: var(--button-secondary-background-fill-hover, rgba(127, 127, 127, 0.25));
+}
+.minipaint-intercept-entry-actions button,
+.minipaint-intercept-history-toggle {
+    min-height: 24px;
+    padding: 0 8px;
+    font-size: 12px;
+}
+.minipaint-intercept-message {
+    padding: 6px 8px;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.12));
+}
+.minipaint-intercept-message-failure {
+    border-left: 3px solid var(--error-text-color, #d9534f);
+    color: var(--error-text-color, inherit);
+}
+.minipaint-intercept-message[hidden] { display: none; }
+.minipaint-intercept-history {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 220px;
+    overflow-y: auto;
+}
+.minipaint-intercept-history[hidden] { display: none; }
+.minipaint-intercept-entry {
+    padding: 4px 6px;
+    border-radius: var(--radius-sm, 4px);
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.3));
+    background: var(--block-background-fill, transparent);
+}
+.minipaint-intercept-entry-pinned { border-left: 3px solid var(--color-accent, #ff7c00); }
+.minipaint-intercept-entry-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 12px;
+}
+.minipaint-intercept-entry-pin {
+    border: 0;
+    padding: 0 2px;
+    background: transparent;
+    color: inherit;
+    font-size: 14px;
+    cursor: pointer;
+}
+.minipaint-intercept-entry-outcome { margin-left: auto; }
+.minipaint-intercept-entry-prompt {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.minipaint-intercept-entry-details {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 12px;
+}
+.minipaint-intercept-entry-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 2px;
+}
+.minipaint-intercept-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 2px;
+}
+.minipaint-intercept-generate {
+    background: var(--color-accent, #ff7c00);
+    color: var(--button-primary-text-color, inherit);
+    border-color: transparent;
+    font-weight: 600;
+}
+.minipaint-intercept-generate[disabled] {
+    opacity: 0.5;
+    cursor: default;
+}
+.minipaint-intercept-toast {
+    position: fixed;
+    z-index: 61;
+    max-width: min(400px, calc(100vw - 24px));
+    padding: 8px 14px;
+    border-radius: 8px;
+    background: var(--background-fill-primary, rgba(32, 32, 32, 0.98));
+    color: var(--body-text-color, inherit);
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    border-left: 4px solid var(--color-accent, #ff7c00);
+    font-size: 13px;
+    line-height: 1.35;
+    box-shadow: var(--shadow-drop-lg, 0 2px 8px rgba(0, 0, 0, 0.3));
+    pointer-events: none;
+}
+.minipaint-intercept-toast-failure { border-left-color: var(--error-text-color, #d9534f); }
+.minipaint-intercept-toast[hidden] { display: none; }
+
+/* --------------------------------------------------------------------
  * Clipboard tab
  *
  * A browser on the left, a WanGP request composer on the right. Every

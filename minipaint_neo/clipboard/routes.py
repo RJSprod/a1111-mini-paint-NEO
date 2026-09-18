@@ -45,6 +45,10 @@ QUEUE_ROUTE = ROUTE_PREFIX + "/queue"
 ENHANCE_SETTINGS_ROUTE = ROUTE_PREFIX + "/enhance-settings"
 OUTPUTS_ROUTE = ROUTE_PREFIX + "/outputs"
 OUTPUT_FILE_ROUTE = ROUTE_PREFIX + "/output/{file_id}"
+#: The gallery's Send to WanGP popup: everything it asks, over one POST, and
+#: the small copy of the picture it froze.
+INTERCEPT_ROUTE = ROUTE_PREFIX + "/intercept"
+INTERCEPT_IMAGE_ROUTE = ROUTE_PREFIX + "/intercept/image/{token}"
 
 #: How many pictures one page of the grid carries.
 #:
@@ -267,6 +271,33 @@ async def _library(request: typing.Any) -> typing.Any:
     return _json(answer)
 
 
+#: What the status line says when the gallery's button is pointed somewhere.
+INTERCEPT_SENTENCES = {
+    config.INTERCEPT_MINIPAINT: "The gallery’s 🖌️ button sends to Mini Paint again.",
+    config.INTERCEPT_CLIPBOARD: "The gallery’s 🖌️ button now sends into Clipboard.",
+    config.INTERCEPT_WANGP: "The gallery’s 🖌️ button now opens a WanGP request.",
+}
+
+
+def menu_facts(current: typing.Optional[config.Config] = None) -> dict:
+    """What the browser's menu draws itself from, in one place.
+
+    Answered by the settings route and carried by the tab's own menu-state
+    box, so a menu that changed a setting over HTTP and one that was built
+    from a render agree on what they show.
+    """
+    current = current if current is not None else config.load()
+    return {
+        "intercept": bool(current.intercept),
+        "intercept_target": current.intercept_target,
+        "intercepts": [[target, config.INTERCEPT_LABELS[target]] for target in config.INTERCEPT_TARGETS],
+        "configured": bool(current.configured),
+        "sort": current.sort,
+        "thumbnail": current.thumbnail,
+        "sorts": [[mode, config.SORT_LABELS[mode]] for mode in config.SORT_MODES],
+    }
+
+
 def apply_settings(changes: typing.Mapping[str, typing.Any]) -> dict:
     """The three things the menu remembers: the sort, the tile size, the intercept.
 
@@ -278,6 +309,10 @@ def apply_settings(changes: typing.Mapping[str, typing.Any]) -> dict:
     A value that is not one falls back rather than refusing: a menu that
     cannot change the sort because a string was wrong is a worse answer than
     a sort that did not move.
+
+    The intercept is a destination now - ``intercept_target`` - and the
+    older switch is still taken, meaning Clipboard or Mini Paint, so a page
+    from before the third destination existed keeps working.
     """
     changes = changes if isinstance(changes, dict) else {}
     said = []
@@ -289,11 +324,15 @@ def apply_settings(changes: typing.Mapping[str, typing.Any]) -> dict:
             said.append(f"Sorted by {config.SORT_LABELS[mode].lower()}.")
     if "thumbnail" in changes:
         wanted["thumbnail"] = config.clamp_thumbnail(changes.get("thumbnail"))
-    if "intercept" in changes:
-        wanted["intercept"] = bool(changes.get("intercept"))
-        said.append("The gallery’s 🖌️ button now sends into Clipboard."
-                    if wanted["intercept"] else
-                    "The gallery’s 🖌️ button sends to Mini Paint again.")
+    if "intercept_target" in changes:
+        target = str(changes.get("intercept_target") or "")
+        if target in config.INTERCEPT_TARGETS:
+            wanted["intercept_target"] = target
+            said.append(INTERCEPT_SENTENCES[target])
+    elif "intercept" in changes:
+        target = config.INTERCEPT_CLIPBOARD if changes.get("intercept") else config.INTERCEPT_MINIPAINT
+        wanted["intercept_target"] = target
+        said.append(INTERCEPT_SENTENCES[target])
     current = config.update(**wanted) if wanted else config.load()
     return {
         "ok": True,
@@ -301,15 +340,10 @@ def apply_settings(changes: typing.Mapping[str, typing.Any]) -> dict:
         "sort": current.sort,
         "thumbnail": current.thumbnail,
         "intercept": current.intercept,
+        "intercept_target": current.intercept_target,
         # What the browser's menu draws itself from. Answered here so a menu
         # that changed a setting is correct without a Gradio render.
-        "menu": {
-            "intercept": bool(current.intercept),
-            "configured": bool(current.configured),
-            "sort": current.sort,
-            "thumbnail": current.thumbnail,
-            "sorts": [[mode, config.SORT_LABELS[mode]] for mode in config.SORT_MODES],
-        },
+        "menu": menu_facts(current),
     }
 
 
@@ -612,6 +646,96 @@ def _refused_here(error: IntegrationError) -> typing.Any:
     return _json(dict(error.as_dict(), status=errors.message(error.code)), 400)
 
 
+#: What the popup may ask of the intercept route, and the arguments each
+#: takes out of the body. One list, read by the route and by the checks.
+INTERCEPT_ACTIONS = ("describe", "submit", "cancel", "draft", "history", "history_load", "history_delete", "history_pin")
+
+
+def intercept_action(body: typing.Mapping[str, typing.Any]) -> typing.Tuple[dict, int]:
+    """The popup's one door, as a function: ``(answer, HTTP status)``.
+
+    Every action is request-and-response. ``describe`` is what the popup
+    draws itself from; ``submit`` is Generate; ``cancel`` lets the frozen
+    picture go; ``draft`` keeps an edited prompt shared with Clipboard when
+    the popup closes without generating; the ``history_*`` verbs are the
+    list's own buttons. Refusals carry the code's sentence and a 4xx that
+    says whether the caller or the world was wrong.
+    """
+    from . import intercept
+
+    body = body if isinstance(body, dict) else {}
+    action = str(body.get("action") or "describe")
+    if action not in INTERCEPT_ACTIONS:
+        return {"ok": False, "code": errors.REQUEST_INVALID, "message": f"{action} is not a Send to WanGP action."}, 400
+    model = body.get("model") if isinstance(body.get("model"), dict) else None
+    inputs = body.get("inputs") if isinstance(body.get("inputs"), dict) else None
+    try:
+        if action == "describe":
+            answer = intercept.describe(body.get("handoff"), model, inputs)
+        elif action == "submit":
+            answer = intercept.submit(
+                body.get("handoff"), body.get("prompt") or "", body.get("roles"), body.get("inherit"),
+                body.get("enhance") if isinstance(body.get("enhance"), bool) else None,
+                body.get("page") or "", model, inputs,
+            )
+        elif action == "cancel":
+            answer = intercept.cancel(body.get("handoff"))
+        elif action == "draft":
+            answer = intercept.save_prompt(body.get("prompt") or "")
+        elif action == "history":
+            answer = {"ok": True, "history": intercept.history_view(model, inputs)}
+        elif action == "history_load":
+            answer = intercept.recipe(body.get("id"), model, inputs)
+        elif action == "history_delete":
+            removed = intercept.delete_history(body.get("id"))
+            answer = {"ok": True, "removed": removed, "history": intercept.history_view(model, inputs)}
+        else:
+            pinned = intercept.pin_history(body.get("id"), body.get("pinned") is True)
+            answer = {"ok": pinned is not None, "entry": pinned, "history": intercept.history_view(model, inputs)}
+            if pinned is None:
+                answer.update({"code": errors.REQUEST_INVALID, "message": "That history entry is gone."})
+    except IntegrationError as error:
+        return dict(error.as_dict(), status=errors.message(error.code)), 400
+    if answer.get("ok") is False:
+        code = str(answer.get("code") or "")
+        status = 409 if code in (errors.WANGP_NOT_RUNNING, errors.QUEUE_BUSY, errors.INTERCEPT_IMAGE_EXPIRED) else 400
+        return answer, status
+    return answer, 200
+
+
+async def _intercept(request: typing.Any) -> typing.Any:
+    """The Send to WanGP popup's route. See ``intercept_action``."""
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        answer, status = intercept_action(body)
+    except Exception as error:
+        scrub.console(f"a Send to WanGP action failed ({type(error).__name__}).", _LOG_PREFIX)
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    return _json(answer, status)
+
+
+async def _intercept_image(request: typing.Any) -> typing.Any:
+    """The frozen picture, small, for the popup's thumbnail. By token only."""
+    from starlette.responses import Response
+
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    from . import intercept
+
+    try:
+        data, mime = intercept.preview(request.path_params.get("token", ""))
+    except IntegrationError as error:
+        return _json(error.as_dict(), 404)
+    except Exception:
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    return Response(content=data, media_type=mime, headers={"Cache-Control": "no-store"})
+
+
 async def _import(request: typing.Any) -> typing.Any:
     if not _signed_in(request):
         return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
@@ -746,6 +870,8 @@ def install(app: typing.Any) -> None:
             Route(OUTPUT_FILE_ROUTE, endpoint=_output_file, methods=["GET", "HEAD"]),
             Route(IMPORT_ROUTE, endpoint=_import, methods=["POST"]),
             Route(SEND_ROUTE, endpoint=_send, methods=["POST"]),
+            Route(INTERCEPT_ROUTE, endpoint=_intercept, methods=["POST"]),
+            Route(INTERCEPT_IMAGE_ROUTE, endpoint=_intercept_image, methods=["GET"]),
         ]
         app.router.routes[0:0] = routes
         setattr(app, _INSTALLED_FLAG, True)
@@ -762,8 +888,9 @@ def install(app: typing.Any) -> None:
         scrub.console(f"the thumbnail cache could not be swept ({type(error).__name__}); it will be swept after the next writes.", _LOG_PREFIX)
 
 
-__all__ = ["IMAGE_ROUTE", "IMMUTABLE_CACHE", "IMPORT_ROUTE", "LIBRARY_ROUTE", "PAGE_SIZE",
+__all__ = ["IMAGE_ROUTE", "IMMUTABLE_CACHE", "IMPORT_ROUTE", "INTERCEPT_ACTIONS", "INTERCEPT_IMAGE_ROUTE",
+           "INTERCEPT_ROUTE", "INTERCEPT_SENTENCES", "LIBRARY_ROUTE", "PAGE_SIZE",
            "PAGE_SIZE_MAX", "PAGE_SIZE_MIN", "REVALIDATED_CACHE", "ROUTE_PREFIX",
            "SEND_ROUTE", "SETTINGS_ROUTE", "QUEUE_ROUTE", "ENHANCE_SETTINGS_ROUTE", "REQUEST_MEMORY_SECONDS",
-           "apply_settings", "clamp_size", "forget_request", "image_url", "install", "library_page",
-           "page_of", "recent_request", "remember_request"]
+           "apply_settings", "clamp_size", "forget_request", "image_url", "install", "intercept_action", "library_page",
+           "menu_facts", "page_of", "recent_request", "remember_request"]

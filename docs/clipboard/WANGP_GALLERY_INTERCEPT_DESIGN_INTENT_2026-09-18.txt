@@ -1,0 +1,833 @@
+A1111 MINI PAINT NEO
+DESIGN INTENT TECHNICAL SPECIFICATION
+
+Feature:
+Gallery Send-to-WanGP Intercept via Clipboard Request Mapping
+
+Status:
+Design intent / implementation guidance
+
+Primary Goal:
+Allow the existing A1111/Forge gallery "send" action from txt2img/img2img to drive a WanGP generation request through Clipboard's existing request/composer and queue pathways, while adding a compact confirmation popup, transient gallery-image overrides, optional Clipboard inheritance, request history, and minimal-to-no impact on the underlying engine architecture.
+
+===============================================================================
+1. DESIGN PRINCIPLE
+===============================================================================
+
+This feature MUST be implemented as a thin routing/UI layer over the existing
+Clipboard -> WanGP generation request path.
+
+The preferred architecture is:
+
+    Gallery
+      -> existing send button
+      -> intercept destination router
+      -> compact WanGP popup
+      -> Clipboard request/composer API
+      -> Clipboard model/capability mapping
+      -> existing WanGP queue / execution path
+
+The popup and gallery intercept code MUST NOT become a second WanGP request
+engine.
+
+The popup MUST NOT contain model-family-specific behavior such as hard-coded
+MiniMax H3, REF2VA, FL2VA, LTX, Ideogram, or future model logic.
+
+Clipboard is the model-aware request-mapping layer.
+
+The new feature's responsibility is primarily to:
+- obtain the currently selected gallery image;
+- present generic request controls;
+- allow temporary image-role overrides;
+- optionally inherit the current Clipboard request state;
+- submit the resulting request through Clipboard's existing WanGP path;
+- record request history.
+
+Underlying engine behavior, WanGP transport, queue semantics, handoff protocol,
+and model mapping should remain unchanged whenever possible.
+
+===============================================================================
+2. USER-FACING ENTRY POINT
+===============================================================================
+
+Clipboard's menu gains:
+
+    Intercept Options >
+
+with three mutually exclusive choices:
+
+    Send to "Minipaint"
+    Send to "Clipboard"
+    Send to "WanGP"
+
+Default behavior remains:
+
+    Send to "Minipaint"
+
+The existing gallery send button remains the visible action in txt2img/img2img.
+No additional permanent gallery buttons should be required.
+
+The selected intercept destination determines how that existing button behaves.
+
+===============================================================================
+3. INTERCEPT SETTING MODEL
+===============================================================================
+
+The existing boolean intercept state should be replaced or evolved into a
+destination setting.
+
+Recommended normalized values:
+
+    minipaint
+    clipboard
+    wangp
+
+Backward compatibility should be preserved.
+
+Suggested migration behavior:
+
+    legacy intercept = false  -> minipaint
+    legacy intercept = true   -> clipboard
+
+The old boolean can remain readable during migration if needed, but new logic
+should use a destination enum/string rather than layering another boolean on top.
+
+===============================================================================
+4. WAN-GP INTERCEPT FLOW
+===============================================================================
+
+When the intercept destination is "wangp":
+
+1. User selects an image in the txt2img/img2img gallery.
+2. User presses the existing gallery send button.
+3. The exact selected gallery image is frozen for this request.
+4. A compact WanGP confirmation popup opens.
+5. Popup obtains current generic request capabilities from Clipboard.
+6. User confirms or edits request options.
+7. User presses Generate.
+8. Clipboard builds/maps the effective request.
+9. Request is submitted through the existing WanGP queue/outbox path.
+10. Popup closes immediately after successful queue admission/submission.
+11. User remains free to continue A1111 generation and queue more WanGP tasks.
+
+The selected gallery image MUST NOT remain a live pointer to the currently
+selected gallery item after the popup opens.
+
+Changing gallery selection after opening the popup MUST NOT change which image
+the popup submits.
+
+===============================================================================
+5. TRANSIENT IMAGE REQUIREMENT
+===============================================================================
+
+Sending a gallery image to WanGP MUST NOT create a persistent copy in Clipboard
+storage.
+
+This distinction is mandatory:
+
+    Clipboard storage
+        = persistent asset library
+
+    Send-to-WanGP gallery image
+        = transient request input
+
+The selected image may be staged temporarily using the existing handoff/request
+mechanism as necessary for submission, but it must not appear as a normal saved
+Clipboard item solely because it was sent to WanGP.
+
+Temporary handoff data should be released when no longer needed, including on
+Cancel where practical.
+
+===============================================================================
+6. COMPACT POPUP DESIGN
+===============================================================================
+
+The WanGP popup MUST be compact.
+
+It MUST NOT be full-screen.
+
+It should contain only functional controls and concise status information.
+Avoid instructional paragraphs, descriptive prose, or redundant labels.
+
+Recommended control layout:
+
+    Prompt
+    Enhance toggle
+
+    Use selected image as:
+        [role controls supplied by Clipboard]
+
+    Inherit Clipboard inputs
+        [on/off]
+
+    WanGP status indicator
+
+    Cancel    Generate
+
+Exact layout may vary, but the interaction should remain visually dense,
+obvious, and fast to use.
+
+===============================================================================
+7. PROMPT STATE
+===============================================================================
+
+The popup Prompt field and Clipboard Prompt field represent the same logical
+state.
+
+Requirements:
+
+- Popup opens with the current Clipboard prompt.
+- Editing the popup prompt updates the Clipboard prompt state.
+- Editing the Clipboard prompt should be reflected when the popup is opened.
+- If both surfaces are open simultaneously, same-page synchronization should be
+  maintained where practical.
+- Generate MUST submit the prompt value currently visible in the popup.
+- Submission MUST NOT depend only on a delayed blur/save operation.
+
+The visible value at Generate time is authoritative for that request.
+
+===============================================================================
+8. PROMPT ENHANCER STATE
+===============================================================================
+
+The popup enhancer toggle and Clipboard enhancer toggle represent the same
+logical setting.
+
+Requirements:
+
+- Popup initializes from current Clipboard enhancer state.
+- Changing it in the popup updates the shared setting.
+- Generate carries the current visible toggle value explicitly.
+- Submission must not rely on stale persisted state.
+
+Today this may correspond to MiniMax H3 prompt enhancement behavior, but the
+popup itself should not be coupled to a particular enhancer implementation.
+
+===============================================================================
+9. MODEL-AGNOSTIC IMAGE ROLE CAPABILITIES
+===============================================================================
+
+The popup MUST NOT determine supported image roles by examining WanGP model
+names itself.
+
+Instead, Clipboard must expose a generic capability description for the current
+request context.
+
+Examples of generic image roles include:
+
+    first_frame
+    last_frame
+    reference
+
+Future Clipboard mappings may expose additional roles.
+
+The popup simply renders the roles Clipboard reports as available.
+
+Current expected MiniMax-oriented examples:
+
+    FL2VA-like mapping:
+        available:
+            First Frame
+            Last Frame
+
+        default:
+            First Frame
+
+    REF2VA-like mapping:
+        available:
+            First Frame
+            Last Frame
+            Reference
+
+        default:
+            Reference
+
+These examples describe current Clipboard mapping behavior only.
+
+They MUST NOT be hard-coded into the popup/intercept layer.
+
+Future Clipboard support may map requests for LTX, Ideogram, or other systems
+without requiring the popup architecture to change.
+
+===============================================================================
+10. MULTI-ROLE OVERRIDE
+===============================================================================
+
+The selected gallery image may be assigned to one or more available image roles.
+
+The UI MUST support multi-selection where Clipboard reports that multiple roles
+are valid.
+
+For example, if Clipboard exposes:
+
+    First Frame
+    Last Frame
+    Reference
+
+the user may choose:
+
+    First Frame only
+
+or:
+
+    Reference only
+
+or:
+
+    First Frame + Last Frame
+
+or:
+
+    First Frame + Last Frame + Reference
+
+The same selected gallery image is then used as the override value for each
+chosen role.
+
+Default selected role(s) are supplied by Clipboard's capability/mapping layer.
+
+===============================================================================
+11. CLIPBOARD INHERITANCE
+===============================================================================
+
+The popup provides an inheritance control.
+
+Recommended wording:
+
+    Inherit Clipboard inputs
+
+When inheritance is enabled:
+
+- Clipboard's current request/draft inputs are used as the base request.
+- The selected gallery image overrides only the image roles selected in the
+  popup.
+- Other Clipboard request inputs remain intact unless Clipboard's model mapping
+  determines otherwise.
+
+When inheritance is disabled:
+
+- The request is built without inheriting Clipboard image inputs.
+- The selected gallery image is applied only to the role(s) chosen in the
+  popup.
+- Prompt and enhancer remain shared popup/Clipboard state unless intentionally
+  changed by a later design decision.
+
+The popup should not independently implement merge logic.
+
+It should send:
+- inherit on/off;
+- selected role IDs;
+- transient gallery image;
+- current prompt;
+- current enhancer state;
+
+to Clipboard, and Clipboard should construct the effective request.
+
+===============================================================================
+12. INHERITANCE EXAMPLE
+===============================================================================
+
+Clipboard state:
+
+    First Frame = forest image
+
+A1111 img2img gallery:
+
+    selected image = dog image
+
+Current Clipboard mapping reports:
+
+    First Frame
+    Last Frame
+    Reference
+
+with Reference as the default role.
+
+User opens Send-to-WanGP popup and chooses:
+
+    Use selected image as:
+        Reference
+
+    Inherit Clipboard inputs:
+        On
+
+Effective request becomes:
+
+    First Frame = forest image from Clipboard
+    Reference   = selected dog image from gallery
+
+The dog image is transient and is not saved into Clipboard storage.
+
+This enables fast compositions such as placing the user's dog into the forest
+context without manually rebuilding the Clipboard request.
+
+===============================================================================
+13. WAN-GP STATUS INDICATOR
+===============================================================================
+
+The compact popup should display a small WanGP state indicator.
+
+At minimum the user should be able to distinguish:
+
+    available / idle
+    currently generating / busy
+    unavailable / not running
+
+"Currently generating" is useful information and should be visible without
+expanding the popup.
+
+Busy/generating MUST NOT be treated as an error.
+
+If the existing queue supports admission while WanGP is busy, Generate should
+continue to queue normally.
+
+If WanGP is unavailable, the popup should show a concise warning/state rather
+than unnecessary explanatory text.
+
+Generate availability should follow the actual existing execution/queue
+capability rather than hard-coding "running = required" if the underlying
+architecture supports managed start or deferred execution.
+
+===============================================================================
+14. REQUEST HISTORY
+===============================================================================
+
+WanGP popup submissions should have a persistent request history.
+
+Purpose:
+
+- show what was previously sent;
+- allow a previous request configuration to be reloaded;
+- allow entries to be deleted;
+- allow favorite entries to be pinned.
+
+History should be available from the Clipboard/WanGP request workflow without
+requiring the original A1111 gallery image to become a saved Clipboard asset.
+
+Each successful submission creates one history entry.
+
+Recommended history fields:
+
+    id
+    created_at
+    prompt
+    enhance
+    inherit
+    selected_role_ids
+    capability/request context needed for reloading
+    model/mapping metadata if Clipboard chooses to record it
+    request summary
+    pin state
+
+Optional metadata may include:
+
+    queue/job identifier
+    execution state
+    lightweight preview metadata
+
+History storage should preserve request intent without coupling the schema to a
+specific WanGP model family.
+
+Avoid fields such as:
+
+    is_ref2va = true
+
+Prefer generic fields such as:
+
+    selected_role_ids = ["reference"]
+
+or normalized Clipboard request/mapping identifiers.
+
+===============================================================================
+15. HISTORY LIMIT
+===============================================================================
+
+History is capped at:
+
+    100 unpinned entries
+
+Pinned entries:
+
+- appear at the top of the history list;
+- are not removed by automatic history trimming;
+- do not count toward the 100-entry unpinned retention cap unless a future
+  implementation deliberately changes that rule.
+
+When adding a new unpinned entry causes the unpinned count to exceed 100:
+
+- delete the oldest unpinned entries until the count is 100;
+- never automatically delete pinned entries.
+
+===============================================================================
+16. HISTORY ACTIONS
+===============================================================================
+
+Each history line item supports:
+
+    Load
+    Delete
+    Pin / Unpin
+
+Load:
+
+- restores the reusable request recipe into the Clipboard/popup request state;
+- restores prompt;
+- restores enhancer state;
+- restores inheritance preference;
+- restores selected generic role IDs where still valid;
+- lets Clipboard reconcile the loaded recipe with current model capabilities.
+
+Delete:
+
+- removes that history entry;
+- does not delete unrelated Clipboard assets;
+- does not affect a WanGP generation already completed or queued unless
+  explicitly implemented separately.
+
+Pin:
+
+- moves the item into the pinned group/top of the list;
+- protects it from normal 100-entry trimming.
+
+Unpin:
+
+- returns it to normal chronological retention rules.
+
+===============================================================================
+17. HISTORY AND TRANSIENT IMAGES
+===============================================================================
+
+History should represent the request recipe.
+
+It MUST NOT silently convert every transient gallery image into a normal
+Clipboard asset.
+
+If implementation requires an image reference for reliable reload, that
+reference should use a dedicated history/handoff mechanism rather than
+polluting normal Clipboard storage.
+
+If a transient source image can no longer be reloaded later, the UI may restore
+the rest of the request recipe and indicate that the transient image is no
+longer available.
+
+A future implementation may add explicit "save source image" behavior, but that
+is outside the scope of this feature.
+
+===============================================================================
+18. CLIPBOARD AS THE REQUEST-MAPPING LAYER
+===============================================================================
+
+This is the core architectural constraint.
+
+The gallery popup should not know:
+
+- MiniMax H3-specific behavior;
+- REF2VA/FL2VA model-name logic;
+- LTX-specific image-role rules;
+- Ideogram-specific request rules;
+- model-name parsing;
+- WanGP component IDs;
+- model-dependent DOM structure.
+
+Clipboard should expose a generic request interface such as conceptually:
+
+    get_request_capabilities()
+    build_request(base_state, overrides, inherit)
+    submit_request(request)
+
+Exact API names are implementation details.
+
+The returned capability object should be normalized and UI-friendly.
+
+Conceptual example:
+
+    {
+        "roles": [
+            {"id": "first_frame", "label": "First Frame"},
+            {"id": "last_frame", "label": "Last Frame"},
+            {"id": "reference", "label": "Reference"}
+        ],
+        "default_roles": ["reference"],
+        "inherit_supported": true
+    }
+
+The popup renders this generic structure.
+
+Clipboard owns how those IDs map to the active model/WanGP request.
+
+===============================================================================
+19. MINIMAL ENGINE IMPACT
+===============================================================================
+
+Implementation should prefer reuse over modification.
+
+Prefer:
+
+- extending the existing intercept destination setting;
+- using existing gallery-selection handling;
+- using existing transient handoff mechanisms;
+- using existing Clipboard prompt/enhancer state;
+- using existing Clipboard request composition;
+- using existing WanGP queue/outbox submission;
+- using existing runtime/status APIs;
+- using existing Clipboard event/state synchronization where available.
+
+Avoid:
+
+- a second WanGP queue;
+- a second prompt-enhancement pipeline;
+- direct popup-to-WanGP model logic;
+- duplicating Clipboard model mapping;
+- permanent gallery image imports just to submit a request;
+- modifications to WanGP internals that are unnecessary for the feature;
+- modifications to image-generation engines themselves;
+- tight coupling between A1111 gallery code and specific WanGP models.
+
+The feature should behave as an alternate front-end entry point into the
+Clipboard -> WanGP request flow.
+
+===============================================================================
+20. LAZY LOADING / PERFORMANCE
+===============================================================================
+
+The popup must work even if the user has never opened the Clipboard tab in the
+current session.
+
+Do not require the full Clipboard browser bundle to have been manually activated
+before Send-to-WanGP can work.
+
+Preferred approaches:
+
+- expose a small stable request/status API from Clipboard; and/or
+- lazy-load a small dedicated popup/intercept module when WanGP intercept is
+  first used.
+
+Do not move the full WanGP or Clipboard implementation into the always-loaded
+A1111 page bootstrap.
+
+Preserve the existing failure-isolation and lazy-loading philosophy.
+
+===============================================================================
+21. FAILURE ISOLATION
+===============================================================================
+
+Failure of WanGP-specific functionality must not break the original gallery
+send behavior globally.
+
+Expected behavior:
+
+- Minipaint destination continues to work independently.
+- Clipboard destination continues to work independently.
+- WanGP popup failure should remain isolated to the WanGP intercept path.
+- Existing generation tabs should remain usable if WanGP is unavailable.
+
+No failure in model capability discovery should corrupt Clipboard storage or
+change gallery selection.
+
+===============================================================================
+22. CANCEL BEHAVIOR
+===============================================================================
+
+Cancel should:
+
+- close the popup;
+- create no WanGP request;
+- create no request-history entry;
+- create no Clipboard asset;
+- release temporary staged resources where practical.
+
+Any prompt/enhancer edits already made in the popup may remain shared with
+Clipboard because those controls represent shared state.
+
+===============================================================================
+23. GENERATE BEHAVIOR
+===============================================================================
+
+Generate should:
+
+1. capture visible popup state;
+2. validate currently selected generic roles against current Clipboard
+   capabilities;
+3. send prompt/enhancer/inheritance/role overrides plus transient gallery image
+   to Clipboard's request builder;
+4. submit through the existing WanGP queue/outbox pathway;
+5. record a history entry after successful request acceptance/submission;
+6. close the popup;
+7. return control immediately to the user's A1111 workflow.
+
+The user should be able to repeat this workflow rapidly for multiple gallery
+images.
+
+===============================================================================
+24. CAPABILITY CHANGES WHILE POPUP IS OPEN
+===============================================================================
+
+If the active WanGP/Clipboard model capability context changes while a popup is
+open, the implementation should avoid submitting now-invalid role assignments.
+
+A lightweight revalidation at Generate time is sufficient.
+
+Clipboard remains authoritative.
+
+Possible behavior:
+
+- keep still-valid selected roles;
+- remove or reject roles no longer supported;
+- apply updated defaults only if no valid user selection remains.
+
+Avoid embedding special model transition logic in the popup.
+
+===============================================================================
+25. LOADING HISTORY AGAINST A DIFFERENT MODEL
+===============================================================================
+
+A history entry may be loaded while Clipboard is mapped to a different model
+family than when the entry was created.
+
+Clipboard should reconcile the saved generic request recipe against current
+capabilities.
+
+For example:
+
+- a saved "reference" role can be restored when current capabilities support
+  reference;
+- if current capabilities do not support reference, Clipboard may omit that role
+  or surface a compact incompatibility state;
+- the popup should not parse model names to decide this.
+
+This allows history to survive future expansion to LTX, Ideogram, and other
+targets.
+
+===============================================================================
+26. STORAGE AND SCHEMA GUIDANCE
+===============================================================================
+
+New persistent state may include:
+
+    intercept destination
+    request history
+    pinned history state
+
+Existing Clipboard prompt/enhancer persistence should be reused.
+
+Suggested design:
+
+    intercept_target: string
+    history_schema_version: integer
+    history: list
+
+Use atomic/forgiving persistence consistent with the rest of the extension.
+
+History migration should tolerate missing fields and older entries.
+
+Avoid making a history-file schema depend on specific current model names unless
+stored only as optional informational metadata.
+
+===============================================================================
+27. SECURITY / DATA SCOPE
+===============================================================================
+
+No new network exposure is required by design.
+
+Use existing same-origin/local extension request pathways.
+
+Do not transmit gallery images to any additional destination beyond what is
+required by the existing Clipboard -> WanGP execution path.
+
+Transient image lifecycle should be bounded and explicit.
+
+===============================================================================
+28. REQUIRED REGRESSION TESTS
+===============================================================================
+
+At minimum, add coverage for:
+
+1. legacy intercept=false migrates to minipaint;
+2. legacy intercept=true migrates to clipboard;
+3. minipaint destination preserves original behavior;
+4. clipboard destination preserves current behavior;
+5. wangp destination opens popup;
+6. popup works without opening Clipboard tab first;
+7. selected gallery image is frozen at popup open;
+8. changing gallery selection does not change staged request image;
+9. Cancel queues nothing;
+10. Cancel creates no history item;
+11. WanGP send creates no Clipboard asset;
+12. prompt is shared with Clipboard;
+13. enhancer state is shared with Clipboard;
+14. Generate uses visible prompt value;
+15. Generate uses visible enhancer value;
+16. capabilities are supplied by Clipboard, not model-name logic in popup;
+17. role multi-select works;
+18. Clipboard-supplied default roles are applied;
+19. inheritance on preserves non-overridden Clipboard image inputs;
+20. inheritance off excludes Clipboard image inputs;
+21. gallery image overrides every selected role;
+22. busy/generating WanGP status is shown and queueing still works where allowed;
+23. unavailable WanGP state is handled without breaking A1111;
+24. multiple rapid requests queue independently;
+25. successful requests create history entries;
+26. failed/cancelled submissions do not create successful history entries;
+27. history Load restores recipe;
+28. history Delete removes only the selected history item;
+29. Pin moves item to pinned section;
+30. pinned items survive trimming;
+31. oldest unpinned items trim beyond 100;
+32. loading history under changed capabilities is reconciled by Clipboard;
+33. no hard-coded REF2VA/FL2VA model-name dependency exists in popup tests;
+34. existing WanGP queue/protocol tests continue to pass.
+
+===============================================================================
+29. NON-GOALS
+===============================================================================
+
+This feature does NOT require:
+
+- redesigning WanGP itself;
+- redesigning the existing generation engine;
+- replacing Clipboard's WanGP queue;
+- creating a new model-detection system inside the popup;
+- creating a second persistent image library;
+- storing every sent gallery image in Clipboard;
+- implementing LTX or Ideogram support now;
+- changing WanGP generation algorithms;
+- making the popup a full request editor.
+
+Future model support should be added primarily by extending Clipboard's mapping
+and capability layer.
+
+===============================================================================
+30. ACCEPTANCE CRITERIA
+===============================================================================
+
+The feature is successful when:
+
+- a user can select "Send to WanGP" as the gallery send intercept destination;
+- the existing gallery send button opens a compact popup;
+- the popup uses the current Clipboard prompt/enhancer state;
+- the popup receives generic supported image roles and defaults from Clipboard;
+- the user can assign the selected gallery image to one or multiple supported
+  roles;
+- the user can enable or disable Clipboard image inheritance;
+- the gallery image overrides selected inherited roles;
+- the image remains transient and is not added to Clipboard storage;
+- the popup shows a compact WanGP idle/busy/unavailable state;
+- Generate queues through the existing Clipboard -> WanGP request path;
+- the popup closes and the user can continue A1111 work immediately;
+- successful requests appear in a 100-entry unpinned history;
+- history entries can be loaded, deleted, pinned, and unpinned;
+- pinned entries remain at the top and are protected from trimming;
+- the popup contains no MiniMax-specific model logic;
+- future model families can be supported by extending Clipboard mapping without
+  redesigning the intercept popup;
+- existing Minipaint, Clipboard, WanGP, queue, and generation behavior is not
+  regressed.
+
+===============================================================================
+31. IMPLEMENTATION INTENT IN ONE SENTENCE
+===============================================================================
+
+Add a compact, model-agnostic gallery-to-WanGP request launcher that reuses
+Clipboard as the authoritative request/composition and model-mapping layer,
+supports transient image-role overrides plus optional Clipboard inheritance,
+records reusable request history, and leaves the underlying generation and
+WanGP engine architecture essentially untouched.

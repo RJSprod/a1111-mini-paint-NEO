@@ -474,9 +474,24 @@ says that, and is never sent twice.
 
 **With Mini Paint.** The Canvas's *Send to* menu now offers **Clipboard**; *Send selected
 to Mini Paint* lands on the Canvas as Layer 1 over a Background, one Undo away; and the
-menu's **Intercept "Send to Mini Paint"** switch makes the gallery's 🖌️ button put the
-result *here* instead — its original file when Forge proves which one it is — and passes it
-through to the Canvas, with the reason, when Clipboard cannot take it.
+menu's **Intercept Options** choose what the gallery's 🖌️ button does: put the result on
+the Canvas as always, put it *here* — its original file when Forge proves which one it is,
+passed through to the Canvas with the reason when Clipboard cannot take it — or open the
+**Send to WanGP** popup.
+
+**Send to WanGP from the gallery.** With that third option ticked, the 🖌️ button freezes
+the result under an opaque token (never in the library) and opens a compact popup over
+the gallery: the composer's prompt and its *Enhanced prompts* switch, the image roles the
+WanGP page's model reads (first frame, last frame, reference, several at once), *Inherit
+Clipboard inputs* for everything the popup does not override, a dot saying whether WanGP
+is idle, generating or not running, and Generate. The request goes down the composer's
+own path into the same server-owned queue, marked *from the gallery*, and the popup is
+gone as soon as the outbox has the job, so a run of generations can be queued without
+leaving the tab. Its own history keeps the last hundred recipes, plus what you pin, and
+loads one back reconciled against the model the page is on. Every request it makes is
+bounded and it holds no stream open, so it costs nothing of the six-connection budget on
+an HTTP/1.1 Forge and nothing at all over the auto-TLS extension's HTTP/2.
+`docs/clipboard/README.md` has the whole of it.
 
 **Themed.** Every part of the tab is an ordinary Gradio component and every colour is a
 theme variable; there is no fixed white or black anywhere in it, so a night-mode theme
@@ -697,7 +712,7 @@ minipaint_neo/
     assets.py                    the browser bundles, fetched per tab from /minipaint-assets/js/ rather than parsed into every page
     interop.py                   the public queue API's server half: staging, preparing handoffs, the outbox routes, /minipaint-interop/*
     clipboard/                   the Clipboard tab (see docs/clipboard/README.md)
-        config.py                the folder, the intercept, the sort and the thumbnail size
+        config.py                the folder, the intercept destination, the sort and the thumbnail size
         store.py                 the library: one folder, opaque ids, containment, import, refresh, rename, delete
         history.py               the composer's draft and Queue Send History
         outbox.py                the queue outbox: every press a job the server owns, in press order; what each job is waiting for, said out loud
@@ -706,6 +721,8 @@ minipaint_neo/
         enhance.py               enhanced prompts: ModelSwitchRefiner's MiniMax H3 writer (mc_llm_api), the switch, the four system prompts and their overrides
         outputs.py               what WanGP made for this tab's requests, kept where a restart can find it: View Outputs reads this, not the queue
         routes.py                a picture by its id, and bytes in
+        intercept.py             Send to WanGP from the gallery: the frozen picture behind a token, the roles a model reads,
+                                 the popup's request path through the outbox, and its pinned history
         ui.py                    the tab: the browser, the composer, the enhancement panel, Add to Queue through the public API
     wangp/                       the WanGP tab, all of it (see docs/wangp/README.md)
         config.py                what survives a restart, and only that
@@ -730,6 +747,8 @@ browser/minipaint_interop.js     window.minipaintInterop: the public queue API (
 browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid and its pager, the queue list and the history,
                                  the menu, paste and drop, Add to Queue, the page's model, and the one standing notice
                                  (browser/ is not auto-loaded: each tab fetches its own bundle from /minipaint-assets/js/, cached by content)
+browser/minipaint_intercept.js   the Send to WanGP popup: opened by the gallery button on a frozen picture, drawn from
+                                 /minipaint-clipboard/intercept, closed the moment the outbox has the job; fetched only when first needed
 wan2gp_bridge/                   the companion plugin, installed into your WanGP
 style.css                        legacy rules, rules scoped to the Canvas root, then to the Clipboard root (theme variables only)
 miniPaint/                       the legacy editor itself

@@ -227,6 +227,46 @@
     border-radius: var(--block-radius, 8px);
 }
 
+/* The paper under the picture.
+
+   Forge paints the transparency checkerboard itself, in `#eee` over
+   `#cccccc` (canvas.css, `.forge-image-container:not(.plain)`). On the
+   img2img box that pattern is a thumbnail-sized patch; here it is the
+   whole tab, and on a night theme it is a slab of daylight.
+
+   The PNG Info tab's image box is the same pattern done the way a theme
+   wants it. That box is an ordinary Gradio image block, so a theme gets to
+   paint it - Lobe draws one there out of the block's own background with a
+   translucent neutral laid over it, which is why that tab is already right
+   at night while this one is not. The squares end up a shade of whatever
+   paper the theme chose rather than a colour of their own, and the whole
+   thing follows day and night without being told which it is.
+
+   That treatment is what is reproduced here, in Forge's own geometry (10px
+   squares on a 20px tile), so only the colour changes. The block colour is
+   read from Gradio's variable rather than from the theme, which is what
+   keeps it right under a theme that is not Lobe.
+
+   The neutral is deliberately not a variable: at this alpha it lightens
+   dark paper and darkens light paper by the same amount, which is the one
+   value that needs no second rule for the other mode.
+
+   Scoped to this surface, so img2img and Inpaint keep the look the rest of
+   Forge gives them. `:not(.plain)` is the host's own setting for a solid
+   colour, which surface.py marks and which still decides when it is on.
+   The id is what carries this over Forge's rule; no !important needed. */
+#minipaint_canvas_surface .forge-image-container:not(.plain) {
+    --minipaint-checker: rgba(127, 127, 127, 0.16);
+    background-color: var(--block-background-fill, var(--background-fill-primary, #202020));
+    background-image:
+        linear-gradient(45deg, var(--minipaint-checker) 25%, transparent 25%),
+        linear-gradient(-45deg, var(--minipaint-checker) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, var(--minipaint-checker) 75%),
+        linear-gradient(-45deg, transparent 75%, var(--minipaint-checker) 75%);
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+    background-size: 20px 20px;
+}
+
 /* The editor did not start. One line and a way back, in the status row -
    not a screen of its own. Shown only when the Canvas bundle or its attach
    failed; see minipaintCanvasReady in javascript/main.js. */

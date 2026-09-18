@@ -846,6 +846,58 @@ def check_toolbar_geometry(r, page, label):
             time.sleep(0.5)
 
 
+#: What Forge's own canvas.css paints the transparency pattern in.
+HOST_PAPER = "rgb(204, 204, 204)"
+HOST_SQUARES = "rgb(238, 238, 238)"
+
+PAPER_JS = """() => {
+    const box = document.querySelector('#minipaint_canvas_surface .forge-image-container');
+    const surface = document.getElementById('minipaint_canvas_surface');
+    if (!box || !surface) { return null; }
+    const s = getComputedStyle(box);
+    // What the theme's block colour comes to, resolved by the browser rather
+    // than by this test: a variable holds whatever the theme wrote (a hex, a
+    // name, another variable), and only a real element turns that into the
+    // rgb() a computed background is reported in. The probe goes beside the
+    // canvas rather than inside it - same variables, and the canvas's own
+    // MutationObserver is not watching the surface.
+    const probe = document.createElement('span');
+    probe.style.backgroundColor = 'var(--block-background-fill, var(--background-fill-primary, #202020))';
+    surface.appendChild(probe);
+    const themed = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return {color: s.backgroundColor, image: s.backgroundImage, size: s.backgroundSize,
+            declared: s.getPropertyValue('--block-background-fill').trim(), themed: themed};
+}"""
+
+
+def check_canvas_paper(r, page, label):
+    """The canvas's paper is the theme's, not Forge's daylight.
+
+    Forge's canvas.css fills the box with #eee over #cccccc. On the img2img
+    box that is a thumbnail-sized patch; on this tab it is the whole window,
+    and on a night theme it is a slab of daylight - so the stylesheet paints
+    it the way the PNG Info tab's image box is painted, out of the theme's
+    own block colour. Run here as well as in browser_loading.py because there
+    the host rule is quoted and here it is the real file: if Forge renames
+    that rule or stops setting the background at all, this is what notices.
+    """
+    g = page.evaluate(PAPER_JS)
+    if g is None:
+        r.check(f"{label}: paper: the canvas is measurable", False, "no image container on the page")
+        return
+    r.check(f"{label}: paper: the theme gives this page a block colour to follow",
+            bool(g["declared"]) and g["themed"] not in ("", "rgba(0, 0, 0, 0)"), json.dumps(g))
+    r.check(f"{label}: paper: and the canvas is painted in it",
+            g["color"] == g["themed"], json.dumps(g))
+    r.check(f"{label}: paper: not in the host's #cccccc",
+            g["color"] != HOST_PAPER, json.dumps(g))
+    r.check(f"{label}: paper: and its light squares are gone too",
+            HOST_SQUARES not in g["image"] and HOST_PAPER not in g["image"], g["image"])
+    r.check(f"{label}: paper: with Forge's geometry kept - 10px squares on a 20px tile",
+            "20px 20px" in g["size"], g["size"])
+
+
 def open_page(p, port, chromium, args, keep=False, touch=True):
     browser = p.chromium.launch(executable_path=chromium, headless=not keep, args=args)
     context = browser.new_context(viewport={"width": 1280, "height": 900}, has_touch=touch)
@@ -908,6 +960,7 @@ def run_new_ui(r: Results, port: int, chromium: str, keep: bool) -> None:
             r.check("with a live editor attached to this surface",
                     bool(uuid) and page.evaluate("u => !!(window.minipaintCanvas && window.minipaintCanvas.attachedTo(u))", uuid))
             check_toolbar_geometry(r, page, "webgl")
+            check_canvas_paper(r, page, "webgl")
             r.check("webgl: the browser has WebGL", page.evaluate("() => { try { const c = document.createElement('canvas'); return !!(c.getContext('webgl') || c.getContext('experimental-webgl')); } catch (e) { return false; } }"))
             run_flow(r, page, refs, uuid, "webgl", with_upload=True)
             r.check("webgl: no page errors", not errors, "; ".join(e[:160] for e in errors[:3]))

@@ -20,6 +20,14 @@ the graph cannot see:
     stylesheet's default matched twice, the inner match shadowed the value,
     and the grid never heard it. Nothing but a real layout can catch that.
 
+*   a tile is a button, and the page it is drawn into carries a theme that
+    says `button { min-width: fit-content !important }`. The stylesheet's
+    `min-width: 0` lost, every tile grew to its own caption's width, and the
+    grid was reported a fourth time with every check passing - because each
+    check measured the picture inside the tile and none measured the tile
+    against its cell. The script states the geometry inline now, and this
+    suite puts that theme's rule on the page to prove it holds.
+
 The Canvas is stubbed here for the same reason as in ``browser_loading.py``:
 none of this depends on the editor, so none of it should need a Forge Neo
 checkout to run.
@@ -64,9 +72,13 @@ def build_page(library: pathlib.Path):
     for stale in library.glob("*"):
         stale.unlink()
     # Deliberately mixed shapes: a grid that only looks tidy with square
-    # pictures is not tidy.
+    # pictures is not tidy. And one name the length Forge actually gives a
+    # picture - a timestamp, a seed and the start of the prompt - because a
+    # tile only grows past its cell under a theme's `min-width: fit-content`
+    # when its caption is wider than the cell, and "wide.png" never is.
     for name, size in (("tall.png", (300, 900)), ("wide.png", (900, 300)), ("square.png", (500, 500)),
-                       ("portrait.png", (400, 600)), ("landscape.png", (800, 450)), ("tiny.png", (64, 64))):
+                       ("portrait.png", (400, 600)), ("tiny.png", (64, 64)),
+                       ("2026-01-25-19h04m08s_seed431100828_Make this a reference.png", (800, 450))):
         Image.new("RGB", size, (30, 90, 200)).save(library / name)
 
     current = clip_config.load()
@@ -147,6 +159,8 @@ TILES_JS = """() => Array.from(document.querySelectorAll('.minipaint-clip-item')
     const tr = t ? t.getBoundingClientRect() : null;
     const im = el.querySelector('img');
     const ir = im ? im.getBoundingClientRect() : null;
+    const nm = el.querySelector('.minipaint-clip-name');
+    const nr = nm ? nm.getBoundingClientRect() : null;
     let paint = null;
     if (im && ir && im.naturalWidth && im.naturalHeight && ir.width && ir.height) {
         const cs = getComputedStyle(im);
@@ -170,7 +184,17 @@ TILES_JS = """() => Array.from(document.querySelectorAll('.minipaint-clip-item')
     const inL = r.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft);
     const inR = r.right - parseFloat(cs.borderRightWidth) - parseFloat(cs.paddingRight);
     return {name: el.dataset.name || '', w: Math.round(r.width), h: Math.round(r.height),
+            x: Math.round(r.left), y: Math.round(r.top),
+            // What the page's stylesheets made of the tile's own box: the
+            // declaration that won, for the report when one is not its cell.
+            minWidth: cs.minWidth, boxWidth: cs.width, display: cs.display,
             thumbW: tr ? Math.round(tr.width) : 0, thumbH: tr ? Math.round(tr.height) : 0,
+            // The caption, which has to stay inside the tile on every side:
+            // a caption wider than the tile is what made the tile wider.
+            nameSpillX: nr ? Math.round(Math.max(nr.right - r.right, r.left - nr.left)) : 0,
+            nameSpillY: nr ? Math.round(nr.bottom - r.bottom) : 0,
+            // How wide the caption would be if nothing clipped it.
+            nameFull: nm ? nm.scrollWidth : 0,
             // How far the picture reaches past the tile that is meant to
             // hold it, on the two sides a picture can run over.
             spillY: ir ? Math.round(ir.bottom - r.bottom) : 0,
@@ -346,6 +370,7 @@ def check_grid(r: Results, page) -> None:
     off = adrift(tiles)
     r.check("and every picture is DRAWN in the middle of its tile", not off, str(off))
     check_a_hostile_page_cannot_move_a_picture(r, page)
+    check_a_hostile_theme_cannot_resize_a_tile(r, page)
 
     # The slider. It writes a CSS variable; the grid has to be the element
     # that hears it, which is the whole of the bug this covers.
@@ -407,9 +432,19 @@ def check_tiles_hold_without_the_thumb_box(r: Results, page) -> None:
     columns and the tile clips what it holds, so neither the tile nor the
     picture can grow - and the picture's own ceiling is stated in pixels
     rather than as a percentage of a box that may have no height to give.
+
+    The script now states the box's and the picture's geometry inline, with
+    !important, and nothing on the page can stop the box shaping while it
+    does - so those pins are taken off first, and put back after. With them
+    on, this check would be asking nothing; what it asks is what the tile
+    and the stylesheet do on their own, which is the layer under the pins.
     """
     set_slider(page, 144)
     time.sleep(0.6)
+    kept = page.evaluate("""() => Array.from(document.querySelectorAll('.minipaint-clip-thumb, .minipaint-clip-thumb img'))
+        .map(el => { const s = el.getAttribute('style') || ''; el.removeAttribute('style'); return s; })""")
+    r.check("(the script had pinned the box and the picture inline, so there was something to take off)",
+            kept and all("!important" in s for s in kept), str(kept[:1]))
     style = page.add_style_tag(content=NO_THUMB_BOX_CSS)
     try:
         page.wait_for_function(
@@ -428,7 +463,139 @@ def check_tiles_hold_without_the_thumb_box(r: Results, page) -> None:
         r.check("and every picture is still drawn in the middle of its tile", not off, str(off))
     finally:
         style.evaluate("el => el.remove()")
+        page.evaluate("""kept => Array.from(document.querySelectorAll('.minipaint-clip-thumb, .minipaint-clip-thumb img'))
+            .forEach((el, i) => { if (kept[i]) { el.setAttribute('style', kept[i]); } })""", kept)
         time.sleep(0.4)
+
+
+# What the page this grid lives on says about a button. The first rule is
+# the Lobe theme's, verbatim (src/styles/components/button.ts): it is what
+# made every tile as wide as its own caption on the user's machine, each
+# running out of its cell under the next one, with three fixes to the
+# picture already in place - none of which could reach the tile's own box.
+# The rest are the other ways a theme can size a button, a span, a picture
+# or the grid itself, said at a specificity above the stylesheet's own, so
+# that only the script's inline declarations stand between them and the
+# tile.
+LOBE_BUTTON_CSS = "button { cursor: pointer; min-width: fit-content !important; }"
+HOSTILE_THEME_CSS = LOBE_BUTTON_CSS + """
+#tabs #minipaint_clipboard_root button {
+    display: inline-block !important; width: fit-content !important; max-width: none !important;
+    height: auto !important; min-height: 44px !important; max-height: none !important;
+    padding: 12px 24px !important; margin: 6px !important;
+    font-size: 18px !important; line-height: 2 !important; white-space: nowrap !important;
+}
+#tabs #minipaint_clipboard_root span {
+    display: inline !important; width: auto !important; min-width: max-content !important;
+    font-size: 18px !important; line-height: 2 !important;
+}
+#tabs #minipaint_clipboard_root img {
+    width: auto !important; height: auto !important; max-width: none !important; max-height: none !important;
+}
+#tabs #minipaint_clipboard_root .minipaint-clip-grid {
+    display: flex !important; flex-wrap: wrap !important; gap: 24px !important; padding: 0 !important;
+}
+#tabs #minipaint_clipboard_root .minipaint-clip-mount { display: block !important; }
+"""
+
+
+def check_a_hostile_theme_cannot_resize_a_tile(r: Results, page) -> None:
+    """A theme's rules about buttons cannot change the size of a tile.
+
+    The fourth report of this grid, with a screenshot: pictures centred in
+    boxes two columns wide, a selection border the width of two tiles,
+    captions clipped at the wrong end. The grid's tracks were right - the
+    columns were the slider's size - and the tiles were not: the Lobe theme
+    says `button { min-width: fit-content !important }` about every button
+    on the page, a tile is a button, and that beat the tile's `min-width:
+    0`. Each tile was as wide as its one-line caption, ran out of its cell
+    under the next tile, and the last in each row showed the whole of it.
+
+    Every earlier fix was a stylesheet rule about the picture, and a
+    stylesheet rule cannot beat a theme's !important on the tile. What can
+    is an inline declaration marked !important, which is what the script
+    now writes for every geometric property of the grid, the tile, the box,
+    the picture and the caption. This is the check that those hold: the
+    theme's own rule, and every other way a stylesheet can size the same
+    elements, are put on the page, and every tile has to stay exactly its
+    cell - not merely uniform, and not merely with its picture centred.
+    """
+    expected = page.evaluate("""() => {
+        const grid = document.querySelector('.minipaint-clip-grid');
+        const thumb = parseFloat(getComputedStyle(grid).getPropertyValue('--minipaint-clip-thumb'));
+        return {w: thumb + 12, h: thumb + 32, gap: parseFloat(getComputedStyle(grid).columnGap)};
+    }""")
+    r.check("the grid knows the size the slider holds", expected["w"] > 12 and expected["h"] > 32, str(expected))
+    before = page.evaluate(TILES_JS)
+    r.check("(one caption is wider than its cell, which is what the theme's rule grows a tile to)",
+            any(t["nameFull"] > t["w"] for t in before), str([(t["name"][:12], t["nameFull"], t["w"]) for t in before]))
+    # The theme's one rule first, alone and verbatim - the report - and then
+    # the whole of what a stylesheet could say about these elements.
+    for what, css in (("the Lobe theme's `button { min-width: fit-content !important }`", LOBE_BUTTON_CSS),
+                      ("every other way a stylesheet can size a button, a span, a picture or the grid", HOSTILE_THEME_CSS)):
+        style = page.add_style_tag(content=css)
+        try:
+            time.sleep(0.5)
+            tiles = page.evaluate(TILES_JS)
+            sizes = sorted({(t["w"], t["h"]) for t in tiles})
+            r.check(f"under {what}, every tile is still exactly its cell",
+                    tiles and sizes == [(round(expected["w"]), round(expected["h"]))],
+                    f"{sizes} for {round(expected['w'])}x{round(expected['h'])}; "
+                    f"min-width {sorted({t['minWidth'] for t in tiles})}, display {sorted({t['display'] for t in tiles})}")
+            # Neighbours on a row are one column apart: a tile that had run
+            # out of its cell would be under the next one, and the two would
+            # overlap rather than sit a gap apart.
+            rows = {}
+            for t in tiles:
+                rows.setdefault(t["y"], []).append(t["x"])
+            steps = sorted({b - a for xs in rows.values() for a, b in zip(sorted(xs), sorted(xs)[1:])})
+            r.check("and each tile sits in its own column, a gap from the next",
+                    steps == [round(expected["w"] + expected["gap"])], f"column steps {steps} for {expected}")
+            r.check("and every caption stays inside its tile",
+                    not [t["name"] for t in tiles if t["nameSpillX"] > 1 or t["nameSpillY"] > 1],
+                    str([(t["name"][:12], t["nameSpillX"], t["nameSpillY"]) for t in tiles if t["nameSpillX"] > 1 or t["nameSpillY"] > 1]))
+            spilling = [(t["name"][:12], t["spillX"], t["spillY"]) for t in tiles if t["spillY"] > 1 or t["spillX"] > 1]
+            r.check("and every picture is still inside its tile", not spilling, str(spilling))
+            r.check("and still drawn in the middle of it", not adrift(tiles), str(adrift(tiles)))
+            boxes = sorted({(t["thumbW"], t["thumbH"]) for t in tiles})
+            r.check("and the box the picture is drawn in is still one square",
+                    len(boxes) == 1 and abs(boxes[0][0] - boxes[0][1]) <= 2, str(boxes))
+        finally:
+            style.evaluate("el => el.remove()")
+            time.sleep(0.4)
+    check_a_tile_that_is_not_its_cell_is_reported(r, page)
+
+
+def check_a_tile_that_is_not_its_cell_is_reported(r: Results, page) -> None:
+    """If a tile is ever not its cell again, the journal says what won.
+
+    Four reports, and each fix was made against the page the suite builds
+    rather than the one the user has - because nothing on the user's page
+    said which declaration had beaten the stylesheet. So the tile check the
+    page runs after every render measures the tile against its cell too,
+    and its line carries the tile's computed display, width and min-width:
+    the difference between fixing the next one and guessing again.
+
+    Proven the only way it can be: the theme's rule on the page and the
+    script's pins taken off the tiles, which is the old page exactly. The
+    line has to name the fault and the winning value, and clear again once
+    the tiles are their cells.
+    """
+    style = page.add_style_tag(content=LOBE_BUTTON_CSS)
+    kept = page.evaluate("""() => Array.from(document.querySelectorAll('.minipaint-clip-item'))
+        .map(el => { const s = el.getAttribute('style') || ''; el.removeAttribute('style'); return s; })""")
+    try:
+        time.sleep(0.3)
+        report = page.evaluate("() => { window.minipaintClipboard.reportTiles(); return window.minipaintClipboard.debug().tileReport; }")
+        r.check("a tile that is not the size of its cell is reported, with the size it is, the size it should be and the min-width that won",
+                "tile(s) not the size of their cell" in report and " for " in report and "min-width fit-content" in report, repr(report))
+    finally:
+        page.evaluate("""kept => Array.from(document.querySelectorAll('.minipaint-clip-item'))
+            .forEach((el, i) => { if (kept[i]) { el.setAttribute('style', kept[i]); } })""", kept)
+        style.evaluate("el => el.remove()")
+        time.sleep(0.4)
+    cleared = page.evaluate("() => { window.minipaintClipboard.reportTiles(); return window.minipaintClipboard.debug().tileReport; }")
+    r.check("and the report clears once every tile is its cell again", cleared == "", repr(cleared))
 
 
 # The page this grid actually lives on. Forge's own stylesheet, its theme and
@@ -661,7 +828,7 @@ def check_patching(r: Results, page, library) -> None:
                                         { credentials: 'same-origin' })).blob();
         const answer = await fetch('/minipaint-clipboard/import?source=paste', {
             method: 'POST', credentials: 'same-origin',
-            headers: { 'Content-Type': blob.type || 'image/png', 'X-MiniPaint-Filename': 'aaa-new.png' },
+            headers: { 'Content-Type': blob.type || 'image/png', 'X-MiniPaint-Filename': '0000-new.png' },
             body: blob
         });
         return (await answer.json()).ok === true;
@@ -679,8 +846,10 @@ def check_patching(r: Results, page, library) -> None:
             len(after) == 7 and len(fresh) == 1, f"{len(after)} tiles, {len(fresh)} new")
     r.check("AND THE OTHER SIX ARE THE SAME ELEMENTS, not new ones that look the same",
             sorted(t["stamp"] for t in kept) == sorted(t["stamp"] for t in before), str(len(kept)))
+    # Named to sort first by name, ahead of the timestamp-named picture in
+    # the seeded library, so "in its place" is the first place.
     r.check("the new one is in its place in the order, not appended",
-            after[0]["name"] == "aaa-new.png", str([t["name"] for t in after]))
+            after[0]["name"] == "0000-new.png", str([t["name"] for t in after]))
     r.check("and the scroll position survives the patch",
             page.evaluate("() => document.querySelector('.minipaint-clip-grid').scrollTop") == scrolled,
             str(page.evaluate("() => document.querySelector('.minipaint-clip-grid').scrollTop")))
@@ -689,7 +858,7 @@ def check_patching(r: Results, page, library) -> None:
     # the grid hears about it rather than being handed new markup.
     page.evaluate("""() => {
         const doomed = Array.from(document.querySelectorAll('.minipaint-clip-item'))
-            .filter(t => t.dataset.name === 'aaa-new.png')[0];
+            .filter(t => t.dataset.name === '0000-new.png')[0];
         if (doomed) { doomed.click(); }
     }""")
     time.sleep(0.8)

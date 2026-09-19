@@ -1081,6 +1081,21 @@ def theming_checks(r: Results) -> None:
     r.check("the server-rendered markup carries no inline styles", "style=" not in markup)
     script = (ROOT / "browser" / "minipaint_clipboard.js").read_text(encoding="utf-8")
     r.check("the browser script sets no colours of its own", "#fff" not in script.lower() and not re.search(r"(^|[^-\w])white\b(?!-space)", script) and "backgroundColor" not in script)
+    # The script restates the grid's geometry inline, marked !important, so
+    # a theme's own `button { min-width: fit-content !important }` cannot
+    # make a tile wider than its cell - tests/browser_clipboard.py puts that
+    # rule on a page and measures. The two numbers the script measures the
+    # tracks from are the stylesheet's, and the two copies must not drift.
+    frame = re.search(r"--minipaint-clip-frame:\s*(\d+)px", block)
+    caption = re.search(r"--minipaint-clip-caption:\s*(\d+)px", block)
+    r.check("the script's tile frame and caption are the stylesheet's own numbers",
+            frame and caption and f"const TILE_FRAME = {frame.group(1)};" in script and f"const TILE_CAPTION = {caption.group(1)};" in script,
+            f"css {frame and frame.group(1)}/{caption and caption.group(1)}")
+    r.check("and it pins the tile's box inline, with !important, against a theme's button rule",
+            'setProperty(property, declarations[property], "important")' in script and '"min-width": "0"' in script
+            and "pin(tile, TILE_GEOMETRY)" in script and "pin(grid, GRID_GEOMETRY)" in script and "pin(picture, PICTURE_GEOMETRY)" in script)
+    r.check("and the geometry it pins names no colour: border widths and styles only",
+            not re.search(r'"(border-color|background|color|border)"\s*:', script))
     r.check("and never puts the prompt or a filename into the journal", "note(" in script and "request.prompt" not in script and not re.search(r'note\([^)]*\bname\b', script))
     r.check("the queue list, too, is theme variables only", "minipaint-clip-job" in block and "background: var(--" in block.split(".minipaint-clip-job {")[1].split("}")[0])
 

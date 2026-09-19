@@ -196,6 +196,10 @@ window.minipaintClipboard = (function () {
         //: What the menu has been told since the page was built, over this
         //: tab's own route rather than through a Gradio render.
         menuOverride: null,
+        //: The gallery's 🖌️ button, taken over while the setting says WanGP:
+        //: the one capture-phase listener, and how many presses it finished.
+        galleryListener: null,
+        takeovers: 0,
         //: What is wrong, if anything. Two different faults with two
         //: different sentences; see renderNotice.
         offline: { server: false, queue: false, stale: STALE_WITHOUT_THE_CHANNEL },
@@ -1863,7 +1867,6 @@ window.minipaintClipboard = (function () {
      * question from the one the button asked.
      */
     async function receiveOverHttp(picked) {
-        const state = menuState();
         const target = interceptTarget();
         if (target === "minipaint") {
             note("receive: the picture never arrived, and the Canvas cannot be filled from here");
@@ -1880,21 +1883,12 @@ window.minipaintClipboard = (function () {
         }
         connectionNotice(true);
         if (target === "wangp") {
-            // The same repair for the third destination: the popup's own
-            // bundle freezes the picture over the public API's staging route
-            // and opens on it, with no Gradio event anywhere in the chain.
-            const loader = window.minipaintAssets;
-            const bundle = String(state.intercept_bundle || "");
-            const ok = window.minipaintIntercept ? true
-                : (loader && loader.load && bundle ? await loader.load([bundle]) : false);
-            const popup = window.minipaintIntercept;
-            if (!ok || !popup || typeof popup.stageAndOpen !== "function") {
-                note("receive: the Send to WanGP popup could not be loaded for the direct route");
-                toast("That picture did not reach WanGP - the request popup could not be loaded.", true);
-                return false;
-            }
+            // Only a page whose Clipboard bundle was not attached when the
+            // button was pressed gets here: otherwise the press never became
+            // a framework event at all (onGalleryButton). The finish is the
+            // same one.
             note("receive: freezing the picture over the direct route without the queue");
-            return popup.stageAndOpen(url, "", {});
+            return openWanGPPopup(url, "");
         }
         try {
             const response = await fetch(url, { credentials: "same-origin", cache: "no-store" });
@@ -1916,6 +1910,98 @@ window.minipaintClipboard = (function () {
             toast("That picture could not be put into Clipboard: " + why, true);
             return false;
         }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* The gallery's button, while it is pointed at WanGP                    */
+    /* ------------------------------------------------------------------ */
+
+    //: The host's result tabs whose output row carries the 🖌️ button, and
+    //: the id that button has under each: the server's receive_button_id.
+    const GALLERY_TABS = ["txt2img", "img2img", "extras"];
+    const GALLERY_BUTTON_SUFFIX = "_send_to_minipaint";
+
+    /**
+     * The picture the gallery under that tab is showing, as a URL this page
+     * can fetch: the selected thumbnail, else the first - the choice the
+     * host's own send buttons make - read off the page rather than asked of
+     * the framework, because no framework event is in this chain.
+     */
+    function galleryPictureUrl(tab) {
+        const gallery = byId(tab + "_gallery");
+        if (!gallery) { return ""; }
+        const thumbs = Array.from(gallery.querySelectorAll(".thumbnail-item"));
+        const chosen = thumbs.filter(function (thumb) { return thumb.classList.contains("selected"); })[0] || thumbs[0] || null;
+        let img = chosen ? chosen.querySelector("img") : null;
+        if (!img) { img = gallery.querySelector("img"); }
+        return img ? String(img.currentSrc || img.getAttribute("src") || "") : "";
+    }
+
+    /**
+     * Freeze a picture the host serves and open the Send to WanGP popup on
+     * it: the finish of a gallery press pointed at WanGP, and of the direct
+     * route for a page whose bundle missed the press. The popup's own
+     * bundle is fetched the first time, and never before a press needs it.
+     */
+    function openWanGPPopup(url, tab) {
+        const bundle = String(menuState().intercept_bundle || "");
+        const loader = window.minipaintAssets;
+        const loading = window.minipaintIntercept ? Promise.resolve(true)
+            : (loader && typeof loader.load === "function" && bundle ? loader.load([bundle]) : Promise.resolve(false));
+        const failed = function () {
+            note("gallery: the Send to WanGP popup could not be loaded");
+            toast("That picture did not reach WanGP - the request popup could not be loaded.", true);
+            return false;
+        };
+        return Promise.resolve(loading).then(function (ok) {
+            const popup = window.minipaintIntercept;
+            if (!ok || !popup || typeof popup.stageAndOpen !== "function") { return failed(); }
+            return popup.stageAndOpen(url, tab, {});
+        }, failed);
+    }
+
+    /** The result tab whose 🖌️ button a click landed on, or "". */
+    function galleryButtonTab(target) {
+        if (!target || typeof target.closest !== "function") { return ""; }
+        for (const tab of GALLERY_TABS) {
+            if (target.closest("#" + tab + GALLERY_BUTTON_SUFFIX)) { return tab; }
+        }
+        return "";
+    }
+
+    /**
+     * The gallery's 🖌️ button, taken over by the page while the setting says
+     * WanGP.
+     *
+     * The button's own handler is a Gradio event: the picked picture goes to
+     * the server and a frozen copy comes back for the popup - two trips
+     * through a queue that has to be alive, on a payload the framework has
+     * to accept first (Forge Neo's own gallery helper answers in a shape
+     * this Gradio refused before the function ran, and nothing said so
+     * anywhere). The Clipboard tab's own sends never were that: they are
+     * plain requests the page makes itself. So while the setting is WanGP a
+     * press is finished the same way. The event is stopped here, in the
+     * capture phase, before the framework's handler on the button sees it;
+     * the picture the gallery is showing is fetched from the host and
+     * frozen over the public API's staging route; the popup opens on it.
+     * Mini Paint and Clipboard keep the framework path: the Canvas's
+     * document lives on the server, and the library import is that path's
+     * own job.
+     */
+    function onGalleryButton(event) {
+        const tab = galleryButtonTab(event.target);
+        if (!tab || interceptTarget() !== "wangp") { return; }
+        event.stopPropagation();
+        event.preventDefault();
+        S.takeovers += 1;
+        const url = galleryPictureUrl(tab);
+        if (!url) {
+            note("gallery: the " + tab + " gallery shows no picture to send to WanGP");
+            toast("Generate or pick an image in the gallery first.", true);
+            return;
+        }
+        note("gallery: the " + tab + " send is finished by the page, for WanGP, without the queue");
+        openWanGPPopup(url, tab);
     }
 
     /** The file a gallery item stands for, as a URL this page can fetch. */
@@ -2988,6 +3074,13 @@ window.minipaintClipboard = (function () {
             S.outboxListener = onOutboxEvent;
             document.addEventListener("minipaint:outbox", S.outboxListener);
         }
+        if (!S.galleryListener) {
+            // Capture phase, on the document: it runs before the framework's
+            // own handler on the button whatever order the two were bound
+            // in, and it survives the button being rebuilt by a Reload UI.
+            S.galleryListener = onGalleryButton;
+            document.addEventListener("click", S.galleryListener, true);
+        }
         // A standing fault worth saying before anything is tried, rather than
         // after the first thing fails: a host that tells its own page to call
         // it somewhere the browser will not let the page call. Nothing this
@@ -3036,6 +3129,7 @@ window.minipaintClipboard = (function () {
                             items: S.outputs.items.length, chosen: S.outputs.chosen },
                  intercept: interceptTarget() === "clipboard",
                  interceptTarget: interceptTarget(),
+                 takeovers: S.takeovers,
                  sort: menuState().sort || S.library.sort,
                  library: { revision: S.library.revision, page: S.library.page, pages: S.library.pages,
                             total: S.library.total, shown: S.library.ids.length, busy: S.library.busy } };
@@ -3078,6 +3172,7 @@ window.minipaintClipboard = (function () {
         pressHidden: pressHidden,
         showOffline: connectionNotice,
         receiveOverHttp: receiveOverHttp,
+        galleryPictureUrl: galleryPictureUrl,
         debug: debug
     };
 })();

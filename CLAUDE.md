@@ -72,6 +72,21 @@ already opened once, and the direct route (`stageAndOpen`) always freezes a
 new one. A test that opens the popup twice must use two handoffs; the Node
 harness's `keys` scenario is where that was learned.
 
+**Forge Neo's `extract_image_from_gallery` returns the inputs array.** It
+answers a Gradio js function, so it returns `[[item]]` - a one-item gallery
+inside a one-element array - where older builds returned `[item]`. The Canvas
+wrapped that once more, and Gradio 4.40 refused the nested gallery payload
+*before* `receive()` ran: nothing on the server saw the press, nothing was
+logged anywhere, and the only visible thing was the chained tab switch (the
+trap above). `pickGalleryImage` now unwraps either shape, and the browser
+suites carry the Neo-shaped helper in their page head
+(`browser_clipboard.FORGE_GALLERY_HELPERS`); a page without it exercises a
+helper no real Forge has. The WanGP destination no longer rides that event
+at all: `browser/minipaint_clipboard.js` takes the button over in the page
+(`onGalleryButton`) and finishes the press over plain HTTP, the way the
+Clipboard tab's own sends work, and the server's WanGP branch in `receive()`
+is only the fallback for a page without that bundle.
+
 **A Gradio gallery that is holding a picture has no upload input.** Gradio 4
 swaps a gallery's drop zone for its thumbnails as soon as it has one, so a
 component the browser wrote perfectly well a moment ago classifies as

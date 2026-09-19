@@ -794,11 +794,21 @@ class TouchCanvas:
         it; the Canvas and the library are untouched. A destination that
         fails says so and passes the picture through to the Canvas, so the
         send never vanishes.
+
+        The WanGP branch is the fallback, not the usual path: while the
+        setting says WanGP the Clipboard bundle takes the button over in
+        the page and finishes the press over plain HTTP, the way that tab's
+        own sends work, so this event is never even sent. It runs only on a
+        page that has no Clipboard bundle to do that.
         """
         doc = document.ensure(state)
         image = host.gallery_image(payload)
         if image is None:
             doc.pending_switch = "canvas"
+            # Into the transfer log too: a press that reaches here and says
+            # nothing on disk is indistinguishable, afterwards, from a press
+            # the framework refused before this function ran.
+            log_quietly({"destination": f"{tab} -> nowhere", "outcome": "the gallery handed no picture; nothing was received"})
             return self._unchanged(doc, mode, "Pick an image in the gallery first.")
 
         notes = []

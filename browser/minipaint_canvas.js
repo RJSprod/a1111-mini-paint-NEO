@@ -2893,16 +2893,31 @@ window.minipaintCanvas = (function () {
     /* Galleries and tabs                                                    */
     /* ------------------------------------------------------------------ */
 
-    /** The selected gallery item, the way the host's own send buttons pick it. */
+    /**
+     * The selected gallery item, the way the host's own send buttons pick it.
+     *
+     * The host's helper answers a Gradio js function, so what it returns is
+     * the INPUTS array, not a value: an older build returned [item], Forge
+     * Neo returns [[item]] - the one input being a one-item gallery. Both
+     * are unwrapped to the item here, and the item alone is what leaves as
+     * the one-item gallery value the server reads. Wrapping the Neo answer
+     * once more made a nested list, which Gradio 4.40 refuses BEFORE the
+     * receive function runs: nothing on the server saw the press, nothing
+     * was logged anywhere, and the only visible thing was the chained tab
+     * switch that runs whether or not the step before it succeeded.
+     */
     function pickGalleryImage(gallery) {
         if (!Array.isArray(gallery) || gallery.length === 0) { return null; }
-        let picked = [gallery[0]];
+        let item = gallery[0];
         if (typeof window.extract_image_from_gallery === "function") {
             try {
-                const extracted = window.extract_image_from_gallery(gallery);
-                if (Array.isArray(extracted) && extracted.length) { picked = [extracted[0]]; }
+                let extracted = window.extract_image_from_gallery(gallery);
+                let depth = 0;
+                while (Array.isArray(extracted) && depth < 4) { extracted = extracted.length ? extracted[0] : null; depth += 1; }
+                if (extracted !== null && extracted !== undefined && !Array.isArray(extracted)) { item = extracted; }
             } catch (e) { /* the first item it is */ }
         }
+        const picked = [item];
         watchReceive(picked);
         return picked;
     }

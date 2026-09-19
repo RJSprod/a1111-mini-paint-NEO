@@ -892,7 +892,16 @@ library, on `wangp` it freezes it through `intercept.stage()` and writes the
 `wangp:<token>:<w>x<h>:<tab>` handoff into the tab box for the chained
 browser step (`_after_receive_js()`: load the popup bundle, open it, and only
 then tell the Canvas's own watch that the picture landed), and either way
-passes through to the Canvas on failure;
+passes through to the Canvas on failure. That `wangp` branch is the
+fallback: while the setting says WanGP, `browser/minipaint_clipboard.js`
+takes the button over in the page first (`onGalleryButton`, a capture-phase
+click listener on the document; `galleryPictureUrl(tab)` reads the selected
+thumbnail's URL off the page; `openWanGPPopup(url, tab)` loads the popup
+bundle and calls its `stageAndOpen`), so the framework never sees the press.
+`browser/minipaint_canvas.js`'s `pickGalleryImage(gallery)` unwraps the host
+helper's answer - the INPUTS array, `[[item]]` on Forge Neo and `[item]` on
+older builds - to the item, because a nested list is refused by Gradio 4.40
+before the receive function runs;
 `after_receive(state)` → which tab the follow-up step switches to;
 `receive_picture(image, state, mode, origin, label)`;
 `receive_from(event, provider, inputs, origin="clipboard", label="Clipboard",

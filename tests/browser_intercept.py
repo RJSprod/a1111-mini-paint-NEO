@@ -173,8 +173,78 @@ def gallery_jobs():
 # --------------------------------------------------------------------------
 
 
+def set_destination(page, label: str) -> None:
+    """Point the gallery's button somewhere through the Clipboard menu."""
+    clip.open_clipboard(page)
+    page.evaluate("() => window.minipaintClipboard.toggleMenu()")
+    time.sleep(0.4)
+    clip.menu_click(page, "Intercept Options")
+    time.sleep(0.4)
+    clip.menu_click(page, f"Send to “{label}”")
+    time.sleep(2.0)
+    page.evaluate("() => window.minipaintClipboard.closeMenu()")
+
+
+class QueueJoins:
+    """Every submission the page makes to Gradio's queue while this is armed."""
+
+    def __init__(self, page):
+        self.page = page
+        self.urls: list = []
+        self._handler = lambda request: self.urls.append(request.url) if "/queue/join" in request.url else None
+
+    def __enter__(self):
+        self.page.on("request", self._handler)
+        return self
+
+    def __exit__(self, *_exc):
+        self.page.remove_listener("request", self._handler)
+        return False
+
+
+def check_the_framework_path_takes_the_host_helper_shape(r: Results, page, library) -> None:
+    """Forge Neo's gallery helper answers [[item]]; the pick must hand Gradio [item].
+
+    A user's press pointed at WanGP did nothing on the server and left no
+    line in any log: the Canvas wrapped the helper's answer once more, and
+    Gradio 4.40 refused the nested gallery payload before the receive
+    function ran. The only visible thing was the chained tab switch. This
+    page carries the helper in its real shape, so a press that still goes
+    through the framework - the Clipboard destination - proves the payload
+    is one it accepts.
+    """
+    open_txt2img(page)
+    r.check("the page has Forge Neo's own gallery helper, answering the inputs array",
+            page.evaluate("() => JSON.stringify(window.extract_image_from_gallery([{image: {url: 'u'}}]))") == '[[{"image":{"url":"u"}}]]')
+    picked = page.evaluate("""() => {
+        const picked = window.minipaintCanvas.pickGalleryImage([{image: {url: 'u'}}, {image: {url: 'v'}}]);
+        window.minipaintCanvas.receiveLanded();
+        return JSON.stringify(picked); }""")
+    r.check("and the Canvas hands the framework the item alone, as a one-item gallery", picked == '[{"image":{"url":"u"}}]', str(picked))
+    r.check("the page has taken no gallery press over yet", page.evaluate("() => window.minipaintClipboard.debug().takeovers") == 0)
+    set_destination(page, "Clipboard")
+    open_txt2img(page)
+    files_before = len(list(library.glob("*")))
+    with QueueJoins(page) as joins:
+        r.check("pointed at Clipboard, the gallery's button is pressed", press_send(page))
+        landed = False
+        for _ in range(30):
+            # A Playwright call, not time.sleep: the request events this is
+            # counting are only delivered while the test is inside one.
+            page.wait_for_timeout(500)
+            if len(list(library.glob("*"))) > files_before:
+                landed = True
+                break
+    r.check("and the press is a framework event the server accepted: the picture lands in the library",
+            landed and len(joins.urls) >= 1, f"joins={len(joins.urls)} files before={files_before} after={len(list(library.glob('*')))}")
+    r.check("the page did not take that press over - Clipboard keeps the framework path",
+            page.evaluate("() => window.minipaintClipboard.debug().takeovers") == 0)
+    set_destination(page, "WanGP")
+    r.check("the destination is back on WanGP for the rest", page.evaluate("() => window.minipaintClipboard.interceptTarget()") == "wangp")
+
+
 def check_the_button_opens_the_popup(r: Results, page, library) -> None:
-    """The real chain: press, receive, handoff, bundle, open."""
+    """The real chain: press, takeover, fetch, stage, open - no framework event in it."""
     from minipaint_neo import interop
     from minipaint_neo.clipboard import intercept
 
@@ -183,10 +253,14 @@ def check_the_button_opens_the_popup(r: Results, page, library) -> None:
             page.evaluate("() => !window.minipaintIntercept"))
     files_before = set(p.name for p in library.glob("*"))
     staged_before = set(p.name for p in interop.staging_root().iterdir())
-    r.check("the gallery's send button is pressed", press_send(page))
-    r.check("and the popup opens", wait_popup(page, True), str(popup_state(page)))
+    with QueueJoins(page) as joins:
+        r.check("the gallery's send button is pressed", press_send(page))
+        r.check("and the popup opens", wait_popup(page, True), str(popup_state(page)))
+    r.check("pointed at WanGP, the press never became a framework event: the page took the button over, the way the Clipboard tab's own sends work",
+            len(joins.urls) == 0 and page.evaluate("() => window.minipaintClipboard.debug().takeovers") == 1,
+            f"joins={len(joins.urls)} takeovers={page.evaluate('() => window.minipaintClipboard.debug().takeovers')}")
     state = popup_state(page) or {}
-    r.check("on a picture the server froze for it, from txt2img",
+    r.check("on the picture the gallery shows, frozen over the staging route, from txt2img",
             bool(state.get("token")) and state.get("tab") == "txt2img" and state.get("open") is True, str(state)[:200])
     staged_now = set(p.name for p in interop.staging_root().iterdir()) - staged_before
     r.check("the frozen picture is one new transient under the staging root, and nothing in the Clipboard folder",
@@ -316,7 +390,7 @@ def check_the_menu_offers_the_destinations(r: Results, page) -> None:
 
 
 def check_the_direct_route_when_the_queue_is_dead(r: Results, page) -> None:
-    """Gradio's queue cut: the Canvas's watch hands the picture to the popup over HTTP."""
+    """Gradio's queue cut: the takeover never needed it, so nothing changes."""
     open_txt2img(page)
     page.route("**/queue/**", lambda route: route.abort())
     try:
@@ -324,7 +398,7 @@ def check_the_direct_route_when_the_queue_is_dead(r: Results, page) -> None:
         r.check("dead queue: the button is pressed", press_send(page))
         opened = wait_popup(page, True, 25.0)
         state = popup_state(page) or {}
-        r.check("dead queue: the popup still opens, on a NEW picture staged over the direct route, never the previous press's",
+        r.check("dead queue: the popup still opens, on a NEW picture staged over the staging route, never the previous press's",
                 opened and state.get("token") and state.get("token") != state_before.get("token"), str(state)[:160])
         r.check("dead queue: and knows which tab it came from, so it sits under that button",
                 state.get("tab") == "txt2img", str(state.get("tab")))
@@ -369,6 +443,7 @@ def run() -> Results:
                 page.goto(f"http://127.0.0.1:{PORT}/", wait_until="load")
                 page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
                 time.sleep(2.5)
+                check_the_framework_path_takes_the_host_helper_shape(r, page, library)
                 check_the_button_opens_the_popup(r, page, library)
                 check_generate_queues_and_closes(r, page, library)
                 check_escape_queues_nothing(r, page)

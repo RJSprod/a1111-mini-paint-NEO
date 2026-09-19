@@ -95,9 +95,30 @@ def head_html() -> str:
     """
     return (
         "<script>" + loading.FORGE_CANVAS_STUB + "</script>"
+        "<script>" + FORGE_GALLERY_HELPERS + "</script>"
         "<script>" + (ROOT / "javascript" / "main.js").read_text(encoding="utf-8") + "</script>"
         "<style>" + (ROOT / "style.css").read_text(encoding="utf-8") + "</style>"
     )
+
+
+# Forge Neo's own gallery helpers (javascript/ui.js), the same in shape: the
+# helper answers a Gradio js function, so what it returns is the INPUTS
+# array - a one-item gallery inside a one-element array - and not the item.
+# A page without this exercised a helper no real Forge has, which is how a
+# pick that wrapped the answer once more, into a list Gradio 4.40 refuses
+# before the receive function runs, passed every suite.
+FORGE_GALLERY_HELPERS = """
+function selected_gallery_index() {
+    const app = typeof gradioApp === "function" ? gradioApp() : document;
+    return Array.from(app.querySelectorAll('.thumbnail-item.thumbnail-small')).findIndex(el => el.classList.contains('selected'));
+}
+function extract_image_from_gallery(gallery) {
+    if (gallery.length === 0) { return [null]; }
+    let index = selected_gallery_index();
+    if (index < 0 || index >= gallery.length) { index = 0; }
+    return [[gallery[index]]];
+}
+"""
 
 
 # --------------------------------------------------------------------------

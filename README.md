@@ -484,10 +484,12 @@ the result under an opaque token (never in the library) and opens a compact popu
 the gallery: the composer's prompt and its *Enhanced prompts* switch, the image roles the
 WanGP page's model reads (first frame, last frame, reference, several at once), *Inherit
 Clipboard inputs* for everything the popup does not override, a dot saying whether WanGP
-is idle, generating or not running, and Generate. The request goes down the composer's
-own path into the same server-owned queue, marked *from the gallery*, and the popup is
-gone as soon as the outbox has the job, so a run of generations can be queued without
-leaving the tab. Its own history keeps the last hundred recipes, plus what you pin, and
+is idle, generating or not running, and Generate. The press itself is finished by the
+page, the way the Clipboard tab's own sends are: no Gradio event, no queue, the picture
+fetched from the host and frozen over the staging route. The request goes down the
+composer's own path into the same server-owned queue, marked *from the gallery*, and the
+popup is gone as soon as the outbox has the job, so a run of generations can be queued
+without leaving the tab. Its own history keeps the last hundred recipes, plus what you pin, and
 loads one back reconciled against the model the page is on. Every request it makes is
 bounded and it holds no stream open, so it costs nothing of the six-connection budget on
 an HTTP/1.1 Forge and nothing at all over the auto-TLS extension's HTTP/2.

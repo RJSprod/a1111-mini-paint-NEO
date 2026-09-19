@@ -97,6 +97,23 @@ which is what `set_image_file`'s `replace` option does in
 "has it taken the picture yet" is a different question for each - that is
 what `accept_more` is for, and why the plan says which kind a destination is.
 
+**A theme's rule about `button` reaches the Clipboard tiles.** Every tile in
+the thumbnail grid is a `<button>`, and the Lobe theme says
+`button { min-width: fit-content !important }` about every button on the
+page. That beat the stylesheet's `min-width: 0`, made each tile as wide as
+its own one-line caption, and ran it out of its cell under the next tile:
+pictures centred in boxes two columns wide, a selection border the width of
+two tiles. Three earlier fixes centred the picture inside the tile and none
+could reach the tile's own box, because no stylesheet rule beats a theme's
+`!important` on the element. The bundle now writes every geometric
+declaration of the grid, the tile, its box, its picture and its caption
+inline and marked `!important` (`pin` in `browser/minipaint_clipboard.js`),
+which nothing in the cascade can override; `style.css` keeps the colours and
+the readable copy of the same geometry, and `tests/browser_clipboard.py`
+puts the theme's rule on its page to prove the tiles hold. Do not fix this
+grid with a stylesheet rule again; if it is ever reported once more,
+`reportTiles` puts the winning declaration in the journal.
+
 **A cyclic `gr.State` in an outputs list is a RecursionError.** Gradio 4.40
 walks state components among a dependency's outputs and hashes them *before*
 calling the function, and that walk has no cycle detection and no depth limit.

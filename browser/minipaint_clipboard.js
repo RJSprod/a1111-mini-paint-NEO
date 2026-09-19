@@ -57,6 +57,15 @@ window.minipaintClipboard = (function () {
     const TAB_PANEL_ID = "tab_minipaint_clipboard";
     //: Matches the stylesheet's own default for --minipaint-clip-thumb.
     const DEFAULT_THUMB = 144;
+    //: The tile's frame on one axis - 4px of padding and a 2px border, twice
+    //: - and the strip under the square that carries the name. A column is
+    //: the thumbnail plus the first, a row is the thumbnail plus the second.
+    //: The stylesheet declares the same two numbers, as
+    //: --minipaint-clip-frame and --minipaint-clip-caption, for the rules
+    //: that document the grid; test_clipboard_ui.py holds the two copies
+    //: equal. Why the script states them at all is above pin().
+    const TILE_FRAME = 12;
+    const TILE_CAPTION = 32;
     const IMPORT_ROUTE = "/minipaint-clipboard/import";
     const SEND_ROUTE = "/minipaint-clipboard/send";
     const BOXES = {
@@ -689,7 +698,10 @@ window.minipaintClipboard = (function () {
         const input = slider ? slider.querySelector("input[type=range]") : null;
         const value = Number(size) || (input ? Number(input.value) : 0) || DEFAULT_THUMB;
         S.thumb = value;
-        if (grid) { grid.style.setProperty("--minipaint-clip-thumb", value + "px"); }
+        // Marked important like the rest of the grid's geometry (see pin),
+        // so the one variable every track and ceiling below is measured
+        // from cannot be restated by a stylesheet either.
+        if (grid) { grid.style.setProperty("--minipaint-clip-thumb", value + "px", "important"); }
     }
 
     /**
@@ -764,15 +776,33 @@ window.minipaintClipboard = (function () {
     function reportTiles() {
         const tiles = items();
         if (!tiles.length) { return; }
+        // The cell every tile is meant to be: the column and row tracks are
+        // measured from the same variable, and a column is narrower only in
+        // a panel too narrow for one whole tile.
+        const grid = gridElement();
+        const gridStyle = grid ? getComputedStyle(grid) : null;
+        const thumb = gridStyle ? parseFloat(gridStyle.getPropertyValue("--minipaint-clip-thumb")) : 0;
+        const room = grid ? grid.clientWidth - parseFloat(gridStyle.paddingLeft) - parseFloat(gridStyle.paddingRight) : 0;
+        const cellWidth = thumb > 0 ? Math.min(thumb + TILE_FRAME, room > 0 ? room : Infinity) : 0;
+        const cellHeight = thumb > 0 ? thumb + TILE_CAPTION : 0;
+        const misfit = [];
         const adrift = [];
         for (const tile of tiles.slice(0, 24)) {
+            const tileBox = tile.getBoundingClientRect();
+            const tileStyle = getComputedStyle(tile);
+            // A tile that is not the size of its cell. This is the fault the
+            // pictures were centred three times for: the tile's own box was
+            // wider than its column, and nothing measured the box.
+            if (tileBox.width && tileBox.height && cellWidth
+                && (Math.abs(tileBox.width - cellWidth) > 1 || Math.abs(tileBox.height - cellHeight) > 1)) {
+                misfit.push({ width: Math.round(tileBox.width), height: Math.round(tileBox.height),
+                              display: tileStyle.display, minWidth: tileStyle.minWidth, boxWidth: tileStyle.width });
+            }
             const picture = tile.querySelector("img");
             if (!picture || !picture.complete || !picture.naturalWidth || !picture.naturalHeight) { continue; }
             const box = picture.getBoundingClientRect();
             if (!box.width || !box.height) { continue; }
             const style = getComputedStyle(picture);
-            const tileBox = tile.getBoundingClientRect();
-            const tileStyle = getComputedStyle(tile);
             const left = tileBox.left + parseFloat(tileStyle.borderLeftWidth) + parseFloat(tileStyle.paddingLeft);
             const right = tileBox.right - parseFloat(tileStyle.borderRightWidth) - parseFloat(tileStyle.paddingRight);
             const fits = style.objectFit === "contain" || style.objectFit === "scale-down";
@@ -787,11 +817,21 @@ window.minipaintClipboard = (function () {
                               width: style.width, margins: style.marginLeft + "/" + style.marginRight });
             }
         }
-        if (!adrift.length) { S.tileReport = ""; return; }
-        const worst = adrift.reduce(function (a, b) { return Math.abs(b.offset) > Math.abs(a.offset) ? b : a; });
-        const line = "grid: " + adrift.length + " of " + tiles.length + " thumbnail(s) drawn off-centre, worst "
-            + worst.offset + "px (object-fit " + worst.fit + ", object-position " + worst.at
-            + ", width " + worst.width + ", margins " + worst.margins + ")";
+        if (!adrift.length && !misfit.length) { S.tileReport = ""; return; }
+        const parts = [];
+        if (misfit.length) {
+            const first = misfit[0];
+            parts.push(misfit.length + " of " + tiles.length + " tile(s) not the size of their cell, first "
+                + first.width + "x" + first.height + " for " + Math.round(cellWidth) + "x" + Math.round(cellHeight)
+                + " (display " + first.display + ", width " + first.boxWidth + ", min-width " + first.minWidth + ")");
+        }
+        if (adrift.length) {
+            const worst = adrift.reduce(function (a, b) { return Math.abs(b.offset) > Math.abs(a.offset) ? b : a; });
+            parts.push(adrift.length + " of " + tiles.length + " thumbnail(s) drawn off-centre, worst "
+                + worst.offset + "px (object-fit " + worst.fit + ", object-position " + worst.at
+                + ", width " + worst.width + ", margins " + worst.margins + ")");
+        }
+        const line = "grid: " + parts.join("; ");
         // Once per situation. A render that changes nothing must not add a
         // line, or a grid the user scrolls fills the log with one sentence.
         if (line === S.tileReport) { return; }
@@ -841,6 +881,185 @@ window.minipaintClipboard = (function () {
         return item.w + " × " + item.h + " · " + human;
     }
 
+    /**
+     * WHY THE GEOMETRY IS WRITTEN INLINE, WITH !important.
+     *
+     * The stylesheet says everything below already, scoped to the tab's
+     * root, and it was not enough. This grid is drawn into somebody else's
+     * page - Forge's own stylesheet, its theme and every other extension's
+     * - and a theme is free to say !important about an element type. The
+     * Lobe theme does: `button { min-width: fit-content !important }`, about
+     * every button on the page, and a tile is a button. That one declaration
+     * beat the tile's `min-width: 0`, made every tile as wide as its own
+     * one-line caption, and each ran out of its cell under the next one:
+     * a picture centred in a box two columns wide, a selection border the
+     * width of two tiles. Three earlier fixes had centred the picture inside
+     * the tile, and none of them could reach the tile's own box.
+     *
+     * An inline declaration marked important is the strongest thing in the
+     * cascade: no stylesheet on the page, whatever its specificity and
+     * whatever it says, can override it. So the script that builds the grid
+     * and its tiles states their geometry here - sizes, placement, the box
+     * model, the fit of the picture, the shape of the caption - and the
+     * stylesheet keeps what it has always kept: colours, radii, the hover
+     * and selection borders, the missing-picture mark. Nothing here names a
+     * colour; test_clipboard_ui.py holds that line.
+     *
+     * The thumbnail size stays the one variable the slider writes onto the
+     * grid (applyThumbnailSize); every other length below is a number this
+     * file owns. reportTiles says so, with the values that won, if a tile is
+     * ever not the size of its cell again.
+     */
+    function pin(element, declarations) {
+        for (const property in declarations) {
+            if (Object.prototype.hasOwnProperty.call(declarations, property)) {
+                element.style.setProperty(property, declarations[property], "important");
+            }
+        }
+    }
+
+    //: The mount: the grid over its pager, laid out together.
+    const MOUNT_GEOMETRY = {
+        "display": "flex",
+        "flex-direction": "column",
+        "gap": "var(--minipaint-clip-gap, 8px)",
+        "box-sizing": "border-box",
+        "width": "auto",
+        "min-width": "0",
+        "max-width": "100%"
+    };
+
+    //: The grid: columns the size the slider names, never stretched to fill
+    //: the row (a stretched column is a box wider than the picture in it),
+    //: and rows of that size plus the caption, so every cell is identical
+    //: before any picture has loaded. min() keeps a single column from
+    //: overflowing a panel narrower than one tile.
+    const GRID_GEOMETRY = {
+        "display": "grid",
+        "grid-template-columns": "repeat(auto-fill, min(calc(var(--minipaint-clip-thumb) + " + TILE_FRAME + "px), 100%))",
+        "grid-auto-rows": "calc(var(--minipaint-clip-thumb) + " + TILE_CAPTION + "px)",
+        "grid-auto-flow": "row",
+        "justify-content": "start",
+        "align-content": "start",
+        "justify-items": "stretch",
+        "align-items": "stretch",
+        "gap": "var(--minipaint-clip-gap, 8px)",
+        "padding": "var(--minipaint-clip-gap, 8px)",
+        "margin": "0",
+        "box-sizing": "border-box",
+        "align-self": "stretch",
+        "width": "auto",
+        "min-width": "0",
+        "max-width": "100%",
+        "overflow-x": "hidden",
+        "overflow-y": "auto"
+    };
+
+    //: The tile is the boundary: exactly its cell, one cell, and nothing it
+    //: holds is drawn outside it. It centres what it holds; the two
+    //: full-width children opt back out below.
+    const TILE_GEOMETRY = {
+        "display": "flex",
+        "flex-direction": "column",
+        "flex-wrap": "nowrap",
+        "align-items": "center",
+        "justify-content": "flex-start",
+        "gap": "4px",
+        "box-sizing": "border-box",
+        "grid-column": "auto",
+        "grid-row": "auto",
+        "justify-self": "stretch",
+        "align-self": "stretch",
+        "width": "100%",
+        "min-width": "0",
+        "max-width": "100%",
+        "height": "100%",
+        "min-height": "0",
+        "max-height": "100%",
+        "margin": "0",
+        "padding": "4px",
+        "border-width": "2px",
+        "border-style": "solid",
+        "overflow": "hidden",
+        "float": "none",
+        "transform": "none",
+        "aspect-ratio": "auto"
+    };
+
+    //: The square takes the room the caption leaves. Its height is what the
+    //: picture's height: 100% resolves against, so it has to be definite:
+    //: flex, inside a tile whose height the row has fixed.
+    const THUMB_GEOMETRY = {
+        "display": "flex",
+        "align-items": "center",
+        "justify-content": "center",
+        "flex": "1 1 auto",
+        "align-self": "stretch",
+        "box-sizing": "border-box",
+        "width": "100%",
+        "min-width": "0",
+        "max-width": "100%",
+        "min-height": "0",
+        "margin": "0",
+        "padding": "0",
+        "border-width": "0",
+        "overflow": "hidden",
+        "text-align": "center",
+        "float": "none",
+        "aspect-ratio": "auto"
+    };
+
+    //: The picture fills the square and is placed in it by object-fit alone,
+    //: with a second ceiling stated in pixels for a square that has no
+    //: height to give. A margin from anywhere cannot push it to one side,
+    //: because there is no free space for a margin to take.
+    const PICTURE_GEOMETRY = {
+        "display": "block",
+        "box-sizing": "border-box",
+        "flex": "0 1 auto",
+        "align-self": "center",
+        "width": "100%",
+        "min-width": "0",
+        "max-width": "100%",
+        "height": "100%",
+        "min-height": "0",
+        "max-height": "var(--minipaint-clip-thumb)",
+        "object-fit": "contain",
+        "object-position": "50% 50%",
+        "margin": "0",
+        "padding": "0",
+        "border-width": "0",
+        "position": "static",
+        "float": "none",
+        "transform": "none",
+        "aspect-ratio": "auto"
+    };
+
+    //: The caption is the tile's width, not its own: one line, clipped with
+    //: an ellipsis. Its type size is stated because the row's height was
+    //: worked out from it; a theme's larger button text would otherwise take
+    //: the difference out of the square.
+    const NAME_GEOMETRY = {
+        "display": "block",
+        "flex": "0 0 auto",
+        "align-self": "stretch",
+        "box-sizing": "border-box",
+        "width": "100%",
+        "min-width": "0",
+        "max-width": "100%",
+        "height": "auto",
+        "max-height": "none",
+        "margin": "0",
+        "padding": "0",
+        "border-width": "0",
+        "font-size": "12px",
+        "line-height": "1.3",
+        "white-space": "nowrap",
+        "overflow": "hidden",
+        "text-overflow": "ellipsis",
+        "text-align": "left"
+    };
+
     /** Where the browser draws, inside the block the server used to fill. */
     function gridMount() {
         const host = byId(GRID_ID);
@@ -849,18 +1068,24 @@ window.minipaintClipboard = (function () {
         if (mount) { return mount; }
         mount = document.createElement("div");
         mount.className = "minipaint-clip-mount";
+        pin(mount, MOUNT_GEOMETRY);
         const grid = document.createElement("div");
         grid.className = "minipaint-clip-grid";
         grid.setAttribute("role", "listbox");
         grid.setAttribute("aria-label", "Clipboard images");
         grid.setAttribute("tabindex", "0");
         grid.dataset.count = "0";
+        pin(grid, GRID_GEOMETRY);
         const pager = document.createElement("div");
         pager.className = "minipaint-clip-pager";
         pager.hidden = true;
         mount.appendChild(grid);
         mount.appendChild(pager);
         host.appendChild(mount);
+        // The size the slider holds, on the grid before its first tile: the
+        // tracks above are measured from it, and a page whose stylesheet
+        // never arrived would otherwise have nothing to measure them from.
+        applyThumbnailSize(S.thumb);
         return mount;
     }
 
@@ -885,22 +1110,29 @@ window.minipaintClipboard = (function () {
         tile.dataset.name = item.name;
         tile.dataset.v = item.v || "";
         tile.title = item.name + " · " + sizeText(item);
+        pin(tile, TILE_GEOMETRY);
         const thumb = document.createElement("span");
         thumb.className = "minipaint-clip-thumb";
+        pin(thumb, THUMB_GEOMETRY);
         const picture = document.createElement("img");
         picture.alt = "";
         picture.loading = "lazy";
         picture.draggable = false;
+        pin(picture, PICTURE_GEOMETRY);
         // A thumbnail that 404s costs that tile its picture and the page
         // nothing else: the name and a missing mark, where the picture was.
+        // The picture is hidden inline, because its display is stated
+        // inline and the stylesheet's rule for a missing one would lose.
         picture.addEventListener("error", function () {
             tile.classList.add("minipaint-clip-item-missing");
+            pin(picture, { "display": "none" });
         });
         picture.src = imageUrl(item.id, item.v);
         thumb.appendChild(picture);
         const label = document.createElement("span");
         label.className = "minipaint-clip-name";
         label.textContent = item.name;
+        pin(label, NAME_GEOMETRY);
         tile.appendChild(thumb);
         tile.appendChild(label);
         return tile;
@@ -925,7 +1157,12 @@ window.minipaintClipboard = (function () {
             tile.dataset.v = item.v || "";
             tile.classList.remove("minipaint-clip-item-missing");
             const picture = tile.querySelector("img");
-            if (picture) { picture.src = imageUrl(item.id, item.v); }
+            if (picture) {
+                // Shown again, in case the version before was the one that
+                // 404ed and hid it.
+                pin(picture, { "display": PICTURE_GEOMETRY.display });
+                picture.src = imageUrl(item.id, item.v);
+            }
         }
         return tile;
     }
@@ -3132,7 +3369,8 @@ window.minipaintClipboard = (function () {
                  takeovers: S.takeovers,
                  sort: menuState().sort || S.library.sort,
                  library: { revision: S.library.revision, page: S.library.page, pages: S.library.pages,
-                            total: S.library.total, shown: S.library.ids.length, busy: S.library.busy } };
+                            total: S.library.total, shown: S.library.ids.length, busy: S.library.busy },
+                 tileReport: S.tileReport };
     }
 
     return {
@@ -3158,6 +3396,7 @@ window.minipaintClipboard = (function () {
         closeMenu: closeMenu,
         select: select,
         setThumbnailSize: setThumbnailSize,
+        reportTiles: reportTiles,
         pasteFromClipboard: pasteFromClipboard,
         setIntercept: setIntercept,
         interceptTarget: interceptTarget,

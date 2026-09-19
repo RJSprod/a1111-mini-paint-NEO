@@ -775,6 +775,17 @@ for a theme that lacks one; `tests/test_clipboard_ui.py` refuses a white, a `#ff
 black or a fixed background in that block, the queue list included. The thumbnail size is
 one CSS variable the browser sets from the slider. On a narrow tab the two columns stack.
 
+The grid's *geometry* has a second author. Every tile is a `<button>`, and a theme is free
+to say `!important` about every button on the page — the Lobe theme's
+`button { min-width: fit-content !important }` once made each tile as wide as its own
+caption and ran it out of its cell. So the browser script that builds the grid also writes
+each geometric declaration — the tracks, the tile's box, the square, the picture's fit, the
+caption's one line — inline on the element and marked `!important`, which no stylesheet on
+the page can override. `style.css` keeps the readable copy of the same rules and every
+colour; the browser suite puts that theme's rule on its page and measures every tile
+against its cell. If a tile is ever not its cell again, the journal line `clipboard: grid: …`
+names the size it is, the size it should be, and the declaration that won.
+
 ## The public API for other extensions
 
 `window.minipaintInterop` is on every Forge page once the extension has loaded. It is

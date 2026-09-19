@@ -1291,6 +1291,25 @@
 
 /* -- the grid ------------------------------------------------------- */
 
+/* WHO DECIDES THE GRID'S GEOMETRY. The rules in this section are the
+   readable statement of it, and the fallback; the script that draws the
+   grid (browser/minipaint_clipboard.js, `pin`) restates every geometric
+   declaration below INLINE and marked !important on the grid, each tile,
+   its box, its picture and its caption as it builds them. It has to: this
+   stylesheet is loaded into somebody else's page, and a theme there is free
+   to say !important about an element type. The Lobe theme says
+   `button { min-width: fit-content !important }` about every button on the
+   page, a tile is a button, and that beat the `min-width: 0` below - every
+   tile grew to the width of its own one-line caption and ran out of its
+   cell under the next one, with three fixes to the picture already here.
+   No stylesheet rule can win that; an inline !important declaration cannot
+   lose it. Colours, radii, the hover and selection borders and the missing
+   mark are decided here and only here, and the browser suite puts that
+   theme's rule on its page to prove the tiles hold. Change a length here
+   and change it in the script's tables too; test_clipboard_ui.py holds the
+   frame and caption numbers equal, and tests/browser_clipboard.py measures
+   the rest. */
+
 /* The thumbnail size lives on the tab root, not on the grid's own wrapper.
    Gradio puts a component's elem_classes on BOTH the outer block and the
    inner "prose" div it renders into, so a rule keyed on that class matches
@@ -1484,6 +1503,9 @@
        full-width children opt back out below. */
     align-items: center;
     gap: 4px;
+    /* Exactly its cell. A theme's `button { min-width: fit-content
+       !important }` beat this declaration and made the tile the width of
+       its caption: the script states it again inline, where nothing can. */
     min-width: 0;
     min-height: 0;
     height: 100%;

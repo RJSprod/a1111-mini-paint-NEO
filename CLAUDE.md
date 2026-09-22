@@ -156,6 +156,18 @@ journal lines are captured through a `console.debug` hook rather than the log
 route, because that route only ever carries the last two dozen lines and a long
 scenario pushes out the line being asserted.
 
+**A source-text check cannot tell a function that is written from one that is
+called.** The WanGP tab's height checks were written against the bundle's text
+and passed with the observer replaced by `if (false)` (the word was still in the
+comment above it) and again with the call removed from the boot sequence (the
+line was still in the file). `_fit()` in `tests/test_wangp_receiver_contract.py`
+runs the bundle against a page whose column can be moved and asserts the numbers
+it computes; five mutations that survived the text checks fail against it. While
+writing it: the bundle's auth probe writes a journal line after an async turn, so
+the scenario's JSON was not the last line of stdout and the entire check block
+was skipped in silence - the harness silences every console method and ends the
+process on the write.
+
 **Every check has a mutation that must break it.** `_RECOVERY_MUTATIONS` in
 `tests/test_wangp_protocol.py` reverts one decision per entry and names the
 check that must then fail; an anchor that no longer matches the live source is
@@ -173,6 +185,24 @@ the six-connection limit for everything on Forge's origin. Two things to know
 about it: only Hypercorn's public `serve()`/`Config` API is safe across
 releases (0.13, which the old `certipie` dependency pinned into venvs, has
 none of the internals), and its installer upgrades anything below 0.17.
+
+`RJSprod/SD-Neo-ModelSwitchRefiner` also draws a floating assistant panel over
+every workspace and has a focus mode that gives one workspace the whole window.
+Two things are shared with it, and both are written down in
+`docs/OVERLAY_AND_TAB_HEIGHT_2026-09-22.txt`:
+
+**A dialog layer, `--minipaint-dialog-layer: 2000`.** Everything that extension
+draws is below it (1100 for a focused workspace, 1200 for the panel) and it has
+a check saying so. The Send to WanGP popup used to draw at 60, which put it
+under both of them *and* under this extension's own canvas focus mode - the
+report was "I cannot open this menu in focus mode", and it had been opening all
+along. Moving either number means moving the check in the other repository.
+
+**An event, `minipaint:overlay`.** The popup dispatches it on `document` with
+`{name, open, modal}` when it takes the page and when it gives it back, and the
+assistant puts its panel away for it. Fire and forget: nothing waits for a
+listener, and a page with none behaves as it always did. A replacement picture
+is the same overlay and is announced once.
 
 `RJSprod/SD-Neo-ModelSwitchRefiner` runs a local LLM. Its logs showed
 `llama-server` taking every CPU core for nine minutes with its model on the

@@ -3002,18 +3002,108 @@ window.minipaintWanGP = (function () {
      * unproven, and the frame's own request is one of those. Hanging it off
      * the handshake made the deadlock it was written to break.
      */
+    /* -------------------------------------------------------------------- */
+    /* The tab's height: the one measurement a stylesheet cannot make          */
+    /* -------------------------------------------------------------------- */
+    //
+    // This is layout, not protocol, and it sits in this file because it is the
+    // WanGP tab's only browser bundle and a second one for fifteen lines would
+    // be worse. It reads; it never talks to the iframe and never touches the
+    // bridge's state.
+    //
+    // What it is for: the frame used to be `height: 80vh` with the Integration
+    // management panel in the page below it, so the tab was four fifths of a
+    // window of WanGP and then a scroll to reach anything else. `style.css`
+    // makes the tab a flex column whose frame takes what is left, and the room
+    // there is depends on how far down the page the column starts -- a theme's
+    // header plus Forge's tab bar plus whether the assistant's focus mode has
+    // taken both out of the layout. No stylesheet can know it. This measures
+    // it and writes it to the custom property the rule reads.
+    //
+    // Without this the column is auto-height and the frame keeps its 80vh
+    // basis, so every way this can fail -- the bundle not loading, the tab not
+    // in the page, a browser with no ResizeObserver -- lands on exactly the
+    // behaviour the tab already had.
+
+    //: Left under the column, so a one-pixel rounding error is not a scrollbar.
+    const FRAME_BOTTOM_ROOM = 4;
+    //: Never smaller than this, however little room the measurement finds: a
+    //: tab squeezed to nothing is worse than one that overflows a little.
+    const FRAME_MIN_HEIGHT = 320;
+    const COLUMN_PROPERTY = "--minipaint-wangp-height";
+
+    /** Give the tab's column the room between its top and the bottom of the
+     * window, and let the stylesheet's flex column divide it.
+     *
+     * Only the column is measured. What the frame gets, and what is left for
+     * the management panel on the bottom edge, is flexbox's arithmetic and
+     * not this function's -- which is why opening that panel shrinks the
+     * frame instead of pushing the page into a scroll.
+     */
+    function fitFrame() {
+        const frame = rootElement();
+        if (!frame) { return 0; }
+        const column = frame.closest ? frame.closest("#wangp_root") : null;
+        if (!column) { return 0; }
+        let box;
+        try {
+            box = column.getBoundingClientRect();
+        } catch (error) {
+            return 0;
+        }
+        // A tab that is not on screen measures zero, and sizing against that
+        // would write a floor-height column the next real measurement has to
+        // undo. Left alone; measured again when it shows.
+        if (!box.width) { return 0; }
+
+        const room = Math.max(FRAME_MIN_HEIGHT,
+                              Math.round(window.innerHeight - box.top
+                                         - FRAME_BOTTOM_ROOM));
+        try {
+            column.style.setProperty(COLUMN_PROPERTY, room + "px");
+        } catch (error) {
+            return 0;
+        }
+        return room;
+    }
+
+    function watchFrameSize() {
+        let scheduled = 0;
+        const later = function () {
+            if (scheduled) { return; }
+            scheduled = window.requestAnimationFrame(function () {
+                scheduled = 0;
+                try { fitFrame(); } catch (error) { /* a layout is not worth an exception */ }
+            });
+        };
+        try {
+            window.addEventListener("resize", later);
+            // Focus mode does not resize the window: it takes the chrome out
+            // of the layout, which moves this column's top without any event
+            // a listener on `window` would hear. The column's own box is the
+            // thing that changed, so the column is what is watched.
+            if (typeof ResizeObserver === "function") {
+                const frame = rootElement();
+                const column = frame && frame.closest ? frame.closest("#wangp_root") : null;
+                if (column) { new ResizeObserver(later).observe(column); }
+            }
+        } catch (error) { /* the stylesheet's fallback is the whole degradation */ }
+        later();
+    }
+
     function startAuthProbe() {
         probeAuth().then(function () { report(S.ready, ""); });
     }
 
     try {
         if (document.readyState === "loading") {
-            document.addEventListener("DOMContentLoaded", function () { startAuthProbe(); watchRoot(0); watchLifecycle(); watchTransport(); }, { once: true });
+            document.addEventListener("DOMContentLoaded", function () { startAuthProbe(); watchRoot(0); watchLifecycle(); watchTransport(); watchFrameSize(); }, { once: true });
         } else {
             startAuthProbe();
             watchRoot(0);
             watchLifecycle();
             watchTransport();
+            watchFrameSize();
         }
     } catch (e) {
         // A page this file cannot bind to is a Send menu without WanGP lines,
@@ -3043,6 +3133,10 @@ window.minipaintWanGP = (function () {
         capabilities: capabilities,
         // One line into the same journal the handshake and the queries write
         // to, for the Canvas's half of a send. Text only; nothing is parsed.
-        note: function (message) { say(text(message, 300)); }
+        note: function (message) { say(text(message, 300)); },
+        // The tab's own layout, exposed for the same reason the rest is: so a
+        // test can drive it, and so a page can re-fit after doing something
+        // this file did not hear about.
+        fitFrame: fitFrame
     };
 })();

@@ -39,7 +39,7 @@ const fs = require("fs");
 /* ---------------------------------------------------------------- a DOM -- */
 
 class FakeEvent {
-    constructor(type, init) { this.type = type; this.bubbles = !!(init && init.bubbles); this.target = null; this.key = (init && init.key) || ""; this.ctrlKey = !!(init && init.ctrlKey); this.metaKey = false; this.defaultPrevented = false; }
+    constructor(type, init) { this.type = type; this.bubbles = !!(init && init.bubbles); this.target = null; this.key = (init && init.key) || ""; this.ctrlKey = !!(init && init.ctrlKey); this.metaKey = false; this.defaultPrevented = false; this.detail = (init && init.detail) || null; }
     preventDefault() { this.defaultPrevented = true; }
     stopPropagation() { this.stopped = true; }
 }
@@ -166,6 +166,14 @@ global.document = document;
 global.Event = FakeEvent;
 global.CustomEvent = FakeEvent;
 
+/* What the popup announces to the rest of the page, in order. Anything that
+   floats over Forge listens for these so it can get out of a dialog's way;
+   the Forge Assistant's launcher is the one that prompted them. */
+const overlays = [];
+document.addEventListener("minipaint:overlay", function (event) {
+    overlays.push((event.detail && event.detail.name) + ":" + ((event.detail && event.detail.open) ? "open" : "closed"));
+});
+
 /* ---------------------------------------------------------- the window -- */
 
 const calls = [];
@@ -280,6 +288,7 @@ function report(extra) {
         cancels: posted("cancel").map(function (c) { return c.body.handoff; }),
         drafts: posted("draft").map(function (c) { return c.body.prompt; }),
         loaded: loaded,
+        overlays: overlays.slice(),
         hidden: root() ? root().hidden : null,
         toast: (function () { const t = body.querySelector(".minipaint-intercept-toast"); return t && !t.hidden ? t.textContent : ""; })(),
         message: (function () { const m = root() && root().querySelector(".minipaint-intercept-message"); return m && !m.hidden ? m.textContent : ""; })(),
@@ -455,6 +464,8 @@ def run() -> Results:
         r.check("and closes the moment the server has stored it, saying so", opened["hidden"] is True and opened["state"]["open"] is False
                 and opened["toast"].startswith("Queued on the server.") and "it goes next" in opened["toast"], str(opened["toast"]))
         r.check("no cancel was sent for a picture that was generated", opened["cancels"] == [])
+        r.check("a generated picture closes the popup and says the overlay has gone",
+                opened["overlays"] == ["intercept:open", "intercept:closed"], str(opened["overlays"]))
         r.check("a handoff already opened once is refused - the step that hands it over runs after a failed receive too",
                 opened.get("reopened") is False and opened["hidden"] is True and opened.get("describesAfter") == 1, str(opened.get("reopened")))
 
@@ -474,12 +485,22 @@ def run() -> Results:
         r.check("Cancel sends one cancel for the frozen picture and no submit, and closes",
                 cancelled["cancels"] == ["wangp:" + "a" * 32 + ":64x48:txt2img"] and cancelled["submits"] == [] and cancelled["hidden"] is True)
         r.check("and an edited prompt is shared with Clipboard on the way out", cancelled["drafts"] == ["edited then cancelled"], str(cancelled["drafts"]))
+        # Announced so that anything floating over Forge can get out of a
+        # dialog's way. Closing has to be announced too, or whatever moved
+        # aside never comes back.
+        r.check("opening and closing are announced to the page, in that order",
+                cancelled["overlays"] == ["intercept:open", "intercept:closed"], str(cancelled["overlays"]))
 
     replaced = _run("replace")
     if replaced and "error" not in replaced:
         r.check("a second picture replaces the first, which is cancelled on the server, and the prompt typed so far is kept",
                 replaced["cancels"] == ["wangp:" + "a" * 32 + ":64x48:txt2img"] and replaced["state"]["token"] == "b" * 32
                 and replaced["state"]["prompt"] == "kept across" and replaced["state"]["tab"] == "img2img", str(replaced["state"])[:200])
+        # One overlay, still up. A second "open" would make a listener that
+        # counts them think two dialogs were on screen, and the one that
+        # matters here puts a panel away on open and back on close.
+        r.check("a replacement picture is the same overlay, announced once",
+                replaced["overlays"] == ["intercept:open"], str(replaced["overlays"]))
 
     facts = _run("facts")
     if facts and "error" not in facts:

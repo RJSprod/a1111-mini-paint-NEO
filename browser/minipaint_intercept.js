@@ -51,6 +51,21 @@ window.minipaintIntercept = (function () {
     const CLIPBOARD_ENHANCE_ID = "minipaint_clipboard_enhance_toggle";
     const CLASS = "minipaint-intercept";
     const TOAST_MS = 4500;
+    //: Published when this popup takes over the page, and again when it gives
+    //: way. Anything else that floats over Forge can put itself away while a
+    //: dialog is up and bring itself back afterwards, without either side
+    //: importing the other or knowing the other's class names.
+    //:
+    //: Dispatched on `document`, because that is the one node every extension
+    //: on the page can reach. `detail.name` says which overlay, so a listener
+    //: can ignore the ones it does not care about; `detail.open` says which
+    //: way. The event is fire-and-forget: nothing here waits for a listener,
+    //: and a page with no listeners behaves exactly as it did.
+    //:
+    //: Its first listener is SD-Neo-ModelSwitchRefiner's Forge Assistant,
+    //: whose launcher sat on top of this popup.
+    const OVERLAY_EVENT = "minipaint:overlay";
+    const OVERLAY_NAME = "intercept";
 
     const S = {
         dom: null,
@@ -805,14 +820,31 @@ window.minipaintIntercept = (function () {
             S.facts = facts;
             describe();
         });
+        if (!replacing) { announce(true); }
         note("opened for " + (parsed.tab || "a gallery") + " picture " + parsed.token.slice(0, 8));
         return true;
     }
 
+    /** Say that an overlay of ours has taken over, or given way.
+     *
+     * Never fails a caller: an overlay that could not be announced is still an
+     * overlay, and the popup is no less usable for a page whose browser has no
+     * `CustomEvent` constructor.
+     */
+    function announce(open) {
+        try {
+            document.dispatchEvent(new CustomEvent(OVERLAY_EVENT, {
+                detail: { name: OVERLAY_NAME, open: !!open, modal: true }
+            }));
+        } catch (error) { /* nothing here depends on being heard */ }
+    }
+
     function close() {
+        const was = S.open;
         S.open = false;
         removeKeys();
         if (S.dom) { S.dom.root.hidden = true; }
+        if (was) { announce(false); }
     }
 
     /** Cancel: the frozen picture is let go; an edited prompt stays shared. */

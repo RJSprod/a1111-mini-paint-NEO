@@ -912,6 +912,72 @@
     max-width: 70ch;
 }
 
+/* ------------------------------------------------------------------
+ * WanGP tab
+ *
+ * The tab is a flex column that fills the window: the frame takes what is
+ * left and the Integration management panel sits on the bottom edge of it.
+ * ------------------------------------------------------------------ */
+
+/* -- the WanGP tab fills the window ---------------------------------- */
+/*
+   The frame was `height: 80vh` with the Integration management panel in the
+   page below it, so the tab was four fifths of a window of WanGP and then a
+   scroll -- and focus mode, which hands the workspace the whole window, made
+   the waste more obvious rather than less.
+
+   A flex column now: the frame takes what is left and the management panel
+   sits on the bottom edge of the window, where it is reachable without
+   scrolling past WanGP to find it.
+
+   One measurement does it, and `--minipaint-wangp-height` is where it lands:
+   how far it is from the top of this column to the bottom of the window. That
+   is the one thing a stylesheet cannot know, because what is above the column
+   is a theme's header, Forge's tab bar, and whether the assistant's focus mode
+   has taken both out of the layout. `browser/minipaint_wangp.js` measures it.
+
+   Nothing here is positioned, and it does not need to be: the management panel
+   is the last row of a column that ends at the bottom of the window, so it is
+   on the bottom edge by construction -- which also means opening it *shrinks
+   the frame* rather than pushing the page into a scroll. `test_frontends`
+   holds this whole file to no out-of-flow positioning outside focus mode, so
+   that nothing can ever be laid over the Canvas; it reads the file as text, so
+   even naming the property in a comment trips it.
+
+   With no measurement the column is auto-height and the frame keeps its 80vh
+   basis, which is exactly what the tab did before -- so a page whose bundle
+   never loaded is no worse off than it was. The script is the improvement;
+   this rule is the contract.
+*/
+#wangp_root.minipaint-wangp {
+    display: flex;
+    flex-direction: column;
+    height: var(--minipaint-wangp-height, auto);
+    min-height: 0;
+}
+
+/* `80vh` is a flex *basis*, not a height: in a column with a measured height
+   this grows or shrinks to what is left, and without one it is the height the
+   frame has always had. */
+#wangp_root.minipaint-wangp > #wangp_iframe_root {
+    flex: 1 1 auto;
+    min-height: 240px;
+    height: 80vh;
+}
+
+/* The frame fills the box the column gave it. `!important` because the height
+   it replaces is an inline style on the element, and nothing in a stylesheet
+   beats one without it. */
+#wangp_root.minipaint-wangp .minipaint-wangp-frame {
+    height: 100% !important;
+}
+
+#wangp_root.minipaint-wangp > #wangp_manage_root {
+    flex: 0 0 auto;
+}
+
+
+
 /* --------------------------------------------------------------------
  * Send to WanGP popup
  *
@@ -922,9 +988,32 @@
  * it; only sizes and layout are decided here.
  * ------------------------------------------------------------------ */
 
+/* -- the stacking contract ------------------------------------------- */
+/*
+   Send to WanGP is a dialog, and a dialog is the top of this page.
+   `z-index: 60` was above everything this extension draws and below
+   everything two other extensions do, which is a popup that opens
+   underneath whatever is in front:
+
+     11, 12, 40, 61   this extension's own bars, menus and toasts
+     1000             this extension's canvas focus mode
+     1100             SD-Neo-ModelSwitchRefiner's focused workspace
+     1200             SD-Neo-ModelSwitchRefiner's assistant panel
+
+   So the popup was invisible in either extension's focus mode and covered by
+   the assistant's launcher out of it -- reported as "I cannot open this menu
+   in focus mode", which it was opening all along. The dialog layer sits above
+   all of it, with room left underneath for anything that wants to be over the
+   page but under a dialog. The sibling repository has a test asserting its own
+   layers stay below this number; changing it means changing that too.
+*/
+:root {
+    --minipaint-dialog-layer: 2000;
+}
+
 .minipaint-intercept {
     position: fixed;
-    z-index: 60;
+    z-index: var(--minipaint-dialog-layer, 2000);
     width: min(400px, calc(100vw - 24px));
     max-height: calc(100vh - 24px);
     overflow-y: auto;
@@ -1155,7 +1244,8 @@
 }
 .minipaint-intercept-toast {
     position: fixed;
-    z-index: 61;
+    /* Over the dialog it reports on, and therefore over everything. */
+    z-index: calc(var(--minipaint-dialog-layer, 2000) + 1);
     max-width: min(400px, calc(100vw - 24px));
     padding: 8px 14px;
     border-radius: 8px;

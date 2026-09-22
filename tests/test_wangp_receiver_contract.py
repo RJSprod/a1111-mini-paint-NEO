@@ -36,6 +36,8 @@ setup_path()
 import hashlib  # noqa: E402
 import json  # noqa: E402
 import pathlib  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
 import typing  # noqa: E402
@@ -810,6 +812,49 @@ def tab_checks(r: Results) -> None:
                     len({wangp_ui.paint_token() for _ in range(64)}) == 64
                     and all(len(token) == 12 for token in (wangp_ui.paint_token(),)))
 
+            # -- the tab fills the window ------------------------------------
+            #
+            # The frame was `height: 80vh` with the Integration management
+            # panel in the page below it, so the tab was four fifths of a
+            # window of WanGP and then a scroll to reach anything else, and
+            # focus mode - which hands the workspace the whole window - made
+            # the waste more obvious rather than less. The height is the
+            # stylesheet's now and the frame fills the box the column gives it.
+            r.check("the frame asks for its whole box and states no viewport height of its own",
+                    "height:100%" in frame and "vh" not in frame, frame)
+            r.check("and it still cannot collapse on a page whose stylesheet never arrived",
+                    "min-height:480px" in frame)
+            css = (ROOT / "style.css").read_text(encoding="utf-8")
+            tab = css[css.find("/* -- the WanGP tab fills the window"):css.find(" * Send to WanGP popup")]
+            r.check("the tab is a flex column measured to the bottom of the window",
+                    "flex-direction: column" in tab
+                    and "height: var(--minipaint-wangp-height, auto)" in tab, tab[:200])
+            r.check("the frame takes what is left and the management panel keeps its own room",
+                    "flex: 1 1 auto" in tab and "flex: 0 0 auto" in tab
+                    and "#wangp_manage_root" in tab)
+            r.check("the frame's 80vh survives only as the basis, which is what a page with no script gets",
+                    "height: 80vh" in tab)
+            # One measurement, and the script that makes it, RUN rather than
+            # read. The offset above the column is a theme's header plus
+            # Forge's tab bar plus whether another extension's focus mode has
+            # taken both out of the layout, which is why no stylesheet can do
+            # this - and why reading the source cannot tell a function that is
+            # written from one that is called.
+            fit = _fit()
+            if fit and "error" not in fit:
+                r.check("the tab's height is measured to the bottom of the window",
+                        fit["belowChrome"] == 900 - 120 - 4, str(fit))
+                r.check("and in focus mode, where the chrome is out of the layout, that is the whole window",
+                        fit["focused"] == 900 - 4 and fit["wrote"] == "896px", str(fit))
+                r.check("the column is what carries it, so flexbox divides it between the frame and the panel",
+                        fit["exposed"] is True and fit["wrote"].endswith("px"))
+                r.check("a tab that is not on screen is left alone rather than sized against zero",
+                        fit["offscreen"] == 0 and fit["keptAfterOffscreen"] == "896px", str(fit))
+                r.check("and a window with almost no room floors it rather than squeezing it to nothing",
+                        fit["floored"] == 320, str(fit))
+                r.check("the column's own box is watched, which is the only thing focus mode changes",
+                        fit["observed"] is True)
+
             # ---- and now the failure this whole shape exists for ----
             print("  (the traceback below is this test breaking the WanGP tab on purpose)")
             working = wangp_ui.create_ui
@@ -1576,6 +1621,107 @@ def auth_probe_checks(r: Results) -> None:
         wangp_proxy._boundary = boundary
         wangp_proxy.set_auth_acknowledged(acknowledged)
 
+
+
+#: Enough of a page to measure one column on, so that the tab's height is
+#: checked by running it rather than by reading it.
+#:
+#: Its own stub rather than ``test_wangp_protocol``'s: that one answers
+#: ``closest`` with null and has no ``getBoundingClientRect`` at all, because
+#: recovery never measures anything. Layout is the one thing in this bundle
+#: that does, and a source-text check cannot tell a function that is written
+#: from one that is called - which is exactly what a mutation proved.
+_FIT_HARNESS = r"""
+const fs = require("fs");
+function el(id, tag) {
+    return {id: id, tagName: (tag || "div").toUpperCase(), children: [], parentElement: null,
+        box: {top: 0, left: 0, width: 1200, height: 100},
+        style: {props: {}, setProperty: function (k, v) { this.props[k] = v; }},
+        classList: {add() {}, remove() {}, contains() { return false; }},
+        getBoundingClientRect: function () { return this.box; },
+        getAttribute: function () { return null; }, setAttribute: function () {},
+        querySelector: function () { return null; }, querySelectorAll: function () { return []; },
+        addEventListener: function () {}, removeEventListener: function () {},
+        closest: function (sel) {
+            let walk = this;
+            const want = sel.replace("#", "");
+            while (walk) { if (walk.id === want) { return walk; } walk = walk.parentElement; }
+            return null;
+        }};
+}
+const column = el("wangp_root");
+const frame = el("wangp_iframe_root");
+const manage = el("wangp_manage_root");
+frame.parentElement = column; manage.parentElement = column;
+column.children = [frame, manage];
+const document = {
+    readyState: "complete", visibilityState: "visible",
+    body: el("body"), documentElement: el("html"),
+    createElement: function (t) { return el("made", t); },
+    getElementById: function () { return null; },
+    querySelector: function (s) { return s === "#wangp_iframe_root" ? frame : null; },
+    querySelectorAll: function () { return []; },
+    addEventListener: function () {}, removeEventListener: function () {}
+};
+const window = {
+    innerHeight: 900, innerWidth: 1400,
+    location: {origin: "https://forge.test", href: "https://forge.test/"},
+    addEventListener: function () {}, removeEventListener: function () {},
+    requestAnimationFrame: function (fn) { fn(); return 1; },
+    document: document, setTimeout: setTimeout, clearTimeout: clearTimeout,
+    navigator: {userAgent: "node"}
+};
+global.window = window; global.document = document;
+global.ResizeObserver = function () { return {observe: function () { global.__observed = true; }, disconnect() {}}; };
+global.MutationObserver = function () { return {observe() {}, disconnect() {}}; };
+global.fetch = function () {
+    return Promise.resolve({ok: true, status: 204, json: function () { return Promise.resolve({}); },
+                            text: function () { return Promise.resolve(""); }});
+};
+console.log = function () {};
+new Function("window", "document", "fetch", fs.readFileSync(process.argv[2], "utf8"))(window, document, global.fetch);
+const api = window.minipaintWanGP;
+const out = {exposed: typeof api.fitFrame === "function", observed: !!global.__observed};
+// Below a theme's header and Forge's tab bar.
+column.box = {top: 120, left: 0, width: 1200, height: 700};
+out.belowChrome = api.fitFrame();
+// Focus mode: the chrome is out of the layout, so the column starts at the top.
+column.box = {top: 0, left: 0, width: 1200, height: 900};
+out.focused = api.fitFrame();
+out.wrote = column.style.props["--minipaint-wangp-height"];
+// A tab that is not on screen measures zero and must be left alone.
+column.box = {top: 0, left: 0, width: 0, height: 0};
+out.offscreen = api.fitFrame();
+out.keptAfterOffscreen = column.style.props["--minipaint-wangp-height"];
+// Almost no room at all: floored rather than squeezed to nothing.
+column.box = {top: 880, left: 0, width: 1200, height: 20};
+out.floored = api.fitFrame();
+process.stdout.write(JSON.stringify(out) + "\n");
+process.exit(0);
+"""
+
+
+def _fit() -> dict:
+    """Run the tab's sizer against that page, and report what it did."""
+    node = shutil.which("node")
+    if not node:
+        return {}
+    with tempfile.TemporaryDirectory(prefix="minipaint-wangp-fit-") as scratch:
+        harness = pathlib.Path(scratch) / "fit.js"
+        harness.write_text(_FIT_HARNESS, encoding="utf-8")
+        bundle = ROOT / "browser" / "minipaint_wangp.js"
+        try:
+            done = subprocess.run([node, str(harness), str(bundle)],
+                                  capture_output=True, text=True, timeout=30, check=False)
+        except Exception as error:
+            return {"error": str(error)[:200]}
+    lines = done.stdout.strip().splitlines()
+    if not lines:
+        return {"error": done.stderr[-300:]}
+    try:
+        return json.loads(lines[-1])
+    except ValueError:
+        return {"error": lines[-1][:200]}
 
 def run() -> Results:
     r = Results("wangp receiver contract")

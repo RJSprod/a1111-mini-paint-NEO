@@ -1,0 +1,132 @@
+Send to WanGP over everything, and a WanGP tab that fills the window
+====================================================================
+2026-09-22
+
+Two reports, one page, and a sibling extension in both of them. The Forge
+Assistant in RJSprod/SD-Neo-ModelSwitchRefiner floats a panel over every
+workspace and has a focus mode that gives one workspace the whole window.
+This extension has a dialog and a tab, and neither of them got on with it.
+
+
+1. "I cannot open the Send to WanGP menu in focus mode"
+-------------------------------------------------------
+
+It was opening all along. It was underneath.
+
+    .minipaint-intercept { z-index: 60 }
+
+60 is above everything this extension draws and below everything the other
+one does:
+
+     11, 12, 40, 61   this extension's bars, menus and toasts
+     1000             this extension's own canvas focus mode
+     1100             the sibling's focused workspace
+     1200             the sibling's assistant panel
+
+So in either extension's focus mode the popup was invisible, and out of focus
+mode the assistant's launcher sat on top of it. Note the first line of that
+list: this extension's *own* focus mode covered its *own* dialog, and had
+done since both were written. The report came from the sibling because the
+sibling is what the user had open.
+
+A dialog is the top of the page. `--minipaint-dialog-layer: 2000` is that,
+named once, with the popup and its toast drawn on it rather than on numbers
+of their own. There is room left under it for anything that wants to be over
+the page but under a dialog.
+
+The sibling repository carries the mirror of this: a check that its own two
+layers stay below 2000. Changing this number means changing that one.
+
+
+2. The panel on top of the dialog
+---------------------------------
+
+Stacking fixes what covers what. It does not fix a panel sitting over a
+dialog somebody is trying to read, and no number can: the assistant's panel
+is 360 pixels of conversation and the popup opens under the button that was
+pressed.
+
+So the popup says when it takes the page, and when it gives it back:
+
+    document.dispatchEvent(new CustomEvent("minipaint:overlay", {
+        detail: { name: "intercept", open: true, modal: true }
+    }));
+
+Fire and forget. Nothing here waits for a listener and a page with none
+behaves exactly as it did. `detail.name` says which overlay so a listener can
+ignore the ones it does not care about; `detail.open` says which way. A
+replacement picture is the same overlay and is announced once, because a
+listener that counts them would otherwise think two dialogs were up.
+
+The sibling listens for it and puts its panel back to its launcher. It does
+not reopen on close - a panel that springs back over the page somebody has
+just returned to is the same complaint from the other end - and it leaves
+focus mode alone, because the dialog draws above it now.
+
+This is the whole of the contract. Two repositories, one event name, one
+number, and neither side imports the other or knows the other's class names.
+
+
+3. The WanGP tab did not fill the page
+--------------------------------------
+
+The frame was `height: 80vh` with the Integration management accordion in the
+page below it, so the tab was four fifths of a window of WanGP and then a
+scroll to reach anything else. Focus mode, which hands the workspace the
+whole window, made the waste more obvious rather than less: more room, the
+same 80vh, a bigger gap.
+
+The tab is a flex column now. The frame takes what is left; the management
+panel is the last row, so it is on the bottom edge by construction. Opening
+it *shrinks the frame* rather than pushing the page into a scroll.
+
+Nothing is positioned to do it, and that is deliberate: `test_frontends`
+holds this stylesheet to no out-of-flow positioning outside focus mode so
+that nothing can ever be laid over the Canvas. (It reads the file as text, so
+even naming the property in a comment trips it. That is how this section came
+to be written the way it is.)
+
+One measurement, and it is the one a stylesheet cannot make: how far it is
+from the top of the column to the bottom of the window. What is above the
+column is a theme's header plus Forge's tab bar plus whether the sibling's
+focus mode has taken both out of the layout. `fitFrame()` in
+browser/minipaint_wangp.js measures it and writes `--minipaint-wangp-height`;
+`watchFrameSize()` re-measures on a window resize and on the column's own box
+changing, which is the only thing focus mode changes.
+
+It lives beside the bridge because the WanGP tab has one browser bundle and a
+second one for fifteen lines of layout would be worse. It reads; it never
+talks to the iframe and never touches the bridge's state.
+
+Every way it can fail - the bundle not loading, the tab not on screen, a
+browser with no ResizeObserver - leaves the column auto-height and the frame
+on its 80vh basis, which is exactly what the tab did before. The script is
+the improvement; the stylesheet is the contract.
+
+
+4. What the tests learned
+-------------------------
+
+The layout checks were written against the source first: does the bundle
+contain `ResizeObserver`, does it contain `fitFrame`. Every one of them
+passed with the observer replaced by `if (false)`, because the word was still
+in the comment above it explaining the fallback. Tightened to the exact
+construction, they still passed with the *call* removed from the boot
+sequence, because the line was still in the file.
+
+A source-text check cannot tell a function that is written from one that is
+called. `_fit()` in tests/test_wangp_receiver_contract.py runs the real bundle
+against a page whose column can be moved, and asserts what it computes: 776
+below a tab bar, 896 in focus mode, unchanged when the tab is off screen,
+floored when there is no room. Five mutations that survived the source checks
+fail against it.
+
+Its stub is its own rather than test_wangp_protocol's, which answers
+`closest` with null and has no `getBoundingClientRect`: recovery never
+measures anything, and layout is the only thing in this bundle that does.
+
+One sharp edge for whoever writes the next one. The bundle's auth probe
+writes a journal line *after* an async turn, so the scenario's JSON was not
+the last line of stdout and the whole check block was being skipped in
+silence. The harness silences every console method and ends the process on
+the write.

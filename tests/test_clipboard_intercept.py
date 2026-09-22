@@ -654,6 +654,20 @@ def bundle_checks(r: Results) -> None:
     r.check("and it is compact: a fixed width under the button, never the window",
             "min(400px" in block and "100vh" not in block.split(".minipaint-intercept {")[1].split("}")[0].replace("max-height: calc(100vh - 24px)", ""))
 
+    # A dialog is the top of the page, and this one was not. `z-index: 60` was
+    # above everything this extension draws and below two things another
+    # extension does: SD-Neo-ModelSwitchRefiner's focused workspace (1100) and
+    # its assistant panel (1200). So the popup opened underneath whatever was
+    # in front - reported as "I cannot open this menu in focus mode", which it
+    # had been opening all along. The sibling repository has the mirror of this
+    # check: its own layers must stay below this number.
+    layer = re.search(r"--minipaint-dialog-layer:\s*(\d+)", css)
+    r.check("the dialog layer is a named number, above every focus layer on the page",
+            layer is not None and int(layer.group(1)) > 1200, layer.group(1) if layer else "absent")
+    r.check("and the popup and its toast are drawn on it, not on a number of their own",
+            "z-index: var(--minipaint-dialog-layer" in block
+            and "calc(var(--minipaint-dialog-layer" in block)
+
 
 # ---------------------------------------------------------------------- run --
 

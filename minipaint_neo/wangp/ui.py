@@ -359,7 +359,12 @@ def iframe_html(channel_id: str = "", paint: str = "") -> str:
     return (
         f'<iframe id="{IFRAME_ELEM_ID}" class="minipaint-wangp-frame" title="WanGP" '
         f'src="{html.escape(PUBLIC_PATH, quote=True)}"{stamp} '
-        'style="width:100%;height:80vh;min-height:480px;border:0;display:block" '
+        # The height is the stylesheet's now, not this string's: the tab is a
+        # flex column and the frame takes what is left of the window after the
+        # Integration management panel on its bottom edge. `100%` of that, with
+        # a floor so a page whose stylesheet never arrived still has a frame it
+        # can see rather than a collapsed one.
+        'style="width:100%;height:100%;min-height:480px;border:0;display:block" '
         'referrerpolicy="same-origin" allow="clipboard-read; clipboard-write; fullscreen">'
         "</iframe>"
     )

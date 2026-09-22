@@ -76,9 +76,12 @@ scroll to reach anything else. Focus mode, which hands the workspace the
 whole window, made the waste more obvious rather than less: more room, the
 same 80vh, a bigger gap.
 
-The tab is a flex column now. The frame takes what is left; the management
-panel is the last row, so it is on the bottom edge by construction. Opening
-it *shrinks the frame* rather than pushing the page into a scroll.
+The frame is given the room from the top of the column to the bottom of the
+window, less whatever the management panel below it needs. The panel ends up
+on the bottom edge by arithmetic: the column is auto-height, so it is exactly
+the frame plus the panel, and the two of them reach the bottom. Opening the
+panel re-measures and the frame gives up the room, rather than the page
+growing a scrollbar.
 
 Nothing is positioned to do it, and that is deliberate: `test_frontends`
 holds this stylesheet to no out-of-flow positioning outside focus mode so
@@ -130,3 +133,38 @@ writes a journal line *after* an async turn, so the scenario's JSON was not
 the last line of stdout and the whole check block was being skipped in
 silence. The harness silences every console method and ends the process on
 the write.
+
+
+5. The first attempt at section 3, and why it was wrong
+-------------------------------------------------------
+
+Shipped, and reported back the same day: "the wangp window got smaller".
+
+The first version made the column a flex column with a measured height, gave
+the frame `flex: 1 1 auto`, and set the frame itself to `height: 100%`. Every
+part of that worked except the last one. Gradio wraps raw markup in containers
+of its own; those have auto height; and a percentage of an auto height
+resolves to auto. So the frame sat at its 480px inline floor INSIDE a
+container that had correctly filled the window, and the difference - 267px in
+the shape this was reproduced at - showed as a void between the frame and the
+panel. The panel was docked, the column was the right height, and the one
+thing anybody actually looks at was smaller than before.
+
+Reproduced in headless Chromium against the real stylesheet and the real
+bundle, which is the only way this was ever going to be settled: a Node stub
+has no layout, and every check written against the source passed while the
+page was wrong.
+
+The height is stated on the frame now, as a measured pixel value, and nothing
+between the column and the frame is styled at all - so there is no chain left
+to resolve against. No flex, no positioning, no percentages.
+
+A second defect was found while looking, and it had not been reported yet
+because it had not bitten: the sizer observed the column, and wrote a custom
+property on the column. An observer that writes to the box it watches is a
+loop that never settles. It now watches the two boxes it never sizes - the
+management panel, because opening it is the one thing that changes the room
+without changing the window, and the column's parent, because focus mode moves
+the column without a resize event - and it writes only when the answer has
+changed. Both halves are asserted, the second by a check that the element
+being sized is never among the elements being watched.

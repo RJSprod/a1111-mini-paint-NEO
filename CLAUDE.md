@@ -156,6 +156,21 @@ journal lines are captured through a `console.debug` hook rather than the log
 route, because that route only ever carries the last two dozen lines and a long
 scenario pushes out the line being asserted.
 
+**A percentage height inside a Gradio container resolves to auto.** The WanGP
+frame was given `height: 100%` of a container the stylesheet had correctly
+sized to the window; Gradio wraps raw markup in containers of its own, those
+have auto height, and the frame sat at its inline `min-height` floor with the
+difference showing as a void. Heights that have to be exact are measured and
+written as pixels on the element itself, with nothing styled in between - see
+`docs/OVERLAY_AND_TAB_HEIGHT_2026-09-22.txt` §5. Layout like this is settled in
+a real browser; a Node stub has no layout and every source check passed while
+the page was wrong.
+
+**Never observe the box you resize.** The same sizer watched the column and
+wrote a custom property on the column, which is a ResizeObserver loop waiting
+for a layout that oscillates. It watches only boxes it never sizes, and writes
+only when the value changed.
+
 **A source-text check cannot tell a function that is written from one that is
 called.** The WanGP tab's height checks were written against the bundle's text
 and passed with the observer replaced by `if (false)` (the word was still in the

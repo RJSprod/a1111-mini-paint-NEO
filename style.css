@@ -915,68 +915,44 @@
 /* ------------------------------------------------------------------
  * WanGP tab
  *
- * The tab is a flex column that fills the window: the frame takes what is
- * left and the Integration management panel sits on the bottom edge of it.
+ * The frame fills the window and the Integration management panel sits on the
+ * bottom edge of it, by arithmetic rather than by positioning.
  * ------------------------------------------------------------------ */
 
-/* -- the WanGP tab fills the window ---------------------------------- */
 /*
-   The frame was `height: 80vh` with the Integration management panel in the
-   page below it, so the tab was four fifths of a window of WanGP and then a
-   scroll -- and focus mode, which hands the workspace the whole window, made
-   the waste more obvious rather than less.
+   The frame was `height: 80vh` with the management panel in the page below
+   it, so the tab was four fifths of a window of WanGP and then a scroll --
+   and focus mode, which hands the workspace the whole window, made the waste
+   more obvious rather than less.
 
-   A flex column now: the frame takes what is left and the management panel
-   sits on the bottom edge of the window, where it is reachable without
-   scrolling past WanGP to find it.
+   `--minipaint-wangp-frame` is the height the frame is given, and
+   `browser/minipaint_wangp.js` measures it: the room from the top of the
+   column to the bottom of the window, less whatever the panel needs. That is
+   the one thing a stylesheet cannot know, because what is above the column is
+   a theme's header, Forge's tab bar, and whether the assistant's focus mode
+   has taken both out of the layout.
 
-   One measurement does it, and `--minipaint-wangp-height` is where it lands:
-   how far it is from the top of this column to the bottom of the window. That
-   is the one thing a stylesheet cannot know, because what is above the column
-   is a theme's header, Forge's tab bar, and whether the assistant's focus mode
-   has taken both out of the layout. `browser/minipaint_wangp.js` measures it.
+   The panel is not positioned and does not need to be. The column is
+   auto-height, so it is exactly the frame plus the panel, and the frame is
+   sized so the two of them reach the bottom of the window -- which puts the
+   panel on the bottom edge by arithmetic. Opening it re-measures, and the
+   frame gives up the room rather than the page growing a scrollbar.
 
-   Nothing here is positioned, and it does not need to be: the management panel
-   is the last row of a column that ends at the bottom of the window, so it is
-   on the bottom edge by construction -- which also means opening it *shrinks
-   the frame* rather than pushing the page into a scroll. `test_frontends`
-   holds this whole file to no out-of-flow positioning outside focus mode, so
-   that nothing can ever be laid over the Canvas; it reads the file as text, so
-   even naming the property in a comment trips it.
+   Stated on the frame itself, and on nothing else. A percentage height was
+   tried first and is wrong: Gradio wraps raw markup in containers of its own,
+   those have auto height, and a percentage of an auto height resolves to auto
+   -- so the frame sat at its 480px floor inside a container that had
+   correctly filled the window, and the difference showed as a void above the
+   panel. Nothing between the column and the frame is styled now, so there is
+   no chain left to resolve against and nothing to get wrong.
 
-   With no measurement the column is auto-height and the frame keeps its 80vh
-   basis, which is exactly what the tab did before -- so a page whose bundle
-   never loaded is no worse off than it was. The script is the improvement;
-   this rule is the contract.
+   With no measurement the frame keeps its 80vh, which is exactly what the tab
+   did before: a page whose bundle never loaded is no worse off than it was.
+   The script is the improvement; this rule is the contract.
 */
-#wangp_root.minipaint-wangp {
-    display: flex;
-    flex-direction: column;
-    height: var(--minipaint-wangp-height, auto);
-    min-height: 0;
-}
-
-/* `80vh` is a flex *basis*, not a height: in a column with a measured height
-   this grows or shrinks to what is left, and without one it is the height the
-   frame has always had. */
-#wangp_root.minipaint-wangp > #wangp_iframe_root {
-    flex: 1 1 auto;
-    min-height: 240px;
-    height: 80vh;
-}
-
-/* The frame fills the box the column gave it. `!important` because the height
-   it replaces is an inline style on the element, and nothing in a stylesheet
-   beats one without it. */
 #wangp_root.minipaint-wangp .minipaint-wangp-frame {
-    height: 100% !important;
+    height: var(--minipaint-wangp-frame, 80vh);
 }
-
-#wangp_root.minipaint-wangp > #wangp_manage_root {
-    flex: 0 0 auto;
-}
-
-
 
 /* --------------------------------------------------------------------
  * Send to WanGP popup

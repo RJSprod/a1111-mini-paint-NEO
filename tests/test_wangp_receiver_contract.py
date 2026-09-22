@@ -820,20 +820,31 @@ def tab_checks(r: Results) -> None:
             # focus mode - which hands the workspace the whole window - made
             # the waste more obvious rather than less. The height is the
             # stylesheet's now and the frame fills the box the column gives it.
-            r.check("the frame asks for its whole box and states no viewport height of its own",
-                    "height:100%" in frame and "vh" not in frame, frame)
+            # The frame states no height at all: the stylesheet owns it,
+            # because the height it wants is the room left in the window and
+            # only a measurement knows that.
+            inline = frame.split('style="', 1)[1].split('"', 1)[0]
+            declared = {piece.split(":", 1)[0].strip()
+                        for piece in inline.split(";") if ":" in piece}
+            r.check("the frame states no height of its own, and no viewport fraction either",
+                    "height" not in declared and "vh" not in inline, inline)
             r.check("and it still cannot collapse on a page whose stylesheet never arrived",
                     "min-height:480px" in frame)
             css = (ROOT / "style.css").read_text(encoding="utf-8")
-            tab = css[css.find("/* -- the WanGP tab fills the window"):css.find(" * Send to WanGP popup")]
-            r.check("the tab is a flex column measured to the bottom of the window",
-                    "flex-direction: column" in tab
-                    and "height: var(--minipaint-wangp-height, auto)" in tab, tab[:200])
-            r.check("the frame takes what is left and the management panel keeps its own room",
-                    "flex: 1 1 auto" in tab and "flex: 0 0 auto" in tab
-                    and "#wangp_manage_root" in tab)
-            r.check("the frame's 80vh survives only as the basis, which is what a page with no script gets",
-                    "height: 80vh" in tab)
+            tab = css[css.find(" * WanGP tab"):css.find(" * Send to WanGP popup")]
+            r.check("the height is stated on the frame, from the measured property, falling back to what the tab did before",
+                    "height: var(--minipaint-wangp-frame, 80vh)" in tab, tab[-300:])
+            # The defect this replaced, and the reason the rule is where it is.
+            # `height: 100%` on the frame was correct-looking and wrong: Gradio
+            # wraps raw markup in containers of its own, those have auto
+            # height, and a percentage of an auto height resolves to auto - so
+            # the frame sat at its 480px floor inside a container that had
+            # filled the window, and the difference showed as a void above the
+            # panel.
+            r.check("no percentage height anywhere in the tab's rules, which is what left a void above the panel",
+                    "height: 100%" not in tab and "height:100%" not in tab, tab)
+            r.check("and nothing between the column and the frame is styled, so there is no chain to resolve against",
+                    "#wangp_iframe_root" not in tab, tab)
             # One measurement, and the script that makes it, RUN rather than
             # read. The offset above the column is a theme's header plus
             # Forge's tab bar plus whether another extension's focus mode has
@@ -842,18 +853,24 @@ def tab_checks(r: Results) -> None:
             # written from one that is called.
             fit = _fit()
             if fit and "error" not in fit:
-                r.check("the tab's height is measured to the bottom of the window",
-                        fit["belowChrome"] == 900 - 120 - 4, str(fit))
-                r.check("and in focus mode, where the chrome is out of the layout, that is the whole window",
-                        fit["focused"] == 900 - 4 and fit["wrote"] == "896px", str(fit))
-                r.check("the column is what carries it, so flexbox divides it between the frame and the panel",
-                        fit["exposed"] is True and fit["wrote"].endswith("px"))
+                r.check("the frame is measured to the bottom of the window, less the panel below it",
+                        fit["belowChrome"] == 900 - 120 - 40 - 4, str(fit))
+                r.check("and in focus mode, where the chrome is out of the layout, that is nearly the whole window",
+                        fit["focused"] == 900 - 40 - 4 and fit["wrote"] == "856px", str(fit))
+                r.check("opening the panel takes the room from the frame rather than from the page",
+                        fit["panelOpen"] == 900 - 240 - 4, str(fit))
                 r.check("a tab that is not on screen is left alone rather than sized against zero",
-                        fit["offscreen"] == 0 and fit["keptAfterOffscreen"] == "896px", str(fit))
-                r.check("and a window with almost no room floors it rather than squeezing it to nothing",
-                        fit["floored"] == 320, str(fit))
-                r.check("the column's own box is watched, which is the only thing focus mode changes",
-                        fit["observed"] is True)
+                        fit["offscreen"] == 0 and fit["keptAfterOffscreen"] == "856px", str(fit))
+                r.check("and a window with almost no room floors it at the same number the markup does",
+                        fit["floored"] == 480, str(fit))
+                # Two halves of the same rule, and both were nearly got wrong.
+                # Writing on every notification, or watching the element whose
+                # property is written, is a resize observer that never settles.
+                r.check("nothing is written when the answer has not changed",
+                        fit["rewroteWhenUnchanged"] is False, str(fit))
+                r.check("and the element this sizes is never the element it watches",
+                        "wangp_manage_root" in fit["observed"]
+                        and "wangp_root" not in fit["observed"], str(fit["observed"]))
 
             # ---- and now the failure this whole shape exists for ----
             print("  (the traceback below is this test breaking the WanGP tab on purpose)")
@@ -1636,7 +1653,9 @@ const fs = require("fs");
 function el(id, tag) {
     return {id: id, tagName: (tag || "div").toUpperCase(), children: [], parentElement: null,
         box: {top: 0, left: 0, width: 1200, height: 100},
-        style: {props: {}, setProperty: function (k, v) { this.props[k] = v; }},
+        style: {props: {}, writes: 0,
+                setProperty: function (k, v) { this.props[k] = v; this.writes += 1; },
+                getPropertyValue: function (k) { return this.props[k] || ""; }},
         classList: {add() {}, remove() {}, contains() { return false; }},
         getBoundingClientRect: function () { return this.box; },
         getAttribute: function () { return null; }, setAttribute: function () {},
@@ -1650,16 +1669,28 @@ function el(id, tag) {
         }};
 }
 const column = el("wangp_root");
-const frame = el("wangp_iframe_root");
+const holder = el("wangp_iframe_root");
+const frame = el("wangp_iframe");
+frame.classList.contains = function (c) { return c === "minipaint-wangp-frame"; };
 const manage = el("wangp_manage_root");
-frame.parentElement = column; manage.parentElement = column;
-column.children = [frame, manage];
+manage.box = {top: 0, left: 0, width: 1200, height: 40};
+holder.parentElement = column; manage.parentElement = column;
+frame.parentElement = holder;
+holder.children = [frame];
+holder.querySelector = function (sel) {
+    return sel === ".minipaint-wangp-frame" ? frame : null;
+};
+column.children = [holder, manage];
 const document = {
     readyState: "complete", visibilityState: "visible",
     body: el("body"), documentElement: el("html"),
     createElement: function (t) { return el("made", t); },
     getElementById: function () { return null; },
-    querySelector: function (s) { return s === "#wangp_iframe_root" ? frame : null; },
+    querySelector: function (s) {
+        if (s === "#wangp_iframe_root") { return holder; }
+        if (s === "#wangp_manage_root") { return manage; }
+        return null;
+    },
     querySelectorAll: function () { return []; },
     addEventListener: function () {}, removeEventListener: function () {}
 };
@@ -1672,7 +1703,10 @@ const window = {
     navigator: {userAgent: "node"}
 };
 global.window = window; global.document = document;
-global.ResizeObserver = function () { return {observe: function () { global.__observed = true; }, disconnect() {}}; };
+global.ResizeObserver = function () {
+    return {observe: function (node) { (global.__observed = global.__observed || []).push(node.id); },
+            disconnect() {}};
+};
 global.MutationObserver = function () { return {observe() {}, disconnect() {}}; };
 global.fetch = function () {
     return Promise.resolve({ok: true, status: 204, json: function () { return Promise.resolve({}); },
@@ -1681,18 +1715,27 @@ global.fetch = function () {
 console.log = function () {};
 new Function("window", "document", "fetch", fs.readFileSync(process.argv[2], "utf8"))(window, document, global.fetch);
 const api = window.minipaintWanGP;
-const out = {exposed: typeof api.fitFrame === "function", observed: !!global.__observed};
-// Below a theme's header and Forge's tab bar.
+const out = {exposed: typeof api.fitFrame === "function", observed: global.__observed || []};
+// Below a theme's header and Forge's tab bar, with a 40px panel under it.
 column.box = {top: 120, left: 0, width: 1200, height: 700};
 out.belowChrome = api.fitFrame();
 // Focus mode: the chrome is out of the layout, so the column starts at the top.
 column.box = {top: 0, left: 0, width: 1200, height: 900};
 out.focused = api.fitFrame();
-out.wrote = column.style.props["--minipaint-wangp-height"];
+out.wrote = column.style.props["--minipaint-wangp-frame"];
+// The management panel opened. The frame gives up the room.
+manage.box = {top: 0, left: 0, width: 1200, height: 240};
+out.panelOpen = api.fitFrame();
+manage.box = {top: 0, left: 0, width: 1200, height: 40};
+api.fitFrame();
+// Writing again with nothing changed is what turns an observer into a loop.
+const before = column.style.writes;
+api.fitFrame();
+out.rewroteWhenUnchanged = column.style.writes !== before;
 // A tab that is not on screen measures zero and must be left alone.
 column.box = {top: 0, left: 0, width: 0, height: 0};
 out.offscreen = api.fitFrame();
-out.keptAfterOffscreen = column.style.props["--minipaint-wangp-height"];
+out.keptAfterOffscreen = column.style.props["--minipaint-wangp-frame"];
 // Almost no room at all: floored rather than squeezed to nothing.
 column.box = {top: 880, left: 0, width: 1200, height: 20};
 out.floored = api.fitFrame();

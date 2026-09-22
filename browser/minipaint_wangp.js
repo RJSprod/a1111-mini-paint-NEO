@@ -196,6 +196,9 @@ window.minipaintWanGP = (function () {
     /* The tab's own elements. The tab builds these once and only changes what
      * is visible, so finding them is a lookup, never a watch. */
     const IFRAME_ROOT_ID = "wangp_iframe_root";
+    //: The Integration management panel, which the tab's height has to leave
+    //: room for. Read only, and only to measure.
+    const MANAGE_ROOT_ID = "wangp_manage_root";
     const IFRAME_ID = "wangp_iframe";
     // The tab mints the channel id per iframe load and puts it in a hidden
     // textbox rather than in the iframe's URL, so that "which session is this"
@@ -3007,44 +3010,51 @@ window.minipaintWanGP = (function () {
     /* -------------------------------------------------------------------- */
     //
     // This is layout, not protocol, and it sits in this file because it is the
-    // WanGP tab's only browser bundle and a second one for fifteen lines would
-    // be worse. It reads; it never talks to the iframe and never touches the
+    // WanGP tab's only browser bundle and a second one for this would be
+    // worse. It reads; it never talks to the iframe and never touches the
     // bridge's state.
     //
     // What it is for: the frame used to be `height: 80vh` with the Integration
     // management panel in the page below it, so the tab was four fifths of a
-    // window of WanGP and then a scroll to reach anything else. `style.css`
-    // makes the tab a flex column whose frame takes what is left, and the room
-    // there is depends on how far down the page the column starts -- a theme's
-    // header plus Forge's tab bar plus whether the assistant's focus mode has
-    // taken both out of the layout. No stylesheet can know it. This measures
-    // it and writes it to the custom property the rule reads.
+    // window of WanGP and then a scroll to reach anything else. What the frame
+    // should have is the room from the top of the column to the bottom of the
+    // window, less whatever the panel needs - and the offset above the column
+    // is a theme's header plus Forge's tab bar plus whether the assistant's
+    // focus mode has taken both out of the layout. No stylesheet can know it.
     //
-    // Without this the column is auto-height and the frame keeps its 80vh
-    // basis, so every way this can fail -- the bundle not loading, the tab not
-    // in the page, a browser with no ResizeObserver -- lands on exactly the
-    // behaviour the tab already had.
+    // The panel ends up on the bottom edge by arithmetic: the column is
+    // auto-height, so it is the frame plus the panel, and the frame is sized
+    // so the two of them reach the bottom. Nothing is positioned.
+    //
+    // Without this the frame keeps its 80vh and the tab behaves exactly as it
+    // did before, which is what every failure here lands on: the bundle not
+    // loading, the tab not on screen, a browser with no ResizeObserver.
 
     //: Left under the column, so a one-pixel rounding error is not a scrollbar.
     const FRAME_BOTTOM_ROOM = 4;
     //: Never smaller than this, however little room the measurement finds: a
-    //: tab squeezed to nothing is worse than one that overflows a little.
-    const FRAME_MIN_HEIGHT = 320;
-    const COLUMN_PROPERTY = "--minipaint-wangp-height";
+    //: frame squeezed to nothing is worse than one that overflows a little.
+    //: The same number the markup carries as the frame's inline `min-height`,
+    //: deliberately - a smaller one here would be computed, written, and then
+    //: overridden by the markup, which is a measurement that quietly does not
+    //: mean what it says.
+    const FRAME_MIN_HEIGHT = 480;
+    const FRAME_PROPERTY = "--minipaint-wangp-frame";
 
-    /** Give the tab's column the room between its top and the bottom of the
-     * window, and let the stylesheet's flex column divide it.
+    /** Give the frame the room between the top of the tab and the bottom of
+     * the window, less what the management panel below it is using.
      *
-     * Only the column is measured. What the frame gets, and what is left for
-     * the management panel on the bottom edge, is flexbox's arithmetic and
-     * not this function's -- which is why opening that panel shrinks the
-     * frame instead of pushing the page into a scroll.
+     * Writes only when the answer has changed. That is not an optimisation:
+     * what this writes changes the size of the boxes an observer below is
+     * watching, and an observer that writes on every notification is a loop
+     * that never settles.
      */
     function fitFrame() {
-        const frame = rootElement();
-        if (!frame) { return 0; }
-        const column = frame.closest ? frame.closest("#wangp_root") : null;
-        if (!column) { return 0; }
+        const holder = rootElement();
+        if (!holder) { return 0; }
+        const column = holder.closest ? holder.closest("#wangp_root") : null;
+        const frame = holder.querySelector ? holder.querySelector(".minipaint-wangp-frame") : null;
+        if (!column || !frame) { return 0; }
         let box;
         try {
             box = column.getBoundingClientRect();
@@ -3052,19 +3062,34 @@ window.minipaintWanGP = (function () {
             return 0;
         }
         // A tab that is not on screen measures zero, and sizing against that
-        // would write a floor-height column the next real measurement has to
+        // would write a floor-height frame the next real measurement has to
         // undo. Left alone; measured again when it shows.
         if (!box.width) { return 0; }
 
+        let below = 0;
+        const panel = managePanel();
+        if (panel) {
+            try {
+                below = panel.getBoundingClientRect().height || 0;
+            } catch (error) { below = 0; }
+        }
+
         const room = Math.max(FRAME_MIN_HEIGHT,
-                              Math.round(window.innerHeight - box.top
+                              Math.round(window.innerHeight - box.top - below
                                          - FRAME_BOTTOM_ROOM));
+        const wanted = room + "px";
         try {
-            column.style.setProperty(COLUMN_PROPERTY, room + "px");
+            if (column.style.getPropertyValue(FRAME_PROPERTY) === wanted) { return room; }
+            column.style.setProperty(FRAME_PROPERTY, wanted);
         } catch (error) {
             return 0;
         }
         return room;
+    }
+
+    function managePanel() {
+        const scope = app();
+        return scope.querySelector ? scope.querySelector("#" + MANAGE_ROOT_ID) : null;
     }
 
     function watchFrameSize() {
@@ -3078,14 +3103,21 @@ window.minipaintWanGP = (function () {
         };
         try {
             window.addEventListener("resize", later);
-            // Focus mode does not resize the window: it takes the chrome out
-            // of the layout, which moves this column's top without any event
-            // a listener on `window` would hear. The column's own box is the
-            // thing that changed, so the column is what is watched.
+            // Two boxes, and NEITHER of them is one this sizes. Watching the
+            // column would be watching the element whose custom property this
+            // writes, which is how a resize observer becomes a loop.
+            //
+            // The panel, because opening Integration management is the one
+            // thing that changes how much room is left without changing the
+            // window. Its parent, because focus mode moves the whole column
+            // without a resize event and without changing anything this wrote.
             if (typeof ResizeObserver === "function") {
-                const frame = rootElement();
-                const column = frame && frame.closest ? frame.closest("#wangp_root") : null;
-                if (column) { new ResizeObserver(later).observe(column); }
+                const holder = rootElement();
+                const column = holder && holder.closest ? holder.closest("#wangp_root") : null;
+                const observer = new ResizeObserver(later);
+                const panel = managePanel();
+                if (panel) { observer.observe(panel); }
+                if (column && column.parentElement) { observer.observe(column.parentElement); }
             }
         } catch (error) { /* the stylesheet's fallback is the whole degradation */ }
         later();

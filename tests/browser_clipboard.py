@@ -1445,9 +1445,19 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
                      thumb: p.querySelector('.minipaint-clip-output-thumb').tagName }; }""")
         r.check("a video is played in a video element, in the stage and in the strip",
                 kinds["stage"] == "VIDEO" and kinds["thumb"] == "VIDEO", str(kinds))
+        # The address is attached when the tile comes near the strip's window,
+        # so this waits for the first one rather than reading it the instant
+        # the panel is drawn. What it asserts has not changed: the poster is
+        # one frame of the file itself, and nothing makes a thumbnail anywhere.
+        page.wait_for_function(
+            """() => { const t = document.querySelector('.minipaint-clip-output-thumb');
+                return !!t && !!t.getAttribute('src'); }""", timeout=8000)
         r.check("and the strip's poster is asked for as one frame, so no thumbnail has to be made anywhere",
                 page.evaluate("""() => { const t = document.querySelector('.minipaint-clip-output-thumb');
                     return (t.getAttribute('src') || '').indexOf('#t=') > 0; }"""))
+        r.check("the address waits in data-src until then, so a tile off the end of the strip fetches nothing",
+                page.evaluate("""() => { const t = document.querySelector('.minipaint-clip-output-thumb');
+                    return (t.dataset.src || '').indexOf('#t=') > 0; }"""))
 
         first = page.evaluate("() => window.minipaintClipboard.debug().outputs.chosen")
         page.evaluate("""() => { const tiles = document.querySelectorAll('.minipaint-clip-output-tile');
@@ -1471,6 +1481,46 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
         time.sleep(0.3)
         r.check("and tapping again brings them back",
                 page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').controls") is True)
+
+        # A page of outputs is sixty items, and a video tile is a `<video>`:
+        # the browser opens a connection, range-requests enough of the file to
+        # paint the frame at #t=1, and spins up a decoder. Sixty of those at
+        # once is sixty decoders competing for CPU and for the six connections
+        # this origin has - which the page has already spent most of on
+        # streams that never close. The stage player's own range requests
+        # queue behind all of it, and that is what choppy playback is here.
+        with tempfile.TemporaryDirectory(prefix="minipaint-outputs-many-") as many:
+            folder = pathlib.Path(many)
+            _seed_outputs(folder, 40)
+            # Counted on the wire, not in the DOM. The tiles that scroll away
+            # have their address taken off again, so a moment after the strip
+            # is drawn the page LOOKS the same whether or not it asked for all
+            # forty - the difference is the burst of requests it made getting
+            # there, and that burst is the whole problem.
+            asked = set()
+            def note(request):
+                if "/minipaint-clipboard/output/" in request.url:
+                    asked.add(request.url.split("?")[0].split("#")[0])
+            page.on("request", note)
+            page.evaluate("() => window.minipaintClipboard.openOutputs()")
+            page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 20", timeout=8000)
+            page.wait_for_function(
+                """() => { const t = document.querySelector('.minipaint-clip-output-thumb');
+                    return !!t && !!t.getAttribute('src'); }""", timeout=8000)
+            time.sleep(1.2)
+            page.remove_listener("request", note)
+            tiles = page.evaluate(
+                "() => document.querySelectorAll('.minipaint-clip-output-thumb').length")
+            r.check("forty outputs make forty tiles", tiles == 40, str(tiles))
+            # One row of 132px tiles: what is near the strip's window is a
+            # dozen or so however wide the browser is, plus the one playing.
+            r.check("but the page asks for only the files near the strip's window, not all forty",
+                    0 < len(asked) < 30, f"{len(asked)} of {tiles} requested")
+        # Back to the three this check started with, for what follows.
+        _seed_outputs(folder, 3)
+        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
+        time.sleep(0.3)
 
         page.keyboard.press("Escape")
         time.sleep(0.4)

@@ -1,0 +1,110 @@
+Why the outputs gallery played badly, and what was actually wrong
+=================================================================
+2026-09-22
+
+Reported: video playback in Clipboard's "view outputs" is choppy, worse the
+larger the browser window, and the thumbnail strip is slow to fill.
+
+Three causes, and none of them is the video decoder.
+
+
+1. Sixty video elements
+-----------------------
+
+`PAGE_SIZE` is 60, and the outputs gallery has no thumbnails: `outputs_page`
+gives every item one address, `output_url(item["id"])`, which is the file.
+A video tile was therefore
+
+    media = el("video", ...);
+    media.preload = "metadata";
+    media.src = item.url + "#t=1";
+
+The comment above it said metadata is all the browser has to fetch. That is
+not what `#t=1` asks for: to paint the frame at one second the browser fetches
+the header, range-requests around the keyframe nearest that second, and spins
+up a decoder. Sixty of those at once is sixty decoders and sixty fetches
+against the six HTTP/1.1 connections this origin has - most of which the page
+has already spent on streams that never close (the connection-starvation note
+in CLAUDE.md is the same six).
+
+The stage player's own range requests queue behind all of it. That is what the
+choppiness IS: the video is not slow to decode, it is slow to arrive.
+
+`loading="lazy"` does this for a picture and does nothing at all for a video,
+which is why the `<img>` branch beside it was already fine and the `<video>`
+branch was not.
+
+Tiles carry the address in `data-src` now. One pair of IntersectionObservers
+per strip - not per tile; sixty tiles is a hundred and twenty observers for
+one question - attaches it when the tile comes within 200px of the strip's
+window and takes it off again when it is 600px past. Two margins rather than
+one so a tile resting near the edge is not attached and detached on every
+pixel of scroll. Taking it off matters as much as not setting it: a `<video>`
+holds its decoder and its buffered bytes until it is told to look again, which
+is what the `load()` after `removeAttribute("src")` is for.
+
+Measured on a page of forty: forty requests before, twelve after.
+
+
+2. Both file routes blocked the event loop
+------------------------------------------
+
+`_output_file` and `_image` were `async def`, and both do blocking work:
+
+    data = handle.read(end - start + 1)      # up to 4 MB, per range request
+    store().thumbnail(asset_id)              # a Pillow decode and encode
+
+A blocking read inside a coroutine blocks the event loop, and on this server
+the event loop is every other request there is - the rest of the gallery,
+Forge's own streams, the interop spine. A four-megabyte chunk read on the loop
+is four megabytes of everybody else waiting, and a video is a lot of chunks.
+A strip of uncached thumbnails is tens to hundreds of milliseconds each,
+serialised, while a video is trying to stream past them.
+
+Starlette runs a plain `def` endpoint in a threadpool and awaits a coroutine
+one on the loop. So the signature is the fix, and the test asserts the
+signature, because here the signature IS the behaviour.
+
+The no-range branch also read the whole file into memory before sending any of
+it - the file's size in RAM per request, and nothing on the wire until the
+last byte had been read. It is a `FileResponse` now.
+
+
+3. Why a bigger window was worse
+--------------------------------
+
+Nothing in the stylesheet: there is no filter, no shadow and no transform on
+either the stage or the tiles. It is that the stage video is scaled to the
+window, so a larger window is more pixels to decode and paint per frame - on a
+CPU that sixty background decoders are already competing for, over a
+connection pool they are already saturating. The window did not cause it; it
+raised the cost of the frame while the other two causes were starving it.
+
+
+4. What the test had to be, and what it must not be
+---------------------------------------------------
+
+The first version of the check counted tiles that had a `src` attribute a
+moment after the strip was drawn. It passed with the fix AND with the defect
+put back - twelve against fifteen - because the far observer takes the address
+off the tiles that scrolled away either way. A moment later the page looks the
+same whether or not it asked for all forty.
+
+The difference is the burst of requests made getting there, so that is what is
+counted: Playwright's `page.on("request", ...)`, deduplicated by file. Forty
+of forty with the defect, twelve of forty with the fix.
+
+A steady-state assertion about a transient cost is worth nothing. This one was
+only caught because the mutation was actually run.
+
+
+5. What is still not done
+-------------------------
+
+The outputs gallery still has no thumbnails of its own: a tile is the file.
+The right fix is a small stored poster per output, the way `store.thumbnail`
+already does it for library pictures - memory cache, then disk, then make one.
+For a video that needs a frame extracted, which needs ffmpeg, and ffmpeg is
+not a dependency of this extension today. Worth doing if the strip is still
+slow on a cold cache; it would take the strip from twelve video fetches to
+twelve WEBPs of a few kilobytes each.

@@ -117,7 +117,15 @@ def _json(payload: dict, status: int = 200) -> typing.Any:
     return JSONResponse(payload, status_code=status, headers={"Cache-Control": "no-store"})
 
 
-async def _image(request: typing.Any) -> typing.Any:
+def _image(request: typing.Any) -> typing.Any:
+    """One library picture, or its thumbnail.
+
+    Not ``async``, for the reason on ``_output_file``: a thumbnail that is
+    not cached yet is a Pillow decode and encode - tens of milliseconds for
+    a photograph, hundreds for a phone picture - and one on the event loop
+    is the whole server stopped for that long. A strip of them is that,
+    serialised, while a video is trying to stream past it.
+    """
     from starlette.responses import Response
 
     if not _signed_in(request):
@@ -538,7 +546,7 @@ def _byte_range(header: typing.Any, size: int) -> typing.Optional[typing.Tuple[i
 RANGE_CHUNK = 4 * 1024 * 1024
 
 
-async def _output_file(request: typing.Any) -> typing.Any:
+def _output_file(request: typing.Any) -> typing.Any:
     """One output, by its opaque id, with byte ranges.
 
     RANGES ARE THE WHOLE POINT. A ``<video>`` element will play a file
@@ -546,8 +554,17 @@ async def _output_file(request: typing.Any) -> typing.Any:
     to ask for the middle, so the scrub bar does nothing. That is the
     difference between a gallery and a list of things that play from the
     start, so this answers 206 with ``Content-Range`` rather than only 200.
+
+    NOT ``async``, and that is the point of the rest of it. This reads a
+    file, and a blocking read inside a coroutine blocks the event loop -
+    which on this server is every other request there is: the rest of the
+    gallery, Forge's own streams, the interop spine. A four-megabyte chunk
+    read on the loop is four megabytes of everybody else waiting, and a
+    video is a lot of chunks. Starlette runs a plain ``def`` endpoint in a
+    threadpool, so this is the whole fix: the read blocks a worker instead
+    of the server.
     """
-    from starlette.responses import Response
+    from starlette.responses import FileResponse, Response
 
     if not _signed_in(request):
         return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
@@ -569,11 +586,14 @@ async def _output_file(request: typing.Any) -> typing.Any:
         return Response(status_code=200, media_type=mime,
                         headers=dict(common, **{"Content-Length": str(size)}))
     span = _byte_range(request.headers.get("range"), size)
+    if span is None:
+        # Streamed rather than read whole. A video answered without a range
+        # used to arrive in memory in one piece before any of it was sent,
+        # which is the file's size in RAM per request and nothing on the wire
+        # until the last byte of it is read.
+        return FileResponse(path, media_type=mime, headers=common)
     try:
         with path.open("rb") as handle:
-            if span is None:
-                data = handle.read()
-                return Response(content=data, media_type=mime, headers=dict(common, **{"Content-Length": str(len(data))}))
             start, end = span
             end = min(end, start + RANGE_CHUNK - 1)
             handle.seek(start)

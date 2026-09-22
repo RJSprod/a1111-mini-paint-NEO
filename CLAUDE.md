@@ -156,6 +156,31 @@ journal lines are captured through a `console.debug` hook rather than the log
 route, because that route only ever carries the last two dozen lines and a long
 scenario pushes out the line being asserted.
 
+**`loading="lazy"` does nothing for a `<video>`, and `#t=1` is not metadata.**
+The outputs strip built one `<video preload="metadata" src="...#t=1">` per item
+for a page of sixty: to paint that frame the browser fetches the header,
+range-requests the keyframe and starts a decoder, sixty times, against the six
+connections this origin has. That is what made the stage player choppy - the
+video was not slow to decode, it was slow to arrive. Tiles keep their address
+in `data-src` and an IntersectionObserver attaches it near the strip's window
+and removes it well past, with a `load()` after the removal because a `<video>`
+holds its decoder until told to look again.
+`docs/OUTPUTS_PLAYBACK_2026-09-22.txt` has the measurements.
+
+**A blocking read in an `async def` route blocks every other request.** Both
+file routes of the Clipboard tab were coroutines reading files - 4 MB video
+chunks, Pillow thumbnail encodes - on the event loop, which on this server is
+the rest of the gallery, Forge's streams and the interop spine. Starlette runs
+a plain `def` endpoint in a threadpool, so the signature is the fix; the test
+asserts the signature because here it is the behaviour.
+
+**A steady-state assertion cannot see a transient cost.** The check for the
+lazy strip counted tiles holding a `src` shortly after the strip was drawn, and
+passed with the defect put back, because the far observer strips the address
+off either way. What differs is the burst of requests made getting there, so
+the check counts requests on the wire: forty of forty with the defect, twelve
+with the fix.
+
 **A percentage height inside a Gradio container resolves to auto.** The WanGP
 frame was given `height: 100%` of a container the stylesheet had correctly
 sized to the window; Gradio wraps raw markup in containers of its own, those

@@ -349,6 +349,33 @@ def route_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
     r.check("an id that is not one is a 404, not a path anybody can steer", gone.status_code == 404)
     r.check("and the refusal names no folder", str(folder) not in gone.text)
 
+    # -- and none of it on the event loop ---------------------------------
+    #
+    # Reported as choppy video and a slow thumbnail strip. These routes read
+    # files - a four-megabyte video chunk, a Pillow decode for a thumbnail
+    # that is not cached yet - and a blocking read inside a coroutine blocks
+    # the event loop, which on this server is every other request there is:
+    # the rest of the gallery, Forge's own streams, the interop spine. A
+    # video is a lot of chunks, so it is a lot of everybody else waiting.
+    #
+    # Starlette runs a plain `def` endpoint in a threadpool and awaits a
+    # coroutine one on the loop, so the signature IS the fix and asserting it
+    # is asserting the behaviour.
+    import inspect
+
+    from minipaint_neo.clipboard import routes as routes_module
+
+    r.check("serving an output is not a coroutine, so Starlette gives it a worker thread",
+            not inspect.iscoroutinefunction(routes_module._output_file))
+    r.check("and neither is serving a picture or its thumbnail",
+            not inspect.iscoroutinefunction(routes_module._image))
+    # A whole file is streamed rather than read into memory first: a video
+    # answered without a range used to be its own size in RAM per request,
+    # with nothing on the wire until the last byte had been read.
+    source = inspect.getsource(routes_module._output_file)
+    r.check("a whole file is streamed, not gathered in memory and then sent",
+            "FileResponse(path" in source and "data = handle.read()" not in source, source[:200])
+
 
 def run() -> Results:
     r = Results("clipboard outputs")

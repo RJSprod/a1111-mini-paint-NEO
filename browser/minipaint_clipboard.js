@@ -1699,6 +1699,91 @@ window.minipaintClipboard = (function () {
         } catch (e) { /* a player the page is already tearing down */ }
     }
 
+    //: How far outside the strip a tile is loaded, and how far past that it
+    //: is let go again. Two numbers rather than one so a tile resting near
+    //: the edge is not attached and detached on every pixel of scroll.
+    const TILE_NEAR = "200px";
+    const TILE_FAR = "600px";
+
+    /** Attach a strip tile's media only while it is near the strip's window,
+     * and let it go again when it is not.
+     *
+     * A page of outputs is sixty items (``PAGE_SIZE``), and a video tile is a
+     * `<video>`: the browser opens a connection, range-requests the header and
+     * enough of the file to paint the frame at ``#t=1``, and spins up a
+     * decoder for it. Sixty of those at once is sixty decoders competing for
+     * CPU and - worse - for the six HTTP/1.1 connections this origin has,
+     * which the page has already spent most of on streams that never close
+     * (see the connection-starvation note in CLAUDE.md). The stage player's
+     * own range requests queue behind all of it, which is what choppy
+     * playback *is* here: the video is not slow to decode, it is slow to
+     * arrive.
+     *
+     * `loading="lazy"` would do this for a picture and does nothing at all for
+     * a video, so the videos are what this is for; pictures go through it too
+     * so that one rule covers the strip.
+     */
+    function watchTiles(strip) {
+        const tiles = Array.from(strip.querySelectorAll(".minipaint-clip-output-tile"));
+        const mediaOf = function (tile) {
+            return tile.querySelector(".minipaint-clip-output-thumb");
+        };
+        if (typeof IntersectionObserver !== "function") {
+            // Nothing to be clever with: every tile loads, as it always did.
+            for (const tile of tiles) { attachTile(mediaOf(tile)); }
+            return;
+        }
+        // One pair of observers for the whole strip, not a pair per tile:
+        // sixty tiles is a hundred and twenty observers for one question.
+        //
+        // Wired after the strip is in the document, because `rootMargin` is
+        // measured against the root's own box and a root that is not laid out
+        // has none - which is the difference between loading a tile a little
+        // early and never loading it at all.
+        const near = new IntersectionObserver(function (entries) {
+            for (const entry of entries) {
+                if (entry.isIntersecting) { attachTile(mediaOf(entry.target)); }
+            }
+        }, { root: strip, rootMargin: TILE_NEAR });
+        const far = new IntersectionObserver(function (entries) {
+            for (const entry of entries) {
+                if (!entry.isIntersecting) { detachTile(mediaOf(entry.target)); }
+            }
+        }, { root: strip, rootMargin: TILE_FAR });
+        for (const tile of tiles) { near.observe(tile); far.observe(tile); }
+        S.outputs.watchers = [near, far];
+    }
+
+    function attachTile(media) {
+        if (!media || media.getAttribute("src")) { return; }
+        const wanted = media.dataset.src;
+        if (wanted) { media.setAttribute("src", wanted); }
+    }
+
+    function detachTile(media) {
+        if (!media || !media.getAttribute("src")) { return; }
+        media.removeAttribute("src");
+        // A `<video>` holds its decoder and its buffered bytes until it is
+        // told to look again. Without this the element is quiet but the cost
+        // of it is still on the page.
+        if (media.tagName === "VIDEO" && typeof media.load === "function") {
+            try { media.load(); } catch (e) { /* already torn down */ }
+        }
+    }
+
+    /** Let go of every tile in the strip that is being replaced. */
+    function stopTiles() {
+        for (const observer of S.outputs.watchers || []) {
+            try { observer.disconnect(); } catch (e) { /* already gone */ }
+        }
+        S.outputs.watchers = [];
+        const strip = S.outputs.strip;
+        if (!strip) { return; }
+        for (const media of Array.from(strip.querySelectorAll(".minipaint-clip-output-thumb"))) {
+            detachTile(media);
+        }
+    }
+
     function outputTile(item, chosen) {
         const tile = el("button", "minipaint-clip-output-tile" + (chosen ? " minipaint-clip-output-chosen" : ""));
         tile.type = "button";
@@ -1709,17 +1794,19 @@ window.minipaintClipboard = (function () {
             // The poster is the frame at one second, asked for with a media
             // fragment. No ffmpeg, no server-side thumbnailing, no second
             // copy of the file on disk: the browser already decodes video,
-            // and metadata is all it has to fetch to draw this.
+            // and metadata plus one frame is all it has to fetch to draw this.
+            //
+            // The address goes in `data-src` and not in `src`: see watchTile.
             media = el("video", "minipaint-clip-output-thumb");
             media.preload = "metadata";
             media.muted = true;
             media.playsInline = true;
-            media.src = item.url + "#t=1";
+            media.dataset.src = item.url + "#t=1";
         } else {
             media = el("img", "minipaint-clip-output-thumb");
             media.loading = "lazy";
             media.alt = "";
-            media.src = item.url;
+            media.dataset.src = item.url;
         }
         tile.appendChild(media);
         if (!item.exact) { tile.appendChild(el("span", "minipaint-clip-output-guess", "~")); }
@@ -1823,9 +1910,11 @@ window.minipaintClipboard = (function () {
             const wanted = (S.outputs.items || []).filter(function (one) { return one.id === tile.dataset.output; })[0];
             if (wanted) { showOutput(wanted); }
         });
+        stopTiles();
         S.outputs.strip = strip;
         for (const item of items) { strip.appendChild(outputTile(item, false)); }
         panel.appendChild(strip);
+        watchTiles(strip);
 
         if (items.length) {
             showOutput(items[0]);

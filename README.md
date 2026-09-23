@@ -445,7 +445,9 @@ paged at 60. The controls are the page's rather than the browser's, so they are 
 every browser and phone - play and pause (or press the picture), a timeline to scrub
 (the file is served with byte ranges), a frame back and a frame forward, back to the start,
 **loop** (on by default; Android's own player has none), **mute**, **speed** from ¼× to 2×
-and **full screen**, which keeps these controls. Loop, mute and speed are remembered. On a
+and **full screen**, which keeps these controls - and which is the stage's own, so it stacks on
+a page that is already full screen (the Forge Assistant's focus mode makes the whole page full
+screen) and comes off again leaving that one where it was. Loop, mute and speed are remembered. On a
 keyboard: Space or K plays, ← and → step a frame (with Shift, a second), L loops, M mutes,
 F is full screen, and Escape leaves full screen and then the view. **Load**, beside the
 prompt, puts the recipe that made the output back into the request - the prompt as it was

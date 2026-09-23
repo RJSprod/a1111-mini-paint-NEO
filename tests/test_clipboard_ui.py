@@ -1068,6 +1068,9 @@ def theming_checks(r: Results) -> None:
         # The pager's go-to-page box is a text input, and a theme fills one
         # the same way Gradio fills its own.
         "--input-background-fill",
+        # The player's Play button is the theme's primary button, fill and
+        # text as the pair a theme promises are legible together.
+        "--button-primary-background-fill", "--button-primary-border-color", "--button-primary-text-color",
     }
     used = set(re.findall(r"var\((--[\w-]+)", block))
     r.check("every variable is Gradio's own theme variable or the tab's own size",

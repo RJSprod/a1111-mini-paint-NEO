@@ -1,0 +1,149 @@
+View Outputs gets its own player and a Load; the Clipboard tab fills the window
+=============================================================================
+2026-09-23
+
+Three requests, one change.
+
+  1. "The clipboard 'view outputs' needs real playback controls ... On my
+     mobile device i cannot loop the video ... scrubbing timeline and mute
+     toggle."
+  2. "The clipboard view ... doesnt fill the page. Please resize the
+     thumbnail browser and the right side column ... to responsively fill the
+     browser window better vertically."
+  3. "I need a way to 'Load' from the view outputs. So if i am looking at one
+     of them, i can load the prompt and images if available so i can generate
+     again."
+
+
+1. The player
+-------------
+
+The stage played its video on the browser's own controls. Those are a
+different set on every browser, and Android's have no loop - a three-second
+clip could not be watched twice without pressing play again. The controls are
+the page's now, under the picture rather than over it, the same everywhere:
+
+  play/pause (and a press on the picture), a timeline with the time, one
+  frame back, one frame forward, back to the start, loop, mute, speed
+  (1/4x to 2x), full screen.
+
+Every button is 44px, pinned inline with `!important` like the tiles are,
+because the Lobe theme's `button { min-width: fit-content !important }` reaches
+these too (see CLAUDE.md). The glyphs are SVG paths filled with the button's
+own text colour: an emoji would be the same coloured picture on every theme.
+The Play button is the theme's primary button - fill and text as a pair,
+because the accent with the primary text colour was orange on orange.
+
+Loop defaults to on (a generated clip is a few seconds long) and, with mute and
+speed, is remembered in localStorage. Loading a source resets the rate to the
+default rate, so both are set; preferences are saved only from a press, never
+from `ratechange`, which also fires for that reset.
+
+A frame is learned from the video itself where `requestVideoFrameCallback`
+exists (the smallest step between two presented frames), and is 1/24 s
+otherwise. The timeline seeks with `fastSeek` while held where the browser has
+it (Firefox, Safari) and exactly where it is let go.
+
+What it costs while a video plays: one callback per presented frame -
+`requestVideoFrameCallback`, or an animation frame where there is none - writing
+the timeline's value, the played share, and the time when its tenth changes.
+Nothing reads layout. It stops when the video pauses, ends or is replaced, and
+a stopped video's event can only stop its own clock: an event from a replaced
+video arrives after its successor started.
+
+Keys while the view is open: Space/K, arrows (Shift: one second), L, M, F;
+Escape leaves full screen first and the view second.
+
+
+2. Load
+-------
+
+The Queue Send History already had Load: the browser writes `load:<id>` into
+the hidden `history_action` box and the server restores that record into the
+composer - the prompt as typed, each picture still in the library, Use WanGP
+for what was inherited or has gone - and queues nothing.
+
+The outputs page already joined each output to its history record by
+`request_id`, for the prompt it shows. It now hands the record's id over as
+`recipe`, and the stage's Load writes that same box. So an output restores
+exactly what its history entry would, by exactly the same code, and the view
+closes because the request column is what just changed. An output whose
+request left no record - made before history was kept, deleted, or aged out
+past 200 - has a Load that is disabled and says why.
+
+Only a Clipboard send leaves a Clipboard history record. The Send to WanGP
+popup keeps its own history, and loading one of those would mean opening the
+popup; that is not this.
+
+
+3. Filling the window
+---------------------
+
+The grid was `max-height: 70vh`, and the request column was as tall as its
+content. On the reported window both stopped about two thirds of the way down.
+
+Both are fitted now, by measuring - a percentage height inside Gradio's
+containers resolves to auto (CLAUDE.md):
+
+  grid height  = window height - the grid's top - what is under it in its
+                 column - 12px, floor 240px
+  prompt floor = the Prompt box's height + whatever the request column leaves
+                 before the bottom of the window - 12px, floor 96px
+
+The Prompt box's own height is Gradio's (it grows with what is typed, between
+4 and 12 lines), so what is written is a minimum height, which Gradio never
+writes. When the queue under it needs more than the window has, the minimum
+goes back to 96px and the page scrolls as it always did.
+
+Measured as though the page were scrolled to the top: the page's scroll and
+every scrolling ancestor's are added back, so a fit taken half way down is the
+fit the top would get - in focus mode the tab itself is the scroller.
+
+It observes only what it never resizes: the rows above and below the grid, the
+pager, and the request column's blocks other than the Prompt's. It is also run
+on window and visual-viewport resizes, on a class change on <body> (focus mode,
+from either extension), when the tab is shown and after every grid draw. It
+writes only a value that changed. Left alone it writes nothing, which is what
+the check measures.
+
+When the two columns stack (Gradio wraps them under 608px: 320 + 280 + gap),
+the grid keeps its old 70% share and the Prompt box its own size, so the
+request is still in reach below it.
+
+
+4. What the checks had to be
+----------------------------
+
+A player is checked by watching it play, so the suite makes a real clip: 48
+numbered frames, VP8 at 24 fps, two seconds, with the ffmpeg Playwright installs
+beside its browsers. The fixture's other outputs are not videos and are not
+meant to be.
+
+Three checks passed with the thing they guarded removed until they were made
+honest:
+
+  * the exact seek on release: Chromium has no fastSeek, so both paths are the
+    same seek. The page is given a stand-in that lands on whole seconds.
+  * a replaced video's pause stopping its successor's clock: Chromium delivers
+    the old pause before the new play. The late pause is sent on purpose.
+  * the speed preference: set before `src`, reset by the load, and re-saved as
+    1x by the `ratechange` handler. Caught on the second video.
+
+One more failed for a reason that was not the product's: the Load checks
+passed alone and failed in the full run, reading "no recipe" off every
+output. Closing the view leaves its last draw on the panel, so "the gallery
+has items" was already true before the new answer arrived, and the check read
+the previous check's two clips. The page counts its draws now
+(`debug().outputs.drawn`), and a check that opens the view waits for its own
+(`_open_outputs_fresh`).
+
+Twenty-three mutations were applied against the browser checks, one decision
+each, and twenty-two fail a named check. The twenty-third is masked by design
+and was left: removing the clock stop from `stopPlayer` changes nothing,
+because the pause that follows stops the clock too. The recipe's server side is
+also caught by `test_clipboard_outputs.py` on its own.
+
+The two failing checks in browser_clipboard ("and it takes what is typed into
+it", "leaving the panel back in the column ...") fail on main as it stands and
+are not touched here: the system-prompt box already holds the server's answer
+on this fixture, and the typed text lands beside it.

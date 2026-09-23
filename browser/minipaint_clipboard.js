@@ -32,6 +32,8 @@ window.minipaintClipboard = (function () {
 
     const ROOT_ID = "minipaint_clipboard_root";
     const BROWSER_ID = "minipaint_clipboard_browser";
+    const COMPOSER_ID = "minipaint_clipboard_composer";
+    const PROMPT_ID = "minipaint_clipboard_prompt";
     const GRID_ID = "minipaint_clipboard_grid";
     const MENU_ID = "minipaint_clipboard_menu";
     const SORT_BUTTON_ID = "minipaint_clipboard_sort_open";
@@ -671,6 +673,7 @@ window.minipaintClipboard = (function () {
         // Once the pictures have had a frame to lay out: measured before
         // that, every tile is "off-centre" because nothing has been drawn.
         setTimeout(reportTiles, 400);
+        scheduleFit();
     }
 
     /** A Gradio round trip landed on this page, whatever it carried. */
@@ -1092,6 +1095,152 @@ window.minipaintClipboard = (function () {
     function gridElement() {
         const mount = gridMount();
         return mount ? mount.querySelector(".minipaint-clip-grid") : null;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Filling the window                                                   */
+    /* ------------------------------------------------------------------ */
+    //
+    // The grid used to be capped at 70vh by the stylesheet and the composer
+    // was as tall as its content, so on a tall window both columns stopped
+    // two thirds of the way down and left the rest of it empty - more so in
+    // focus mode, where the window is all the tab has.
+    //
+    // So both are fitted to the window, by measuring rather than by a
+    // percentage: a percentage height inside a Gradio container resolves to
+    // auto (see CLAUDE.md), and the one number that is right is "from here
+    // to the bottom of the window, less what has to fit under it". The grid
+    // gets that as its height; the Prompt box gets whatever the composer
+    // leaves over, as a minimum height - its own height is Gradio's, which
+    // grows it with what is typed, and a minimum is the one thing Gradio's
+    // autosizing never writes.
+    //
+    // It is measured as though the page were scrolled to the top, so a fit
+    // taken half way down the page is the fit the top would get. It observes
+    // only boxes it never resizes - the rows above and below the grid, and
+    // the composer's other blocks - and writes only when a number changed,
+    // which is what keeps it out of the loop the WanGP frame once fell into.
+    //
+    // Stacked on a narrow window, the composer is under the grid rather than
+    // beside it, and "to the bottom of the window" would mean a grid that
+    // pushed the composer off the screen: the grid keeps the old cap and the
+    // Prompt box its own size.
+
+    //: The least the grid is given, whatever the window. Below it the page
+    //: scrolls, as it always did.
+    const FIT_FLOOR = 240;
+    //: The Prompt box's own floor, the stylesheet's `min-height`.
+    const PROMPT_FLOOR = 96;
+    //: Breathing room under both columns.
+    const FIT_GAP = 12;
+    //: The share of the window the grid keeps when the columns are stacked.
+    const STACKED_SHARE = 0.7;
+
+    /** How far everything above this node has been scrolled. */
+    function scrolledAbove(node) {
+        let total = window.scrollY || window.pageYOffset || 0;
+        for (let walk = node.parentElement; walk && walk !== document.documentElement; walk = walk.parentElement) {
+            total += walk.scrollTop || 0;
+        }
+        return total;
+    }
+
+    function promptBox() {
+        const host = byId(PROMPT_ID);
+        return host ? host.querySelector("textarea") : null;
+    }
+
+    /** Write a pixel size, pinned, only if it is not already that. */
+    function writeSize(node, properties, value) {
+        const text = value === null ? "" : Math.round(value) + "px";
+        let changed = false;
+        for (const property of properties) {
+            if (node.style.getPropertyValue(property) === text) { continue; }
+            changed = true;
+            if (text) { node.style.setProperty(property, text, "important"); }
+            else { node.style.removeProperty(property); }
+        }
+        return changed;
+    }
+
+    function fitTab() {
+        S.fitFrame = 0;
+        if (!tabVisible()) { return null; }
+        const grid = gridElement();
+        const column = byId(BROWSER_ID);
+        const composer = byId(COMPOSER_ID);
+        if (!grid || !column) { return null; }
+        const view = window.innerHeight || document.documentElement.clientHeight || 0;
+        if (!view) { return null; }
+        const g = grid.getBoundingClientRect();
+        const c = column.getBoundingClientRect();
+        const k = composer ? composer.getBoundingClientRect() : null;
+        // Beside or under: the composer starts at or below the bottom of the
+        // browser column when the row has wrapped.
+        const stacked = !!k && k.top >= c.bottom - 1;
+        const top = g.top + scrolledAbove(grid);
+        const below = Math.max(0, c.bottom - g.bottom);
+        let height = view - top - below - FIT_GAP;
+        if (stacked) { height = Math.min(height, view * STACKED_SHARE); }
+        height = Math.max(FIT_FLOOR, height);
+        const result = { grid: Math.round(height), prompt: null, stacked: stacked };
+        writeSize(grid, ["height", "max-height"], height);
+        const box = promptBox();
+        if (box && k && !stacked) {
+            const bottom = k.bottom + scrolledAbove(composer);
+            const current = box.getBoundingClientRect().height;
+            const wanted = Math.max(PROMPT_FLOOR, current + (view - bottom - FIT_GAP));
+            result.prompt = Math.round(wanted);
+            writeSize(box, ["min-height"], wanted);
+        } else if (box) {
+            writeSize(box, ["min-height"], null);
+        }
+        S.fitted = result;
+        return result;
+    }
+
+    function scheduleFit() {
+        if (S.fitFrame) { return; }
+        S.fitFrame = window.requestAnimationFrame(fitTab);
+    }
+
+    /** What moves the room there is, watched - and nothing that is resized. */
+    function watchFit() {
+        if (S.fitWatch) { return; }
+        S.fitWatch = true;
+        window.addEventListener("resize", scheduleFit);
+        if (window.visualViewport) { window.visualViewport.addEventListener("resize", scheduleFit); }
+        // Focus mode, from either extension, is a class on the body.
+        if (typeof MutationObserver === "function" && document.body) {
+            new MutationObserver(scheduleFit).observe(document.body, { attributes: true, attributeFilter: ["class"] });
+        }
+        if (typeof ResizeObserver !== "function") { return; }
+        const sizes = new ResizeObserver(scheduleFit);
+        S.fitObserver = sizes;
+        const watchAll = function () {
+            sizes.disconnect();
+            const column = byId(BROWSER_ID);
+            const composer = byId(COMPOSER_ID);
+            const promptHost = byId(PROMPT_ID);
+            // The browser column's rows other than the grid's own host: the
+            // toolbar above it and the status line under it.
+            if (column) {
+                for (const child of Array.from(column.children)) {
+                    if (!child.contains(gridElement())) { sizes.observe(child); }
+                }
+            }
+            // The pager, which is inside the grid's host but never sized.
+            const pager = pagerElement();
+            if (pager) { sizes.observe(pager); }
+            // Every block of the composer but the Prompt's own.
+            if (composer) {
+                for (const child of Array.from(composer.children)) {
+                    if (!promptHost || !child.contains(promptHost)) { sizes.observe(child); }
+                }
+            }
+        };
+        watchAll();
+        S.fitRewatch = watchAll;
     }
 
     function pagerElement() {
@@ -1691,12 +1840,412 @@ window.minipaintClipboard = (function () {
      */
     function stopPlayer() {
         const video = S.outputs.player;
+        stopClock();
+        leaveFullscreen();
         if (!video) { return; }
         try {
             video.pause();
             video.removeAttribute("src");
             video.load();
         } catch (e) { /* a player the page is already tearing down */ }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* The player: controls on the page, not the browser's                  */
+    /* ------------------------------------------------------------------ */
+    //
+    // The browser's own controls were the only way to drive a video here,
+    // and they are a different set on every browser: Android's have no loop
+    // at all, so a clip three seconds long could not be watched twice without
+    // pressing play again. These are the page's own, the same everywhere,
+    // every one a 44px target: play, a timeline to scrub, a frame back and a
+    // frame forward (a generated clip is looked at a frame at a time), loop,
+    // mute, speed and full screen.
+    //
+    // Loop, mute and speed are remembered, because they are preferences about
+    // watching, not about one video.
+    //
+    // WHAT IT COSTS WHILE A VIDEO PLAYS. One callback per presented frame -
+    // `requestVideoFrameCallback` where the browser has it, one animation
+    // frame otherwise - that writes a number into the timeline and, when the
+    // tenth of a second changes, two short strings. Nothing reads layout.
+    // It runs only while the video is playing and the view is open, and a
+    // paused video costs nothing at all.
+
+    //: Where the three preferences live. Per browser, like the rest of the
+    //: tab's view state.
+    const PLAYER_PREFS = "minipaint-outputs-player:v1";
+    const PLAYER_RATES = [0.25, 0.5, 1, 1.5, 2];
+    //: A frame when the video has not said how long its frames are.
+    const FRAME_FALLBACK = 1 / 24;
+
+    function playerPrefs() {
+        let found = null;
+        try { found = JSON.parse(window.localStorage.getItem(PLAYER_PREFS) || "null"); } catch (e) { found = null; }
+        found = found && typeof found === "object" ? found : {};
+        return {
+            // On by default: a generated clip is a few seconds long, and
+            // watching it again is the usual thing to want.
+            loop: found.loop !== false,
+            muted: found.muted === true,
+            rate: PLAYER_RATES.indexOf(found.rate) >= 0 ? found.rate : 1
+        };
+    }
+
+    function savePlayerPrefs(video) {
+        try {
+            window.localStorage.setItem(PLAYER_PREFS, JSON.stringify({
+                loop: !!video.loop, muted: !!video.muted, rate: video.playbackRate || 1
+            }));
+        } catch (e) { /* memory only; the player still works */ }
+    }
+
+    //: The glyphs, as SVG paths filled with the button's own text colour -
+    //: which is what lets them follow a night theme, where an emoji would
+    //: be the same colourful picture on every theme and every phone.
+    const PLAYER_ICONS = {
+        play: "M8 5v14l11-7z",
+        pause: "M6 5h4v14H6zM14 5h4v14h-4z",
+        restart: "M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z",
+        back: "M6 6h2v12H6zM9.5 12L18 18V6z",
+        forward: "M16 6h2v12h-2zM6 18l8.5-6L6 6z",
+        loop: "M7 7h10v3l4-4-4-4v3H5v6h2zM17 17H7v-3l-4 4 4 4v-3h12v-6h-2z",
+        sound: "M3 9v6h4l5 5V4L7 9zM16.5 12A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4zM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6z",
+        muted: "M3 9v6h4l5 5V4L7 9zM16 9.4l1.4-1.4L19.5 10l2.1-2.1L23 9.4 20.9 11.5 23 13.6l-1.4 1.4-2.1-2.1-2.1 2.1L16 13.6l2.1-2.1z",
+        full: "M5 5h5v2H7v3H5zM14 5h5v5h-2V7h-3zM5 14h2v3h3v2H5zM17 14h2v5h-5v-2h3z",
+        exit: "M8 5h2v5H5V8h3zM14 5h2v3h3v2h-5zM5 14h5v5H8v-3H5zM14 14h5v2h-3v3h-2z"
+    };
+
+    function playerIcon(name) {
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", "0 0 24 24");
+        svg.setAttribute("aria-hidden", "true");
+        svg.setAttribute("focusable", "false");
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", PLAYER_ICONS[name] || "");
+        path.setAttribute("fill", "currentColor");
+        svg.appendChild(path);
+        return svg;
+    }
+
+    //: The same reason the tiles are pinned (see the theme note in CLAUDE.md):
+    //: a theme's rule about `button` reaches these too, and a control that a
+    //: theme can squash is a control a finger can miss.
+    const CONTROL_GEOMETRY = {
+        "display": "inline-flex",
+        "align-items": "center",
+        "justify-content": "center",
+        "box-sizing": "border-box",
+        "width": "44px",
+        "min-width": "44px",
+        "height": "44px",
+        "padding": "0",
+        "margin": "0",
+        "flex": "0 0 auto"
+    };
+
+    function playerButton(name, label, onPress) {
+        const button = el("button", "minipaint-clip-player-button");
+        button.type = "button";
+        button.dataset.control = name;
+        button.setAttribute("aria-label", label);
+        button.title = label;
+        button.appendChild(playerIcon(name));
+        pin(button, CONTROL_GEOMETRY);
+        button.addEventListener("click", function (event) {
+            event.stopPropagation();
+            onPress(button);
+        });
+        return button;
+    }
+
+    function setIcon(button, name, label) {
+        button.replaceChildren(playerIcon(name));
+        button.setAttribute("aria-label", label);
+        button.title = label;
+    }
+
+    /** `m:ss.t` - to the tenth, because the clips are seconds long. */
+    function clock(seconds) {
+        const value = isFinite(seconds) && seconds > 0 ? seconds : 0;
+        const minutes = Math.floor(value / 60);
+        const rest = value - minutes * 60;
+        return minutes + ":" + (rest < 10 ? "0" : "") + rest.toFixed(1);
+    }
+
+    /** Stop the clock only if it is this video's. An event from a video that
+     *  has just been replaced arrives after its successor started, and must
+     *  not stop the successor's clock. */
+    function stopClockFor(video) {
+        if (S.outputs.clock && S.outputs.clock.video === video) { stopClock(); }
+    }
+
+    function stopClock() {
+        const running = S.outputs.clock;
+        S.outputs.clock = null;
+        if (!running) { return; }
+        try {
+            if (running.kind === "video" && running.video.cancelVideoFrameCallback) {
+                running.video.cancelVideoFrameCallback(running.handle);
+            } else if (running.kind === "frame") {
+                window.cancelAnimationFrame(running.handle);
+            }
+        } catch (e) { /* already stopped */ }
+    }
+
+    /** Draw where the video is. Writes only; never reads layout. */
+    function drawTime(controls) {
+        const video = controls.video;
+        const duration = isFinite(video.duration) ? video.duration : 0;
+        if (!controls.scrubbing) {
+            controls.scrub.max = String(duration || 0);
+            controls.scrub.value = String(video.currentTime || 0);
+            controls.scrub.style.setProperty("--minipaint-clip-played",
+                (duration ? (100 * video.currentTime / duration) : 0).toFixed(2) + "%");
+        }
+        const shown = clock(video.currentTime) + " / " + clock(duration);
+        if (shown !== controls.shown) {
+            controls.shown = shown;
+            controls.time.textContent = shown;
+        }
+    }
+
+    /** Follow the video frame by frame while it plays, and not otherwise. */
+    function startClock(controls) {
+        stopClock();
+        const video = controls.video;
+        const running = { video: video, kind: "", handle: 0 };
+        S.outputs.clock = running;
+        const useFrames = typeof video.requestVideoFrameCallback === "function";
+        const tick = function (now, meta) {
+            if (S.outputs.clock !== running || S.outputs.player !== video || video.paused) { return; }
+            // The length of a frame, learned from the frames themselves: the
+            // smallest step between two presented frames is one frame.
+            if (meta && typeof meta.mediaTime === "number") {
+                if (controls.lastMedia !== undefined) {
+                    const step = meta.mediaTime - controls.lastMedia;
+                    if (step > 0.004 && (!controls.frame || step < controls.frame)) { controls.frame = step; }
+                }
+                controls.lastMedia = meta.mediaTime;
+            }
+            drawTime(controls);
+            running.kind = useFrames ? "video" : "frame";
+            running.handle = useFrames ? video.requestVideoFrameCallback(tick)
+                                       : window.requestAnimationFrame(tick);
+        };
+        running.kind = useFrames ? "video" : "frame";
+        running.handle = useFrames ? video.requestVideoFrameCallback(tick) : window.requestAnimationFrame(tick);
+    }
+
+    function togglePlay(controls) {
+        const video = controls.video;
+        if (video.paused || video.ended) {
+            const started = video.play();
+            if (started && typeof started.catch === "function") {
+                started.catch(function () { drawPlay(controls); });
+            }
+        } else {
+            video.pause();
+        }
+    }
+
+    function drawPlay(controls) {
+        const playing = !controls.video.paused && !controls.video.ended;
+        setIcon(controls.play, playing ? "pause" : "play", playing ? "Pause" : "Play");
+        controls.root.classList.toggle("minipaint-clip-player-playing", playing);
+    }
+
+    function stepFrame(controls, direction, seconds) {
+        const video = controls.video;
+        if (!video.paused) { video.pause(); }
+        const step = seconds || controls.frame || FRAME_FALLBACK;
+        const duration = isFinite(video.duration) ? video.duration : 0;
+        const target = Math.max(0, Math.min(duration || Infinity, (video.currentTime || 0) + direction * step));
+        video.currentTime = target;
+        drawTime(controls);
+    }
+
+    function inFullscreen() {
+        return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+
+    function leaveFullscreen() {
+        if (!inFullscreen()) { return; }
+        try {
+            const leave = document.exitFullscreen || document.webkitExitFullscreen;
+            if (leave) { leave.call(document); }
+        } catch (e) { /* the browser left it already */ }
+    }
+
+    /** The stage, not the video: in full screen the controls are still ours. */
+    function toggleFullscreen(controls) {
+        if (inFullscreen()) { leaveFullscreen(); return; }
+        const stage = S.outputs.stage;
+        const enter = stage && (stage.requestFullscreen || stage.webkitRequestFullscreen);
+        try {
+            if (enter) {
+                const done = enter.call(stage);
+                if (done && typeof done.catch === "function") { done.catch(function () { /* refused */ }); }
+            } else if (controls.video.webkitEnterFullscreen) {
+                // iOS: only the video itself can go full screen, with the
+                // system's own controls. Better that than nothing.
+                controls.video.webkitEnterFullscreen();
+            }
+        } catch (e) { /* refused; the button stays where it is */ }
+    }
+
+    function nextRate(rate) {
+        const index = PLAYER_RATES.indexOf(rate);
+        return PLAYER_RATES[(index + 1) % PLAYER_RATES.length];
+    }
+
+    function rateLabel(rate) {
+        return (rate === 0.25 ? "\u00bc" : rate === 0.5 ? "\u00bd" : String(rate)) + "\u00d7";
+    }
+
+    /** The control bar for one video. */
+    function buildPlayer(video) {
+        const prefs = playerPrefs();
+        video.loop = prefs.loop;
+        video.muted = prefs.muted;
+        // The default as well as the rate: loading a source puts the rate
+        // back to the default, so a rate set on its own lasts only until the
+        // file arrives.
+        video.defaultPlaybackRate = prefs.rate;
+        video.playbackRate = prefs.rate;
+
+        const root = el("div", "minipaint-clip-player");
+        root.setAttribute("role", "group");
+        root.setAttribute("aria-label", "Video controls");
+        const controls = { video: video, root: root, scrubbing: false, frame: 0, shown: "" };
+
+        const line = el("div", "minipaint-clip-player-line");
+        const scrub = el("input", "minipaint-clip-player-scrub");
+        scrub.type = "range";
+        scrub.min = "0";
+        scrub.max = "0";
+        scrub.step = "any";
+        scrub.value = "0";
+        scrub.setAttribute("aria-label", "Position in the video");
+        const time = el("span", "minipaint-clip-player-time", "0:00.0 / 0:00.0");
+        line.appendChild(scrub);
+        line.appendChild(time);
+        root.appendChild(line);
+        Object.assign(controls, { scrub: scrub, time: time });
+
+        // Scrubbing: the thumb belongs to the finger while it is held. A
+        // coarse seek while dragging, where the browser offers one, and an
+        // exact one where it is let go.
+        const seek = function (exact) {
+            const target = Number(scrub.value) || 0;
+            try {
+                if (!exact && typeof video.fastSeek === "function") { video.fastSeek(target); }
+                else { video.currentTime = target; }
+            } catch (e) { /* not seekable yet */ }
+            scrub.style.setProperty("--minipaint-clip-played",
+                (Number(scrub.max) ? (100 * target / Number(scrub.max)) : 0).toFixed(2) + "%");
+        };
+        scrub.addEventListener("pointerdown", function () { controls.scrubbing = true; });
+        scrub.addEventListener("input", function () { controls.scrubbing = true; seek(false); });
+        scrub.addEventListener("change", function () { seek(true); controls.scrubbing = false; drawTime(controls); });
+        scrub.addEventListener("pointerup", function () { controls.scrubbing = false; });
+        scrub.addEventListener("click", function (event) { event.stopPropagation(); });
+
+        const row = el("div", "minipaint-clip-player-row");
+        const restart = playerButton("restart", "Back to the start", function () {
+            video.currentTime = 0;
+            drawTime(controls);
+        });
+        const back = playerButton("back", "One frame back", function () { stepFrame(controls, -1); });
+        const play = playerButton("play", "Play", function () { togglePlay(controls); });
+        play.classList.add("minipaint-clip-player-main");
+        const forward = playerButton("forward", "One frame forward", function () { stepFrame(controls, 1); });
+        const loop = playerButton("loop", "Loop", function () {
+            video.loop = !video.loop;
+            loop.setAttribute("aria-pressed", String(video.loop));
+            savePlayerPrefs(video);
+        });
+        loop.setAttribute("aria-pressed", String(video.loop));
+        const sound = playerButton(video.muted ? "muted" : "sound", video.muted ? "Unmute" : "Mute", function () {
+            video.muted = !video.muted;
+            savePlayerPrefs(video);
+        });
+        const speed = el("button", "minipaint-clip-player-button minipaint-clip-player-speed", rateLabel(video.playbackRate));
+        speed.type = "button";
+        speed.dataset.control = "speed";
+        speed.setAttribute("aria-label", "Playback speed " + video.playbackRate);
+        speed.title = "Playback speed";
+        pin(speed, Object.assign({}, CONTROL_GEOMETRY, { "width": "auto", "min-width": "52px", "padding": "0 8px" }));
+        speed.addEventListener("click", function (event) {
+            event.stopPropagation();
+            const rate = nextRate(video.playbackRate);
+            video.defaultPlaybackRate = rate;
+            video.playbackRate = rate;
+            savePlayerPrefs(video);
+        });
+        const full = playerButton("full", "Full screen", function () { toggleFullscreen(controls); });
+        const canFullscreen = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled
+                                 || video.webkitEnterFullscreen);
+        full.hidden = !canFullscreen;
+        for (const button of [restart, back, play, forward, loop, sound, speed, full]) { row.appendChild(button); }
+        root.appendChild(row);
+        Object.assign(controls, { play: play, loop: loop, sound: sound, speed: speed, full: full });
+
+        video.addEventListener("play", function () { drawPlay(controls); startClock(controls); });
+        video.addEventListener("pause", function () { drawPlay(controls); stopClockFor(video); drawTime(controls); });
+        video.addEventListener("ended", function () { drawPlay(controls); stopClockFor(video); drawTime(controls); });
+        for (const name of ["loadedmetadata", "durationchange", "seeked", "timeupdate"]) {
+            video.addEventListener(name, function () {
+                // While playing the frame loop draws; these are for a paused
+                // video that is being moved by hand.
+                if (video.paused) { drawTime(controls); }
+            });
+        }
+        video.addEventListener("volumechange", function () {
+            setIcon(sound, video.muted ? "muted" : "sound", video.muted ? "Unmute" : "Mute");
+        });
+        // Drawn from the event, saved only from the press: the browser changes
+        // the rate itself when a source loads, and that is not a preference.
+        video.addEventListener("ratechange", function () {
+            speed.textContent = rateLabel(video.playbackRate);
+            speed.setAttribute("aria-label", "Playback speed " + video.playbackRate);
+        });
+        const onFullscreen = function () {
+            const on = inFullscreen();
+            setIcon(full, on ? "exit" : "full", on ? "Leave full screen" : "Full screen");
+            if (S.outputs.stage) { S.outputs.stage.classList.toggle("minipaint-clip-output-full", on); }
+        };
+        document.addEventListener("fullscreenchange", onFullscreen);
+        document.addEventListener("webkitfullscreenchange", onFullscreen);
+        controls.forget = function () {
+            document.removeEventListener("fullscreenchange", onFullscreen);
+            document.removeEventListener("webkitfullscreenchange", onFullscreen);
+        };
+        drawPlay(controls);
+        drawTime(controls);
+        return controls;
+    }
+
+    /** The keys a player answers to while the view is open. */
+    function playerKey(event) {
+        const controls = S.outputs.controls;
+        if (!controls || !outputsOpen()) { return false; }
+        const target = event.target;
+        if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
+            && !(target.classList && target.classList.contains("minipaint-clip-player-scrub"))) {
+            return false;
+        }
+        const key = event.key;
+        if (key === " " || key === "k" || key === "K") { togglePlay(controls); }
+        else if (key === "ArrowLeft") { stepFrame(controls, -1, event.shiftKey ? 1 : 0); }
+        else if (key === "ArrowRight") { stepFrame(controls, 1, event.shiftKey ? 1 : 0); }
+        else if (key === "l" || key === "L") { controls.loop.click(); }
+        else if (key === "m" || key === "M") { controls.sound.click(); }
+        else if (key === "f" || key === "F") { toggleFullscreen(controls); }
+        else { return false; }
+        event.preventDefault();
+        event.stopPropagation();
+        return true;
     }
 
     //: How far outside the strip a tile is loaded, and how far past that it
@@ -1784,6 +2333,47 @@ window.minipaintClipboard = (function () {
         }
     }
 
+    /**
+     * Load: put the recipe that made this output back into the composer.
+     *
+     * The same path the Queue Send History's own Load takes - the hidden box
+     * the server's `history_action` reads - so it restores exactly what that
+     * does: the prompt as it was typed, each picture that is still in the
+     * library, and "Use WanGP" for what was inherited or has since gone. It
+     * queues nothing. The view closes, because the composer is what it has
+     * just changed.
+     *
+     * An output with no recipe - its request was made before history was
+     * kept, or its record has been deleted or aged out - says so rather than
+     * offering a button that would do nothing.
+     */
+    function loadButton(item) {
+        const button = el("button", "minipaint-clip-output-load", "Load");
+        button.type = "button";
+        if (!item.recipe) {
+            button.disabled = true;
+            button.title = "No recipe was kept for this output, so there is nothing to load.";
+            return button;
+        }
+        button.title = "Put this output's prompt and pictures back in the request, to generate again. Nothing is queued.";
+        button.addEventListener("click", function (event) {
+            event.stopPropagation();
+            loadRecipe(item);
+        });
+        return button;
+    }
+
+    function loadRecipe(item) {
+        if (!item || !item.recipe) { return false; }
+        const sent = sendInput(BOXES.historyAction, "load:" + item.recipe + ":" + Date.now());
+        note("outputs: load " + String(item.recipe).slice(0, 8) + (sent ? "" : " (the history box is missing)"));
+        if (!sent) { return false; }
+        closeOutputs();
+        // The history list is re-read the way its own Load does it.
+        setTimeout(function () { askQueue(null); }, 300);
+        return true;
+    }
+
     function outputTile(item, chosen) {
         const tile = el("button", "minipaint-clip-output-tile" + (chosen ? " minipaint-clip-output-chosen" : ""));
         tile.type = "button";
@@ -1822,19 +2412,39 @@ window.minipaintClipboard = (function () {
         stage.innerHTML = "";
         S.outputs.player = null;
         let media;
+        if (S.outputs.controls && S.outputs.controls.forget) { S.outputs.controls.forget(); }
+        S.outputs.controls = null;
+        let controls = null;
         if (item.kind === "video") {
             media = el("video", "minipaint-clip-output-stage-media");
-            media.src = item.url;
-            media.controls = true;
-            media.autoplay = true;
+            media.controls = false;
             media.playsInline = true;
+            media.preload = "auto";
             S.outputs.player = media;
+            controls = buildPlayer(media);
+            S.outputs.controls = controls;
+            // A press on the picture is play and pause, the way every video
+            // on a phone works. Only on the picture: the bar has its own.
+            media.addEventListener("click", function (event) {
+                event.stopPropagation();
+                togglePlay(controls);
+            });
+            media.src = item.url;
         } else {
             media = el("img", "minipaint-clip-output-stage-media");
             media.alt = item.name;
             media.src = item.url;
         }
         stage.appendChild(media);
+        if (controls) {
+            stage.appendChild(controls.root);
+            const started = media.play();
+            if (started && typeof started.catch === "function") {
+                // Refused - a browser that wants a gesture first. The play
+                // button says so by still being a play button.
+                started.catch(function () { drawPlay(controls); });
+            }
+        }
         const caption = el("div", "minipaint-clip-output-caption");
         caption.appendChild(el("span", "minipaint-clip-output-name", item.name));
         if (item.prompt) {
@@ -1847,6 +2457,7 @@ window.minipaintClipboard = (function () {
                              "matched to a request by when it was written");
             caption.appendChild(guess);
         }
+        caption.appendChild(loadButton(item));
         stage.appendChild(caption);
         const strip = S.outputs.strip;
         if (strip) {
@@ -1863,19 +2474,14 @@ window.minipaintClipboard = (function () {
         if (!panel) { return; }
         const items = (answer && answer.items) || [];
         S.outputs.items = items;
+        // Counted, so a caller can tell this draw from the one left on the
+        // panel by the last time it was open: closing does not clear it.
+        S.outputs.drawn = (S.outputs.drawn || 0) + 1;
         S.outputs.page = (answer && answer.page) || 0;
         S.outputs.pages = (answer && answer.pages) || 1;
         panel.innerHTML = "";
 
         const stage = el("div", "minipaint-clip-output-stage");
-        // Tap to hide and show the controls, which is what the picture under
-        // them is for. The press has to miss the controls themselves, or
-        // pressing pause would also hide the pause button.
-        stage.addEventListener("click", function (event) {
-            const video = S.outputs.player;
-            if (!video || event.target !== stage) { return; }
-            video.controls = !video.controls;
-        });
         S.outputs.stage = stage;
         panel.appendChild(stage);
 
@@ -1959,7 +2565,15 @@ window.minipaintClipboard = (function () {
         panel.classList.add(EDITOR_OPEN_CLASS);
         if (S.outputsKey) { document.removeEventListener("keydown", S.outputsKey, true); }
         S.outputsKey = function (event) {
-            if (event.key === "Escape") { event.stopPropagation(); closeOutputs(); }
+            if (event.key === "Escape") {
+                // Full screen first, the way every player does it: one
+                // Escape leaves full screen, the next leaves the view.
+                if (inFullscreen()) { return; }
+                event.stopPropagation();
+                closeOutputs();
+                return;
+            }
+            playerKey(event);
         };
         document.addEventListener("keydown", S.outputsKey, true);
         askOutputs(0);
@@ -1969,6 +2583,8 @@ window.minipaintClipboard = (function () {
     function closeOutputs() {
         const panel = outputsPanel();
         stopPlayer();
+        if (S.outputs.controls && S.outputs.controls.forget) { S.outputs.controls.forget(); }
+        S.outputs.controls = null;
         if (panel) { panel.classList.remove(EDITOR_OPEN_CLASS); }
         if (S.outputsKey) { document.removeEventListener("keydown", S.outputsKey, true); S.outputsKey = null; }
         return true;
@@ -3372,6 +3988,9 @@ window.minipaintClipboard = (function () {
             if (!button) { return; }
             setTimeout(function () {
                 if (tabVisible()) {
+                    // A tab that was hidden was not measured while it was.
+                    if (S.fitRewatch) { S.fitRewatch(); }
+                    scheduleFit();
                     // Over HTTP: coming back to this tab must not depend on
                     // a framework channel that a backgrounded tab has lost.
                     // With a folder re-read, because coming back to the tab
@@ -3426,6 +4045,8 @@ window.minipaintClipboard = (function () {
         // first, so a change that lands between these two is not missed.
         watch();
         gridMount();
+        watchFit();
+        scheduleFit();
         fetchLibrary({ quiet: true, refresh: true });
         // And the queue: what ran while this browser was closed, from the
         // route rather than from a framework render that a closed browser
@@ -3452,14 +4073,17 @@ window.minipaintClipboard = (function () {
                  editorOpen: editorOpen(),
                  outputsOpen: outputsOpen(),
                  outputs: { page: S.outputs.page, pages: S.outputs.pages,
-                            items: S.outputs.items.length, chosen: S.outputs.chosen },
+                            items: S.outputs.items.length, chosen: S.outputs.chosen,
+                            drawn: S.outputs.drawn || 0,
+                            player: !!S.outputs.controls, clock: !!S.outputs.clock },
                  intercept: interceptTarget() === "clipboard",
                  interceptTarget: interceptTarget(),
                  takeovers: S.takeovers,
                  sort: menuState().sort || S.library.sort,
                  library: { revision: S.library.revision, page: S.library.page, pages: S.library.pages,
                             total: S.library.total, shown: S.library.ids.length, busy: S.library.busy },
-                 tileReport: S.tileReport };
+                 tileReport: S.tileReport,
+                 fitted: S.fitted || null };
     }
 
     return {
@@ -3482,6 +4106,8 @@ window.minipaintClipboard = (function () {
         openOutputs: openOutputs,
         closeOutputs: closeOutputs,
         askOutputs: askOutputs,
+        loadRecipe: loadRecipe,
+        fit: fitTab,
         closeMenu: closeMenu,
         select: select,
         setThumbnailSize: setThumbnailSize,

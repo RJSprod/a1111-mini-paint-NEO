@@ -448,6 +448,7 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
     index = page_of(page, pages)
     shown = listed[index * wanted:(index + 1) * wanted]
     prompts = {}
+    recipes = {}
     if shown:
         wanted_ids = {item["request_id"] for item in shown if item["request_id"]}
         if wanted_ids:
@@ -455,6 +456,12 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
                 found = record.get("request_id")
                 if found in wanted_ids and found not in prompts:
                     prompts[found] = record.get("enhanced_prompt") or record.get("prompt_override") or ""
+                    # The record itself, by its own id, for Load: the gallery
+                    # hands it to the same `history_action` History's own
+                    # Load button uses, so an output restores exactly what
+                    # its history entry would - and an output whose record
+                    # has gone has no recipe to offer, which it says.
+                    recipes[found] = str(record.get("history_id") or "")
     where = outputs.folder()
     if where is None:
         reason = "unconfigured"
@@ -486,6 +493,7 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
                 # how a user comes to trust the wrong video.
                 "exact": item["exact"],
                 "prompt": str(prompts.get(item["request_id"], ""))[:400],
+                "recipe": recipes.get(item["request_id"], ""),
                 "url": output_url(item["id"]),
             }
             for item in shown

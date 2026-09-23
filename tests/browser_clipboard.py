@@ -1911,6 +1911,98 @@ def check_the_player_is_the_pages(r: Results, page) -> None:
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def _full_screen(page) -> str:
+    """What is full screen: the page, the player's stage, something else, or nothing."""
+    return page.evaluate("""() => {
+        const now = document.fullscreenElement;
+        if (!now) { return 'nothing'; }
+        if (now === document.documentElement) { return 'page'; }
+        return now.classList.contains('minipaint-clip-output-stage') ? 'stage' : 'other';
+    }""")
+
+
+def check_the_players_full_screen_is_its_own(r: Results, page) -> None:
+    """The page can be full screen without the player: the Forge Assistant's
+    focus mode asks for the whole document. The player used to take any full
+    screen for its own - its button "left" the page's instead of entering the
+    stage's, and closing the view ended the page's, and focus mode with it.
+
+    Real full screen, asked for with real presses: a browser grants it only
+    inside one, and headless Chromium grants it like any other.
+    """
+    from minipaint_neo.clipboard import outputs
+
+    binary = _ffmpeg()
+    if not binary:
+        r.check("a real clip can be made for the full-screen checks", False, "no ffmpeg found")
+        return
+    folder = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-full-"))
+    full = ".minipaint-clip-player [data-control='full']"
+    label = f"() => document.querySelector(\"{full}\").getAttribute('aria-label')"
+    try:
+        try:
+            _seed_outputs(folder, 1, kind="webm", request_id=PLAYER_REQUEST, job_id="e" * 16)
+        except Exception as error:
+            r.check("the clip for the full-screen checks was made", False, f"{type(error).__name__}: {error}")
+            return
+        # The page's own full screen, the way the assistant asks for it: a
+        # press, and the document. Above the view, so it can be pressed.
+        page.evaluate("""() => {
+            const b = document.createElement('button');
+            b.id = 'page-full-screen';
+            b.textContent = 'page';
+            b.style.cssText = 'position:fixed;left:0;bottom:0;z-index:2147483647';
+            b.onclick = () => document.documentElement.requestFullscreen();
+            document.body.appendChild(b);
+        }""")
+        _open_outputs_on(page, "clip000.webm")
+        _video_ready(page)
+
+        # On its own: the stage, and back.
+        page.click(full)
+        page.wait_for_timeout(400)
+        alone = {"on": _full_screen(page), "label": page.evaluate(label)}
+        page.click(full)
+        page.wait_for_timeout(400)
+        alone["off"] = _full_screen(page)
+        r.check("on its own, the button makes the stage full screen and says Leave",
+                alone["on"] == "stage" and alone["label"] == "Leave full screen", str(alone))
+        r.check("and a second press gives the screen back", alone["off"] == "nothing", str(alone))
+
+        # With the page already full screen.
+        page.click("#page-full-screen")
+        page.wait_for_timeout(400)
+        before = {"full": _full_screen(page), "label": page.evaluate(label),
+                  "stage": page.evaluate("""() => document.querySelector('.minipaint-clip-output-stage')
+                      .classList.contains('minipaint-clip-output-full')""")}
+        r.check("the page going full screen is not the player going full screen",
+                before == {"full": "page", "label": "Full screen", "stage": False}, str(before))
+        page.click(full)
+        page.wait_for_timeout(400)
+        stacked = _full_screen(page)
+        r.check("its button still makes the stage full screen, on top of the page's",
+                stacked == "stage", stacked)
+        page.click(full)
+        page.wait_for_timeout(400)
+        unstacked = _full_screen(page)
+        r.check("and a second press leaves the page's full screen where it was",
+                unstacked == "page", unstacked)
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        page.wait_for_timeout(400)
+        closed = _full_screen(page)
+        r.check("closing the view leaves the page's full screen alone too", closed == "page", closed)
+    finally:
+        page.evaluate("""() => {
+            if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); }
+            const b = document.getElementById('page-full-screen');
+            if (b) { b.remove(); }
+        }""")
+        page.wait_for_timeout(300)
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        outputs.reset_for_tests()
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def check_an_output_loads_its_recipe(r: Results, page) -> None:
     """Asked for: "a way to Load from the view outputs ... load the prompt and
     images if available so i can generate again".
@@ -3199,6 +3291,7 @@ def run() -> Results:
                 check_the_toolbar_flyouts_are_the_one_door(r, page)
                 check_view_outputs_is_a_gallery(r, page)
                 check_the_player_is_the_pages(r, page)
+                check_the_players_full_screen_is_its_own(r, page)
                 check_an_output_loads_its_recipe(r, page)
                 check_the_tab_fills_the_window(r, page)
                 check_a_thumbnail_is_fetched_once(r, page)

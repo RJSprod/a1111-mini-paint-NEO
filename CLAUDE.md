@@ -194,6 +194,17 @@ where it is let go. In Chromium the two paths are the same seek, so the check
 gives the page a stand-in `fastSeek` that lands on whole seconds; without it the
 check passed with the exact seek removed.
 
+**`document.fullscreenElement` is not necessarily yours.** The Forge Assistant's
+focus mode makes the whole document full screen, and anything else on the page
+can stack an element on top of that. A player that asked "is anything full
+screen?" took the page's full screen for its own: its button called
+`exitFullscreen()` instead of entering, and closing the view ended the page's -
+and the assistant's focus mode with it. Ask whether *your* element is the full
+screen one (`inFullscreen()` in the Clipboard's player); only Escape's "leave
+full screen first" wants any full screen, because the browser spends that key
+on whichever it is. Headless Chromium and its headless shell both grant full
+screen to a real press, stacking included, so this is checked for real.
+
 **Playwright's ffmpeg is a build of its own.** It reads piped JPEG frames and
 writes VP8 WebM and nothing else, and it wants `-i pipe:0` - `-` is "Protocol
 not found". Playwright's Chromium has no H.264, so a WanGP-shaped MP4 does not

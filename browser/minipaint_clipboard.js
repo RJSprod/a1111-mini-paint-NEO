@@ -2065,8 +2065,25 @@ window.minipaintClipboard = (function () {
         drawTime(controls);
     }
 
+    /** Whatever is full screen, the player's or not. */
+    function fullscreenNow() {
+        return document.fullscreenElement || document.webkitFullscreenElement || null;
+    }
+
+    /**
+     * Is the stage what is full screen? Only that is the player's.
+     *
+     * The page itself can be full screen too - the Forge Assistant's focus
+     * mode asks for the whole document - and a player that took any full
+     * screen for its own ended that one: its button "left" the page's full
+     * screen instead of entering its own, its icon said Leave, and closing
+     * the view or picking another output took the page out of full screen,
+     * and focus mode with it. Stacked on the page's, the stage's own full
+     * screen comes off by itself and leaves the page's where it was.
+     */
     function inFullscreen() {
-        return !!(document.fullscreenElement || document.webkitFullscreenElement);
+        const now = fullscreenNow();
+        return !!now && now === S.outputs.stage;
     }
 
     function leaveFullscreen() {
@@ -2567,8 +2584,10 @@ window.minipaintClipboard = (function () {
         S.outputsKey = function (event) {
             if (event.key === "Escape") {
                 // Full screen first, the way every player does it: one
-                // Escape leaves full screen, the next leaves the view.
-                if (inFullscreen()) { return; }
+                // Escape leaves full screen, the next leaves the view. Any
+                // full screen, not only the stage's: the browser spends
+                // this Escape on the page's as well.
+                if (fullscreenNow()) { return; }
                 event.stopPropagation();
                 closeOutputs();
                 return;

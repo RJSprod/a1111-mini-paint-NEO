@@ -184,7 +184,10 @@ const window = {
     sessionStorage: { getItem: function (k) { return SESSION[k] === undefined ? null : SESSION[k]; }, setItem: function (k, v) { SESSION[k] = String(v); } },
     crypto: { getRandomValues: function (bytes) { for (let i = 0; i < bytes.length; i++) { bytes[i] = (i * 13 + 5) % 256; } return bytes; } },
     HTMLInputElement: { prototype: {} },
-    minipaintAssets: { load: function (urls) { loaded.push(urls); return Promise.resolve(true); } }
+    minipaintAssets: { load: function (urls) { loaded.push(urls); return Promise.resolve(true); } },
+    _listeners: {},
+    addEventListener: function (kind, fn) { (this._listeners[kind] = this._listeners[kind] || []).push(fn); },
+    fire: function (kind) { (this._listeners[kind] || []).forEach(function (fn) { fn({ type: kind }); }); }
 };
 global.window = window;
 window.document = document;
@@ -221,6 +224,17 @@ const HISTORY = [
       roles: [{ id: "reference", label: "Reference", valid: true }], summary: "s", pinned: false, model: "", outcome: "Queued", image: {} }
 ];
 
+//: How many reads of the gallery picture never answer, per scenario.
+let galleryHangs = MODE === "stagehang" ? 1 : (MODE === "stagedead" || MODE === "stageleaving" ? 99 : 0);
+//: The journal, for the scenarios that read it. A file name and a prompt are
+//: planted where a careless line would pick them up.
+const journal = [];
+const SECRET_NAME = "Jane_Doe_private_holiday.png";
+if (MODE.indexOf("stage") === 0) {
+    window.minipaintWanGP = { note: function (line) { journal.push(String(line)); } };
+    window.minipaintInterceptTiming = { timeout: 50, retryDelay: 10 };
+}
+
 global.fetch = function (url, options) {
     const text = String(url);
     const body = options && typeof options.body === "string" ? JSON.parse(options.body) : null;
@@ -244,7 +258,17 @@ global.fetch = function (url, options) {
     } else if (text.indexOf("/minipaint-interop/stage") === 0) {
         payload = { ok: true, image: { kind: "staged", id: "c".repeat(32) }, width: 80, height: 60 };
     } else if (text.indexOf("/gallery/") === 0) {
-        return Promise.resolve({ ok: true, status: 200, blob: function () { return Promise.resolve({ type: "image/png", size: 3 }); } });
+        const picture = { ok: true, status: 200, blob: function () { return Promise.resolve({ type: "image/png", size: 3 }); } };
+        if (galleryHangs > 0) {
+            // A request on a stalled connection: nothing comes back until it is aborted.
+            galleryHangs -= 1;
+            return new Promise(function (resolve, reject) {
+                const signal = options && options.signal;
+                if (signal) { signal.addEventListener("abort", function () { const e = new Error("The operation was aborted."); e.name = "AbortError"; reject(e); }); }
+            });
+        }
+        if (MODE === "stagepresses") { return new Promise(function (resolve) { setTimeout(function () { resolve(picture); }, 60); }); }
+        return Promise.resolve(picture);
     }
     return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve(payload); } });
 };
@@ -403,10 +427,42 @@ async function main() {
                  deletes: posted("history_delete").map(function (c) { return c.body.id; }),
                  loads: posted("history_load").map(function (c) { return c.body.id; }) });
     }
+    const stageCalls = function () { return calls.filter(function (c) { return c.url.indexOf("/minipaint-interop/stage") === 0; }).length; };
+    const galleryCalls = function () { return calls.filter(function (c) { return c.url.indexOf("/gallery/") === 0; }).length; };
+    const PICTURE = "/gallery/" + SECRET_NAME;
     if (MODE === "stage") {
         const ok = await popup.stageAndOpen("/gallery/one.png", "extras", {});
         await tick(40);
-        report({ staged: ok, stageCalls: calls.filter(function (c) { return c.url.indexOf("/minipaint-interop/stage") === 0; }).length });
+        report({ staged: ok, stageCalls: stageCalls() });
+    }
+    if (MODE === "stagehang") {
+        // The first read never answers: it is cancelled on its deadline and the send tried again.
+        const ok = await popup.stageAndOpen(PICTURE, "txt2img", {});
+        await tick(40);
+        report({ staged: ok, stageCalls: stageCalls(), galleryCalls: galleryCalls(), journal: journal });
+    }
+    if (MODE === "stagedead") {
+        const ok = await popup.stageAndOpen(PICTURE, "txt2img", {});
+        const toastNow = (function () { const t = body.querySelector(".minipaint-intercept-toast"); return t && !t.hidden ? t.textContent : ""; })();
+        report({ staged: ok, stageCalls: stageCalls(), galleryCalls: galleryCalls(), journal: journal, failureToast: toastNow });
+    }
+    if (MODE === "stagepresses") {
+        // Eleven presses in a row, as on 2026-09-23, while the first is still on its way.
+        const runs = [];
+        for (let i = 0; i < 11; i++) { runs.push(popup.stageAndOpen(PICTURE, "txt2img", {})); await tick(2); }
+        const toastWhileBusy = (function () { const t = body.querySelector(".minipaint-intercept-toast"); return t && !t.hidden ? t.textContent : ""; })();
+        const results = await Promise.all(runs);
+        await tick(40);
+        report({ results: results, stageCalls: stageCalls(), galleryCalls: galleryCalls(), journal: journal, toastWhileBusy: toastWhileBusy });
+    }
+    if (MODE === "stageleaving") {
+        // A reload cancels the requests in flight; that is not a failure to shout about.
+        const run = popup.stageAndOpen(PICTURE, "txt2img", {});
+        await tick(5);
+        window.fire("beforeunload");
+        const ok = await run;
+        const toastNow = (function () { const t = body.querySelector(".minipaint-intercept-toast"); return t && !t.hidden ? t.textContent : ""; })();
+        report({ staged: ok, galleryCalls: galleryCalls(), journal: journal, toastAfter: toastNow });
     }
 }
 
@@ -546,8 +602,48 @@ def run() -> Results:
         r.check("the direct route fetches the picture, stages it over the queue API and opens on the token it got",
                 staged.get("staged") is True and staged.get("stageCalls") == 1 and staged["state"]["token"] == "c" * 32 and staged["state"]["tab"] == "extras",
                 str(staged["state"])[:160])
+    secret = "Jane_Doe_private_holiday"
+
+    def private(answer):
+        """Nothing written down or shown names the picture's file."""
+        text = json.dumps({k: answer.get(k) for k in ("journal", "toast", "failureToast", "toastWhileBusy", "toastAfter")})
+        return secret not in text
+
+    hung = _run("stagehang")
+    if hung and "error" not in hung:
+        r.check("a read that never answers is cancelled on its deadline and the send tried once more, which then opens the popup",
+                hung.get("staged") is True and hung.get("galleryCalls") == 2 and hung.get("stageCalls") == 1 and hung["state"]["open"] is True,
+                str({k: hung.get(k) for k in ("staged", "galleryCalls", "stageCalls")}))
+        r.check("the journal says what timed out, which attempt, and how the page reaches Forge",
+                any("reading the picture: no answer within" in line and "attempt 1 of 2" in line and "page over" in line
+                    and "trying once more" in line for line in hung["journal"]), str(hung["journal"])[:400])
+        r.check("a stalled send never writes the picture's file name down", private(hung), str(hung["journal"])[:400])
+
+    dead = _run("stagedead")
+    if dead and "error" not in dead:
+        r.check("a connection that stays stalled gives up after two bounded tries, with no request left behind",
+                dead.get("staged") is False and dead.get("galleryCalls") == 2 and dead.get("stageCalls") == 0, str(dead)[:300])
+        r.check("and says so on screen, with what to do", "could not be sent to WanGP" in dead.get("failureToast", "")
+                and "Press the button again" in dead.get("failureToast", ""), dead.get("failureToast", ""))
+        r.check("the failure is private too", private(dead), str(dead["journal"])[:400])
+
+    presses = _run("stagepresses")
+    if presses and "error" not in presses:
+        r.check("eleven presses while one send is on its way make one send, not eleven",
+                presses.get("galleryCalls") == 1 and presses.get("stageCalls") == 1 and all(v is True for v in presses.get("results", [])),
+                str({k: presses.get(k) for k in ("galleryCalls", "stageCalls", "results")}))
+        r.check("a press while one is on its way is told so", "Still sending" in presses.get("toastWhileBusy", ""), presses.get("toastWhileBusy", ""))
+        r.check("the presses are private", private(presses))
+
+    leaving = _run("stageleaving")
+    if leaving and "error" not in leaving:
+        r.check("a send cancelled by a reload is not reported as a failure and not retried",
+                leaving.get("staged") is False and leaving.get("toastAfter", "") == "" and leaving.get("galleryCalls") == 1
+                and any("page is being reloaded or closed" in line for line in leaving["journal"]), str(leaving)[:400])
+
     for name, answer in (("norole", norole), ("refused", refused), ("cancel", cancelled), ("replace", replaced), ("facts", facts),
-                         ("shared", shared), ("keys", keys), ("history", listed), ("stage", staged)):
+                         ("shared", shared), ("keys", keys), ("history", listed), ("stage", staged), ("stagehang", hung),
+                         ("stagedead", dead), ("stagepresses", presses), ("stageleaving", leaving)):
         r.check(f"the {name} scenario ran", answer is not None and "error" not in answer, str(answer)[:300])
     return r
 

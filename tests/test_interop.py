@@ -199,8 +199,33 @@ def route_checks(r: Results, folder: pathlib.Path) -> None:
     r.check("the routes are installed once", sum(1 for route in app.router.routes if getattr(route, "path", "") == interop.STAGE_ROUTE) == 1)
     client = TestClient(app)
 
-    answer = client.post(interop.STAGE_ROUTE, content=_png(), headers={"Content-Type": "image/png"}).json()
+    # Watch where the decode runs and what the journal says, then put both back.
+    import asyncio
+
+    seen = {"loop_in_decode": None}
+    lines = []
+    real_stage_bytes, real_journal = interop.stage_bytes, interop._journal
+
+    def watched_stage_bytes(data, content_type=""):
+        try:
+            asyncio.get_running_loop()
+            seen["loop_in_decode"] = True
+        except RuntimeError:
+            seen["loop_in_decode"] = False
+        return real_stage_bytes(data, content_type)
+
+    interop.stage_bytes, interop._journal = watched_stage_bytes, lines.append
+    try:
+        answer = client.post(interop.STAGE_ROUTE, content=_png(), headers={"Content-Type": "image/png"}).json()
+    finally:
+        interop.stage_bytes, interop._journal = real_stage_bytes, real_journal
     r.check("POST /stage answers a token", answer.get("ok") and answer["image"]["kind"] == "staged" and protocol.valid_handoff_id(answer["image"]["id"]), str(answer))
+    # Under HTTP/2 the event loop serves every request of every page: a
+    # picture decoded on it stalls them all while it runs.
+    r.check("the picture is decoded and re-encoded off the event loop", seen["loop_in_decode"] is False, str(seen))
+    r.check("the journal says a stage arrived, before anything is decoded, by size alone",
+            len(lines) == 2 and lines[0].startswith("stage: received ") and lines[0].endswith(" bytes")
+            and lines[1].startswith("stage: image staged (") and " ms)" in lines[1], str(lines))
     bad = client.post(interop.STAGE_ROUTE, content=b"nope", headers={"Content-Type": "image/png"})
     r.check("and a refusal with a code and a sentence, not a traceback",
             bad.status_code == 400 and bad.json().get("code") == errors.IMAGE_STAGE_INVALID and bad.json().get("message"), bad.text[:120])

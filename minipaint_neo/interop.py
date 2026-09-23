@@ -484,19 +484,31 @@ async def _stage_route(request: typing.Any) -> typing.Any:
     if not _signed_in(request):
         return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
     content_type = request.headers.get("content-type", "")
+    started = time.monotonic()
     try:
         # One byte past the ceiling is enough to refuse without holding more.
         body = await request.body()
+        # Written on arrival, so a send that never reaches Forge is visible as
+        # the absence of this line - on 2026-09-23 that absence was the whole
+        # diagnosis. A size, never a name.
+        _journal(f"stage: received {len(body)} bytes")
         if len(body) > STAGE_MAX_BYTES:
             raise IntegrationError(errors.HANDOFF_TOO_LARGE, f"{len(body)} bytes uploaded")
-        answer = stage_bytes(body, content_type)
+        # Decoding and re-encoding a picture is CPU work. This route is a
+        # coroutine on the server's one event loop - which, under the
+        # auto-TLS extension's HTTP/2, serves every request of every page -
+        # so the work goes to the threadpool rather than stalling them all.
+        from starlette.concurrency import run_in_threadpool
+
+        answer = await run_in_threadpool(stage_bytes, body, content_type)
     except IntegrationError as error:
         _journal(f"stage: refused - {error.code}")
         return _refused(error)
     except Exception as error:
         _journal(f"stage: failed - {type(error).__name__}")
         return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
-    _journal(f"stage: image staged ({answer['width']}x{answer['height']})")
+    elapsed = int((time.monotonic() - started) * 1000)
+    _journal(f"stage: image staged ({answer['width']}x{answer['height']}, {elapsed} ms)")
     return _json(answer)
 
 

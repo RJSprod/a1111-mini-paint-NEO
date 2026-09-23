@@ -47,6 +47,17 @@ window.minipaintIntercept = (function () {
     //: popup goes with what the server knows. The bridge has its own bound;
     //: this is the popup's, and it is the shorter of the two on purpose.
     const BRIDGE_TIMEOUT_MS = 6000;
+    //: The direct route (stageAndOpen): how long each of its two requests may
+    //: take, how many times it tries, and how long it waits in between. On
+    //: 2026-09-23 the page's one HTTP/2 connection to Forge stalled after the
+    //: tab had been in the background for an hour; every press of the button
+    //: added another request that never came back, eleven in all, the popup
+    //: never opened, and nothing said why until a reload cancelled them. The
+    //: connection answered again as soon as those requests were cancelled, so
+    //: a stalled send is cancelled on a deadline and tried once more.
+    const STAGE_TIMEOUT_MS = 15000;
+    const STAGE_ATTEMPTS = 2;
+    const STAGE_RETRY_DELAY_MS = 1500;
     const CLIPBOARD_PROMPT_ID = "minipaint_clipboard_prompt";
     const CLIPBOARD_ENHANCE_ID = "minipaint_clipboard_enhance_toggle";
     const CLASS = "minipaint-intercept";
@@ -70,6 +81,11 @@ window.minipaintIntercept = (function () {
     const S = {
         dom: null,
         open: false,
+        //: The direct route's send in progress, if any (see stageAndOpen),
+        //: and whether the page is being reloaded or closed.
+        staging: null,
+        leaving: false,
+        leavingWatched: false,
         handoff: "",
         token: "",
         tab: "",
@@ -974,31 +990,181 @@ window.minipaintIntercept = (function () {
      * it. The Clipboard bundle calls this when Gradio's queue is dead and
      * the button is pointed at WanGP, with the URL the host serves the
      * gallery picture from.
+     *
+     * One send at a time: a press while one is on its way says so and waits
+     * for that one, rather than stacking another request on a connection
+     * that may be the thing that is stuck. Every request has a deadline;
+     * one that misses it is cancelled and the send tried once more. A send
+     * cancelled because the page is being reloaded or closed is not a
+     * failure and says nothing on screen.
+     *
+     * The journal gets timings, the connection's protocol, status codes and
+     * error kinds - never the picture's address, which carries its file
+     * name, and never a prompt.
      */
     function stageAndOpen(url, tab, options) {
         const source = String(url || "");
         if (!source) { return Promise.resolve(false); }
-        return fetch(source, { credentials: "same-origin", cache: "no-store" }).then(function (response) {
-            if (!response.ok) { throw new Error("the host would not serve the picture (" + response.status + ")"); }
-            return response.blob();
-        }).then(function (blob) {
-            return fetch(STAGE_ROUTE, {
-                method: "POST", credentials: "same-origin", cache: "no-store",
-                headers: { "Content-Type": blob.type || "application/octet-stream" }, body: blob
-            }).then(function (response) { return response.json(); });
-        }).then(function (answer) {
-            if (!answer || !answer.ok || !answer.image || !HEX32.test(String(answer.image.id || ""))) {
-                throw new Error((answer && answer.message) || "the picture could not be staged");
-            }
+        // A press is proof the user is still here, whatever a cancelled
+        // reload said earlier.
+        S.leaving = false;
+        if (S.staging) {
+            note("stage: pressed again while the last picture is still on its way - waiting for that one");
+            toast("Still sending the last picture to WanGP…", false);
+            return S.staging;
+        }
+        watchLeaving();
+        note("stage: sending a picture - " + transportFacts());
+        toast("Sending the picture to WanGP…", false);
+        const started = now();
+        const run = stageAttempt(source, tab, options, 1, started);
+        S.staging = run;
+        const clear = function () { if (S.staging === run) { S.staging = null; } };
+        run.then(clear, clear);
+        return run;
+    }
+
+    function stageAttempt(source, tab, options, attempt, started) {
+        return stageOnce(source).then(function (staged) {
+            const answer = staged.answer;
             const handoff = PREFIX + answer.image.id + ":" + (answer.width || 0) + "x" + (answer.height || 0) + ":" + String(tab || visibleTab() || "");
-            note("staged the picture over HTTP without the queue");
+            note("staged the picture over HTTP without the queue (reading it took " + staged.readMs + " ms, staging "
+                 + staged.stageMs + " ms, attempt " + attempt + ", " + (now() - started) + " ms in all)");
+            toast("", false);
             return open(handoff, options);
-        }).catch(function (error) {
-            note("could not stage the picture over HTTP: " + ((error && error.message) || error));
-            toast("That picture could not be frozen for WanGP: " + ((error && error.message) || error), true);
+        }, function (error) {
+            const why = describeFailure(error);
+            if (S.leaving) {
+                note("stage: cancelled because the page is being reloaded or closed (" + why + ") - not a failure");
+                toast("", false);
+                return false;
+            }
+            const retry = attempt < STAGE_ATTEMPTS && !(error && error.answered);
+            note("could not stage the picture over HTTP: " + why + " - attempt " + attempt + " of " + STAGE_ATTEMPTS
+                 + ", " + (now() - started) + " ms since the press; " + transportFacts()
+                 + (retry ? "; the stalled request was cancelled, trying once more" : ""));
+            if (retry) {
+                toast("WanGP did not answer yet - trying once more…", false);
+                return wait(timing().retryDelay).then(function () {
+                    if (S.leaving) { return false; }
+                    return stageAttempt(source, tab, options, attempt + 1, started);
+                });
+            }
+            toast(error && error.answered
+                ? "That picture could not be sent to WanGP: " + why + "."
+                : "That picture could not be sent to WanGP: Forge did not answer this page. "
+                  + "Press the button again in a moment; if it keeps happening, reload the page.", true);
             return false;
         });
     }
+
+    /** The picture read from the host, then staged. Rejects with a described error. */
+    function stageOnce(source) {
+        const readStart = now();
+        let readMs = 0;
+        return boundedFetch(source, { credentials: "same-origin", cache: "no-store" }, "reading the picture").then(function (response) {
+            if (!response.ok) { throw answered("the host would not serve the picture (" + response.status + ")"); }
+            return response.blob();
+        }).then(function (blob) {
+            readMs = now() - readStart;
+            return boundedFetch(STAGE_ROUTE, {
+                method: "POST", credentials: "same-origin", cache: "no-store",
+                headers: { "Content-Type": blob.type || "application/octet-stream" }, body: blob
+            }, "staging it");
+        }).then(function (response) {
+            return response.json().then(null, function () {
+                throw answered("Forge answered " + response.status + " without a readable body");
+            });
+        }).then(function (answer) {
+            if (!answer || !answer.ok || !answer.image || !HEX32.test(String(answer.image.id || ""))) {
+                throw answered((answer && answer.message) || "the picture could not be staged");
+            }
+            return { answer: answer, readMs: readMs, stageMs: now() - readStart - readMs };
+        });
+    }
+
+    /**
+     * fetch with a deadline. A request that misses it is aborted - on HTTP/2
+     * that cancels its stream rather than leaving it on the page's one
+     * connection - and rejects saying which step it was and how long it had.
+     */
+    function boundedFetch(url, init, step) {
+        const limit = timing().timeout;
+        let controller = null;
+        try { controller = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { controller = null; }
+        let timedOut = false;
+        const cutoff = controller ? setTimeout(function () {
+            timedOut = true;
+            try { controller.abort(); } catch (e) { /* settled */ }
+        }, limit) : 0;
+        const options = Object.assign({}, init);
+        if (controller) { options.signal = controller.signal; }
+        const settle = function () { if (cutoff) { clearTimeout(cutoff); } };
+        return fetch(url, options).then(function (response) { settle(); return response; }, function (error) {
+            settle();
+            const failure = new Error(timedOut ? "no answer within " + Math.round(limit / 1000) + " s"
+                                               : String((error && error.message) || error || "the request failed"));
+            failure.kind = timedOut ? "timeout" : ((error && error.name) || "network");
+            failure.step = step;
+            throw failure;
+        });
+    }
+
+    function answered(message) {
+        const error = new Error(message);
+        error.answered = true;   // the server did reply; trying again would get the same reply
+        return error;
+    }
+
+    /** What went wrong, fit for the journal: the step, the kind, the words - no address. */
+    function describeFailure(error) {
+        if (!error) { return "unknown failure"; }
+        if (error.answered) { return String(error.message || "refused"); }
+        const step = error.step ? error.step + ": " : "";
+        return step + (error.kind === "timeout" ? String(error.message) : String(error.kind || "error") + " - " + String(error.message || ""));
+    }
+
+    /**
+     * How this page reaches Forge, in the terms a failure is diagnosed from:
+     * the protocol the page itself arrived over (h2 when the auto-TLS
+     * extension's HTTP/2 is doing its job), whether the browser thinks it is
+     * online, and whether the tab is on screen. Nothing that names a person.
+     */
+    function transportFacts() {
+        let protocol = "unknown";
+        try {
+            const entries = typeof performance !== "undefined" && performance.getEntriesByType
+                ? performance.getEntriesByType("navigation") : [];
+            if (entries && entries[0] && entries[0].nextHopProtocol) { protocol = String(entries[0].nextHopProtocol); }
+        } catch (e) { /* unknown */ }
+        let online = "unknown";
+        try { if (typeof navigator !== "undefined" && typeof navigator.onLine === "boolean") { online = navigator.onLine ? "online" : "offline"; } } catch (e) { /* unknown */ }
+        const visible = document && document.visibilityState ? String(document.visibilityState) : "unknown";
+        return "page over " + protocol + ", browser " + online + ", tab " + visible;
+    }
+
+    //: The page is being reloaded or closed: requests are about to be
+    //: cancelled by the browser, and that is not a failure worth a toast.
+    function watchLeaving() {
+        if (S.leavingWatched || typeof window.addEventListener !== "function") { return; }
+        S.leavingWatched = true;
+        const leaving = function () { S.leaving = true; };
+        window.addEventListener("beforeunload", leaving);
+        window.addEventListener("pagehide", leaving);
+        window.addEventListener("pageshow", function () { S.leaving = false; });
+    }
+
+    function timing() {
+        // The checks shorten the waits; nothing on a real page sets this.
+        const override = window.minipaintInterceptTiming || {};
+        return {
+            timeout: Number(override.timeout) > 0 ? Number(override.timeout) : STAGE_TIMEOUT_MS,
+            retryDelay: Number(override.retryDelay) >= 0 && override.retryDelay !== undefined ? Number(override.retryDelay) : STAGE_RETRY_DELAY_MS
+        };
+    }
+
+    function wait(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+    function now() { return Date.now(); }
 
     function state() {
         return {

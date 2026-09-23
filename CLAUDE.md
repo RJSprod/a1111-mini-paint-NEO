@@ -35,6 +35,22 @@ now lives in the auto-TLS extension (HTTP/2, see below); the transport breaker
 in `browser/minipaint_wangp.js` is what keeps a page alive without it. The
 whole incident is `docs/wangp/BROWSER_CONNECTION_STARVATION_2026-09-17.txt`.
 
+**Under HTTP/2 a stalled request stalls the page, and a press adds another.**
+With the auto-TLS extension's HTTP/2, a page has ONE connection to Forge
+(Hypercorn), and every request, stream and reload rides it. On 2026-09-23,
+after the tab had been in the background for an hour, that connection
+stalled: eleven presses of the gallery's Send to WanGP made eleven
+unbounded requests that never reached the server, no popup opened, the page
+would not reload, and the only message was eleven NetworkErrors when the
+reload cancelled them - after which Forge answered at once. So every request
+on the direct route (`stageAndOpen`) has a deadline and is aborted when it
+misses it, a second press waits for the first instead of adding a request,
+one retry follows a stall, and a request cancelled by a reload is not a
+failure. The server writes `stage: received N bytes` on arrival, so a send
+that never reached Forge shows as that line's absence, and the page logs the
+protocol it arrived over (`page over h2`). A request without a deadline is a
+bug here even when "it always answers".
+
 **Gradio applies an equal string as no change.** Its frontend updates a
 component through Svelte's `safe_not_equal`, so handing an HTML component the
 string it already holds leaves the DOM exactly as it was. A repaint whose

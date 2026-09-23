@@ -440,8 +440,17 @@ the default.
 in one press; jobs already being sent finish, and nothing in WanGP's own queue is touched.
 
 **View Outputs** (under the queue). What WanGP made for this tab's requests, over the whole
-window: a player with a filmstrip of everything else under it, tap to hide the controls,
-paged at 60, scrubbable because the file is served with byte ranges. It is its own document,
+window: the output in a stage with its own controls under it, a filmstrip of everything else,
+paged at 60. The controls are the page's rather than the browser's, so they are the same on
+every browser and phone - play and pause (or press the picture), a timeline to scrub
+(the file is served with byte ranges), a frame back and a frame forward, back to the start,
+**loop** (on by default; Android's own player has none), **mute**, **speed** from ¼× to 2×
+and **full screen**, which keeps these controls. Loop, mute and speed are remembered. On a
+keyboard: Space or K plays, ← and → step a frame (with Shift, a second), L loops, M mutes,
+F is full screen, and Escape leaves full screen and then the view. **Load**, beside the
+prompt, puts the recipe that made the output back into the request - the prompt as it was
+typed and each picture still in the library, exactly what the Queue Send History's own Load
+restores - and queues nothing; an output whose request left no recipe says so. It is its own document,
 not a view of the queue, so closing the WebUI does not empty it — last week's videos are
 still there next week. A job the server ran is tied to its files exactly, by the paths WanGP
 handed back; a job a browser page ran is matched to the files that appeared while it was
@@ -456,6 +465,13 @@ the thumbnails, rename, delete, refresh (files dropped into the folder by hand a
 and *Send selected to* Mini Paint, img2img, Inpaint, Extras or ImageStitch by the same
 routes the Canvas takes. A Forge PNG keeps every byte, so its generation parameters
 survive.
+
+The tab **fills the window**. The thumbnail grid runs down to the bottom of it, and the
+Prompt box takes whatever the request column has left over, in or out of focus mode - both
+measured and re-measured when the window, the queue or the layout changes. When the queue
+needs more room than there is, the Prompt box goes back to its own size and the page scrolls,
+as it always did; on a narrow window the columns stack and the grid keeps its old share so the
+request is still in reach.
 
 The grid **pages, sixty pictures at a time**, with Back / Next / go-to under it and the
 whole library's count beside them; the selection is yours and survives paging, because a

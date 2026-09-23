@@ -1361,21 +1361,23 @@ def check_the_toolbar_flyouts_are_the_one_door(r: Results, page) -> None:
     time.sleep(0.2)
 
 
-def _seed_outputs(folder, count, kind="mp4"):
+def _seed_outputs(folder, count, kind="mp4", request_id="seeded", job_id="f" * 16, reset=True):
     """Put ``count`` files in ``folder`` and hand them to the ledger.
 
     The .mp4 bytes are not a video and are not meant to be: what is being
-    checked here is the gallery - the shape it takes, the strip, the way the
-    controls hide - and none of that is the codec's business. The .png is a
-    real picture, so at least one tile in this suite is one the browser
-    genuinely decodes and draws.
+    checked here is the gallery - the shape it takes, the strip - and none of
+    that is the codec's business. The .png is a real picture, so at least one
+    tile in this suite is one the browser genuinely decodes and draws. The
+    .webm IS a video - see ``_real_clip`` - for the checks that have to watch
+    one play.
     """
     from PIL import Image
 
     from minipaint_neo.clipboard import config as clip_config
     from minipaint_neo.clipboard import outputs
 
-    outputs.reset_for_tests()
+    if reset:
+        outputs.reset_for_tests()
     folder.mkdir(parents=True, exist_ok=True)
     clip_config.update(outputs_folder=str(folder))
     made = []
@@ -1383,12 +1385,75 @@ def _seed_outputs(folder, count, kind="mp4"):
         if kind == "png":
             path = folder / f"shot{index:03d}.png"
             Image.new("RGB", (64, 36), (20, 40 + index, 90)).save(path)
+        elif kind == "webm":
+            path = folder / f"clip{index:03d}.webm"
+            _real_clip(path)
         else:
             path = folder / f"clip{index:03d}.mp4"
             path.write_bytes(b"not really a video" * 8)
         made.append(str(path))
-    outputs.remember("f" * 16, made, request_id="seeded", model="A video model")
+    outputs.remember(job_id, made, request_id=request_id, model="A video model")
     return made
+
+
+#: The clip the player's checks watch: two seconds at 24 frames a second, so
+#: one frame is a known 1/24 s and the end is a known 2.0 s.
+CLIP_FRAMES = 48
+CLIP_FPS = 24
+
+
+def _ffmpeg():
+    """An ffmpeg that can write WebM, or None.
+
+    Playwright installs one beside its browsers - it records video with it -
+    and that one is enough: it reads piped JPEG frames and writes VP8 WebM,
+    which is exactly what this needs. A system ffmpeg is the fallback.
+    """
+    named = os.environ.get("FFMPEG", "")
+    if named and pathlib.Path(named).exists():
+        return named
+    roots = [os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""), "/opt/pw-browsers",
+             str(pathlib.Path.home() / ".cache" / "ms-playwright"),
+             str(pathlib.Path.home() / "Library" / "Caches" / "ms-playwright"),
+             str(pathlib.Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright")]
+    for root in roots:
+        if not root or not pathlib.Path(root).is_dir():
+            continue
+        for name in ("ffmpeg-linux", "ffmpeg-mac", "ffmpeg-win64.exe"):
+            for candidate in sorted(pathlib.Path(root).glob(f"ffmpeg-*/{name}")):
+                return str(candidate)
+    return shutil.which("ffmpeg")
+
+
+def _real_clip(path):
+    """A real video the browser decodes: numbered frames, VP8 in WebM.
+
+    VP8 because the Chromium that Playwright drives has no H.264 - an MP4 of
+    the kind WanGP writes would not play here at all - and WebM is one of the
+    suffixes the gallery lists as a video.
+    """
+    import io
+    import subprocess
+
+    from PIL import Image, ImageDraw
+
+    binary = _ffmpeg()
+    if not binary:
+        raise RuntimeError("no ffmpeg to make a clip with")
+    frames = []
+    for index in range(CLIP_FRAMES):
+        picture = Image.new("RGB", (160, 90), (index * 5 % 255, 80, 200 - index * 3))
+        ImageDraw.Draw(picture).text((10, 35), f"frame {index}", fill=(255, 255, 255))
+        buffer = io.BytesIO()
+        picture.save(buffer, format="JPEG", quality=85)
+        frames.append(buffer.getvalue())
+    subprocess.run([binary, "-hide_banner", "-loglevel", "error", "-y",
+                    # `pipe:0` rather than `-`: Playwright's build has the pipe
+                    # protocol and not the shorthand for it.
+                    "-f", "image2pipe", "-c:v", "mjpeg", "-framerate", str(CLIP_FPS), "-i", "pipe:0",
+                    "-c:v", "libvpx", "-b:v", "400k", "-auto-alt-ref", "0", str(path)],
+                   input=b"".join(frames), check=True, timeout=60)
+    return path
 
 
 def check_view_outputs_is_a_gallery(r: Results, page) -> None:
@@ -1468,19 +1533,23 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
         r.check("and the strip marks which one is playing",
                 page.evaluate("() => document.querySelectorAll('.minipaint-clip-output-chosen').length") == 1)
 
-        # Tap to hide, tap to show. The press has to land on the stage and
-        # not on the controls, or pausing would also hide the pause button.
-        before = page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').controls")
-        page.evaluate("""() => { const s = document.querySelector('.minipaint-clip-output-stage');
-            s.dispatchEvent(new MouseEvent('click', { bubbles: true })); }""")
-        time.sleep(0.3)
-        after = page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').controls")
-        r.check("tapping the stage hides the controls", before is True and after is False, f"{before} -> {after}")
-        page.evaluate("""() => { const s = document.querySelector('.minipaint-clip-output-stage');
-            s.dispatchEvent(new MouseEvent('click', { bubbles: true })); }""")
-        time.sleep(0.3)
-        r.check("and tapping again brings them back",
-                page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').controls") is True)
+        # The controls used to be the browser's own, drawn over the picture,
+        # and a tap on the stage hid them so the picture could be seen. They
+        # are the page's now and sit UNDER the picture, so there is nothing
+        # over it to hide - which is what these two hold the line on. The
+        # player itself is checked with a real clip in
+        # check_the_player_is_the_pages.
+        placed = page.evaluate("""() => {
+            const video = document.querySelector('.minipaint-clip-output-stage-media');
+            const bar = document.querySelector('.minipaint-clip-player');
+            if (!video || !bar) { return null; }
+            return { native: video.controls, videoBottom: video.getBoundingClientRect().bottom,
+                     barTop: bar.getBoundingClientRect().top };
+        }""")
+        r.check("the browser's own controls are off, and the page's are there instead",
+                bool(placed) and placed["native"] is False, str(placed))
+        r.check("and they are under the picture, never over it, so nothing has to be hidden to see it",
+                bool(placed) and placed["barTop"] >= placed["videoBottom"] - 1, str(placed))
 
         # A page of outputs is sixty items, and a video tile is a `<video>`:
         # the browser opens a connection, range-requests enough of the file to
@@ -1614,6 +1683,401 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
         outputs.reset_for_tests()
         clip_config.update(outputs_folder="")
         shutil.rmtree(folder, ignore_errors=True)
+
+
+#: A request id of the shape the protocol accepts, so the ledger, the history
+#: and the join between them all take it.
+PLAYER_REQUEST = "ab" * 16
+LOAD_REQUEST = "cd" * 16
+NO_RECIPE_REQUEST = "ef" * 16
+
+
+def _open_outputs_fresh(page):
+    """Open View Outputs and wait for THIS opening's draw.
+
+    Closing the view leaves its last draw on the panel, so "there are items"
+    is already true before the new answer arrives - which is how a check once
+    read the previous check's outputs and reported that none had a recipe.
+    """
+    before = page.evaluate("() => window.minipaintClipboard.debug().outputs.drawn")
+    page.evaluate("() => window.minipaintClipboard.openOutputs()")
+    page.wait_for_function("n => window.minipaintClipboard.debug().outputs.drawn > n", arg=before, timeout=8000)
+
+
+def _open_outputs_on(page, name):
+    """Open View Outputs and wait until ``name`` is in the stage and playable."""
+    _open_outputs_fresh(page)
+    page.evaluate("""name => {
+        const item = [...document.querySelectorAll('.minipaint-clip-output-tile')]
+            .find((t) => (t.title || '').indexOf(name) === 0);
+        if (item) { item.click(); }
+    }""", name)
+
+
+def _video_ready(page, timeout=10000):
+    page.wait_for_function("""() => {
+        const v = document.querySelector('.minipaint-clip-output-stage-media');
+        return !!v && v.tagName === 'VIDEO' && v.readyState >= 2 && isFinite(v.duration) && v.duration > 1;
+    }""", timeout=timeout)
+
+
+def check_the_player_is_the_pages(r: Results, page) -> None:
+    """Asked for: "real playback controls ... on my mobile device i cannot
+    loop the video ... scrubbing timeline and mute toggle".
+
+    Everything here is against a real clip the browser decodes, because a
+    player is only checked by watching it play: two seconds, 24 frames a
+    second, so a frame and the end are both known numbers.
+    """
+    from minipaint_neo.clipboard import outputs
+
+    binary = _ffmpeg()
+    r.check("a real clip can be made for the player's checks (Playwright's ffmpeg, or one on PATH)",
+            bool(binary), "no ffmpeg found")
+    if not binary:
+        return
+    folder = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-player-"))
+    try:
+        try:
+            _seed_outputs(folder, 1, kind="webm", request_id=PLAYER_REQUEST, job_id="e" * 16)
+        except Exception as error:
+            # One failed check, not a suite that stops here: everything after
+            # this in the run is about other parts of the tab.
+            r.check("the clip for the player's checks was made", False, f"{type(error).__name__}: {error}")
+            return
+        page.evaluate("() => localStorage.removeItem('minipaint-outputs-player:v1')")
+        # The theme's rule about buttons, on the page, so the sizes below are
+        # sizes a Lobe user gets.
+        page.evaluate("""() => {
+            const s = document.createElement('style');
+            s.id = 'hostile-button-rule';
+            s.textContent = 'button { min-width: fit-content !important; padding: 0 !important; }';
+            document.head.appendChild(s);
+        }""")
+        _open_outputs_on(page, "clip000.webm")
+        _video_ready(page)
+
+        controls = page.evaluate("""() => {
+            const bar = document.querySelector('.minipaint-clip-player');
+            const names = [...bar.querySelectorAll('[data-control]')].map((b) => b.dataset.control);
+            const small = [...bar.querySelectorAll('.minipaint-clip-player-button')]
+                .filter((b) => !b.hidden)
+                .map((b) => b.getBoundingClientRect())
+                .filter((box) => box.width < 43.5 || box.height < 43.5).length;
+            const scrub = bar.querySelector('.minipaint-clip-player-scrub').getBoundingClientRect();
+            return { names, small, scrubHeight: scrub.height };
+        }""")
+        r.check("the bar has play, a frame each way, back to the start, loop, mute, speed and full screen",
+                set(controls["names"]) >= {"play", "back", "forward", "restart", "loop", "sound", "speed", "full"},
+                str(controls["names"]))
+        r.check("every button is a finger wide and a finger tall, with a theme's button rule on the page",
+                controls["small"] == 0, str(controls))
+        r.check("and the timeline is a finger tall too", controls["scrubHeight"] >= 43.5, str(controls))
+
+        page.wait_for_timeout(600)
+        if page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').paused"):
+            page.click(".minipaint-clip-player [data-control='play']")
+        page.wait_for_function("() => !document.querySelector('.minipaint-clip-output-stage-media').paused",
+                               timeout=5000)
+        r.check("it plays, and the play button says Pause while it does",
+                page.evaluate("() => document.querySelector(\"[data-control='play']\").getAttribute('aria-label')") == "Pause")
+        first = page.evaluate("() => document.querySelector('.minipaint-clip-player-time').textContent")
+        page.wait_for_timeout(700)
+        second = page.evaluate("() => document.querySelector('.minipaint-clip-player-time').textContent")
+        r.check("the time moves while it plays", first != second, f"{first} -> {second}")
+        r.check("and the clock that moves it is running", page.evaluate("() => window.minipaintClipboard.debug().outputs.clock") is True)
+
+        r.check("loop is on by default, because a clip is a few seconds long",
+                page.evaluate("""() => document.querySelector('.minipaint-clip-output-stage-media').loop
+                    && document.querySelector("[data-control='loop']").getAttribute('aria-pressed') === 'true'"""))
+        page.wait_for_timeout(2300)
+        r.check("and it really loops: still playing after the two seconds are up",
+                page.evaluate("""() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
+                    return !v.paused && !v.ended; }"""))
+
+        # A press on the picture is pause, the way a phone's player works.
+        page.click(".minipaint-clip-output-stage-media")
+        page.wait_for_timeout(200)
+        r.check("a press on the picture pauses it",
+                page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').paused"))
+        r.check("and a paused video costs nothing: the clock has stopped",
+                page.evaluate("() => window.minipaintClipboard.debug().outputs.clock") is False)
+
+        # A frame each way, from a known place.
+        page.evaluate("""() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
+            v.currentTime = 0.5; }""")
+        page.wait_for_timeout(300)
+        page.click(".minipaint-clip-player [data-control='forward']")
+        page.wait_for_timeout(300)
+        forward = page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').currentTime")
+        r.check("a frame forward is one frame", abs(forward - (0.5 + 1 / CLIP_FPS)) < 0.01, str(forward))
+        page.click(".minipaint-clip-player [data-control='back']")
+        page.wait_for_timeout(300)
+        back = page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').currentTime")
+        r.check("and a frame back is one frame back", abs(back - 0.5) < 0.01, str(back))
+
+        # The timeline, the way a finger drives it: input while held, change
+        # where it is let go. While held it seeks coarsely where the browser
+        # can (`fastSeek`, which Firefox and Safari have and Chromium does
+        # not), so this page is given one that lands on whole seconds - the
+        # way a keyframe seek does - and the exact seek on letting go is what
+        # has to bring it to 1.5. Without the stand-in, Chromium's plain seek
+        # is exact either way and the check could not tell.
+        page.evaluate("""() => {
+            HTMLMediaElement.prototype.fastSeek = function (t) { this.currentTime = Math.round(t); };
+            const s = document.querySelector('.minipaint-clip-player-scrub');
+            s.value = '1.5';
+            s.dispatchEvent(new Event('input', {bubbles: true}));
+        }""")
+        page.wait_for_timeout(300)
+        held = page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').currentTime")
+        page.evaluate("""() => {
+            const s = document.querySelector('.minipaint-clip-player-scrub');
+            s.dispatchEvent(new Event('change', {bubbles: true}));
+            delete HTMLMediaElement.prototype.fastSeek;
+        }""")
+        page.wait_for_timeout(400)
+        scrubbed = page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').currentTime")
+        r.check("while the thumb is held the seek is the quick one", abs(held - 2.0) < 0.05, str(held))
+        r.check("and where it is let go the video is exactly there", abs(scrubbed - 1.5) < 0.05, str(scrubbed))
+        r.check("and its length is the video's", abs(float(page.evaluate(
+            "() => document.querySelector('.minipaint-clip-player-scrub').max")) - CLIP_FRAMES / CLIP_FPS) < 0.1)
+
+        # Loop off, mute on, speed up: remembered across a new video.
+        page.click(".minipaint-clip-player [data-control='loop']")
+        page.click(".minipaint-clip-player [data-control='sound']")
+        page.click(".minipaint-clip-player [data-control='speed']")
+        page.wait_for_timeout(200)
+        now = page.evaluate("""() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
+            return { loop: v.loop, muted: v.muted, rate: v.playbackRate,
+                     sound: document.querySelector("[data-control='sound']").getAttribute('aria-label'),
+                     speed: document.querySelector("[data-control='speed']").textContent }; }""")
+        r.check("loop turns off, mute turns on, and speed steps up",
+                now["loop"] is False and now["muted"] is True and now["rate"] == 1.5, str(now))
+        r.check("and the buttons say so", now["sound"] == "Unmute" and now["speed"] == "1.5×", str(now))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        page.wait_for_timeout(200)
+        _open_outputs_on(page, "clip000.webm")
+        _video_ready(page)
+        kept = page.evaluate("""() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
+            return { loop: v.loop, muted: v.muted, rate: v.playbackRate,
+                     pressed: document.querySelector("[data-control='loop']").getAttribute('aria-pressed') }; }""")
+        r.check("all three are remembered for the next video",
+                kept == {"loop": False, "muted": True, "rate": 1.5, "pressed": "false"}, str(kept))
+
+        # The keys, while the view is open.
+        page.evaluate("() => { const v = document.querySelector('.minipaint-clip-output-stage-media'); v.pause(); }")
+        page.keyboard.press("m")
+        page.wait_for_timeout(150)
+        r.check("M is mute", page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').muted") is False)
+        page.keyboard.press("k")
+        page.wait_for_timeout(300)
+        r.check("K is play", page.evaluate("() => !document.querySelector('.minipaint-clip-output-stage-media').paused"))
+        page.keyboard.press("k")
+        page.wait_for_timeout(150)
+
+        # Replacing a playing video: the old one's pause arrives after the new
+        # one has started, and must not stop the new one's clock.
+        _seed_outputs(folder, 2, kind="webm", request_id=PLAYER_REQUEST, job_id="e" * 16)
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        page.wait_for_timeout(200)
+        _open_outputs_on(page, "clip000.webm")
+        _video_ready(page)
+        page.evaluate("""() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
+            window.__replaced = v; v.play(); }""")
+        page.wait_for_timeout(300)
+        page.evaluate("""() => { const tile = [...document.querySelectorAll('.minipaint-clip-output-tile')]
+            .find((t) => (t.title || '').indexOf('clip001.webm') === 0); tile.click(); }""")
+        _video_ready(page)
+        page.wait_for_function("() => !document.querySelector('.minipaint-clip-output-stage-media').paused", timeout=5000)
+        page.wait_for_timeout(300)
+        # Chromium happens to deliver the old video's pause before the new
+        # one's play; nothing promises that order, so the late one is sent
+        # here on purpose.
+        page.evaluate("() => { window.__replaced.dispatchEvent(new Event('pause')); delete window.__replaced; }")
+        page.wait_for_timeout(300)
+        r.check("the next video's clock is running, whatever the last one's pause said on its way out",
+                page.evaluate("() => window.minipaintClipboard.debug().outputs.clock") is True)
+
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        page.wait_for_timeout(200)
+        gone = page.evaluate("""() => ({ clock: window.minipaintClipboard.debug().outputs.clock,
+            player: window.minipaintClipboard.debug().outputs.player })""")
+        r.check("closing the view stops the clock and lets go of the controls", gone == {"clock": False, "player": False}, str(gone))
+    finally:
+        page.evaluate("() => { const s = document.getElementById('hostile-button-rule'); if (s) { s.remove(); } }")
+        page.evaluate("() => localStorage.removeItem('minipaint-outputs-player:v1')")
+        outputs.reset_for_tests()
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def check_an_output_loads_its_recipe(r: Results, page) -> None:
+    """Asked for: "a way to Load from the view outputs ... load the prompt and
+    images if available so i can generate again".
+
+    Load is the Queue Send History's own Load, reached from the output that
+    request made: the prompt as typed, each picture still in the library, and
+    nothing queued.
+    """
+    from minipaint_neo.clipboard import history, outputs
+
+    folder = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-load-"))
+    asset = page.evaluate("() => { const c = document.querySelector('.minipaint-clip-item'); return c ? c.dataset.asset : ''; }")
+    record = None
+    try:
+        record = history.add_history({
+            "history_id": "load" + "0" * 12, "request_id": LOAD_REQUEST,
+            "admitted_at": "2026-09-23T10:00:00+00:00", "model_type": "t2v", "model_label": "A video model",
+            "prompt_mode": "override", "prompt_override": "a red fox crossing the snow at dusk",
+            "first_mode": "override" if asset else "inherit", "first_asset_id": asset,
+            "last_mode": "inherit", "reference_mode": "inherit", "tasks_added": 1,
+        })
+        _seed_outputs(folder / "made", 1, kind="png", request_id=LOAD_REQUEST, job_id="d" * 16)
+        _seed_outputs(folder / "stray", 1, kind="png", request_id=NO_RECIPE_REQUEST, job_id="c" * 16, reset=False)
+        page.evaluate("() => { const box = document.querySelector('#minipaint_clipboard_prompt textarea'); return box ? box.value : null; }")
+        _open_outputs_fresh(page)
+        buttons = page.evaluate("""() => {
+            const items = [...document.querySelectorAll('.minipaint-clip-output-tile')];
+            const seen = {};
+            for (const tile of items) {
+                tile.click();
+                const load = document.querySelector('.minipaint-clip-output-load');
+                seen[tile.dataset.output] = load ? { disabled: load.disabled, title: load.title } : null;
+            }
+            return Object.values(seen);
+        }""")
+        enabled = [b for b in buttons if b and not b["disabled"]]
+        disabled = [b for b in buttons if b and b["disabled"]]
+        if not enabled:
+            # Say what the server had, so a miss here names its own cause.
+            buttons = {"buttons": buttons,
+                       "history": [(h.get("request_id") or "")[:6] for h in history.load_history()[:5]],
+                       "ledger": [(f.get("request_id") or "")[:6] for f in outputs.files(refresh=False)]}
+        r.check("an output whose request left a recipe offers Load, and says nothing is queued",
+                len(enabled) == 1 and "Nothing is queued" in enabled[0]["title"], str(buttons))
+        r.check("and one with no recipe says so rather than offering a button that does nothing",
+                len(disabled) == 1 and "No recipe" in disabled[0]["title"], str(buttons))
+
+        page.evaluate("""() => {
+            for (const tile of document.querySelectorAll('.minipaint-clip-output-tile')) {
+                tile.click();
+                const load = document.querySelector('.minipaint-clip-output-load');
+                if (load && !load.disabled) { load.click(); return; }
+            }
+        }""")
+        page.wait_for_function("""() => {
+            const box = document.querySelector('#minipaint_clipboard_prompt textarea');
+            return !!box && box.value === 'a red fox crossing the snow at dusk';
+        }""", timeout=10000)
+        r.check("pressing it puts the prompt back in the request", True)
+        r.check("and the view gets out of the way of the request it has just changed",
+                page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is False)
+        if asset:
+            r.check("with the first frame it was made from",
+                    page.evaluate("""a => { const card = document.getElementById('minipaint_clipboard_card_first');
+                        return !!card && card.innerHTML.indexOf(a) >= 0; }""", asset),
+                    "the first-frame card does not show the picture")
+        r.check("and nothing was queued by it",
+                page.evaluate("() => { const s = document.getElementById('minipaint_clipboard_status'); return s ? s.textContent : ''; }").find("Nothing was queued") >= 0
+                or page.evaluate("() => document.body.textContent.indexOf('Nothing was queued') >= 0"))
+    finally:
+        if record:
+            history.delete_history(record["history_id"])
+        history.save_draft(history.empty_draft())
+        page.evaluate("""() => { const box = document.querySelector('#minipaint_clipboard_prompt textarea');
+            if (box && window.minipaintWriteInput) { window.minipaintWriteInput(box, ''); } }""")
+        outputs.reset_for_tests()
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def check_the_tab_fills_the_window(r: Results, page) -> None:
+    """Asked for: "it doesnt fill the page ... resize the thumbnail browser and
+    the right side column ... to responsively fill the browser window better
+    vertically".
+
+    The grid was capped at 70vh, and the composer was as tall as its content.
+    Both now end at the bottom of the window, less a small gap - measured,
+    because nothing a stylesheet can say inside Gradio's containers comes out
+    as a pixel height.
+    """
+    GAP = 12
+
+    def measure():
+        return page.evaluate("""() => {
+            window.minipaintClipboard.fit();
+            const grid = document.querySelector('#minipaint_clipboard_grid .minipaint-clip-grid');
+            const column = document.getElementById('minipaint_clipboard_browser');
+            const composer = document.getElementById('minipaint_clipboard_composer');
+            const box = document.querySelector('#minipaint_clipboard_prompt textarea');
+            return { view: window.innerHeight, scrolled: window.scrollY,
+                     grid: grid.getBoundingClientRect().height,
+                     columnBottom: column.getBoundingClientRect().bottom + window.scrollY,
+                     composerBottom: composer.getBoundingClientRect().bottom + window.scrollY,
+                     composerTop: composer.getBoundingClientRect().top,
+                     columnTop: column.getBoundingClientRect().top,
+                     prompt: box ? box.getBoundingClientRect().height : 0,
+                     promptMin: box ? box.style.getPropertyValue('min-height') : '',
+                     fitted: window.minipaintClipboard.debug().fitted };
+        }""")
+
+    try:
+        page.evaluate("() => window.scrollTo(0, 0)")
+        page.wait_for_timeout(300)
+        first = measure()
+        r.check("the grid is no longer held to seventy percent of the window", first["grid"] > first["view"] * 0.7 - 1
+                or first["columnBottom"] >= first["view"] - GAP - 4, str(first))
+        r.check("the browser column ends at the bottom of the window",
+                abs(first["columnBottom"] - (first["view"] - GAP)) <= 4, str(first))
+        # The queue under the Prompt box grows with every request, and when it
+        # needs more than the window has the box goes back to its own floor
+        # and the page scrolls, as it always did. Either is right; which one
+        # depends on how long the queue is by now in this run.
+        r.check("and so does the request column, or its Prompt box is back at its floor because the queue needs the room",
+                abs(first["composerBottom"] - (first["view"] - GAP)) <= 4
+                or (first["promptMin"] == "96px" and first["composerBottom"] > first["view"]), str(first))
+
+        page.set_viewport_size({"width": 1400, "height": 1600})
+        page.wait_for_timeout(500)
+        taller = measure()
+        r.check("a taller window gives the grid the difference",
+                abs((taller["grid"] - first["grid"]) - 650) <= 6, f"{first['grid']} -> {taller['grid']}")
+        # How tall the request column is with its Prompt box at the floor:
+        # if that fits in this window, the box must have grown to fill it.
+        at_floor = first["composerBottom"] - first["prompt"] + 96
+        if at_floor < taller["view"] - GAP:
+            r.check("and the Prompt box takes whatever the request column has left over",
+                    abs(taller["composerBottom"] - (taller["view"] - GAP)) <= 4 and taller["prompt"] > first["prompt"],
+                    str(taller))
+        else:
+            r.check("the request column is longer than even this window, so its Prompt box stays at its floor",
+                    taller["promptMin"] == "96px", str(taller))
+
+        # Idle, nothing is rewritten: the fit is not feeding itself.
+        writes = page.evaluate("""() => new Promise((resolve) => {
+            const grid = document.querySelector('#minipaint_clipboard_grid .minipaint-clip-grid');
+            const box = document.querySelector('#minipaint_clipboard_prompt textarea');
+            let count = 0;
+            const watch = new MutationObserver((records) => { count += records.length; });
+            watch.observe(grid, { attributes: true, attributeFilter: ['style'] });
+            if (box) { watch.observe(box, { attributes: true, attributeFilter: ['style'] }); }
+            setTimeout(() => { watch.disconnect(); resolve(count); }, 1500);
+        })""")
+        r.check("left alone it writes nothing, so nothing is feeding itself", writes == 0, str(writes))
+
+        page.set_viewport_size({"width": 560, "height": 900})
+        page.wait_for_timeout(600)
+        narrow = measure()
+        # 560 is narrower than the two columns' minimum widths together
+        # (320 + 280), so Gradio stacks them. Asserted, so the two checks
+        # after it can never be skipped by a layout that did not stack.
+        r.check("at 560px wide the request column is under the browser, not beside it",
+                narrow["composerTop"] >= narrow["columnTop"] + 10 and narrow["fitted"]["stacked"] is True, str(narrow))
+        r.check("stacked on a narrow window the grid keeps a share of it, so the request is still reachable",
+                narrow["grid"] <= narrow["view"] * 0.7 + 1, str(narrow))
+        r.check("and the Prompt box is its own size again", narrow["promptMin"] == "", str(narrow))
+    finally:
+        page.set_viewport_size({"width": 1400, "height": 950})
+        page.wait_for_timeout(400)
 
 
 def check_a_thumbnail_is_fetched_once(r: Results, page) -> None:
@@ -2734,6 +3198,9 @@ def run() -> Results:
                 check_the_prompt_editor_fills_the_window(r, page)
                 check_the_toolbar_flyouts_are_the_one_door(r, page)
                 check_view_outputs_is_a_gallery(r, page)
+                check_the_player_is_the_pages(r, page)
+                check_an_output_loads_its_recipe(r, page)
+                check_the_tab_fills_the_window(r, page)
                 check_a_thumbnail_is_fetched_once(r, page)
                 r.check("a picture can be selected", select_first(page),
                         repr(box(page, "minipaint_clipboard_selected")))

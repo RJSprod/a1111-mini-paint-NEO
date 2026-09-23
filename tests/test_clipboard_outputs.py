@@ -294,6 +294,41 @@ def page_checks(r: Results, clock: _Clock, folder: pathlib.Path) -> None:
             str(folder) not in json.dumps(page))
 
 
+def recipe_checks(r: Results, clock: _Clock, folder: pathlib.Path) -> None:
+    """Load from View Outputs: an output names the history record of the
+    request that made it, so the gallery can hand that record to the same
+    Load the Queue Send History uses. An output with no record has no recipe,
+    and says so by having none."""
+    from minipaint_neo.clipboard import history
+
+    kept = "a" * 32
+    gone = "b" * 32
+    outputs.reset_for_tests()
+    config.update(outputs_folder=str(folder))
+    clock.now += 1
+    made = _wrote(folder, "made.mp4", clock.now)
+    clock.now += 1
+    stray = _wrote(folder, "stray.mp4", clock.now)
+    outputs.remember("4" * 16, [str(made)], request_id=kept)
+    outputs.remember("5" * 16, [str(stray)], request_id=gone)
+    record = history.add_history({
+        "history_id": "recipe0000000000", "request_id": kept, "prompt_mode": "override",
+        "prompt_override": "a fox in the snow", "first_mode": "inherit", "last_mode": "inherit",
+        "reference_mode": "inherit"})
+    try:
+        by_name = {item["name"]: item for item in routes.outputs_page()["items"]}
+        r.check("an output whose request is in the history names that record, for Load",
+                by_name["made.mp4"]["recipe"] == record["history_id"], str(by_name["made.mp4"]))
+        r.check("and carries its prompt beside it, as it did",
+                by_name["made.mp4"]["prompt"] == "a fox in the snow", str(by_name["made.mp4"]))
+        r.check("an output whose request left no record names none, so the gallery can say so",
+                by_name["stray.mp4"]["recipe"] == "", str(by_name["stray.mp4"]))
+        r.check("the recipe is an id and nothing else - no prompt, path or picture rides on it",
+                all(isinstance(item["recipe"], str) and "/" not in item["recipe"] for item in by_name.values()))
+    finally:
+        history.delete_history(record["history_id"])
+
+
 # ------------------------------------------------------------------ the bytes --
 
 
@@ -394,7 +429,7 @@ def run() -> Results:
         try:
             folder_checks(r, base)
             folders = {}
-            for name in ("exact", "window", "restart", "page", "route"):
+            for name in ("exact", "window", "restart", "page", "route", "recipe"):
                 folders[name] = base / name
                 folders[name].mkdir()
             exact_checks(r, clock, folders["exact"])
@@ -402,6 +437,7 @@ def run() -> Results:
             window_checks(r, clock, folders["window"])
             restart_checks(r, clock, folders["restart"])
             page_checks(r, clock, folders["page"])
+            recipe_checks(r, clock, folders["recipe"])
             range_checks(r)
             route_checks(r, folders["route"], clock)
         finally:

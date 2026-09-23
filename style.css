@@ -2382,6 +2382,171 @@
     font-style: italic;
 }
 
+/* The player's own controls, under the picture.
+
+   The browser's controls differ on every browser and Android's cannot loop,
+   so these are the page's: a timeline, the time, and one row of 44px
+   buttons - a finger's width, pinned inline by the bundle as well, because
+   a theme's rule about `button` reaches these as it reached the tiles.
+   Every colour is the theme's. */
+#minipaint_clipboard_root .minipaint-clip-player {
+    flex: 0 0 auto;
+    width: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 2px 10px 0;
+}
+
+#minipaint_clipboard_root .minipaint-clip-player-line {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-player-time {
+    flex: 0 0 auto;
+    color: var(--body-text-color, inherit);
+    font-size: var(--text-sm, 0.85em);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* The timeline: 44px tall to be found by a finger, a 6px track to look at,
+   and a thumb big enough to see where it is. Styled in full, because the
+   size of a range input's thumb cannot be changed any other way; the part
+   already played is drawn from `--played`, which the bundle keeps. */
+#minipaint_clipboard_root .minipaint-clip-player-scrub {
+    /* The track, built from the theme's accent and border: played to the left
+       of `--minipaint-clip-played`, which the bundle keeps, the rest after. */
+    --minipaint-clip-track: linear-gradient(to right,
+        var(--color-accent, #ff7c00) var(--minipaint-clip-played, 0%),
+        var(--border-color-primary, rgba(127, 127, 127, 0.5)) var(--minipaint-clip-played, 0%));
+    -webkit-appearance: none;
+    appearance: none;
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 44px;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-player-scrub::-webkit-slider-runnable-track {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--minipaint-clip-track);
+}
+
+#minipaint_clipboard_root .minipaint-clip-player-scrub::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    margin-top: -7px;
+    border: 2px solid var(--background-fill-primary, Canvas);
+    border-radius: 50%;
+    background: var(--color-accent, #ff7c00);
+}
+
+#minipaint_clipboard_root .minipaint-clip-player-scrub::-moz-range-track {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border-color-primary, rgba(127, 127, 127, 0.5));
+}
+
+#minipaint_clipboard_root .minipaint-clip-player-scrub::-moz-range-progress {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--color-accent, #ff7c00);
+}
+
+#minipaint_clipboard_root .minipaint-clip-player-scrub::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--background-fill-primary, Canvas);
+    border-radius: 50%;
+    background: var(--color-accent, #ff7c00);
+}
+
+#minipaint_clipboard_root .minipaint-clip-player-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding-bottom: 2px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-player-button {
+    border: 1px solid var(--border-color-primary, #888);
+    border-radius: 999px;
+    background: var(--button-secondary-background-fill, transparent);
+    color: var(--button-secondary-text-color, var(--body-text-color, inherit));
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-player-button svg {
+    width: 22px;
+    height: 22px;
+    display: block;
+}
+
+#minipaint_clipboard_root .minipaint-clip-player-button[aria-pressed="true"] {
+    border-color: var(--color-accent, #ff7c00);
+    color: var(--color-accent, #ff7c00);
+    box-shadow: inset 0 0 0 1px var(--color-accent, #ff7c00);
+}
+
+/* Play is the one that matters most, so it is the one that looks it - as the
+   theme's own primary button, fill and text as a pair. The accent with the
+   primary text colour was orange on orange under Gradio's default theme: a
+   theme only promises its primary text is legible on its primary fill. */
+#minipaint_clipboard_root .minipaint-clip-player-main {
+    border-color: var(--button-primary-border-color, var(--color-accent, #ff7c00));
+    background: var(--button-primary-background-fill, var(--color-accent, #ff7c00));
+    color: var(--button-primary-text-color, CanvasText);
+}
+
+/* Full screen is the stage, so the controls are still there. */
+#minipaint_clipboard_root .minipaint-clip-output-stage:fullscreen,
+#minipaint_clipboard_root .minipaint-clip-output-stage.minipaint-clip-output-full {
+    width: 100vw;
+    height: 100vh;
+    border-radius: 0;
+    background: var(--background-fill-secondary, Canvas);
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-caption {
+    align-items: center;
+}
+
+/* Load: the recipe back into the request. Last in the caption, and never
+   squeezed out by a long prompt beside it. */
+#minipaint_clipboard_root .minipaint-clip-output-load {
+    flex: 0 0 auto;
+    margin-left: auto;
+    min-height: 36px;
+    padding: 4px 16px;
+    border: 1px solid var(--color-accent, #ff7c00);
+    border-radius: 999px;
+    background: var(--button-secondary-background-fill, transparent);
+    color: var(--body-text-color, inherit);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-load[disabled] {
+    opacity: 0.45;
+    border-color: var(--border-color-primary, #888);
+    cursor: default;
+}
+
 #minipaint_clipboard_root .minipaint-clip-output-empty {
     color: var(--body-text-color-subdued, inherit);
     padding: 24px;

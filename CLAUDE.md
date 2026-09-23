@@ -181,6 +181,25 @@ off either way. What differs is the burst of requests made getting there, so
 the check counts requests on the wire: forty of forty with the defect, twelve
 with the fix.
 
+**Loading a source puts a video's rate back.** The media load algorithm sets
+`playbackRate` to `defaultPlaybackRate`, so a rate set before `src` lasts until the
+file arrives - and the `ratechange` that reset fires is not a preference. The
+View Outputs player sets both and saves its three preferences only from a press.
+`tests/browser_clipboard.py` caught it on the second video, which is the only
+place it shows.
+
+**Chromium has no `fastSeek`.** Firefox (LibreWolf, the host's browser) and Safari
+have it, and the player uses it while the timeline is held and an exact seek
+where it is let go. In Chromium the two paths are the same seek, so the check
+gives the page a stand-in `fastSeek` that lands on whole seconds; without it the
+check passed with the exact seek removed.
+
+**Playwright's ffmpeg is a build of its own.** It reads piped JPEG frames and
+writes VP8 WebM and nothing else, and it wants `-i pipe:0` - `-` is "Protocol
+not found". Playwright's Chromium has no H.264, so a WanGP-shaped MP4 does not
+play in the browser suites at all; `_real_clip` makes the WebM the player's
+checks watch.
+
 **A percentage height inside a Gradio container resolves to auto.** The WanGP
 frame was given `height: 100%` of a container the stylesheet had correctly
 sized to the window; Gradio wraps raw markup in containers of its own, those

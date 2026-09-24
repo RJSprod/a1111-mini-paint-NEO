@@ -1117,6 +1117,21 @@ window.minipaintWanGP = (function () {
      */
     function watchLifecycle() {
         let awaySince = 0;
+        // Separately from awaySince, because a page is nearly always hidden
+        // first and frozen later: the freeze used to arrive at a page already
+        // "away" and be dropped without a word, so no log ever said whether
+        // the browser had frozen the page or merely hidden it - the one fact
+        // that separates a sleeping page from a broken connection.
+        let frozenSince = 0;
+
+        // A page the browser threw away in the background and loaded fresh
+        // when it was opened again. Everything it held is gone, and without
+        // this line the reload looks like one nobody asked for.
+        try {
+            if (document.wasDiscarded) {
+                say("lifecycle: the browser had discarded this page while it was in the background and loaded it again when it was opened");
+            }
+        } catch (e) { /* an engine without it cannot tell us */ }
 
         // "hidden" is throttled, not stopped - the page keeps running and
         // keeps posting these lines, but its turn of the event loop comes
@@ -1163,8 +1178,23 @@ window.minipaintWanGP = (function () {
             // The Page Lifecycle events, where the engine has them. A frozen
             // page runs nothing at all - not even a timer - which is the state
             // a throttled one is usually mistaken for.
-            document.addEventListener("freeze", function () { gone("frozen", true); });
-            document.addEventListener("resume", function () { back("resumed"); });
+            // A frozen page cannot post a line, so the freeze is only noted,
+            // and said - with how long it lasted - when the page thaws.
+            document.addEventListener("freeze", function () {
+                if (!frozenSince) { frozenSince = Date.now(); }
+                gone("frozen", true);
+            });
+            document.addEventListener("resume", function () {
+                if (frozenSince) {
+                    const frozen = Math.round((Date.now() - frozenSince) / 100) / 10;
+                    frozenSince = 0;
+                    say("lifecycle: the browser had frozen this page for " + frozen + "s - nothing in it ran in that time");
+                }
+                // Thawed is not the same as on screen: a page can be resumed
+                // while still hidden, and saying "back on screen" for that
+                // was wrong.
+                if (document.visibilityState !== "hidden") { back("resumed"); }
+            });
             // A page restored from the back-forward cache was not reloaded and
             // kept its state, so its queue picks up rather than starting over.
             window.addEventListener("pageshow", function (event) {
@@ -2527,9 +2557,12 @@ window.minipaintWanGP = (function () {
      * What the interop layer says about its event stream. "silent" is the
      * stream having had no frame for longer than the server's heartbeat
      * allows, and the layer answering that by sending one plain request;
-     * "answered" is that request coming back, however it came back; "open"
+     * "answered" is that request coming back, however it came back - with
+     * ``ok`` false when what came back was an error, which still proves
+     * Forge is reachable and is said as such rather than as success; "open"
      * is the stream itself again. Only the first arms anything, and either
-     * of the other two disarms it.
+     * of the other two disarms it. "unanswered" - the request running out
+     * of time - disarms nothing: it is exactly what the deadline is for.
      */
     function onStreamState(detail) {
         const state = String(detail.state || "");
@@ -2545,7 +2578,9 @@ window.minipaintWanGP = (function () {
         if (S.transport.deadline) {
             S.transport.deadline.cancel();
             S.transport.deadline = null;
-            say("transport: Forge answered (" + state + "); the silence was the stream's alone, nothing shed");
+            say(state === "answered" && detail.ok === false
+                ? "transport: Forge answered with an error (" + (text(detail.code, 40) || "unknown") + ") - it is reachable, so the silence was the stream's alone; nothing shed"
+                : "transport: Forge answered (" + state + "); the silence was the stream's alone, nothing shed");
         }
         S.transport.silentSince = 0;
         if (S.transport.shed) { reloadAfterShed("the transport is back (" + state + ")"); }

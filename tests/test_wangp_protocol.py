@@ -3088,6 +3088,62 @@ S["transport starved while hidden"] = async function () {
     return await snap(w, api, { whileAway: whileAway, after: frameSrc(w) });
 };
 
+// Forge answered, but with an error. That still proves it is reachable - a
+// page that cannot get a connection gets no answer at all - so nothing is
+// shed; but the journal must not call it success, which is the line that hid
+// the real state of the connection in three incidents.
+S["transport silent then answered with an error"] = async function () {
+    const { w, api } = await healthy();
+    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
+    await w.tick.advance(5000);
+    w.fire("minipaint:outbox", STREAM("answered", { ok: false, code: "INTERNAL_ERROR" }));
+    await w.tick.advance(30000);
+    return await snap(w, api, { sheds: api.state().transport.sheds, src: frameSrc(w),
+                                saidError: w.said("Forge answered with an error (INTERNAL_ERROR)"),
+                                saidPlain: w.said("Forge answered (answered)") });
+};
+
+// The snapshot ran out of time: nothing came back. That disarms nothing -
+// it is exactly the case the budget is for.
+S["transport silent then unanswered"] = async function () {
+    const { w, api } = await healthy();
+    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
+    await w.tick.advance(15000);
+    w.fire("minipaint:outbox", STREAM("unanswered"));
+    await w.tick.advance(5500);
+    return await snap(w, api, { shed: frameSrc(w), sheds: api.state().transport.sheds });
+};
+
+// Hidden, then frozen while hidden - the order a browser nearly always does
+// it in - then thawed while still hidden, then shown. Each is its own fact.
+S["frozen while hidden"] = async function () {
+    const { w, api } = await healthy();
+    w.hidden(true);
+    await w.tick.advance(1000);
+    w.fire("freeze", {});
+    await w.tick.advance(600000);
+    w.fire("resume", {});
+    const backWhileHidden = w.said("back on screen");
+    await w.tick.advance(1000);
+    w.hidden(false);
+    await w.tick.advance(100);
+    return await snap(w, api, { saidFrozen: w.said("the browser had frozen this page for 600s"),
+                                backWhileHidden: backWhileHidden, saidBack: w.said("back on screen after") });
+};
+
+// Discarded in the background and loaded fresh on return.
+S["a discarded page says so"] = async function () {
+    const w = H.world({});
+    w.doc.wasDiscarded = true;
+    const api = await H.load(w);
+    await w.tick.advance(400);
+    return await snap(w, api, { saidDiscarded: w.said("the browser had discarded this page") });
+};
+S["a page loaded normally says nothing of a discard"] = async function () {
+    const { w, api } = await healthy();
+    return await snap(w, api, { saidDiscarded: w.said("the browser had discarded this page") });
+};
+
 // A tab on a card holds no connection worth giving back.
 S["transport starved with no frame"] = async function () {
     const { w, api } = await healthy();
@@ -3341,6 +3397,30 @@ _RECOVERY_MUTATIONS = (
         'if (state !== "answered" && state !== "open") { return; }',
         'if (true) { return; }',
         "transport silent then answered", "sheds", 0, 1,
+    ),
+    (
+        "an error reply is logged as a plain answer",
+        'say(state === "answered" && detail.ok === false',
+        'say(false',
+        "transport silent then answered with an error", "saidError", True, False,
+    ),
+    (
+        "a freeze after hiding is dropped",
+        "                if (!frozenSince) { frozenSince = Date.now(); }\n",
+        "",
+        "frozen while hidden", "saidFrozen", True, False,
+    ),
+    (
+        "a thaw is called being back on screen",
+        'if (document.visibilityState !== "hidden") { back("resumed"); }',
+        'back("resumed");',
+        "frozen while hidden", "backWhileHidden", False, True,
+    ),
+    (
+        "a discard goes unsaid",
+        "            if (document.wasDiscarded) {",
+        "            if (false) {",
+        "a discarded page says so", "saidDiscarded", True, False,
     ),
     (
         "the breaker spends its budget while the page is hidden",
@@ -3639,6 +3719,23 @@ def recovery_checks(r: Results) -> None:
         check("and the shed is counted, for the bug report", "transport starved", "sheds", 1)
         check("the budget is on-screen time only", "transport starved while hidden", "whileAway", "/wan2gp/")
         check("and runs out once the page is back", "transport starved while hidden", "after", "about:blank")
+        check("Forge answering with an error sheds nothing: it is reachable",
+              "transport silent then answered with an error", "sheds", 0)
+        check("and leaves the iframe where it was", "transport silent then answered with an error", "src", "/wan2gp/")
+        check("but the journal says it was an error, naming it",
+              "transport silent then answered with an error", "saidError", True)
+        check("and does not call it a plain answer", "transport silent then answered with an error", "saidPlain", False)
+        check("a snapshot that ran out of time stands nothing down",
+              "transport silent then unanswered", "shed", "about:blank")
+        check("so the budget still runs out and the iframe is shed", "transport silent then unanswered", "sheds", 1)
+        check("a freeze that follows hiding is said, with how long it lasted",
+              "frozen while hidden", "saidFrozen", True)
+        check("a thaw while still hidden is not called being back on screen",
+              "frozen while hidden", "backWhileHidden", False)
+        check("and being shown afterwards still is", "frozen while hidden", "saidBack", True)
+        check("a page the browser discarded says so when it loads again",
+              "a discarded page says so", "saidDiscarded", True)
+        check("and a page loaded normally does not", "a page loaded normally says nothing of a discard", "saidDiscarded", False)
         check("a tab on a card has nothing to shed", "transport starved with no frame", "sheds", 0)
         check("and says so", "transport starved with no frame", "saidNothing", True)
         check("a shed frame is loaded again even when nobody ever answers",

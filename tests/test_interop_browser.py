@@ -83,7 +83,9 @@ global.window = {
 };
 global.EventSource = FakeEventSource;
 const told = [];
+const notes = [];
 window.minipaintWanGP = {
+    note: function (line) { notes.push(String(line)); },
     flushForm: function () {
         flushes.push({ at: calls.length });
         return Promise.resolve(FLUSH_MODE === "absent" ? { ok: false } : { ok: true, flush: FLUSH_MODE });
@@ -183,7 +185,7 @@ function installClock() {
         }
     };
 }
-if (process.argv[3] === "silence" || process.argv[3] === "starved") { installClock(); }
+if (["silence", "starved", "hidden", "hiddenstarved", "openhidden", "jobsonly"].indexOf(process.argv[3]) !== -1) { installClock(); }
 
 new Function("window", "document", "fetch", "EventSource", "CustomEvent", "localStorage",
     fs.readFileSync(process.argv[2], "utf8"))(window, document, fetch, FakeEventSource, CustomEvent, localStorage);
@@ -200,7 +202,8 @@ function report(extra) {
         told: told.slice(),
         submitBodies: calls.filter(function (c) { return c.url.indexOf("/outbox/submit") !== -1; }).map(function (c) { return c.body; }),
         cursors: streams.map(function (s) { const at = s.url.indexOf("cursor="); return at === -1 ? "" : s.url.slice(at + 7); }),
-        state: api.streamState()
+        state: api.streamState(),
+        notes: notes.slice()
     }, extra || {})));
     process.exit(0);
 }
@@ -303,8 +306,76 @@ async function silence() {
     });
 }
 
-(MODE === "reset" ? resets() : MODE === "handback" ? handback()
-    : (MODE === "silence" || MODE === "starved") ? silence() : main()).catch(function (e) {
+// The page goes to the background and comes back. Nothing of this
+// extension's is held open while it is away, and the return is one snapshot
+// - which is also the test of the connection, written down with its timing -
+// before a fresh stream, never a stream trusted across the absence.
+function setHidden(yes) {
+    document.visibilityState = yes ? "hidden" : "visible";
+    for (const fn of listeners.visibilitychange || []) { fn({}); }
+}
+async function away() {
+    STARVED = MODE === "hiddenstarved";
+    api.watch();
+    for (const s of streams) { s.fire("open", {}); }
+    const syncs = function () { return calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length; };
+    setHidden(true);
+    const closedOnHide = streams.length === 1 && streams[0].closed === true && api.streamState().open === false;
+    // Long enough that a stream held across it is the one that came back
+    // half-dead, and that the watchdog would have fired many times over.
+    await CLOCK.advance(3600000);
+    const streamsWhileAway = streams.length;
+    const syncsWhileAway = syncs();
+    setHidden(false);
+    const streamsAtReturn = streams.length;
+    await CLOCK.advance(1);
+    await new Promise(function (r) { realSetTimeout(r, 20); });
+    const afterReturn = { streams: streams.length, syncs: syncs(), open: api.streamState().open };
+    await CLOCK.advance(20000);
+    await new Promise(function (r) { realSetTimeout(r, 20); });
+    report({
+        closedOnHide: closedOnHide, streamsWhileAway: streamsWhileAway, syncsWhileAway: syncsWhileAway,
+        streamsAtReturn: streamsAtReturn, afterReturn: afterReturn,
+        streamEvents: emitted.filter(function (e) { return e && e.kind === "stream"; }).map(function (e) { return e.state; }),
+        streamsAtEnd: streams.length
+    });
+}
+
+// Asked for a stream while the page is already in the background: nothing
+// is opened until it is back.
+async function openHidden() {
+    setHidden(true);
+    api.watch();
+    const whileHidden = streams.length;
+    await CLOCK.advance(60000);
+    setHidden(false);
+    await CLOCK.advance(1);
+    await new Promise(function (r) { realSetTimeout(r, 20); });
+    report({ whileHidden: whileHidden, afterReturn: streams.length });
+}
+
+// A page that knows of a job the server is running, from a snapshot, but
+// whose stream was let go on purpose. Coming back to it is still a reason to
+// watch, as it always was.
+async function jobsOnly() {
+    api.watch();
+    api.unwatch();
+    JOBS.list = [{ job_id: "1111222233334444", state: "wangp_generating", executor: "server", revision: 2,
+                   request: { request_id: "a".repeat(32) }, result: null, error: null, summary: {}, wangp: null }];
+    await api.sync();
+    const before = streams.length - 1;
+    setHidden(true);
+    await CLOCK.advance(60000);
+    setHidden(false);
+    await CLOCK.advance(1);
+    await new Promise(function (r) { realSetTimeout(r, 20); });
+    report({ before: before, afterReturn: streams.length - 1 });
+}
+
+(MODE === "jobsonly" ? jobsOnly() : MODE === "reset" ? resets() : MODE === "handback" ? handback()
+    : (MODE === "silence" || MODE === "starved") ? silence()
+    : (MODE === "hidden" || MODE === "hiddenstarved") ? away()
+    : MODE === "openhidden" ? openHidden() : main()).catch(function (e) {
     console.log(JSON.stringify({ error: String(e && e.stack || e) }));
 });
 """
@@ -437,9 +508,60 @@ def run() -> Results:
     starved = _run("starved")
     r.check("the harness drove a page whose request never came back", starved is not None and "error" not in starved, str(starved)[:300])
     if starved and "error" not in starved:
+        events = starved.get("streamEvents") or []
         r.check("a request that never comes back is never reported as answered",
-                starved.get("streamEvents") == ["open", "silent"] and starved.get("syncs") == 1, str(starved))
-        r.check("and no second stream is opened over a request still in flight", starved.get("reopened") == 0, str(starved.get("reopened")))
+                "answered" not in events, str(starved))
+        r.check("and once its time runs out it is reported as unanswered, which disarms nothing",
+                events[:3] == ["open", "silent", "unanswered"], str(events))
+        r.check("and the journal says Forge did not answer, in so many words",
+                any("Forge did not answer within 15s" in line for line in starved.get("notes") or []), str(starved.get("notes")))
+        # A limit on the snapshot, where there was none: a stuck snapshot used
+        # to stay in flight for the life of the page, and every later one -
+        # the return from the background's included - queued behind it.
+        r.check("and it is tried again after a pause, not in a storm",
+                starved.get("syncs") == 2, str(starved.get("syncs")))
+        r.check("and no second stream is opened while nothing is coming back", starved.get("reopened") == 0, str(starved.get("reopened")))
+
+    # The background. A stream held open across a long absence came back
+    # half-dead in three incidents: open as far as the page could tell, and
+    # silent. So none is held: it is let go on the way out, and the return is
+    # a snapshot first - the test of the connection, written down - and a
+    # fresh stream after it.
+    hidden = _run("hidden")
+    r.check("the harness drove a page that went to the background", hidden is not None and "error" not in hidden, str(hidden)[:300])
+    if hidden and "error" not in hidden:
+        r.check("the stream is closed the moment the page is hidden", hidden.get("closedOnHide") is True, str(hidden))
+        r.check("and nothing is opened or asked for while it is away",
+                hidden.get("streamsWhileAway") == 1 and hidden.get("syncsWhileAway") == 0, str(hidden))
+        r.check("the return takes a snapshot before it opens anything",
+                hidden.get("streamsAtReturn") == 1 and (hidden.get("afterReturn") or {}).get("syncs") == 1, str(hidden))
+        r.check("and then opens a fresh stream, at once rather than after a retry delay",
+                (hidden.get("afterReturn") or {}).get("streams") == 2 and (hidden.get("afterReturn") or {}).get("open") is True,
+                str(hidden.get("afterReturn")))
+        notes = hidden.get("notes") or []
+        r.check("and the journal says how long it was away and that Forge answered, with the time it took",
+                any("back after 3600s in the background; Forge answered in" in line for line in notes), str(notes))
+    gone = _run("hiddenstarved")
+    r.check("the harness drove a return to a Forge that does not answer", gone is not None and "error" not in gone, str(gone)[:300])
+    if gone and "error" not in gone:
+        r.check("a return whose snapshot never comes back opens no stream",
+                gone.get("streamsAtEnd") == 1, str(gone))
+        r.check("and says, in the journal, that the connection is not getting through",
+                any("back after 3600s in the background: Forge did not answer within 15s" in line for line in gone.get("notes") or []),
+                str(gone.get("notes")))
+        r.check("and tells the WanGP tab it went unanswered, never answered",
+                "unanswered" in (gone.get("streamEvents") or []) and "answered" not in (gone.get("streamEvents") or []),
+                str(gone.get("streamEvents")))
+    jobs = _run("jobsonly")
+    r.check("the harness drove a page that only knows of a running job", jobs is not None and "error" not in jobs, str(jobs)[:300])
+    if jobs and "error" not in jobs:
+        r.check("a page with a job in progress watches it again when it comes back",
+                jobs.get("before") == 0 and jobs.get("afterReturn") == 1, str(jobs))
+    late = _run("openhidden")
+    r.check("the harness drove a stream asked for in the background", late is not None and "error" not in late, str(late)[:300])
+    if late and "error" not in late:
+        r.check("a stream asked for while hidden is not opened until the page is back",
+                late.get("whileHidden") == 0 and late.get("afterReturn") == 1, str(late))
     return r
 
 

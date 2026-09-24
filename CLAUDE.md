@@ -259,6 +259,23 @@ process on the write.
 check that must then fail; an anchor that no longer matches the live source is
 itself a failure. Moving a line means updating its anchor in the same commit.
 
+**Nothing of ours is held open while the page is hidden.** Three incidents
+followed the same shape: the tab sat in the background for 20-45 minutes and
+came back to connections that were open as far as the page could tell and
+silent. The event spine is released on `visibilitychange` to hidden and never
+opened while hidden (`openStream` refuses and remembers the wish); the return
+is one bounded snapshot - `sync` has a limit, `SYNC_TIMEOUT_MS`, because an
+unbounded one stayed "in flight" for the life of the page and every later
+snapshot queued behind it - and only then a fresh stream. A snapshot that runs
+out of time is "unanswered", never "answered": the WanGP tab's starvation
+deadline acts on exactly that difference, and "Forge answered" written over a
+request that failed is the log line that hid the real state three times.
+
+**A freeze usually arrives at a page that is already hidden.** The lifecycle
+journal records hidden and frozen separately; the first version dropped the
+freeze because the page was already "away", so no log could say whether the
+browser had frozen it. A thaw is not a return to the screen either.
+
 **`admission` is three-valued.** An unconfirmed queue request omits the field
 rather than adding a fourth value, because the protocol test holds that
 vocabulary closed.

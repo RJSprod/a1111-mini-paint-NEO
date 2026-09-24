@@ -12,7 +12,10 @@
  * over tokens and gets a code.
  *
  * The server owns the line. enqueue() submits a job to the queue outbox on
- * the Forge server and returns when that job has ended; the server hands out
+ * the Forge server. A job the server runs answers as soon as the server has
+ * it - that is the whole of what this page waits for; what became of it is
+ * the history's to say, read when it is opened. A job this page runs itself
+ * (a WanGP with no unattended service) answers when it has run. The server hands out
  * one lease at a time across every browser page, in the order the jobs were
  * submitted, and each page runs only the jobs it submitted - the WanGP form
  * a job overlays is Gradio session state belonging to the iframe in *this*
@@ -59,7 +62,6 @@ window.minipaintInterop = (function () {
     const OUTBOX_RETRY_ROUTE = OUTBOX_ROUTE + "/retry";
     const OUTBOX_ADOPT_ROUTE = OUTBOX_ROUTE + "/adopt";
     const OUTBOX_TRACK_ROUTE = OUTBOX_ROUTE + "/track";
-    const EVENTS_ROUTE = "/minipaint-interop/events";
     const SYNC_ROUTE = "/minipaint-interop/sync";
     const HEX32 = /^[0-9a-f]{32}$/;
     const CODE_RE = /^[A-Z][A-Z0-9_]{2,59}$/;
@@ -83,31 +85,18 @@ window.minipaintInterop = (function () {
     const TRACK_MS = 3000;
     const TRACK_MAX_MS = 6 * 60 * 60 * 1000;
     const PAGE_KEY = "minipaint.interop.page";
-    // The event spine. A page that is told what changed makes no request at
-    // all while nothing does, which is what lets the timers above be removed
-    // for server-executed jobs rather than merely lengthened - the mean
-    // latency of a poll is half its interval, and lengthening one trades
-    // requests for staleness in both directions.
-    //
-    // STREAM_DEAD_MS is deliberately more than twice the server's heartbeat:
-    // a watchdog that fires on one missed frame turns an ordinary scheduling
-    // hiccup into a reconnect storm.
-    const STREAM_DEAD_MS = 40000;
-    const STREAM_RETRY_MS = 2000;
-    const STREAM_RETRY_MAX_MS = 30000;
     // A snapshot that has not come back in this long is not coming back:
     // the page's connection to Forge is not getting through. Without a limit
     // a stuck snapshot stayed "in flight" for the life of the page, and
     // every later snapshot - the one a return from the background takes
-    // included - queued behind it and was never sent. Shorter than the WanGP
-    // tab's own starvation deadline, which is what acts on the silence.
+    // included - queued behind it and was never sent.
     const SYNC_TIMEOUT_MS = 15000;
     // A return from the background after at least this long is worth a line
     // in the journal saying whether Forge answered. Shorter trips are tab
     // flicks, and one line each would bury the ones that matter.
     const RETURN_NOTE_AFTER_MS = 30000;
-    // Jobs the server runs. A page neither claims nor tracks one of these:
-    // it watches, and what it is watching continues whether or not it does.
+    // Jobs the server runs. A page neither claims, tracks nor watches one of
+    // these: it runs whether or not any page is open.
     const SERVER_STATES = ["admitted", "waiting_turn", "enhanced", "ensuring_wangp", "composing",
         "waiting_for_card", "submitting_wangp", "wangp_waiting", "wangp_generating"];
     const SERVER_TERMINAL = ["completed", "failed", "cancelled", "execution_unknown"];
@@ -689,16 +678,17 @@ window.minipaintInterop = (function () {
             if (!answer.ok || !answer.job) { return refusal(code(answer.code) || "REQUEST_INVALID", normalised.request.request_id, answer.message); }
             const job = answer.job;
             note("enqueue " + job.job_id.slice(0, 8) + ": submitted (start " + (normalised.request.start || "auto") + (job.state === "enhancing" ? ", enhancing" : "") + ")");
-            const promised = wait ? awaitJob(job.job_id, timeoutMs) : Promise.resolve(resultOfJob(job));
             emit("submitted", job);
             if (serverRun(job)) {
-                // Admitted. From here the server owns it, and this page may
-                // be closed, frozen, discarded or thrown in a river without
-                // the job noticing. All this does is watch.
-                openStream();
-            } else {
-                setTimeout(pump, 0);
+                // Admitted, and that is the answer. From here the server owns
+                // it and this page may be closed, frozen or discarded without
+                // the job noticing - so nothing waits on it and nothing
+                // watches it. What became of it is in the history, which is
+                // read when somebody opens it.
+                return resultOfJob(job);
             }
+            const promised = wait ? awaitJob(job.job_id, timeoutMs) : Promise.resolve(resultOfJob(job));
+            setTimeout(pump, 0);
             return promised;
         }, function () {
             return refusal("INTERNAL_ERROR", normalised.request.request_id, "The queue outbox could not be reached.");
@@ -839,7 +829,6 @@ window.minipaintInterop = (function () {
     async function resumeTracking() {
         const answer = await jobs();
         let count = 0;
-        if (((answer && answer.jobs) || []).some(serverRun)) { openStream(); }
         for (const job of (answer && answer.jobs) || []) {
             if (serverRun(job)) { continue; }
             if ((job.state === "queued" || job.state === "started") && job.page === pageId()) {
@@ -855,15 +844,23 @@ window.minipaintInterop = (function () {
     }
 
     /* ------------------------------------------------------------------ */
-    /* The event spine: told, rather than asking                             */
+    /* Snapshots: asked for at moments that need one, never held open        */
     /* ------------------------------------------------------------------ */
+    //
+    // THIS PAGE HOLDS NO LIVE CONNECTION TO FORGE.
+    //
+    // It used to hold one - an event stream, opened by the first job and by
+    // the Clipboard tab and kept for the life of the page, so that every view
+    // could be told the moment anything moved. A connection held open while
+    // it waits on nothing is the one that came back half-dead in every
+    // incident that locked this page up, and nothing it carried needed to be
+    // live: a job the server has accepted runs whether or not anybody
+    // watches, and a view can be read when it is opened, after the user does
+    // something to it, and when they ask. So that is when it is read. See
+    // CLAUDE.md, "Nothing of ours is held open".
 
     const stream = {
-        source: null, cursor: "", epoch: "", lastFrameAt: 0, watchdog: 0, lifecycle: false,
-        // When the page went to the background, while it holds no stream on
-        // purpose. See installLifecycle.
-        hiddenAt: 0, retrySync: 0,
-        retry: STREAM_RETRY_MS, wanted: false, syncing: null, buffered: [], jobs: new Map(),
+        lifecycle: false, hiddenAt: 0, syncing: null, lastSyncAt: 0, jobs: new Map(),
         // null until a snapshot says. Whether this Forge runs the queue
         // unattended decides whether a press needs to commit WanGP's live
         // form first; see flushSettings.
@@ -889,190 +886,22 @@ window.minipaintInterop = (function () {
         try { bridge.inheritSettings(stream.inherit && stream.unattended !== false); } catch (e) { /* never load-bearing */ }
     }
 
-    /** Open the one stream this page has, or do nothing if it already has it.
-     *
-     * One transport per page, shared by everything that wants to know what
-     * the server is doing. It is an observer and nothing else: losing it
-     * makes this page stale and cannot stop a job, which is exactly why the
-     * server-executed path can drop the pump and the tracking timers instead
-     * of slowing them down. */
-    function openStream() {
-        if (stream.source || typeof EventSource !== "function") { return false; }
-        stream.wanted = true;
-        installLifecycle();
-        // Never while hidden. A page in the background holds no connection
-        // of this extension's open: a stream the browser was left holding
-        // for a sleeping page is the one that came back half-dead. Wanted is
-        // remembered, and the return opens it.
-        if (hidden()) { return false; }
-        let url = EVENTS_ROUTE + "?page=" + encodeURIComponent(pageId());
-        if (stream.cursor) { url += "&cursor=" + encodeURIComponent(stream.cursor); }
-        let source;
-        try { source = new EventSource(url, { withCredentials: true }); } catch (e) { return false; }
-        stream.source = source;
-        stream.lastFrameAt = Date.now();
-        source.addEventListener("open", function () {
-            stream.retry = STREAM_RETRY_MS;
-            // The transport is back. Anything that armed itself on the
-            // silence below stands down on this.
-            emit("stream", null, { state: "open" });
-        });
-        for (const kind of ["hello", "job", "enhance", "handoff", "runtime", "wangp", "library", "reset", "heartbeat", "claim_ready"]) {
-            source.addEventListener(kind, function (event) { onFrame(kind, event); });
-        }
-        source.addEventListener("error", function () { reopenStream(); });
-        armWatchdog();
-        return true;
-    }
-
-    function closeStream() {
-        stream.wanted = false;
-        releaseStream();
-    }
-
-    /** Let the connection go and keep the wish for one. */
-    function releaseStream() {
-        if (stream.watchdog) { clearTimeout(stream.watchdog); stream.watchdog = 0; }
-        if (stream.source) { try { stream.source.close(); } catch (e) { /* already gone */ } stream.source = null; }
-    }
-
     function hidden() {
         try { return document.visibilityState === "hidden"; } catch (e) { return false; }
     }
 
-    function reopenStream() {
-        if (stream.source) { try { stream.source.close(); } catch (e) { /* already gone */ } stream.source = null; }
-        if (!stream.wanted) { return; }
-        const delay = stream.retry;
-        stream.retry = Math.min(STREAM_RETRY_MAX_MS, Math.round(stream.retry * 1.8));
-        setTimeout(function () { if (stream.wanted && !hidden()) { openStream(); } }, delay);
-    }
-
     /**
-     * What a snapshot's outcome means for the stream, said on the document.
+     * One authoritative snapshot, bounded. What a page does when it has a
+     * reason to look: a press, a return to the screen, a caller asking.
      *
-     * "answered" is Forge replying - with ``ok`` saying whether the reply
-     * was the snapshot or an error, because "Forge answered" written over a
-     * request that failed is the line that hid the real state of the
-     * connection in three separate incidents. "unanswered" is the snapshot
-     * running out of time: nothing came back at all. The stream is not
-     * reopened over that - another connection is the last thing a page
-     * whose connections are not getting through needs - and one more
-     * snapshot is tried later instead, which reopens it if it comes back.
-     */
-    function afterSnapshot(payload, why, now) {
-        if (payload && payload.code === "SYNC_TIMEOUT") {
-            note("stream: " + why + ": Forge did not answer within " + Math.round(SYNC_TIMEOUT_MS / 1000)
-                + "s - this page's connection to Forge is not getting through; trying again in "
-                + Math.round(STREAM_RETRY_MAX_MS / 1000) + "s");
-            emit("stream", null, { state: "unanswered" });
-            if (stream.retrySync) { clearTimeout(stream.retrySync); }
-            stream.retrySync = setTimeout(function () {
-                stream.retrySync = 0;
-                if (!stream.wanted || hidden()) { return; }
-                sync().then(function (next) { afterSnapshot(next, "retry"); });
-            }, STREAM_RETRY_MAX_MS);
-            return;
-        }
-        const ok = !!(payload && payload.ok === true);
-        emit("stream", null, { state: "answered", ok: ok, code: ok ? "" : code(payload && payload.code) || "INTERNAL_ERROR" });
-        if (!ok) { note("stream: " + why + ": Forge answered with an error (" + (code(payload && payload.code) || "INTERNAL_ERROR") + "), not a hang"); }
-        if (now && ok) { openStream(); } else { reopenStream(); }
-    }
-
-    /** A cheap local timer against the last frame seen. It makes no request
-     * while frames arrive, which is the point: a healthy page that is being
-     * told things asks for nothing at all. */
-    function armWatchdog() {
-        if (stream.watchdog) { clearTimeout(stream.watchdog); }
-        stream.watchdog = setTimeout(function () {
-            stream.watchdog = 0;
-            if (!stream.wanted) { return; }
-            if (Date.now() - stream.lastFrameAt < STREAM_DEAD_MS) { armWatchdog(); return; }
-            const silent = Date.now() - stream.lastFrameAt;
-            note("stream: no frame for " + Math.round(silent / 1000) + "s; reconnecting");
-            // Said out loud, because a silent stream is the one signal this
-            // page gets for free that its transport to Forge may be gone -
-            // the server heartbeats every fifteen seconds, so silence is
-            // never the server having nothing to say. The snapshot below is
-            // the test of it: if that plain request comes back, the page can
-            // still reach Forge and the silence was the stream's alone; if it
-            // does not come back either, nothing from this page is getting a
-            // connection, and whoever is holding them has to let go. The
-            // WanGP tab listens for exactly that pair.
-            emit("stream", null, { state: "silent", silent_ms: silent });
-            sync().then(function (payload) { afterSnapshot(payload, "after the silence"); });
-        }, STREAM_DEAD_MS);
-    }
-
-    function onFrame(kind, event) {
-        stream.lastFrameAt = Date.now();
-        armWatchdog();
-        let payload = {};
-        try { payload = JSON.parse(event.data || "{}") || {}; } catch (e) { payload = {}; }
-        if (event.lastEventId) { stream.cursor = event.lastEventId; }
-        if (kind === "hello") {
-            if (stream.epoch && payload.server_epoch && payload.server_epoch !== stream.epoch) {
-                // A different run of Forge. Nothing this page holds means
-                // anything against it, so it takes a snapshot rather than
-                // trying to reconcile two epochs.
-                stream.cursor = "";
-                sync();
-            }
-            stream.epoch = String(payload.server_epoch || "");
-            if (!stream.cursor && payload.cursor) { stream.cursor = String(payload.cursor); }
-            return;
-        }
-        if (kind === "heartbeat") { return; }
-        if (kind === "reset") {
-            stream.cursor = "";
-            sync();
-            return;
-        }
-        if (kind === "claim_ready") { setTimeout(pump, 0); return; }
-        if (stream.syncing) { stream.buffered.push({ kind: kind, payload: payload, cursor: stream.cursor }); return; }
-        applyFrame(kind, payload);
-    }
-
-    function applyFrame(kind, payload) {
-        if (kind !== "job" || !payload || !payload.job_id) { emit("server", null, { kind: kind, detail: payload }); return; }
-        const known = stream.jobs.get(payload.job_id) || {};
-        if (Number(payload.revision || 0) < Number(known.revision || 0)) { return; }
-        stream.jobs.set(payload.job_id, payload);
-        emit("server", null, { kind: "job", detail: payload });
-        if (SERVER_TERMINAL.indexOf(String(payload.state)) !== -1) { settleFromServer(payload.job_id); }
-        // A job the server has given back. It was admitted as unattended, the
-        // server found it could not run it - this WanGP has no queue worker to
-        // submit into - and handed it to whoever is here. Nothing else starts
-        // the pump for it: the page decided to watch rather than pump when the
-        // submission was acknowledged, and without this it watches forever a
-        // job that is waiting for it.
-        else if (!serverRun(payload)) { setTimeout(pump, 0); }
-    }
-
-    /** A caller waiting on a server-executed job gets its answer from the
-     * authoritative record, not from the event: the event is a description
-     * and the snapshot is the truth. */
-    function settleFromServer(jobId) {
-        if (!waiters[jobId]) { return; }
-        jobs().then(function (answer) {
-            const found = (answer && answer.jobs || []).filter(function (item) { return item.job_id === jobId; })[0];
-            if (found) { settleWaiters(found); emit("done", found); }
-        }, function () { /* the next sync will settle it */ });
-    }
-
-    /**
-     * One authoritative snapshot. What a page does on return, on reconnect,
-     * and whenever it has any reason to doubt what it holds.
-     *
-     * Events that arrive while this is in flight are buffered and applied
-     * after it, in order, discarding anything at or below the snapshot's own
-     * revision - so a transition that happened during the request is neither
-     * lost nor applied twice.
+     * It has a limit because an unbounded one stayed "in flight" for the life
+     * of the page when the connection under it stopped answering, and every
+     * later snapshot queued behind it. A snapshot that runs out of time
+     * answers ``SYNC_TIMEOUT``, which says exactly that and nothing more.
      */
     function sync() {
         if (stream.syncing) { return stream.syncing; }
-        stream.buffered = [];
+        installLifecycle();
         const abort = typeof AbortController === "function" ? new AbortController() : null;
         // The limit settles the snapshot itself rather than trusting the
         // abort to: a request that ignores its signal still loses the race.
@@ -1099,8 +928,7 @@ window.minipaintInterop = (function () {
             })
             .then(function (payload) {
                 if (!payload || payload.ok !== true) { return payload || { ok: false }; }
-                stream.epoch = String(payload.server_epoch || "");
-                stream.cursor = String(payload.cursor || "");
+                stream.lastSyncAt = Date.now();
                 // Read here rather than asked for separately: a press needs
                 // to know whether the job it is about to make will be run by
                 // the server, and the snapshot already says.
@@ -1116,61 +944,32 @@ window.minipaintInterop = (function () {
                 return payload;
             }, function () { return { ok: false, code: "INTERNAL_ERROR" }; })
             .then(function (payload) {
-                const at = Number((payload && payload.revision) || 0);
-                const buffered = stream.buffered;
-                stream.buffered = [];
                 stream.syncing = null;
-                for (const item of buffered) {
-                    const revision = Number((item.payload && item.payload.revision) || 0);
-                    if (revision && revision <= at) { continue; }
-                    applyFrame(item.kind, item.payload);
-                }
                 return payload;
             });
         return stream.syncing;
     }
 
     /**
-     * The page lifecycle, which server-owned execution makes simple.
-     *
-     * There used to be a rule that a hidden page holding work had to keep
-     * running it - which is a promise the browser does not let anybody keep.
-     * Timer throttling, freezing, discard, app switching and network loss are
-     * browser policy, and no amount of care here changes any of them. Now no
-     * page owns executable work, so the whole lifecycle is about one thing:
-     * whether this page's *view* is worth keeping fresh.
-     *
-     *   hidden    let the transport go; the job is unaffected either way,
-     *             and there is nothing to drain
-     *   frozen    abandon it, and mark what we hold as uncertain
-     *   visible   sync once, say whether Forge answered, reopen, render
-     *             the truth
-     *   pageshow  the same, including a restore from the back/forward cache
-     *   closed    nothing at all is required
-     */
-    /**
-     * Back on screen: one snapshot, which is also the test of the connection,
-     * then the stream. The snapshot goes first so that the stream's frames
-     * land on top of the truth rather than before it, and so that a page
-     * that cannot reach Forge says so instead of opening a stream that will
-     * never speak. After a long absence the outcome is written down either
-     * way, with how long it took - the one fact that tells a sleeping page
-     * from a broken connection.
+     * Back on screen after a real absence: one snapshot, and the journal says
+     * how it went - Forge answered in so many milliseconds, answered with an
+     * error, or did not answer at all. Nothing is reopened, because nothing
+     * was open. The line is the one fact that tells a page that merely slept
+     * from a connection that stopped working.
      */
     function returned(away) {
-        stream.wanted = true;
         const started = Date.now();
+        const why = "back after " + Math.round(away / 1000) + "s in the background";
         sync().then(function (payload) {
-            const long = away >= RETURN_NOTE_AFTER_MS;
             if (payload && payload.code === "SYNC_TIMEOUT") {
-                afterSnapshot(payload, "back after " + Math.round(away / 1000) + "s in the background");
-                return;
+                note("snapshot: " + why + ": Forge did not answer within " + Math.round(SYNC_TIMEOUT_MS / 1000)
+                     + "s - this page's connection to Forge is not getting through");
+            } else if (payload && payload.ok === true) {
+                note("snapshot: " + why + "; Forge answered in " + (Date.now() - started) + " ms");
+            } else {
+                note("snapshot: " + why + ": Forge answered with an error ("
+                     + (code(payload && payload.code) || "INTERNAL_ERROR") + "), not a hang");
             }
-            if (long && payload && payload.ok === true) {
-                note("stream: back after " + Math.round(away / 1000) + "s in the background; Forge answered in "
-                     + (Date.now() - started) + " ms; the stream is opened again");
-            }
-            afterSnapshot(payload, "back after " + Math.round(away / 1000) + "s in the background", true);
         });
     }
 
@@ -1179,32 +978,12 @@ window.minipaintInterop = (function () {
         stream.lifecycle = true;
         try {
             document.addEventListener("visibilitychange", function () {
-                if (hidden()) {
-                    // Given up here rather than left for the browser to hold.
-                    // A stream kept open across a long background came back
-                    // half-dead - open as far as the page could tell, and
-                    // silent - and nothing noticed until a watchdog armed
-                    // before the page went away got its turn. Closed, it
-                    // cannot go stale: the return opens a new one.
-                    stream.hiddenAt = Date.now();
-                    if (stream.source) { releaseStream(); }
-                    return;
-                }
+                if (hidden()) { stream.hiddenAt = Date.now(); return; }
                 const away = stream.hiddenAt ? Date.now() - stream.hiddenAt : 0;
                 stream.hiddenAt = 0;
-                if (!(stream.wanted || stream.jobs.size)) { return; }
-                returned(away);
+                if (away >= RETURN_NOTE_AFTER_MS) { returned(away); }
             });
-            window.addEventListener("pageshow", function (event) {
-                if (event && event.persisted) { stream.cursor = ""; }
-                if (stream.wanted || stream.jobs.size) { openStream(); sync(); }
-            });
-            window.addEventListener("freeze", function () { closeStream(); stream.wanted = true; });
-            window.addEventListener("resume", function () { if (stream.wanted) { openStream(); sync(); } });
-            window.addEventListener("pagehide", function () {
-                if (stream.source) { try { stream.source.close(); } catch (e) { /* going away */ } stream.source = null; }
-            });
-        } catch (e) { /* an older environment without one of these keeps the stream as it is */ }
+        } catch (e) { /* an engine without it simply takes no snapshot on return */ }
     }
 
     /** Whether a job is one the server runs. A page watches these; it never
@@ -1283,18 +1062,12 @@ window.minipaintInterop = (function () {
             resumeTracking: resumeTracking,
             refreshWaiters: refreshWaiters,
             pageId: pageId,
-            // The event spine. ``watch`` opens the one stream this page has;
-            // ``sync`` is the authoritative snapshot that repairs a view
-            // however badly it drifted, and is what a page does on return.
-            watch: openStream,
-            unwatch: closeStream,
+            // ``sync`` is the authoritative snapshot, bounded. There is no
+            // ``watch``: this page holds no live connection to be told over.
             sync: sync,
             serverRun: serverRun,
-            streamState: function () {
-                return {
-                    open: !!stream.source, epoch: stream.epoch, cursor: stream.cursor,
-                    lastFrameAt: stream.lastFrameAt, jobs: stream.jobs.size
-                };
+            snapshotState: function () {
+                return { lastSyncAt: stream.lastSyncAt, jobs: stream.jobs.size };
             }
         },
         // The sentence for a code, for a caller that wants the same words.

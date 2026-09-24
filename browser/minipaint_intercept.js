@@ -899,8 +899,8 @@ window.minipaintIntercept = (function () {
         const clipboard = window.minipaintClipboard;
         if (clipboard && typeof clipboard.queue === "function") {
             // The Clipboard tab is on this page and already knows how to
-            // watch a server job or pump a browser one - and its queue list
-            // is what shows the job, so it re-reads too.
+            // record a server job or pump a browser one - and its history is
+            // what shows the job, so it re-reads that once, now.
             try { clipboard.queue(JSON.stringify(instruction), "the gallery"); } catch (e) { /* below */ }
             if (typeof clipboard.refreshQueue === "function") { try { clipboard.refreshQueue(); } catch (e) { /* fine */ } }
             return;
@@ -916,10 +916,8 @@ window.minipaintIntercept = (function () {
             });
             return;
         }
-        const api = window.minipaintInterop;
-        if (api && api.wangp && typeof api.wangp.watch === "function") {
-            try { api.wangp.watch(); } catch (e) { /* the job runs regardless */ }
-        }
+        // A job the server runs needs nothing more from this page: it is in
+        // the history, which is read when somebody opens it.
     }
 
     function submit() {

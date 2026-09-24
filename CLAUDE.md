@@ -259,17 +259,18 @@ process on the write.
 check that must then fail; an anchor that no longer matches the live source is
 itself a failure. Moving a line means updating its anchor in the same commit.
 
-**Nothing of ours is held open while the page is hidden.** Three incidents
-followed the same shape: the tab sat in the background for 20-45 minutes and
-came back to connections that were open as far as the page could tell and
-silent. The event spine is released on `visibilitychange` to hidden and never
-opened while hidden (`openStream` refuses and remembers the wish); the return
-is one bounded snapshot - `sync` has a limit, `SYNC_TIMEOUT_MS`, because an
-unbounded one stayed "in flight" for the life of the page and every later
-snapshot queued behind it - and only then a fresh stream. A snapshot that runs
-out of time is "unanswered", never "answered": the WanGP tab's starvation
-deadline acts on exactly that difference, and "Forge answered" written over a
-request that failed is the log line that hid the real state three times.
+**Nothing of ours is held open.** Every incident that locked the page up came
+back to connections that were open as far as the page could tell and silent.
+The page holds no live connection to Forge at all: the event spine is not
+opened (the `/events` route stays, unused, for pages loaded before), the
+Clipboard grid and history are read when opened, after the page changes them
+and on Refresh, and `enqueue()` answers a server job the moment the server has
+it. A job the server cannot run unattended is failed with a sentence, not
+handed back to a page nothing would tell. `sync` is bounded
+(`SYNC_TIMEOUT_MS`): an unbounded one stayed "in flight" for the life of the
+page and every later snapshot queued behind it. A live connection is for a
+known boundary - something is coming and will finish - and nothing in this
+extension has one; the WanGP iframe is the one exception, and it is WanGP's.
 
 **A freeze usually arrives at a page that is already hidden.** The lifecycle
 journal records hidden and frozen separately; the first version dropped the

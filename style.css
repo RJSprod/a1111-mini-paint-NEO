@@ -1330,6 +1330,12 @@
     --minipaint-clip-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='3 6 5 6 21 6'/%3E%3Cpath d='M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6'/%3E%3Cpath d='M10 11v6M14 11v6'/%3E%3Cpath d='M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2'/%3E%3C/svg%3E");
 }
 
+/* Refresh: the circular arrow. The grid and the history are read when the
+   tab opens and after this page changes them; this is for everything else. */
+#minipaint_clipboard_root .minipaint-clip-icon-refresh {
+    --minipaint-clip-icon: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 12a9 9 0 1 1-2.64-6.36'/%3E%3Cpolyline points='21 3 21 9 15 9'/%3E%3C/svg%3E");
+}
+
 /* Sort: the three descending bars every list control has used for
    decades, which reads as "order" without a word. */
 #minipaint_clipboard_root .minipaint-clip-icon-sort {

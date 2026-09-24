@@ -763,7 +763,7 @@ minipaint_neo/
 javascript/main.js               legacy bridge, parent-frame side, and the loader for everything below
 browser/minipaint_canvas.js      attaches the canvas; crop frame, touch gestures, tools, the rail's height, the layer list, the held mask, focus mode
 browser/minipaint_wangp.js       the WanGP iframe: handshake, receiver query, verified send, queue, confirm and track
-browser/minipaint_interop.js     window.minipaintInterop: the public queue API (v1, minipaint.wangp.queue/v1): enqueue, the event stream, sync, cancelAll
+browser/minipaint_interop.js     window.minipaintInterop: the public queue API (v1, minipaint.wangp.queue/v1): enqueue (answers when the server has the job), sync (a bounded snapshot), cancelAll - no live connection
 browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid and its pager, the queue list and the history,
                                  the menu, paste and drop, Add to Queue, the page's model, and the one standing notice
                                  (browser/ is not auto-loaded: each tab fetches its own bundle from /minipaint-assets/js/, cached by content)

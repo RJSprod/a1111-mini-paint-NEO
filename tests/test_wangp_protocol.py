@@ -3036,83 +3036,13 @@ S["malformed state"] = async function () {
 };
 
 // ------------------------------------------------------------------------
-// The transport breaker: the day the browser, not the server, froze.
+// What the server says WanGP is doing arrives in a snapshot - the page holds
+// no live connection for it to arrive over any other way.
 // ------------------------------------------------------------------------
-const STREAM = function (state, extra) { return { detail: Object.assign({ kind: "stream", state: state }, extra || {}) }; };
 const RUNTIME = function (running, state) {
-    return { detail: { kind: "runtime", detail: { running: running, state: state || (running ? "READY" : "STOPPED") } } };
+    return { detail: { kind: "synced", runtime: { running: running, state: state || (running ? "READY" : "STOPPED") } } };
 };
 function frameSrc(w) { const f = w.doc.getElementById("wangp_iframe"); return f ? String(f.src) : null; }
-
-// The spine went quiet and Forge answered the plain request: the silence was
-// the stream's alone, and nothing this tab holds is in anybody's way.
-S["transport silent then answered"] = async function () {
-    const { w, api } = await healthy();
-    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
-    await w.tick.advance(10000);
-    const waiting = api.state().transport.waiting;
-    w.fire("minipaint:outbox", STREAM("answered"));
-    await w.tick.advance(30000);
-    return await snap(w, api, { waiting: waiting, sheds: api.state().transport.sheds, src: frameSrc(w) });
-};
-
-// Nothing answered: the iframe is unloaded to give its connections back,
-// and loaded again the moment the transport is back.
-S["transport starved"] = async function () {
-    const { w, api } = await healthy();
-    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
-    await w.tick.advance(19000);
-    const early = frameSrc(w);
-    await w.tick.advance(1500);
-    const shed = frameSrc(w);
-    const attachedWhileShed = api.state().attached;
-    w.fire("minipaint:outbox", STREAM("answered"));
-    await w.tick.advance(500);
-    return await snap(w, api, {
-        early: early, shed: shed, attachedWhileShed: attachedWhileShed, back: frameSrc(w),
-        sheds: api.state().transport.sheds,
-        saidShed: w.said("unloading the WanGP iframe to give its connections back"),
-        saidReload: w.said("loading WanGP again in the shed iframe")
-    });
-};
-
-// The budget is on-screen time, like every other budget in this file.
-S["transport starved while hidden"] = async function () {
-    const { w, api } = await healthy();
-    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
-    w.hidden(true);
-    await w.tick.advance(60000);
-    const whileAway = frameSrc(w);
-    w.hidden(false);
-    await w.tick.advance(21600);
-    return await snap(w, api, { whileAway: whileAway, after: frameSrc(w) });
-};
-
-// Forge answered, but with an error. That still proves it is reachable - a
-// page that cannot get a connection gets no answer at all - so nothing is
-// shed; but the journal must not call it success, which is the line that hid
-// the real state of the connection in three incidents.
-S["transport silent then answered with an error"] = async function () {
-    const { w, api } = await healthy();
-    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
-    await w.tick.advance(5000);
-    w.fire("minipaint:outbox", STREAM("answered", { ok: false, code: "INTERNAL_ERROR" }));
-    await w.tick.advance(30000);
-    return await snap(w, api, { sheds: api.state().transport.sheds, src: frameSrc(w),
-                                saidError: w.said("Forge answered with an error (INTERNAL_ERROR)"),
-                                saidPlain: w.said("Forge answered (answered)") });
-};
-
-// The snapshot ran out of time: nothing came back. That disarms nothing -
-// it is exactly the case the budget is for.
-S["transport silent then unanswered"] = async function () {
-    const { w, api } = await healthy();
-    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
-    await w.tick.advance(15000);
-    w.fire("minipaint:outbox", STREAM("unanswered"));
-    await w.tick.advance(5500);
-    return await snap(w, api, { shed: frameSrc(w), sheds: api.state().transport.sheds });
-};
 
 // Hidden, then frozen while hidden - the order a browser nearly always does
 // it in - then thawed while still hidden, then shown. Each is its own fact.
@@ -3142,42 +3072,6 @@ S["a discarded page says so"] = async function () {
 S["a page loaded normally says nothing of a discard"] = async function () {
     const { w, api } = await healthy();
     return await snap(w, api, { saidDiscarded: w.said("the browser had discarded this page") });
-};
-
-// A tab on a card holds no connection worth giving back.
-S["transport starved with no frame"] = async function () {
-    const { w, api } = await healthy();
-    w.setState(VIEW_ERROR);
-    w.removeFrame();
-    w.mutate([]);
-    await w.tick.advance(200);
-    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
-    await w.tick.advance(21000);
-    return await snap(w, api, { sheds: api.state().transport.sheds, saidNothing: w.said("no WanGP iframe to shed") });
-};
-
-// A blank tab is not a recovery: with no answer at all, WanGP is loaded again anyway.
-S["reload after shed does not wait for ever"] = async function () {
-    const { w, api } = await healthy();
-    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
-    await w.tick.advance(20100);
-    const shed = frameSrc(w);
-    await w.tick.advance(14000);
-    const stillShed = frameSrc(w);
-    await w.tick.advance(1500);
-    return await snap(w, api, { shed: shed, stillShed: stillShed, back: frameSrc(w),
-                          saidRegardless: w.said("loading WanGP again regardless") });
-};
-
-// The shed frame is still in the page, and it is not a bridge to bind to.
-S["a shed frame is not bound while blank"] = async function () {
-    const { w, api } = await healthy();
-    w.fire("minipaint:outbox", STREAM("silent", { silent_ms: 40000 }));
-    await w.tick.advance(20100);
-    w.hidden(true);
-    w.hidden(false);
-    await w.tick.advance(500);
-    return await snap(w, api, { src: frameSrc(w) });
 };
 
 // ------------------------------------------------------------------------
@@ -3385,25 +3279,7 @@ _RECOVERY_MUTATIONS = (
         "    function clearRecoveryWarning() {\n        if (true) { return; }\n        const notice = noticeElement();",
         "warning clears on a later handshake", "notice", False, True,
     ),
-    # -- the transport breaker --
-    (
-        "the breaker never arms",
-        "S.transport.deadline = deadline(TRANSPORT_STARVED_MS, transportStarved);",
-        "S.transport.deadline = null;",
-        "transport starved", "shed", "about:blank", "/wan2gp/",
-    ),
-    (
-        "Forge answering does not stand the breaker down",
-        'if (state !== "answered" && state !== "open") { return; }',
-        'if (true) { return; }',
-        "transport silent then answered", "sheds", 0, 1,
-    ),
-    (
-        "an error reply is logged as a plain answer",
-        'say(state === "answered" && detail.ok === false',
-        'say(false',
-        "transport silent then answered with an error", "saidError", True, False,
-    ),
+    # -- the lifecycle journal --
     (
         "a freeze after hiding is dropped",
         "                if (!frozenSince) { frozenSince = Date.now(); }\n",
@@ -3421,24 +3297,6 @@ _RECOVERY_MUTATIONS = (
         "            if (document.wasDiscarded) {",
         "            if (false) {",
         "a discarded page says so", "saidDiscarded", True, False,
-    ),
-    (
-        "the breaker spends its budget while the page is hidden",
-        "S.transport.deadline = deadline(TRANSPORT_STARVED_MS, transportStarved);",
-        "S.transport.deadline = { cancel: (function (id) { return function () { clearTimeout(id); }; })(setTimeout(transportStarved, TRANSPORT_STARVED_MS)) };",
-        "transport starved while hidden", "whileAway", "/wan2gp/", "about:blank",
-    ),
-    (
-        "a shed frame is never loaded again on its own",
-        'reloadAfterShed("nobody answered within " + RELOAD_AFTER_SHED_MS',
-        'void ("nobody answered within " + RELOAD_AFTER_SHED_MS',
-        "reload after shed does not wait for ever", "back", "/wan2gp/", "about:blank",
-    ),
-    (
-        "a blank, shed frame is bound to like any other",
-        'if (S.transport.shed && (frame.getAttribute("src") || "") === "about:blank") {',
-        'if (false) {',
-        "a shed frame is not bound while blank", "attached", False, True,
     ),
     # -- boot and runtime frames --
     (
@@ -3696,38 +3554,7 @@ def recovery_checks(r: Results) -> None:
         check("and a tab drawn again is picked up by the bounded ladder",
               "unknown with no root", "readyAgain", True)
 
-        # -- the transport breaker: the day the browser froze ------------------
-        # Six connections to one origin, five of them streams, and a WanGP
-        # that stopped answering held two of those for ever. Everything the
-        # page then asked for queued in the browser behind them; the server
-        # was fine, and only restarting the browser freed the page. This is
-        # the tab giving back the two connections that are its own to give,
-        # and only once it is sure that nothing else is getting through.
-        check("a silent spine that Forge then answers sheds nothing",
-              "transport silent then answered", "sheds", 0)
-        check("and leaves the iframe exactly where it was", "transport silent then answered", "src", "/wan2gp/")
-        check("having waited on the silence rather than acted on it",
-              "transport silent then answered", "waiting", True)
-        check("a silent spine that nothing answers has the iframe unloaded",
-              "transport starved", "shed", "about:blank")
-        check("and not a moment before the budget has run", "transport starved", "early", "/wan2gp/")
-        check("and nothing stays bound to the unloaded frame", "transport starved", "attachedWhileShed", False)
-        check("and the journal says what was done and why", "transport starved", "saidShed", True)
-        check("Forge answering loads WanGP again in the same frame", "transport starved", "back", "/wan2gp/")
-        check("and says so", "transport starved", "saidReload", True)
-        check("and the bridge is shaken hands with again", "transport starved", "ready", True)
-        check("and the shed is counted, for the bug report", "transport starved", "sheds", 1)
-        check("the budget is on-screen time only", "transport starved while hidden", "whileAway", "/wan2gp/")
-        check("and runs out once the page is back", "transport starved while hidden", "after", "about:blank")
-        check("Forge answering with an error sheds nothing: it is reachable",
-              "transport silent then answered with an error", "sheds", 0)
-        check("and leaves the iframe where it was", "transport silent then answered with an error", "src", "/wan2gp/")
-        check("but the journal says it was an error, naming it",
-              "transport silent then answered with an error", "saidError", True)
-        check("and does not call it a plain answer", "transport silent then answered with an error", "saidPlain", False)
-        check("a snapshot that ran out of time stands nothing down",
-              "transport silent then unanswered", "shed", "about:blank")
-        check("so the budget still runs out and the iframe is shed", "transport silent then unanswered", "sheds", 1)
+        # -- the lifecycle journal: frozen, thawed, discarded ------------------
         check("a freeze that follows hiding is said, with how long it lasted",
               "frozen while hidden", "saidFrozen", True)
         check("a thaw while still hidden is not called being back on screen",
@@ -3736,15 +3563,6 @@ def recovery_checks(r: Results) -> None:
         check("a page the browser discarded says so when it loads again",
               "a discarded page says so", "saidDiscarded", True)
         check("and a page loaded normally does not", "a page loaded normally says nothing of a discard", "saidDiscarded", False)
-        check("a tab on a card has nothing to shed", "transport starved with no frame", "sheds", 0)
-        check("and says so", "transport starved with no frame", "saidNothing", True)
-        check("a shed frame is loaded again even when nobody ever answers",
-              "reload after shed does not wait for ever", "back", "/wan2gp/")
-        check("but not before the answer has had its chance",
-              "reload after shed does not wait for ever", "stillShed", "about:blank")
-        check("and the journal says it stopped waiting", "reload after shed does not wait for ever", "saidRegardless", True)
-        check("a blank, shed frame is not bound to on resume", "a shed frame is not bound while blank", "attached", False)
-        check("and is still the blank frame", "a shed frame is not bound while blank", "src", "about:blank")
 
         # -- the tab painted when Forge started ------------------------------
         # The card under the root is painted once, when Forge builds the UI,

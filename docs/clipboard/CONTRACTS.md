@@ -20,8 +20,8 @@ textbox written by script plus a Gradio event carrying it over the queue. When t
 connection that dropped and did not come back, a session the server has
 forgotten - the box is written and nothing else happens, for as long as the
 page stays open. Everything else the tab does for a running job rides plain
-HTTP and keeps working through exactly that failure: the event stream, the
-imports, the thumbnails. Only the actions were tied to the queue.
+HTTP and keeps working through exactly that failure: the imports, the
+thumbnails. Only the actions were tied to the queue.
 
 The answer:
 
@@ -230,6 +230,16 @@ start auto (N image(s) prepared); for model <type>`, `pump: stopped - CODE`,
 GET /minipaint-interop/events?page=<id>[&cursor=<epoch>:<revision>]    text/event-stream
 GET /minipaint-interop/sync?page=<id>                                  the authoritative snapshot
 ```
+
+**No page opens `/events` any more.** A connection held open while it waits on
+nothing is the one that came back half-dead in every incident that locked the
+page up, so the page reads instead: `/sync` (bounded to 15 s) when it has a
+reason to look, the library when the Clipboard tab is opened, after the page
+changes it and on Refresh, and the history when it is opened, after a send and
+on Refresh. A job the server has accepted answers `enqueue()` at once; what
+became of it is the history's to say. The route stays, unused, for a page
+loaded before this change until it is reloaded. What follows describes the
+stream as it was built.
 
 Events are **advisory**; the snapshot is authoritative. An event says something about job X
 changed and carries enough to update a screen; it is never a second copy of the truth. A

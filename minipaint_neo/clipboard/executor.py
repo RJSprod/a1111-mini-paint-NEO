@@ -115,6 +115,10 @@ _wake = threading.Event()
 _state: typing.Dict[str, typing.Any] = {"thread": None, "stopping": False, "started": False, "last_error": ""}
 _seams: typing.Dict[str, typing.Any] = {"clock": time.time, "sleep": time.sleep, "enabled": True}
 
+#: What a job says when this WanGP can never run it unattended. The next
+#: press is routed to the page-driven path, so pressing again is the fix.
+NO_SERVICE_MESSAGE = "This WanGP cannot run queued jobs on its own. Press Add to Queue again: it will be sent from this page."
+
 
 # ----------------------------------------------------------------- seams --
 
@@ -440,19 +444,17 @@ def _wait_for_service(job: dict, code: str) -> bool:
     if code == errors.SERVICE_UNAVAILABLE and not control.executable_ever():
         # This Wan2GP has no queue worker to submit into, and inventing a
         # second execution path beside its arbiter is the one thing this
-        # design refuses - that is two generations on one card. What is left
-        # is the path that was always there: the page drives the live form
-        # and presses WanGP's own button. It needs the tab open, so it is not
-        # walking away; it is generating, which is what was asked for.
-        handed = outbox.hand_to_browser(
-            job["job_id"], "this WanGP has no generation service for unattended jobs")
-        if handed is not None:
-            _journal(
-                f"job {job['job_id'][:8]}: this WanGP cannot run unattended jobs "
-                f"({control.why_not()[:200]}); it will run from the page instead"
-            )
-            return True
-        return bool(outbox.fail(job["job_id"], code, "this WanGP has no generation service"))
+        # design refuses - that is two generations on one card. The job used
+        # to be handed back to the page, but nothing tells a page that any
+        # more - no connection is held open to tell it over - so it ends
+        # here, saying so. The next press already goes straight to the path
+        # the page drives itself (see outbox.chosen_executor), because the
+        # child has now said it never can.
+        _journal(
+            f"job {job['job_id'][:8]}: this WanGP cannot run unattended jobs "
+            f"({control.why_not()[:200]}); the job is ended and the next press runs from the page"
+        )
+        return bool(outbox.fail(job["job_id"], code, NO_SERVICE_MESSAGE))
 
     counted = outbox.attempt(job["job_id"])
     attempts = int((counted or job).get("attempts") or 0)
@@ -465,15 +467,10 @@ def _wait_for_service(job: dict, code: str) -> bool:
         if why:
             _journal(f"job {job['job_id'][:8]}: waiting for WanGP's generation service - {why[:300]}")
     if attempts > MAX_RETRYABLE_ATTEMPTS:
-        # Waited long enough. The page can still run this - that is the path
-        # that existed before unattended jobs did - so it goes there rather
-        # than being thrown away, and only becomes a failure if there is no
-        # page to take it either.
-        handed = outbox.hand_to_browser(job["job_id"], f"unattended execution never became available ({code})")
-        if handed is not None:
-            _journal(f"job {job['job_id'][:8]}: gave up waiting for unattended execution; it will run from the page instead")
-            return True
-        return bool(outbox.fail(job["job_id"], code, f"still not ready after {attempts} attempts"))
+        # Waited long enough. Ended with a sentence somebody can act on,
+        # rather than handed to a page that nothing would tell.
+        _journal(f"job {job['job_id'][:8]}: gave up waiting for unattended execution after {attempts} attempts")
+        return bool(outbox.fail(job["job_id"], code, f"WanGP was still not ready after {attempts} tries. Press Add to Queue again."))
     delay = min(BACKOFF_MAX, BACKOFF_START * (2 ** min(6, attempts - 1)))
     outbox.transition(job["job_id"], outbox.ENSURING_WANGP,
                       stage=f"WanGP is up but not ready to take a job yet. Trying again in {int(delay)}s.")

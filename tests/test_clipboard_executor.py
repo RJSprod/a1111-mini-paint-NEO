@@ -623,8 +623,10 @@ def incapable_build_checks(r: Results, clock) -> None:
         r.check("which the page can claim at once",
                 outbox.claim(PAGE).get("job", {}).get("job_id") == job["job_id"], str(outbox.claim(PAGE))[:120])
 
-        # And a job already in flight when the answer arrives is handed over
-        # rather than left waiting for something that will never come.
+        # And a job already in flight when the answer arrives is ended with a
+        # sentence that says what to do, rather than left waiting for
+        # something that will never come - or handed to a page that nothing
+        # would tell, now that no page holds a connection to be told over.
         outbox.reset_for_tests()
         outbox.use_clock(clock)
         outbox.use_executor(outbox.EXECUTOR_SERVER)
@@ -633,9 +635,10 @@ def incapable_build_checks(r: Results, clock) -> None:
         executor.step()
         executor.step()
         settled = outbox.get(stranded["job_id"])
-        r.check("a job already admitted is handed to the page rather than waiting for what will never come",
-                settled["executor"] == outbox.EXECUTOR_BROWSER and settled["state"] == outbox.PENDING,
-                f"{settled['executor']} {settled['state']}")
+        r.check("a job already admitted ends rather than waiting for what will never come",
+                settled["state"] == outbox.FAILED, f"{settled['executor']} {settled['state']}")
+        r.check("saying the next press will run from the page",
+                (settled.get("error") or {}).get("message") == executor.NO_SERVICE_MESSAGE, str(settled.get("error")))
         r.check("nothing was submitted to a child that cannot take it", not child.submissions, str(child.submissions))
     finally:
         control.use_transport(None)
@@ -756,17 +759,15 @@ def failure_checks(r: Results, clock) -> None:
                 "not ready" in waiting["stage"].lower() and "again in" in waiting["stage"].lower(), waiting["stage"])
         r.check("nothing was submitted to a child that said it could not execute", not child.submissions, str(child.submissions))
 
-        # Bounded, though - and what it gives up to is the page, not a
-        # failure. Running with the tab open is not walking away, but it is
-        # generating, and a job thrown away is neither.
+        # Bounded, though - and when it gives up, it says so in words, in the
+        # history, rather than handing the job to a page nothing would tell.
         for _ in range(executor.MAX_RETRYABLE_ATTEMPTS + 4):
             executor.step()
         settled = outbox.get(job["job_id"])
-        r.check("a WanGP that never becomes able to run one hands the job to the page rather than binning it",
-                settled["executor"] == outbox.EXECUTOR_BROWSER and settled["state"] == outbox.PENDING,
-                f"{settled['executor']} {settled['state']}")
-        r.check("and the page can claim it, which is the whole point of handing it over",
-                outbox.claim(PAGE).get("job", {}).get("job_id") == job["job_id"], str(outbox.claim(PAGE))[:120])
+        r.check("a WanGP that never becomes able to run one ends the job, saying why",
+                settled["state"] == outbox.FAILED and "Press Add to Queue again" in str((settled.get("error") or {}).get("message")),
+                f"{settled['state']} {settled.get('error')}")
+        r.check("and nothing is left for a page to claim", not outbox.claim(PAGE).get("job"), str(outbox.claim(PAGE))[:120])
 
         # And the moment it can, the job it was holding goes on.
         child.available = True

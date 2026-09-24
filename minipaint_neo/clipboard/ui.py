@@ -131,6 +131,14 @@ OPEN_OUTPUTS_JS = f"() => {{ if ({_JS}) {_JS}.openOutputs(); }}"
 #: The toolbar's Paste. Reading the system clipboard is the browser's to do
 #: and needs its permission, so this has no server half at all.
 PASTE_JS = f"() => {{ if ({_JS}) {_JS}.pasteFromClipboard(); }}"
+#: The toolbar's Refresh: the grid, the cards and the history, read now.
+#: Browser-driven, because the grid and the history are drawn from this
+#: tab's own routes; it presses the hidden server Refresh for the cards.
+REFRESH_ALL_JS = f"() => {{ if ({_JS}) {_JS}.refreshAll(); }}"
+#: Chained after every server action that changes the library. The grid is
+#: read, not told - nothing holds a connection open to tell it - so the
+#: action that changed it is what asks for it again.
+LIBRARY_CHANGED_JS = f"() => {{ if ({_JS}) {_JS}.libraryChanged(); }}"
 SWITCH_JS = "(target) => { if (window.minipaintCanvas && window.minipaintCanvas.switchTo) { window.minipaintCanvas.switchTo(target); } }"
 
 # The Gradio half of a send, kept here because this tab is the only thing
@@ -1609,6 +1617,13 @@ class ClipboardTab:
                             "Delete", elem_id=_id("delete_now"), min_width=0,
                             elem_classes=["minipaint-clip-action", "minipaint-clip-icon", "minipaint-clip-icon-delete"],
                         )
+                        # Refresh: the one way to see what other pages and
+                        # finished jobs did while this one was open, because
+                        # nothing is pushed to it any more.
+                        refresh_now_btn = gr.Button(
+                            "Refresh", elem_id=_id("refresh_now"), min_width=0,
+                            elem_classes=["minipaint-clip-action", "minipaint-clip-icon", "minipaint-clip-icon-refresh"],
+                        )
                         to_first = gr.Button("+First", elem_id=_id("to_first"), elem_classes=["minipaint-clip-action", "minipaint-clip-role"], min_width=0)
                         to_last = gr.Button("+Last", elem_id=_id("to_last"), elem_classes=["minipaint-clip-action", "minipaint-clip-role"], min_width=0)
                         to_ref = gr.Button("+Ref", elem_id=_id("to_ref"), elem_classes=["minipaint-clip-action", "minipaint-clip-role"], min_width=0)
@@ -1810,7 +1825,7 @@ class ClipboardTab:
 
         self._wire(
             grid=grid, status=status, selected_box=selected_box, menu_state=menu_state,
-            cards=(card_first, card_last, card_ref), menu_btn=menu_btn, paste_btn=paste_btn, delete_btn=delete_btn, roles=(to_first, to_last, to_ref),
+            cards=(card_first, card_last, card_ref), menu_btn=menu_btn, paste_btn=paste_btn, delete_btn=delete_btn, refresh_now_btn=refresh_now_btn, roles=(to_first, to_last, to_ref),
             sort_btn=sort_btn, send_btn=send_btn, sort_request=sort_request, thumb=thumb, refresh_btn=refresh_btn, upload_btn=upload_btn,
             outputs_open=outputs_open, outputs_panel=outputs_panel,
             intercept_request=intercept_request, folder_open=folder_open, folder_panel=folder_panel, folder_text=folder_text,
@@ -1874,19 +1889,19 @@ class ClipboardTab:
         p["thumb"].change(None, js=THUMB_JS, inputs=[p["thumb"]])
         p["thumb"].release(self.thumbnail_changed, inputs=[p["thumb"]], outputs=[p["menu_state"]], **quiet)
         p["intercept_request"].input(self.set_intercept, inputs=[p["intercept_request"]], outputs=[p["menu_state"], p["status"]], **quiet)
-        p["upload_btn"].upload(self.upload, inputs=[p["upload_btn"], selected], outputs=refresh_outputs, **quiet)
+        p["upload_btn"].upload(self.upload, inputs=[p["upload_btn"], selected], outputs=refresh_outputs, **quiet).then(None, js=LIBRARY_CHANGED_JS)
         p["paste_open"].click(lambda: gr.update(visible=True), inputs=[], outputs=[p["paste_panel"]], **quiet)
         p["paste_close"].click(lambda: gr.update(visible=False), inputs=[], outputs=[p["paste_panel"]], **quiet)
-        p["paste_image"].upload(self.pasted, inputs=[p["paste_image"], selected], outputs=refresh_outputs + [p["paste_image"], p["paste_panel"]], **quiet)
+        p["paste_image"].upload(self.pasted, inputs=[p["paste_image"], selected], outputs=refresh_outputs + [p["paste_image"], p["paste_panel"]], **quiet).then(None, js=LIBRARY_CHANGED_JS)
 
         # -- the folder, rename, delete
         p["folder_open"].click(self.open_folder, inputs=[], outputs=[p["folder_panel"], p["folder_text"], p["folder_status"]], **quiet)
         p["folder_close"].click(lambda: gr.update(visible=False), inputs=[], outputs=[p["folder_panel"]], **quiet)
-        p["folder_use"].click(lambda text: self.choose_folder(text, False), inputs=[p["folder_text"]], outputs=[p["folder_status"], p["folder_panel"], *refresh_outputs], **quiet)
-        p["folder_create"].click(lambda text: self.choose_folder(text, True), inputs=[p["folder_text"]], outputs=[p["folder_status"], p["folder_panel"], *refresh_outputs], **quiet)
+        p["folder_use"].click(lambda text: self.choose_folder(text, False), inputs=[p["folder_text"]], outputs=[p["folder_status"], p["folder_panel"], *refresh_outputs], **quiet).then(None, js=LIBRARY_CHANGED_JS)
+        p["folder_create"].click(lambda text: self.choose_folder(text, True), inputs=[p["folder_text"]], outputs=[p["folder_status"], p["folder_panel"], *refresh_outputs], **quiet).then(None, js=LIBRARY_CHANGED_JS)
         p["rename_open"].click(self.open_rename, inputs=[selected], outputs=[p["rename_panel"], p["rename_text"], p["status"]], **quiet)
         p["rename_cancel"].click(lambda: gr.update(visible=False), inputs=[], outputs=[p["rename_panel"]], **quiet)
-        p["rename_ok"].click(self.rename, inputs=[selected, p["rename_text"]], outputs=[p["rename_panel"], p["status"], *cards], **quiet)
+        p["rename_ok"].click(self.rename, inputs=[selected, p["rename_text"]], outputs=[p["rename_panel"], p["status"], *cards], **quiet).then(None, js=LIBRARY_CHANGED_JS)
         p["delete_open"].click(self.open_delete, inputs=[selected], outputs=[p["delete_panel"], p["status"]], **quiet)
         # The toolbar's own two, beside the menu.
         #
@@ -1903,16 +1918,17 @@ class ClipboardTab:
         # unlinks the file. The panel stays on the menu for anyone who wants
         # to be asked.
         p["paste_btn"].click(None, js=PASTE_JS, inputs=[], outputs=[])
-        p["delete_btn"].click(self.delete, inputs=[selected], outputs=[p["delete_panel"], *refresh_outputs], **quiet)
+        p["refresh_now_btn"].click(None, js=REFRESH_ALL_JS, inputs=[], outputs=[])
+        p["delete_btn"].click(self.delete, inputs=[selected], outputs=[p["delete_panel"], *refresh_outputs], **quiet).then(None, js=LIBRARY_CHANGED_JS)
         p["delete_cancel"].click(lambda: gr.update(visible=False), inputs=[], outputs=[p["delete_panel"]], **quiet)
-        p["delete_ok"].click(self.delete, inputs=[selected], outputs=[p["delete_panel"], *refresh_outputs], **quiet)
+        p["delete_ok"].click(self.delete, inputs=[selected], outputs=[p["delete_panel"], *refresh_outputs], **quiet).then(None, js=LIBRARY_CHANGED_JS)
 
         # -- the composer
         for (slot, _label, _field), button in zip(SLOTS, p["roles"]):
             button.click(lambda selected_id, slot=slot: self.assign(slot, selected_id), inputs=[selected], outputs=cards_outputs, **quiet)
         p["slot_action"].input(self.slot_action, inputs=[p["slot_action"]], outputs=cards_outputs, **quiet)
         for slot, upload in p["slot_uploads"].items():
-            upload.upload(lambda file, selected_id, slot=slot: self.slot_upload(slot, file, selected_id), inputs=[upload, selected], outputs=refresh_outputs, **quiet)
+            upload.upload(lambda file, selected_id, slot=slot: self.slot_upload(slot, file, selected_id), inputs=[upload, selected], outputs=refresh_outputs, **quiet).then(None, js=LIBRARY_CHANGED_JS)
         p["prompt"].blur(self.prompt_changed, inputs=[p["prompt"]], outputs=[], **quiet)
 
         # -- Add to Queue, the queue list, the job buttons and Cancel

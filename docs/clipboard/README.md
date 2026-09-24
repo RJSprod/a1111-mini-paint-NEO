@@ -89,7 +89,7 @@ Refresh, and every card and history entry that used it says so.
   WanGP from the gallery* below). The choice is saved on the Forge host, so a second
   browser and a Reload UI see the same setting; the old on/off switch is read as Mini
   Paint or Clipboard.
-* **Refresh** — read the folder again.
+* **Refresh** — read the folder again. The toolbar has the same thing as a button (below).
 * **Sort ›** — by name, newest, oldest, largest, smallest. The same list the toolbar's own
   sort button opens.
 * **Paste image** — reads your clipboard when the browser lets the page do that; otherwise
@@ -259,7 +259,19 @@ take a request, and the slot rules.
 
 ## The Queue
 
-Under the button, every job the server holds, newest first: its state (*Enhancing*,
+**Nothing on this tab is live.** The grid and the list below are read when the
+tab is opened, after this page changes them (a paste, an import, an upload, a
+rename, a delete, a send) and when **Refresh** is pressed - never pushed to the
+page over a connection held open for it. A connection held open while it waits
+on nothing is the one that came back half-dead in every incident that locked
+the page up. So a send is finished, as far as this page is concerned, the
+moment the server has the job: *Sent to WanGP. It is in Queue Send History.*
+The job runs on the server whether the page is open or not, and what became of
+it is what the list says the next time it is read. A picture another page or a
+finished WanGP job put in the library shows up the same way.
+
+Under the button, every job the server holds, newest first, as it was when the
+list was read: its state (*Enhancing*,
 *Waiting*, *Sending*, *Generating*, *Queued*, *Refused*, *Unconfirmed*, *Cancelled*), when
 it was pressed, the prompt typed for it (or *Prompt: Use WanGP*; both prompts once it has
 been enhanced), which fields it supplies, how it ended, and - on two lines of their own -
@@ -446,8 +458,7 @@ worked; the second could stop delivering - a connection that dropped and did
 not come back, a session the server has forgotten - and then the menu item did
 nothing at all. No picture, no error, no status. Everything else the tab does
 for a running job kept working through exactly that failure, because the
-queue, the event stream, the imports and the thumbnails all ride ordinary
-HTTP. Only the actions were tied to Gradio.
+queue, the imports and the thumbnails all ride ordinary HTTP. Only the actions were tied to Gradio.
 
 They are not any more:
 
@@ -605,9 +616,13 @@ The suite checks each against the failure it is for: a destination built but
 never rendered must not be offered and must not break the other destinations,
 and the send must still arrive with the page made deaf to the write.
 
-### The toolbar's Paste and Delete
+### The toolbar's Paste, Delete and Refresh
 
-Beside the menu button, one press each, because this tab is used as a
+**Refresh** reads the grid, the composer's cards and the list of jobs again.
+Nothing is pushed to this tab, so this is how to see what other pages and
+finished jobs did while it was open.
+
+Paste and Delete sit beside the menu button, one press each, because this tab is used as a
 clipboard: a picture arrives from somewhere else, gets used, and goes, over
 and over. Both actions are also in the menu, which is where they are
 discovered; these are for doing them forty times without a flyout in between.

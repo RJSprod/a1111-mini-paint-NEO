@@ -1589,22 +1589,33 @@ window.minipaintClipboard = (function () {
     }
 
     /**
-     * A LIBRARY event: re-ask for the page being shown and patch from it.
+     * Something on this page changed the library: re-ask for the page being
+     * shown and patch from it.
      *
-     * The event carries a revision and a total and no contents, so this can
-     * neither apply a delta wrongly nor be made stale by one it missed. A
-     * page that was asleep resyncs through the same call.
+     * THE GRID IS READ, NOT TOLD. It used to patch itself from events the
+     * server pushed down a connection held open for the life of the page;
+     * that connection is gone (see CLAUDE.md, "Nothing of ours is held
+     * open"). So the grid is read when the tab is opened, after this page
+     * pastes, imports, uploads, renames or deletes, and when Refresh is
+     * pressed. A picture another page or a finished WanGP job put in the
+     * library shows up at the next of those - which is when anybody looks.
      *
      * A new picture does not move you. An import while you are on page 3
-     * updates the count and the page total; being relocated mid-task because
-     * a background job finished is the kind of helpfulness nobody wants, so
-     * the page you are on is the page you keep.
+     * updates the count and the page total; the page you are on is the page
+     * you keep.
      */
-    function onLibraryEvent(payload) {
-        const revision = String((payload && payload.revision) || "");
-        if (revision && revision === S.library.revision) { return; }
+    function libraryChanged() {
         if (S.library.inflight) { S.library.pending = true; return; }
         fetchLibrary({ quiet: true });
+    }
+
+    /** The toolbar's Refresh: the grid, the composer's cards and the
+     * history, read now. The one way to see what other pages and finished
+     * jobs did while this one was open. */
+    function refreshAll() {
+        pressHidden(PRESS.refresh);
+        fetchLibrary({ refresh: true });
+        askQueue(null);
     }
 
     /** The sort, over HTTP: remembered first, then drawn when it arrives. */
@@ -2860,10 +2871,10 @@ window.minipaintClipboard = (function () {
             toast("Put " + ((asset && asset.filename) || "the picture") + " in Clipboard "
                   + "(the page had lost its connection).");
             // For the composer's cards and the menu, which the server still
-            // renders. The GRID hears about this from the library event the
-            // import published, so it patches whether or not this press
-            // reaches anything.
+            // renders; the grid is read over HTTP, so it is right whether or
+            // not this press reaches anything.
             pressHidden(PRESS.refresh);
+            libraryChanged();
             return true;
         } catch (error) {
             const why = (error && error.message) || String(error);
@@ -3028,8 +3039,9 @@ window.minipaintClipboard = (function () {
             if (slot && asset && asset.asset_id) {
                 sendInput(BOXES.slotAction, "assign:" + slot + ":" + asset.asset_id + ":" + Date.now());
             }
-            // For the cards and the menu; the grid patches from the event.
+            // For the cards and the menu; the grid is read over HTTP.
             pressHidden(PRESS.refresh);
+            libraryChanged();
             toast(slot ? "Imported and placed in the slot." : "Imported into Clipboard.");
             return asset;
         } catch (error) {
@@ -3465,41 +3477,18 @@ window.minipaintClipboard = (function () {
         if (!parsed.job_id) { return; }
         const how = fromWatcher ? " (" + fromWatcher + ")" : "";
         // Admitted, durably, and the press is over. A job the server runs
-        // needs nothing from this page from here: it is watched, not pumped,
-        // and the page may be closed the moment this line is written.
+        // needs nothing from this page from here - not a pump, not a watch -
+        // and the page may be closed the moment this line is written. It is
+        // a history entry now; the history says what became of it.
         if (parsed.executor === "server" || (parsed.state && SERVER_STATES.indexOf(String(parsed.state)) !== -1)) {
-            note("queue: job " + String(parsed.job_id).slice(0, 8) + " admitted by the server" + how + "; watching");
-            watch();
+            note("queue: job " + String(parsed.job_id).slice(0, 8) + " admitted by the server" + how + "; it is in the history");
+            toast("Sent to WanGP. It is in Queue Send History.");
             return;
         }
         note("queue: job " + String(parsed.job_id).slice(0, 8) + " appended by the server" + how + "; pumping");
         if (!pump()) {
             toast("WanGP is not available in this page.", true);
         }
-    }
-
-    /**
-     * Hold the one event stream this page has, so the grid can be told.
-     *
-     * THE GRID NOW DEPENDS ON THIS, and nothing else on the tab did. A job
-     * opened the stream when there was a job to watch, so an idle page had
-     * no stream at all - which was fine while the server re-rendered the
-     * grid over the framework's channel and is not fine now: a picture
-     * imported from another page, or deleted from this one, would leave
-     * every open grid quietly stale until something else made it re-ask.
-     *
-     * Per the spine's own rule, a page with this tab closed is subscribed to
-     * nothing: this bundle is fetched when the tab is first opened, so a
-     * session that never opens Clipboard never gets here. A page that has it
-     * open holds the one connection it already holds, and the interop
-     * module's own lifecycle lets it go while the page is hidden and takes
-     * it back on return.
-     */
-    function watch() {
-        const api = interop();
-        if (!api || !api.wangp || typeof api.wangp.watch !== "function") { return false; }
-        try { api.wangp.watch(); } catch (e) { return false; }
-        return true;
     }
 
     function outboxSentence(job) {
@@ -3525,12 +3514,12 @@ window.minipaintClipboard = (function () {
         }, OUTBOX_REFRESH_THROTTLE_MS);
     }
 
-    /** The public API says a job moved: show it, and let the server re-render the list. */
+    /** This page's own queue work moved - a submission, or a job this page
+     * ran itself finishing: show it, and re-read the history once. Nothing
+     * here arrives from the server on its own any more. */
     function onOutboxEvent(event) {
         const detail = event && event.detail ? event.detail : {};
-        // The library moved. Advisory: it says so and nothing else, so the
-        // page re-asks for the page it is showing. See onLibraryEvent.
-        if (detail.kind === "library") { onLibraryEvent(detail.detail || {}); return; }
+        if (detail.kind !== "submitted" && detail.kind !== "done") { return; }
         const job = detail.job || null;
         if (detail.kind === "done" && job) {
             const failed = job.state !== "queued" && job.state !== "started";
@@ -3540,9 +3529,6 @@ window.minipaintClipboard = (function () {
             }).join(", ") + " was not used by the current model." : ""), failed);
             refreshCapabilities(true);
         }
-        // "waiting" arrives every few seconds while the line ahead is held -
-        // a prompt still being written, another page's turn - and "tracked"
-        // whenever a queued task moved in WanGP; both are news for the list.
         refreshOutbox();
     }
 
@@ -4010,11 +3996,10 @@ window.minipaintClipboard = (function () {
                     // A tab that was hidden was not measured while it was.
                     if (S.fitRewatch) { S.fitRewatch(); }
                     scheduleFit();
-                    // Over HTTP: coming back to this tab must not depend on
-                    // a framework channel that a backgrounded tab has lost.
-                    // With a folder re-read, because coming back to the tab
-                    // is exactly when the folder may have moved underneath it.
-                    watch();
+                    // Opening the tab is one of the moments the grid is read -
+                    // over HTTP, and with a folder re-read, because coming
+                    // back to the tab is exactly when the folder may have
+                    // moved underneath it.
                     fetchLibrary({ quiet: true, refresh: true });
                     refreshCapabilities(false);
                 }
@@ -4060,9 +4045,7 @@ window.minipaintClipboard = (function () {
         element.addEventListener("keydown", onLibraryKey);
         watchTab();
         // The grid, from the index route, before anything else is asked of
-        // the server: it is the thing the user is looking at. The stream
-        // first, so a change that lands between these two is not missed.
-        watch();
+        // the server: it is the thing the user is looking at.
         gridMount();
         watchFit();
         scheduleFit();
@@ -4138,6 +4121,8 @@ window.minipaintClipboard = (function () {
         addToQueue: addToQueue,
         cancelAll: cancelAll,
         refreshQueue: refreshOutbox,
+        refreshAll: refreshAll,
+        libraryChanged: libraryChanged,
         pump: pump,
         pageId: pageId,
         modelJson: modelJson,

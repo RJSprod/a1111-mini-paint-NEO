@@ -817,11 +817,11 @@ def check_patching(r: Results, page, library) -> None:
     page.evaluate("() => { const g = document.querySelector('.minipaint-clip-grid'); g.scrollTop = 24; }")
     scrolled = page.evaluate("() => document.querySelector('.minipaint-clip-grid').scrollTop")
 
-    # THE PAGE IS NOT TOLD TO LOOK. A picture goes into the library through
-    # the same import route a paste or a drop takes, the server says the
-    # library moved, and the grid re-asks and patches on its own. Calling
-    # library() here instead would prove the drawing and skip the half that
-    # keeps every other open page correct.
+    # A PICTURE FROM SOMEWHERE ELSE. It goes into the library through the
+    # same import route a paste or a drop takes, but not from this page - so
+    # nothing tells this grid. Nothing is pushed to the page any more (no
+    # connection is held open to push it over); the grid shows it when it is
+    # next read, and Refresh is how somebody asks for that.
     landed = page.evaluate("""async () => {
         const id = document.querySelector('.minipaint-clip-item').dataset.asset;
         const blob = await (await fetch('/minipaint-clipboard/image/' + id,
@@ -834,6 +834,19 @@ def check_patching(r: Results, page, library) -> None:
         return (await answer.json()).ok === true;
     }""")
     r.check("patching: a picture is imported from outside the grid", landed is True, str(landed))
+    time.sleep(3.0)
+    r.check("and the grid does not change by itself: nothing is pushed to it",
+            len(page.evaluate(READ_TILES_JS)) == 6, str(len(page.evaluate(READ_TILES_JS))))
+    r.check("no event stream was opened by the tab", page.evaluate("""() => performance.getEntriesByType('resource')
+        .filter(e => e.name.indexOf('/minipaint-interop/events') !== -1).length""") == 0)
+    pressed = page.evaluate("""() => {
+        const host = document.getElementById('minipaint_clipboard_refresh_now');
+        const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
+        if (!b) { return false; }
+        b.click();
+        return true;
+    }""")
+    r.check("the toolbar has a Refresh button", pressed is True)
     for _ in range(20):
         time.sleep(0.5)
         if len(page.evaluate(READ_TILES_JS)) == 7:
@@ -842,7 +855,7 @@ def check_patching(r: Results, page, library) -> None:
     after = page.evaluate(READ_TILES_JS)
     kept = [t for t in after if t["stamp"]]
     fresh = [t for t in after if not t["stamp"]]
-    r.check("one picture in means one node in, from the event alone",
+    r.check("Refresh brings it in: one picture in means one node in",
             len(after) == 7 and len(fresh) == 1, f"{len(after)} tiles, {len(fresh)} new")
     r.check("AND THE OTHER SIX ARE THE SAME ELEMENTS, not new ones that look the same",
             sorted(t["stamp"] for t in kept) == sorted(t["stamp"] for t in before), str(len(kept)))
@@ -854,8 +867,9 @@ def check_patching(r: Results, page, library) -> None:
             page.evaluate("() => document.querySelector('.minipaint-clip-grid').scrollTop") == scrolled,
             str(page.evaluate("() => document.querySelector('.minipaint-clip-grid').scrollTop")))
 
-    # And out again the same way: the menu's Delete is a server action, and
-    # the grid hears about it rather than being handed new markup.
+    # And out again from this page: the toolbar's Delete is a server action,
+    # and the action itself asks the grid to read again - it is not handed
+    # new markup, and it is not told by a stream.
     page.evaluate("""() => {
         const doomed = Array.from(document.querySelectorAll('.minipaint-clip-item'))
             .filter(t => t.dataset.name === '0000-new.png')[0];

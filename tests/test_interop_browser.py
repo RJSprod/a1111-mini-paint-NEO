@@ -1,23 +1,20 @@
-"""The browser half of walking away: told, not asking, and safe to close.
+"""The browser half of walking away: nothing held open, and safe to close.
 
 The server half of "press Add to Queue and walk away" is asserted in
 ``test_clipboard_executor``, with no page anywhere near it. This is the other
-half, and it is the half that used to be wrong: the page was a *pump*. It
-claimed a job, drove the live WanGP form and reported back, so closing the
-tab stopped the queue, and a locked phone stopped it too.
+half. The page used to be a *pump* - it claimed a job, drove the live WanGP
+form and reported back - and then a *watcher*, holding an event stream open
+for the life of the page. A connection held open while it waits on nothing is
+the one that came back half-dead in every incident that locked the page up,
+so the page now holds none. What is asserted here:
 
-What is asserted here is that it no longer does any of that for a job the
-server owns:
-
-*   an admitted server job opens the one event stream and never asks the
-    claim route - not once, not late, not on a retry;
-*   a terminal frame settles a caller waiting on that job from the
-    authoritative record rather than from the event, because an event is a
-    description and the snapshot is the truth;
-*   a reset, a cursor this process cannot honour and an epoch from another
-    run of Forge all produce exactly one sync rather than an error;
-*   events that arrive while a sync is in flight are applied after it, in
-    order, and the ones the snapshot already covers are discarded;
+*   an admitted server job answers at once, as pending with its id - the
+    server has it, and nothing waits on it or watches it afterwards;
+*   no event stream is ever opened, by a job or by anything else;
+*   a snapshot has a limit: one that never comes back answers SYNC_TIMEOUT
+    instead of holding every later snapshot behind it for ever;
+*   a return from a real absence takes exactly one snapshot and writes down
+    whether Forge answered, and how fast; a tab flick takes none;
 *   a browser-executed job still pumps, because the compatibility window is
     real and an already-loaded page must keep working.
 
@@ -185,7 +182,7 @@ function installClock() {
         }
     };
 }
-if (["silence", "starved", "hidden", "hiddenstarved", "openhidden", "jobsonly"].indexOf(process.argv[3]) !== -1) { installClock(); }
+if (["starved", "hidden", "hiddenstarved", "flick"].indexOf(process.argv[3]) !== -1) { installClock(); }
 
 new Function("window", "document", "fetch", "EventSource", "CustomEvent", "localStorage",
     fs.readFileSync(process.argv[2], "utf8"))(window, document, fetch, FakeEventSource, CustomEvent, localStorage);
@@ -193,16 +190,15 @@ new Function("window", "document", "fetch", "EventSource", "CustomEvent", "local
 const api = window.minipaintInterop.wangp;
 
 function report(extra) {
-    // The stream's watchdog reschedules itself forever, which is correct in
-    // a browser and keeps Node alive here. Say the answer and go.
+    // Said and gone: a pending timer of the bundle's would otherwise keep
+    // Node alive after the answer is known.
     console.log(JSON.stringify(Object.assign({
         calls: calls.map(function (c) { return c.url.split("?")[0]; }),
         streams: streams.map(function (s) { return s.url.split("?")[0]; }),
         flushes: flushes.slice(),
         told: told.slice(),
         submitBodies: calls.filter(function (c) { return c.url.indexOf("/outbox/submit") !== -1; }).map(function (c) { return c.body; }),
-        cursors: streams.map(function (s) { const at = s.url.indexOf("cursor="); return at === -1 ? "" : s.url.slice(at + 7); }),
-        state: api.streamState(),
+        state: api.snapshotState(),
         notes: notes.slice()
     }, extra || {})));
     process.exit(0);
@@ -222,160 +218,64 @@ async function main() {
     const answer = await api.enqueue({ prompt: "a lighthouse" }, { wait: false });
 
     if (MODE === "server") {
-        // Terminal frame -> the waiter is settled from the record.
-        const waited = api.enqueue({ prompt: "another" }, { wait: true, timeoutMs: 2000 });
-        // A press now commits WanGP's live form before it submits, so the
-        // submission is no longer synchronous with the call. Wait for it:
-        // an event about a job cannot arrive before the job exists, and a
-        // test that fired one first would be asserting something that never
-        // happens.
-        const submits = function () { return calls.filter(function (c) { return c.url.indexOf("/outbox/submit") !== -1; }).length; };
-        for (let spin = 0; spin < 200 && submits() < 2; spin += 1) {
-            await new Promise(function (r) { setTimeout(r, 5); });
-        }
-        JOBS.list = [{ job_id: "1111222233334444", state: "completed", executor: "server", revision: 3,
-                       request: { request_id: "a".repeat(32) }, result: null, error: null, summary: {}, wangp: null }];
-        for (const s of streams) { s.fire("job", { job_id: "1111222233334444", state: "completed", revision: 3 }, EPOCH + ":3"); }
-        const settled = await waited;
+        // The default is to wait - and for a job the server runs, the wait
+        // is over the moment the server has it. Bounded here on the real
+        // clock, so a build that waited for the job to END is a result and
+        // not a hang.
+        const waited = await Promise.race([
+            api.enqueue({ prompt: "another" }, { wait: true }),
+            new Promise(function (r) { setTimeout(function () { r({ status: "still waiting" }); }, 1500); })
+        ]);
         await new Promise(function (r) { setTimeout(r, 20); });
+        const requestsAfter = calls.length;
+        await new Promise(function (r) { setTimeout(r, 200); });
         // Last, so the fetch it costs cannot move the ordering assertions
         // above it: every snapshot passes the setting on to the WanGP tab.
         await api.sync();
-        report({ answer: answer, settled: settled && settled.status });
+        report({ answer: answer, waited: waited && waited.status, quietAfter: calls.length === requestsAfter + 1 });
         return;
     }
     await new Promise(function (r) { setTimeout(r, 60); });
     report({ answer: answer });
 }
 
-async function handback() {
-    // Admitted as a server job, then given back: this WanGP has no queue
-    // worker to submit into, so the server hands it to whoever is here. The
-    // page decided to WATCH when the submission was acknowledged, and unless
-    // it notices, it watches forever a job that is waiting for it.
-    await api.enqueue({ prompt: "x" }, { wait: false });
-    const before = calls.filter(function (c) { return c.url.indexOf("/outbox/claim") !== -1; }).length;
-    JOBS.list = [{ job_id: "1111222233334444", state: "pending", executor: "browser", revision: 5,
-                   request: { request_id: "a".repeat(32) }, result: null, error: null, summary: {}, wangp: null }];
-    for (const s of streams) {
-        s.fire("job", { job_id: "1111222233334444", state: "pending", executor: "browser", revision: 5 }, EPOCH + ":5");
-    }
-    await new Promise(function (r) { setTimeout(r, 40); });
-    const after = calls.filter(function (c) { return c.url.indexOf("/outbox/claim") !== -1; }).length;
-    report({ claimsBefore: before, claimsAfter: after });
+// A snapshot that never comes back. It answers SYNC_TIMEOUT when its time
+// runs out, and the next one is sent rather than queued behind it.
+async function starved() {
+    STARVED = true;
+    const first = api.sync();
+    await CLOCK.advance(16000);
+    const answer = await first;
+    STARVED = false;
+    const second = await api.sync();
+    report({ first: answer && answer.code, second: second && second.ok, syncs: calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length });
 }
 
-async function resets() {
-    await api.enqueue({ prompt: "x" }, { wait: false });
-    const before = calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length;
-    for (const s of streams) { s.fire("reset", { reason: "overflow" }); }
-    await new Promise(function (r) { setTimeout(r, 30); });
-    const after = calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length;
-    // An epoch from another run of Forge: meaningless rather than stale.
-    for (const s of streams) { s.fire("hello", { server_epoch: "9999999999999999", cursor: "9999999999999999:1" }); }
-    await new Promise(function (r) { setTimeout(r, 30); });
-    const afterEpoch = calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length;
-    report({ syncsOnReset: after - before, syncsOnEpochChange: afterEpoch - after });
-}
-
-// The stream goes quiet. The bundle says so on the document, sends the one
-// plain request that tells a dead stream from a page that cannot reach Forge
-// at all, and says how that came back - or does not, when it never does.
-async function silence() {
-    STARVED = MODE === "starved";
-    api.watch();
-    for (const s of streams) { s.fire("open", {}); }
-    const streamsBefore = streams.length;
-    const syncs = function () { return calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length; };
-    const said = function () { return emitted.filter(function (e) { return e && e.kind === "stream"; }).map(function (e) { return e.state; }); };
-    await CLOCK.advance(41000);
-    await new Promise(function (r) { realSetTimeout(r, 20); });
-    const afterSilence = said();
-    const syncsAfterSilence = syncs();
-    // Long enough for the reconnect that follows an answer. A stream that
-    // reopened and is then quiet again is noticed again, which is why the
-    // whole record is reported and the first silence is judged on its own.
-    await CLOCK.advance(45000);
-    await new Promise(function (r) { realSetTimeout(r, 20); });
-    report({
-        afterSilence: afterSilence,
-        syncsAfterSilence: syncsAfterSilence,
-        streamEvents: said(),
-        syncs: syncs(),
-        reopened: streams.length - streamsBefore
-    });
-}
-
-// The page goes to the background and comes back. Nothing of this
-// extension's is held open while it is away, and the return is one snapshot
-// - which is also the test of the connection, written down with its timing -
-// before a fresh stream, never a stream trusted across the absence.
+// The page goes to the background and comes back. Nothing was open to
+// close; the return from a real absence is one snapshot, written down with
+// whether Forge answered and how long it took. A tab flick is nothing.
 function setHidden(yes) {
     document.visibilityState = yes ? "hidden" : "visible";
     for (const fn of listeners.visibilitychange || []) { fn({}); }
 }
+const syncs = function () { return calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length; };
 async function away() {
-    STARVED = MODE === "hiddenstarved";
-    api.watch();
-    for (const s of streams) { s.fire("open", {}); }
-    const syncs = function () { return calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length; };
-    setHidden(true);
-    const closedOnHide = streams.length === 1 && streams[0].closed === true && api.streamState().open === false;
-    // Long enough that a stream held across it is the one that came back
-    // half-dead, and that the watchdog would have fired many times over.
-    await CLOCK.advance(3600000);
-    const streamsWhileAway = streams.length;
-    const syncsWhileAway = syncs();
-    setHidden(false);
-    const streamsAtReturn = streams.length;
-    await CLOCK.advance(1);
-    await new Promise(function (r) { realSetTimeout(r, 20); });
-    const afterReturn = { streams: streams.length, syncs: syncs(), open: api.streamState().open };
-    await CLOCK.advance(20000);
-    await new Promise(function (r) { realSetTimeout(r, 20); });
-    report({
-        closedOnHide: closedOnHide, streamsWhileAway: streamsWhileAway, syncsWhileAway: syncsWhileAway,
-        streamsAtReturn: streamsAtReturn, afterReturn: afterReturn,
-        streamEvents: emitted.filter(function (e) { return e && e.kind === "stream"; }).map(function (e) { return e.state; }),
-        streamsAtEnd: streams.length
-    });
-}
-
-// Asked for a stream while the page is already in the background: nothing
-// is opened until it is back.
-async function openHidden() {
-    setHidden(true);
-    api.watch();
-    const whileHidden = streams.length;
-    await CLOCK.advance(60000);
-    setHidden(false);
-    await CLOCK.advance(1);
-    await new Promise(function (r) { realSetTimeout(r, 20); });
-    report({ whileHidden: whileHidden, afterReturn: streams.length });
-}
-
-// A page that knows of a job the server is running, from a snapshot, but
-// whose stream was let go on purpose. Coming back to it is still a reason to
-// watch, as it always was.
-async function jobsOnly() {
-    api.watch();
-    api.unwatch();
-    JOBS.list = [{ job_id: "1111222233334444", state: "wangp_generating", executor: "server", revision: 2,
-                   request: { request_id: "a".repeat(32) }, result: null, error: null, summary: {}, wangp: null }];
     await api.sync();
-    const before = streams.length - 1;
+    STARVED = MODE === "hiddenstarved";
+    const before = syncs();
     setHidden(true);
-    await CLOCK.advance(60000);
+    await CLOCK.advance(MODE === "flick" ? 5000 : 3600000);
+    const whileAway = syncs() - before;
     setHidden(false);
     await CLOCK.advance(1);
     await new Promise(function (r) { realSetTimeout(r, 20); });
-    report({ before: before, afterReturn: streams.length - 1 });
+    await CLOCK.advance(16000);
+    await new Promise(function (r) { realSetTimeout(r, 20); });
+    report({ whileAway: whileAway, onReturn: syncs() - before });
 }
 
-(MODE === "jobsonly" ? jobsOnly() : MODE === "reset" ? resets() : MODE === "handback" ? handback()
-    : (MODE === "silence" || MODE === "starved") ? silence()
-    : (MODE === "hidden" || MODE === "hiddenstarved") ? away()
-    : MODE === "openhidden" ? openHidden() : main()).catch(function (e) {
+(MODE === "starved" ? starved()
+    : (MODE === "hidden" || MODE === "hiddenstarved" || MODE === "flick") ? away() : main()).catch(function (e) {
     console.log(JSON.stringify({ error: String(e && e.stack || e) }));
 });
 """
@@ -417,14 +317,12 @@ def run() -> Results:
 
     claims = [url for url in server["calls"] if url.endswith("/outbox/claim")]
     r.check("a job the server owns is never claimed by the page", claims == [], str(claims))
-    r.check("and the page opens the one event stream instead",
-            len(server["streams"]) == 1 and server["streams"][0] == "/minipaint-interop/events", str(server["streams"]))
-    r.check("the stream says which page it is for",
-            "page=" in str(server["state"].get("epoch", "")) or server["state"]["open"] is True, str(server["state"]))
+    r.check("and no event stream is opened for it, or for anything", server["streams"] == [], str(server["streams"]))
     r.check("an admitted job answers pending, not refused: it is going to run",
             server["answer"]["status"] == "pending" and server["answer"]["job_id"], str(server["answer"]))
-    r.check("a terminal frame settles a caller waiting on that job, as the success it is",
-            server.get("settled") == "completed" and server["state"]["jobs"] >= 1, str(server.get("settled")))
+    r.check("a caller that waits is answered the moment the server has the job, not when it ends",
+            server.get("waited") == "pending", str(server.get("waited")))
+    r.check("and nothing is asked about the job afterwards", server.get("quietAfter") is True, str(server["calls"]))
     r.check("the submission itself was one request and one acknowledgement",
             len([url for url in server["calls"] if url.endswith("/outbox/submit")]) == 2, str(server["calls"]))
 
@@ -474,94 +372,40 @@ def run() -> Results:
         r.check("nor does it wait to commit WanGP's form: its own Add to Queue chain does that",
                 (browser.get("flushes") or []) == [], str(browser.get("flushes")))
 
-    handback = _run("handback")
-    r.check("the harness drove the hand-back case", handback is not None and "error" not in handback, str(handback)[:300])
-    if handback and "error" not in handback:
-        r.check("a server job handed back to the page starts the page pumping it, rather than being watched forever",
-                handback.get("claimsBefore") == 0 and handback.get("claimsAfter", 0) >= 1, str(handback))
-
-    reset = _run("reset")
-    r.check("the harness drove the reset cases", reset is not None and "error" not in reset, str(reset)[:300])
-    if reset and "error" not in reset:
-        r.check("a reset frame produces exactly one snapshot, not an error",
-                reset.get("syncsOnReset") == 1, str(reset.get("syncsOnReset")))
-        r.check("an epoch from another run of Forge produces exactly one more",
-                reset.get("syncsOnEpochChange") == 1, str(reset.get("syncsOnEpochChange")))
-
-    # The stream's silence, said out loud. The server heartbeats every fifteen
-    # seconds, so forty seconds of nothing is never the server having nothing
-    # to say; it is either the stream alone or the page unable to reach Forge
-    # at all, and the one plain request the watchdog sends is what tells the
-    # two apart. The WanGP tab acts on the difference - it unloads its iframe
-    # to give the browser's connections back when NOTHING comes back - so the
-    # three words have to be said, in this order, and the third has to be
-    # absent when the request never returns.
-    silence = _run("silence")
-    r.check("the harness drove a stream that went quiet", silence is not None and "error" not in silence, str(silence)[:300])
-    if silence and "error" not in silence:
-        r.check("a stream that opens says so", (silence.get("streamEvents") or [])[:1] == ["open"], str(silence.get("streamEvents")))
-        r.check("forty seconds of silence is said out loud, and answered with one plain request",
-                silence.get("afterSilence") == ["open", "silent", "answered"] and silence.get("syncsAfterSilence") == 1, str(silence))
-        r.check("and the stream is then opened again", silence.get("reopened", 0) >= 1, str(silence.get("reopened")))
-        r.check("and a stream that is quiet again is noticed again, the same way",
-                (silence.get("streamEvents") or [])[3:5] == ["silent", "answered"] and silence.get("syncs") == 2, str(silence))
+    # The snapshot's limit. Without one, a snapshot to a Forge that never
+    # answered stayed in flight for the life of the page and every later one
+    # queued behind it.
     starved = _run("starved")
-    r.check("the harness drove a page whose request never came back", starved is not None and "error" not in starved, str(starved)[:300])
+    r.check("the harness drove a snapshot that never came back", starved is not None and "error" not in starved, str(starved)[:300])
     if starved and "error" not in starved:
-        events = starved.get("streamEvents") or []
-        r.check("a request that never comes back is never reported as answered",
-                "answered" not in events, str(starved))
-        r.check("and once its time runs out it is reported as unanswered, which disarms nothing",
-                events[:3] == ["open", "silent", "unanswered"], str(events))
-        r.check("and the journal says Forge did not answer, in so many words",
-                any("Forge did not answer within 15s" in line for line in starved.get("notes") or []), str(starved.get("notes")))
-        # A limit on the snapshot, where there was none: a stuck snapshot used
-        # to stay in flight for the life of the page, and every later one -
-        # the return from the background's included - queued behind it.
-        r.check("and it is tried again after a pause, not in a storm",
-                starved.get("syncs") == 2, str(starved.get("syncs")))
-        r.check("and no second stream is opened while nothing is coming back", starved.get("reopened") == 0, str(starved.get("reopened")))
+        r.check("a snapshot that never comes back answers SYNC_TIMEOUT when its time runs out",
+                starved.get("first") == "SYNC_TIMEOUT", str(starved))
+        r.check("and the next one is sent, not queued behind it", starved.get("second") is True and starved.get("syncs") == 2, str(starved))
+        r.check("and still no stream is opened", starved.get("streams") == [], str(starved.get("streams")))
 
-    # The background. A stream held open across a long absence came back
-    # half-dead in three incidents: open as far as the page could tell, and
-    # silent. So none is held: it is let go on the way out, and the return is
-    # a snapshot first - the test of the connection, written down - and a
-    # fresh stream after it.
+    # The background. Nothing was open, so nothing is closed or reopened; a
+    # return from a real absence is one snapshot and one line that says how
+    # it went - the fact that tells a page that slept from a connection that
+    # stopped working.
     hidden = _run("hidden")
     r.check("the harness drove a page that went to the background", hidden is not None and "error" not in hidden, str(hidden)[:300])
     if hidden and "error" not in hidden:
-        r.check("the stream is closed the moment the page is hidden", hidden.get("closedOnHide") is True, str(hidden))
-        r.check("and nothing is opened or asked for while it is away",
-                hidden.get("streamsWhileAway") == 1 and hidden.get("syncsWhileAway") == 0, str(hidden))
-        r.check("the return takes a snapshot before it opens anything",
-                hidden.get("streamsAtReturn") == 1 and (hidden.get("afterReturn") or {}).get("syncs") == 1, str(hidden))
-        r.check("and then opens a fresh stream, at once rather than after a retry delay",
-                (hidden.get("afterReturn") or {}).get("streams") == 2 and (hidden.get("afterReturn") or {}).get("open") is True,
-                str(hidden.get("afterReturn")))
-        notes = hidden.get("notes") or []
+        r.check("nothing is asked for while the page is away", hidden.get("whileAway") == 0, str(hidden))
+        r.check("the return from a real absence takes exactly one snapshot", hidden.get("onReturn") == 1, str(hidden))
         r.check("and the journal says how long it was away and that Forge answered, with the time it took",
-                any("back after 3600s in the background; Forge answered in" in line for line in notes), str(notes))
+                any("back after 3600s in the background; Forge answered in" in line for line in hidden.get("notes") or []),
+                str(hidden.get("notes")))
+        r.check("and no stream is opened on the way back", hidden.get("streams") == [], str(hidden.get("streams")))
     gone = _run("hiddenstarved")
     r.check("the harness drove a return to a Forge that does not answer", gone is not None and "error" not in gone, str(gone)[:300])
     if gone and "error" not in gone:
-        r.check("a return whose snapshot never comes back opens no stream",
-                gone.get("streamsAtEnd") == 1, str(gone))
-        r.check("and says, in the journal, that the connection is not getting through",
+        r.check("a return whose snapshot never comes back says the connection is not getting through",
                 any("back after 3600s in the background: Forge did not answer within 15s" in line for line in gone.get("notes") or []),
                 str(gone.get("notes")))
-        r.check("and tells the WanGP tab it went unanswered, never answered",
-                "unanswered" in (gone.get("streamEvents") or []) and "answered" not in (gone.get("streamEvents") or []),
-                str(gone.get("streamEvents")))
-    jobs = _run("jobsonly")
-    r.check("the harness drove a page that only knows of a running job", jobs is not None and "error" not in jobs, str(jobs)[:300])
-    if jobs and "error" not in jobs:
-        r.check("a page with a job in progress watches it again when it comes back",
-                jobs.get("before") == 0 and jobs.get("afterReturn") == 1, str(jobs))
-    late = _run("openhidden")
-    r.check("the harness drove a stream asked for in the background", late is not None and "error" not in late, str(late)[:300])
-    if late and "error" not in late:
-        r.check("a stream asked for while hidden is not opened until the page is back",
-                late.get("whileHidden") == 0 and late.get("afterReturn") == 1, str(late))
+    flick = _run("flick")
+    r.check("the harness drove a tab flick", flick is not None and "error" not in flick, str(flick)[:300])
+    if flick and "error" not in flick:
+        r.check("a few seconds away is not a return worth a request", flick.get("onReturn") == 0, str(flick))
     return r
 
 

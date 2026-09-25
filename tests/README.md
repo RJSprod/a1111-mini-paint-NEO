@@ -111,7 +111,16 @@ Neo's own gallery helper in its real shape, because the first version of the
 popup rode the button's Gradio event and that event was refused by Gradio
 before its function ran, on a payload the helper's answer had been wrapped
 into once too often: nothing was logged anywhere, and no graph test can see
-that. It stubs the Canvas too, so it runs in CI.
+that. It stubs the Canvas too, so it runs in CI. Its page carries the WanGP
+tab as well (on its setup card, since the machine has no WanGP), for the check
+that the tab's panel is *parked* rather than hidden while another tab is
+selected: the panel's computed box under the real stylesheet, the width the
+bundle kept for it, and an iframe under it receiving animation frames at the
+rate of one under the tab on screen. Chromium ticks frames in a hidden frame
+too, so the starvation Firefox shows cannot be reproduced there - only the
+invariant the cure rests on, which is that the parked panel has its full box
+where a hidden one has none. Taking the `display: block !important` out of
+the parked rule fails exactly those checks.
 
 `browser_smoke.py` tests the *editor*, and needs the real ForgeCanvas for
 that, so it needs a Forge Neo checkout and does not run in CI.

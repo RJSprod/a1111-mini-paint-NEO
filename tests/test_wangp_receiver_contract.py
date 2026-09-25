@@ -845,6 +845,20 @@ def tab_checks(r: Results) -> None:
                     "height: 100%" not in tab and "height:100%" not in tab, tab)
             r.check("and nothing between the column and the frame is styled, so there is no chain to resolve against",
                     "#wangp_iframe_root" not in tab, tab)
+            # The panel is parked, never hidden: a rendered box, invisible,
+            # keyed on the inline display Gradio writes on every tab switch.
+            # `visibility: hidden` is load-bearing twice over - it is what
+            # keeps the parked page unfocusable, and what the assistant of
+            # SD-Neo-ModelSwitchRefiner reads to know the panel is not the
+            # workspace on screen.
+            parked = tab[tab.find('#tab_wangp[style*="display: none"]'):]
+            parked = parked[:parked.find("}") + 1]
+            r.check("the tab's panel is parked rather than hidden, keyed on the inline display Gradio writes",
+                    parked.startswith('#tab_wangp[style*="display: none"]') and '.minipaint-wangp-tab[style*="display: none"]' in parked
+                    and "display: block !important" in parked, parked)
+            r.check("as a fixed box in the viewport, invisible and untouchable, at the width it has in its place",
+                    "position: fixed" in parked and "visibility: hidden" in parked and "pointer-events: none" in parked
+                    and "width: var(--minipaint-wangp-parked-width, 100vw)" in parked, parked)
             # One measurement, and the script that makes it, RUN rather than
             # read. The offset above the column is a theme's header plus
             # Forge's tab bar plus whether another extension's focus mode has
@@ -871,6 +885,14 @@ def tab_checks(r: Results) -> None:
                 r.check("and the element this sizes is never the element it watches",
                         "wangp_manage_root" in fit["observed"]
                         and "wangp_root" not in fit["observed"], str(fit["observed"]))
+                # The panel is parked at the top of the viewport while another
+                # tab is selected (see the stylesheet), so the column's top
+                # is not where it will be on screen: fitted for that place.
+                r.check("a parked panel, laid out at the top of the viewport, is fitted for where its tab will show it",
+                        fit["parked"] == 900 - (100 + 12) - 40 - 4 and fit["parkedWrote"] == "744px", str(fit))
+                r.check("and left alone when there is no tab strip to measure from", fit["parkedNoStrip"] == 0, str(fit))
+                r.check("shown again it is measured where it is, and the panel's width is kept for the next park",
+                        fit["shownAgain"] == 900 - 120 - 40 - 4 and fit["keptWidth"] == "1200px", str(fit))
 
             # ---- and now the failure this whole shape exists for ----
             print("  (the traceback below is this test breaking the WanGP tab on purpose)")
@@ -1661,10 +1683,17 @@ function el(id, tag) {
         getAttribute: function () { return null; }, setAttribute: function () {},
         querySelector: function () { return null; }, querySelectorAll: function () { return []; },
         addEventListener: function () {}, removeEventListener: function () {},
+        className: "",
         closest: function (sel) {
             let walk = this;
-            const want = sel.replace("#", "");
-            while (walk) { if (walk.id === want) { return walk; } walk = walk.parentElement; }
+            const wants = sel.split(",").map(function (one) { return one.trim(); });
+            while (walk) {
+                for (const want of wants) {
+                    if (want[0] === "#" && walk.id === want.slice(1)) { return walk; }
+                    if (want[0] === "." && (" " + (walk.className || "") + " ").indexOf(" " + want.slice(1) + " ") !== -1) { return walk; }
+                }
+                walk = walk.parentElement;
+            }
             return null;
         }};
 }
@@ -1681,6 +1710,20 @@ holder.querySelector = function (sel) {
     return sel === ".minipaint-wangp-frame" ? frame : null;
 };
 column.children = [holder, manage];
+// Forge's tab strip and the WanGP tab's panel above the column. The panel is
+// parked - laid out at the top of the viewport - while another tab is
+// selected, and the sizer must then fit the frame for where the panel WILL
+// be, not where it is.
+const tabs = el("tabs");
+tabs.clientWidth = 1200;
+const strip = el("strip");
+strip.box = {top: 60, left: 0, bottom: 100, width: 1200, height: 40};
+const panel = el("tab_wangp");
+panel.className = "tabitem";
+panel.box = {top: 100, left: 0, bottom: 900, width: 1200, height: 800};
+panel.parentElement = tabs; column.parentElement = panel;
+panel.children = [column]; tabs.children = [strip, panel];
+tabs.querySelector = function (sel) { return sel.indexOf(".tab-nav") !== -1 ? strip : null; };
 const document = {
     readyState: "complete", visibilityState: "visible",
     body: el("body"), documentElement: el("html"),
@@ -1739,6 +1782,24 @@ out.keptAfterOffscreen = column.style.props["--minipaint-wangp-frame"];
 // Almost no room at all: floored rather than squeezed to nothing.
 column.box = {top: 880, left: 0, width: 1200, height: 20};
 out.floored = api.fitFrame();
+// While the panel is parked it is laid out at the top of the viewport, and
+// the frame is fitted for where the tab will show it: under the strip, plus
+// the column's own offset inside the panel.
+column.box = {top: 12, left: 0, width: 1200, height: 700};
+panel.box = {top: 0, left: 0, bottom: 800, width: 1200, height: 800};
+panel.style.display = "none";
+out.parked = api.fitFrame();
+out.parkedWrote = column.style.props["--minipaint-wangp-frame"];
+// With no strip to measure from, a parked panel is left alone.
+tabs.querySelector = function () { return null; };
+out.parkedNoStrip = api.fitFrame();
+tabs.querySelector = function (sel) { return sel.indexOf(".tab-nav") !== -1 ? strip : null; };
+// Shown again: measured where it is, and the panel's width kept for the next park.
+panel.style.display = "block";
+panel.box = {top: 100, left: 0, bottom: 900, width: 1200, height: 800};
+column.box = {top: 120, left: 0, width: 1200, height: 700};
+out.shownAgain = api.fitFrame();
+out.keptWidth = panel.style.props["--minipaint-wangp-parked-width"];
 process.stdout.write(JSON.stringify(out) + "\n");
 process.exit(0);
 """

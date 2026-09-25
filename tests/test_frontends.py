@@ -211,19 +211,33 @@ def run() -> Results:
     # be raised each time the Clipboard grows another full-window view, and a
     # check that is routinely edited is a check nobody reads.
     #
-    # Exactly three shapes are allowed. Focus mode, which is this canvas
+    # Exactly four shapes are allowed. Focus mode, which is this canvas
     # filling the window on purpose; anything under the Clipboard tab's own
     # root, which cannot reach this canvas at all because the selector cannot
-    # match outside that tab; and the gallery's Send to WanGP popup, a
-    # dialog over the page by design - hidden until a gallery send is pointed
-    # at WanGP, one column wide, and matching nothing but its own elements. A
-    # fixed rule that is none of these is the thing this check exists to
-    # catch, and it is named in the failure.
+    # match outside that tab; the gallery's Send to WanGP popup, a dialog
+    # over the page by design - hidden until a gallery send is pointed at
+    # WanGP, one column wide, and matching nothing but its own elements; and
+    # the WanGP tab's parked panel, which is fixed so that it stays a
+    # rendered box while another tab is selected, and which cannot cover
+    # anything because the same rule makes it invisible and untouchable -
+    # both of which this insists on, because a parked panel that could be
+    # seen or pressed would be the exact thing this check exists to catch.
+    # A fixed rule that is none of these is named in the failure.
     fixed_blocks = [block for block in css.split("}") if "position: fixed" in block]
     selectors = [block.split("{")[0].strip() for block in fixed_blocks]
-    def deliberate(one):
-        return "minipaint-focus" in one or "#minipaint_clipboard_root" in one or one.split("\n")[-1].strip().startswith(".minipaint-intercept")
-    stray = [one for one in selectors if not deliberate(one)]
+    def parked(block):
+        selector = block.split("{")[0].strip().split("\n")[-1].strip()
+        # The declarations, not the block: the rule's own comment names the
+        # two properties it insists on, and a check that read the comment
+        # passed with them taken out of the rule.
+        body = block.split("{", 1)[1] if "{" in block else ""
+        return (selector.startswith("#tab_wangp[style*=") or selector.startswith(".minipaint-wangp-tab[style*=")) \
+            and "visibility: hidden" in body and "pointer-events: none" in body
+    def deliberate(block):
+        one = block.split("{")[0].strip()
+        return "minipaint-focus" in one or "#minipaint_clipboard_root" in one \
+            or one.split("\n")[-1].strip().startswith(".minipaint-intercept") or parked(block)
+    stray = [block.split("{")[0].strip() for block in fixed_blocks if not deliberate(block)]
     r.check("every fixed rule is either focus mode or scoped inside the Clipboard tab, so none can cover the canvas",
             bool(selectors) and not stray, str(stray or selectors))
     r.check("and focus mode is still one of them, so the check is watching a live stylesheet",

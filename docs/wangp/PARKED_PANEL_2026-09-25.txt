@@ -1,0 +1,177 @@
+The WanGP view that froze while WanGP kept working, and the parked panel
+=======================================================================
+
+2026-09-25. Reported three times over two days as "the wangp frame just
+froze": the WanGP page inside the WanGP tab stopped updating and stopped
+taking presses - the Advanced toggle did nothing, no progress, no new results
+- while jobs sent from the Clipboard tab kept being generated on the server,
+and a reload of the frame brought back a page that showed every one of them.
+WanGP itself was never stuck. Standalone WanGP, in a browser tab of its own,
+has never done this.
+
+
+1. What the log said
+--------------------
+
+The freeze that was caught in a log (logs/wangp-log.txt, 15:00 on the 25th)
+rules out the layers this project usually suspects first:
+
+  - The frame had been loaded at 11:35 and never reloaded; no PROXY_STREAM
+    line, no heartbeat miss, no lifecycle line but two short trips to the
+    background, hours earlier.
+  - From 15:00:04 to 15:00:47 the user's presses inside the frame each
+    produced a save (a trusted click is a form touch, and a touch is saved a
+    second later), and every one of those saves went the whole way: through
+    the proxy, into WanGP's Gradio queue, the plugin answered, and the answer
+    came back into the page in 34-122 ms. Twelve round trips through the very
+    page that was "frozen", all fine.
+
+So the server, the proxy, Forge's connection and the WanGP page's own Gradio
+queue were all working at the moment the user's presses did nothing. Whatever
+was wrong was inside that page's own behaviour, and the heartbeat could not
+see it: the page answered, it just was not WanGP any more.
+
+
+2. What is different about a frame in a hidden tab
+--------------------------------------------------
+
+Two things happen to the WanGP page in this extension that never happen to
+standalone WanGP, and both come from being inside a Forge tab:
+
+  - Gradio switches an unselected tab's panel off with an inline
+    `display: none` (Gradio 4.40's TabItem sets the style directly; Forge's
+    own ui.js reads that attribute to find the current tab). A document
+    inside a box that does not exist is not being rendered. Firefox - the
+    host's LibreWolf - gives such a document no animation frames at all;
+    this project measured that in August, when the bridge's own requests
+    queued behind Gradio's frame-scheduled flush until the tab was opened,
+    and answered it with the frame timer in the page head. Gradio 5, which
+    the WanGP page runs, dispatches its events and applies its component
+    updates inside animation frames. The frame timer covers the bridge's
+    requests; it was never meant to keep all of WanGP moving.
+  - Every return to the tab is a `display: none -> block` transition: a
+    relayout of the whole WanGP page, every ResizeObserver in it firing, from
+    a state the page has been suspended in for as long as the user was
+    elsewhere. The user's pattern is exactly that - hours in the Clipboard
+    tab sending jobs, then back to WanGP.
+
+Neither can be proved from the log to be *the* cause: a page that is not
+rendered writes no journal. What can be said is that they are the only
+differences from the environment where the freeze never happens, and that
+the user's own reading of it - "it is running in a frame within a tab that
+is often in the background" - names them.
+
+
+3. What a browser offers, and what it does not
+----------------------------------------------
+
+Nothing in a page can raise a frame's priority. The browser renders
+documents that have layout boxes, in the tab that is in front, and that is
+all. So the choices were: give WanGP a tab of its own (a top-level document
+gets everything standalone gets, at the cost of the embedded experience),
+give it its own origin and port (the same, plus a changed security model),
+or stop hiding the frame. The user wanted the embedded experience kept, so
+the frame stopped being hidden.
+
+
+4. The parked panel
+-------------------
+
+The WanGP panel is never `display: none`. `style.css`:
+
+    #tab_wangp[style*="display: none"],
+    .minipaint-wangp-tab[style*="display: none"] {
+        display: block !important;
+        position: fixed; top: 0; left: 0;
+        width: var(--minipaint-wangp-parked-width, 100vw);
+        overflow: hidden;
+        visibility: hidden;
+        pointer-events: none;
+        z-index: -1;
+    }
+
+Keyed on the very inline style Gradio writes, so the panel is parked from its
+first paint, with no script in the loop and no flash of it in the page flow;
+a page whose bundle never loaded is parked all the same. While its tab is not
+the one selected the panel is a rendered box, fixed in the viewport,
+invisible, unfocusable (a hidden box is not focusable and not in the
+accessibility tree), untouchable, behind everything. Its document keeps its
+layout and its animation frames. When the tab is selected, Gradio writes
+`display: block`, the rule stops matching, and the panel is back in its
+place with nothing to relayout: the bundle kept its width.
+
+Why `visibility: hidden` and not `opacity: 0`: the assistant in
+SD-Neo-ModelSwitchRefiner decides which workspace is on screen by asking
+whether a panel's computed visibility is hidden (`visible()` in its
+forge_assistant_host.js). A parked WanGP panel answers "not showing" there,
+so its focus mode keeps taking the right workspace. An opacity-zero panel
+would have read as showing.
+
+Why nothing moves in the DOM: an iframe that is moved reloads its document.
+The frame stays where the tab's repair observer, the heartbeat and the
+bridge expect it; the only new code is the rule above and a small park
+controller in `browser/minipaint_wangp.js`.
+
+What the bundle adds (`watchTabPanel` and friends):
+
+  - It finds the panel from the tab's own root (`closest(".tabitem")`),
+    marks it `minipaint-wangp-tab` for a host that named it otherwise, and
+    watches its `style` attribute - one element, one attribute.
+  - It keeps the panel's width in its place (`--minipaint-wangp-parked-width`,
+    measured from the panel while shown and from the tab strip's container
+    while parked, so a page that opened on another tab parks WanGP at its
+    real width from the start). A fixed box shrink-wraps otherwise, and a
+    width that changed with the tab would relayout WanGP on every switch.
+  - `fitFrame` fits the frame for where the panel WILL be - under the tab
+    strip, plus the column's offset inside the panel - rather than for the
+    top of the viewport where it is parked, so the WanGP page is the right
+    size before its tab is ever opened; the real measurement corrects any
+    difference on the first show.
+  - "On screen" for the heartbeat and the leaving flush now means the tab
+    is selected AND the frame intersects the viewport. A parked frame does
+    the second - it is parked inside the viewport - so intersection alone
+    stopped meaning anything.
+  - A journal line each way: `tab: the WanGP tab left the screen; its page
+    is parked - rendered, invisible, still running` and `tab: the WanGP tab
+    is on screen again after Ns parked; meanwhile its page ran N frames by
+    the browser and M by the bridge's timer`. M near zero, with N large, is
+    the parking working; M large means the page was not being rendered
+    after all and the whole diagnosis is wrong.
+
+
+5. What was measured
+--------------------
+
+In headless Chromium, against the real stylesheet (tests/browser_intercept.py,
+"the WanGP panel is parked, not hidden"): with txt2img selected the WanGP
+panel's inline style says `display: none`, its computed style says block,
+fixed, hidden, pointer-events none, and its box is 1216 x N px in a 1400 px
+window - the width the bundle kept for it. An iframe under it has a 200 x
+100 box; one under a `display: none` box has none. Over one second the
+parked iframe received animation frames at the same rate as one under the
+tab on screen. Selecting the WanGP tab puts the panel back in flow with the
+bundle saying so; leaving parks it again. Taking the `display: block
+!important` out of the rule fails exactly the box checks.
+
+What Chromium cannot show is the starvation itself: it ticks frames in a
+`display: none` frame too (a probe found 77 frames a second in all three of a
+shown, a hidden and a parked frame). Firefox is where a hidden frame gets
+none, and the host's browser is Firefox. The journal's frame counts are the
+measurement on the machine that matters.
+
+On the virtual clock (tests/test_wangp_protocol.py, `panel_checks`): the
+parked page's heartbeat does not beat, a touched form is committed when the
+tab is left although the frame never left the viewport, the width is kept,
+and five mutations of the controller each fail the check they should.
+
+
+6. What this does not change
+----------------------------
+
+The browser tab itself in the background is throttled exactly as standalone
+WanGP would be. The proxy and Forge's connection are untouched - the log
+says they were not the fault. Forge's own scripts still share the WanGP
+page's thread; a heavy gallery update in txt2img can still delay a frame,
+which only a tab of its own would end. If the freeze survives the parked
+panel, the journal will say so in the `tab:` lines' frame counts, and the
+own-tab design is the next step; nothing here gets in its way.

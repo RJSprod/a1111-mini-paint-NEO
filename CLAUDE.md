@@ -147,6 +147,29 @@ now presses the hidden Refresh once at boot when it finds the root with no
 iframe, and again whenever a runtime frame on the event spine disagrees with
 what the tab shows. `Runtime._announce()` is what publishes those frames.
 
+**A frame in a hidden tab is a document the browser does not render.** Gradio
+switches an unselected tab's panel off with `display: none`; a document inside
+a box that does not exist gets no animation frames in Firefox, and Gradio 5
+inside the WanGP page dispatches its events and applies its updates inside
+animation frames. On 2026-09-25 the WanGP view "froze" - clicks did nothing,
+progress and results stopped arriving - while the server, the proxy and the
+bridge's own requests through that very page all kept working: the page had
+spent hours in a hidden Forge tab between uses, and every return was a
+`display:none -> block` relayout of the whole WanGP page. The bridge's frame
+timer keeps the *bridge's* requests moving through that; it never kept all of
+WanGP moving. So the WanGP panel is never `display: none`: `style.css` parks it
+instead - keyed on the very inline style Gradio writes, a rendered box, fixed in
+the viewport, `visibility: hidden`, untouchable - and `browser/minipaint_wangp.js`
+keeps the panel's width across the switch, fits the frame for where the panel
+will be, and takes "on screen" to mean the tab is selected. Do not hide that
+panel, do not move the iframe in the DOM (a moved iframe reloads its document),
+and do not turn the rule into `opacity: 0`: the hidden visibility is what keeps
+the parked page unfocusable and what the sibling assistant's `visible()` reads
+to know the panel is not the workspace on screen. `tests/browser_intercept.py`
+measures the parked box and the frames; the journal's `tab:` lines say how long
+the page was parked and how many of its frames the browser ran meanwhile.
+`docs/wangp/PARKED_PANEL_2026-09-25.txt` has the log evidence.
+
 **A silent stream is the only free signal a page gets.** Forge heartbeats every
 fifteen seconds on both of its streams, so silence never means "nothing to
 say". `minipaint_neo/wangp/proxy.py` therefore bounds a proxied stream's idle
@@ -345,6 +368,13 @@ along. Moving either number means moving the check in the other repository.
 assistant puts its panel away for it. Fire and forget: nothing waits for a
 listener, and a page with none behaves as it always did. A replacement picture
 is the same overlay and is announced once.
+
+A third thing is shared since 2026-09-25, and it is a reading rather than a
+contract: the assistant's `visible()` (its `forge_assistant_host.js`) takes a
+panel whose computed visibility is hidden as not showing, and that is what
+keeps a parked WanGP panel - a rendered box, `visibility: hidden` - from being
+mistaken for the workspace on screen. The parked rule in `style.css` says so;
+a change to either side has to keep the other true.
 
 `RJSprod/SD-Neo-ModelSwitchRefiner` runs a local LLM. Its logs showed
 `llama-server` taking every CPU core for nine minutes with its model on the

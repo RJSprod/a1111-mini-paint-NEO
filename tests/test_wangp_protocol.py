@@ -1498,10 +1498,24 @@ console.debug = function (prefix, message) { if (prefix === "MiniPaint WanGP:") 
 // ---- a page ---------------------------------------------------------------
 class El {
   constructor(tag) {
-    this.tagName = String(tag).toUpperCase(); this.children = []; this.parentNode = null; this.style = { cssText: "" };
+    this.tagName = String(tag).toUpperCase(); this.children = []; this.parentNode = null;
+    // An inline style with both faces the bundle uses: properties, and
+    // setProperty/getPropertyValue for the custom ones.
+    this.style = { cssText: "", props: {},
+                   setProperty: function (k, v) { this.props[k] = String(v); },
+                   getPropertyValue: function (k) { return this.props[k] || ""; } };
     this.attrs = {}; this.listeners = {}; this.id = ""; this.className = ""; this.textContent = ""; this.hidden = false;
-    this.dataset = {};
+    this.dataset = {}; this.box = { top: 0, left: 0, bottom: 0, width: 0, height: 0 }; this.clientWidth = 0;
+    const self = this;
+    this.classList = {
+      add: function (c) { if (!self.classList.contains(c)) { self.className = (self.className + " " + c).trim(); } },
+      remove: function (c) { self.className = self.className.split(" ").filter(function (x) { return x && x !== c; }).join(" "); },
+      contains: function (c) { return self.className.split(" ").indexOf(c) !== -1; }
+    };
   }
+  get parentElement() { return this.parentNode; }
+  getBoundingClientRect() { return this.box; }
+  closest(sel) { let n = this; while (n) { if (n instanceof El && matches(n, sel)) { return n; } n = n.parentNode; } return null; }
   setAttribute(k, v) { this.attrs[k] = String(v); if (k === "id") { this.id = String(v); } }
   getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; }
   appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
@@ -1511,19 +1525,41 @@ class El {
   querySelector(sel) { return find(this, sel); }
   get isConnected() { let n = this; while (n) { if (n === docRoot) { return true; } n = n.parentNode; } return false; }
 }
-function matches(el, sel) {
+function matchesOne(el, sel) {
+  sel = sel.trim();
+  if (!sel) { return false; }
   if (sel[0] === "#") { return el.id === sel.slice(1); }
   if (sel[0] === ".") { return (" " + el.className + " ").indexOf(" " + sel.slice(1) + " ") !== -1; }
+  if (sel[0] === "[") { const m = /^\[([\w-]+)='([^']*)'\]$/.exec(sel); return !!m && el.getAttribute(m[1]) === m[2]; }
   return el.tagName === sel.toUpperCase();
 }
+function matches(el, sel) { return sel.split(",").some(function (one) { return matchesOne(el, one); }); }
 function find(node, sel) {
-  if (sel.indexOf(" ") !== -1) { return null; }
+  if (sel.indexOf(",") === -1 && sel.indexOf(" ") !== -1) { return null; }
   for (const c of node.children) { if (matches(c, sel)) { return c; } const deep = find(c, sel); if (deep) { return deep; } }
   return null;
 }
 const docRoot = new El("body");
-const root = new El("div"); root.id = "wangp_iframe_root"; docRoot.appendChild(root);
+// Forge's tab strip and the WanGP tab's panel, the way Gradio renders them:
+// the panel is switched off with an inline display none whenever another
+// tab is selected, which is what the stylesheet's parking is keyed on.
+const tabs = new El("div"); tabs.id = "tabs"; tabs.className = "tabs"; tabs.clientWidth = 1200; docRoot.appendChild(tabs);
+const strip = new El("div"); strip.className = "tab-nav"; strip.setAttribute("role", "tablist");
+strip.box = { top: 60, left: 0, bottom: 100, width: 1200, height: 40 }; tabs.appendChild(strip);
+const panel = new El("div"); panel.id = "tab_wangp"; panel.className = "tabitem"; panel.setAttribute("role", "tabpanel");
+panel.style.display = MODE === "park" ? "none" : "block";
+panel.box = { top: 100, left: 0, bottom: 900, width: 1200, height: 800 }; tabs.appendChild(panel);
+const root = new El("div"); root.id = "wangp_iframe_root"; panel.appendChild(root);
 const frame = new El("iframe"); frame.id = "wangp_iframe"; frame.attrs.src = "/wan2gp/"; root.appendChild(frame);
+const mutationObservers = [];
+// Forge selecting another tab, or this one: Gradio writes the panel's inline
+// display, and the attribute observer the bundle put on the panel hears it.
+function selectTab(on) {
+  panel.style.display = on ? "block" : "none";
+  for (const o of mutationObservers) {
+    if (o.target === panel) { o.fn([{ type: "attributes", attributeName: "style", target: panel }]); }
+  }
+}
 
 // ---- WanGP, inside the frame -------------------------------------------------
 const B = {
@@ -1539,7 +1575,9 @@ const B = {
 let inner = null;
 function newDocument() {
   inner = { listeners: {}, addEventListener: function (k, f) { (this.listeners[k] = this.listeners[k] || []).push(f); },
-            postMessage: function (message) { toBridge(message); } };
+            postMessage: function (message) { toBridge(message); },
+            // The bridge's frame timer, as its head script leaves it.
+            __minipaintFrames: { installed: "head", timedFrames: 0, nativeFrames: 0 } };
   frame.contentWindow = inner;
 }
 newDocument();
@@ -1624,7 +1662,11 @@ const win = {
   addEventListener: function (k, f) { (listeners[k] = listeners[k] || []).push(f); },
   setTimeout: vSet, clearTimeout: vClear, setInterval: vEvery, clearInterval: vClear, document: doc,
   matchMedia: () => ({ matches: false, addEventListener() {} }),
-  MutationObserver: class { observe() {} disconnect() {} },
+  MutationObserver: class {
+    constructor(fn) { this.fn = fn; this.target = null; mutationObservers.push(this); }
+    observe(target, options) { this.target = target; this.options = options; }
+    disconnect() { this.target = null; }
+  },
   IntersectionObserver: class { constructor(fn) { this.fn = fn; observers.push(this); } observe() {} disconnect() {} },
   getComputedStyle: function () { return { position: "static", display: "block" }; },
   requestAnimationFrame: (f) => vSet(f, 16), innerHeight: 900,
@@ -1903,6 +1945,42 @@ const scenarios = {
     B.busyMs = 0;
     await until(t0 + 25100);
     return { noted, cleared: linesWith("no longer waiting on WanGP").length, bar: !!bar(), navigations: B.navigations };
+  },
+
+  // The tab's panel: parked while another tab is selected, never hidden. The
+  // page opened on another tab, so the panel was switched off before the
+  // bundle loaded (see the panel above).
+  park: async function () {
+    api.inheritSettings(true);
+    api.attach(null);
+    await advance(1000);
+    const atBoot = { tab: api.state().tab, width: panel.style.props["--minipaint-wangp-parked-width"] || "",
+                     said: linesWith("tab: the WanGP tab is not the one on screen; its page is parked").length,
+                     marked: panel.classList.contains("minipaint-wangp-tab") };
+    // A parked frame is inside the viewport: the intersection observer says so.
+    screen(true);
+    await advance(20001);
+    const parkedPings = B.pings;
+    inner.__minipaintFrames.nativeFrames = 1200;
+    inner.__minipaintFrames.timedFrames = 3;
+    selectTab(true);
+    await advance(1);
+    const shown = { tab: api.state().tab, pings: B.pings,
+                    said: linesWith("tab: the WanGP tab is on screen again after 21s parked; meanwhile its page ran 1200 frames by the browser and 3 by the bridge's timer").length };
+    // A touch, then another tab selected: the leaving flush carries it,
+    // though the frame never left the viewport.
+    const base = B.presses;
+    changed(); await advance(200);
+    selectTab(false);
+    await advance(10);
+    const leavePresses = B.presses - base;
+    await advance(3000);
+    const leaveTotal = B.presses - base;
+    const parkedAgain = api.state().tab;
+    selectTab(true);
+    await advance(1);
+    return { atBoot, parkedPings, shown, leavePresses, leaveTotal, parkedAgain,
+             again: linesWith("tab: the WanGP tab is on screen again after 3s parked").length };
   }
 };
 
@@ -1916,8 +1994,8 @@ const scenarios = {
 """
 
 
-def _run_live(modes):
-    """Every mode against the real bundle, as {mode: answer}."""
+def _run_live(modes, source=None):
+    """Every mode against the real bundle - or a mutated copy - as {mode: answer}."""
     import json as _json
     import shutil
     import subprocess
@@ -1932,7 +2010,7 @@ def _run_live(modes):
         (root / "harness.js").write_text(_LIVE_HARNESS, encoding="utf-8")
         for mode in modes:
             try:
-                run = subprocess.run([node, str(root / "harness.js"), str(BROWSER_COPY), mode],
+                run = subprocess.run([node, str(root / "harness.js"), str(source or BROWSER_COPY), mode],
                                      capture_output=True, text=True, timeout=120, check=False)
                 out = run.stdout.strip().splitlines()
                 answers[mode] = _json.loads(out[-1]) if out else {"error": run.stderr[-400:]}
@@ -2126,6 +2204,114 @@ def heartbeat_checks(r: Results) -> None:
             busy.get("noted") == 1 and busy.get("cleared") == 1, repr(busy))
     r.check("and nothing is done about it - a generation can hold a request for minutes",
             busy.get("bar") is False and busy.get("navigations") == 0, repr(busy))
+
+
+#: One decision of the tab-panel parking reverted per entry, with the key of
+#: the 'park' answer that must then read differently. An anchor that no
+#: longer matches the live source is itself a failure.
+_PANEL_MUTATIONS = (
+    (
+        "on screen ignores whether the tab is selected",
+        "const showing = T.selected === false ? false : P.intersecting;",
+        "const showing = P.intersecting;",
+        "parkedPings", 0, 5,
+    ),
+    (
+        "the panel is never watched",
+        "        watchTabPanel();\n        attach(null);",
+        "        attach(null);",
+        "atBoot.tab.found", True, False,
+    ),
+    (
+        "a switched-off panel reads as shown",
+        "        return panelSwitchedOff(T.panel || tabPanel());",
+        "        return false;",
+        "atBoot.tab.parked", True, False,
+    ),
+    (
+        "the panel's width is not kept",
+        "            T.framesAtPark = frameCounts();\n            keepPanelWidth();",
+        "            T.framesAtPark = frameCounts();",
+        "atBoot.width", "1200px", "",
+    ),
+    (
+        "leaving the tab commits nothing",
+        "if (was === true && showing === false) { flushProactively(why); }",
+        "if (false) { flushProactively(why); }",
+        "leavePresses", 1, 0,
+    ),
+)
+
+
+def _dig(answer, path):
+    """``answer["a"]["b"]`` for ``"a.b"``, or None."""
+    found = answer
+    for key in path.split("."):
+        if not isinstance(found, dict):
+            return None
+        found = found.get(key)
+    return found
+
+
+def panel_checks(r: Results) -> None:
+    """The WanGP tab's panel parked - rendered, invisible - never hidden.
+
+    WHAT THIS EXISTS TO CATCH.
+
+    Gradio switches an unselected tab's panel off with display: none, and a
+    document inside a box that does not exist is not rendered: Firefox gives
+    it no animation frames, and Gradio 5 in the WanGP page dispatches its
+    events and applies its updates inside animation frames. So the WanGP
+    page stood still whenever another Forge tab was selected, and every
+    return was a relayout. The stylesheet keeps the panel a rendered box
+    (tests/browser_intercept.py measures that in a browser); this is the
+    bundle's half: the panel found and marked, its real width kept across
+    the switch so WanGP's layout does not change, "on screen" meaning the
+    tab is selected - a parked frame still intersects the viewport - so the
+    heartbeat does not beat for a page nobody can see and the leaving flush
+    still happens, and a journal line each way saying what the page did
+    meanwhile.
+    """
+    import tempfile
+
+    answers = _run_live(("park",))
+    if answers is None:
+        r.check("node is available for the tab panel checks (skipped)", True)
+        return
+    park = answers.get("park", {})
+    r.check("the harness drove the real bundle through a park", "error" not in park and not park.get("thrown"), repr(park)[:400])
+    boot = park.get("atBoot") or {}
+    tab = boot.get("tab") or {}
+    r.check("a page that opened on another tab finds its panel switched off, and marks it for the stylesheet",
+            tab.get("found") is True and tab.get("selected") is False and tab.get("parked") is True
+            and tab.get("parks") == 1 and boot.get("marked") is True, repr(boot))
+    r.check("and keeps the panel's width in its place - measured from the strip's container while it is parked",
+            boot.get("width") == "1200px", repr(boot))
+    r.check("and says so, once", boot.get("said") == 1, repr(boot))
+    r.check("a parked frame intersects the viewport and is still not on screen: the heartbeat does not beat for it",
+            park.get("parkedPings") == 0, repr(park))
+    shown = park.get("shown") or {}
+    r.check("selecting the tab is on screen: the heartbeat asks at once",
+            (shown.get("tab") or {}).get("selected") is True and (shown.get("tab") or {}).get("parked") is False
+            and shown.get("pings") == 1, repr(shown))
+    r.check("and the journal says how long the page was parked and what it did meanwhile", shown.get("said") == 1, repr(shown))
+    r.check("leaving the tab commits a touched form, though the frame never left the viewport - and only once",
+            park.get("leavePresses") == 1 and park.get("leaveTotal") == 1, repr(park))
+    again = park.get("parkedAgain") or {}
+    r.check("and the page is parked again, counted", again.get("parked") is True and again.get("parks") == 2, repr(again))
+    r.check("and coming back says so again", park.get("again") == 1, repr(park))
+
+    # -- and every one of those checks bites ---------------------------------
+    source = BROWSER_COPY.read_text(encoding="utf-8")
+    with tempfile.TemporaryDirectory(prefix="minipaint-wangp-panel-") as scratch:
+        for name, old, new, key, well, ill in _PANEL_MUTATIONS:
+            if not r.check(f"the check for '{name}' still points at live code", source.count(old) == 1,
+                           f"{source.count(old)} matches"):
+                continue
+            mutated = pathlib.Path(scratch) / "mutated.js"
+            mutated.write_text(source.replace(old, new), encoding="utf-8")
+            answer = (_run_live(("park",), source=mutated) or {}).get("park") or {}
+            r.check(f"'park' fails when {name}", _dig(answer, key) == ill and well != ill, f"{key}={_dig(answer, key)!r}")
 
 
 #: The script in the WanGP document, answering the heartbeat and reporting
@@ -4514,6 +4700,7 @@ def run() -> Results:
     proactive_flush_checks(r)
     live_settings_checks(r)
     heartbeat_checks(r)
+    panel_checks(r)
     bridge_liveness_checks(r)
     recovery_checks(r)
     page_head_checks(r)

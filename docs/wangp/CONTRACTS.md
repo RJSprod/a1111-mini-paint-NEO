@@ -304,10 +304,13 @@ The frame timer (`bridge_js.head_script`, placed by `page_head`) wraps
 `requestAnimationFrame` in the page head, before Gradio's modules load. Gradio
 schedules every event trigger inside an animation frame and gates it on its
 component-update flush, which Gradio's core schedules through a reference it
-captured when its module was evaluated; the iframe is not rendered while the
-Forge tab holding it is not on screen, and a browser that gives such a
-document no frames leaves that flush - and every bridge request behind it -
-waiting until the WanGP tab is opened again. So every frame requested in the
+captured when its module was evaluated; the iframe used to be a document the
+browser was not rendering while the Forge tab holding it was not on screen
+(since 2026-09-25 the tab's panel is parked rather than hidden - see
+`PARKED_PANEL_2026-09-25.txt` - so this is now the fallback for a page whose
+stylesheet did not apply), and a browser that gives such a document no
+frames leaves that flush - and every bridge request behind it - waiting
+until the WanGP tab is opened again. So every frame requested in the
 page is also given a timer, short while a bridge request is in flight
 (`FRAME_FALLBACK_MS`) and longer otherwise (`IDLE_FRAME_FALLBACK_MS`), and the
 first to fire runs the callback; a rendered page's own frame always wins.

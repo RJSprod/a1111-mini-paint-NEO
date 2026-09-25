@@ -978,6 +978,57 @@
     height: var(--minipaint-wangp-frame, 80vh);
 }
 
+/* -- the panel is parked, never hidden ------------------------------- */
+/*
+   Gradio switches an unselected tab's panel off with an inline
+   `display: none`, and a document inside a box that does not exist is not
+   rendered: Firefox gives it no animation frames at all, and Gradio 5 runs
+   its event dispatch and its component updates inside animation frames. So
+   WanGP's page stood still whenever another Forge tab was the one selected -
+   thousands of its frames were being run by the bridge's fallback timer -
+   and every return was a display:none -> block relayout of the whole page.
+   Neither happens to WanGP in a tab of its own, which is why it never froze
+   there.
+
+   So the WanGP panel is never `display: none`. While its tab is not the one
+   selected it is PARKED instead: still a rendered box, fixed in the viewport,
+   invisible, unfocusable and untouchable, behind everything. Gradio keeps
+   writing its inline `display: none` on every switch, and this rule is keyed
+   on that very text - Forge's own ui.js reads the same attribute to find the
+   current tab - so the panel is parked from its first paint, with no script
+   in the loop and no flash of it in the page flow. The bundle only keeps the
+   panel's real width across the switch (`--minipaint-wangp-parked-width`,
+   so WanGP's layout does not change at all), fits the frame for where the
+   panel will be rather than where it is parked, and says in the journal when
+   the tab left and came back and what its page did meanwhile.
+
+   `visibility: hidden` and not `opacity: 0`, for two reasons. A hidden box is
+   not focusable and not in the accessibility tree, so nothing can reach the
+   parked page by keyboard or screen reader. And SD-Neo-ModelSwitchRefiner's
+   assistant decides which workspace is on screen by asking whether a panel's
+   computed visibility is hidden (`visible()` in its forge_assistant_host.js)
+   - a parked WanGP panel must answer "not showing" there, or its focus mode
+   would take the wrong workspace. A same-origin frame with a layout box
+   shares the page's rendering loop whatever its visibility, so the frames
+   keep coming; tests/browser_intercept.py measures exactly that.
+
+   `z-index: -1` and `pointer-events: none` are belt and braces under the
+   visibility: nothing hit-tests a hidden box either way. The width falls back
+   to the viewport's until the bundle has measured the panel in its place.
+*/
+#tab_wangp[style*="display: none"],
+.minipaint-wangp-tab[style*="display: none"] {
+    display: block !important;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: var(--minipaint-wangp-parked-width, 100vw);
+    overflow: hidden;
+    visibility: hidden;
+    pointer-events: none;
+    z-index: -1;
+}
+
 /* --------------------------------------------------------------------
  * Send to WanGP popup
  *

@@ -377,6 +377,19 @@ WanGP's own connection stalling while its page still runs — the log says when 
 request has waited on WanGP for a long time, and nothing is reloaded for it, because a
 generation can hold a request for minutes without anything being wrong.
 
+**Why the WanGP tab is never hidden.** Forge switches an unselected tab's panel off with
+`display: none`, and a page inside a box that does not exist is not rendered: Firefox gives
+it no animation frames, and WanGP's Gradio runs its events and its updates inside animation
+frames — so the WanGP page stood still whenever another tab was selected, and a long stay in
+the Clipboard tab could come back to a WanGP view that no longer took presses or showed
+results while WanGP itself carried on. The WanGP panel is therefore *parked* rather than
+hidden while another tab is selected: still a rendered box, fixed in the window, invisible
+and untouchable, at the width it has in its place, so the WanGP page keeps running exactly as
+it does in a tab of its own and comes back without a relayout. The page's log says
+`tab: the WanGP tab left the screen; its page is parked` and, on return, how long it was
+parked and how many of its frames the browser ran meanwhile. Nothing reloads and nothing
+changes on screen; `docs/wangp/PARKED_PANEL_2026-09-25.txt` is the whole story.
+
 **One WanGP, and an emergency stop.** The extension runs one WanGP per machine, not just
 per Forge: a second Forge server started against the same install finds the first one's
 lock and refuses to start another (`WANGP_ALREADY_MANAGED`) rather than putting a second

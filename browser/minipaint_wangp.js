@@ -219,6 +219,13 @@ window.minipaintWanGP = (function () {
     //: room for. Read only, and only to measure.
     const MANAGE_ROOT_ID = "wangp_manage_root";
     const IFRAME_ID = "wangp_iframe";
+    //: The tab's panel - Forge's `#tab_wangp` - is found from the root, never
+    //: by id, and marked with this so the stylesheet parks it whatever a
+    //: host named it. See watchTabPanel.
+    const TAB_PANEL_CLASS = "minipaint-wangp-tab";
+    //: The panel's width in its place, kept across a park so the WanGP
+    //: page's layout never changes with the tab. See keepPanelWidth.
+    const PARKED_WIDTH_PROPERTY = "--minipaint-wangp-parked-width";
     // The tab mints the channel id per iframe load and puts it in a hidden
     // textbox rather than in the iframe's URL, so that "which session is this"
     // and "where do the bytes go" stay two separate facts. The attributes are
@@ -370,7 +377,11 @@ window.minipaintWanGP = (function () {
         wanted: null,
         running: false,
         lastAt: 0,
+        //: On screen is the tab selected AND the frame intersecting the
+        //: viewport; a parked frame does the second without the first. See
+        //: syncOnScreen.
         onScreen: null,
+        intersecting: null,
         observer: null,
         //: Change notices from the WanGP page, counted. A save remembers the
         //: count it covered, so a notice that lands while it runs is not lost.
@@ -383,6 +394,21 @@ window.minipaintWanGP = (function () {
         changeTimer: 0,
         //: How many saves the form's changes have made, for a bug report.
         saves: 0
+    };
+
+    //: The tab's panel: whether Forge has the WanGP tab selected, and how
+    //: long its page has been parked. See watchTabPanel.
+    const T = {
+        panel: null,
+        observer: null,
+        //: null until a panel has been found and read. A page without one -
+        //: an unusual host, a harness - is treated as always selected.
+        selected: null,
+        parkedAt: 0,
+        parks: 0,
+        //: The WanGP page's frame counts when it was parked, so the return
+        //: can say what the page did meanwhile.
+        framesAtPark: null
     };
 
     /* ------------------------------------------------------------------ */
@@ -2041,24 +2067,209 @@ window.minipaintWanGP = (function () {
      * same fact stated in a way the browser will tell us.
      */
     function watchOnScreen(frame) {
-        if (!frame || typeof window.IntersectionObserver !== "function") { return; }
+        if (!frame) { return; }
+        P.onScreen = null;
+        P.intersecting = null;
+        if (typeof window.IntersectionObserver !== "function") {
+            // An engine without it cannot say where the frame is; the tab's
+            // panel still says whether the tab is selected, which is the
+            // half that matters.
+            P.intersecting = true;
+            syncOnScreen("the WanGP tab left the screen");
+            return;
+        }
         try {
             if (P.observer) { P.observer.disconnect(); }
-            P.onScreen = null;
             P.observer = new window.IntersectionObserver(function (entries) {
                 for (const entry of entries) {
-                    const showing = !!(entry && entry.isIntersecting);
-                    const was = P.onScreen;
-                    P.onScreen = showing;
-                    // Only the leaving edge, and only once it has been seen
-                    // on screen: a panel that was hidden all along has no
-                    // uncommitted anything to carry.
-                    if (was === true && !showing) { flushProactively("the WanGP tab left the screen"); }
-                    if (was !== showing) { heartbeatSync(); }
+                    P.intersecting = !!(entry && entry.isIntersecting);
+                    syncOnScreen("the WanGP tab left the screen");
                 }
             });
             P.observer.observe(frame);
         } catch (e) { /* an engine without it loses the trigger, nothing else */ }
+    }
+
+    /**
+     * On screen means both: the WanGP tab is the selected one, and the frame
+     * intersects the viewport. A parked frame does the second - it is parked
+     * inside the viewport, invisible - so intersection alone stopped meaning
+     * anything the moment the panel stopped being hidden. Leaving is the last
+     * moment an uncommitted form exists, and the heartbeat only beats for a
+     * page somebody can see.
+     */
+    function syncOnScreen(why) {
+        const showing = T.selected === false ? false : P.intersecting;
+        const was = P.onScreen;
+        if (was === showing) { return; }
+        P.onScreen = showing;
+        // Only the leaving edge, and only once it has been seen on screen: a
+        // panel that was hidden all along has no uncommitted anything to carry.
+        if (was === true && showing === false) { flushProactively(why); }
+        heartbeatSync();
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* The tab's panel: parked, never hidden                                 */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * WHY THE PANEL IS PARKED RATHER THAN HIDDEN.
+     *
+     * Gradio switches an unselected tab's panel off with an inline
+     * `display: none`. A document inside a box that does not exist is not
+     * being rendered, and Firefox gives such a document no animation frames
+     * at all - while Gradio 5, inside the WanGP page, runs its event dispatch
+     * and its component updates inside animation frames. So the WanGP page
+     * stood still whenever another Forge tab was selected (the bridge's
+     * fallback timer was running thousands of its frames for it), and every
+     * return was a display:none -> block relayout of the whole page. WanGP
+     * in a tab of its own has neither, which is why it never froze there.
+     *
+     * The stylesheet does the parking: keyed on the very inline style Gradio
+     * writes, it keeps the panel a rendered box - fixed in the viewport,
+     * invisible, unfocusable, untouchable - from its first paint, with no
+     * script in the loop. What this file adds is the part a stylesheet
+     * cannot: the panel's real width, kept across the switch so WanGP's
+     * layout never changes; the frame fitted for where the panel WILL be
+     * rather than where it is parked; "on screen" for the heartbeat and the
+     * leaving flush meaning the tab is selected, since a parked frame still
+     * intersects the viewport; and a journal line each way, with what the
+     * WanGP page did while it was parked.
+     *
+     * Found from the tab's own root, never by id: Forge names the panel
+     * `#tab_wangp` and the stylesheet addresses that; the class this marks it
+     * with covers a host that named it otherwise.
+     */
+    function tabPanel() {
+        const holder = rootElement();
+        if (!holder || typeof holder.closest !== "function") { return null; }
+        try { return holder.closest(".tabitem, [role='tabpanel']"); } catch (e) { return null; }
+    }
+
+    /** Whether Gradio has switched this panel off - the inline style it
+     * writes on every tab change, which the stylesheet's parking is keyed on. */
+    function panelSwitchedOff(panel) {
+        try { return !!(panel && panel.style && panel.style.display === "none"); } catch (e) { return false; }
+    }
+
+    /** Whether the WanGP tab is not the selected one right now. */
+    function parked() {
+        return panelSwitchedOff(T.panel || tabPanel());
+    }
+
+    function watchTabPanel() {
+        const panel = tabPanel();
+        if (!panel) { return false; }
+        if (T.panel === panel) { return true; }
+        T.panel = panel;
+        try { panel.classList.add(TAB_PANEL_CLASS); } catch (e) { /* the id-keyed rule still parks it */ }
+        if (T.observer) {
+            try { T.observer.disconnect(); } catch (e) { /* gone with its page */ }
+            T.observer = null;
+        }
+        if (typeof MutationObserver === "function") {
+            try {
+                // One element, one attribute: the inline style Gradio writes.
+                T.observer = new MutationObserver(function () { panelChanged(); });
+                T.observer.observe(panel, { attributes: true, attributeFilter: ["style"] });
+            } catch (e) { T.observer = null; }
+        }
+        panelChanged();
+        return true;
+    }
+
+    /** The tab was selected or deselected: say so, keep what a parked panel
+     * needs kept, and tell the rest of this file what on screen means now. */
+    function panelChanged() {
+        const selected = !parked();
+        if (selected === T.selected) { return; }
+        const first = T.selected === null;
+        T.selected = selected;
+        if (!selected) {
+            T.parks += 1;
+            T.parkedAt = Date.now();
+            T.framesAtPark = frameCounts();
+            keepPanelWidth();
+            say("tab: the WanGP tab " + (first ? "is not the one on screen" : "left the screen")
+                + "; its page is parked - rendered, invisible, still running");
+        } else {
+            let meanwhile = "";
+            const frames = frameCounts();
+            if (frames && T.framesAtPark) {
+                meanwhile = "; meanwhile its page ran " + Math.max(0, frames.native - T.framesAtPark.native)
+                    + " frames by the browser and " + Math.max(0, frames.timed - T.framesAtPark.timed) + " by the bridge's timer";
+            }
+            say("tab: the WanGP tab is on screen"
+                + (T.parkedAt ? " again after " + seconds(Date.now() - T.parkedAt) + " parked" : "") + meanwhile);
+            T.parkedAt = 0;
+            T.framesAtPark = null;
+        }
+        syncOnScreen("the WanGP tab left the screen");
+    }
+
+    /**
+     * The panel's width in its place, written where the stylesheet's parked
+     * rule reads it. Measured from the panel itself while it is shown, and
+     * from its container - the box it fills when shown - while it is parked,
+     * so a page that opened on another tab parks WanGP at its real width from
+     * the start. Written only when it changed: the write resizes a box the
+     * frame sizer's observer is watching.
+     */
+    function keepPanelWidth() {
+        const panel = T.panel;
+        if (!panel || !panel.style || typeof panel.style.setProperty !== "function") { return 0; }
+        let width = 0;
+        try {
+            if (!panelSwitchedOff(panel)) {
+                width = panel.getBoundingClientRect().width;
+            } else {
+                const parent = panel.parentElement;
+                width = parent ? (parent.clientWidth || 0) : 0;
+                if (width && window.getComputedStyle) {
+                    const style = window.getComputedStyle(parent);
+                    width -= (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+                }
+            }
+        } catch (e) { return 0; }
+        width = Math.round(width);
+        if (width <= 0) { return 0; }
+        const wanted = width + "px";
+        try {
+            if (panel.style.getPropertyValue(PARKED_WIDTH_PROPERTY) !== wanted) {
+                panel.style.setProperty(PARKED_WIDTH_PROPERTY, wanted);
+            }
+        } catch (e) { return 0; }
+        return width;
+    }
+
+    /** The bridge's frame counters in the WanGP page, or null. Same origin,
+     * so the handle its head script leaves on its window is simply read. */
+    function frameCounts() {
+        try {
+            const frame = S.frame || frameElement();
+            const handle = frame && frame.contentWindow && frame.contentWindow.__minipaintFrames;
+            if (!handle) { return null; }
+            return { timed: Number(handle.timedFrames) || 0, native: Number(handle.nativeFrames) || 0 };
+        } catch (e) { return null; }
+    }
+
+    /**
+     * Where the column's top will be once the tab is on screen, while the
+     * panel is parked at the top of the viewport: just under the tab strip,
+     * plus the column's own offset inside the panel - measurable now, since
+     * the parked panel is laid out. Null when the strip cannot be found; the
+     * real measurement corrects any difference on the first show.
+     */
+    function shownTop(columnBox) {
+        try {
+            const panel = T.panel || tabPanel();
+            const tabs = panel && panel.parentElement;
+            const strip = tabs && tabs.querySelector ? tabs.querySelector(".tab-nav, [role='tablist']") : null;
+            if (!panel || !strip) { return null; }
+            const offset = columnBox.top - panel.getBoundingClientRect().top;
+            return strip.getBoundingClientRect().bottom + offset;
+        } catch (e) { return null; }
     }
 
     /* ------------------------------------------------------------------ */
@@ -3324,6 +3535,16 @@ window.minipaintWanGP = (function () {
                 counting_down: !!H.countdown,
                 automatic_reloads: H.reloads,
                 reloads: H.reloadsTotal
+            },
+            // The tab's panel: parked - rendered, invisible - while another
+            // tab is selected, never hidden. See watchTabPanel.
+            tab: {
+                found: !!T.panel,
+                selected: T.selected,
+                parked: parked(),
+                parks: T.parks,
+                parked_ms: T.parkedAt ? Date.now() - T.parkedAt : 0,
+                on_screen: P.onScreen
             }
         };
     }
@@ -3464,6 +3685,9 @@ window.minipaintWanGP = (function () {
             return;
         }
         say("watchRoot: found #" + IFRAME_ROOT_ID + " after " + step_ + " attempt(s)");
+        // The panel above the root is Forge's and is never re-rendered, so it
+        // is watched once, here, where the root has just been found.
+        watchTabPanel();
         attach(null);
         // The card under this root was painted when Forge STARTED, not when
         // this page loaded, and nothing repaints it until something presses
@@ -3604,6 +3828,16 @@ window.minipaintWanGP = (function () {
         // would write a floor-height frame the next real measurement has to
         // undo. Left alone; measured again when it shows.
         if (!box.width) { return 0; }
+        // A parked panel is laid out at the top of the viewport, not where its
+        // tab will show it: fitted for that place instead, so the WanGP page
+        // is the right size before the tab is ever opened. See shownTop.
+        let top = box.top;
+        if (parked()) {
+            top = shownTop(box);
+            if (top === null) { return 0; }
+        } else {
+            keepPanelWidth();
+        }
 
         let below = 0;
         const panel = managePanel();
@@ -3614,7 +3848,7 @@ window.minipaintWanGP = (function () {
         }
 
         const room = Math.max(FRAME_MIN_HEIGHT,
-                              Math.round(window.innerHeight - box.top - below
+                              Math.round(window.innerHeight - top - below
                                          - FRAME_BOTTOM_ROOM));
         const wanted = room + "px";
         try {

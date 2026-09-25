@@ -78,8 +78,12 @@ def build_page(library: pathlib.Path):
     draft["prompt_override"] = "the draft prompt"
     history.save_draft(draft)
 
+    from minipaint_neo.wangp import ui as wangp_ui
+
     def both_tabs():
-        return (router.on_ui_tabs() or []) + (clip_ui.on_ui_tabs() or [])
+        # The WanGP tab too - on its setup card, since this machine has no
+        # WanGP - for the check that its panel is parked rather than hidden.
+        return (router.on_ui_tabs() or []) + (clip_ui.on_ui_tabs() or []) + (wangp_ui.on_ui_tabs() or [])
 
     shared.opts.data[settings.USE_OLD_UI] = False
     script_callbacks.callbacks["after_component"][:] = [host.on_after_component]
@@ -389,6 +393,129 @@ def check_the_menu_offers_the_destinations(r: Results, page) -> None:
     page.evaluate("() => window.minipaintClipboard.closeMenu()")
 
 
+PANEL_JS = """() => {
+    const panel = document.getElementById("tab_wangp");
+    if (!panel) { return {}; }
+    const cs = getComputedStyle(panel);
+    const box = panel.getBoundingClientRect();
+    const tabs = panel.parentElement;
+    const ts = getComputedStyle(tabs);
+    const placeWidth = Math.round(tabs.clientWidth - (parseFloat(ts.paddingLeft) || 0) - (parseFloat(ts.paddingRight) || 0));
+    return { inline: panel.getAttribute("style") || "", display: cs.display, position: cs.position,
+             visibility: cs.visibility, pointer: cs.pointerEvents, width: Math.round(box.width), height: Math.round(box.height),
+             kept: panel.style.getPropertyValue("--minipaint-wangp-parked-width"), placeWidth: placeWidth,
+             marked: panel.classList.contains("minipaint-wangp-tab") };
+}"""
+
+#: Three iframes with a frame counter each: under the tab on screen, under
+#: the parked WanGP panel, and under a box that does not exist.
+FRAME_PROBES_JS = """() => {
+    const src = "<scr" + "ipt>let n = 0; (function t() { n += 1; requestAnimationFrame(t); })(); window.count = () => n;</scr" + "ipt>";
+    const make = function (id, parent) {
+        const f = document.createElement("iframe");
+        f.id = id; f.srcdoc = src; f.style.cssText = "width:200px;height:100px;border:0";
+        parent.appendChild(f);
+    };
+    make("mp-probe-shown", document.getElementById("tab_txt2img"));
+    make("mp-probe-parked", document.getElementById("tab_wangp"));
+    const none = document.createElement("div");
+    none.id = "mp-probe-none-box"; none.style.display = "none";
+    document.body.appendChild(none);
+    make("mp-probe-none", none);
+    return true;
+}"""
+FRAME_COUNTS_JS = """() => {
+    const count = function (id) { const w = document.getElementById(id).contentWindow; return w && w.count ? w.count() : -1; };
+    return { shown: count("mp-probe-shown"), parked: count("mp-probe-parked"), none: count("mp-probe-none") };
+}"""
+FRAME_BOXES_JS = """() => {
+    const box = function (id) { const r = document.getElementById(id).getBoundingClientRect(); return { width: r.width, height: r.height }; };
+    return { shown: box("mp-probe-shown"), parked: box("mp-probe-parked"), none: box("mp-probe-none") };
+}"""
+FRAME_PROBES_AWAY_JS = """() => {
+    for (const id of ["mp-probe-shown", "mp-probe-parked", "mp-probe-none-box"]) {
+        const node = document.getElementById(id);
+        if (node) { node.remove(); }
+    }
+    return true;
+}"""
+TAB_STATE_JS = "() => window.minipaintWanGP ? window.minipaintWanGP.state().tab : null"
+
+
+def check_the_wangp_panel_is_parked_not_hidden(r: Results, page) -> None:
+    """The WanGP tab's panel while another tab is selected: a rendered box,
+    invisible, still receiving animation frames - never display: none.
+
+    Gradio switches an unselected tab's panel off with an inline
+    display: none, and a document in a box that does not exist is not
+    rendered: Firefox gives it no animation frames, and Gradio 5 in the
+    WanGP page dispatches its events and applies its updates in animation
+    frames - so WanGP stood still whenever another Forge tab was selected.
+    Chromium keeps ticking frames in a hidden frame, so the starvation
+    itself cannot be reproduced here; what can be, and is, is the invariant
+    the cure rests on: the parked panel has its full box where a hidden one
+    has none, and an iframe under it receives frames at the rate of one
+    under the tab on screen. Measured in a browser because a Node stub has
+    no layout, and the last height fix passed every source check while the
+    page was wrong.
+    """
+    from minipaint_neo import assets
+
+    open_txt2img(page)
+    journal = []
+    page.on("console", lambda message: journal.append(message.text))
+    if not page.evaluate("() => !!window.minipaintWanGP"):
+        page.add_script_tag(url=f"http://127.0.0.1:{PORT}{assets.url_for('wangp')}")
+    time.sleep(1.0)
+    parked = page.evaluate(PANEL_JS)
+    r.check("with txt2img selected, Gradio has switched the WanGP panel off", "display: none" in (parked.get("inline") or ""), str(parked))
+    r.check("and the stylesheet keeps it a rendered box: block, fixed, invisible, untouchable",
+            parked.get("display") == "block" and parked.get("position") == "fixed" and parked.get("visibility") == "hidden"
+            and parked.get("pointer") == "none" and (parked.get("width") or 0) > 0 and (parked.get("height") or 0) > 0, str(parked))
+    r.check("at the width it has in its place, kept by the bundle",
+            parked.get("kept") == f"{parked.get('placeWidth')}px" and parked.get("width") == parked.get("placeWidth")
+            and parked.get("marked") is True, str(parked))
+    tab = page.evaluate(TAB_STATE_JS) or {}
+    r.check("and the bundle knows the tab is parked",
+            tab.get("found") is True and tab.get("selected") is False and tab.get("parked") is True, str(tab))
+
+    page.evaluate(FRAME_PROBES_JS)
+    time.sleep(0.6)
+    before = page.evaluate(FRAME_COUNTS_JS)
+    time.sleep(1.0)
+    after = page.evaluate(FRAME_COUNTS_JS)
+    boxes = page.evaluate(FRAME_BOXES_JS)
+    shown = after["shown"] - before["shown"]
+    parked_frames = after["parked"] - before["parked"]
+    r.check("an iframe under the parked panel has its box, where one under display: none has none",
+            boxes["parked"]["width"] > 0 and boxes["parked"]["height"] > 0 and boxes["none"]["width"] == 0, str(boxes))
+    r.check("and receives animation frames at the rate of the tab on screen",
+            shown >= 20 and parked_frames >= shown * 0.5, f"shown={shown} parked={parked_frames}")
+    page.evaluate(FRAME_PROBES_AWAY_JS)
+
+    page.locator("#tabs > .tab-nav > button", has_text="WanGP").first.click()
+    time.sleep(0.8)
+    on_screen = page.evaluate(PANEL_JS)
+    tab = page.evaluate(TAB_STATE_JS) or {}
+    r.check("selecting the WanGP tab puts the panel back in its place",
+            on_screen.get("position") != "fixed" and on_screen.get("visibility") == "visible"
+            and "display: none" not in (on_screen.get("inline") or ""), str(on_screen))
+    # The whole point of keeping the width: the WanGP page's box is the same
+    # parked and shown, so the switch is not a relayout.
+    r.check("at exactly the width it was parked at", on_screen.get("width") == parked.get("width")
+            and (on_screen.get("width") or 0) > 0, f"shown={on_screen.get('width')} parked={parked.get('width')}")
+    r.check("and the bundle says it is on screen, after how long parked",
+            tab.get("selected") is True and tab.get("parked") is False
+            and any("tab: the WanGP tab is on screen again after" in line for line in journal),
+            str(tab) + " " + str([line for line in journal if "tab:" in line][-3:]))
+    open_txt2img(page)
+    time.sleep(0.5)
+    tab = page.evaluate(TAB_STATE_JS) or {}
+    r.check("and leaving it parks it again, said in the journal",
+            tab.get("parked") is True and tab.get("parks") == 2
+            and any("tab: the WanGP tab left the screen; its page is parked" in line for line in journal), str(tab))
+
+
 def check_the_direct_route_when_the_queue_is_dead(r: Results, page) -> None:
     """Gradio's queue cut: the takeover never needed it, so nothing changes."""
     open_txt2img(page)
@@ -448,6 +575,7 @@ def run() -> Results:
                 check_generate_queues_and_closes(r, page, library)
                 check_escape_queues_nothing(r, page)
                 check_the_menu_offers_the_destinations(r, page)
+                check_the_wangp_panel_is_parked_not_hidden(r, page)
                 check_the_direct_route_when_the_queue_is_dead(r, page)
             finally:
                 browser.close()

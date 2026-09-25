@@ -377,6 +377,17 @@ composed from the record after a successful flush is recorded as `flushed_form` 
 `recorded_form`; both came out of `load_model_form`, and nothing downstream could tell them
 apart otherwise.
 
+Where a job's settings came from is said in one closed vocabulary, worked out from the job
+alone by `outbox.settings_source(job)` / `settings_sentence(job)`: `saved_at_send`,
+`last_saved_no_answer`, `last_saved_loading`, `last_saved`, `model_defaults`, `not_inherited`,
+`page_session`, `live_page` (a job a page ran itself), or empty while a server job has not been
+composed. The key is what a record stores - Queue Send History's `settings`, the popup
+history's `settings` (learned from the job once it is composed, and kept after the job has
+gone) - and anything outside the list is read as empty. The Queue card shows the sentence as
+a *Settings* line, and the executor journals it once per job. The gallery's `submit` action and
+the queue route's `add` action both take `settings_flush` from the page, filtered against the
+five outcomes like `enqueue`'s.
+
 **The queue is one Forge session's.** `start_session()` runs before anything sweeps and
 empties it: every job, in every state, and every pinned input released. Nothing carries into
 the next run, and a finished job leaves the list after a short grace

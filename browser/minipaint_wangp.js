@@ -68,9 +68,14 @@ window.minipaintWanGP = (function () {
     // Protocol 6: commit the live form so a server-composed job runs at it.
     const FORM_FLUSH = "WANGP_FORM_FLUSH";
     const FORM_FLUSHED = "WANGP_FORM_FLUSHED";
+    // The heartbeat, and the WanGP page saying its form was touched. Both are
+    // the script in the WanGP document speaking for itself; see protocol.py.
+    const PING = "WANGP_PING";
+    const PONG = "WANGP_PONG";
+    const FORM_CHANGED = "WANGP_FORM_CHANGED";
 
-    const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH];
-    const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED];
+    const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH, PING];
+    const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED, PONG, FORM_CHANGED];
 
     // The flush outcomes, as protocol.py names them.
     const FLUSH_REQUESTED = "requested";
@@ -91,6 +96,20 @@ window.minipaintWanGP = (function () {
     const FLUSH_BUDGET_MS = 900;
     const FLUSH_POLL_MS = 75;
     const FLUSH_CALL_TIMEOUT_MS = 8000;
+    // Saving as the form changes. The form is committed this long after the
+    // last change notice, and one look is taken this long after that press at
+    // whether the record moved: one press and one look, because a save nobody
+    // is waiting on has no business polling.
+    const SAVE_QUIET_MS = 1000;
+    const SAVE_SETTLE_MS = 400;
+    // A send waits at most this long, in all, for WanGP to save what is on
+    // its screen, and past it goes with WanGP's last saved settings and says
+    // so. The poll inside stops a little sooner, so that "nothing moved" is
+    // told apart from "nobody answered".
+    const SEND_SAVE_BUDGET_MS = 2000;
+    const SEND_POLL_BUDGET_MS = 1700;
+    // The outcomes after which WanGP's record holds what the press covered.
+    const SAVED = [FLUSH_COMMITTED, FLUSH_UNCHANGED, FLUSH_REQUESTED];
 
     const RECEIVER_IDS = ["start_frame", "end_frame", "reference", "control_image", "positioned_ref", "style_ref"];
     const ROLES = ["start", "end", "reference", "control", "positioned", "style"];
@@ -331,7 +350,12 @@ window.minipaintWanGP = (function () {
         start: false,
         generationRunning: null,
         // Protocol 5: whether it can say where admitted tasks are in the queue.
-        track: false
+        track: false,
+        // Whether it answers the heartbeat, and whether it says when its form
+        // is touched. A bridge that never said either is never pinged, and a
+        // form it never reports on is never taken to be saved already.
+        ping: false,
+        formWatch: false
     };
 
     //: The proactive flush's own state, declared here rather than beside the
@@ -347,7 +371,18 @@ window.minipaintWanGP = (function () {
         running: false,
         lastAt: 0,
         onScreen: null,
-        observer: null
+        observer: null,
+        //: Change notices from the WanGP page, counted. A save remembers the
+        //: count it covered, so a notice that lands while it runs is not lost.
+        changes: 0,
+        //: Whether WanGP's record holds everything this page has been told
+        //: changed: true after a save that covered every notice, false after
+        //: a notice, and false for a bridge session nothing was saved from.
+        current: false,
+        //: The quiet second after the last notice. See onFormChanged.
+        changeTimer: 0,
+        //: How many saves the form's changes have made, for a bug report.
+        saves: 0
     };
 
     /* ------------------------------------------------------------------ */
@@ -908,7 +943,10 @@ window.minipaintWanGP = (function () {
         const wait = HELLO_DELAYS[S.helloStep];
         S.helloStep += 1;
         say("handshake: offer " + S.helloStep + "/" + HELLO_DELAYS.length + " sent into the iframe");
-        post(HELLO, hex32(), { instance_id: S.instanceId, protocol: PROTOCOL });
+        // ``watch_form``: tell this page when somebody touches the form. Asked
+        // for by name, because a bridge that did not know the notice would
+        // otherwise be sending this page something it drops.
+        post(HELLO, hex32(), { instance_id: S.instanceId, protocol: PROTOCOL, watch_form: true });
         S.helloTimer = setTimeout(step, wait);
     }
 
@@ -1139,6 +1177,7 @@ window.minipaintWanGP = (function () {
             // Last chance to carry an uncommitted form across; throttled or
             // frozen it may not land, which is why nothing waits for it.
             flushProactively("the page went to the background");
+            heartbeatSync();
         };
 
         // Coming back is also the moment to find out whether anything went
@@ -1151,13 +1190,14 @@ window.minipaintWanGP = (function () {
         };
 
         const back = function (why) {
-            if (!awaySince) { say("lifecycle: " + why); check(why); return; }
+            if (!awaySince) { say("lifecycle: " + why); check(why); heartbeatSync(); return; }
             const away = Math.round((Date.now() - awaySince) / 100) / 10;
             awaySince = 0;
             resumeDeadlines();
             say("lifecycle: back on screen after " + away + "s (" + why + ")"
                 + "; deadlines resume with what they had left");
             check(why);
+            heartbeatSync();
         };
 
         try {
@@ -1297,6 +1337,12 @@ window.minipaintWanGP = (function () {
     function onMessage(event) {
         const message = acceptable(event);
         if (!message) { return; }
+        // Anything the WanGP page says proves it is there, whatever it says.
+        heard();
+        // The two that arrive by the dozen write nothing on arrival. What
+        // they lead to - a miss, a save that carried something - does.
+        if (message.type === PONG) { onPong(message.requestId, message.payload); return; }
+        if (message.type === FORM_CHANGED) { onFormChanged(message.payload); return; }
         say("received " + message.type + " from the iframe");
         if (message.type === READY) { onReady(message.payload); return; }
         if (message.type === RUNTIME_STATE) { onRuntimeState(message.payload); return; }
@@ -1371,6 +1417,11 @@ window.minipaintWanGP = (function () {
         S.queue = declared && !!(payload.capabilities && payload.capabilities.queue === true);
         S.start = declared && !!(payload.capabilities && payload.capabilities.start === true);
         S.track = declared && !!(payload.capabilities && payload.capabilities.track === true);
+        S.ping = declared && !!(payload.capabilities && payload.capabilities.ping === true);
+        S.formWatch = declared && !!(payload.capabilities && payload.capabilities.form_watch === true);
+        // A session this page has saved nothing from yet: whatever WanGP has
+        // recorded may be from before, so no send may take it as current.
+        P.current = false;
         S.generationRunning = typeof payload.generation_running === "boolean" ? payload.generation_running : null;
         S.lastCode = declared ? "" : (failure || "BRIDGE_COMPONENT_INCOMPATIBLE");
         report(declared, S.lastCode);
@@ -1383,6 +1434,7 @@ window.minipaintWanGP = (function () {
         // said it is ready has a live form and no recorded one, and this is
         // the first moment it can be asked to commit it.
         if (declared) { flushProactively("the WanGP page became ready"); }
+        heartbeatReady();
         // Presentation only, and never a reason a picture cannot be sent.
         try { theme(S.theme || detectTheme()); } catch (e) { /* section 27.1 */ }
         // A bridge that introduced itself is the whole definition of the
@@ -1691,6 +1743,12 @@ window.minipaintWanGP = (function () {
     async function flushForm(options) {
         const settings = options || {};
         const budget = Number(settings.timeoutMs) > 0 ? Number(settings.timeoutMs) : FLUSH_BUDGET_MS;
+        // ``settleMs``: press, wait this long, look once, and stop - a save
+        // nobody is waiting on. ``callTimeoutMs``: a shorter limit for each
+        // question, for a caller whose own limit is shorter than a question's.
+        const settle = Number(settings.settleMs) > 0 ? Number(settings.settleMs) : 0;
+        const callTimeout = Number(settings.callTimeoutMs) > 0
+            ? Math.min(FLUSH_CALL_TIMEOUT_MS, Number(settings.callTimeoutMs)) : FLUSH_CALL_TIMEOUT_MS;
         const started = Date.now();
         const why = settings.reason ? " [" + text(settings.reason, 60) + "]" : "";
         const give = function (outcome, detail) {
@@ -1708,7 +1766,7 @@ window.minipaintWanGP = (function () {
 
         let first;
         try {
-            first = await ask(FORM_FLUSH, {}, FLUSH_CALL_TIMEOUT_MS, FORM_FLUSHED);
+            first = await ask(FORM_FLUSH, {}, callTimeout, FORM_FLUSHED);
         } catch (error) {
             return give(FLUSH_UNAVAILABLE, "the bridge did not answer");
         }
@@ -1722,11 +1780,25 @@ window.minipaintWanGP = (function () {
         if (first.flush !== FLUSH_REQUESTED) { return give(FLUSH_UNAVAILABLE, first.flush); }
 
         const before = String(first.fingerprint || "");
+        if (settle) {
+            // One look. Moved is a commit; not moved is either nothing to
+            // carry or a commit still on its way, and both are the press
+            // having been taken - which is all a save in the background needs.
+            await new Promise(function (resume) { window.setTimeout(resume, settle); });
+            let look;
+            try {
+                look = await ask(FORM_FLUSH, { probe: true }, callTimeout, FORM_FLUSHED);
+            } catch (error) {
+                return give(FLUSH_REQUESTED, "the press was taken; the look after it was not answered");
+            }
+            if (!look || look.ok === false) { return give(FLUSH_REQUESTED, "the press was taken; the look after it was refused"); }
+            return give(String(look.fingerprint || "") !== before ? FLUSH_COMMITTED : FLUSH_REQUESTED);
+        }
         while (Date.now() - started < budget) {
             await new Promise(function (resume) { window.setTimeout(resume, FLUSH_POLL_MS); });
             let probe;
             try {
-                probe = await ask(FORM_FLUSH, { probe: true }, FLUSH_CALL_TIMEOUT_MS, FORM_FLUSHED);
+                probe = await ask(FORM_FLUSH, { probe: true }, callTimeout, FORM_FLUSHED);
             } catch (error) {
                 return give(FLUSH_UNAVAILABLE, "the bridge stopped answering mid-flush");
             }
@@ -1793,25 +1865,173 @@ window.minipaintWanGP = (function () {
     }
 
     /**
-     * One commit, at most one at a time, and never more often than the gap.
-     * Returns nothing: no caller of this is waiting on it, by design.
+     * One commit, at most one at a time. Returns nothing: no caller of this
+     * is waiting on it, by design.
+     *
+     * With a WanGP page that reports its changes (``S.formWatch``) this knows
+     * whether there is anything to carry: a record that already holds every
+     * change this page was told of is left alone, and one that does not is
+     * saved at once, whatever the gap - leaving the tab is the last moment an
+     * uncommitted value exists. Without one it cannot know, so it commits
+     * and keeps the gap, as it always did.
      */
     function flushProactively(why) {
         if (P.wanted !== true) { return; }
         if (P.running) { return; }
         if (!S.ready || !S.bridgeSession) { return; }
+        if (S.formWatch && P.current) { return; }
         const now = Date.now();
-        if (P.lastAt && now - P.lastAt < PROACTIVE_GAP_MS) { return; }
-        P.lastAt = now;
+        if (!S.formWatch && P.lastAt && now - P.lastAt < PROACTIVE_GAP_MS) { return; }
+        startSave(why, false);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Saving as the form changes, and before every send                     */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * WHY THE FORM IS SAVED WHILE IT IS BEING CHANGED.
+     *
+     * The commits above happen at moments that are free, and they leave one
+     * hole: a value changed while the WanGP tab stays on screen and the page
+     * stays in front is committed by none of them. A LoRA weight changed
+     * there and then sent from the gallery composed at the old weight. So the
+     * WanGP page says when somebody touches its form (FORM_CHANGED, only
+     * people's own events, throttled), and about a second after the last
+     * notice the form is committed: one press and one look, never two at
+     * once, each question with its own limit. It is the same commit as every
+     * other one - WanGP's own chain - so a page mid settings-load refuses it
+     * (FLUSH_SUPPRESSED) exactly as it refuses a press.
+     *
+     * Nothing here is held open and nothing polls: a notice is a message
+     * inside this browser, and a save is one short question to WanGP.
+     */
+    function onFormChanged(payload) {
+        P.changes += 1;
+        P.current = false;
+        if (P.changeTimer) { clearTimeout(P.changeTimer); }
+        P.changeTimer = setTimeout(saveOnChange, SAVE_QUIET_MS);
+    }
+
+    function saveOnChange() {
+        P.changeTimer = 0;
+        // Nothing reads the record, or nobody has said yet whether anything
+        // does: a notice changes nothing about that.
+        if (P.wanted !== true) { return; }
+        // The save in flight looks again when it finishes; see afterSave.
+        if (P.running) { return; }
+        startSave("the WanGP form changed", true);
+    }
+
+    /** The one way a save in the background starts. */
+    function startSave(why, fromChange) {
+        if (!S.ready || !S.bridgeSession) { return false; }
         P.running = true;
+        P.lastAt = Date.now();
+        const covered = P.changes;
+        // Every notice so far is this save's to carry - leaving the tab a
+        // moment after a change must not be followed by the same save again.
+        if (P.changeTimer) { clearTimeout(P.changeTimer); P.changeTimer = 0; }
+        if (fromChange) { P.saves += 1; }
         let done;
         try {
-            done = flushForm({ reason: why, quiet: true });
+            done = flushForm({ reason: why, quiet: true, settleMs: SAVE_SETTLE_MS });
         } catch (e) {
             P.running = false;
-            return;
+            return false;
         }
-        Promise.resolve(done).then(function () { P.running = false; }, function () { P.running = false; });
+        Promise.resolve(done).then(function (answer) { afterSave(answer, covered); },
+                                   function () { afterSave(null, covered); });
+        return true;
+    }
+
+    function afterSave(answer, covered) {
+        P.running = false;
+        const outcome = answer && answer.flush;
+        if (P.changes === covered && SAVED.indexOf(outcome) !== -1) { P.current = true; }
+        // A notice that landed while this save ran has its own quiet second
+        // coming, or had it while this one held the flag; either way it gets
+        // a save of its own and is never folded into one that began before it.
+        if (P.changes !== covered && !P.changeTimer) { P.changeTimer = setTimeout(saveOnChange, SAVE_QUIET_MS); }
+    }
+
+    /**
+     * Save before a send: what the gallery's Generate and Clipboard's Add to
+     * Queue ask for just before they hand a job to the server, which then
+     * composes it from WanGP's record.
+     *
+     * Resolves - never rejects - within SEND_SAVE_BUDGET_MS with
+     * ``{flush}``: one of the FLUSH_* outcomes, or "" when nothing will read
+     * the record (inheritance off, or a queue this page runs itself). A
+     * record that already holds every change the WanGP page reported
+     * answers ``unchanged`` at once; otherwise the form is committed and
+     * the wait lasts until the record moves, up to the limit. Past it, or
+     * with no WanGP page to ask, the answer is ``unavailable`` and the job
+     * goes with WanGP's last saved settings - the job says so.
+     */
+    function saveForSend(reason) {
+        const why = text(reason, 60) || "a send";
+        if (P.wanted === false) { return Promise.resolve({ ok: true, flush: "" }); }
+        if (!ensure() || !S.ready || !S.bridgeSession) {
+            say("save before send: " + FLUSH_UNAVAILABLE + " [" + why + "] (no WanGP page in this browser to ask)");
+            return Promise.resolve({ ok: true, flush: FLUSH_UNAVAILABLE });
+        }
+        if (S.formWatch && P.current && !P.running && !P.changeTimer) {
+            say("save before send: nothing new since the last save [" + why + "]");
+            return Promise.resolve({ ok: true, flush: FLUSH_UNCHANGED, already: true });
+        }
+        const covered = P.changes;
+        // A save that was about to happen is this one now.
+        if (P.changeTimer) { clearTimeout(P.changeTimer); P.changeTimer = 0; }
+        return new Promise(function (resolve) {
+            let settled = false;
+            const finish = function (answer) {
+                if (settled) { return; }
+                settled = true;
+                clearTimeout(limit);
+                resolve(answer);
+            };
+            // Wall-clock, not an on-screen deadline: this is a person waiting
+            // on a button, and the promise to them is two seconds.
+            const limit = setTimeout(function () {
+                say("save before send: no answer within " + SEND_SAVE_BUDGET_MS + " ms [" + why
+                    + "]; the job goes with WanGP's last saved settings");
+                finish({ ok: true, flush: FLUSH_UNAVAILABLE, timed_out: true });
+                if (!P.changeTimer) { P.changeTimer = setTimeout(saveOnChange, SAVE_QUIET_MS); }
+            }, SEND_SAVE_BUDGET_MS);
+            let asked;
+            try {
+                asked = flushForm({ reason: "before " + why, timeoutMs: SEND_POLL_BUDGET_MS, callTimeoutMs: SEND_SAVE_BUDGET_MS });
+            } catch (e) {
+                finish({ ok: true, flush: FLUSH_UNAVAILABLE });
+                return;
+            }
+            Promise.resolve(asked).then(function (answer) {
+                const outcome = answer && typeof answer.flush === "string" && answer.flush ? answer.flush : FLUSH_UNAVAILABLE;
+                if (!settled && P.changes === covered && SAVED.indexOf(outcome) !== -1) { P.current = true; }
+                finish({ ok: true, flush: outcome });
+            }, function () { finish({ ok: true, flush: FLUSH_UNAVAILABLE }); });
+        });
+    }
+
+    /**
+     * Whether jobs are built from this page's settings, from the public
+     * API's last snapshot, when that API was here first.
+     *
+     * The API tells this file after every snapshot it takes - but a snapshot
+     * taken before this file had loaded told nobody, and the next one may be
+     * an hour away. Reading what it already knows makes the order the two
+     * files load in not matter.
+     */
+    function pullInheritance() {
+        try {
+            const api = window.minipaintInterop;
+            const snapshot = api && api.wangp && typeof api.wangp.snapshotState === "function"
+                ? api.wangp.snapshotState() : null;
+            if (snapshot && typeof snapshot.inherit === "boolean") {
+                inheritSettings(snapshot.inherit && snapshot.unattended !== false);
+            }
+        } catch (e) { /* the next snapshot will say */ }
     }
 
     /**
@@ -1834,10 +2054,404 @@ window.minipaintWanGP = (function () {
                     // on screen: a panel that was hidden all along has no
                     // uncommitted anything to carry.
                     if (was === true && !showing) { flushProactively("the WanGP tab left the screen"); }
+                    if (was !== showing) { heartbeatSync(); }
                 }
             });
             P.observer.observe(frame);
         } catch (e) { /* an engine without it loses the trigger, nothing else */ }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* The heartbeat: is the WanGP page still there to answer               */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * WHAT THIS WATCHES, AND WHAT IT CANNOT SEE.
+     *
+     * The WanGP page lives in an iframe on this page's own origin, so it runs
+     * on this page's thread. Every five seconds while the WanGP tab is on
+     * screen, this asks the script in that page whether it is there (PING),
+     * and the script answers on the spot (PONG) - a message inside this
+     * browser, with no request and no Gradio event anywhere in it. Nothing is
+     * held open, and nothing runs while the tab is hidden or off screen.
+     *
+     * Because the two share a thread, an answer that comes late means this
+     * page was busy as much as WanGP was, and the journal says which: every
+     * miss is written with how late this page's own timer ran. An answer
+     * that never comes means there is no WanGP document able to answer - it
+     * reloaded and did not come back, landed on an error page, lost its
+     * script, or never finished loading. That is what the bar is for.
+     *
+     * What it cannot see is WanGP's own connection stalling while its page
+     * still runs: the page answers, and its Gradio events wait. The answer
+     * carries how long the bridge has been waiting on one of those, and the
+     * journal says so - but nothing acts on it, because a request can sit
+     * behind a generation for minutes without anything being wrong, and a
+     * reload in the middle of that would be the fault instead of the cure.
+     *
+     * After twenty seconds of silence on screen the tab says "WanGP stopped
+     * responding" and offers to reload the view; ten seconds later it does,
+     * unless dismissed. A reload is this page loading the WanGP page again,
+     * in the same frame: WanGP's queue and a generation it is running live in
+     * WanGP's process and are not touched. At most one automatic reload
+     * every two minutes, and three in the life of this page; after that the
+     * bar only offers the button.
+     */
+    const HEARTBEAT_MS = 5000;
+    const STUCK_AFTER_MS = 20000;
+    //: A WanGP page that has not finished loading gets longer before it is
+    //: called stuck: a slow load reloaded is a slower load, and a load that
+    //: has stalled outright is still caught, a little later.
+    const LOAD_STUCK_AFTER_MS = 60000;
+    const RELOAD_COUNTDOWN_MS = 10000;
+    const RELOAD_GAP_MS = 2 * 60 * 1000;
+    const RELOADS_MAX = 3;
+    //: A timer this late means the whole page was busy, not only WanGP.
+    const LATE_TICK_MS = 1000;
+    //: A bridge request waiting this long on Gradio is worth one line.
+    const BUSY_NOTE_MS = 15000;
+    const STUCK_BAR_ID = "minipaint-wangp-stuck";
+    const STUCK_BAR_CLASS = "minipaint-wangp-stuck";
+
+    const H = {
+        //: A bridge that answers pings has been ready in this page. Before
+        //: that there is nothing to miss: a page that never came up is the
+        //: handshake's to report, not this.
+        armed: false,
+        //: The frame's document has not finished loading (or has not said so).
+        loading: false,
+        timer: 0,
+        due: 0,
+        lastTick: 0,
+        heardAt: 0,
+        //: On-screen time without a word from the WanGP page. Time away is
+        //: never counted: nobody could have seen the page either way.
+        silentMs: 0,
+        pingId: "",
+        missed: 0,
+        busyNoted: false,
+        stuck: false,
+        dismissed: false,
+        countdown: null,
+        countdownEnds: 0,
+        ticker: 0,
+        reloads: 0,
+        lastReloadAt: 0,
+        //: Every reload, by the button or on its own, for a bug report.
+        reloadsTotal: 0
+    };
+
+    function seconds(ms) { return (Math.round(ms / 100) / 10) + "s"; }
+
+    /** Whether the heartbeat should be beating now. */
+    function heartbeatWatching() {
+        return H.armed && !!S.frame && S.frame.isConnected !== false && onScreen() && P.onScreen === true;
+    }
+
+    /** Start, or stop, according to what is true now. Cheap and idempotent:
+     * called on every change that could matter. */
+    function heartbeatSync() {
+        if (heartbeatWatching()) {
+            if (!H.timer) {
+                H.lastTick = 0;
+                heartbeatSchedule(0);
+            }
+            return;
+        }
+        heartbeatPause();
+    }
+
+    function heartbeatPause() {
+        if (H.timer) { clearTimeout(H.timer); H.timer = 0; }
+        // The time away is not silence, and a ping sent before it is not
+        // waited on. A countdown does not run for a view nobody is looking at.
+        H.lastTick = 0;
+        H.pingId = "";
+        stopCountdown();
+    }
+
+    function heartbeatSchedule(ms) {
+        H.due = Date.now() + ms;
+        H.timer = setTimeout(heartbeatTick, ms);
+    }
+
+    function heartbeatTick() {
+        H.timer = 0;
+        if (!heartbeatWatching()) { heartbeatPause(); return; }
+        const now = Date.now();
+        const late = Math.max(0, now - H.due);
+        if (H.lastTick && H.heardAt < H.lastTick) {
+            H.silentMs += now - H.lastTick;
+            if (H.pingId) {
+                H.missed += 1;
+                say("heartbeat: no answer from the WanGP page for " + seconds(H.silentMs) + " on screen ("
+                    + H.missed + " ping" + (H.missed === 1 ? "" : "s") + "); this page's own timer ran " + late + " ms late - "
+                    + (late >= LATE_TICK_MS ? "this whole page was busy, not only WanGP"
+                                            : "this page was on time, so the silence is the WanGP page's"));
+            }
+        }
+        H.lastTick = now;
+        if (H.silentMs >= (H.loading ? LOAD_STUCK_AFTER_MS : STUCK_AFTER_MS)) { stuck(); }
+        H.pingId = "";
+        if (S.ready && S.bridgeSession && S.ping) {
+            const requestId = hex32();
+            if (post(PING, requestId, {})) { H.pingId = requestId; }
+        }
+        heartbeatSchedule(HEARTBEAT_MS);
+    }
+
+    /** The WanGP page said something. Whatever it was, it is there. */
+    function heard() {
+        H.heardAt = Date.now();
+        if (!H.silentMs && !H.missed && !H.stuck) { return; }
+        say("heartbeat: the WanGP page answered again after " + seconds(H.silentMs) + " on screen without a word"
+            + (H.missed ? " (" + H.missed + " ping" + (H.missed === 1 ? "" : "s") + " unanswered)" : ""));
+        H.silentMs = 0;
+        H.missed = 0;
+        // The episode is over, and a dismissal was about that one.
+        H.dismissed = false;
+        if (H.stuck) { hideStuckBar("the WanGP page answered again"); }
+    }
+
+    function onPong(requestId, payload) {
+        if (requestId === H.pingId) { H.pingId = ""; }
+        const busy = Number(payload && payload.busy_ms) || 0;
+        if (busy >= BUSY_NOTE_MS && !H.busyNoted) {
+            H.busyNoted = true;
+            say("heartbeat: the WanGP page is here, but its bridge has waited " + seconds(busy)
+                + " for WanGP to answer '" + text(payload.op, 20) + "' (" + (Number(payload.waiting) || 0)
+                + " more behind it) - WanGP's own connection may be stuck, or busy behind a generation; nothing is done about it");
+        } else if (busy < BUSY_NOTE_MS && H.busyNoted) {
+            H.busyNoted = false;
+            say("heartbeat: the WanGP page's bridge is no longer waiting on WanGP");
+        }
+    }
+
+    /** A bridge that answers pings is ready: from now on, silence counts. */
+    function heartbeatReady() {
+        if (S.ready) { H.loading = false; }
+        if (S.ready && S.ping && !H.armed) {
+            H.armed = true;
+            say("heartbeat: watching the WanGP page every " + (HEARTBEAT_MS / 1000) + "s while its tab is on screen");
+        }
+        heartbeatSync();
+    }
+
+    /** A new document in the frame gets its own time to come up. */
+    function heartbeatNewDocument(loaded) {
+        H.loading = !loaded;
+        H.silentMs = 0;
+        H.missed = 0;
+        H.pingId = "";
+        H.lastTick = 0;
+        H.dismissed = false;
+        if (H.stuck) { hideStuckBar("the WanGP view loaded again"); }
+    }
+
+    function autoReloadAllowed() {
+        if (H.reloads >= RELOADS_MAX) { return false; }
+        return !H.lastReloadAt || Date.now() - H.lastReloadAt >= RELOAD_GAP_MS;
+    }
+
+    /** Silent for too long on screen: say so, and offer the fix. */
+    function stuck() {
+        if (!H.stuck) {
+            H.stuck = true;
+            say("heartbeat: the WanGP page has not answered for " + seconds(H.silentMs)
+                + " on screen; showing 'WanGP stopped responding'"
+                + (autoReloadAllowed() ? " and reloading the view in " + (RELOAD_COUNTDOWN_MS / 1000) + "s unless dismissed"
+                                       : " with the button only (" + (H.reloads >= RELOADS_MAX
+                                           ? RELOADS_MAX + " automatic reloads already in this page"
+                                           : "an automatic reload was made less than " + (RELOAD_GAP_MS / 60000) + " minutes ago") + ")"));
+            // A frame whose handshake ended is offered one more round first:
+            // it costs nothing, and a page that was only slow comes back
+            // without being reloaded.
+            if (!S.ready) { rearm(); }
+        }
+        if (H.dismissed) { return; }
+        showStuckBar();
+        if (!H.countdown && autoReloadAllowed()) { startCountdown(); }
+    }
+
+    function startCountdown() {
+        stopCountdown();
+        H.countdownEnds = Date.now() + RELOAD_COUNTDOWN_MS;
+        H.countdown = deadline(RELOAD_COUNTDOWN_MS, function () {
+            H.countdown = null;
+            stopTicker();
+            if (!H.stuck || H.dismissed || !autoReloadAllowed()) { drawStuckBar(); return; }
+            H.reloads += 1;
+            H.lastReloadAt = Date.now();
+            reloadView("no answer for " + seconds(H.silentMs) + " on screen (automatic reload " + H.reloads + " of " + RELOADS_MAX + ")");
+        });
+        stopTicker();
+        H.ticker = setInterval(drawStuckBar, 1000);
+        drawStuckBar();
+    }
+
+    function stopCountdown() {
+        if (H.countdown) { H.countdown.cancel(); H.countdown = null; }
+        H.countdownEnds = 0;
+        stopTicker();
+        if (H.stuck) { drawStuckBar(); }
+    }
+
+    function stopTicker() {
+        if (H.ticker) { clearInterval(H.ticker); H.ticker = 0; }
+    }
+
+    /**
+     * Load the WanGP page again, in the same frame.
+     *
+     * No Gradio event and no request of this page's own: the frame navigates
+     * to the address it already had, and its load event starts a fresh
+     * handshake the way any reload does. What was in flight on the old page
+     * is retired as unconfirmed, never as refused - see abandon().
+     */
+    function reloadView(why) {
+        const frame = S.frame;
+        H.reloadsTotal += 1;
+        hideStuckBar("");
+        heartbeatNewDocument(false);
+        if (!frame || frame.isConnected === false) {
+            say("heartbeat: no WanGP frame to reload (" + text(why, 120) + "); asking the tab to paint one");
+            if (requestIframeRepair("the stuck view had no frame to reload")) { return false; }
+            return false;
+        }
+        const src = frame.getAttribute("src") || "";
+        say("heartbeat: reloading the WanGP view (" + text(why, 160) + ")");
+        try {
+            if (src) { frame.setAttribute("src", src); }
+            else if (frame.contentWindow) { frame.contentWindow.location.reload(); }
+        } catch (e) {
+            say("heartbeat: the WanGP view could not be reloaded (" + text(e && e.message, 80) + ")");
+            return false;
+        }
+        return true;
+    }
+
+    /** The frame's document finished loading: a fresh one, with its own
+     * twenty seconds, and a leaving worth hearing about. */
+    function frameLoaded(frame) {
+        heartbeatNewDocument(true);
+        watchFrameLeaving(frame);
+    }
+
+    /**
+     * Know when the WanGP document in the frame goes away - WanGP reloading
+     * its own page, say - so the silence until the next one has loaded is
+     * judged as a load and not as a page that stopped answering. Same origin,
+     * so its window can be listened to; a frame that cannot be is judged the
+     * ordinary way.
+     */
+    function watchFrameLeaving(frame) {
+        try {
+            const inner = frame && frame.contentWindow;
+            if (!inner || inner.__minipaintLeaving) { return; }
+            inner.__minipaintLeaving = true;
+            inner.addEventListener("pagehide", function () {
+                if (frame === S.frame) { H.loading = true; }
+            });
+        } catch (e) { /* not ours to listen to */ }
+    }
+
+    /** The bar, if it is on the page. */
+    function stuckBarElement() {
+        const scope = app();
+        const direct = scope.getElementById ? scope.getElementById(STUCK_BAR_ID) : null;
+        if (direct) { return direct; }
+        return scope.querySelector ? scope.querySelector("#" + STUCK_BAR_ID) : null;
+    }
+
+    /**
+     * Put the bar over the top of the frame.
+     *
+     * Written by the browser, like the recovery notice and for the same
+     * reason: the tab's own surfaces are painted through a Gradio event, and
+     * this says the page behind that event is not answering. It is laid over
+     * the frame rather than in the column's flow, because the frame's height
+     * is measured to fill the window and a bar in the flow would push the
+     * management panel off its bottom edge. Its geometry is inline, so it is
+     * where it should be even with no stylesheet; the stylesheet only dresses
+     * it. Every word in it is a constant.
+     */
+    function showStuckBar() {
+        const holder = rootElement();
+        if (!holder || typeof holder.appendChild !== "function") { return false; }
+        let bar = stuckBarElement();
+        if (!bar) {
+            try {
+                bar = document.createElement("div");
+                bar.id = STUCK_BAR_ID;
+                bar.className = STUCK_BAR_CLASS;
+                bar.setAttribute("role", "alert");
+                bar.style.cssText = "position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:30;"
+                    + "display:flex;flex-wrap:wrap;align-items:center;gap:0.6em;max-width:calc(100% - 16px);box-sizing:border-box;";
+                const words = document.createElement("span");
+                words.className = STUCK_BAR_CLASS + "-text";
+                const reload = document.createElement("button");
+                reload.type = "button";
+                reload.className = STUCK_BAR_CLASS + "-reload";
+                reload.textContent = "Reload view";
+                reload.addEventListener("click", function () {
+                    say("heartbeat: 'Reload view' pressed");
+                    reloadView("'Reload view' pressed");
+                });
+                const dismiss = document.createElement("button");
+                dismiss.type = "button";
+                dismiss.className = STUCK_BAR_CLASS + "-dismiss";
+                dismiss.textContent = "Dismiss";
+                dismiss.addEventListener("click", function () {
+                    // The bar goes; the episode does not. It ends when the
+                    // WanGP page answers or loads again, and only then can
+                    // the next silence put the bar back.
+                    H.dismissed = true;
+                    say("heartbeat: 'WanGP stopped responding' dismissed; no automatic reload until the WanGP page answers or loads again");
+                    removeStuckBar();
+                });
+                bar.appendChild(words);
+                bar.appendChild(reload);
+                bar.appendChild(dismiss);
+            } catch (e) {
+                return false;
+            }
+            try {
+                if (window.getComputedStyle && window.getComputedStyle(holder).position === "static") { holder.style.position = "relative"; }
+            } catch (e) { /* the bar still shows, only less precisely placed */ }
+            try { holder.appendChild(bar); } catch (e) { return false; }
+        }
+        bar.hidden = false;
+        drawStuckBar();
+        return true;
+    }
+
+    function drawStuckBar() {
+        const bar = stuckBarElement();
+        const words = bar && bar.querySelector ? bar.querySelector("." + STUCK_BAR_CLASS + "-text") : null;
+        if (!words) { return; }
+        let line = "WanGP stopped responding.";
+        if (H.countdown && H.countdownEnds) {
+            line += " Reloading the view in " + Math.max(0, Math.ceil((H.countdownEnds - Date.now()) / 1000)) + "s.";
+        } else if (H.reloads >= RELOADS_MAX) {
+            line += " It has been reloaded automatically " + RELOADS_MAX + " times; reload it yourself if it stays stuck.";
+        }
+        words.textContent = line;
+    }
+
+    /** The episode is over: the bar and its countdown go, and the next
+     * silence starts a new one. */
+    function hideStuckBar(why) {
+        H.stuck = false;
+        removeStuckBar();
+        if (why) { say("heartbeat: 'WanGP stopped responding' taken away (" + text(why, 80) + ")"); }
+    }
+
+    function removeStuckBar() {
+        stopCountdown();
+        const bar = stuckBarElement();
+        if (bar && bar.parentNode && typeof bar.parentNode.removeChild === "function") {
+            try { bar.parentNode.removeChild(bar); } catch (e) { /* already gone */ }
+        }
     }
 
     function queueRefusal(failureCode, detail, requestId) {
@@ -2207,6 +2821,11 @@ window.minipaintWanGP = (function () {
         abandon(BRIDGE_SESSION_MISMATCH, true);
         S.frame = null;
         S.ready = false;
+        S.ping = false;
+        S.formWatch = false;
+        P.current = false;
+        heartbeatPause();
+        if (H.stuck) { hideStuckBar("the WanGP view was taken away"); }
         S.bridgeSession = "";
         S.bridgeVersion = "";
         S.receivers = [];
@@ -2601,8 +3220,15 @@ window.minipaintWanGP = (function () {
             frame.dataset.minipaintWangp = "1";
             // The element's own load event, not the document's: a reload of
             // this iframe is exactly the moment the old channel dies.
-            frame.addEventListener("load", function () { beginHandshake(true); });
+            frame.addEventListener("load", function () {
+                if (frame === S.frame) { frameLoaded(frame); }
+                beginHandshake(true);
+            });
         }
+        // Bound mid-load or after it, nobody knows which: a READY or the
+        // load event settles it. See LOAD_STUCK_AFTER_MS.
+        H.loading = true;
+        watchFrameLeaving(frame);
         if (options && typeof options.channelId === "string" && HEX32.test(options.channelId)) {
             frame.setAttribute(CHANNEL_ATTRIBUTE, options.channelId);
         }
@@ -2675,7 +3301,30 @@ window.minipaintWanGP = (function () {
                 pressed: S.recovery.pressed,
                 warning_shown: S.recovery.warningShown
             },
-            boot_repainted: S.bootRepainted
+            boot_repainted: S.bootRepainted,
+            // Whether WanGP's record holds this page's settings, and why not.
+            settings: {
+                wanted: P.wanted,
+                watched: S.formWatch,
+                current: P.current,
+                saving: P.running,
+                changes: P.changes,
+                saves: P.saves
+            },
+            // The heartbeat, at rest on a healthy page: armed, beating while
+            // the tab is on screen, silent for 0 ms, nothing stuck.
+            heartbeat: {
+                armed: H.armed,
+                beating: !!H.timer,
+                loading: H.loading,
+                silent_ms: H.silentMs,
+                missed: H.missed,
+                stuck: H.stuck,
+                dismissed: H.dismissed,
+                counting_down: !!H.countdown,
+                automatic_reloads: H.reloads,
+                reloads: H.reloadsTotal
+            }
         };
     }
 
@@ -2881,7 +3530,8 @@ window.minipaintWanGP = (function () {
             const removed = (record && record.removedNodes) || [];
             if (!added.length && !removed.length) { return false; }
             for (const node of Array.prototype.slice.call(added).concat(Array.prototype.slice.call(removed))) {
-                if (!node || node.id !== RECOVERY_NOTICE_ID) { return false; }
+                // The heartbeat's bar lives in the same node, for the same reason.
+                if (!node || (node.id !== RECOVERY_NOTICE_ID && node.id !== STUCK_BAR_ID)) { return false; }
             }
         }
         return true;
@@ -3026,6 +3676,8 @@ window.minipaintWanGP = (function () {
             watchTransport();
             watchFrameSize();
         }
+        // The public API may have loaded first and taken its snapshot already.
+        pullInheritance();
     } catch (e) {
         // A page this file cannot bind to is a Send menu without WanGP lines,
         // and nothing worse than that.
@@ -3050,6 +3702,10 @@ window.minipaintWanGP = (function () {
         queueAndConfirm: queueAndConfirm,
         trackQueue: trackQueue,
         flushForm: flushForm,
+        // Save WanGP's form just before a send; see saveForSend. What the
+        // gallery's Generate, Clipboard's Add to Queue and the public API's
+        // enqueue all wait on, for two seconds at most.
+        saveForSend: saveForSend,
         inheritSettings: inheritSettings,
         capabilities: capabilities,
         // One line into the same journal the handshake and the queries write

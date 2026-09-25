@@ -227,6 +227,38 @@ The one thing it cannot do is work with no page at all: a truly cold start has
 no Gradio session, so there is no live form to commit and the saved defaults
 above are what the job gets.
 
+**When the page commits it (2026-09-25).** A commit happens at five moments,
+none of which holds anything open:
+
+* **the page becoming ready**, and inheritance being switched on - which is
+  what removes "generate once first";
+* **about a second after somebody stops changing the form.** The script in the
+  WanGP document reports touches (`FORM_CHANGED`: only `isTrusted` events,
+  throttled to one per half second, only to a parent whose hello asked with
+  `watch_form`), and the parent then commits once and looks once
+  (`settleMs`) - never two at a time, each question with its own limit;
+* **the WanGP tab leaving the screen**, and **the page going to the
+  background**, when there is anything uncommitted;
+* **just before every send** - the gallery's Generate, Clipboard's Add to
+  Queue and `enqueue()` all wait on `saveForSend`, which answers at once when
+  every change the page was told of is already committed and otherwise commits
+  and polls for at most two seconds. The answer travels as `settings_flush`.
+
+None of it happens until the page knows jobs read the record: the interop
+bundle takes one bounded snapshot when it loads, and passes `inherit_settings`
+to the WanGP bundle. Before 2026-09-25 that snapshot was never taken - the only
+caller was a return from the background, whose listener the snapshot itself
+installed - so the tab was never told and no commit ever happened.
+
+**Every job says which it got.** The snapshot's `source` and the press's
+`settings_flush` become one of a closed set of words (`outbox.SETTINGS_*`), on
+the Queue card, in Queue Send History, in the popup's history and in one
+journal line per job: *saved from the WanGP page at send*, *WanGP's last saved
+settings (the page didn't answer)*, *WanGP's last saved settings (WanGP was
+loading a model's settings at send)*, *WanGP's last saved settings*, *the
+model's defaults (nothing saved yet)*, or *the model's defaults (taking the
+WanGP page's settings is switched off)*.
+
 Two things the job owns and the base does not: the prompt, and `client_id`.
 The base carries the *composing page's* client id, WanGP routes a
 generation's returned artifacts by that key, and an adapter that did not
@@ -384,7 +416,7 @@ inference and is now a citation:
 | claim | how to settle it |
 | --- | --- |
 | ~~the process-wide service is reachable from a server-side entry point with no browser session~~ | **Settled in the field, and the answer was no.** `service_for(state)` is `state.service if isinstance(state, SharedState) else None`, so a thread with no session gets `None` — by construction, not by accident. The global cannot be requested (Wan2GP copies globals onto the plugin before the service exists) and module-level archaeology is revision-specific and was wrong twice. The service is now **learned from the first page request** that reaches the bridge, which is the documented seam: every browser request carries a state, the first one resolves it, and the process keeps it because it is a singleton the pages share. |
-| a flush lands within its budget on a loaded page | press with a WanGP tab open and a slider moved; the job should record `settings_flush: committed` and a `flushed_form` base. The budget is 2.5 s and a miss is not a failure — it composes from the record — so this is a tuning question, not a correctness one. |
+| a flush lands within its budget on a loaded page | press with a WanGP tab open and a slider moved; the job should record `settings_flush: committed` (or `unchanged` if the page had already saved it) and a `flushed_form` base, and its Queue card should say *saved from the WanGP page at send*. A send waits at most 2 s and a miss is not a failure — it composes from the record and says so — so this is a tuning question, not a correctness one. |
 | alternating between the shared-queue path and ordinary WebUI use leaves `wgp`'s module state good | alternate several times on a real install, not once |
 | `preload_model_policy = "U"` does not fire on this path | check it on the target install; if it does, residency is defeated and the setting is the fix |
 | the enhancer/WanGP VRAM handover is needed at all | measure a cold enhanced chain with GPU memory sampled at each stage boundary. WanGP-then-enhancer is the protected direction; enhancer-then-WanGP is not, and that is the boundary `enhance.release_runtime()` targets |

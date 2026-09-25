@@ -3553,6 +3553,9 @@ window.minipaintClipboard = (function () {
      * lives.
      */
     const QUEUE_ROUTE = "/minipaint-clipboard/queue";
+    //: The WanGP page's own save before a press keeps to two seconds; this
+    //: is the backstop for one that does not, a little longer on purpose.
+    const SAVE_TIMEOUT_MS = 2500;
 
     function queueHost() { return byId(OUTBOX_LIST_ID); }
 
@@ -3721,6 +3724,9 @@ window.minipaintClipboard = (function () {
                 }
             }
             entry.appendChild(thumbs);
+            if (record.settings) {
+                entry.appendChild(el("div", "minipaint-clip-history-settings", "Settings: " + record.settings));
+            }
             const actions = el("div", "minipaint-clip-history-actions");
             for (const pair of [["load", "Load"], ["delete", "Delete"]]) {
                 const button = el("button", "", pair[1]);
@@ -3829,15 +3835,40 @@ window.minipaintClipboard = (function () {
     function addToQueue(prompt, enhanceOn) {
         let model = null;
         try { model = JSON.parse(modelJson() || "null"); } catch (e) { model = null; }
-        return askQueue({
-            action: "add",
-            prompt: String(prompt === undefined || prompt === null ? promptValue() : prompt),
-            enhance: typeof enhanceOn === "boolean" ? enhanceOn : undefined,
-            model: model
+        // Read now, before the wait below: the press is what was on screen.
+        const typed = String(prompt === undefined || prompt === null ? promptValue() : prompt);
+        return saveWanGP().then(function (flushed) {
+            return askQueue({
+                action: "add",
+                prompt: typed,
+                enhance: typeof enhanceOn === "boolean" ? enhanceOn : undefined,
+                model: model,
+                settings_flush: flushed
+            });
         }).then(function (answer) {
             if (!answer) { toast("Forge is not answering; nothing was queued.", true); return null; }
             if (answer.instruction) { queue(JSON.stringify(answer.instruction), "the queue route"); }
             return answer;
+        });
+    }
+
+    /**
+     * WanGP's form, saved just before the press goes to the server, which
+     * builds the job from what WanGP saved. Two seconds at most, and never a
+     * reason not to queue: see the WanGP bundle's saveForSend.
+     */
+    function saveWanGP() {
+        const bridge = window.minipaintWanGP;
+        if (!bridge || typeof bridge.saveForSend !== "function") { return Promise.resolve("unavailable"); }
+        let asked;
+        try { asked = bridge.saveForSend("Clipboard's Add to Queue"); } catch (e) { return Promise.resolve("unavailable"); }
+        return new Promise(function (resolve) {
+            let settled = false;
+            const done = function (value) { if (!settled) { settled = true; clearTimeout(backstop); resolve(value); } };
+            const backstop = setTimeout(function () { done("unavailable"); }, SAVE_TIMEOUT_MS);
+            Promise.resolve(asked).then(function (answer) {
+                done(answer && typeof answer.flush === "string" ? answer.flush : "unavailable");
+            }, function () { done("unavailable"); });
         });
     }
 

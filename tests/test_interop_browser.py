@@ -15,6 +15,10 @@ so the page now holds none. What is asserted here:
     instead of holding every later snapshot behind it for ever;
 *   a return from a real absence takes exactly one snapshot and writes down
     whether Forge answered, and how fast; a tab flick takes none;
+*   a page takes one snapshot when it loads, unasked, so that the WanGP tab
+    is told whether jobs are built from its settings - before this existed
+    the first snapshot waited on a listener only a snapshot could install,
+    and none was ever taken;
 *   a browser-executed job still pumps, because the compatibility window is
     real and an already-loaded page must keep working.
 
@@ -84,8 +88,14 @@ const notes = [];
 window.minipaintWanGP = {
     note: function (line) { notes.push(String(line)); },
     flushForm: function () {
-        flushes.push({ at: calls.length });
+        flushes.push({ at: calls.length, how: "flushForm" });
         return Promise.resolve(FLUSH_MODE === "absent" ? { ok: false } : { ok: true, flush: FLUSH_MODE });
+    },
+    // The save every send path shares: two seconds at most, and none at all
+    // when the WanGP page says its record is already current.
+    saveForSend: function (reason) {
+        flushes.push({ at: calls.length, how: "saveForSend", reason: String(reason) });
+        return Promise.resolve({ ok: true, flush: FLUSH_MODE === "absent" ? "unavailable" : FLUSH_MODE });
     },
     // The WanGP tab's own script keeps the recorded form current ahead of a
     // press, but only when something is going to read it. It cannot find
@@ -182,7 +192,7 @@ function installClock() {
         }
     };
 }
-if (["starved", "hidden", "hiddenstarved", "flick"].indexOf(process.argv[3]) !== -1) { installClock(); }
+if (["starved", "hidden", "hiddenstarved", "flick", "bootstarved"].indexOf(process.argv[3]) !== -1) { installClock(); }
 
 new Function("window", "document", "fetch", "EventSource", "CustomEvent", "localStorage",
     fs.readFileSync(process.argv[2], "utf8"))(window, document, fetch, FakeEventSource, CustomEvent, localStorage);
@@ -242,13 +252,28 @@ async function main() {
 // A snapshot that never comes back. It answers SYNC_TIMEOUT when its time
 // runs out, and the next one is sent rather than queued behind it.
 async function starved() {
+    // The page's own snapshot at load comes first, as it does on a real page;
+    // on this clock it would otherwise be taken in the middle of the scenario.
+    await CLOCK.advance(1);
+    const atLoad = calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length;
     STARVED = true;
     const first = api.sync();
     await CLOCK.advance(16000);
     const answer = await first;
     STARVED = false;
     const second = await api.sync();
-    report({ first: answer && answer.code, second: second && second.ok, syncs: calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length });
+    report({ first: answer && answer.code, second: second && second.ok,
+             syncs: calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length - atLoad });
+}
+
+// A page that has only loaded: nobody pressed, nobody came back from
+// anywhere. It takes exactly one snapshot, and the WanGP tab hears from it.
+async function booted() {
+    if (MODE === "bootstarved") { STARVED = true; }
+    await new Promise(function (r) { realSetTimeout(r, 50); });
+    if (CLOCK) { await CLOCK.advance(16000); }
+    await new Promise(function (r) { realSetTimeout(r, 20); });
+    report({ syncs: syncs() });
 }
 
 // The page goes to the background and comes back. Nothing was open to
@@ -260,6 +285,9 @@ function setHidden(yes) {
 }
 const syncs = function () { return calls.filter(function (c) { return c.url.indexOf("/sync") !== -1; }).length; };
 async function away() {
+    // The snapshot a page takes when it loads, first, as on a real page: on
+    // this clock it would otherwise be taken while the page is "away".
+    await CLOCK.advance(1);
     await api.sync();
     STARVED = MODE === "hiddenstarved";
     const before = syncs();
@@ -275,7 +303,8 @@ async function away() {
 }
 
 (MODE === "starved" ? starved()
-    : (MODE === "hidden" || MODE === "hiddenstarved" || MODE === "flick") ? away() : main()).catch(function (e) {
+    : (MODE === "hidden" || MODE === "hiddenstarved" || MODE === "flick") ? away()
+    : (MODE === "boot" || MODE === "bootstarved") ? booted() : main()).catch(function (e) {
     console.log(JSON.stringify({ error: String(e && e.stack || e) }));
 });
 """
@@ -341,6 +370,8 @@ def run() -> Results:
             len(flushes) >= 1 and flushes[0]["at"] == 0, str(flushes))
     r.check("and tells the server what it managed, so the base can be attributed",
             bool(bodies) and bodies[0].get("settings_flush") == "committed", str(bodies[:1]))
+    r.check("through the same save the gallery and the Clipboard tab wait on, saying who asked",
+            bool(flushes) and flushes[0].get("how") == "saveForSend" and flushes[0].get("reason") == "a queue request", str(flushes))
 
     absent = _run("noflush")
     r.check("the harness drove a page whose WanGP cannot flush", absent is not None and "error" not in absent, str(absent)[:300])
@@ -406,6 +437,32 @@ def run() -> Results:
     r.check("the harness drove a tab flick", flick is not None and "error" not in flick, str(flick)[:300])
     if flick and "error" not in flick:
         r.check("a few seconds away is not a return worth a request", flick.get("onReturn") == 0, str(flick))
+
+    # The load. PR #102 made every snapshot one a page asks for, and the only
+    # thing that asked was a return from the background - through a listener
+    # that only a snapshot installed. So no page ever took one, the WanGP tab
+    # was never told that jobs are built from its settings, and a LoRA weight
+    # changed there never reached a job sent from anywhere else.
+    boot = _run("boot")
+    r.check("the harness drove a page that only loaded", boot is not None and "error" not in boot, str(boot)[:300])
+    if boot and "error" not in boot:
+        r.check("a page takes exactly one snapshot when it loads, with nobody asking", boot.get("syncs") == 1, str(boot))
+        r.check("and that snapshot tells the WanGP tab whether jobs are built from its settings",
+                boot.get("told") == [True], str(boot.get("told")))
+        r.check("and keeps what it said where a WanGP tab that loads later can read it",
+                (boot.get("state") or {}).get("inherit") is True and (boot.get("state") or {}).get("unattended") is True,
+                str(boot.get("state")))
+        r.check("and the journal says it was taken, how fast, and what it said",
+                any("snapshot: at page load, Forge answered in" in line and "built from the WanGP page's settings" in line
+                    for line in boot.get("notes") or []), str(boot.get("notes")))
+        r.check("and it opens no stream", boot.get("streams") == [], str(boot.get("streams")))
+    silent = _run("bootstarved")
+    r.check("the harness drove a page whose Forge does not answer at load", silent is not None and "error" not in silent, str(silent)[:300])
+    if silent and "error" not in silent:
+        r.check("a load snapshot that never comes back is bounded and says so, and is not repeated",
+                silent.get("syncs") == 1 and any("snapshot: at page load, Forge did not answer within 15s" in line
+                                                  for line in silent.get("notes") or []), str(silent))
+        r.check("and the WanGP tab is told nothing it was not told", silent.get("told") == [], str(silent.get("told")))
     return r
 
 

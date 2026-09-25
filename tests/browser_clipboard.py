@@ -1041,18 +1041,36 @@ def check_the_queue_section_is_the_browsers(r: Results, page) -> None:
     # the server and comes back with a sentence and a button is.
     before = page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_queue_status');
         return h ? h.textContent.trim() : ''; }""")
-    page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_queue');
-        const b = h && (h.tagName === 'BUTTON' ? h : h.querySelector('button'));
-        if (b) { b.click(); } }""")
-    said = ""
-    for _ in range(12):
-        time.sleep(1)
-        said = page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_queue_status');
-            return h ? h.textContent.trim() : ''; }""")
-        if said and said != before:
-            break
+    presses = []
+
+    def pressed(request):
+        if request.method == "POST" and "/minipaint-clipboard/queue" in request.url:
+            try:
+                presses.append(json.loads(request.post_data or "{}"))
+            except ValueError:
+                presses.append({})
+
+    page.on("request", pressed)
+    try:
+        page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_queue');
+            const b = h && (h.tagName === 'BUTTON' ? h : h.querySelector('button'));
+            if (b) { b.click(); } }""")
+        said = ""
+        for _ in range(12):
+            time.sleep(1)
+            said = page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_queue_status');
+                return h ? h.textContent.trim() : ''; }""")
+            if said and said != before:
+                break
+    finally:
+        page.remove_listener("request", pressed)
     r.check("Add to Queue reaches the server over that route and comes back with a sentence",
             bool(said) and said != before, repr(said))
+    adds = [body for body in presses if body.get("action") == "add"]
+    # No WanGP page is in this one, so nothing can be saved: the press says
+    # so rather than leaving the server to guess, and it was not held up.
+    r.check("and it tells the server what came of saving WanGP's form first - here, that there was nothing to ask",
+            len(adds) == 1 and adds[0].get("settings_flush") in ("", "unavailable"), str(adds)[:200])
 
     r.check("the history list is the browser's too",
             page.evaluate("""() => {

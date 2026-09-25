@@ -162,6 +162,41 @@ STAGE_TEXT = {
     EXECUTION_UNKNOWN: "Whether WanGP ran this could not be proved.",
 }
 
+#: Where a job's WanGP settings came from - the one thing about a job that
+#: must never be silent, because a job that ran at settings nobody chose for
+#: it looks exactly like one that ran at the settings its owner set up. The
+#: key is what a record stores; the sentence is what the queue, both send
+#: histories and the log say. A closed vocabulary: nothing else is stored.
+SETTINGS_SAVED_AT_SEND = "saved_at_send"
+SETTINGS_NO_ANSWER = "last_saved_no_answer"
+SETTINGS_LOADING = "last_saved_loading"
+SETTINGS_LAST_SAVED = "last_saved"
+SETTINGS_DEFAULTS = "model_defaults"
+SETTINGS_OFF = "not_inherited"
+SETTINGS_SESSION = "page_session"
+SETTINGS_LIVE = "live_page"
+SETTINGS_TEXT = {
+    SETTINGS_SAVED_AT_SEND: "saved from the WanGP page at send",
+    SETTINGS_NO_ANSWER: "WanGP's last saved settings (the page didn't answer)",
+    SETTINGS_LOADING: "WanGP's last saved settings (WanGP was loading a model's settings at send)",
+    SETTINGS_LAST_SAVED: "WanGP's last saved settings",
+    SETTINGS_DEFAULTS: "the model's defaults (nothing saved yet)",
+    SETTINGS_OFF: "the model's defaults (taking the WanGP page's settings is switched off)",
+    SETTINGS_SESSION: "the WanGP page's own session",
+    SETTINGS_LIVE: "the WanGP page itself, as it was when this browser queued the job",
+}
+SETTINGS_KEYS = tuple(SETTINGS_TEXT)
+
+#: What was done about WanGP's form at the press, for the line the press
+#: writes - before the job has been composed and its settings are known.
+FLUSH_NOTES = {
+    protocol.FLUSH_COMMITTED: "WanGP's form saved from its page at send",
+    protocol.FLUSH_UNCHANGED: "WanGP's form already saved from its page",
+    protocol.FLUSH_REQUESTED: "WanGP's form asked to save at send",
+    protocol.FLUSH_SUPPRESSED: "WanGP was loading a model's settings, so its form was not saved at send",
+    protocol.FLUSH_UNAVAILABLE: "the WanGP page did not answer, so its form was not saved at send",
+}
+
 ORIGIN_CLIPBOARD = "clipboard"
 ORIGIN_API = "api"
 #: A press of the gallery's send button with WanGP as its destination. Its
@@ -722,6 +757,54 @@ def public(job: typing.Mapping[str, typing.Any]) -> dict:
         "settings_flush": job.get("settings_flush", ""),
         "inherit_settings": bool(job.get("inherit_settings")),
     }
+
+
+def settings_source(job: typing.Mapping[str, typing.Any]) -> str:
+    """Where this job's WanGP settings came from, as a ``SETTINGS_*`` key -
+    or "" while that is not decided yet.
+
+    A job the server runs gets its settings when it is composed, so until
+    then nobody can say; from then on its snapshot's ``source`` says which
+    base it read, and the press's ``settings_flush`` says why a recorded one
+    was the last one saved rather than the one on screen. A job a page ran
+    itself was the live form with its fields laid over it, by construction.
+    Works on a stored job and on ``public(job)`` alike.
+    """
+    if not isinstance(job, typing.Mapping):
+        return ""
+    if job.get("executor", EXECUTOR_BROWSER) != EXECUTOR_SERVER:
+        return SETTINGS_LIVE if job.get("state") in POSITIVE else ""
+    snapshot = job.get("snapshot") if isinstance(job.get("snapshot"), typing.Mapping) else {}
+    source = snapshot.get("source")
+    if source == protocol.BASE_FLUSHED:
+        return SETTINGS_SAVED_AT_SEND
+    if source == protocol.BASE_FACTORY:
+        return SETTINGS_DEFAULTS if job.get("inherit_settings") else SETTINGS_OFF
+    if source == protocol.BASE_SESSION:
+        return SETTINGS_SESSION
+    if source == protocol.BASE_RECORDED:
+        flushed = job.get("settings_flush") or ""
+        if flushed == protocol.FLUSH_SUPPRESSED:
+            return SETTINGS_LOADING
+        if flushed == protocol.FLUSH_UNAVAILABLE:
+            return SETTINGS_NO_ANSWER
+        return SETTINGS_LAST_SAVED
+    return ""
+
+
+def settings_sentence(job: typing.Mapping[str, typing.Any]) -> str:
+    """``settings_source`` in words, or ""."""
+    return SETTINGS_TEXT.get(settings_source(job), "")
+
+
+def flush_note(job: typing.Mapping[str, typing.Any]) -> str:
+    """What the press did about WanGP's form, for its journal line."""
+    # A job a page runs drives the live form whatever the setting says.
+    if job.get("executor", EXECUTOR_BROWSER) != EXECUTOR_SERVER:
+        return "WanGP's settings are its page's own when this browser queues it"
+    if not job.get("inherit_settings"):
+        return "WanGP's settings are not taken from its page (switched off)"
+    return FLUSH_NOTES.get(job.get("settings_flush") or "", "WanGP's form was not asked to save at send")
 
 
 def _public_snapshot(raw: typing.Any) -> typing.Optional[dict]:
@@ -1993,6 +2076,9 @@ __all__ = [
     "inherit_settings", "use_inherit",
     "MAX_PENDING", "ORIGIN_API", "ORIGIN_CLIPBOARD", "ORIGIN_GALLERY", "OUTBOX_NAME", "PAGE_ACTIVE_SECONDS", "PENDING",
     "PHASE_DONE", "PHASE_SENT", "POSITIVE", "QUEUED", "SCHEMA", "SENDING", "SERVER_ACTIVE",
+    "FLUSH_NOTES", "SETTINGS_DEFAULTS", "SETTINGS_KEYS", "SETTINGS_LAST_SAVED", "SETTINGS_LIVE", "SETTINGS_LOADING",
+    "SETTINGS_NO_ANSWER", "SETTINGS_OFF", "SETTINGS_SAVED_AT_SEND", "SETTINGS_SESSION", "SETTINGS_TEXT",
+    "flush_note", "settings_sentence", "settings_source",
     "SERVER_SUBMITTED", "SERVER_TERMINAL", "STAGE_TEXT", "STARTED", "STATES", "SUBMITTING_WANGP",
     "TERMINAL", "UNCONFIRMED", "WAITING", "WAITING_FOR_CARD", "WAITING_TURN", "WAIT_BUSY_MS",
     "WAIT_ENHANCE_MS", "WAIT_TURN_MS", "WANGP_ACCEPTED", "WANGP_FINISHED", "WANGP_GENERATING",

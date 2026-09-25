@@ -416,7 +416,8 @@ async def _queue(request: typing.Any) -> typing.Any:
     try:
         if action == "add":
             answer = tab.add_to_queue(body.get("prompt") or "", page, body.get("model"),
-                                      body.get("enhance") if isinstance(body.get("enhance"), bool) else None)
+                                      body.get("enhance") if isinstance(body.get("enhance"), bool) else None,
+                                      settings_flush=body.get("settings_flush"))
         elif action == "cancel_all":
             answer = tab.cancel_all(page)
         elif action in ("cancel", "retry", "adopt", "dismiss"):
@@ -705,6 +706,7 @@ def intercept_action(body: typing.Mapping[str, typing.Any]) -> typing.Tuple[dict
                 body.get("handoff"), body.get("prompt") or "", body.get("roles"), body.get("inherit"),
                 body.get("enhance") if isinstance(body.get("enhance"), bool) else None,
                 body.get("page") or "", model, inputs,
+                settings_flush=body.get("settings_flush"),
             )
         elif action == "cancel":
             answer = intercept.cancel(body.get("handoff"))

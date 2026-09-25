@@ -215,7 +215,12 @@ def bootstrap_js(uuid: str, options: typing.Mapping[str, typing.Any], status_ele
         "options": dict(options),
         "status": status_elem_id,
     }
-    wangp = json.dumps([assets.url_for("wangp")])
+    # The public queue API rides with it, in that order (the loader runs
+    # them in the order given): its one snapshot at load is what tells the
+    # WanGP tab whether jobs are built from its settings. Without it that
+    # was never said, and a setting changed in the WanGP tab never reached a
+    # job sent from anywhere else.
+    wangp = json.dumps([assets.url_for("wangp"), assets.url_for("interop")])
     # The transfer library, named for the page and started early. A send is
     # the first thing that needs it and a send is the worst moment to be
     # fetching it, so it is asked for here and awaited only where it is used.

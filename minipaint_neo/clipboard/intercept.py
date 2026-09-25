@@ -360,6 +360,9 @@ def _normalize_entry(raw: typing.Any) -> typing.Optional[dict]:
         "executor": str(raw.get("executor") or "")[:16],
         "image": {"width": whole(image.get("width")), "height": whole(image.get("height")),
                   "tab": str(image.get("tab") or "")[:24]},
+        # Where the job's WanGP settings came from: one of the outbox's keys,
+        # filled in once the job has been composed. See history_view.
+        "settings": raw.get("settings") if raw.get("settings") in outbox.SETTINGS_KEYS else "",
     }
 
 
@@ -468,13 +471,20 @@ def history_view(model: typing.Any = None, inputs: typing.Any = None) -> typing.
     except Exception:
         labels = {}
     view = []
+    learned: typing.Dict[str, str] = {}
     for entry in load_history():
         outcome = ""
+        settings = entry.get("settings") or ""
         if entry["job_id"]:
             job = outbox.get(entry["job_id"])
             if job is not None:
                 state = str(job.get("state") or "")
                 outcome = labels.get(state, state)
+                # Unlike the outcome, this is a fact about the recipe that
+                # stays true after the job has gone, so it is kept.
+                known = outbox.settings_source(job)
+                if known and known != settings:
+                    settings = learned[entry["id"]] = known
         view.append({
             "id": entry["id"],
             "when": entry["created_at"].replace("T", " ").replace("+00:00", " UTC"),
@@ -487,8 +497,24 @@ def history_view(model: typing.Any = None, inputs: typing.Any = None) -> typing.
             "model": entry["model"].get("label") or entry["model"].get("type") or "",
             "outcome": outcome,
             "image": dict(entry["image"]),
+            "settings": outbox.SETTINGS_TEXT.get(settings, ""),
         })
+    if learned:
+        _remember_settings(learned)
     return view
+
+
+def _remember_settings(learned: typing.Mapping[str, str]) -> None:
+    """Write down where these entries' settings came from. Best effort: a
+    view that could not save it says it anyway, and says it again next time."""
+    try:
+        entries = _load_entries()
+        for entry in entries:
+            if entry["id"] in learned:
+                entry["settings"] = learned[entry["id"]]
+        _save_entries(entries)
+    except Exception:
+        pass
 
 
 def recipe(entry_id: typing.Any, model: typing.Any = None, inputs: typing.Any = None) -> dict:
@@ -634,6 +660,7 @@ def submit(
     page: typing.Any,
     model: typing.Any = None,
     inputs: typing.Any = None,
+    settings_flush: typing.Any = "",
 ) -> dict:
     """Generate: capture, revalidate, build, submit, record - in that order.
 
@@ -643,6 +670,11 @@ def submit(
     the outbox, one history entry, and - when the server executes the job
     and so already owns its own pinned copy of the picture - the staged
     original let go.
+
+    ``settings_flush`` is what the popup's page managed to do about WanGP's
+    form just before it pressed - saved it, found nothing new, or got no
+    answer - and it is recorded on the job, never believed beyond that: see
+    ``outbox.submit``.
     """
     parsed = parse_handoff(handoff)
     if parsed is None:
@@ -666,7 +698,8 @@ def submit(
             # The switch on screen and the setting on disk had drifted, as
             # they can when a change event is lost; the press is the answer.
             enhance.set_enabled(wanted)
-        job = outbox.submit(request, page, outbox.ORIGIN_GALLERY, model=block, enhance=wanted)
+        job = outbox.submit(request, page, outbox.ORIGIN_GALLERY, model=block, enhance=wanted,
+                            settings_flush=str(settings_flush or ""))
     except IntegrationError as error:
         _journal(f"generate refused before storing - {error.code}")
         notes = []
@@ -702,7 +735,8 @@ def submit(
     pending = outbox.pending_count()
     _journal(f"generate: job {job['job_id'][:8]} from {parsed['tab'] or 'a gallery'} as {', '.join(kept)}"
              f"{'; inheriting Clipboard' if use_draft else ''}{'; enhanced' if job.get('enhance_requested') else ''}"
-             f"{'; ' + str(len(dropped)) + ' role(s) no longer offered dropped' if dropped else ''}; {pending} waiting")
+             f"{'; ' + str(len(dropped)) + ' role(s) no longer offered dropped' if dropped else ''}; {pending} waiting"
+             f"; {outbox.flush_note(job)}")
     line = "Queued on the server." if server else "Queued for WanGP."
     if job.get("enhance"):
         line = "Queued; the prompt is being enhanced first."

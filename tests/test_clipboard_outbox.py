@@ -260,8 +260,75 @@ def route_checks(r: Results) -> None:
     r.check("the contract names the outbox route", client.get(interop.CONTRACT_ROUTE).json().get("outbox") == interop.OUTBOX_ROUTE)
 
 
+def settings_source_checks(r: Results) -> None:
+    """Where a job's WanGP settings came from, as the queue, both send
+    histories and the log say it - worked out from the job alone.
+
+    Written as a table because it is one: every combination a job can be in,
+    and the one answer each gets. The executor's checks drive the server
+    half through a real compose; this is every row, the page-run ones and
+    the not-yet-decided ones included.
+    """
+    from minipaint_neo.wangp import protocol as wire
+
+    def server(source, flush="", inherit=True):
+        job = {"executor": outbox.EXECUTOR_SERVER, "state": outbox.COMPLETED, "settings_flush": flush, "inherit_settings": inherit}
+        if source is not None:
+            job["snapshot"] = {"source": source}
+        return job
+
+    table = (
+        ("a flushed base", server(wire.BASE_FLUSHED, wire.FLUSH_COMMITTED), outbox.SETTINGS_SAVED_AT_SEND,
+         "saved from the WanGP page at send"),
+        ("a recorded base whose page did not answer", server(wire.BASE_RECORDED, wire.FLUSH_UNAVAILABLE), outbox.SETTINGS_NO_ANSWER,
+         "WanGP's last saved settings (the page didn't answer)"),
+        ("a recorded base whose WanGP was loading settings", server(wire.BASE_RECORDED, wire.FLUSH_SUPPRESSED), outbox.SETTINGS_LOADING,
+         "WanGP's last saved settings (WanGP was loading a model's settings at send)"),
+        ("a recorded base nobody tried to save", server(wire.BASE_RECORDED, ""), outbox.SETTINGS_LAST_SAVED,
+         "WanGP's last saved settings"),
+        ("factory, inheriting", server(wire.BASE_FACTORY, wire.FLUSH_COMMITTED), outbox.SETTINGS_DEFAULTS,
+         "the model's defaults (nothing saved yet)"),
+        ("factory, by choice", server(wire.BASE_FACTORY, "", inherit=False), outbox.SETTINGS_OFF,
+         "the model's defaults (taking the WanGP page's settings is switched off)"),
+        ("a job not composed yet", server(None, wire.FLUSH_COMMITTED), "", ""),
+        ("a page-run job WanGP took", {"executor": outbox.EXECUTOR_BROWSER, "state": outbox.QUEUED}, outbox.SETTINGS_LIVE,
+         "the WanGP page itself, as it was when this browser queued the job"),
+        ("a page-run job still waiting", {"executor": outbox.EXECUTOR_BROWSER, "state": outbox.PENDING}, "", ""),
+        ("a legacy document that names no executor", {"state": outbox.STARTED}, outbox.SETTINGS_LIVE,
+         "the WanGP page itself, as it was when this browser queued the job"),
+    )
+    for name, job, key, sentence in table:
+        r.check(f"settings source: {name}", outbox.settings_source(job) == key and outbox.settings_sentence(job) == sentence,
+                repr((outbox.settings_source(job), outbox.settings_sentence(job))))
+    r.check("the vocabulary is closed: every key has its sentence and nothing else is stored",
+            set(outbox.SETTINGS_KEYS) == set(outbox.SETTINGS_TEXT) and "" not in outbox.SETTINGS_KEYS)
+
+    notes = {
+        "committed": outbox.flush_note(server(None, wire.FLUSH_COMMITTED)),
+        "unchanged": outbox.flush_note(server(None, wire.FLUSH_UNCHANGED)),
+        "unavailable": outbox.flush_note(server(None, wire.FLUSH_UNAVAILABLE)),
+        "suppressed": outbox.flush_note(server(None, wire.FLUSH_SUPPRESSED)),
+        "none": outbox.flush_note(server(None, "")),
+        "off": outbox.flush_note(server(None, "", inherit=False)),
+        "page": outbox.flush_note({"executor": outbox.EXECUTOR_BROWSER, "inherit_settings": True}),
+        "page off": outbox.flush_note({"executor": outbox.EXECUTOR_BROWSER, "inherit_settings": False}),
+    }
+    r.check("the press's own line says what was done about WanGP's form, before anything is composed",
+            notes["committed"] == "WanGP's form saved from its page at send"
+            and notes["unchanged"] == "WanGP's form already saved from its page"
+            and notes["unavailable"] == "the WanGP page did not answer, so its form was not saved at send"
+            and notes["suppressed"] == "WanGP was loading a model's settings, so its form was not saved at send"
+            and notes["none"] == "WanGP's form was not asked to save at send", repr(notes))
+    r.check("and says plainly when the page's settings are not taken at all, or are the page's own",
+            notes["off"] == "WanGP's settings are not taken from its page (switched off)"
+            and notes["page"] == "WanGP's settings are its page's own when this browser queues it", repr(notes))
+    r.check("a job a page runs itself drives the live form whatever the setting says, and its line says so",
+            notes["page off"] == notes["page"], repr(notes))
+
+
 def run() -> Results:
     r = Results("clipboard outbox")
+    settings_source_checks(r)
     with tempfile.TemporaryDirectory(prefix="minipaint-outbox-") as scratch:
         base = pathlib.Path(scratch)
         wangp_config.use_config_dir(base / "data")

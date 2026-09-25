@@ -928,19 +928,27 @@ def flush_attribution_checks(r: Results, clock) -> None:
     that ran at whatever WanGP happened to have kept.
     """
     _setup(clock)
+    process_log.begin("f" * 32, "executor settings attribution check")
     runtime = FakeRuntime()
     runtime.state = FakeRuntime.READY
     runtime.instance_id = "child-one"
     child = FakeChild(clock)
     monkey = []
     _install(monkey, runtime)
-    def source_for(prompt, flush):
-        """One press, driven to a generated file. Returns its recorded base."""
-        job = outbox.submit(_request(prompt=prompt), PAGE, settings_flush=flush)
+    said = {}
+    def source_for(prompt, flush, inherit=True):
+        """One press, driven to a generated file. Returns its recorded base,
+        and keeps what the queue and the journal say about it."""
+        job = outbox.submit(_request(prompt=prompt), PAGE, settings_flush=flush, inherit=inherit)
         _run(child, runtime)
         child.finish(job["execution_id"])
         _run(child, runtime)
-        return outbox.get(job["job_id"])["snapshot"]["source"]
+        done = outbox.get(job["job_id"])
+        log = pathlib.Path(str(process_log.path()))
+        text = log.read_text(encoding="utf-8") if log.exists() else ""
+        said[prompt] = {"sentence": outbox.settings_sentence(done),
+                        "journal": [line for line in text.splitlines() if job["job_id"][:8] + ":" in line and "settings - " in line]}
+        return done["snapshot"]["source"]
 
     try:
         control.use_transport(child)
@@ -955,11 +963,34 @@ def flush_attribution_checks(r: Results, clock) -> None:
         r.check("every one of them reached WanGP regardless - a flush is an optimisation, never a gate",
                 len(child.submissions) == 4, str(len(child.submissions)))
 
+        # What the queue and the log say about each, in the words promised:
+        # the one thing about a job that must never be silent.
+        r.check("the flushed one says its settings were saved from the WanGP page at send",
+                said[PROMPT]["sentence"] == "saved from the WanGP page at send", str(said[PROMPT]))
+        r.check("the one whose page did not answer says it got WanGP's last saved settings, and why",
+                said["a fourth"]["sentence"] == "WanGP's last saved settings (the page didn't answer)", str(said["a fourth"]))
+        r.check("the one WanGP refused mid settings-load says that",
+                said["a third"]["sentence"] == "WanGP's last saved settings (WanGP was loading a model's settings at send)",
+                str(said["a third"]))
+        r.check("and one no page tried to save says only where they came from",
+                said["another"]["sentence"] == "WanGP's last saved settings", str(said["another"]))
+        r.check("every one of them writes exactly one line in the journal saying the same",
+                all(len(said[key]["journal"]) == 1 and said[key]["sentence"] in said[key]["journal"][0]
+                    for key in (PROMPT, "another", "a third", "a fourth")), str({k: v["journal"] for k, v in said.items()}))
+
         # Factory is still factory. A press that flushed against a WanGP with
         # nothing recorded has carried nothing, and must not claim otherwise.
         child.source = wire.BASE_FACTORY
         r.check("a flush against a WanGP with nothing recorded is still factory, not a flushed base",
                 source_for("a fifth", wire.FLUSH_COMMITTED) == wire.BASE_FACTORY)
+        r.check("and it says it ran at the model's defaults because nothing was saved yet",
+                said["a fifth"]["sentence"] == "the model's defaults (nothing saved yet)"
+                and len(said["a fifth"]["journal"]) == 1 and "the model's defaults (nothing saved yet)" in said["a fifth"]["journal"][0],
+                str(said["a fifth"]))
+        source_for("a sixth", "", inherit=False)
+        r.check("while one that was told not to take the page's settings says that, not 'nothing saved'",
+                said["a sixth"]["sentence"] == "the model's defaults (taking the WanGP page's settings is switched off)",
+                str(said["a sixth"]))
     finally:
         control.use_transport(None)
         _restore(monkey)

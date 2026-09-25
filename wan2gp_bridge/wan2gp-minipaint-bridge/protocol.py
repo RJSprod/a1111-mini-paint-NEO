@@ -48,11 +48,26 @@ QUEUE_TRACKED = "WANGP_QUEUE_TRACKED"
 #: when the button was pressed. See the FLUSH_* outcomes below.
 FORM_FLUSH = "WANGP_FORM_FLUSH"
 FORM_FLUSHED = "WANGP_FORM_FLUSHED"
+#: The heartbeat. Answered by the script in the WanGP document on the spot -
+#: no Gradio round trip, no request, nothing on the network - so an unanswered
+#: one means there is no WanGP document there able to answer: it went away,
+#: was replaced, never came up, or is not running at all. Additive like the
+#: flush: the parent only sends it to a bridge whose READY said ``ping``, and
+#: an older peer drops a type it does not know.
+PING = "WANGP_PING"
+PONG = "WANGP_PONG"
+#: Somebody touched WanGP's form. Sent by the script in the WanGP document,
+#: throttled, and only to a parent whose hello asked for it (``watch_form``);
+#: the parent commits the form about a second after the last one. It says
+#: that something changed and nothing about what: no value crosses.
+FORM_CHANGED = "WANGP_FORM_CHANGED"
 
 #: What the parent page may send into the iframe.
-TO_BRIDGE = frozenset({HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH})
+TO_BRIDGE = frozenset({HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH,
+                       PING})
 #: What the iframe may send out to the parent page.
-TO_PARENT = frozenset({READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED})
+TO_PARENT = frozenset({READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED,
+                       PONG, FORM_CHANGED})
 
 #: Stable logical receiver ids. The bridge maps these onto whatever the
 #: installed WanGP calls them; MiniPaint only ever sees these.

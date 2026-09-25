@@ -245,18 +245,39 @@ Protocol 3 adds `queue(request)`, `confirmQueue(requestId)`, `queueAndConfirm(re
 and `capabilities()`, and `state().queue` from the handshake's `capabilities.queue`;
 the shapes are in `docs/clipboard/CONTRACTS.md`.
 
-Protocol 6 adds `flushForm({timeoutMs})`: ask WanGP to commit this page's live
-settings form so a job composed later — on the server, with this page shut —
-runs at what was on screen. It writes one hidden trigger
+Protocol 6 adds `flushForm({timeoutMs, settleMs, callTimeoutMs})`: ask WanGP to
+commit this page's live settings form so a job composed later — on the server,
+with this page shut — runs at what was on screen. It writes one hidden trigger
 (`save_form_trigger`, which WanGP already wires to
 `save_inputs(target="state")`) rather than reading the form back, then polls a
-fingerprint of the recorded form until it moves or a 2.5 s budget runs out.
-Resolves — never rejects — with one of `committed`, `unchanged`,
-`suppressed`, `unavailable`; every one of them is a fine outcome, because a
-job composes from the recorded form when a flush cannot happen. A probe never
-writes, and a page carrying `ignore_save_form` is refused rather than
-flushed. `minipaintInterop.enqueue` calls it before submitting and passes the
-outcome as `settings_flush`; pass `{flush: false}` to opt out.
+fingerprint of the recorded form until it moves or the budget (900 ms unless
+given) runs out; with `settleMs` it looks once, that long after the press, and
+stops. Resolves — never rejects — with one of `committed`, `unchanged`,
+`requested` (settle mode, not moved yet), `suppressed`, `unavailable`; every
+one of them is a fine outcome, because a job composes from the recorded form
+when a flush cannot happen. A probe never writes, and a page carrying
+`ignore_save_form` is refused rather than flushed.
+
+`saveForSend(reason)` is the save every send path waits on — the gallery's
+Generate, Clipboard's Add to Queue and `minipaintInterop.enqueue` (pass
+`{flush: false}` to opt out). It resolves within 2 s with `{flush}`: `""` when
+nothing reads the record (inheritance off, or a queue this page runs itself),
+`unchanged` at once when the bridge reports its changes (`form_watch`) and
+every one it reported is already committed, otherwise the outcome of a flush,
+and `unavailable` when there is no bridge session or it did not answer in
+time. The page also commits about a second after the last `FORM_CHANGED`, one
+save at a time; `state().settings` says whether the record is current.
+
+The heartbeat: while the WanGP tab is on screen and the page is visible, a
+bridge whose READY said `capabilities.ping` is sent `PING` every 5 s and
+answers `PONG` `{busy_ms, op, waiting}` from its page script, never through
+Gradio. Twenty seconds of on-screen silence (sixty while the document is still
+loading) shows *WanGP stopped responding* with Reload view and Dismiss over the
+frame and reloads the frame's `src` ten seconds later unless dismissed — at
+most once per two minutes and three times per page. `state().heartbeat` is the
+whole of it. `HELLO` carries `watch_form: true`; a bridge that honours it says
+`capabilities.form_watch` and sends `FORM_CHANGED` `{touches}` for trusted
+events only.
 
 ## `wan2gp_bridge/wan2gp-minipaint-bridge/` — the WanGP-side plugin
 

@@ -375,6 +375,10 @@ that is always visible is worth having and is not in this version.)
 Bridge 1.4.0 speaks protocol 5 (the queue operation, starting a run, tracking where a page's
 queued tasks are, and the model a request insists on); the extension's copy and the installed
 copy must match, so updating one half means updating the other and restarting WanGP.
+Bridge 1.7.0 adds, inside the same protocol, the heartbeat (`PING`/`PONG`) and the notice
+that the form was touched (`FORM_CHANGED`), which is what lets the page save WanGP's
+settings as they change; an extension newer than its bridge says `BRIDGE_VERSION_MISMATCH`
+until the bridge is installed again from setup step 4 and WanGP restarted.
 
 Version comparison is exact equality, not a range: the two halves of the protocol are
 released together, so an installed bridge that is *newer* than the extension is as wrong as
@@ -387,6 +391,36 @@ each component it needs through WanGP's plugin API and reports what it actually 
 handshake. A build that is missing a mandatory one answers `ready=false` with
 `BRIDGE_COMPONENT_INCOMPATIBLE`, and the Send menu offers nothing rather than sending into
 something that looked about right.
+
+## When the WanGP view stops answering
+
+While the WanGP tab is on screen and the page is in front, the page sends the WanGP page a
+`PING` every five seconds and the bridge's page script answers on the spot — a message
+inside the browser, with no request to Forge and no connection held. The page journal
+(`logs/wangp-log.txt`, column `browser`) then says, in order:
+
+* `heartbeat: watching the WanGP page every 5s while its tab is on screen` — once, when a
+  1.7.0 bridge first answers;
+* `heartbeat: no answer from the WanGP page for Ns on screen (k pings); this page's own
+  timer ran M ms late - …` — one per unanswered beat, ending either *this page was on time,
+  so the silence is the WanGP page's* or *this whole page was busy, not only WanGP*. The
+  second means the browser's thread was the bottleneck, not WanGP;
+* `heartbeat: the WanGP page has not answered for 20s on screen; showing 'WanGP stopped
+  responding' …` — the bar is up, with *Reload view* and *Dismiss*, and (unless an automatic
+  reload happened less than two minutes ago, or three already have) a ten-second countdown;
+* `heartbeat: reloading the WanGP view (…)` — the frame loaded `/wan2gp/` again. WanGP's
+  process, its queue and any generation it is running are untouched; requests the old page
+  had in flight are settled *unconfirmed*, never *refused*;
+* `heartbeat: the WanGP page answered again after Ns …` — the episode is over and the bar
+  goes;
+* `heartbeat: the WanGP page is here, but its bridge has waited Ns for WanGP to answer
+  '…'` — the page is alive but a Gradio round trip inside it has not come back. This is
+  written once and never acted on: a generation can hold a request that long.
+
+A WanGP document that has not finished loading gets a minute rather than twenty seconds,
+and time with the tab off screen or the page hidden is never counted. `minipaintWanGP.state()
+.heartbeat` in the browser console has the whole state, and `.settings` has whether WanGP's
+saved settings are current with the page.
 
 ## Restart WanGP now: the emergency option
 

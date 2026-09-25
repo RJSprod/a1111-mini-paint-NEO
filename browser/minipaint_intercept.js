@@ -47,6 +47,9 @@ window.minipaintIntercept = (function () {
     //: popup goes with what the server knows. The bridge has its own bound;
     //: this is the popup's, and it is the shorter of the two on purpose.
     const BRIDGE_TIMEOUT_MS = 6000;
+    //: The WanGP page's own save keeps to two seconds; this is the popup's
+    //: backstop for a bridge that does not, a little longer on purpose.
+    const SAVE_TIMEOUT_MS = 2500;
     //: The direct route (stageAndOpen): how long each of its two requests may
     //: take, how many times it tries, and how long it waits in between. On
     //: 2026-09-23 the page's one HTTP/2 connection to Forge stalled after the
@@ -625,6 +628,7 @@ window.minipaintIntercept = (function () {
         details.push(entry.inherit ? "inherits Clipboard" : "image only");
         if (entry.model) { details.push(entry.model); }
         row.appendChild(el("div", CLASS + "-entry-details", details.join(" · ")));
+        if (entry.settings) { row.appendChild(el("div", CLASS + "-entry-settings", "Settings: " + entry.settings)); }
         const actions = el("div", CLASS + "-entry-actions");
         for (const pair of [["load", "Load"], ["delete", "Delete"]]) {
             const button = el("button", "", pair[1]);
@@ -893,6 +897,26 @@ window.minipaintIntercept = (function () {
         }, factsBody());
     }
 
+    /**
+     * WanGP's form, saved just before the job is handed over, because the
+     * server builds the job from what WanGP saved - so a LoRA weight changed
+     * in the WanGP tab a moment ago travels with this press.
+     *
+     * Two seconds at most, and never a reason not to send: no WanGP page in
+     * this browser, or one that did not answer, answers "unavailable", and
+     * the job goes with WanGP's last saved settings and says so. "" is
+     * nothing to save: the job is not built from WanGP's settings at all.
+     */
+    function saveWanGP() {
+        const bridge = window.minipaintWanGP;
+        if (!bridge || typeof bridge.saveForSend !== "function") { return Promise.resolve("unavailable"); }
+        let asked;
+        try { asked = bridge.saveForSend("the gallery's Generate"); } catch (e) { return Promise.resolve("unavailable"); }
+        return withTimeout(Promise.resolve(asked), SAVE_TIMEOUT_MS, null).then(function (answer) {
+            return answer && typeof answer.flush === "string" ? answer.flush : "unavailable";
+        });
+    }
+
     /** After the server stored the job: whoever runs it, told. */
     function afterSubmit(instruction) {
         if (!instruction) { return; }
@@ -933,7 +957,12 @@ window.minipaintIntercept = (function () {
         dom.generate.textContent = "Sending…";
         showMessage("");
         const token = S.token;
-        return post(body).then(function (answer) {
+        return saveWanGP().then(function (flushed) {
+            body.settings_flush = flushed;
+            if (!S.open || S.token !== token) { return null; }
+            return post(body);
+        }).then(function (answer) {
+            if (answer === null) { return null; }
             if (!S.open || S.token !== token) { return answer; }
             S.busy = false;
             dom.generate.textContent = "Generate";

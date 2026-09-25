@@ -11,7 +11,10 @@ replaces the first and cancels it; the live page's facts, when the bridge
 is here, travel with every ask; the Clipboard tab's own prompt box and
 switch on the same page are what the popup starts from and mirrors into;
 Escape cancels and Ctrl+Enter generates; the history's buttons post the
-verbs they say. Nothing in here names a model.
+verbs they say; Generate asks the WanGP page to save its form first - two
+and a half seconds at the very most - and tells the server what came of it,
+and a popup closed during that wait sends nothing. Nothing in here names a
+model.
 
 Driven the way ``test_interop_browser`` drives the queue API: Node, a
 stubbed window, every fetch recorded. The DOM is a few dozen lines of fake -
@@ -275,6 +278,20 @@ global.fetch = function (url, options) {
 
 /* ---------------------------------------------------------- the bridge -- */
 
+//: The WanGP page's save before a send, as the popup sees it: asked for by
+//: name, answered with a word - or, for "savemute", never answered at all.
+const saves = [];
+if (MODE === "save" || MODE === "savemute" || MODE === "saveclosed") {
+    window.minipaintWanGP = {
+        note: function () { },
+        saveForSend: function (reason) {
+            saves.push({ reason: String(reason), at: calls.length, submitsBefore: posted("submit").length });
+            if (MODE === "savemute") { return new Promise(function () { }); }
+            return new Promise(function (resolve) { setTimeout(function () { resolve({ ok: true, flush: "committed" }); }, MODE === "saveclosed" ? 80 : 10); });
+        }
+    };
+}
+
 if (MODE === "facts") {
     window.minipaintWanGP = {
         state: function () { return { present: true, ready: true, model: { type: "m", label: "M", family: "", architecture: "" } }; },
@@ -337,6 +354,25 @@ async function main() {
         const reopened = popup.open(H1, {});
         await tick(20);
         report({ before: before, reopened: reopened, describesAfter: posted("describe").length });
+    }
+    if (MODE === "save" || MODE === "savemute") {
+        popup.open(H1, {});
+        await tick(40);
+        const started = Date.now();
+        await popup.generate();
+        const took = Date.now() - started;
+        await tick(20);
+        report({ saves: saves, took: took });
+    }
+    if (MODE === "saveclosed") {
+        popup.open(H1, {});
+        await tick(40);
+        const pressed = popup.generate();
+        await tick(20);
+        popup.cancel();
+        await pressed;
+        await tick(120);
+        report({ saves: saves });
     }
     if (MODE === "norole") {
         popup.open(H1, {});
@@ -520,10 +556,37 @@ def run() -> Results:
         r.check("and closes the moment the server has stored it, saying so", opened["hidden"] is True and opened["state"]["open"] is False
                 and opened["toast"].startswith("Queued on the server.") and "it goes next" in opened["toast"], str(opened["toast"]))
         r.check("no cancel was sent for a picture that was generated", opened["cancels"] == [])
+        r.check("a page with no WanGP to ask still sends, and says nothing was saved",
+                submit.get("settings_flush") == "unavailable", str(submit.get("settings_flush")))
         r.check("a generated picture closes the popup and says the overlay has gone",
                 opened["overlays"] == ["intercept:open", "intercept:closed"], str(opened["overlays"]))
         r.check("a handoff already opened once is refused - the step that hands it over runs after a failed receive too",
                 opened.get("reopened") is False and opened["hidden"] is True and opened.get("describesAfter") == 1, str(opened.get("reopened")))
+
+    # WanGP's form, saved just before the job is handed over - because the
+    # server builds the job from what WanGP saved, and a LoRA weight changed
+    # in the WanGP tab a moment ago is otherwise not in it.
+    saved = _run("save")
+    r.check("the harness drove a Generate on a page with a WanGP to ask", saved is not None and "error" not in saved, str(saved)[:300])
+    if saved and "error" not in saved:
+        asked = saved.get("saves") or []
+        r.check("Generate asks the WanGP page to save its form, once, naming who asked",
+                len(asked) == 1 and asked[0]["reason"] == "the gallery's Generate", str(asked))
+        r.check("before the job is handed over, not after", asked and asked[0]["submitsBefore"] == 0, str(asked))
+        sent = saved["submits"][0] if saved.get("submits") else {}
+        r.check("and the job says what came of it", sent.get("settings_flush") == "committed", str(sent)[:200])
+        r.check("and the popup closes as it always did", saved.get("hidden") is True, str(saved.get("hidden")))
+    # A harness that never reports is the failure here, not a reason to skip:
+    # a Generate waiting for ever on a WanGP that never answers IS the fault.
+    mute = _run("savemute") or {"error": "no answer"}
+    sent = mute["submits"][0] if mute.get("submits") else {}
+    r.check("a WanGP page that never answers holds Generate no longer than the popup's own limit, and the job still goes",
+            "error" not in mute and sent.get("settings_flush") == "unavailable" and 2400 <= (mute.get("took") or 0) < 4000
+            and mute.get("hidden") is True, str({"error": mute.get("error"), "took": mute.get("took"), "sent": sent.get("settings_flush")}))
+    closed = _run("saveclosed") or {"error": "no answer"}
+    r.check("a popup cancelled while WanGP saves sends nothing - the picture it froze has been let go",
+            "error" not in closed and closed.get("submits") == [] and len(closed.get("cancels") or []) == 1,
+            str({"error": closed.get("error"), "submits": closed.get("submits"), "cancels": closed.get("cancels")}))
 
     norole = _run("norole")
     if norole and "error" not in norole:

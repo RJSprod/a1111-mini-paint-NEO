@@ -15,7 +15,11 @@ can accept, ask for one handoff id to be applied to one named receiver, ask
 that a receiver already published in this page's own receiver list be scrolled
 into view, ask that the live page - with a prompt or images overridden by
 handoff id - be added to WanGP's own queue, or ask whether such a request
-landed there. The handoff id is 32 hex characters or it is not a handoff id; the
+landed there. Besides those, the flush and the track ask about WanGP's own
+record, and a PING asks only whether this document is here; it is answered on
+the spot, never through Gradio. The one thing this script says unasked is that
+somebody touched the form - to a parent whose hello asked for it, with a count
+and nothing else. The handoff id is 32 hex characters or it is not a handoff id; the
 receiver must be one the server just described; the focus target must be an
 element id this script published itself.
 
@@ -77,6 +81,13 @@ ACK_POLL_MS = 300
 FRAME_FALLBACK_MS = 40
 IDLE_FRAME_FALLBACK_MS = 150
 
+#: The shortest gap between two change notices while somebody keeps changing
+#: the form - a dragged slider fires an input event per pixel. The first one
+#: after a quiet spell goes at once and the last one is never more than this
+#: behind the last touch, so the parent's own one-second wait starts from the
+#: truth; in between, one message per gap however busy the hand.
+FORM_CHANGE_THROTTLE_MS = 500
+
 #: What ``.then(js=...)`` runs with the acknowledgement textbox's value. It
 #: names one method on one object and swallows its own failures, so a bridge
 #: that is not present cannot turn into a console error on every event.
@@ -104,6 +115,9 @@ def configuration(theme_css: str = "") -> dict:
             "queueTracked": protocol.QUEUE_TRACKED,
             "formFlush": protocol.FORM_FLUSH,
             "formFlushed": protocol.FORM_FLUSHED,
+            "ping": protocol.PING,
+            "pong": protocol.PONG,
+            "formChanged": protocol.FORM_CHANGED,
         },
         "inbound": sorted(protocol.TO_BRIDGE),
         "receiverIds": list(protocol.RECEIVER_IDS),
@@ -127,6 +141,7 @@ def configuration(theme_css: str = "") -> dict:
         "ackPollMs": ACK_POLL_MS,
         "frameFallbackMs": FRAME_FALLBACK_MS,
         "idleFrameFallbackMs": IDLE_FRAME_FALLBACK_MS,
+        "formChangeThrottleMs": FORM_CHANGE_THROTTLE_MS,
         # Longer than the parent will wait, so in the ordinary case the parent
         # reports the timeout and this only ever unwedges the queue behind it.
         "roundTripMs": protocol.RECEIVE_TIMEOUT_MS + 5000,
@@ -278,6 +293,13 @@ _SCRIPT = r"""
   // held before - so a failure can say more than "nothing came back".
   var flight = null;
   var poll = 0;
+  // Whether the parent asked, in its hello, to be told when somebody touches
+  // the form - and the throttle's own bookkeeping. See formTouched.
+  var watchForm = false;
+  var changeTimer = 0;
+  var changeSent = 0;
+  var changeTouches = 0;
+  var changeSeq = 0;
 
   function log(message) {
     try { if (typeof console !== "undefined" && console.debug) { console.debug("[minipaint bridge] " + message); } }
@@ -680,6 +702,11 @@ __MINIPAINT_FRAME_WRAPPER__
       focusable = Object.create(null);
       pending.length = 0;
       setBusy(false);
+      // Asked for by name, so a parent that would not know the notice never
+      // gets one and never has to drop it.
+      watchForm = !!(message.payload && message.payload.watch_form === true);
+      changeTouches = 0;
+      if (changeTimer) { window.clearTimeout(changeTimer); changeTimer = 0; }
       submit({ op: "hello", request_id: message.request_id, channel_id: channelId });
       return;
     }
@@ -691,6 +718,15 @@ __MINIPAINT_FRAME_WRAPPER__
       // that was never made.
       log("dropped " + message.type + ": channel " + message.channel_id.slice(0, 8) + ", this page is bound to "
         + (channelId ? channelId.slice(0, 8) : "no channel yet"));
+      return;
+    }
+
+    if (message.type === CONFIG.types.ping) {
+      // On the spot, and never through submit(): the heartbeat asks whether
+      // this document is here and running, and a Gradio round trip would
+      // answer a different question - one a generation can hold up for
+      // minutes without anything being wrong.
+      pong(message.request_id);
       return;
     }
 
@@ -814,6 +850,61 @@ __MINIPAINT_FRAME_WRAPPER__
     }
   }
 
+  // -- the heartbeat and the change notices -------------------------------------
+  //
+  // The answer to a PING says, besides "here", whether a bridge request is
+  // stuck in its Gradio round trip and for how long. The parent writes that
+  // into its log and never acts on it: a request can wait behind a generation
+  // for a long time without anything being wrong.
+
+  function pong(requestId) {
+    post(CONFIG.types.pong, requestId, {
+      busy_ms: flight ? Math.max(0, Date.now() - flight.clickedAt) : 0,
+      op: flight && flight.request ? String(flight.request.op || "").slice(0, 20) : "",
+      waiting: pending.length
+    });
+  }
+
+  // Somebody changed the form, or may have. Only a trusted event counts: one
+  // the browser made from a person's hand. This script's own writes to its
+  // request box are synthetic, and so is everything WanGP does to its form
+  // by itself - a model's settings loading, say - so neither can start a
+  // loop or a save of a half-loaded form. Clicks and keys count too, because
+  // a dropdown choice is made with a press and fires no input event at all;
+  // a click that changed nothing costs one save that finds nothing new.
+  function formTouched(event) {
+    if (!watchForm || !channelId) { return; }
+    if (!event || event.isTrusted !== true) { return; }
+    var target = event.target;
+    try {
+      if (target && target.closest && target.closest("." + CONFIG.columnClass)) { return; }
+    } catch (error) {}
+    changeTouches += 1;
+    if (changeTimer) { return; }
+    var wait = Math.max(0, CONFIG.formChangeThrottleMs - (Date.now() - changeSent));
+    changeTimer = window.setTimeout(sendChange, wait);
+  }
+
+  function sendChange() {
+    changeTimer = 0;
+    // No second look at watchForm: a hello that stops the notices also
+    // clears the touches and this timer, so nothing counted under the old
+    // one is ever sent under the new.
+    if (!channelId || !changeTouches) { return; }
+    var touches = changeTouches;
+    changeTouches = 0;
+    changeSent = Date.now();
+    changeSeq += 1;
+    post(CONFIG.types.formChanged, "change-" + changeSeq, { touches: touches });
+  }
+
+  function watchTouches() {
+    var kinds = ["input", "change", "click", "keyup", "drop", "paste"];
+    for (var index = 0; index < kinds.length; index += 1) {
+      try { document.addEventListener(kinds[index], formTouched, true); } catch (error) {}
+    }
+  }
+
   // -- presentation ------------------------------------------------------------
 
   function focus(hint) {
@@ -849,6 +940,7 @@ __MINIPAINT_FRAME_WRAPPER__
 
   theme("dark");
   style();
+  watchTouches();
   window.addEventListener("message", onMessage, false);
 })();
 """

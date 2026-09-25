@@ -159,7 +159,16 @@ def normalize_record(raw: typing.Any) -> typing.Optional[dict]:
         "reference_asset_ids": _asset_ids(raw.get("reference_asset_ids")),
         "tasks_added": int(tasks) if isinstance(tasks, (int, float)) and not isinstance(tasks, bool) and tasks > 0 else 0,
         "ignored": ignored,
+        # A key from a closed list, so a hand-edited file cannot put words of
+        # its own on the screen; anything else is "not recorded".
+        "settings": raw.get("settings") if raw.get("settings") in _settings_keys() else "",
     }
+
+
+def _settings_keys() -> typing.Tuple[str, ...]:
+    from . import outbox
+
+    return outbox.SETTINGS_KEYS
 
 
 def load_history() -> typing.List[dict]:
@@ -173,14 +182,17 @@ def _save(records: typing.List[dict]) -> None:
     config.write_document(config.HISTORY_NAME, records[:MAX_HISTORY])
 
 
-def make_record(draft: typing.Mapping[str, typing.Any], result: typing.Mapping[str, typing.Any], enhanced_prompt: str = "") -> dict:
+def make_record(draft: typing.Mapping[str, typing.Any], result: typing.Mapping[str, typing.Any], enhanced_prompt: str = "",
+                settings: str = "") -> dict:
     """A history record from the draft that was sent and the confirmed result.
 
     Each field's mode comes from the result: applied means override,
     reported ignored means ignored, anything else - including a slot that
     was empty - means inherit. The prompt text is stored only when it was an
     override. ``enhanced_prompt`` is what the writer made of it, when the
-    press was enhanced; the draft still holds the typed prompt.
+    press was enhanced; the draft still holds the typed prompt. ``settings``
+    is where the job's WanGP settings came from, as one of the outbox's
+    ``SETTINGS_*`` keys.
     """
     draft = normalize_draft(draft)
     applied = result.get("applied") if isinstance(result.get("applied"), dict) else {}
@@ -215,6 +227,7 @@ def make_record(draft: typing.Mapping[str, typing.Any], result: typing.Mapping[s
         "reference_asset_ids": list(draft["reference_asset_ids"]),
         "tasks_added": int(result.get("tasks_added") or 0) if isinstance(result.get("tasks_added"), (int, float)) else 0,
         "ignored": [{"field": item["field"], "code": str(item.get("code") or "")[:60]} for item in ignored],
+        "settings": settings,
     }
     return normalize_record(record) or record
 

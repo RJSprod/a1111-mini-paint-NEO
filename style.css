@@ -912,6 +912,30 @@
     max-width: 70ch;
 }
 
+/* "WanGP stopped responding", laid over the top of the frame by the
+   browser half when the WanGP page has not answered its heartbeat for twenty
+   seconds on screen. Its position is inline on the element, so it is placed
+   correctly with or without this file; this only dresses it. */
+#wangp_iframe_root .minipaint-wangp-stuck {
+    padding: 0.55em 0.8em;
+    border-radius: 8px;
+    border-left: 4px solid var(--error-text-color, #d9534f);
+    background: var(--background-fill-primary, #1f1f1f);
+    color: var(--body-text-color, inherit);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+    font-size: 0.95em;
+    line-height: 1.4;
+}
+
+#wangp_iframe_root .minipaint-wangp-stuck button {
+    padding: 0.25em 0.8em;
+    border-radius: 6px;
+    border: 1px solid var(--border-color-primary, rgba(128, 128, 128, 0.5));
+    background: var(--button-secondary-background-fill, rgba(128, 128, 128, 0.15));
+    color: inherit;
+    cursor: pointer;
+}
+
 /* ------------------------------------------------------------------
  * WanGP tab
  *
@@ -1194,6 +1218,12 @@
     text-overflow: ellipsis;
 }
 .minipaint-intercept-entry-details {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 12px;
+}
+/* Where the job's WanGP settings came from - saved from the page at send,
+   WanGP's last saved ones, or the model's defaults. */
+.minipaint-intercept-entry-settings {
     color: var(--body-text-color-subdued, inherit);
     font-size: 12px;
 }
@@ -2671,4 +2701,10 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+#minipaint_clipboard_root .minipaint-clip-history-settings {
+  margin-top: 2px;
+  color: var(--body-text-color-subdued, inherit);
+  font-size: var(--text-sm, 0.85em);
 }

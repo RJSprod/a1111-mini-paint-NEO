@@ -362,6 +362,21 @@ when WanGP moves an input that is the file to correct and nothing in Forge or th
 changes. A build that does not expose an input the bridge needs fails closed: the tab keeps
 working, and *Send to* offers nothing rather than something that looked about right.
 
+**If the WanGP view stops answering.** While the WanGP tab is on screen, the page asks the
+WanGP page inside it every five seconds whether it is there — a message inside your browser,
+with no request to Forge and nothing held open — and nothing at all while the tab is hidden
+or another tab is showing. Every unanswered beat goes in the page's log with whether the
+WebUI page itself was running late, which tells a busy browser from a WanGP that stopped.
+After twenty seconds without an answer (a minute for a WanGP page that has not finished
+loading), the tab says **WanGP stopped responding** with **Reload view** and **Dismiss**, and
+reloads the view itself ten seconds later unless dismissed. Reloading the view loads the
+WanGP page again in the same frame: WanGP's queue and a generation it is running live in
+WanGP's own process and carry on. At most one automatic reload every two minutes and three
+in the life of the page; after that the bar only offers the button. What it cannot see is
+WanGP's own connection stalling while its page still runs — the log says when a bridge
+request has waited on WanGP for a long time, and nothing is reloaded for it, because a
+generation can hold a request for minutes without anything being wrong.
+
 **One WanGP, and an emergency stop.** The extension runs one WanGP per machine, not just
 per Forge: a second Forge server started against the same install finds the first one's
 lock and refuses to start another (`WANGP_ALREADY_MANAGED`) rather than putting a second
@@ -534,8 +549,9 @@ same server-owned queue as the tab's presses, ids are never paths, and the answe
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
 API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 rewrite (the page's model
 travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
-and its place in WanGP. Bridge plugin 1.5.0 carries the queue, start and track operations
-(protocol 5) and the control plane server-owned execution runs on (protocol 6), and refuses
+and its place in WanGP. Bridge plugin 1.7.0 carries the queue, start and track operations
+(protocol 5) and the control plane server-owned execution runs on (protocol 6), answers the
+WanGP tab's heartbeat and says when its form is touched, and refuses
 a request composed for a model the page has since left (`MODEL_CHANGED`), so WanGP's bridge
 must be updated and WanGP restarted; a build lacking one of the six queue components keeps
 the image send and refuses the queue with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking
@@ -551,6 +567,32 @@ job **is** in the WanGP tab's queue and can be cancelled there; it may wait for 
 because of your own work; and on Windows a Forge crash loses a generation that was in flight,
 which is reported as "could not be proved" rather than retried. `docs/wangp/SERVER_EXECUTION.md`
 is the whole of it, including what is still an inference waiting for a real install.
+
+**Settings come from the WanGP page.** With *WanGP queue: build queued jobs from the WanGP
+page's settings* on, a job takes its prompt and pictures from where you sent it and
+everything else — LoRAs and their weights, steps, guidance, resolution — from what the WanGP
+tab is set to. WanGP builds a job from the settings it last *saved* for the model, so the
+page keeps that save current without anything held open:
+
+- **As you change them.** About a second after you stop changing something in the WanGP
+  form, the page saves it: one short request, never two at once, each with a time limit, and
+  skipped while WanGP is loading a model's settings so a half-loaded form is never saved.
+- **Before every send.** The gallery's Generate, Clipboard's Add to Queue and the public API
+  ask the WanGP page to save just before they submit. With nothing changed since the last
+  save that costs nothing; otherwise it waits at most two seconds, and a WanGP page that is
+  not there or does not answer sends the job with WanGP's last saved settings.
+- **Once when the page loads.** One status check, with a fifteen-second limit, tells the
+  WanGP tab that jobs use its settings. (Before this it was never told — the check only
+  happened on returning from the background, and the listener for that was only installed by
+  the check itself.)
+
+Every job then says where its settings came from — on its card in the Queue, in Queue Send
+History, in the Send to WanGP popup's history, and in the log: *saved from the WanGP page at
+send*, *WanGP's last saved settings (the page didn't answer)*, *WanGP's last saved settings
+(WanGP was loading a model's settings at send)*, or *the model's defaults (nothing saved
+yet)*. Saving as you change needs bridge 1.7.0; with an older bridge the save before every
+send still happens, and waits up to two seconds each time because it cannot know nothing
+changed.
 
 ## Legacy editor (Old UI)
 

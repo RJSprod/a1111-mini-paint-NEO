@@ -630,8 +630,16 @@ window.minipaintInterop = (function () {
         // unattended queue is the default, and latency is the cheaper wrong
         // guess of the two.
         if (stream.unattended === false) { return ""; }
-        if (!bridge || typeof bridge.flushForm !== "function") { return "unavailable"; }
+        if (!bridge) { return "unavailable"; }
         try {
+            // The same save the gallery and the Clipboard tab wait on: none
+            // at all when the record already holds everything the WanGP page
+            // reported, and never more than two seconds when it does not.
+            if (typeof bridge.saveForSend === "function") {
+                const saved = await bridge.saveForSend("a queue request");
+                return saved && typeof saved.flush === "string" ? saved.flush : "unavailable";
+            }
+            if (typeof bridge.flushForm !== "function") { return "unavailable"; }
             const answer = await bridge.flushForm();
             return (answer && answer.flush) || "unavailable";
         } catch (e) {
@@ -860,7 +868,7 @@ window.minipaintInterop = (function () {
     // CLAUDE.md, "Nothing of ours is held open".
 
     const stream = {
-        lifecycle: false, hiddenAt: 0, syncing: null, lastSyncAt: 0, jobs: new Map(),
+        lifecycle: false, hiddenAt: 0, syncing: null, lastSyncAt: 0, jobs: new Map(), booted: false,
         // null until a snapshot says. Whether this Forge runs the queue
         // unattended decides whether a press needs to commit WanGP's live
         // form first; see flushSettings.
@@ -973,6 +981,40 @@ window.minipaintInterop = (function () {
         });
     }
 
+    /**
+     * One snapshot when the page loads, and only one.
+     *
+     * Everything a page learns from the server about the queue it learns
+     * from a snapshot, and until this existed the first snapshot was taken
+     * when the page came back from the background - which it could only do
+     * once a snapshot had installed the listener that notices the return.
+     * So none was ever taken: the WanGP tab was never told that jobs are
+     * built from its settings, never kept WanGP's record current, and a
+     * LoRA weight changed there never reached a job sent from anywhere else.
+     *
+     * Bounded like every snapshot, held open by nothing, and said in the
+     * journal either way, because "was this page ever told" is the first
+     * question a report about inherited settings asks.
+     */
+    function bootSync() {
+        if (stream.booted) { return; }
+        stream.booted = true;
+        const started = Date.now();
+        sync().then(function (payload) {
+            if (payload && payload.code === "SYNC_TIMEOUT") {
+                note("snapshot: at page load, Forge did not answer within " + Math.round(SYNC_TIMEOUT_MS / 1000)
+                     + "s; the next one is taken when this page returns from the background");
+            } else if (payload && payload.ok === true) {
+                note("snapshot: at page load, Forge answered in " + (Date.now() - started) + " ms; jobs are "
+                     + (stream.inherit === true ? "built from the WanGP page's settings" : "not built from the WanGP page's settings")
+                     + (stream.unattended === false ? ", and run from this page" : ""));
+            } else {
+                note("snapshot: at page load, Forge answered with an error ("
+                     + (code(payload && payload.code) || "INTERNAL_ERROR") + ")");
+            }
+        }, function () { /* sync() never rejects; a throw inside a note is not worth one */ });
+    }
+
     function installLifecycle() {
         if (stream.lifecycle) { return; }
         stream.lifecycle = true;
@@ -1044,6 +1086,11 @@ window.minipaintInterop = (function () {
         }
     }
 
+    // After this function has returned and the page can reach the API: the
+    // snapshot's answer tells the WanGP tab through window.minipaintWanGP,
+    // and a caller may be waiting on the same snapshot through this object.
+    try { setTimeout(bootSync, 0); } catch (e) { /* a page without timers takes its snapshot on return */ }
+
     return {
         version: VERSION,
         contract: CONTRACT,
@@ -1067,7 +1114,11 @@ window.minipaintInterop = (function () {
             sync: sync,
             serverRun: serverRun,
             snapshotState: function () {
-                return { lastSyncAt: stream.lastSyncAt, jobs: stream.jobs.size };
+                // ``inherit`` and ``unattended`` are what the WanGP tab's
+                // script reads when it loads after this file did; null until
+                // a snapshot has said.
+                return { lastSyncAt: stream.lastSyncAt, jobs: stream.jobs.size,
+                         inherit: stream.inherit, unattended: stream.unattended };
             }
         },
         // The sentence for a code, for a caller that wants the same words.

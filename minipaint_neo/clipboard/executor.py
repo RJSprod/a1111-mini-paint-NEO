@@ -503,8 +503,6 @@ def _stage_composing(job: dict) -> bool:
     if not answer["ok"]:
         return bool(outbox.fail(job["job_id"], answer["code"] or errors.COMPOSE_UNAVAILABLE, answer["message"]))
     source = answer["source"]
-    if not inherit:
-        _journal(f"job {job['job_id'][:8]}: settings not inherited by choice; WanGP fills them in from its own defaults")
     if source == wire.BASE_RECORDED and job.get("settings_flush") in wire.FLUSH_FRESH:
         # Same seam, different promise. The page committed its live form on
         # purpose before it pressed, so this base is what was on screen -
@@ -524,11 +522,10 @@ def _stage_composing(job: dict) -> bool:
     moved = outbox.record_snapshot(job["job_id"], snapshot, expect_revision=job["revision"])
     if moved is None:
         return True
-    if answer["source"] == wire.BASE_FACTORY:
-        _journal(
-            f"job {job['job_id'][:8]}: nothing committed in WanGP for {answer['model_type'][:40]}; "
-            "composed from the settings WanGP itself loads for that model, and the job says so"
-        )
+    # One line for every job, whatever it got, so that a job which ran at
+    # settings nobody chose for it is never the one without a line.
+    _journal(f"job {job['job_id'][:8]}: {answer['model_type'][:40]} settings - "
+             f"{outbox.settings_sentence(moved) or 'from ' + str(source)}")
     return bool(outbox.transition(job["job_id"], outbox.WAITING_FOR_CARD, expect_revision=moved["revision"],
                                  model=answer["model"]))
 

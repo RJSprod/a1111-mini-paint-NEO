@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.6.4"
+BRIDGE_VERSION = "1.7.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -1964,6 +1964,13 @@ class Compatibility:
                 # Protocol 5. Where this page's admitted tasks are in WanGP's
                 # queue: needs the same session state the queue needs.
                 "track": bool(ready and not self.queue_missing()),
+                # The heartbeat and the change notices. Both are the script in
+                # the WanGP document talking for itself - no component, no
+                # Gradio event - so they are offered whatever the form made
+                # of this build; a parent that never hears this word never
+                # sends a PING and never counts on being told of a change.
+                "ping": True,
+                "form_watch": True,
                 # Theme is presentation. Section 27.1: it may fail on its own
                 # without taking image handoff with it, so it is reported
                 # separately and never gates ``ready``.

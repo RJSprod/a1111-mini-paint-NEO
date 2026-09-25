@@ -1427,6 +1427,883 @@ def proactive_flush_checks(r: Results) -> None:
             preset.get("afterLeft") == 2 and preset.get("afterRepeat") == 2, repr(preset))
 
 
+#: The parent page, its WanGP iframe and a WanGP bridge inside it, on a
+#: virtual clock: the heartbeat counts in five-second beats and twenty-second
+#: silences, the saves in one-second quiets, and a suite that waited for those
+#: on the wall clock would be a suite nobody ran. Every timer the bundle sets -
+#: bare, through ``window``, or an interval - runs on this clock, in order,
+#: with the promises it releases settled between one timer and the next.
+#:
+#: The bridge answers the way the real one does: a hello with a READY that
+#: lists what it can do, a press of the form with the recorded fingerprint as
+#: it was, a look with the fingerprint as it is, and WanGP's own commit lands a
+#: moment after a press that had something to carry. It can be told to stop
+#: answering, and the frame can be reloaded - which loses the document, fires
+#: ``pagehide`` in it, and fires the frame's ``load`` when the new one is up.
+_LIVE_HARNESS = r"""
+const fs = require("fs");
+const MODE = process.argv[3] || "save";
+const ORIGIN = "http://forge.test";
+const realImmediate = setImmediate;
+
+// ---- the clock ------------------------------------------------------------
+let now = 1700000000000;
+let seq = 0;
+const timers = new Map();
+function vSet(fn, ms) { seq += 1; timers.set(seq, { at: now + Math.max(0, Number(ms) || 0), seq: seq, fn: fn, every: 0 }); return seq; }
+function vEvery(fn, ms) { seq += 1; const every = Math.max(1, Number(ms) || 1); timers.set(seq, { at: now + every, seq: seq, fn: fn, every: every }); return seq; }
+function vClear(id) { timers.delete(id); }
+global.setTimeout = vSet; global.clearTimeout = vClear; global.setInterval = vEvery; global.clearInterval = vClear;
+Date.now = function () { return now; };
+const thrown = [];
+async function settle() { for (let i = 0; i < 10; i += 1) { await new Promise(function (r) { realImmediate(r); }); } }
+async function advance(ms) {
+  const until = now + ms;
+  for (;;) {
+    let next = null;
+    for (const t of timers.values()) {
+      if (t.at > until) { continue; }
+      if (!next || t.at < next.at || (t.at === next.at && t.seq < next.seq)) { next = t; }
+    }
+    if (!next) { break; }
+    now = next.at;
+    if (next.every) { next.at = now + next.every; } else { timers.delete(next.seq); }
+    try { next.fn(); } catch (e) { thrown.push(String(e && e.stack || e)); }
+    await settle();
+  }
+  now = until;
+  await settle();
+}
+// The page was busy: the time passes, and everything that came due meanwhile
+// runs at the end of it - late, and knowing it.
+async function stall(ms) {
+  now += ms;
+  for (;;) {
+    let next = null;
+    for (const t of timers.values()) {
+      if (t.at > now) { continue; }
+      if (!next || t.at < next.at || (t.at === next.at && t.seq < next.seq)) { next = t; }
+    }
+    if (!next) { break; }
+    if (next.every) { next.at = now + next.every; } else { timers.delete(next.seq); }
+    try { next.fn(); } catch (e) { thrown.push(String(e && e.stack || e)); }
+    await settle();
+  }
+}
+
+// ---- the journal ----------------------------------------------------------
+const lines = [];
+console.debug = function (prefix, message) { if (prefix === "MiniPaint WanGP:") { lines.push(String(message)); } };
+
+// ---- a page ---------------------------------------------------------------
+class El {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase(); this.children = []; this.parentNode = null; this.style = { cssText: "" };
+    this.attrs = {}; this.listeners = {}; this.id = ""; this.className = ""; this.textContent = ""; this.hidden = false;
+    this.dataset = {};
+  }
+  setAttribute(k, v) { this.attrs[k] = String(v); if (k === "id") { this.id = String(v); } }
+  getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; }
+  appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
+  removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) { this.children.splice(i, 1); } c.parentNode = null; return c; }
+  addEventListener(k, f) { (this.listeners[k] = this.listeners[k] || []).push(f); }
+  click() { for (const f of this.listeners.click || []) { f({}); } }
+  querySelector(sel) { return find(this, sel); }
+  get isConnected() { let n = this; while (n) { if (n === docRoot) { return true; } n = n.parentNode; } return false; }
+}
+function matches(el, sel) {
+  if (sel[0] === "#") { return el.id === sel.slice(1); }
+  if (sel[0] === ".") { return (" " + el.className + " ").indexOf(" " + sel.slice(1) + " ") !== -1; }
+  return el.tagName === sel.toUpperCase();
+}
+function find(node, sel) {
+  if (sel.indexOf(" ") !== -1) { return null; }
+  for (const c of node.children) { if (matches(c, sel)) { return c; } const deep = find(c, sel); if (deep) { return deep; } }
+  return null;
+}
+const docRoot = new El("body");
+const root = new El("div"); root.id = "wangp_iframe_root"; docRoot.appendChild(root);
+const frame = new El("iframe"); frame.id = "wangp_iframe"; frame.attrs.src = "/wan2gp/"; root.appendChild(frame);
+
+// ---- WanGP, inside the frame -------------------------------------------------
+const B = {
+  loaded: true, answerPing: true, answerFlush: true, answerLook: true, suppress: false, dirty: false, fp: 1, commitMs: 100, flushReplyMs: 5,
+  // The page attaches while it loads, so an older bridge is one from the start.
+  capabilities: MODE === "legacy" ? { queue: true, start: true, track: true }
+    : MODE === "noping" ? { queue: true, start: true, track: true, form_watch: true }
+    : { queue: true, start: true, track: true, ping: true, form_watch: true },
+  hellos: [], presses: 0, looks: 0, pings: 0, busyMs: 0, channel: "", navigations: 0, reloadMs: 500,
+  // What a reloaded document can do: the same as before, unless told.
+  afterReload: null
+};
+let inner = null;
+function newDocument() {
+  inner = { listeners: {}, addEventListener: function (k, f) { (this.listeners[k] = this.listeners[k] || []).push(f); },
+            postMessage: function (message) { toBridge(message); } };
+  frame.contentWindow = inner;
+}
+newDocument();
+function reply(type, requestId, payload) {
+  const from = inner;
+  vSet(function () {
+    if (from !== inner || !B.loaded) { return; }
+    fire("message", { origin: ORIGIN, source: inner, data: { protocol: 5, type: type, channel_id: B.channel, request_id: requestId, payload: payload } });
+  }, type === "WANGP_FORM_FLUSHED" ? B.flushReplyMs : 5);
+}
+function toBridge(message) {
+  if (!B.loaded) { return; }
+  if (message.type === "WANGP_BRIDGE_HELLO") {
+    B.channel = message.channel_id;
+    B.hellos.push(message.payload || {});
+    reply("WANGP_BRIDGE_READY", message.request_id, {
+      bridge_session: "abcdef0123456789abcdef0123456789", instance_id: "inst-1", version: "1.7.0",
+      ready: true, receivers: [], state_revision: "r1", capabilities: B.capabilities
+    });
+    return;
+  }
+  if (message.channel_id !== B.channel) { return; }
+  if (message.type === "WANGP_PING") {
+    B.pings += 1;
+    if (B.answerPing) { reply("WANGP_PONG", message.request_id, { busy_ms: B.busyMs, op: "queue", waiting: 0 }); }
+    return;
+  }
+  if (message.type === "WANGP_FORM_FLUSH") {
+    const look = !!(message.payload && message.payload.probe);
+    if (look) { B.looks += 1; } else { B.presses += 1; }
+    if (!B.answerFlush || (look && !B.answerLook)) { return; }
+    if (!look && B.suppress) { reply("WANGP_FORM_FLUSHED", message.request_id, { ok: true, flush: "suppressed", fingerprint: "fp" + B.fp }); return; }
+    const before = "fp" + B.fp;
+    if (!look && B.dirty) { B.dirty = false; vSet(function () { B.fp += 1; }, B.commitMs); }
+    reply("WANGP_FORM_FLUSHED", message.request_id, { ok: true, flush: "requested", fingerprint: look ? "fp" + B.fp : before });
+  }
+}
+// Somebody touched the form in the WanGP page.
+function changed() {
+  B.dirty = true;
+  const from = inner;
+  vSet(function () {
+    if (from !== inner || !B.loaded) { return; }
+    fire("message", { origin: ORIGIN, source: inner, data: { protocol: 5, type: "WANGP_FORM_CHANGED", channel_id: B.channel, request_id: "change-" + now, payload: { touches: 1 } } });
+  }, 1);
+}
+// The document goes away (WanGP reloading its page, say), with no new one yet.
+function documentLeaves() {
+  B.loaded = false;
+  for (const f of (inner.listeners.pagehide || [])) { f({}); }
+}
+frame.setAttribute = function (k, v) {
+  El.prototype.setAttribute.call(frame, k, v);
+  if (k !== "src") { return; }
+  B.navigations += 1;
+  documentLeaves();
+  vSet(function () {
+    newDocument();
+    B.loaded = true;
+    B.channel = "";
+    if (B.afterReload) { B.afterReload(); }
+    for (const f of (frame.listeners.load || [])) { f({}); }
+  }, B.reloadMs);
+};
+
+// ---- the parent page --------------------------------------------------------
+const listeners = {};
+function fire(kind, event) { for (const fn of listeners[kind] || []) { fn(event); } }
+const observers = [];
+const doc = {
+  readyState: "complete", visibilityState: "visible",
+  addEventListener: function (k, f) { (listeners["doc:" + k] = listeners["doc:" + k] || []).push(f); },
+  getElementById: function (id) { return id === docRoot.id ? docRoot : find(docRoot, "#" + id); },
+  querySelector: function (sel) { return find(docRoot, sel); },
+  querySelectorAll: function () { return []; },
+  createElement: function (tag) { return new El(tag); },
+  documentElement: { classList: { contains: () => false }, style: {}, getAttribute: () => null },
+  body: docRoot, head: new El("head")
+};
+const win = {
+  location: { href: ORIGIN + "/", origin: ORIGIN },
+  addEventListener: function (k, f) { (listeners[k] = listeners[k] || []).push(f); },
+  setTimeout: vSet, clearTimeout: vClear, setInterval: vEvery, clearInterval: vClear, document: doc,
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  MutationObserver: class { observe() {} disconnect() {} },
+  IntersectionObserver: class { constructor(fn) { this.fn = fn; observers.push(this); } observe() {} disconnect() {} },
+  getComputedStyle: function () { return { position: "static", display: "block" }; },
+  requestAnimationFrame: (f) => vSet(f, 16), innerHeight: 900,
+  crypto: { getRandomValues: (b) => { for (let i = 0; i < b.length; i++) { b[i] = Math.floor(Math.random() * 256); } return b; } }
+};
+if (MODE === "pull" || MODE === "pulloff") {
+  // The public API loaded first and has already had its snapshot.
+  win.minipaintInterop = { wangp: { snapshotState: function () { return { inherit: true, unattended: MODE === "pull" }; } } };
+}
+global.window = win; global.document = doc;
+global.MutationObserver = win.MutationObserver;
+global.fetch = () => Promise.resolve({ ok: true, status: 204, type: "basic", json: () => Promise.resolve({}), text: () => Promise.resolve("") });
+new Function("window", "document", "fetch", fs.readFileSync(process.argv[2], "utf8"))(win, doc, global.fetch);
+const api = win.minipaintWanGP;
+
+function screen(showing) { for (const o of observers) { o.fn([{ isIntersecting: showing }]); } }
+function hidden(yes) { doc.visibilityState = yes ? "hidden" : "visible"; fire("doc:visibilitychange", {}); }
+function bar() { return find(docRoot, "#minipaint-wangp-stuck"); }
+function barText() { const b = bar(); const t = b ? find(b, ".minipaint-wangp-stuck-text") : null; return t ? t.textContent : ""; }
+function pressBar(which) { const b = bar(); const button = b ? find(b, ".minipaint-wangp-stuck-" + which) : null; if (button) { button.click(); } return !!button; }
+function linesWith(text) { return lines.filter(function (line) { return line.indexOf(text) !== -1; }); }
+function settleSend(promise) { const box = { answer: null, at: 0 }; promise.then(function (a) { box.answer = a; box.at = now; }); return box; }
+// On screen, with the first beat at the instant returned: every beat after it
+// is a whole multiple of five seconds from there.
+async function bootOnScreen() { api.attach(null); await advance(100); const first = now; screen(true); await advance(1); return first; }
+async function until(at) { await advance(Math.max(0, at - now)); }
+
+const scenarios = {
+  // Saving as the form changes.
+  save: async function () {
+    api.inheritSettings(true);
+    api.attach(null);
+    await advance(1000);
+    const afterReady = { presses: B.presses, looks: B.looks, current: api.state().settings.current };
+    changed(); await advance(300); changed(); await advance(300); changed();
+    await advance(990);
+    const beforeQuiet = B.presses;
+    await advance(20);
+    const atQuiet = B.presses;
+    await advance(600);
+    const afterSave = { presses: B.presses, looks: B.looks, current: api.state().settings.current, fp: B.fp };
+    changed(); await advance(1001);
+    changed();
+    await advance(200);
+    const midRunning = api.state().settings.saving;
+    await advance(3000);
+    return { afterReady, beforeQuiet, atQuiet, afterSave, midRunning,
+             trailing: B.presses - afterSave.presses, current: api.state().settings.current, hello: B.hellos[0] || {},
+             saves: api.state().settings.saves };
+  },
+  // WanGP slow to answer: a touch's quiet second runs out while the save
+  // before it is still waiting, and it must still get a save of its own.
+  slow: async function () {
+    api.inheritSettings(true);
+    api.attach(null);
+    await advance(5000);
+    B.flushReplyMs = 1500;
+    const base = B.presses;
+    changed(); await advance(1002);
+    const first = B.presses - base;
+    changed();
+    await advance(1100);
+    const whileRunning = { presses: B.presses - base, saving: api.state().settings.saving };
+    // The first save's look comes back 3.4s after the second touch: done,
+    // and the second touch's own save not yet asked for.
+    await advance(2400);
+    const between = { current: api.state().settings.current, presses: B.presses - base, saving: api.state().settings.saving };
+    await advance(6000);
+    return { first, whileRunning, between, after: B.presses - base, current: api.state().settings.current };
+  },
+  // A touch, then the WanGP tab left a moment later: that save carries the
+  // touch, and the one the touch had coming is not made as well.
+  leave: async function () {
+    api.inheritSettings(true);
+    api.attach(null);
+    await advance(1000);
+    screen(true);
+    await advance(10);
+    const base = B.presses;
+    changed(); await advance(300);
+    screen(false);
+    await advance(3000);
+    return { saves: B.presses - base, current: api.state().settings.current, fp: B.fp };
+  },
+  // Nothing reads the record: no touch saves anything.
+  off: async function () {
+    api.inheritSettings(false);
+    api.attach(null);
+    await advance(1000);
+    changed(); await advance(3000);
+    const sent = settleSend(api.saveForSend("the gallery's Generate"));
+    await advance(10);
+    return { presses: B.presses, send: sent.answer };
+  },
+  // Save before a send.
+  send: async function () {
+    api.inheritSettings(true);
+    api.attach(null);
+    await advance(1000);
+    const base = B.presses;
+    const t0 = now;
+    const quick = settleSend(api.saveForSend("the gallery's Generate"));
+    await advance(0);
+    const quickResult = { answer: quick.answer, took: quick.at - t0, presses: B.presses - base };
+
+    changed(); await advance(50);
+    const t1 = now;
+    const dirty = settleSend(api.saveForSend("the gallery's Generate"));
+    await advance(2500);
+    const dirtyResult = { answer: dirty.answer, took: dirty.at - t1, current: api.state().settings.current, fp: B.fp };
+
+    B.answerFlush = false;
+    changed(); await advance(50);
+    const t2 = now;
+    const mute = settleSend(api.saveForSend("Clipboard's Add to Queue"));
+    await advance(1999);
+    const beforeLimit = mute.answer;
+    await advance(1);
+    const muteResult = { before: beforeLimit, answer: mute.answer, took: mute.at - t2, current: api.state().settings.current,
+                         said: linesWith("save before send: no answer within 2000 ms").length };
+    B.answerFlush = true;
+    await advance(10000);
+
+    // WanGP takes the press and then goes quiet: every look after it hangs.
+    B.answerLook = false;
+    changed(); await advance(50);
+    const t3 = now;
+    const quiet = settleSend(api.saveForSend("the gallery's Generate"));
+    await advance(1999);
+    const quietBefore = quiet.answer;
+    await advance(1);
+    const quietResult = { before: quietBefore, answer: quiet.answer, took: quiet.at - t3 };
+    B.answerLook = true;
+    await advance(10000);
+
+    B.suppress = true;
+    changed(); await advance(50);
+    const loading = settleSend(api.saveForSend("the gallery's Generate"));
+    await advance(2500);
+    const loadingResult = { answer: loading.answer, current: api.state().settings.current };
+    return { quick: quickResult, dirty: dirtyResult, mute: muteResult, quiet: quietResult, loading: loadingResult };
+  },
+  // A bridge that does not report its changes: no send may take the record as current.
+  legacy: async function () {
+    api.inheritSettings(true);
+    api.attach(null);
+    await advance(1000);
+    const base = B.presses;
+    const t0 = now;
+    const sent = settleSend(api.saveForSend("the gallery's Generate"));
+    await advance(2500);
+    return { answer: sent.answer, took: sent.at - t0, presses: B.presses - base, watched: api.state().settings.watched,
+             hello: B.hellos[0] || {} };
+  },
+  // The public API loaded first: the tab reads what it knows.
+  pull: async function () {
+    api.attach(null);
+    await advance(1000);
+    return { wanted: api.state().settings.wanted, presses: B.presses };
+  },
+  pulloff: async function () {
+    api.attach(null);
+    await advance(1000);
+    return { wanted: api.state().settings.wanted, presses: B.presses };
+  },
+
+  // The heartbeat.
+  beat: async function () {
+    api.attach(null);
+    await advance(100);
+    const beforeScreen = B.pings;
+    screen(true);
+    await advance(20001);
+    const onScreen = B.pings;
+    screen(false);
+    await advance(30000);
+    const offScreen = B.pings - onScreen;
+    screen(true);
+    await advance(1);
+    const back = B.pings - onScreen;
+    hidden(true);
+    await advance(30000);
+    const whileHidden = B.pings - onScreen - back;
+    hidden(false);
+    await advance(1);
+    return { beforeScreen, onScreen, offScreen, back, whileHidden, misses: linesWith("heartbeat: no answer").length,
+             state: api.state().heartbeat, started: linesWith("heartbeat: watching the WanGP page").length };
+  },
+  noping: async function () {
+    await bootOnScreen();
+    await advance(60000);
+    return { pings: B.pings, state: api.state().heartbeat, bar: !!bar() };
+  },
+  stuck: async function () {
+    // The beat at t0 is answered; the one at t0+5s is the first that is not,
+    // so the silence is twenty seconds old at t0+25s.
+    const t0 = await bootOnScreen();
+    B.answerPing = false;
+    await until(t0 + 24999);
+    const before = { bar: !!bar(), misses: linesWith("heartbeat: no answer from the WanGP page").length };
+    await until(t0 + 25000);
+    const shown = { bar: !!bar(), text: barText(), onTime: linesWith("this page was on time").length };
+    await until(t0 + 30000);
+    const counting = barText();
+    B.afterReload = function () { B.answerPing = true; };
+    await until(t0 + 34999);
+    const beforeReload = B.navigations;
+    await until(t0 + 35000);
+    const reloaded = B.navigations;
+    await advance(1000);
+    return { before, shown, counting, beforeReload, reloaded, barAfter: !!bar(), state: api.state().heartbeat,
+             reloadLine: linesWith("heartbeat: reloading the WanGP view").length, ready: api.state().ready };
+  },
+  dismiss: async function () {
+    const t0 = await bootOnScreen();
+    B.answerPing = false;
+    await until(t0 + 25000);
+    const shown = !!bar();
+    const pressed = pressBar("dismiss");
+    await until(t0 + 55000);
+    const quiet = { bar: !!bar(), navigations: B.navigations, dismissed: api.state().heartbeat.dismissed };
+    B.answerPing = true;
+    await until(t0 + 60100);
+    const recovered = { dismissed: api.state().heartbeat.dismissed, answered: linesWith("heartbeat: the WanGP page answered again after").length,
+                        repeated: linesWith("showing 'WanGP stopped responding'").length };
+    B.answerPing = false;
+    await advance(25000);
+    return { shown, pressed, quiet, recovered, again: !!bar() };
+  },
+  button: async function () {
+    const t0 = await bootOnScreen();
+    B.answerPing = false;
+    await until(t0 + 25000);
+    B.afterReload = function () { B.answerPing = true; };
+    const pressed = pressBar("reload");
+    await advance(2000);
+    return { pressed, navigations: B.navigations, state: api.state().heartbeat, bar: !!bar() };
+  },
+  limits: async function () {
+    await bootOnScreen();
+    B.answerPing = false;
+    const reloadsAt = [];
+    let seen = 0;
+    const start = now;
+    let textAtEnd = "";
+    for (let i = 0; i < 180; i += 1) {
+      await advance(5000);
+      if (B.navigations > seen) { seen = B.navigations; reloadsAt.push(now - start); }
+    }
+    textAtEnd = barText();
+    return { reloadsAt, navigations: B.navigations, text: textAtEnd, state: api.state().heartbeat };
+  },
+  late: async function () {
+    // The beat due at t0+10s runs three seconds late.
+    const t0 = await bootOnScreen();
+    B.answerPing = false;
+    await until(t0 + 9999);
+    await stall(3001);
+    return { busy: linesWith("this whole page was busy").length, late: linesWith("ran 3000 ms late").length,
+             lines: linesWith("heartbeat: no answer") };
+  },
+  loading: async function () {
+    await bootOnScreen();
+    await advance(10000);
+    documentLeaves();
+    await advance(30000);
+    const at30 = !!bar();
+    await advance(35000);
+    return { at30, at65: !!bar(), state: api.state().heartbeat };
+  },
+  busy: async function () {
+    const t0 = await bootOnScreen();
+    B.busyMs = 20000;
+    await until(t0 + 20100);
+    const noted = linesWith("its bridge has waited 20s for WanGP to answer 'queue'").length;
+    B.busyMs = 0;
+    await until(t0 + 25100);
+    return { noted, cleared: linesWith("no longer waiting on WanGP").length, bar: !!bar(), navigations: B.navigations };
+  }
+};
+
+(scenarios[MODE] || scenarios.save)().then(function (result) {
+  console.log(JSON.stringify(Object.assign({ thrown: thrown.slice(0, 3) }, result)));
+  process.exit(0);
+}, function (error) {
+  console.log(JSON.stringify({ error: String(error && error.stack || error) }));
+  process.exit(0);
+});
+"""
+
+
+def _run_live(modes):
+    """Every mode against the real bundle, as {mode: answer}."""
+    import json as _json
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        return None
+    answers = {}
+    with tempfile.TemporaryDirectory(prefix="minipaint-wangp-live-") as scratch:
+        root = pathlib.Path(scratch)
+        (root / "harness.js").write_text(_LIVE_HARNESS, encoding="utf-8")
+        for mode in modes:
+            try:
+                run = subprocess.run([node, str(root / "harness.js"), str(BROWSER_COPY), mode],
+                                     capture_output=True, text=True, timeout=120, check=False)
+                out = run.stdout.strip().splitlines()
+                answers[mode] = _json.loads(out[-1]) if out else {"error": run.stderr[-400:]}
+            except Exception as error:
+                answers[mode] = {"error": str(error)[:300]}
+    return answers
+
+
+def live_settings_checks(r: Results) -> None:
+    """WanGP's form saved as it changes, and again just before every send.
+
+    WHAT THIS EXISTS TO CATCH.
+
+    A job is composed on the server from the form WanGP recorded, and WanGP
+    records it only when it is committed. The free moments to commit it -
+    the page becoming ready, the tab leaving the screen, the page going to
+    the background - leave one hole: a LoRA weight changed while the WanGP
+    tab stays in front is committed by none of them. So the WanGP page says
+    when its form is touched, and about a second after the last touch the
+    form is saved (one press, one look), and a send waits - two seconds at
+    most - for a save of anything still unsaved. Every answer is a word the
+    job records, so a job can say where its settings came from.
+    """
+    answers = _run_live(("save", "slow", "leave", "off", "send", "legacy", "pull", "pulloff"))
+    if answers is None:
+        r.check("node is available for the live settings checks (skipped)", True)
+        return
+
+    save = answers.get("save", {})
+    r.check("the harness drove the real bundle through its saves", "error" not in save and not save.get("thrown"), repr(save)[:400])
+    r.check("the hello asks the WanGP page to say when its form is touched",
+            (save.get("hello") or {}).get("watch_form") is True, repr(save.get("hello")))
+    r.check("the page becoming ready saves once, and one look settles it - no poll",
+            save.get("afterReady") == {"presses": 1, "looks": 1, "current": True}, repr(save.get("afterReady")))
+    r.check("touches a second apart are not saved while they keep coming",
+            save.get("beforeQuiet") == 1, repr(save))
+    r.check("and one save follows about a second after the last of them",
+            save.get("atQuiet") == 2, repr(save))
+    after = save.get("afterSave") or {}
+    r.check("that save carried the change into WanGP's record, and the page knows the record is current",
+            after.get("fp") == 2 and after.get("current") is True and after.get("presses") == 2 and after.get("looks") == 2,
+            repr(after))
+    r.check("a touch while a save is running waits for it and then gets a save of its own",
+            save.get("midRunning") is True and save.get("trailing") == 2 and save.get("current") is True, repr(save))
+
+    slow = answers.get("slow", {})
+    r.check("a touch whose quiet second runs out while the save before it still waits on WanGP is not dropped",
+            slow.get("first") == 1 and (slow.get("whileRunning") or {}).get("presses") == 1
+            and (slow.get("whileRunning") or {}).get("saving") is True, repr(slow))
+    r.check("the record is not taken as current when the save that finished began before the last touch",
+            (slow.get("between") or {}).get("current") is False and (slow.get("between") or {}).get("saving") is False
+            and (slow.get("between") or {}).get("presses") == 1, repr(slow))
+    r.check("that touch gets a save of its own once the first is done, and then the record is current",
+            slow.get("after") == 2 and slow.get("current") is True, repr(slow))
+
+    leave = answers.get("leave", {})
+    r.check("a touch and then the WanGP tab leaving the screen is one save, made as it leaves, not two",
+            leave.get("saves") == 1 and leave.get("current") is True and leave.get("fp") == 2, repr(leave))
+
+    off = answers.get("off", {})
+    r.check("with inheritance off, touches save nothing and a send asks nothing",
+            off.get("presses") == 0 and (off.get("send") or {}).get("flush") == "", repr(off))
+
+    send = answers.get("send", {})
+    quick = send.get("quick") or {}
+    r.check("a send with nothing new since the last save is answered at once, without asking WanGP",
+            (quick.get("answer") or {}).get("flush") == "unchanged" and quick.get("took") == 0 and quick.get("presses") == 0,
+            repr(quick))
+    dirty = send.get("dirty") or {}
+    r.check("a send right after a touch saves first and answers when the record has moved",
+            (dirty.get("answer") or {}).get("flush") == "committed" and 0 < (dirty.get("took") or 0) < 1000
+            and dirty.get("current") is True, repr(dirty))
+    mute = send.get("mute") or {}
+    r.check("a WanGP page that does not answer holds a send two seconds and no longer",
+            mute.get("before") is None and (mute.get("answer") or {}).get("flush") == "unavailable"
+            and mute.get("took") == 2000, repr(mute))
+    r.check("and says so in the journal, and does not take the record as current",
+            mute.get("said") == 1 and mute.get("current") is False, repr(mute))
+    quiet = send.get("quiet") or {}
+    r.check("and one that takes the press and then goes quiet mid-wait holds it no longer either",
+            quiet.get("before") is None and (quiet.get("answer") or {}).get("flush") == "unavailable"
+            and quiet.get("took") == 2000, repr(quiet))
+    loading = send.get("loading") or {}
+    r.check("a WanGP page mid settings-load answers suppressed, and the record is not taken as current",
+            (loading.get("answer") or {}).get("flush") == "suppressed" and loading.get("current") is False, repr(loading))
+
+    legacy = answers.get("legacy", {})
+    r.check("a bridge that never said it reports changes is never taken at its word: a send saves and waits",
+            legacy.get("watched") is False and legacy.get("presses") == 1
+            and (legacy.get("answer") or {}).get("flush") == "unchanged" and 1000 < (legacy.get("took") or 0) <= 2000,
+            repr(legacy))
+
+    pull = answers.get("pull", {})
+    r.check("a WanGP tab that loads after the public API took its snapshot still learns that jobs use its settings",
+            pull.get("wanted") is True and pull.get("presses") == 1, repr(pull))
+    pulloff = answers.get("pulloff", {})
+    r.check("and learns it as off when this page runs its own queue",
+            pulloff.get("wanted") is False and pulloff.get("presses") == 0, repr(pulloff))
+
+
+def heartbeat_checks(r: Results) -> None:
+    """The WanGP page asked every five seconds whether it is there.
+
+    WHAT THIS EXISTS TO CATCH.
+
+    A WanGP page that reloaded and did not come back, landed on an error
+    page, or lost its script used to stay that way until somebody reloaded
+    the whole browser tab; PR #102 took away the only automatic recovery.
+    The heartbeat is a message inside this browser - no request, nothing
+    held open - sent only while the WanGP tab is on screen. Twenty seconds
+    of silence puts up "WanGP stopped responding" with Reload view, and the
+    view reloads ten seconds later unless dismissed: at most once in two
+    minutes, three times in the life of the page.
+    """
+    answers = _run_live(("beat", "noping", "stuck", "dismiss", "button", "limits", "late", "loading", "busy"))
+    if answers is None:
+        r.check("node is available for the heartbeat checks (skipped)", True)
+        return
+
+    beat = answers.get("beat", {})
+    r.check("the harness drove the real bundle through a heartbeat", "error" not in beat and not beat.get("thrown"), repr(beat)[:400])
+    r.check("nothing is asked before the WanGP tab has been on screen", beat.get("beforeScreen") == 0, repr(beat))
+    r.check("on screen it asks at once and then every five seconds", beat.get("onScreen") == 5, repr(beat))
+    r.check("off screen it asks nothing, however long", beat.get("offScreen") == 0, repr(beat))
+    r.check("back on screen it asks at once", beat.get("back") == 1, repr(beat))
+    r.check("and a hidden page asks nothing", beat.get("whileHidden") == 0, repr(beat))
+    r.check("a WanGP page that answers every time writes no miss and says once that it is watched",
+            beat.get("misses") == 0 and beat.get("started") == 1, repr(beat))
+
+    noping = answers.get("noping", {})
+    r.check("a bridge that never said it answers pings is never pinged, and never called stuck",
+            noping.get("pings") == 0 and (noping.get("state") or {}).get("armed") is False and noping.get("bar") is False,
+            repr(noping))
+
+    stuck = answers.get("stuck", {})
+    r.check("the harness drove a WanGP page that stopped answering", "error" not in stuck and not stuck.get("thrown"), repr(stuck)[:400])
+    before = stuck.get("before") or {}
+    r.check("every unanswered beat is written down, and nothing is shown before twenty seconds of silence",
+            before.get("bar") is False and before.get("misses") == 3, repr(stuck))
+    shown = stuck.get("shown") or {}
+    r.check("twenty seconds after a beat went unanswered the tab says WanGP stopped responding, and when it will reload",
+            shown.get("bar") is True and shown.get("text") == "WanGP stopped responding. Reloading the view in 10s.", repr(shown))
+    r.check("and the journal said, each time, that this page was on time - so the silence is the WanGP page's",
+            shown.get("onTime") == 4, repr(shown))
+    r.check("the countdown counts down", stuck.get("counting") == "WanGP stopped responding. Reloading the view in 5s.",
+            repr(stuck.get("counting")))
+    r.check("ten seconds after the bar, and not before, the view reloads - in the same frame",
+            stuck.get("beforeReload") == 0 and stuck.get("reloaded") == 1 and stuck.get("reloadLine") == 1, repr(stuck))
+    r.check("and when the reloaded page answers, the bar is gone and the tab is ready again",
+            stuck.get("barAfter") is False and stuck.get("ready") is True
+            and (stuck.get("state") or {}).get("automatic_reloads") == 1, repr(stuck))
+
+    dismiss = answers.get("dismiss", {})
+    quiet = dismiss.get("quiet") or {}
+    r.check("Dismiss takes the bar away and nothing is reloaded behind it",
+            dismiss.get("shown") is True and dismiss.get("pressed") is True and quiet.get("bar") is False
+            and quiet.get("navigations") == 0 and quiet.get("dismissed") is True, repr(dismiss))
+    recovered = dismiss.get("recovered") or {}
+    r.check("and the journal does not claim a bar is showing while it is dismissed",
+            recovered.get("repeated") == 1, repr(dismiss))
+    r.check("a WanGP page that answers again ends the episode, dismissal and all",
+            recovered.get("dismissed") is False and recovered.get("answered") == 1, repr(dismiss))
+    r.check("so the next silence is shown again", dismiss.get("again") is True, repr(dismiss))
+
+    button = answers.get("button", {})
+    r.check("Reload view reloads at once, and is not counted against the automatic ones",
+            button.get("pressed") is True and button.get("navigations") == 1
+            and (button.get("state") or {}).get("automatic_reloads") == 0 and (button.get("state") or {}).get("reloads") == 1
+            and button.get("bar") is False, repr(button))
+
+    limits = answers.get("limits", {})
+    at = limits.get("reloadsAt") or []
+    r.check("a WanGP page that never recovers is reloaded automatically three times in all",
+            limits.get("navigations") == 3 and len(at) == 3, repr(limits))
+    r.check("and never twice within two minutes",
+            len(at) == 3 and all(later - earlier >= 120000 for earlier, later in zip(at, at[1:])), repr(at))
+    r.check("after which the bar only offers the button, and says why",
+            "It has been reloaded automatically 3 times" in (limits.get("text") or "")
+            and (limits.get("state") or {}).get("counting_down") is False, repr(limits.get("text")))
+
+    late = answers.get("late", {})
+    r.check("a beat that ran late says the whole page was busy, not only WanGP, and by how much",
+            late.get("busy") == 1 and late.get("late") == 1, repr(late))
+
+    loading = answers.get("loading", {})
+    r.check("a WanGP page still loading is given a minute before it is called stuck, not twenty seconds",
+            loading.get("at30") is False and loading.get("at65") is True, repr(loading))
+
+    busy = answers.get("busy", {})
+    r.check("a bridge stuck waiting on WanGP's own answer is written down once, and cleared once",
+            busy.get("noted") == 1 and busy.get("cleared") == 1, repr(busy))
+    r.check("and nothing is done about it - a generation can hold a request for minutes",
+            busy.get("bar") is False and busy.get("navigations") == 0, repr(busy))
+
+
+#: The script in the WanGP document, answering the heartbeat and reporting
+#: touches. What matters is what it does NOT do: a PING never becomes a click
+#: (a Gradio round trip could sit behind a generation for minutes), a touch
+#: is only a person's own event and never this script's own write or WanGP's,
+#: and nothing is reported to a parent that did not ask.
+_BRIDGE_LIVE_HARNESS = r"""
+const fs = require("fs");
+const script = fs.readFileSync(process.argv[2], "utf8");
+const MODE = process.argv[3] || "watch";
+const ORIGIN = "http://forge.test";
+const posted = [];
+const listeners = {};
+const docListeners = {};
+let clicks = 0;
+const parent = { postMessage(envelope, origin) { posted.push({ type: envelope.type, channel: envelope.channel_id, request: envelope.request_id, payload: envelope.payload || {}, origin: origin }); } };
+class Event { constructor(type) { this.type = type; } }
+const box = { tagName: "TEXTAREA", value: "", dispatchEvent(event) { touch("input", false, this); } };
+const ack = { tagName: "TEXTAREA", value: "" };
+const button = { tagName: "BUTTON", click() { clicks += 1; } };
+const column = {
+  id: "minipaint_bridge_1", parentElement: null,
+  querySelector(selector) {
+    if (selector === ".minipaint-bridge-request") { return box; }
+    if (selector === ".minipaint-bridge-ack") { return ack; }
+    if (selector === ".minipaint-bridge-trigger") { return button; }
+    return null;
+  }
+};
+const inColumn = { closest(sel) { return sel === ".minipaint-bridge-column" ? column : null; } };
+const onForm = { closest() { return null; } };
+const window = {
+  location: { origin: ORIGIN }, parent: parent,
+  addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+  setTimeout: setTimeout, clearTimeout: clearTimeout, setInterval: setInterval, clearInterval: clearInterval,
+  performance: { now() { return Date.now(); } },
+  requestAnimationFrame(callback) { return setTimeout(callback, 1); },
+  cancelAnimationFrame(id) { clearTimeout(id); }
+};
+const document = {
+  getElementsByClassName(name) { return name === "minipaint-bridge-column" ? [column] : []; },
+  getElementById() { return null; },
+  addEventListener(type, fn, capture) { (docListeners[type] = docListeners[type] || []).push({ fn: fn, capture: capture === true }); },
+  documentElement: { setAttribute() {} }, head: { appendChild() {} }, body: null,
+  createElement() { return { textContent: "" }; }
+};
+globalThis.Event = Event;
+globalThis.TextEncoder = require("util").TextEncoder;
+new Function("window", "document", script)(window, document);
+
+// A person (trusted) or a script (not) touching something on the page.
+function touch(type, trusted, target) {
+  for (const entry of docListeners[type] || []) { entry.fn({ type: type, isTrusted: trusted, target: target || onForm }); }
+}
+function send(type, payload, channel, request) {
+  (listeners.message || []).forEach(function (fn) {
+    fn({ origin: ORIGIN, source: parent, data: { protocol: 5, type: type, channel_id: channel, request_id: request || "r" + Math.random().toString(16).slice(2, 10), payload: payload || {} } });
+  });
+}
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const channel = "c".repeat(32);
+const count = (type) => posted.filter((p) => p.type === type).length;
+
+async function main() {
+  send("WANGP_BRIDGE_HELLO", MODE === "unasked" ? {} : { watch_form: true }, channel, "hello1");
+  await wait(20);
+  const clicksAfterHello = clicks;
+
+  // The heartbeat: answered at once, from this script, with nothing clicked.
+  send("WANGP_PING", {}, channel, "ping1");
+  const pongNow = count("WANGP_PONG");
+  const pong = posted.filter((p) => p.type === "WANGP_PONG")[0] || null;
+  send("WANGP_PING", {}, "d".repeat(32), "ping2");
+  const strangerPong = count("WANGP_PONG") - pongNow;
+
+  // Touches. Capture-phase listeners, so a component that stops propagation
+  // cannot hide one.
+  const captured = ["input", "change", "click", "keyup", "drop", "paste"].every((t) => (docListeners[t] || []).some((e) => e.capture));
+  touch("input", false, onForm);                 // a script - WanGP loading a model's settings
+  touch("input", true, inColumn);                // the bridge's own controls
+  await wait(30);
+  const fromScripts = count("WANGP_FORM_CHANGED");
+  touch("click", true, onForm);                  // a person: a dropdown choice fires no input event
+  await wait(30);
+  const first = count("WANGP_FORM_CHANGED");
+  const firstPayload = (posted.filter((p) => p.type === "WANGP_FORM_CHANGED")[0] || {}).payload || null;
+  for (let i = 0; i < 12; i += 1) { touch("input", true, onForm); await wait(20); }
+  const duringDrag = count("WANGP_FORM_CHANGED");
+  await wait(700);
+  const afterDrag = count("WANGP_FORM_CHANGED");
+  console.log(JSON.stringify({
+    clicksAfterHello, clicksAfter: clicks, pongNow, pong: pong && { channel: pong.channel, request: pong.request, payload: pong.payload, origin: pong.origin },
+    strangerPong, captured, fromScripts, first, firstPayload, duringDrag, afterDrag,
+    channels: posted.filter((p) => p.type === "WANGP_FORM_CHANGED").every((p) => p.channel === channel)
+  }));
+  process.exit(0);
+}
+main();
+"""
+
+
+def bridge_liveness_checks(r: Results) -> None:
+    """The WanGP document's half of the heartbeat and of saving on change."""
+    import json as _json
+    import shutil
+    import subprocess
+    import sys as _sys
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        r.check("node is available for the bridge liveness checks (skipped)", True)
+        return
+
+    folder = str(BRIDGE_COPY.parent)
+    added = folder not in _sys.path
+    if added:
+        _sys.path.insert(0, folder)
+    try:
+        import bridge_js
+    finally:
+        if added and folder in _sys.path:
+            _sys.path.remove(folder)
+
+    results = {}
+    with tempfile.TemporaryDirectory(prefix="minipaint-wangp-bridge-live-") as scratch:
+        root = pathlib.Path(scratch)
+        (root / "bridge.js").write_text(bridge_js.document_script(""), encoding="utf-8")
+        (root / "harness.js").write_text(_BRIDGE_LIVE_HARNESS, encoding="utf-8")
+        for mode in ("watch", "unasked"):
+            try:
+                run = subprocess.run([node, str(root / "harness.js"), str(root / "bridge.js"), mode],
+                                     capture_output=True, text=True, timeout=30, check=False)
+                out = run.stdout.strip().splitlines()
+                results[mode] = _json.loads(out[-1]) if out else {"error": run.stderr[-300:]}
+            except Exception as error:
+                results[mode] = {"error": str(error)[:300]}
+
+    config = bridge_js.configuration("")
+    r.check("the script knows the three new words from protocol.py, not from a copy of its own",
+            config["types"].get("ping") == protocol.PING and config["types"].get("pong") == protocol.PONG
+            and config["types"].get("formChanged") == protocol.FORM_CHANGED and protocol.PING in config["inbound"],
+            repr(config["types"]))
+    r.check("the parent may send a PING, and the bridge may send a PONG and a change notice - nothing else was added",
+            protocol.PING in protocol.TO_BRIDGE and {protocol.PONG, protocol.FORM_CHANGED} <= protocol.TO_PARENT
+            and protocol.PONG not in protocol.TO_BRIDGE and protocol.FORM_CHANGED not in protocol.TO_BRIDGE)
+
+    watch = results.get("watch", {})
+    r.check("the harness drove the real WanGP document script", "error" not in watch, repr(watch)[:400])
+    r.check("a PING is answered on the spot", watch.get("pongNow") == 1, repr(watch))
+    pong = watch.get("pong") or {}
+    r.check("to the channel and request that asked, at this origin only",
+            pong.get("channel") == "c" * 32 and pong.get("request") == "ping1" and pong.get("origin") == "http://forge.test",
+            repr(pong))
+    r.check("saying how long a bridge request has waited on Gradio, and nothing about the form",
+            set((pong.get("payload") or {}).keys()) == {"busy_ms", "op", "waiting"}, repr(pong.get("payload")))
+    r.check("and never through Gradio: answering it clicks nothing",
+            watch.get("clicksAfter") == watch.get("clicksAfterHello"), repr(watch))
+    r.check("a PING on a channel this page is not bound to is not answered", watch.get("strangerPong") == 0, repr(watch))
+    r.check("touches are listened for in the capture phase, clicks and keys included", watch.get("captured") is True, repr(watch))
+    r.check("a script's change is not a touch - neither WanGP's own nor this script's writes to its request box",
+            watch.get("fromScripts") == 0, repr(watch))
+    r.check("a person's click is, and it is said at once", watch.get("first") == 1, repr(watch))
+    r.check("with a count and nothing else - no value crosses",
+            watch.get("firstPayload") == {"touches": 1}, repr(watch.get("firstPayload")))
+    r.check("a drag of a dozen input events inside half a second after a notice sends none while it lasts",
+            watch.get("duringDrag") == watch.get("first"), repr(watch))
+    r.check("and exactly one when the half second is up, so the last touch is never left unsaid",
+            watch.get("afterDrag") == (watch.get("first") or 0) + 1, repr(watch))
+    r.check("every notice goes to the channel that asked for them", watch.get("channels") is True, repr(watch))
+
+    unasked = results.get("unasked", {})
+    r.check("a parent whose hello did not ask is told of no touch at all",
+            "error" not in unasked and unasked.get("first") == 0 and unasked.get("afterDrag") == 0, repr(unasked))
+    r.check("but is still answered when it pings", unasked.get("pongNow") == 1, repr(unasked))
+
+
 def page_head_checks(r: Results) -> None:
     """The frame timer goes into the page head, before Gradio's module.
 
@@ -3635,6 +4512,9 @@ def run() -> Results:
     switch_apply_checks(r)
     frame_fallback_checks(r)
     proactive_flush_checks(r)
+    live_settings_checks(r)
+    heartbeat_checks(r)
+    bridge_liveness_checks(r)
     recovery_checks(r)
     page_head_checks(r)
     session_isolation_checks(r)

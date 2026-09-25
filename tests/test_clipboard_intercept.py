@@ -567,6 +567,44 @@ def history_checks(r: Results) -> None:
             and any(p.name.startswith(intercept.HISTORY_NAME + ".broken-") for p in config.config_dir().iterdir()))
 
 
+def settings_history_checks(r: Results) -> None:
+    """The popup's history says where each job's WanGP settings came from.
+
+    It is learned from the job once the job has been composed, and kept on
+    the entry, because unlike how the job went it stays true after the job
+    has left the outbox. Only a word from the outbox's closed list is ever
+    kept or shown.
+    """
+    config.write_document(intercept.HISTORY_NAME, {"schema_version": intercept.HISTORY_SCHEMA, "history": []})
+    job_id = "ab" * 8
+    intercept.add_history({"prompt": "flushed", "roles": ["reference"], "available_roles": ["reference"], "summary": "s",
+                           "inherit": True, "enhance": False, "pinned": False, "job_id": job_id})
+    composed = {"job_id": job_id, "state": outbox.COMPLETED, "executor": outbox.EXECUTOR_SERVER,
+                "snapshot": {"source": protocol.BASE_FLUSHED}, "settings_flush": protocol.FLUSH_COMMITTED, "inherit_settings": True}
+    waiting = dict(composed, state=outbox.ADMITTED, snapshot=None)
+    real = outbox.get
+    try:
+        outbox.get = lambda wanted: dict(waiting) if wanted == job_id else None
+        before = intercept.history_view(REFERENCE_MODEL, ALL_THREE)
+        r.check("an entry whose job has not been composed yet says nothing about its settings",
+                before and before[0]["settings"] == "" and intercept.load_history()[0]["settings"] == "", str(before[:1]))
+        outbox.get = lambda wanted: dict(composed) if wanted == job_id else None
+        view = intercept.history_view(REFERENCE_MODEL, ALL_THREE)
+    finally:
+        outbox.get = real
+    r.check("once it has, the entry says where they came from, in the words the queue uses",
+            view and view[0]["settings"] == "saved from the WanGP page at send", str(view[:1]))
+    r.check("and keeps it", intercept.load_history()[0]["settings"] == outbox.SETTINGS_SAVED_AT_SEND, str(intercept.load_history()[0]))
+    after = intercept.history_view(REFERENCE_MODEL, ALL_THREE)
+    r.check("so it still says so after the job has left the outbox",
+            after and after[0]["settings"] == "saved from the WanGP page at send" and after[0]["outcome"] == "", str(after[:1]))
+    document = config.read_document(intercept.HISTORY_NAME, {})
+    document["history"][0]["settings"] = "whatever a hand-edited file says"
+    config.write_document(intercept.HISTORY_NAME, document)
+    r.check("a word that is not one of the outbox's is neither kept nor shown",
+            intercept.load_history()[0]["settings"] == "" and intercept.history_view(REFERENCE_MODEL, ALL_THREE)[0]["settings"] == "")
+
+
 # ------------------------------------------------------------------- routes --
 
 
@@ -591,8 +629,12 @@ def route_checks(r: Results) -> None:
             picture.status_code == 200 and picture.headers.get("content-type", "").startswith("image/") and "no-store" in picture.headers.get("cache-control", ""))
     r.check("and refused for a token that names nothing", client.get(routes.INTERCEPT_IMAGE_ROUTE.replace("{token}", "0" * 32)).status_code == 404)
     sent = client.post(routes.INTERCEPT_ROUTE, json={"action": "submit", "handoff": handoff, "prompt": "over http", "roles": ["first_frame"],
-                                                     "inherit": False, "enhance": False, "page": PAGE, "inputs": ALL_THREE})
+                                                     "inherit": False, "enhance": False, "page": PAGE, "inputs": ALL_THREE,
+                                                     "settings_flush": "committed"})
     r.check("submit stores the job and answers the instruction", sent.status_code == 200 and sent.json()["ok"] and sent.json()["instruction"]["job_id"], sent.text[:200])
+    stored = outbox.get(sent.json().get("job_id", "")) or {}
+    r.check("and the job keeps what the page managed about WanGP's form just before it pressed",
+            stored.get("settings_flush") == "committed", str(stored.get("settings_flush")))
     again = client.post(routes.INTERCEPT_ROUTE, json={"action": "submit", "handoff": handoff, "prompt": "x", "roles": ["first_frame"], "page": PAGE, "inputs": NO_IMAGE})
     r.check("a refusal is a 4xx carrying the code and the sentence", again.status_code == 400 and again.json()["code"] == errors.INTERCEPT_NO_IMAGE_ROLE)
     outbox.use_running(lambda: False)
@@ -616,6 +658,12 @@ def route_checks(r: Results) -> None:
     r.check("an unknown action is refused", client.post(routes.INTERCEPT_ROUTE, json={"action": "explode"}).status_code == 400)
     r.check("every action the popup may send is one the route takes",
             set(routes.INTERCEPT_ACTIONS) == {"describe", "submit", "cancel", "draft", "history", "history_load", "history_delete", "history_pin"})
+    invented = intercept.stage(_photo((14, 15, 16)), "txt2img")
+    odd = client.post(routes.INTERCEPT_ROUTE, json={"action": "submit", "handoff": invented, "prompt": "odd word", "roles": ["first_frame"],
+                                                    "inherit": False, "enhance": False, "page": PAGE, "inputs": ALL_THREE,
+                                                    "settings_flush": "saved, honestly"})
+    r.check("a word that is not one of the outcomes is not written onto a job",
+            odd.status_code == 200 and (outbox.get(odd.json().get("job_id", "")) or {}).get("settings_flush") == "", odd.text[:200])
     for stored in outbox.jobs():
         if stored["state"] == "pending":
             outbox.cancel(stored["job_id"])
@@ -700,6 +748,7 @@ def run() -> Results:
                 submit_checks(r, tab)
                 enhancer_checks(r, tab)
                 history_checks(r)
+                settings_history_checks(r)
                 route_checks(r)
             bundle_checks(r)
         finally:

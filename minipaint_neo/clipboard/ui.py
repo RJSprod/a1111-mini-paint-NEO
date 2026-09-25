@@ -339,6 +339,7 @@ def history_view(records: typing.Sequence[dict], asset_of: typing.Callable[[str]
             "tasks": int(record.get("tasks_added") or 0),
             "prompt": prompt,
             "slots": slots,
+            "settings": outbox.SETTINGS_TEXT.get(record.get("settings") or "", ""),
         })
     return entries
 
@@ -565,6 +566,11 @@ def outbox_view(jobs: typing.Sequence[dict], page: str) -> typing.List[dict]:
             seen = (job.get("wangp") or {}).get("state") or outbox.WANGP_ACCEPTED
             lines.append({"label": "WanGP", "text": inside,
                           "live": "generating" if seen == outbox.WANGP_GENERATING else "", "wangp": seen})
+        # Where its settings came from, from the moment that is decided.
+        settings_line = outbox.settings_sentence(job)
+        if settings_line:
+            lines.append({"label": "Settings", "text": settings_line, "live": "",
+                          "settings": outbox.settings_source(job)})
         view.append({
             "job_id": job["job_id"],
             "state": state,
@@ -1119,7 +1125,7 @@ class ClipboardTab:
 
     # -- the queue ------------------------------------------------------------
 
-    def add_to_queue(self, prompt, page, model=None, enhance_wanted=None):
+    def add_to_queue(self, prompt, page, model=None, enhance_wanted=None, settings_flush=""):
         """Add to Queue: the draft as a public request, into the server's outbox.
 
         Everything inherited is omitted from the request. A slot whose file
@@ -1147,6 +1153,10 @@ class ClipboardTab:
         travels with the press is the one that was on screen when it was
         pressed. None means no switch was supplied (a caller that is not the
         tab) and the stored setting still decides.
+
+        ``settings_flush`` is what the page managed to do about WanGP's form
+        just before it pressed - see ``outbox.submit``. Recorded, never acted
+        on here.
         """
         page_id = _page_of(page)
         block = _model_of(model)
@@ -1188,7 +1198,8 @@ class ClipboardTab:
                 # per restart, with nothing to show the user why.
                 enhance.set_enabled(wanted)
                 self._journal(f"enhanced prompts {'on' if wanted else 'off'} from the press; the stored setting disagreed")
-            job = outbox.submit(request, page_id, outbox.ORIGIN_CLIPBOARD, model=block, enhance=wanted)
+            job = outbox.submit(request, page_id, outbox.ORIGIN_CLIPBOARD, model=block, enhance=wanted,
+                                settings_flush=str(settings_flush or ""))
         except IntegrationError as error:
             self._journal(f"queue clicked; refused - {error.code}")
             notes = ["nothing was stored; press it again once WanGP is running"] if error.code == errors.WANGP_NOT_RUNNING else []
@@ -1200,7 +1211,7 @@ class ClipboardTab:
         pending = outbox.pending_count()
         record = job.get("enhance") or {}
         self._journal(f"queue clicked: job {job['job_id'][:8]} (overrides {', '.join(history.draft_overrides(draft)) or 'none'}"
-                      f"{'; enhancing as ' + record['variant'] if record else ''}); {pending} waiting")
+                      f"{'; enhancing as ' + record['variant'] if record else ''}); {pending} waiting; {outbox.flush_note(job)}")
         notes = [f"{pending - 1} ahead of it" if pending > 1 else "it goes next"]
         if job.get("executor") == outbox.EXECUTOR_BROWSER and outbox.unattended_enabled():
             # The setting says unattended and the job is not. That is this
@@ -1269,7 +1280,7 @@ class ClipboardTab:
             record = history.make_record(self._draft_from_request(job["request"], job), {
                 "request_id": job["request"].get("request_id"), "applied": result.get("applied"), "inherited": result.get("inherited"),
                 "ignored": result.get("ignored"), "tasks_added": result.get("tasks_added"), "model": result.get("model"),
-            }, enhanced_prompt=enhanced or "")
+            }, enhanced_prompt=enhanced or "", settings=outbox.settings_source(job))
             history.add_history(record)
             recorded.append(job["job_id"])
             self._journal(f"job {job['job_id'][:8]} {job['state']}; history recorded")

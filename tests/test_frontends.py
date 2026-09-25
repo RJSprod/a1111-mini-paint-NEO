@@ -503,6 +503,9 @@ def run() -> Results:
     r.check("and WanGP is asked for separately, after it, never awaited",
             wangp_url in boot_js and boot_js.index(canvas_url) < boot_js.index(wangp_url)
             and "await" not in boot_js.split(wangp_url)[0].rsplit(";", 2)[-1], boot_js[:400])
+    interop_url = assets.url_for("interop")
+    r.check("the public queue API is asked for with WanGP, after it, so its snapshot at load tells the WanGP tab",
+            f'"{wangp_url}", "{interop_url}"' in boot_js, boot_js[:400])
     r.check("no startup load asks for the canvas and WanGP in one call",
             not any(canvas_url in (d.get("js") or "") and wangp_url in (d.get("js") or "")
                     and f'"{canvas_url}", "{wangp_url}"' in (d.get("js") or "") for d in starts))

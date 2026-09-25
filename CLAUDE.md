@@ -31,9 +31,11 @@ WanGP iframe's own heartbeat and queue through our proxy. On 2026-09-17 a
 wedged WanGP held two of them for ever and the whole WebUI froze in the
 browser while the server was fine. Never add another always-open stream on
 Forge's origin without counting what is already there. The structural cure
-now lives in the auto-TLS extension (HTTP/2, see below); the transport breaker
-in `browser/minipaint_wangp.js` is what keeps a page alive without it. The
-whole incident is `docs/wangp/BROWSER_CONNECTION_STARVATION_2026-09-17.txt`.
+now lives in the auto-TLS extension (HTTP/2, see below). The transport breaker
+that shed the iframe when the event spine went silent was removed with the
+spine in PR #102; what notices a WanGP page that stopped answering now is the
+heartbeat (below), which uses no connection at all. The whole incident is
+`docs/wangp/BROWSER_CONNECTION_STARVATION_2026-09-17.txt`.
 
 **Under HTTP/2 a stalled request stalls the page, and a press adds another.**
 With the auto-TLS extension's HTTP/2, a page has ONE connection to Forge
@@ -272,6 +274,42 @@ page and every later snapshot queued behind it. A live connection is for a
 known boundary - something is coming and will finish - and nothing in this
 extension has one; the WanGP iframe is the one exception, and it is WanGP's.
 
+**A snapshot nobody takes tells nobody.** PR #102 made every snapshot one a
+page asks for, and the only thing that asked was a return from the background
+- through a listener that only a snapshot installed. So no page ever took one:
+the WanGP tab was never told that jobs are built from its settings, never kept
+WanGP's record current, and for two days a LoRA weight changed in the WanGP tab
+never reached a job sent from anywhere else. The interop bundle now takes one
+bounded snapshot when it loads, and the Canvas surface loads it at startup
+right after the WanGP bundle; a WanGP bundle that loads second reads the flag
+from `snapshotState()`. A behaviour that only happens "on return" needs
+something that makes the first one happen.
+
+**WanGP saves only what is committed, and a send cannot wait on a poll.** A job
+composes from the form WanGP last *recorded*, and WanGP records it only when
+the form is committed. So the WanGP page reports touches (`FORM_CHANGED`, only
+`isTrusted` events - the bridge writes its own request box with synthetic
+input events, and WanGP's model loads change the form by script, and either
+would otherwise be a save loop or a save of a half-loaded form) and the parent
+saves about a second after the last one. The count of notices a save covered
+is what decides whether the record is current: a save that began before the
+last touch is not the save of it. `saveForSend` answers at once when the record
+is current and otherwise waits at most two seconds - a poll that has nothing to
+find spends its whole budget, so it must not be the common case. A bridge
+without `form_watch` is never taken at its word.
+
+**The heartbeat cannot see WanGP's own connection.** `PING` is answered by the
+script in the WanGP document itself, on the spot and never through Gradio, and
+that document shares this page's thread: silence means no document there able
+to answer (reloaded and not back, an error page, a lost script), and a late
+answer means this whole page was busy, which the miss line says. A stall in
+WanGP's own Gradio channel leaves the page answering; the `PONG` carries how
+long a bridge request has waited and the journal says so once, but nothing acts
+on it, because a generation can hold a request for minutes. Time away (tab off
+screen, page hidden) is never silence, a loading document gets a minute, and
+Dismiss ends the bar, not the episode - the journal claimed a bar was showing
+when the first version let the next beat start a new episode behind it.
+
 **A freeze usually arrives at a page that is already hidden.** The lifecycle
 journal records hidden and frozen separately; the first version dropped the
 freeze because the page was already "away", so no log could say whether the
@@ -325,8 +363,11 @@ and HTTP/2 was.
 
 ## What is still open
 
-Nothing from the 2026-09-17 incident is unbuilt, but two things have never
+Nothing from the 2026-09-17 incident is unbuilt, but some things have never
 been exercised on the user's own machine rather than in tests: the HTTP/2 path
-on Windows, and the transport breaker actually shedding an iframe in anger. If
-either misbehaves, `--autotls-http1` puts the old server back with one flag,
-and the breaker's whole state is in `minipaintWanGP.state().transport`.
+on Windows, and the heartbeat's automatic reload of a WanGP view in anger. If
+HTTP/2 misbehaves, `--autotls-http1` puts the old server back with one flag.
+The heartbeat's whole state is in `minipaintWanGP.state().heartbeat`, and the
+settings save's in `minipaintWanGP.state().settings`; every miss, bar, dismissal
+and reload is a `heartbeat:` line in the page journal. Saving as the form
+changes and the heartbeat need bridge 1.7.0 installed in WanGP.

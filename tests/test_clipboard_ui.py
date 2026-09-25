@@ -625,6 +625,9 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
     records = history.load_history()
     r.check("and records one history entry", len(records) == 1 and records[0]["request_id"] == request["request_id"], str(len(records)))
     record = records[0] if records else {}
+    r.check("which says its settings were the WanGP page's own, as this browser queued it",
+            record.get("settings") == outbox.SETTINGS_LIVE
+            and tab._history_view()[0].get("settings") == outbox.SETTINGS_TEXT[outbox.SETTINGS_LIVE], str(record.get("settings")))
     r.check("with the recipe: prompt override, last frame and reference overrides, start inherited",
             record.get("prompt_mode") == "override" and record.get("prompt_override") == "a prompt" and record.get("first_mode") == "inherit"
             and record.get("last_mode") == "override" and record.get("last_asset_id") == id_b and record.get("reference_mode") == "override"
@@ -1106,6 +1109,55 @@ def theming_checks(r: Results) -> None:
 # ---------------------------------------------------------------------- run --
 
 
+def settings_line_checks(r: Results, tab) -> None:
+    """Where a job's WanGP settings came from, on its card and in the history.
+
+    The words are the outbox's; what is checked here is that the tab puts
+    them where a person looks - a Settings line on the queue card once the
+    job knows, and nothing before - and that Add to Queue carries what the
+    page managed to save just before it pressed.
+    """
+    from minipaint_neo.wangp import protocol as wire
+
+    page_id = "e" * 32
+    before = len(outbox.jobs())
+    tab.add_to_queue("saved first", page_id, None, False, settings_flush=wire.FLUSH_COMMITTED)
+    pressed = outbox.jobs()[-1] if len(outbox.jobs()) > before else {}
+    r.check("Add to Queue carries what the page saved just before it pressed onto the job",
+            pressed.get("settings_flush") == wire.FLUSH_COMMITTED, str(pressed.get("settings_flush")))
+    tab.add_to_queue("nothing saved", page_id, None, False, settings_flush="whatever it likes")
+    odd = outbox.jobs()[-1]
+    r.check("and a word that is not an outcome is not written onto one",
+            odd.get("settings_flush") == "" and odd["job_id"] != pressed.get("job_id"), str(odd.get("settings_flush")))
+    for job in (pressed, odd):
+        if job:
+            outbox.cancel(job["job_id"])
+
+    base = {"job_id": "c" * 16, "state": outbox.GENERATION_RUNNING, "page": page_id, "origin": outbox.ORIGIN_GALLERY,
+            "executor": outbox.EXECUTOR_SERVER, "request": {"request_id": "d" * 32, "images": {}}, "summary": {},
+            "settings_flush": wire.FLUSH_UNAVAILABLE, "inherit_settings": True}
+    composed = dict(base, snapshot={"source": wire.BASE_RECORDED})
+    waiting = dict(base, state=outbox.ADMITTED)
+    card = (clipboard_ui.outbox_view([composed], page_id) or [{}])[0]
+    lines = {line.get("label"): line for line in card.get("lines") or []}
+    r.check("a composed job's card has a Settings line saying where its settings came from",
+            (lines.get("Settings") or {}).get("text") == "WanGP's last saved settings (the page didn't answer)"
+            and (lines.get("Settings") or {}).get("settings") == outbox.SETTINGS_NO_ANSWER, str(card.get("lines")))
+    early = (clipboard_ui.outbox_view([waiting], page_id) or [{}])[0]
+    r.check("and one not composed yet has none - nobody can say yet",
+            not [line for line in early.get("lines") or [] if line.get("label") == "Settings"], str(early.get("lines")))
+
+    record = history.make_record(history.empty_draft(), {"request_id": "f" * 32}, settings=outbox.SETTINGS_DEFAULTS)
+    shown = clipboard_ui.history_view([record], lambda asset_id: None)
+    r.check("Queue Send History keeps the key and shows the words",
+            record.get("settings") == outbox.SETTINGS_DEFAULTS and shown and shown[0].get("settings") == "the model's defaults (nothing saved yet)",
+            str(shown[:1]))
+    forged = history.normalize_record(dict(record, settings="anything at all"))
+    r.check("and a record naming anything else shows nothing",
+            forged and forged.get("settings") == "" and clipboard_ui.history_view([forged], lambda asset_id: None)[0].get("settings") == "",
+            str(forged and forged.get("settings")))
+
+
 def run() -> Results:
     r = Results("clipboard ui")
     with tempfile.TemporaryDirectory(prefix="minipaint-clipboard-ui-") as scratch:
@@ -1125,6 +1177,7 @@ def run() -> Results:
                 unrendered_destination_checks(r)
                 integration_checks(r, base, tab)
                 enhance_switch_checks(r, base, tab)
+                settings_line_checks(r, tab)
             fallback_checks(r)
             theming_checks(r)
         finally:

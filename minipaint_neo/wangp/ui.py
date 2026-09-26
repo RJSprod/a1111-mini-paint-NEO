@@ -1539,14 +1539,20 @@ def _build_wizard() -> dict:
         parts["candidate"] = gr.State({})
         parts["rows"] = gr.State([])
 
+        # The last setup's answers, offered again and trusted for nothing:
+        # the folder is still checked and the environment still tried before
+        # either reaches the candidate. See config.remembered_choices.
+        remembered = config.remembered_choices()
+
         gr.Markdown("### 1. The WanGP installation")
         parts["root"] = gr.Textbox(
+            value=remembered["root"],
             label="WanGP folder",
             placeholder="the folder that contains wgp.py",
             elem_id="wangp_setup_root_path",
         )
         parts["root_check"] = gr.Button("Check this folder", elem_id="wangp_setup_root_check")
-        parts["root_status"] = gr.Markdown("")
+        parts["root_status"] = gr.Markdown(remembered_note("root", remembered["root"]))
 
         gr.Markdown("### 2. The Python environment that runs it")
         parts["runtime_scan"] = gr.Button("Find environments", elem_id="wangp_setup_runtime_scan")
@@ -1554,6 +1560,7 @@ def _build_wizard() -> dict:
             choices=[], label="Environment", interactive=True, elem_id="wangp_setup_runtime_choice"
         )
         parts["runtime_prefix"] = gr.Textbox(
+            value=remembered["runtime_prefix"],
             label="…or the environment folder, typed in",
             placeholder="the folder with python.exe or bin/python in it",
             elem_id="wangp_setup_runtime_prefix",
@@ -1561,7 +1568,7 @@ def _build_wizard() -> dict:
         parts["runtime_probe"] = gr.Button(
             "Try it against this WanGP", elem_id="wangp_setup_runtime_probe"
         )
-        parts["runtime_status"] = gr.Markdown("")
+        parts["runtime_status"] = gr.Markdown(remembered_note("runtime", remembered["runtime_prefix"]))
 
         gr.Markdown("### 3. The GPU WanGP may use")
         parts["gpu_scan"] = gr.Button("List the GPUs", elem_id="wangp_setup_gpu_scan")
@@ -1622,6 +1629,37 @@ def _build_wizard() -> dict:
         parts["finish_status"] = gr.Markdown("")
 
     return parts
+
+
+def remembered_note(kind: str, value: str) -> str:
+    """What the wizard says under a box it filled from the last setup.
+
+    A remembered answer is an offer, not an answer: nothing reaches the
+    candidate until the folder is checked or the environment is tried, which
+    is why the note names the button rather than saying OK.
+    """
+    if not value:
+        return ""
+    if kind == "root":
+        return _next("remembered from the last setup - press **Check this folder** to use it again.")
+    return _next("remembered from the last setup - press **Try it against this WanGP** to use it again.")
+
+
+def wizard_prefill() -> tuple:
+    """The wizard's remembered boxes, as *Start Setup* fills them.
+
+    Read at the press rather than at build: a Reinitialize made in this very
+    run keeps the folder and environment it took down (``config.clear`` keeps
+    everything but ``initialized``), and the wizard that follows must offer
+    those, not whatever the page was built with.
+    """
+    remembered = config.remembered_choices()
+    return (
+        gr.update(value=remembered["root"]),
+        remembered_note("root", remembered["root"]),
+        gr.update(value=remembered["runtime_prefix"]),
+        remembered_note("runtime", remembered["runtime_prefix"]),
+    )
 
 
 def _good(text: str) -> str:
@@ -1759,10 +1797,13 @@ def _wire_wizard(parts: dict, shell: dict, painted, show, console) -> None:
             )
         # Friendly label shown, UUID carried: section 8.3's whole point.
         choices = [(device.label, device.uuid) for device in devices]
+        # The last setup's card when it is still here, the first otherwise.
+        remembered = config.remembered_choices()["gpu_uuid"]
+        chosen = remembered if any(uuid == remembered for _label, uuid in choices) else choices[0][1]
         return (
-            gr.update(choices=choices, value=choices[0][1]),
+            gr.update(choices=choices, value=chosen),
             _good(f"{len(choices)} GPU(s) found. The one chosen here is the only one WanGP will see."),
-            choices[0][1],
+            chosen,
         )
 
     def scan_gpus_and_record(candidate):
@@ -2017,10 +2058,14 @@ def _wire_wizard(parts: dict, shell: dict, painted, show, console) -> None:
 
     parts["restore"].click(fn=restore, inputs=[], outputs=[parts["finish_status"]] + painted)
 
+    def begin():
+        return (gr.update(visible=False), gr.update(visible=True)) + wizard_prefill()
+
     parts["begin"].click(
-        fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
+        fn=begin,
         inputs=[],
-        outputs=[parts["intro"], parts["steps"]],
+        outputs=[parts["intro"], parts["steps"], parts["root"], parts["root_status"],
+                 parts["runtime_prefix"], parts["runtime_status"]],
     )
 
 

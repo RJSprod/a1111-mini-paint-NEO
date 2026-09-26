@@ -321,7 +321,9 @@ rows need WanGP up and the page loaded, so *Run the checks* is usually pressed t
 Nothing is moved, copied or downloaded: your WanGP keeps its models, presets, LoRAs and
 outputs where they are, and Forge's own Python never imports it. The setup is remembered in
 `<Forge data_path>/a1111-mini-paint-NEO/wan2gp.json`, and the setup it replaces is kept as
-a backup you can restore.
+a backup you can restore. The wizard also remembers the last folder and environment (and
+card): after a *Reinitialize* they are already in their boxes, still to be checked and tried,
+because nothing is trusted on memory.
 
 **What actually runs.** Nothing starts when Forge boots; opening the tab asks for WanGP and
 the tab shows a *starting* card with a *Check again* button rather than holding a Gradio
@@ -353,6 +355,13 @@ and the detail in `logs/send-log.txt`. References **append**: two already there 
 three, in their original order, never one. Nothing is generated for you — you set the rest
 up in WanGP and press Generate yourself.
 
+**Sharing the machine with a local LLM.** If the *SD-Neo-ModelSwitchRefiner* extension
+is installed, it asks this tab in-process which card WanGP is on and whether it is
+running, and keeps its `llama-server` out of the way: on WanGP's card it takes only what
+WanGP has not needed and stops when WanGP needs the room, and while WanGP is running it
+runs on fewer processor threads. Nothing to set up here; the settings are on that
+extension's side (`docs/wangp/README.md`, *Sharing the machine*).
+
 **The bridge plugin.** The piece inside WanGP is `wan2gp-minipaint-bridge`, shipped in
 `wan2gp_bridge/` and installed by setup step 4 into `<WanGP root>/plugins/`. It writes
 inside its own folder and nowhere else, refuses to replace a folder that is not ours, and
@@ -377,18 +386,31 @@ WanGP's own connection stalling while its page still runs — the log says when 
 request has waited on WanGP for a long time, and nothing is reloaded for it, because a
 generation can hold a request for minutes without anything being wrong.
 
+**If the WanGP view answers and does nothing.** That is a different failure, and the one
+that turned out to be behind "the frame froze": Gradio marks a page's session *closed* the
+moment its heartbeat stream drops — for any reason, and the embedded page's heartbeat rides
+Forge's own connection — never marks it open again when the browser reconnects a second
+later, and deletes the closed session's state as soon as it is more than an hour old. WanGP's
+handlers then run on a copy of the build-time state: the queue and the progress go blind,
+presses do nothing, while the bridge's own requests keep answering. Bridge 1.8.0 guards that
+inside WanGP — a session heard within the last fifteen minutes is never expired, and a
+heartbeat that reconnects reopens its session — and says on every answer whether the page's
+state is still the one it had. If it is not, the tab shows **WanGP's page lost its session**
+with the same *Reload view* and *Dismiss*, reloads the view within the same bounds, and asks
+the page once, with a probe that writes nothing, whenever you return to the tab. Every step
+is a `session:` line in the page's log.
+
 **Why the WanGP tab is never hidden.** Forge switches an unselected tab's panel off with
-`display: none`, and a page inside a box that does not exist is not rendered: Firefox gives
-it no animation frames, and WanGP's Gradio runs its events and its updates inside animation
-frames — so the WanGP page stood still whenever another tab was selected, and a long stay in
-the Clipboard tab could come back to a WanGP view that no longer took presses or showed
-results while WanGP itself carried on. The WanGP panel is therefore *parked* rather than
-hidden while another tab is selected: still a rendered box, fixed in the window, invisible
-and untouchable, at the width it has in its place, so the WanGP page keeps running exactly as
-it does in a tab of its own and comes back without a relayout. The page's log says
-`tab: the WanGP tab left the screen; its page is parked` and, on return, how long it was
-parked and how many of its frames the browser ran meanwhile. Nothing reloads and nothing
-changes on screen; `docs/wangp/PARKED_PANEL_2026-09-25.txt` is the whole story.
+`display: none`, and a page inside a box that does not exist is not rendered, so every
+return to the WanGP tab was a relayout of the whole WanGP page. The WanGP panel is therefore
+*parked* rather than hidden while another tab is selected: still a laid-out box, fixed in the
+window, invisible and untouchable, at the width it has in its place, so the page keeps its
+layout and comes back without a relayout. The page's log says `tab: the WanGP tab left the
+screen; its page is parked` and, on return, how long it was parked and how many of its frames
+the browser ran meanwhile — and on Firefox that count stays near zero, because Firefox
+throttles a document whose frame is invisible; Chromium keeps the frames flowing. Nothing
+reloads and nothing changes on screen; `docs/wangp/PARKED_PANEL_2026-09-25.txt` is the whole
+story, including what the freeze it was built for turned out to need instead.
 
 **One WanGP, and an emergency stop.** The extension runs one WanGP per machine, not just
 per Forge: a second Forge server started against the same install finds the first one's
@@ -562,9 +584,10 @@ same server-owned queue as the tab's presses, ids are never paths, and the answe
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
 API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 rewrite (the page's model
 travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
-and its place in WanGP. Bridge plugin 1.7.0 carries the queue, start and track operations
+and its place in WanGP. Bridge plugin 1.8.0 carries the queue, start and track operations
 (protocol 5) and the control plane server-owned execution runs on (protocol 6), answers the
-WanGP tab's heartbeat and says when its form is touched, and refuses
+WanGP tab's heartbeat and says when its form is touched, guards the page's Gradio session
+(below) and refuses
 a request composed for a model the page has since left (`MODEL_CHANGED`), so WanGP's bridge
 must be updated and WanGP restarted; a build lacking one of the six queue components keeps
 the image send and refuses the queue with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking
@@ -603,7 +626,7 @@ Every job then says where its settings came from — on its card in the Queue, i
 History, in the Send to WanGP popup's history, and in the log: *saved from the WanGP page at
 send*, *WanGP's last saved settings (the page didn't answer)*, *WanGP's last saved settings
 (WanGP was loading a model's settings at send)*, or *the model's defaults (nothing saved
-yet)*. Saving as you change needs bridge 1.7.0; with an older bridge the save before every
+yet)*. Saving as you change needs bridge 1.7.0 and the session guard 1.8.0; with an older bridge the save before every
 send still happens, and waits up to two seconds each time because it cannot know nothing
 changed.
 

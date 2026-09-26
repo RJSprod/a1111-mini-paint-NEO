@@ -900,6 +900,48 @@ def config_from_wizard_like():
     )
 
 
+def check_remembered(r: Results, base: pathlib.Path) -> None:
+    """The last setup's folder, environment and GPU, offered to the next wizard.
+
+    Reinitialize keeps everything but ``initialized`` on disk, so the wizard
+    that follows can offer the folder and the environment back instead of
+    asking for them a second time. An offer and nothing more: the wizard
+    still checks and tries them, and nothing here reaches the candidate.
+    """
+    directory = base / "remembered"
+    config.use_config_dir(directory)
+    nothing = {"root": "", "runtime_prefix": "", "runtime_display_name": "", "gpu_uuid": ""}
+    r.check("a machine never set up remembers nothing", config.remembered_choices() == nothing, str(config.remembered_choices()))
+
+    document = config.Config(
+        initialized=True, wangp_root="C:/Roots/Wan2GP",
+        runtime={"type": "conda", "prefix": "C:/envs/wangp", "display_name": "wangp", "launch_strategy": "direct_python"},
+        gpu={"uuid": "GPU-11112222-3333-4444-5555-666677778888"},
+    )
+    config.write_pending(document)
+    config.promote_pending()
+    config.clear()
+    after = config.load()
+    r.check("Reinitialize keeps the folder and environment on disk, uninitialized",
+            after is not None and after.initialized is False and after.wangp_root == "C:/Roots/Wan2GP"
+            and after.runtime.get("prefix") == "C:/envs/wangp", str(after))
+    remembered = config.remembered_choices()
+    r.check("so the next wizard is offered them, and the card",
+            remembered["root"] == "C:/Roots/Wan2GP" and remembered["runtime_prefix"] == "C:/envs/wangp"
+            and remembered["runtime_display_name"] == "wangp" and remembered["gpu_uuid"] == "GPU-11112222-3333-4444-5555-666677778888",
+            str(remembered))
+
+    config.atomic_write(config.config_path(), config._dumps(config.Config()))
+    r.check("with nothing in the active config, the backup's - the last setup that worked",
+            config.remembered_choices()["root"] == "C:/Roots/Wan2GP", str(config.remembered_choices()))
+    config.config_path().write_text("{not json", encoding="utf-8")
+    r.check("an unreadable active config does not stop the offer",
+            config.remembered_choices()["root"] == "C:/Roots/Wan2GP", str(config.remembered_choices()))
+    config.backup_path().unlink()
+    r.check("and with no backup either there is nothing to offer, and no error",
+            config.remembered_choices() == nothing, str(config.remembered_choices()))
+
+
 def run() -> Results:
     r = Results("wangp setup")
 
@@ -919,6 +961,7 @@ def run() -> Results:
             check_interpreter(r, base)
             check_conda_discovery(r, base)
             check_probe(r, base)
+            check_remembered(r, base)
         finally:
             # The path helpers are module state; a later suite in the same
             # process must not inherit a directory that is about to be deleted.

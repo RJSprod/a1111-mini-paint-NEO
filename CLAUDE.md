@@ -12,7 +12,7 @@ because it was learned the hard way.
 ```
 pip install -r tests/requirements.txt
 python -m playwright install chromium
-python tests/run.py                    # 29 suites; every one must run
+python tests/run.py                    # 30 suites; every one must run
 ```
 
 Gradio is pinned to 4.40.0 because that is what the target Forge ships, and the
@@ -158,17 +158,45 @@ spent hours in a hidden Forge tab between uses, and every return was a
 `display:none -> block` relayout of the whole WanGP page. The bridge's frame
 timer keeps the *bridge's* requests moving through that; it never kept all of
 WanGP moving. So the WanGP panel is never `display: none`: `style.css` parks it
-instead - keyed on the very inline style Gradio writes, a rendered box, fixed in
+instead - keyed on the very inline style Gradio writes, a laid-out box, fixed in
 the viewport, `visibility: hidden`, untouchable - and `browser/minipaint_wangp.js`
 keeps the panel's width across the switch, fits the frame for where the panel
-will be, and takes "on screen" to mean the tab is selected. Do not hide that
-panel, do not move the iframe in the DOM (a moved iframe reloads its document),
-and do not turn the rule into `opacity: 0`: the hidden visibility is what keeps
-the parked page unfocusable and what the sibling assistant's `visible()` reads
-to know the panel is not the workspace on screen. `tests/browser_intercept.py`
-measures the parked box and the frames; the journal's `tab:` lines say how long
-the page was parked and how many of its frames the browser ran meanwhile.
-`docs/wangp/PARKED_PANEL_2026-09-25.txt` has the log evidence.
+will be, and takes "on screen" to mean the tab is selected. What that bought was
+less than claimed: Chromium keeps a parked frame's animation frames flowing
+(`tests/browser_intercept.py` measures it), but the host's Firefox throttles a
+document whose embedder is `visibility: hidden` - the journal's `tab:` lines
+counted 4 frames by the browser in 33 minutes parked, 16119 by the bridge's
+timer - and the freeze came back after 17 seconds away. What the parking gives
+everywhere is geometry (no relayout on return, the width kept) and those frame
+counts, which are the measurement that settled it. Do not move the iframe in
+the DOM (a moved iframe reloads its document), and if `opacity: 0` is ever
+tried in place of the hidden visibility, the sibling assistant's `visible()`
+must be taught about opacity first, or its focus mode takes the parked panel
+for the workspace on screen. `docs/wangp/PARKED_PANEL_2026-09-25.txt` has the
+log evidence and what the freeze turned out to need instead.
+
+**Gradio deletes a page's state after its heartbeat drops, and never reopens it.**
+Gradio 5 (WanGP pins 5.29.0) keeps one `/heartbeat/<session>` stream per page, marks the
+session closed the moment that stream ends for any reason, never marks it open again when
+the browser's EventSource reconnects a second later, and a task running every second
+deletes a closed session's `gr.State` once it is more than an hour old
+(`STATE_TTL_WHEN_CLOSED`). WanGP writes its `state` at page load (`main.load → fill_inputs`
+returns it), so a page older than an hour loses it at the first blip: every WanGP handler
+then runs on a fresh copy of the build-time state whose `gen` is not the shared record -
+queue and progress blind, presses doing nothing - while the bridge's own events, which
+never touch that state, keep answering, and only a reload (a new session) brings it back.
+That is what "the WanGP frame froze" was on 2026-09-25: both logs showed the bridge's saves
+answered in 60 ms and no heartbeat miss, and both pages were hours old. Standalone WanGP's
+heartbeat is a localhost connection that never blips; embedded, it rides Forge's HTTP/2
+connection through Hypercorn and this proxy - the connection that stalled on 09-23. Bridge
+1.8.0's `session_guard.py` wraps Gradio's heartbeat route (a reconnect reopens the session,
+every beat is remembered) and `state_holder.delete_state` (a session heard within
+`GRACE_SECONDS` is never expired), marks the page's state on every hello, and reports
+`session: {closed, reset, silent_s}` on every answer; the parent shows *WanGP's page lost its
+session* and reloads within the heartbeat's bounds, and asks once with a probe on every
+return to the tab. The reopen alone would not be enough: the expiry runs every second and
+the reconnect takes three, so the guard on the expiry is the part that matters. Do not read
+`is_closed` as "the tab is gone", and never write a session hash to the console.
 
 **A silent stream is the only free signal a page gets.** Forge heartbeats every
 fifteen seconds on both of its streams, so silence never means "nothing to
@@ -379,9 +407,15 @@ a change to either side has to keep the other true.
 `RJSprod/SD-Neo-ModelSwitchRefiner` runs a local LLM. Its logs showed
 `llama-server` taking every CPU core for nine minutes with its model on the
 CPU, and its GPU placement pointing at the card WanGP owns. That starves WanGP
-while it generates. Capping its threads below the core count, keeping it off
-WanGP's card, and not running a CPU model during a video generation are that
-repository's to fix; nothing here can.
+while it generates. Since 2026-09-26 that repository reads
+`minipaint_neo.wangp.presence.report()` — one dict: the card's UUID, whether
+the child is READY, and the bridge's last word on whether it is generating —
+and on WanGP's card sizes its server to what WanGP has not needed, stops it
+when WanGP grows into a reserve it keeps, and caps its processor threads while
+WanGP is up. The contract is in `docs/wangp/CONTRACTS.md` and its keys are held
+closed by `tests/test_wangp_presence.py`: a key that goes missing, or a pid
+that creeps in, breaks that extension and not this one. `generating` is
+three-valued on purpose; `None` is "nobody has said", never `False`.
 
 ## The host
 
@@ -400,4 +434,5 @@ HTTP/2 misbehaves, `--autotls-http1` puts the old server back with one flag.
 The heartbeat's whole state is in `minipaintWanGP.state().heartbeat`, and the
 settings save's in `minipaintWanGP.state().settings`; every miss, bar, dismissal
 and reload is a `heartbeat:` line in the page journal. Saving as the form
-changes and the heartbeat need bridge 1.7.0 installed in WanGP.
+changes and the heartbeat need bridge 1.7.0 installed in WanGP, and the session guard
+bridge 1.8.0.

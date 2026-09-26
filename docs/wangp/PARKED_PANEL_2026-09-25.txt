@@ -98,7 +98,9 @@ invisible, unfocusable (a hidden box is not focusable and not in the
 accessibility tree), untouchable, behind everything. Its document keeps its
 layout and its animation frames. When the tab is selected, Gradio writes
 `display: block`, the rule stops matching, and the panel is back in its
-place with nothing to relayout: the bundle kept its width.
+place with nothing to relayout: the bundle kept its width. Whether its
+document keeps its animation frames while parked turned out to depend on
+the browser - see section 6.
 
 Why `visibility: hidden` and not `opacity: 0`: the assistant in
 SD-Neo-ModelSwitchRefiner decides which workspace is on screen by asking
@@ -165,13 +167,66 @@ tab is left although the frame never left the viewport, the width is kept,
 and five mutations of the controller each fail the check they should.
 
 
-6. What this does not change
+6. What the machine said
+------------------------
+
+Installed on the host (LibreWolf, 2026-09-25 17:54) and reported back the
+same evening, the `tab:` lines were unambiguous:
+
+    on screen again after 2008.3s parked; meanwhile its page ran 4 frames
+        by the browser and 16119 by the bridge's timer
+    on screen again after  598.7s parked; meanwhile its page ran 3 frames
+        by the browser and 4854 by the bridge's timer
+    on screen again after  424.2s parked; meanwhile its page ran 26 frames
+        by the browser and 9305 by the bridge's timer
+
+Four animation frames in thirty-three minutes: Firefox throttles a document
+whose embedding element is `visibility: hidden`, which is the very property
+section 4 chose, and Chromium - where the suite measures - does not. So the
+parked panel does not keep the WanGP page rendering on the browser that
+matters. What it still gives is geometry (the page keeps its layout and its
+width, a return is not a relayout) and these counts, which are the
+measurement that settled the question. `opacity: 0` might escape the
+throttle; it would need the sibling assistant's `visible()` taught about
+opacity first, and it has not been tried, because the same evening also
+showed the freeze does not need a long park at all.
+
+The freeze came back at 23:51 after the tab had been away for seventeen
+seconds, and the two logs that arrived with it pointed elsewhere:
+
+  - SD-Neo-ModelSwitchRefiner's llama-server had been placed on WanGP's card
+    at 23:45 with 67% of its weights in system RAM ("GPU / VRAM Only could
+    not be satisfied - only 21 of 65 layers"), and at 23:50:14 began a reply
+    that took 405 s - 325 s reading the prompt at 25 tokens/s, 2.6 tokens/s
+    writing - every CPU core for seven minutes, beside a WanGP generation on
+    the same card. From that moment the bridge's round trips through the
+    WanGP page went from about 60 ms to 500-1600 ms, and stayed there after
+    the reload until the reply finished at 23:56:59. A page crawling, not a
+    page dead; that placement is the other repository's to fix.
+  - The 15:00 freeze had no LLM run and fast round trips, so something else
+    is needed for it, and WanGP's Gradio (5.29.0) supplies a candidate that
+    fits every observation in both logs: a page's `/heartbeat/<session>`
+    stream dropping for any reason marks the session closed (nothing ever
+    unmarks it when the browser's EventSource reconnects), and a background
+    task deletes a closed session's `gr.State` the moment it is more than
+    an hour old - WanGP writes its `state` at page load, so for a page older
+    than an hour one blip deletes it at once. Every WanGP handler then gets a
+    fresh copy of the build-time state whose `gen` is not the shared
+    generation record: queue and progress go blind, handlers fail silently,
+    the toggle does nothing, the bridge's own events (which never touch that
+    state) keep answering, and a reload is a new session that shows every
+    job that ran meanwhile. Embedded, that heartbeat rides Forge's HTTP/2
+    connection through Hypercorn and our proxy - the connection that stalled
+    on 09-23 after an hour in the background; standalone, it is a localhost
+    connection that never blips. The bridge is where that is detected and
+    guarded (see the bridge's changelog from 1.8.0 on).
+
+
+7. What this does not change
 ----------------------------
 
 The browser tab itself in the background is throttled exactly as standalone
 WanGP would be. The proxy and Forge's connection are untouched - the log
 says they were not the fault. Forge's own scripts still share the WanGP
 page's thread; a heavy gallery update in txt2img can still delay a frame,
-which only a tab of its own would end. If the freeze survives the parked
-panel, the journal will say so in the `tab:` lines' frame counts, and the
-own-tab design is the next step; nothing here gets in its way.
+which only a tab of its own would end.

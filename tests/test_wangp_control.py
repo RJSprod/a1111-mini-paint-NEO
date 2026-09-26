@@ -939,6 +939,199 @@ def flush_checks(r: Results) -> None:
             str(live[compatibility.SESSION_STATE]))
 
 
+def session_checks(r: Results) -> None:
+    """Bridge 1.8.0: the page's Gradio session, reported and guarded.
+
+    WHAT THIS EXISTS TO CATCH.
+
+    Gradio 5 marks a page's session closed the moment its heartbeat stream
+    ends - for any reason - and nothing marks it open when the browser's
+    EventSource reconnects a second later; a background task then deletes
+    the closed session's state as soon as it is more than an hour old. An
+    embedded WanGP page's heartbeat rides Forge's connection through the
+    proxy, so a blip that standalone WanGP never sees turns, an hour into a
+    session, into a page that answers everything and does nothing. The guard
+    wraps two of Gradio's own objects: the heartbeat route, so a reconnect
+    reopens the session and every beat is remembered; and the expiry, so a
+    session heard within the grace is never expired. And every hello marks
+    the page's state, so a state that lost its marker after a drop is
+    reported as reset - once on the console, and on every answer.
+    """
+    import asyncio
+
+    compatibility, _compose, _control, _execution, _ledger, protocol = _modules()
+    added = str(BRIDGE_DIR) not in sys.path
+    if added:
+        sys.path.insert(0, str(BRIDGE_DIR))
+    try:
+        import session_guard
+    finally:
+        if added and str(BRIDGE_DIR) in sys.path:
+            sys.path.remove(str(BRIDGE_DIR))
+
+    notes = []
+    clock = {"now": 1000.0}
+    guard = session_guard.SessionGuard(notes.append, clock=lambda: clock["now"])
+
+    class Session:
+        def __init__(self):
+            self.is_closed = False
+
+    class Holder:
+        def __init__(self):
+            self.session_data = {"abc": Session()}
+            self.deleted = []
+
+        def delete_state(self, session_id, expired_only=False):
+            self.deleted.append((session_id, expired_only))
+
+    sent = []
+
+    async def inner(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200})
+        await send({"type": "http.response.body", "body": b"data: ALIVE\n\n", "more_body": True})
+        await send({"type": "http.response.body", "body": b"data: ALIVE\n\n", "more_body": True})
+
+    class Route:
+        path = "/gradio_api/heartbeat/{session_hash}"
+
+    class Other:
+        path = "/gradio_api/queue/data"
+
+    route = Route()
+    route.app = inner
+    other = Other()
+    other.app = inner
+
+    class Router:
+        routes = [other, route]
+
+    class App:
+        state_holder = Holder()
+        router = Router()
+
+    app = App()
+    r.check("the guard installs on a Gradio-shaped app, wrapping the heartbeat route's app",
+            guard.install(app) is True and guard.installed and route.app is not inner and other.app is inner, guard.install_note)
+    r.check("and says so once, naming the grace", sum("session guard: Gradio's heartbeat route is wrapped" in n for n in notes) == 1, str(notes))
+
+    scope = {"type": "http", "path_params": {"session_hash": "abc"}}
+
+    async def receive():
+        return {"type": "http.request"}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(route.app(scope, receive, send))
+    r.check("beats pass through untouched",
+            [m.get("type") for m in sent] == ["http.response.start", "http.response.body", "http.response.body"], str(sent))
+    r.check("and each beat is remembered as the moment the page was last heard", guard.recently_heard("abc") is True)
+    r.check("and the stream's end is remembered too", "abc" in guard._dropped)
+
+    # Gradio marks the session closed when the stream ends, and asks for the
+    # expiry every second.
+    app.state_holder.session_data["abc"].is_closed = True
+    app.state_holder.delete_state("abc", expired_only=True)
+    r.check("an expiry of a session heard a moment ago is skipped",
+            app.state_holder.deleted == [] and guard.skipped_expiries == 1, str(app.state_holder.deleted))
+    app.state_holder.delete_state("abc", expired_only=False)
+    r.check("a deliberate deletion is not", app.state_holder.deleted == [("abc", False)], str(app.state_holder.deleted))
+
+    clock["now"] += 3.0
+    asyncio.run(route.app(scope, receive, send))
+    r.check("a heartbeat reconnecting reopens the session Gradio had closed",
+            app.state_holder.session_data["abc"].is_closed is False and guard.reopened == 1)
+    r.check("and says so, with how long the stream had been gone, and no hash",
+            any("heartbeat reconnected after 3s" in n and "reopened" in n and "abc" not in n for n in notes), str(notes[-1:]))
+
+    clock["now"] += session_guard.GRACE_SECONDS + 1
+    app.state_holder.deleted.clear()
+    app.state_holder.delete_state("abc", expired_only=True)
+    r.check("a session not heard within the grace is left to Gradio's own expiry",
+            app.state_holder.deleted == [("abc", True)], str(app.state_holder.deleted))
+    r.check("installing twice does nothing", guard.install(app) is True and guard.reopened == 1)
+
+    class Empty:
+        pass
+
+    bare = session_guard.SessionGuard(notes.append)
+    r.check("an app with no heartbeat route gets no guard and a reason", bare.install(Empty()) is False and bare.install_note != "")
+
+    # -- the marker and the report ------------------------------------------
+    holder = app.state_holder
+    state = {"gen": {}}
+    first = guard.observe("abc", state, "hello", "bsess-1", holder=holder)
+    r.check("a hello marks the page's state with the bridge session",
+            state.get(session_guard.MARKER_KEY) == "bsess-1" and first["reset"] is False, str(first))
+    later = guard.observe("abc", state, "flush", "bsess-1", holder=holder)
+    r.check("a later request from the same state is not a reset, and says how long since the page was heard",
+            later["reset"] is False and later["closed"] is False and isinstance(later["silent_s"], int), str(later))
+    fresh_guard = session_guard.SessionGuard(notes.append, clock=lambda: clock["now"])
+    first_state = {}
+    fresh_guard.observe("fresh", first_state, "hello", "b2", holder=holder)
+    replaced = {}
+    verdict = fresh_guard.observe("fresh", replaced, "flush", "b2", holder=holder)
+    r.check("a state without the marker whose heartbeat never dropped is re-marked, not called reset",
+            verdict["reset"] is False and replaced.get(session_guard.MARKER_KEY) == "b2", str(verdict))
+    deleted = {"gen": {}}
+    reset = guard.observe("abc", deleted, "flush", "bsess-1", holder=holder)
+    r.check("a state without the marker after the heartbeat dropped is a reset", reset["reset"] is True, str(reset))
+    r.check("said once, with no hash in it",
+            sum("session state was reset by Gradio" in n for n in notes) == 1
+            and all("abc" not in n for n in notes if "reset by Gradio" in n), str(notes))
+    again = guard.observe("abc", deleted, "flush", "bsess-1", holder=holder)
+    hello_again = guard.observe("abc", deleted, "hello", "bsess-1", holder=holder)
+    r.check("and reported on every answer after, hellos included, until the page is a new session",
+            again["reset"] is True and hello_again["reset"] is True
+            and sum("session state was reset by Gradio" in n for n in notes) == 1, str(hello_again))
+    holder.session_data["abc"].is_closed = True
+    r.check("Gradio's own closed flag is read and reported, never written by the report",
+            guard.observe("abc", deleted, "flush", "bsess-1", holder=holder)["closed"] is True
+            and holder.session_data["abc"].is_closed is True)
+    r.check("a request with no state and no holder is reported as nothing found",
+            guard.observe("", None, "flush", "b", holder=None) == {"closed": False, "reset": False, "silent_s": None})
+
+    # -- through the bridge itself --------------------------------------------
+    scratch = tempfile.mkdtemp(prefix="minipaint-session-")
+    environ = _environ(scratch)
+    gen = {"queue": [], "in_progress": False}
+    service = FakeService(gen)
+    host = compatibility.Host(FakeHost({"service_for": lambda *_a: service, "get_gen_info": lambda s_: s_["gen"]}))
+    bridge = _bridge_class()(host=host, environ=environ)
+    bridge.declare()
+    bridge.compat.host.accept_components({"save_form_trigger": _Component()})
+    bridge.resolve()
+    bridge.state_keys = (compatibility.SESSION_STATE,) + tuple(k for k in bridge.state_keys if k != compatibility.SESSION_STATE)
+    r.check("the handshake offers the session capability, and the bridge is 1.8.0",
+            compatibility.BRIDGE_VERSION == "1.8.0"
+            and bridge.compat.handshake(bridge_session="s", environ=environ)["capabilities"].get("session") is True)
+    info = json.loads((BRIDGE_DIR / "plugin_info.json").read_text(encoding="utf-8"))
+    r.check("and plugin_info.json says the same version twice",
+            info.get("version") == "1.8.0" and info.get("bridge_version") == "1.8.0", str(info))
+
+    class GradioRequest:
+        session_hash = "abc"
+        request = types.SimpleNamespace(app=App())
+
+    page_state = {"gen": gen}
+    flush = json.dumps({"op": "flush", "request_id": "r1", "channel_id": "c" * 32, "probe": True})
+    ack, _result = bridge.handle(flush, [page_state], "abc", GradioRequest())
+    r.check("every acknowledgement carries the session report, and the first request marks the state",
+            isinstance(ack.get("session"), dict) and ack["session"]["reset"] is False
+            and page_state.get(session_guard.MARKER_KEY) == ack["bridge_session"], str(ack.get("session")))
+    r.check("and the guard was installed from that request's app, once",
+            bridge.sessions.installed is True and GradioRequest.request.app.router.routes[1].app is not inner)
+    bridge.sessions.dropped("abc")
+    ack2, _result = bridge.handle(flush, [{"gen": gen}], "abc", GradioRequest())
+    r.check("a fresh state after a drop is answered as reset", ack2["session"]["reset"] is True, str(ack2.get("session")))
+    ack3, _result = bridge.handle(flush, [page_state], "xyz", None)
+    r.check("a request with no gr.Request still answers, with nothing found",
+            ack3["session"] == {"closed": False, "reset": False, "silent_s": None}, str(ack3.get("session")))
+    ack4, _result = bridge.handle(json.dumps({"op": "nonsense", "request_id": "r2", "channel_id": "c" * 32}), [page_state], "abc", None)
+    r.check("a refused request carries it too", isinstance(ack4.get("session"), dict) and ack4.get("ok") is False, str(ack4))
+
+
 def service_lookup_checks(r: Results) -> None:
     """Finding the one service from a thread with no browser session.
 
@@ -1229,6 +1422,7 @@ def run() -> Results:
     cancellation_checks(r)
     unavailable_checks(r)
     flush_checks(r)
+    session_checks(r)
     service_lookup_checks(r)
     manifest_checks(r)
     diagnosis_checks(r)

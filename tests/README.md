@@ -118,9 +118,12 @@ selected: the panel's computed box under the real stylesheet, the width the
 bundle kept for it, and an iframe under it receiving animation frames at the
 rate of one under the tab on screen. Chromium ticks frames in a hidden frame
 too, so the starvation Firefox shows cannot be reproduced there - only the
-invariant the cure rests on, which is that the parked panel has its full box
-where a hidden one has none. Taking the `display: block !important` out of
-the parked rule fails exactly those checks.
+invariant the parking rests on, which is that the parked panel has its full
+box where a hidden one has none. Taking the `display: block !important` out of
+the parked rule fails exactly those checks. What the suite cannot say, the
+host's journal did: Firefox also throttles a frame whose embedder is
+`visibility: hidden`, so on that browser a parked page gets its geometry kept
+and not its frames (`docs/wangp/PARKED_PANEL_2026-09-25.txt`, section 6).
 
 `browser_smoke.py` tests the *editor*, and needs the real ForgeCanvas for
 that, so it needs a Forge Neo checkout and does not run in CI.

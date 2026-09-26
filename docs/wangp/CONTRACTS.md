@@ -406,6 +406,45 @@ READY is **not** an admission fact. It says a process is alive and answered an H
 Whether the bridge is on the page, the generation service resolved and a settings base can be
 read are the child's to answer, and `hello` is where it does.
 
+## `presence.py` — what another extension in the process may ask
+
+```python
+PRESENCE_VERSION = 1
+KEYS = ("version", "available", "configured", "gpu_uuid", "state", "running", "instance_id", "generating", "source")
+def report() -> dict        # never raises; exactly KEYS, nothing else
+def forget() -> None        # drop the cached setup; tests only
+```
+
+Written for `RJSprod/SD-Neo-ModelSwitchRefiner`, which reads it (by name, and only
+once this package is already imported by the host) to keep its llama-server out of
+WanGP's VRAM and off WanGP's cores: on the card `gpu_uuid` names it sizes the server to
+what WanGP has not needed, stops it when WanGP grows into the reserve it keeps, and caps
+the server's processor threads while `running` is true. Its README's *WanGP on the other
+card* section is the other half of this contract.
+
+The rules, each of which its suite holds:
+
+* **The keys are closed.** A report carries `KEYS` and nothing else, and no key ever
+  names a port, a pid, a secret or a path. The card is its UUID — the identity both
+  extensions record and the one that survives every renumbering; the reader resolves it
+  against its own picture of the machine.
+* **`generating` is three-valued.** `True` and `False` are what the bridge last said,
+  through `control.last_hello()` and only while that answer is within `HELLO_TTL`; `None`
+  is "nobody has said" — a WanGP without the bridge, or one idle long enough that nothing
+  has asked it. A reader that takes `None` for `False` is wrong on the machine this was
+  written for.
+* **`configured` and `gpu_uuid` are the saved setup**, re-read only when the primary
+  config file's size or modification time changed, so a report every two seconds costs no
+  JSON parse and a setup that just finished is seen at once. An unreadable or too-new file
+  reads as not configured, never as an error.
+* **`state`, `running` and `instance_id` are `runtime.snapshot()`**, which is what the tab
+  draws: `running` is READY and nothing else.
+* **Each part is read on its own.** A runtime that cannot be read leaves the setup in the
+  report and the rest truthful; `available` is the one key that is always `True`, because
+  a call that reached this function reached the integration.
+
+Suite: `tests/test_wangp_presence.py`.
+
 ## Tests
 
 `tests/test_wangp_*.py`, in the existing style: a `run()` returning

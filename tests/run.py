@@ -53,6 +53,10 @@ SUITES = [
     # the one worker both submission paths funnel through - which is where
     # "at most one generation, whoever started it" is actually established.
     "test_wangp_control",
+    # What another extension in the process may ask about the managed WanGP:
+    # one dict, held to its documented shape, read by ModelSwitchRefiner to
+    # keep its llama-server out of WanGP's VRAM and off WanGP's cores.
+    "test_wangp_presence",
     "test_interop",
     # The browser half of walking away: a page that is told rather than
     # asking, and that can be closed without the job noticing.

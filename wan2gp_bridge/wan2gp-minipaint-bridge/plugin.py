@@ -54,7 +54,7 @@ import typing
 
 try:
     from . import admission, bridge_js, bridge_ui, compatibility, control, handoff, page_head, protocol
-    from . import receiver_adapters, receiver_state, scrub
+    from . import receiver_adapters, receiver_state, scrub, session_guard
 except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import admission  # type: ignore[no-redef]
     import bridge_js  # type: ignore[no-redef]
@@ -67,6 +67,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import receiver_adapters  # type: ignore[no-redef]
     import receiver_state  # type: ignore[no-redef]
     import scrub  # type: ignore[no-redef]
+    import session_guard  # type: ignore[no-redef]
 
 try:
     import gradio as gr
@@ -146,6 +147,12 @@ class MiniPaintBridge:
         #: What the bridge has written into the live form for a queue request,
         #: per page, and what has been proved about it since.
         self.ledger = admission.Ledger(clock=clock)
+        #: The page's Gradio session, watched and kept: a hello marks the
+        #: state, every answer says whether the mark is still there, and the
+        #: guard on Gradio's own objects keeps a dropped heartbeat from
+        #: expiring a page that is still here. See session_guard.
+        self.sessions = session_guard.SessionGuard(_note)
+        self._guard_tried = False
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -181,6 +188,45 @@ class MiniPaintBridge:
             self.compat.remember_service(state)
         except Exception:
             pass
+
+    def _observe_session(
+        self,
+        gradio_request: typing.Any,
+        session_hash: typing.Any,
+        values: typing.Sequence[typing.Any],
+        operation: typing.Any,
+        bridge_session: str,
+    ) -> dict:
+        """Install the guard the first time a request can reach the app, then
+        read the page's session as this request finds it. Never raises: the
+        session report is a fact about the page, and a fact that cannot be
+        established is reported as nothing found rather than as a refusal.
+        """
+        app = None
+        try:
+            app = getattr(getattr(gradio_request, "request", None), "app", None) or getattr(gradio_request, "app", None)
+        except Exception:
+            app = None
+        if app is not None and not self.sessions.installed and not self._guard_tried:
+            self._guard_tried = True
+            try:
+                if not self.sessions.install(app):
+                    _note(
+                        f"session guard: not installed ({self.sessions.install_note}); a heartbeat that drops "
+                        "expires the page's state an hour on, as Gradio does by itself"
+                    )
+            except Exception as error:
+                _note(f"session guard: could not be installed ({type(error).__name__}: {error})")
+        holder = getattr(app, "state_holder", None) if app is not None else None
+        state = None
+        if compatibility.SESSION_STATE in self.state_keys:
+            index = self.state_keys.index(compatibility.SESSION_STATE)
+            state = values[index] if index < len(values) else None
+        try:
+            return self.sessions.observe(session_hash, state, str(operation or ""), bridge_session, holder=holder)
+        except Exception as error:
+            _note(f"session: could not be read ({type(error).__name__})")
+            return {"closed": False, "reset": False, "silent_s": None}
 
     def live_values(self, values: typing.Sequence[typing.Any]) -> typing.Dict[str, typing.Any]:
         """Positional event inputs back into component keys.
@@ -722,6 +768,7 @@ class MiniPaintBridge:
         raw_request: typing.Any,
         values: typing.Sequence[typing.Any],
         session_hash: typing.Any,
+        gradio_request: typing.Any = None,
     ) -> typing.Tuple[dict, typing.Any]:
         """One request in, one acknowledgement out. Never raises.
 
@@ -730,6 +777,10 @@ class MiniPaintBridge:
         cannot place is an answer it must throw away. The second value is what
         to write: an ``Applied`` for an image send, a mapping of component key
         to value for a queue operation, None for everything else.
+
+        ``gradio_request`` is the ``gr.Request`` the event ran with, when the
+        build supplied one: the only handle a plugin has on Gradio's app, and
+        so the only place the session guard can be installed from.
         """
         started = time.perf_counter()
         request = _parse(raw_request)
@@ -746,6 +797,10 @@ class MiniPaintBridge:
             "instance_id": instance,
             "bridge_session": session,
         }
+        # The page's session, as this request finds it - before the operation,
+        # so a hello marks the state it was handed and every answer, refusals
+        # included, says whether that state is still the one the page had.
+        ack["session"] = self._observe_session(gradio_request, session_hash, values, operation, session)
         result: typing.Any = None
 
         try:
@@ -1098,7 +1153,7 @@ class MiniPaintBridgePlugin(compatibility.plugin_base()):  # type: ignore[misc]
         def handler(request: typing.Any, *values: typing.Any) -> typing.List[typing.Any]:
             raw = values[0] if values else ""
             session_hash = getattr(request, "session_hash", None)
-            ack, result = bridge.handle(raw, values[1:], session_hash)
+            ack, result = bridge.handle(raw, values[1:], session_hash, request)
             return bridge.outputs(ack, result)
 
         # Gradio recognises the parameter by its annotation, and this module

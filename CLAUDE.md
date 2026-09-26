@@ -175,6 +175,29 @@ must be taught about opacity first, or its focus mode takes the parked panel
 for the workspace on screen. `docs/wangp/PARKED_PANEL_2026-09-25.txt` has the
 log evidence and what the freeze turned out to need instead.
 
+**Gradio deletes a page's state after its heartbeat drops, and never reopens it.**
+Gradio 5 (WanGP pins 5.29.0) keeps one `/heartbeat/<session>` stream per page, marks the
+session closed the moment that stream ends for any reason, never marks it open again when
+the browser's EventSource reconnects a second later, and a task running every second
+deletes a closed session's `gr.State` once it is more than an hour old
+(`STATE_TTL_WHEN_CLOSED`). WanGP writes its `state` at page load (`main.load → fill_inputs`
+returns it), so a page older than an hour loses it at the first blip: every WanGP handler
+then runs on a fresh copy of the build-time state whose `gen` is not the shared record -
+queue and progress blind, presses doing nothing - while the bridge's own events, which
+never touch that state, keep answering, and only a reload (a new session) brings it back.
+That is what "the WanGP frame froze" was on 2026-09-25: both logs showed the bridge's saves
+answered in 60 ms and no heartbeat miss, and both pages were hours old. Standalone WanGP's
+heartbeat is a localhost connection that never blips; embedded, it rides Forge's HTTP/2
+connection through Hypercorn and this proxy - the connection that stalled on 09-23. Bridge
+1.8.0's `session_guard.py` wraps Gradio's heartbeat route (a reconnect reopens the session,
+every beat is remembered) and `state_holder.delete_state` (a session heard within
+`GRACE_SECONDS` is never expired), marks the page's state on every hello, and reports
+`session: {closed, reset, silent_s}` on every answer; the parent shows *WanGP's page lost its
+session* and reloads within the heartbeat's bounds, and asks once with a probe on every
+return to the tab. The reopen alone would not be enough: the expiry runs every second and
+the reconnect takes three, so the guard on the expiry is the part that matters. Do not read
+`is_closed` as "the tab is gone", and never write a session hash to the console.
+
 **A silent stream is the only free signal a page gets.** Forge heartbeats every
 fifteen seconds on both of its streams, so silence never means "nothing to
 say". `minipaint_neo/wangp/proxy.py` therefore bounds a proxied stream's idle
@@ -405,4 +428,5 @@ HTTP/2 misbehaves, `--autotls-http1` puts the old server back with one flag.
 The heartbeat's whole state is in `minipaintWanGP.state().heartbeat`, and the
 settings save's in `minipaintWanGP.state().settings`; every miss, bar, dismissal
 and reload is a `heartbeat:` line in the page journal. Saving as the form
-changes and the heartbeat need bridge 1.7.0 installed in WanGP.
+changes and the heartbeat need bridge 1.7.0 installed in WanGP, and the session guard
+bridge 1.8.0.

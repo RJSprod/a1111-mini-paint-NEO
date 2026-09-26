@@ -362,7 +362,10 @@ window.minipaintWanGP = (function () {
         // is touched. A bridge that never said either is never pinged, and a
         // form it never reports on is never taken to be saved already.
         ping: false,
-        formWatch: false
+        formWatch: false,
+        // Bridge 1.8.0: whether the bridge reports the page's Gradio session
+        // with every answer, and guards it. See noteSession.
+        session: false
     };
 
     //: The proactive flush's own state, declared here rather than beside the
@@ -1224,6 +1227,7 @@ window.minipaintWanGP = (function () {
                 + "; deadlines resume with what they had left");
             check(why);
             heartbeatSync();
+            sessionCheck(why);
         };
 
         try {
@@ -1445,6 +1449,8 @@ window.minipaintWanGP = (function () {
         S.track = declared && !!(payload.capabilities && payload.capabilities.track === true);
         S.ping = declared && !!(payload.capabilities && payload.capabilities.ping === true);
         S.formWatch = declared && !!(payload.capabilities && payload.capabilities.form_watch === true);
+        S.session = declared && !!(payload.capabilities && payload.capabilities.session === true);
+        noteSession(payload.session, "ready");
         // A session this page has saved nothing from yet: whatever WanGP has
         // recorded may be from before, so no send may take it as current.
         P.current = false;
@@ -1520,6 +1526,7 @@ window.minipaintWanGP = (function () {
         S.bridgeSession = session;
         S.model = normaliseModel(payload.model) || S.model;
         recordSession(false);
+        noteSession(payload.session, "receivers");
         settle(requestId, {
             ok: true,
             code: "",
@@ -1720,6 +1727,7 @@ window.minipaintWanGP = (function () {
     function onFormFlushed(requestId, payload) {
         const entry = S.pending.get(requestId);
         if (!entry || entry.type !== FORM_FLUSHED) { return; }
+        noteSession(payload.session, "flush");
         if (payload.ok === false) {
             settle(requestId, failure(code(payload.code) || INTERNAL_ERROR, text(payload.detail, 200)));
             return;
@@ -2212,6 +2220,7 @@ window.minipaintWanGP = (function () {
                 + (T.parkedAt ? " again after " + seconds(Date.now() - T.parkedAt) + " parked" : "") + meanwhile);
             T.parkedAt = 0;
             T.framesAtPark = null;
+            if (!first) { sessionCheck("the WanGP tab came on screen"); }
         }
         syncOnScreen("the WanGP tab left the screen");
     }
@@ -2357,7 +2366,23 @@ window.minipaintWanGP = (function () {
         reloads: 0,
         lastReloadAt: 0,
         //: Every reload, by the button or on its own, for a bug report.
-        reloadsTotal: 0
+        reloadsTotal: 0,
+        //: The WanGP page's Gradio session was reset underneath it (the
+        //: bridge said so): the page answers and is useless. The bar in its
+        //: other wording, and the same bounded reload. See sessionLost.
+        lost: false
+    };
+
+    //: What the bridge last said about the page's Gradio session, and the
+    //: one bounded question asked on a return to the tab. See noteSession.
+    const SESSION_CHECK_GAP_MS = 30000;
+    const G = {
+        closed: null,
+        reset: false,
+        silentS: null,
+        checks: 0,
+        lastCheckAt: 0,
+        closedNoted: false
     };
 
     function seconds(ms) { return (Math.round(ms / 100) / 10) + "s"; }
@@ -2465,6 +2490,14 @@ window.minipaintWanGP = (function () {
         H.lastTick = 0;
         H.dismissed = false;
         if (H.stuck) { hideStuckBar("the WanGP view loaded again"); }
+        if (H.lost) {
+            H.lost = false;
+            removeStuckBar();
+            say("session: the WanGP view loaded again - a new session, and the old one's loss is over");
+        }
+        G.reset = false;
+        G.closed = null;
+        G.closedNoted = false;
     }
 
     function autoReloadAllowed() {
@@ -2498,10 +2531,11 @@ window.minipaintWanGP = (function () {
         H.countdown = deadline(RELOAD_COUNTDOWN_MS, function () {
             H.countdown = null;
             stopTicker();
-            if (!H.stuck || H.dismissed || !autoReloadAllowed()) { drawStuckBar(); return; }
+            if (!(H.stuck || H.lost) || H.dismissed || !autoReloadAllowed()) { drawStuckBar(); return; }
             H.reloads += 1;
             H.lastReloadAt = Date.now();
-            reloadView("no answer for " + seconds(H.silentMs) + " on screen (automatic reload " + H.reloads + " of " + RELOADS_MAX + ")");
+            reloadView((H.lost ? "the page's session was reset" : "no answer for " + seconds(H.silentMs) + " on screen")
+                + " (automatic reload " + H.reloads + " of " + RELOADS_MAX + ")");
         });
         stopTicker();
         H.ticker = setInterval(drawStuckBar, 1000);
@@ -2512,7 +2546,7 @@ window.minipaintWanGP = (function () {
         if (H.countdown) { H.countdown.cancel(); H.countdown = null; }
         H.countdownEnds = 0;
         stopTicker();
-        if (H.stuck) { drawStuckBar(); }
+        if (H.stuck || H.lost) { drawStuckBar(); }
     }
 
     function stopTicker() {
@@ -2625,7 +2659,8 @@ window.minipaintWanGP = (function () {
                     // WanGP page answers or loads again, and only then can
                     // the next silence put the bar back.
                     H.dismissed = true;
-                    say("heartbeat: 'WanGP stopped responding' dismissed; no automatic reload until the WanGP page answers or loads again");
+                    say("heartbeat: '" + barTitle() + "' dismissed; no automatic reload until the WanGP page "
+                        + (H.lost ? "loads again" : "answers or loads again"));
                     removeStuckBar();
                 });
                 bar.appendChild(words);
@@ -2648,13 +2683,83 @@ window.minipaintWanGP = (function () {
         const bar = stuckBarElement();
         const words = bar && bar.querySelector ? bar.querySelector("." + STUCK_BAR_CLASS + "-text") : null;
         if (!words) { return; }
-        let line = "WanGP stopped responding.";
+        let line = barTitle() + ".";
         if (H.countdown && H.countdownEnds) {
             line += " Reloading the view in " + Math.max(0, Math.ceil((H.countdownEnds - Date.now()) / 1000)) + "s.";
         } else if (H.reloads >= RELOADS_MAX) {
             line += " It has been reloaded automatically " + RELOADS_MAX + " times; reload it yourself if it stays stuck.";
         }
         words.textContent = line;
+    }
+
+    /** What the bar is saying: a page that stopped answering, or one that
+     * answers and has lost its session. The second wins when both hold. */
+    function barTitle() {
+        return H.lost ? "WanGP's page lost its session" : "WanGP stopped responding";
+    }
+
+    /**
+     * The bridge's word on the page's Gradio session, carried on every
+     * answer from bridge 1.8.0 on: ``closed`` is Gradio's own flag (its
+     * heartbeat stream dropped once, and the bridge's guard is keeping the
+     * state), ``reset`` is the bridge's finding that the state was deleted
+     * underneath the page. A reset page answers everything and does nothing
+     * - WanGP's handlers run on a copy of the build-time state - so it is
+     * shown the bar in its other wording and reloaded within the same
+     * bounds as a page that stopped answering. See session_guard.py.
+     */
+    function noteSession(raw, from) {
+        if (!raw || typeof raw !== "object") { return; }
+        const closed = raw.closed === true;
+        const reset = raw.reset === true;
+        const silent = Number(raw.silent_s);
+        G.closed = closed;
+        G.silentS = isFinite(silent) && silent >= 0 ? silent : null;
+        if (reset) { G.reset = true; sessionLost(from); return; }
+        if (closed && !G.closedNoted) {
+            G.closedNoted = true;
+            say("session: the WanGP page's heartbeat stream dropped once and Gradio marked its session closed"
+                + (G.silentS !== null ? " (last heard " + G.silentS + "s ago)" : "")
+                + "; the bridge keeps its state while the page is heard [" + text(from, 20) + "]");
+        } else if (!closed && G.closedNoted) {
+            G.closedNoted = false;
+            say("session: the WanGP page's session is open again (its heartbeat reconnected)");
+        }
+    }
+
+    /** The page's session is gone: say so once, show the bar, reload within bounds. */
+    function sessionLost(from) {
+        if (!H.lost) {
+            H.lost = true;
+            say("session: WanGP's page lost its session - Gradio deleted its state after its heartbeat dropped"
+                + (G.silentS !== null ? " (last heard " + G.silentS + "s ago)" : "")
+                + "; the page answers and does nothing, so the view is shown 'WanGP's page lost its session'"
+                + (autoReloadAllowed() ? " and reloaded in " + (RELOAD_COUNTDOWN_MS / 1000) + "s unless dismissed"
+                                       : " with the button only") + " [" + text(from, 20) + "]");
+        }
+        if (H.dismissed) { return; }
+        showStuckBar();
+        if (!H.countdown && autoReloadAllowed()) { startCountdown(); }
+    }
+
+    /**
+     * One bounded question on a return to the tab - the moment a page whose
+     * session went while nobody looked is about to be used. A probe flush,
+     * which writes nothing; its answer carries the session report and lands
+     * in noteSession like any other. At most one every SESSION_CHECK_GAP_MS,
+     * and never a timer.
+     */
+    function sessionCheck(why) {
+        if (!S.session || !S.ready || !S.bridgeSession || H.lost) { return false; }
+        const now = Date.now();
+        if (G.lastCheckAt && now - G.lastCheckAt < SESSION_CHECK_GAP_MS) { return false; }
+        G.lastCheckAt = now;
+        G.checks += 1;
+        try {
+            const asked = ask(FORM_FLUSH, { probe: true }, FLUSH_CALL_TIMEOUT_MS, FORM_FLUSHED);
+            Promise.resolve(asked).then(null, function () { /* an unanswered probe is not news here */ });
+        } catch (e) { return false; }
+        return true;
     }
 
     /** The episode is over: the bar and its countdown go, and the next
@@ -3543,6 +3648,14 @@ window.minipaintWanGP = (function () {
                 counting_down: !!H.countdown,
                 automatic_reloads: H.reloads,
                 reloads: H.reloadsTotal
+            },
+            // The page's Gradio session as the bridge last reported it.
+            session: {
+                guarded: S.session,
+                closed: G.closed,
+                reset: G.reset,
+                lost: H.lost,
+                checks: G.checks
             },
             // The tab's panel: parked - rendered, invisible - while another
             // tab is selected, never hidden. See watchTabPanel.

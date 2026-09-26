@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.7.0"
+BRIDGE_VERSION = "1.8.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -1971,6 +1971,11 @@ class Compatibility:
                 # sends a PING and never counts on being told of a change.
                 "ping": True,
                 "form_watch": True,
+                # Bridge 1.8.0: every answer says whether the page's Gradio
+                # session is still the one it had (``session`` in the ack),
+                # and the guard keeps a session heard recently from being
+                # expired after a dropped heartbeat. See session_guard.
+                "session": True,
                 # Theme is presentation. Section 27.1: it may fail on its own
                 # without taking image handoff with it, so it is reported
                 # separately and never gates ``ready``.

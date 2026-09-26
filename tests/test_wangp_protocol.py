@@ -1567,8 +1567,11 @@ const B = {
   // The page attaches while it loads, so an older bridge is one from the start.
   capabilities: MODE === "legacy" ? { queue: true, start: true, track: true }
     : MODE === "noping" ? { queue: true, start: true, track: true, form_watch: true }
-    : { queue: true, start: true, track: true, ping: true, form_watch: true },
+    : { queue: true, start: true, track: true, ping: true, form_watch: true, session: true },
   hellos: [], presses: 0, looks: 0, pings: 0, busyMs: 0, channel: "", navigations: 0, reloadMs: 500,
+  // The bridge's word on the page's Gradio session, carried on every answer
+  // from 1.8.0 on; null until a scenario sets it.
+  session: null,
   // What a reloaded document can do: the same as before, unless told.
   afterReload: null
 };
@@ -1595,7 +1598,8 @@ function toBridge(message) {
     B.hellos.push(message.payload || {});
     reply("WANGP_BRIDGE_READY", message.request_id, {
       bridge_session: "abcdef0123456789abcdef0123456789", instance_id: "inst-1", version: "1.7.0",
-      ready: true, receivers: [], state_revision: "r1", capabilities: B.capabilities
+      ready: true, receivers: [], state_revision: "r1", capabilities: B.capabilities,
+      session: B.session === null ? undefined : B.session
     });
     return;
   }
@@ -1609,10 +1613,11 @@ function toBridge(message) {
     const look = !!(message.payload && message.payload.probe);
     if (look) { B.looks += 1; } else { B.presses += 1; }
     if (!B.answerFlush || (look && !B.answerLook)) { return; }
-    if (!look && B.suppress) { reply("WANGP_FORM_FLUSHED", message.request_id, { ok: true, flush: "suppressed", fingerprint: "fp" + B.fp }); return; }
+    const told = B.session === null ? undefined : B.session;
+    if (!look && B.suppress) { reply("WANGP_FORM_FLUSHED", message.request_id, { ok: true, flush: "suppressed", fingerprint: "fp" + B.fp, session: told }); return; }
     const before = "fp" + B.fp;
     if (!look && B.dirty) { B.dirty = false; vSet(function () { B.fp += 1; }, B.commitMs); }
-    reply("WANGP_FORM_FLUSHED", message.request_id, { ok: true, flush: "requested", fingerprint: look ? "fp" + B.fp : before });
+    reply("WANGP_FORM_FLUSHED", message.request_id, { ok: true, flush: "requested", fingerprint: look ? "fp" + B.fp : before, session: told });
   }
 }
 // Somebody touched the form in the WanGP page.
@@ -1981,6 +1986,43 @@ const scenarios = {
     await advance(1);
     return { atBoot, parkedPings, shown, leavePresses, leaveTotal, parkedAgain,
              again: linesWith("tab: the WanGP tab is on screen again after 3s parked").length };
+  },
+
+  // The bridge's word on the page's Gradio session (bridge 1.8.0): a closed
+  // session is said once, a reset one shows the bar in its other wording and
+  // reloads within the same bounds, and a return to the tab asks once.
+  session: async function () {
+    api.inheritSettings(true);
+    await bootOnScreen();
+    await advance(1000);
+    const healthy = { bar: !!bar(), state: api.state().session };
+    B.session = { closed: true, reset: false, silent_s: 12 };
+    changed(); await advance(1500);
+    const closed = { bar: !!bar(), said: linesWith("session: the WanGP page's heartbeat stream dropped once").length,
+                     state: api.state().session };
+    B.session = { closed: false, reset: false, silent_s: 0 };
+    changed(); await advance(1500);
+    const reopened = linesWith("session: the WanGP page's session is open again").length;
+    // The tab left and came back: one probe, and not another within thirty seconds.
+    const looksBefore = B.looks;
+    selectTab(false); await advance(10); selectTab(true); await advance(50);
+    const probed = B.looks - looksBefore;
+    selectTab(false); await advance(10); selectTab(true); await advance(50);
+    const probedAgain = B.looks - looksBefore;
+    // The session is gone underneath the page.
+    B.session = { closed: false, reset: true, silent_s: 900 };
+    changed(); await advance(1500);
+    const lost = { bar: !!bar(), text: barText(), state: api.state().session,
+                   said: linesWith("session: WanGP's page lost its session").length };
+    // A pong does not end it: the page answers, that is the whole point.
+    const pingsBefore = B.pings;
+    await advance(5000);
+    const stillLost = { bar: !!bar(), pings: B.pings - pingsBefore, text: barText() };
+    B.afterReload = function () { B.session = { closed: false, reset: false, silent_s: 0 }; };
+    await advance(6000);
+    const after = { bar: !!bar(), navigations: B.navigations, state: api.state().session, heartbeat: api.state().heartbeat,
+                    over: linesWith("session: the WanGP view loaded again").length, ready: api.state().ready };
+    return { healthy, closed, reopened, probed, probedAgain, lost, stillLost, after };
   }
 };
 
@@ -2243,6 +2285,48 @@ _PANEL_MUTATIONS = (
 )
 
 
+#: One decision of the session report reverted per entry, with the key of the
+#: 'session' answer that must then read differently.
+_SESSION_MUTATIONS = (
+    (
+        "a reset session shows nothing",
+        "        if (reset) { G.reset = true; sessionLost(from); return; }",
+        "        if (reset) { G.reset = true; return; }",
+        "lost.bar", True, False,
+    ),
+    (
+        "the countdown ignores a lost session",
+        "            if (!(H.stuck || H.lost) || H.dismissed || !autoReloadAllowed()) { drawStuckBar(); return; }",
+        "            if (!H.stuck || H.dismissed || !autoReloadAllowed()) { drawStuckBar(); return; }",
+        "after.navigations", 1, 0,
+    ),
+    (
+        "a return to the tab asks nothing",
+        '            if (!first) { sessionCheck("the WanGP tab came on screen"); }',
+        "            if (!first) { }",
+        "probed", 1, 0,
+    ),
+    (
+        "the probe on return is not rate-limited",
+        "        if (G.lastCheckAt && now - G.lastCheckAt < SESSION_CHECK_GAP_MS) { return false; }",
+        "        if (false) { return false; }",
+        "probedAgain", 1, 2,
+    ),
+    (
+        "the capability is never read",
+        "        S.session = declared && !!(payload.capabilities && payload.capabilities.session === true);",
+        "        S.session = false;",
+        "healthy.state.guarded", True, False,
+    ),
+    (
+        "a new document does not end the loss",
+        "        if (H.lost) {\n            H.lost = false;\n            removeStuckBar();",
+        "        if (H.lost) {\n            removeStuckBar();",
+        "after.state.lost", False, True,
+    ),
+)
+
+
 def _dig(answer, path):
     """``answer["a"]["b"]`` for ``"a.b"``, or None."""
     found = answer
@@ -2251,6 +2335,66 @@ def _dig(answer, path):
             return None
         found = found.get(key)
     return found
+
+
+def session_checks(r: Results) -> None:
+    """The bridge's word on the page's Gradio session, acted on.
+
+    WHAT THIS EXISTS TO CATCH.
+
+    Gradio marks a page's session closed the moment its heartbeat stream
+    drops, never unmarks it when the browser reconnects, and deletes the
+    closed session's state an hour on - so a page older than an hour loses
+    its state at the first blip, answers everything and does nothing, and
+    only a reload brings it back. Bridge 1.8.0 guards the session inside
+    WanGP and says on every answer whether the page's state is still the one
+    it had. This is the parent's half: a closed session is one journal line,
+    a reset one shows the bar in its other wording and reloads the view
+    within the same bounds as a page that stopped answering - a pong does
+    not end it, the page answers, that is the point - and a return to the tab
+    asks once, rate-limited, with a probe that writes nothing.
+    """
+    import tempfile
+
+    answers = _run_live(("session",))
+    if answers is None:
+        r.check("node is available for the session checks (skipped)", True)
+        return
+    session = answers.get("session", {})
+    r.check("the harness drove the real bundle through a session report", "error" not in session and not session.get("thrown"), repr(session)[:400])
+    healthy = session.get("healthy") or {}
+    r.check("a bridge that reports sessions is taken at its word, and a healthy page shows nothing",
+            (healthy.get("state") or {}).get("guarded") is True and healthy.get("bar") is False, repr(healthy))
+    closed = session.get("closed") or {}
+    r.check("a session Gradio marked closed is one journal line and no bar - the guard is keeping its state",
+            closed.get("said") == 1 and closed.get("bar") is False and (closed.get("state") or {}).get("closed") is True, repr(closed))
+    r.check("and its reopening is one line too", session.get("reopened") == 1, repr(session))
+    r.check("a return to the tab asks once, with a probe", session.get("probed") == 1, repr(session))
+    r.check("and not again within thirty seconds", session.get("probedAgain") == 1, repr(session))
+    lost = session.get("lost") or {}
+    r.check("a reset session shows the bar in its other wording, counting down",
+            lost.get("bar") is True and lost.get("text") == "WanGP's page lost its session. Reloading the view in 10s."
+            and lost.get("said") == 1 and (lost.get("state") or {}).get("lost") is True, repr(lost))
+    still = session.get("stillLost") or {}
+    r.check("a pong does not end it: the page answers, and the bar stays",
+            still.get("bar") is True and (still.get("pings") or 0) >= 1, repr(still))
+    after = session.get("after") or {}
+    r.check("ten seconds on the view reloads, the bar goes, and the new session is not a lost one",
+            after.get("navigations") == 1 and after.get("bar") is False and (after.get("state") or {}).get("lost") is False
+            and (after.get("state") or {}).get("reset") is False and after.get("over") == 1 and after.get("ready") is True
+            and (after.get("heartbeat") or {}).get("automatic_reloads") == 1, repr(after))
+
+    # -- and every one of those checks bites ---------------------------------
+    source = BROWSER_COPY.read_text(encoding="utf-8")
+    with tempfile.TemporaryDirectory(prefix="minipaint-wangp-session-") as scratch:
+        for name, old, new, key, well, ill in _SESSION_MUTATIONS:
+            if not r.check(f"the check for '{name}' still points at live code", source.count(old) == 1,
+                           f"{source.count(old)} matches"):
+                continue
+            mutated = pathlib.Path(scratch) / "mutated.js"
+            mutated.write_text(source.replace(old, new), encoding="utf-8")
+            answer = (_run_live(("session",), source=mutated) or {}).get("session") or {}
+            r.check(f"'session' fails when {name}", _dig(answer, key) == ill and well != ill, f"{key}={_dig(answer, key)!r}")
 
 
 def panel_checks(r: Results) -> None:
@@ -4703,6 +4847,7 @@ def run() -> Results:
     live_settings_checks(r)
     heartbeat_checks(r)
     panel_checks(r)
+    session_checks(r)
     bridge_liveness_checks(r)
     recovery_checks(r)
     page_head_checks(r)

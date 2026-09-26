@@ -377,6 +377,20 @@ WanGP's own connection stalling while its page still runs — the log says when 
 request has waited on WanGP for a long time, and nothing is reloaded for it, because a
 generation can hold a request for minutes without anything being wrong.
 
+**If the WanGP view answers and does nothing.** That is a different failure, and the one
+that turned out to be behind "the frame froze": Gradio marks a page's session *closed* the
+moment its heartbeat stream drops — for any reason, and the embedded page's heartbeat rides
+Forge's own connection — never marks it open again when the browser reconnects a second
+later, and deletes the closed session's state as soon as it is more than an hour old. WanGP's
+handlers then run on a copy of the build-time state: the queue and the progress go blind,
+presses do nothing, while the bridge's own requests keep answering. Bridge 1.8.0 guards that
+inside WanGP — a session heard within the last fifteen minutes is never expired, and a
+heartbeat that reconnects reopens its session — and says on every answer whether the page's
+state is still the one it had. If it is not, the tab shows **WanGP's page lost its session**
+with the same *Reload view* and *Dismiss*, reloads the view within the same bounds, and asks
+the page once, with a probe that writes nothing, whenever you return to the tab. Every step
+is a `session:` line in the page's log.
+
 **Why the WanGP tab is never hidden.** Forge switches an unselected tab's panel off with
 `display: none`, and a page inside a box that does not exist is not rendered, so every
 return to the WanGP tab was a relayout of the whole WanGP page. The WanGP panel is therefore
@@ -561,9 +575,10 @@ same server-owned queue as the tab's presses, ids are never paths, and the answe
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
 API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 rewrite (the page's model
 travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
-and its place in WanGP. Bridge plugin 1.7.0 carries the queue, start and track operations
+and its place in WanGP. Bridge plugin 1.8.0 carries the queue, start and track operations
 (protocol 5) and the control plane server-owned execution runs on (protocol 6), answers the
-WanGP tab's heartbeat and says when its form is touched, and refuses
+WanGP tab's heartbeat and says when its form is touched, guards the page's Gradio session
+(below) and refuses
 a request composed for a model the page has since left (`MODEL_CHANGED`), so WanGP's bridge
 must be updated and WanGP restarted; a build lacking one of the six queue components keeps
 the image send and refuses the queue with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking
@@ -602,7 +617,7 @@ Every job then says where its settings came from — on its card in the Queue, i
 History, in the Send to WanGP popup's history, and in the log: *saved from the WanGP page at
 send*, *WanGP's last saved settings (the page didn't answer)*, *WanGP's last saved settings
 (WanGP was loading a model's settings at send)*, or *the model's defaults (nothing saved
-yet)*. Saving as you change needs bridge 1.7.0; with an older bridge the save before every
+yet)*. Saving as you change needs bridge 1.7.0 and the session guard 1.8.0; with an older bridge the save before every
 send still happens, and waits up to two seconds each time because it cannot know nothing
 changed.
 

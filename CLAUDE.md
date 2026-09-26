@@ -158,17 +158,22 @@ spent hours in a hidden Forge tab between uses, and every return was a
 `display:none -> block` relayout of the whole WanGP page. The bridge's frame
 timer keeps the *bridge's* requests moving through that; it never kept all of
 WanGP moving. So the WanGP panel is never `display: none`: `style.css` parks it
-instead - keyed on the very inline style Gradio writes, a rendered box, fixed in
+instead - keyed on the very inline style Gradio writes, a laid-out box, fixed in
 the viewport, `visibility: hidden`, untouchable - and `browser/minipaint_wangp.js`
 keeps the panel's width across the switch, fits the frame for where the panel
-will be, and takes "on screen" to mean the tab is selected. Do not hide that
-panel, do not move the iframe in the DOM (a moved iframe reloads its document),
-and do not turn the rule into `opacity: 0`: the hidden visibility is what keeps
-the parked page unfocusable and what the sibling assistant's `visible()` reads
-to know the panel is not the workspace on screen. `tests/browser_intercept.py`
-measures the parked box and the frames; the journal's `tab:` lines say how long
-the page was parked and how many of its frames the browser ran meanwhile.
-`docs/wangp/PARKED_PANEL_2026-09-25.txt` has the log evidence.
+will be, and takes "on screen" to mean the tab is selected. What that bought was
+less than claimed: Chromium keeps a parked frame's animation frames flowing
+(`tests/browser_intercept.py` measures it), but the host's Firefox throttles a
+document whose embedder is `visibility: hidden` - the journal's `tab:` lines
+counted 4 frames by the browser in 33 minutes parked, 16119 by the bridge's
+timer - and the freeze came back after 17 seconds away. What the parking gives
+everywhere is geometry (no relayout on return, the width kept) and those frame
+counts, which are the measurement that settled it. Do not move the iframe in
+the DOM (a moved iframe reloads its document), and if `opacity: 0` is ever
+tried in place of the hidden visibility, the sibling assistant's `visible()`
+must be taught about opacity first, or its focus mode takes the parked panel
+for the workspace on screen. `docs/wangp/PARKED_PANEL_2026-09-25.txt` has the
+log evidence and what the freeze turned out to need instead.
 
 **A silent stream is the only free signal a page gets.** Forge heartbeats every
 fifteen seconds on both of its streams, so silence never means "nothing to

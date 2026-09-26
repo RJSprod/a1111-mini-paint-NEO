@@ -991,16 +991,26 @@
    there.
 
    So the WanGP panel is never `display: none`. While its tab is not the one
-   selected it is PARKED instead: still a rendered box, fixed in the viewport,
+   selected it is PARKED instead: still a laid-out box, fixed in the viewport,
    invisible, unfocusable and untouchable, behind everything. Gradio keeps
    writing its inline `display: none` on every switch, and this rule is keyed
    on that very text - Forge's own ui.js reads the same attribute to find the
    current tab - so the panel is parked from its first paint, with no script
-   in the loop and no flash of it in the page flow. The bundle only keeps the
+   in the loop and no flash of it in the page flow. The bundle keeps the
    panel's real width across the switch (`--minipaint-wangp-parked-width`,
    so WanGP's layout does not change at all), fits the frame for where the
    panel will be rather than where it is parked, and says in the journal when
-   the tab left and came back and what its page did meanwhile.
+   the tab left and came back and how many frames its page got meanwhile.
+
+   WHAT THIS BUYS, MEASURED. In Chromium a frame under this rule keeps its
+   animation frames at the page's full rate (tests/browser_intercept.py). On
+   the host's Firefox it does not: a document whose embedder is
+   `visibility: hidden` is throttled there, and the journal counted 4 frames
+   by the browser in 33 minutes parked, against 16119 by the bridge's timer
+   (docs/wangp/PARKED_PANEL_2026-09-25.txt, section 6). What the parking
+   gives everywhere is geometry - the page keeps its layout and its width, so
+   a return is not a relayout - and the frame counts in the journal, which
+   are the measurement that settled this.
 
    `visibility: hidden` and not `opacity: 0`, for two reasons. A hidden box is
    not focusable and not in the accessibility tree, so nothing can reach the
@@ -1008,9 +1018,9 @@
    assistant decides which workspace is on screen by asking whether a panel's
    computed visibility is hidden (`visible()` in its forge_assistant_host.js)
    - a parked WanGP panel must answer "not showing" there, or its focus mode
-   would take the wrong workspace. A same-origin frame with a layout box
-   shares the page's rendering loop whatever its visibility, so the frames
-   keep coming; tests/browser_intercept.py measures exactly that.
+   would take the wrong workspace. `opacity: 0` may well escape Firefox's
+   throttle; it would need that check taught about opacity first, and it has
+   not been tried.
 
    `z-index: -1` and `pointer-events: none` are belt and braces under the
    visibility: nothing hit-tests a hidden box either way. The width falls back

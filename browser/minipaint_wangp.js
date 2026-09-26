@@ -2127,15 +2127,23 @@ window.minipaintWanGP = (function () {
      * in a tab of its own has neither, which is why it never froze there.
      *
      * The stylesheet does the parking: keyed on the very inline style Gradio
-     * writes, it keeps the panel a rendered box - fixed in the viewport,
+     * writes, it keeps the panel a laid-out box - fixed in the viewport,
      * invisible, unfocusable, untouchable - from its first paint, with no
      * script in the loop. What this file adds is the part a stylesheet
      * cannot: the panel's real width, kept across the switch so WanGP's
      * layout never changes; the frame fitted for where the panel WILL be
      * rather than where it is parked; "on screen" for the heartbeat and the
      * leaving flush meaning the tab is selected, since a parked frame still
-     * intersects the viewport; and a journal line each way, with what the
-     * WanGP page did while it was parked.
+     * intersects the viewport; and a journal line each way, with how many
+     * frames the WanGP page got while it was parked.
+     *
+     * Those counts are the measurement, and they said something the tests
+     * could not: Chromium keeps a parked frame's animation frames flowing,
+     * the host's Firefox does not (it throttles a document whose embedder is
+     * visibility: hidden - 4 frames by the browser in 33 minutes parked,
+     * 16119 by the bridge's timer). What the parking gives everywhere is
+     * geometry: no relayout on return, the width kept. See
+     * docs/wangp/PARKED_PANEL_2026-09-25.txt, section 6.
      *
      * Found from the tab's own root, never by id: Forge names the panel
      * `#tab_wangp` and the stylesheet addresses that; the class this marks it
@@ -2192,7 +2200,7 @@ window.minipaintWanGP = (function () {
             T.framesAtPark = frameCounts();
             keepPanelWidth();
             say("tab: the WanGP tab " + (first ? "is not the one on screen" : "left the screen")
-                + "; its page is parked - rendered, invisible, still running");
+                + "; its page is parked - laid out, invisible");
         } else {
             let meanwhile = "";
             const frames = frameCounts();

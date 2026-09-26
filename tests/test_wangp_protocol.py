@@ -2263,9 +2263,11 @@ def panel_checks(r: Results) -> None:
     it no animation frames, and Gradio 5 in the WanGP page dispatches its
     events and applies its updates inside animation frames. So the WanGP
     page stood still whenever another Forge tab was selected, and every
-    return was a relayout. The stylesheet keeps the panel a rendered box
-    (tests/browser_intercept.py measures that in a browser); this is the
-    bundle's half: the panel found and marked, its real width kept across
+    return was a relayout. The stylesheet keeps the panel a laid-out box
+    (tests/browser_intercept.py measures that in Chromium, where the frames
+    keep flowing; the host's Firefox throttles an invisible frame all the
+    same, which the journal's frame counts said); this is the bundle's
+    half: the panel found and marked, its real width kept across
     the switch so WanGP's layout does not change, "on screen" meaning the
     tab is selected - a parked frame still intersects the viewport - so the
     heartbeat does not beat for a page nobody can see and the leaving flush

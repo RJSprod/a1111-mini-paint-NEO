@@ -198,6 +198,7 @@ ready.
 | --- | --- |
 | the setup | `<Forge data_path>/a1111-mini-paint-NEO/wan2gp.json` |
 | the previous setup | `…/wan2gp.backup.json` |
+| the last choices the wizard offers | read from the two files above, never a file of their own: after a Reinitialize the setup file keeps the folder, environment and GPU with `initialized: false`, and the wizard fills its boxes from it (or from the backup, the last setup that worked) at build and again at *Start Setup*. An offer, not an answer - the folder is checked and the environment tried before either reaches the candidate |
 | a setup being validated | `…/wan2gp.pending.json` (short-lived) |
 | prepared images on their way to WanGP | `…/runtime/handoff/<32 hex>.png`, mode `0700` where the platform has it |
 | the machine-wide lock | `…/runtime/wangp.lock.json`: the **Forge server's** pid and start time, taken when a managed WanGP starts, dropped when it stops; never the child's pid, a port or a secret |

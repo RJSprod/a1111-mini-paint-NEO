@@ -894,6 +894,42 @@ def tab_checks(r: Results) -> None:
                 r.check("shown again it is measured where it is, and the panel's width is kept for the next park",
                         fit["shownAgain"] == 900 - 120 - 40 - 4 and fit["keptWidth"] == "1200px", str(fit))
 
+            # ---- the wizard offers the last setup back ----
+            # After a Reinitialize the config keeps the folder and environment
+            # with initialized false, and the wizard's boxes are filled from
+            # it - at build, and again at Start Setup, which is the press
+            # that follows a Reinitialize made in this very run. An offer,
+            # never an answer: both notes name the button still to press.
+            import gradio as gr
+
+            kept = config.Config(initialized=False, wangp_root="/opt/Wan2GP",
+                                 runtime={"type": "venv", "prefix": "/opt/Wan2GP/venv", "display_name": "venv", "launch_strategy": ""})
+            config.atomic_write(config.config_path(), config._dumps(kept))
+            with gr.Blocks(analytics_enabled=False):
+                wizard = wangp_ui._build_wizard()
+            r.check("the wizard's folder box is filled from the last setup",
+                    wizard["root"].value == "/opt/Wan2GP", str(wizard["root"].value))
+            r.check("and its environment box too, each with a note naming the button still to press",
+                    wizard["runtime_prefix"].value == "/opt/Wan2GP/venv"
+                    and "Check this folder" in str(wizard["root_status"].value)
+                    and "Try it against this WanGP" in str(wizard["runtime_status"].value), str(wizard["runtime_status"].value))
+            filled = wangp_ui.wizard_prefill()
+            r.check("Start Setup fills them again from what is on disk at the press",
+                    filled[0].get("value") == "/opt/Wan2GP" and filled[2].get("value") == "/opt/Wan2GP/venv"
+                    and "Check this folder" in filled[1] and "Try it against this WanGP" in filled[3], str(filled))
+            begin = [d for d in page["dependencies"]
+                     if any(t[1] == "click" for t in d["targets"]) and "wangp_setup_begin" in
+                     [c["props"].get("elem_id") for c in page["components"] if c["id"] in [t[0] for t in d["targets"]]]]
+            outputs = {c["props"].get("elem_id") for d in begin for c in page["components"] if c["id"] in d["outputs"]}
+            r.check("and the press that starts the wizard writes those boxes",
+                    {"wangp_setup_root_path", "wangp_setup_runtime_prefix"} <= outputs, str(outputs))
+            config.config_path().unlink()
+            with gr.Blocks(analytics_enabled=False):
+                fresh = wangp_ui._build_wizard()
+            r.check("a machine never set up gets empty boxes and no note",
+                    fresh["root"].value == "" and fresh["runtime_prefix"].value == ""
+                    and not fresh["root_status"].value and not fresh["runtime_status"].value, str(fresh["root"].value))
+
             # ---- and now the failure this whole shape exists for ----
             print("  (the traceback below is this test breaking the WanGP tab on purpose)")
             working = wangp_ui.create_ui

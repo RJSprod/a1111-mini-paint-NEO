@@ -595,6 +595,41 @@ def restore_backup() -> typing.Optional[Config]:
     return backup
 
 
+def remembered_choices() -> typing.Dict[str, str]:
+    """The last folder, environment and GPU anybody set up here, for the wizard
+    to offer again. Read, never trusted: the wizard still checks the folder
+    and tries the environment before either becomes an answer.
+
+    The active config first - after a Reinitialize it keeps everything but
+    ``initialized`` (see ``clear``), which is exactly the case this exists for
+    - then the backup, the last setup that worked, then nothing. Empty strings
+    mean "nothing to offer", which is what a machine never set up gets, and
+    what an unreadable file gets rather than an error: an offer is not worth
+    stopping the wizard over.
+    """
+    nothing = {"root": "", "runtime_prefix": "", "runtime_display_name": "", "gpu_uuid": ""}
+    for source in (load, lambda: _read(backup_path())):
+        try:
+            found = source()
+        except Exception:
+            found = None
+        if found is None:
+            continue
+        runtime = found.runtime if isinstance(found.runtime, dict) else {}
+        gpu = found.gpu if isinstance(found.gpu, dict) else {}
+        root = _text(found.wangp_root)
+        prefix = _text(runtime.get("prefix"))
+        if not root and not prefix:
+            continue
+        return {
+            "root": root,
+            "runtime_prefix": prefix,
+            "runtime_display_name": _text(runtime.get("display_name")),
+            "gpu_uuid": _text(gpu.get("uuid")),
+        }
+    return dict(nothing)
+
+
 def clear() -> None:
     """Mark the integration uninitialized, keeping everything else.
 

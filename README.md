@@ -321,7 +321,9 @@ rows need WanGP up and the page loaded, so *Run the checks* is usually pressed t
 Nothing is moved, copied or downloaded: your WanGP keeps its models, presets, LoRAs and
 outputs where they are, and Forge's own Python never imports it. The setup is remembered in
 `<Forge data_path>/a1111-mini-paint-NEO/wan2gp.json`, and the setup it replaces is kept as
-a backup you can restore.
+a backup you can restore. The wizard also remembers the last folder and environment (and
+card): after a *Reinitialize* they are already in their boxes, still to be checked and tried,
+because nothing is trusted on memory.
 
 **What actually runs.** Nothing starts when Forge boots; opening the tab asks for WanGP and
 the tab shows a *starting* card with a *Check again* button rather than holding a Gradio

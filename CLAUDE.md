@@ -12,7 +12,7 @@ because it was learned the hard way.
 ```
 pip install -r tests/requirements.txt
 python -m playwright install chromium
-python tests/run.py                    # 29 suites; every one must run
+python tests/run.py                    # 30 suites; every one must run
 ```
 
 Gradio is pinned to 4.40.0 because that is what the target Forge ships, and the
@@ -407,9 +407,15 @@ a change to either side has to keep the other true.
 `RJSprod/SD-Neo-ModelSwitchRefiner` runs a local LLM. Its logs showed
 `llama-server` taking every CPU core for nine minutes with its model on the
 CPU, and its GPU placement pointing at the card WanGP owns. That starves WanGP
-while it generates. Capping its threads below the core count, keeping it off
-WanGP's card, and not running a CPU model during a video generation are that
-repository's to fix; nothing here can.
+while it generates. Since 2026-09-26 that repository reads
+`minipaint_neo.wangp.presence.report()` — one dict: the card's UUID, whether
+the child is READY, and the bridge's last word on whether it is generating —
+and on WanGP's card sizes its server to what WanGP has not needed, stops it
+when WanGP grows into a reserve it keeps, and caps its processor threads while
+WanGP is up. The contract is in `docs/wangp/CONTRACTS.md` and its keys are held
+closed by `tests/test_wangp_presence.py`: a key that goes missing, or a pid
+that creeps in, breaks that extension and not this one. `generating` is
+three-valued on purpose; `None` is "nobody has said", never `False`.
 
 ## The host
 

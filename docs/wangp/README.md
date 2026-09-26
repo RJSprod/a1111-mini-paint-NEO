@@ -554,6 +554,27 @@ models, no LoRAs, no presets, no outputs, no settings of yours and no plugin —
 plugin folder it can ever write to is its own, and only when a new setup explicitly asks it
 to install one.
 
+## Sharing the machine with ModelSwitchRefiner's language model
+
+The [SD-Neo-ModelSwitchRefiner](https://github.com/RJSprod/SD-Neo-ModelSwitchRefiner)
+extension runs a local `llama-server`, and it can be configured onto the card WanGP uses.
+Since 2026-09-26 it asks this integration, in-process, what it may know about the managed
+WanGP — `minipaint_neo.wangp.presence.report()`: the card's UUID, whether the child is up,
+and (when the bridge has said) whether it is generating — and acts on WanGP's behalf:
+
+* on the card WanGP is running on, its server is sized to what WanGP has not needed this
+  session plus a reserve, and is stopped the moment WanGP grows into that reserve or goes
+  from idle to generating on a card whose needs it has not measured;
+* while WanGP is running, a placement that leaves part of its model on the processor is held
+  to half the physical cores;
+* a card WanGP is not running on is that extension's to use in full, and nothing here is
+  told or asked anything.
+
+Nothing on this side changes for it: no setting, no route, no message on the page. The
+bridge plugin's `generation_running` flag, which the control plane already caches from
+its `hello`, is the only thing the report adds to what the tab already knew. Its README's
+*WanGP on the other card* section documents the settings on its side.
+
 ## Known limits
 
 * **One managed WanGP.** The extension runs a single child per machine: a second Forge

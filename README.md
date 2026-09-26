@@ -355,6 +355,13 @@ and the detail in `logs/send-log.txt`. References **append**: two already there 
 three, in their original order, never one. Nothing is generated for you — you set the rest
 up in WanGP and press Generate yourself.
 
+**Sharing the machine with a local LLM.** If the *SD-Neo-ModelSwitchRefiner* extension
+is installed, it asks this tab in-process which card WanGP is on and whether it is
+running, and keeps its `llama-server` out of the way: on WanGP's card it takes only what
+WanGP has not needed and stops when WanGP needs the room, and while WanGP is running it
+runs on fewer processor threads. Nothing to set up here; the settings are on that
+extension's side (`docs/wangp/README.md`, *Sharing the machine*).
+
 **The bridge plugin.** The piece inside WanGP is `wan2gp-minipaint-bridge`, shipped in
 `wan2gp_bridge/` and installed by setup step 4 into `<WanGP root>/plugins/`. It writes
 inside its own folder and nowhere else, refuses to replace a folder that is not ours, and

@@ -1103,12 +1103,17 @@ def session_checks(r: Results) -> None:
     bridge.compat.host.accept_components({"save_form_trigger": _Component()})
     bridge.resolve()
     bridge.state_keys = (compatibility.SESSION_STATE,) + tuple(k for k in bridge.state_keys if k != compatibility.SESSION_STATE)
-    r.check("the handshake offers the session capability, and the bridge is 1.8.0",
-            compatibility.BRIDGE_VERSION == "1.8.0"
-            and bridge.compat.handshake(bridge_session="s", environ=environ)["capabilities"].get("session") is True)
+    handshake = bridge.compat.handshake(bridge_session="s", environ=environ)
+    r.check("the handshake offers the session capability, and the bridge is 1.9.0",
+            compatibility.BRIDGE_VERSION == "1.9.0"
+            and handshake["capabilities"].get("session") is True)
+    r.check("and, from 1.9.0, says THEME_STATE may carry the page's palette",
+            handshake["capabilities"].get("theme") is True and handshake["capabilities"].get("theme_palette") is True,
+            str(handshake["capabilities"]))
     info = json.loads((BRIDGE_DIR / "plugin_info.json").read_text(encoding="utf-8"))
-    r.check("and plugin_info.json says the same version twice",
-            info.get("version") == "1.8.0" and info.get("bridge_version") == "1.8.0", str(info))
+    r.check("and plugin_info.json says the same version twice, and lists the palette among its capabilities",
+            info.get("version") == "1.9.0" and info.get("bridge_version") == "1.9.0"
+            and "theme_palette" in (info.get("capabilities") or []), str(info))
 
     class GradioRequest:
         session_hash = "abc"

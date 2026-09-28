@@ -978,6 +978,58 @@
     height: var(--minipaint-wangp-frame, 80vh);
 }
 
+/* -- focus mode: the frame is the whole window ----------------------- */
+/*
+   SD-Neo-ModelSwitchRefiner's assistant has a focus mode that hands one
+   workspace the whole window. It marks the workspace's tab panel
+   `forge-assistant-focus-root` - fixed, inset 0, eight pixels of padding, a
+   scroller of its own - and takes every ancestor's other children out of
+   the layout. For this tab the workspace IS the WanGP page, so under that
+   class the frame is the window and nothing else shows: the panel's padding
+   and border go, the Integration management accordion is not displayed, and
+   the frame's measured height is the panel's own - the sizer reads the same
+   class and leaves no room under the frame and none for the accordion.
+
+   Nothing is moved in the DOM (a moved iframe reloads its document), nothing
+   is repainted, and no request is made; leaving focus is the class coming
+   off, and the accordion is back where it was. The class name is the
+   contract with that extension and is written down on both sides
+   (docs/wangp/CONTRACTS.md here, its docs/22-forge-assistant.md there).
+
+   `!important` because that extension's rule for the same panel carries it,
+   and this rule - an id and a class - has to outrank a lone class on the
+   padding and border both. `display: none` on the accordion is safe where
+   it is not safe on the panel: the accordion is beside the frame, never
+   above it, so the WanGP document keeps its box and its frames.
+
+   The one notice the browser writes for itself (`.minipaint-wangp-recovery`,
+   above) is laid over the frame instead of under it here, because under the
+   frame is below the fold of a window the frame fills. Positioned against
+   the panel - which that extension's rule has positioned - rather than the
+   window, so it stays inside the panel wherever the panel is.
+*/
+#tab_wangp.forge-assistant-focus-root,
+.minipaint-wangp-tab.forge-assistant-focus-root {
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+}
+
+#tab_wangp.forge-assistant-focus-root #wangp_manage_root,
+.minipaint-wangp-tab.forge-assistant-focus-root #wangp_manage_root {
+    display: none !important;
+}
+
+#tab_wangp.forge-assistant-focus-root .minipaint-wangp-recovery,
+.minipaint-wangp-tab.forge-assistant-focus-root .minipaint-wangp-recovery {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    right: 12px;
+    z-index: 30;
+    margin: 0;
+}
+
 /* -- the panel is parked, never hidden ------------------------------- */
 /*
    Gradio switches an unselected tab's panel off with an inline

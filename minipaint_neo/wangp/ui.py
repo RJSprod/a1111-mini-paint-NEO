@@ -288,7 +288,27 @@ def _view(view: str, state: str, code: str, actions: typing.Sequence[str]) -> di
         "message": errors.message(code) if code else "",
         "actions": list(actions),
         "degraded": False,
+        # What the WanGP page is dressed in, from Settings: the browser half
+        # reads it here, with the rest of what the tab knows, and tells the
+        # bridge. Read at every paint, so a changed setting reaches the page
+        # at the next paint of the tab or the next load of the page.
+        "look": current_look(),
     }
+
+
+def current_look() -> str:
+    """The WanGP look from Settings, as the skin word the protocol knows.
+
+    Imported at the call rather than at the top, so this module stays
+    loadable without a Forge on the path; and answered with the default
+    when there is none, which is the look a page with no settings gets.
+    """
+    try:
+        from .. import settings as extension_settings
+
+        return extension_settings.wangp_look()
+    except Exception:
+        return "host"
 
 
 def error_actions(code: str) -> typing.List[str]:

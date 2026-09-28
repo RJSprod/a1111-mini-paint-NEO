@@ -1,0 +1,154 @@
+The theme hijack: WanGP in the colours of the page around it
+=============================================================
+2026-09-28. Bridge 1.9.0. Companion to docs/wangp/README.md ("What the WanGP
+page wears") and CONTRACTS.md; this is the reasoning, the alternatives and the
+things checked, in the order they were settled.
+
+1. What was there before
+------------------------
+The bridge has carried a stylesheet since its first version: theme.css, a dark
+palette of nine --mp-* variables scoped on <html data-minipaint-theme="dark">
+and remapped onto Gradio's own theme variables, injected by the document
+script (style()) and switched by THEME_STATE {mode, accent} from the tab's
+bundle, which guessed the mode from the Forge page's classes (detectTheme).
+"light" meant untouched. That was the whole of the integration's night mode,
+and it predates WanGP's studio look.
+
+WanGP's UI update (shared/gradio/ui_studio.py, read from its repository on
+2026-09-28) paints its fields, buttons, accordions, tabs and galleries from
+eleven --studio-* variables - surface, input, border, label, accent, soft,
+button, button-hover, button-text, disabled, disabled-text - declared on the
+element that scopes the studio look, with a light and a dark set per theme
+(Blue Sky is the default; Emerald, Amethyst, Rose and Classic Gradio are the
+others, chosen by the UI_theme key of WanGP's config or --theme). The old
+remnant reached none of them: Gradio's variables went dark, the studio
+controls stayed Blue Sky. That is the half-themed WanGP the user saw.
+
+2. Why a hijack and not an entry in WanGP's dropdown
+---------------------------------------------------
+WanGP's plugin API (WAN2GPPlugin: setup_ui, post_ui_setup, request_component,
+request_global, insert_after, add_custom_js) adds a script. It has no hook for
+a theme or a stylesheet, THEME_CHOICES is a module-level list in ui_studio.py
+resolved before any plugin runs, and the CSS for a theme is a file beside it
+(ui_studio_<name>.css). A sixth entry means patching wgp.py and ui_studio.py
+or writing into WanGP's tree, which the installer must not do: it copies one
+plugin folder and nothing else, and a patch breaks at the next WanGP update.
+
+So the look is a stylesheet the script injects whose rules outrank the
+built-in ones - which is what the user asked for by the name "theme hijack":
+whatever WanGP's dropdown picked, the page shows the palette the bridge was
+told. The dropdown keeps working; it just loses.
+
+3. Getting past an id
+---------------------
+ui_studio.py rewrites every .wangp-studio-* selector in its CSS to
+#component-N (the scope) or :where(#component-N) :is(#a, #b, ...) (the
+fields) when it builds the page's config. No class of that name exists in the
+document. A remap written against .wangp-studio-scope applies to nothing, and
+no class selector outranks the id the variables are declared on.
+
+Importance does: an author declaration marked !important beats an unmarked
+one whatever its specificity. theme.css therefore declares the eleven remaps
+!important on [id^="component-"] under the attribute - every element whose id
+Gradio generated, which includes the scope element - and the elements WanGP
+gave ids of its own (#model_list, #queue_html_container, ...) inherit from the
+nearest of those. Custom properties only, so nothing fights a rule of WanGP's
+that reads one. The page has thousands of component-N elements; eleven custom
+properties on each is a style-recalc cost that was judged acceptable against
+the alternative of not knowing the scope's id.
+
+The fixed colours in ui_styles.css that no variable reaches - the model
+selector's slab (#a9bfd0 / #526a80), the title rules (#333), the editor's two
+buttons (#4535ec, #7e73f2, !important), the queue table's rows, borders,
+hover and drag marks, the progress bar (#e9ecef, #0d6efd, #6c757d), the image
+modal (#1f2937) - get one override each, by the same id or class WanGP uses,
+!important only where WanGP's own rule is. progress.css already reads
+--color-accent, which the remap covers.
+
+4. Match the page, not a fixed Lobe
+-----------------------------------
+"Look like the Lobe theme in night mode" is a moving target: Lobe has thirteen
+primary schemes and six neutral levels, and the user's is one combination. The
+stylesheet does not know Lobe; the tab's bundle samples what the Forge page
+actually wears - Gradio's theme variables, which Lobe and every other theme
+set - and sends nine solid colours as the palette. So WanGP wears Lobe's night
+mode because the page does, and a scheme changed in Lobe's own settings is
+what WanGP wears after the next handshake or the next return to the tab.
+
+Sampled by resolving, not by reading: a probe span inside .gradio-container is
+painted from each slot's variable and getComputedStyle().backgroundColor is
+what is sent - rgb(...) for a colour, and the transparent the browser computes
+for a gradient, a colour-mix it cannot paint as a colour, or an unset variable.
+Each of a slot's variables is tried on its own, first choice first; a chain of
+var() fallbacks was the first version and never reached the fallback when the
+first variable held a gradient, because a variable holding a gradient is not
+unset. The mode is read off the page colour sampled (dark below half
+luminance), which is more honest than the class sniffing it replaces; the
+sniffing stays as the fallback when nothing sampled.
+
+Both sides validate the palette (protocol.normalize_theme, byte-identical in
+the two protocol copies; the script's normaliseTheme against the same
+COLOUR_RE): only the nine known slots, only one solid colour each - a hex
+triplet or one colour function with nothing but numbers, percentages, slashes,
+commas, spaces and keywords inside; never url(), never a gradient, never
+var(). The values land as inline custom properties on <html>, so a bad one
+could at worst be an invalid declaration; the regex keeps even that out, and
+keeps the protocol test's vocabulary closed.
+
+5. The three looks, and the older bridge
+----------------------------------------
+One entry in Settings (minipaint_wangp_look; the words on the page are stored,
+settings.wangp_look() turns them into the protocol's skin word): host (match
+this page; the default), bridge (the bridge's own dark or light), off (WanGP
+untouched). The tab's view JSON carries it as "look", the bundle reads it at
+every send, so it reaches the page at the next Reload UI - the same as every
+other entry marked needs_reload_ui.
+
+A bridge older than 1.9.0 reads THEME_STATE.mode and nothing else, and "light"
+is what leaves WanGP alone there. So the parent sends mode "light" for the
+off skin whatever the page's mode, and for host and bridge sends the page's
+mode; an old bridge then does exactly what it always did (its own dark for a
+dark page, untouched for a light one), and a new bridge reads skin and
+palette. A new bridge with an old parent - not a combination the installer
+can produce, since the bridge is copied out of the parent's own folder - gets
+mode alone and treats a missing skin as the bridge's own palette, which is the
+old behaviour for a dark page and, for a light one, the new light palette.
+
+The attribute's meaning changed with the stylesheet: "light" is now the light
+palette, not "untouched"; untouched is no attribute at all, and the script
+removes it for the off skin. Stylesheet and script ship together in one plugin
+folder, so the two spellings are never mixed.
+
+6. What is checked
+------------------
+tests/test_wangp_protocol.py: the vocabulary on both sides (browser_checks);
+theme_send_checks runs the tab's bundle on the virtual clock against a page
+whose variables resolve (the host look sends nine colours and dark; a
+gradient page background falls to the slot's second choice and a slot with
+nothing solid is left out; a light page is told as light; bridge sends no
+palette; off sends off and light; an unknown look word is host; the probe is
+taken away; a return to the tab re-sends and says nothing new in the journal
+when nothing changed); theme_checks runs the bridge's document script in Node
+(first paint is the bridge's dark; host writes inline properties and drops
+url(), gradients, var() and unknown slots; bridge takes them off; off removes
+the attribute; unknown words are dark bridge; a stranger's channel changes
+nothing) and reads theme.css (both palettes complete with their colour
+scheme; all eleven studio remaps, !important, on [id^="component-"]; the
+Gradio remap keyed on the attribute alone; no colour named after the two
+palettes; no text selector, no layout). tests/test_wangp_receiver_contract.py
+(look_checks): the Settings entry, the three words to skin words, an unknown
+word and no setting, the view JSON. tests/browser_intercept.py: the real
+page's palette, nine browser-computed colours and a light mode. Each of those
+was mutation-checked: the mutation and the check it fails are in the session
+record.
+
+7. Not yet seen on the user's machine
+-------------------------------------
+The remaps were written against WanGP's stylesheets as read from its
+repository, not against a running WanGP, and a Lobe night page has not been
+sampled here (the browser suite samples Gradio's default light theme). What to
+look at first when it is reported: the page journal's "theme:" line (how many
+of nine colours the page gave, and which mode), the iframe's <html> attribute
+and inline --mp-* properties, and whether the studio controls took the
+palette - if they did not, the scope element's id no longer starts with
+"component-" and the selector in theme.css is the thing to change.

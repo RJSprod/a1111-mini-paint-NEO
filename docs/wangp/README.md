@@ -383,7 +383,10 @@ settings as they change. Bridge 1.8.0 adds the session guard: every acknowledgem
 the page's state was deleted underneath it, and how long since the page's heartbeat was last
 heard - and inside WanGP the guard wraps Gradio's heartbeat route (a reconnect reopens the
 session, every beat is remembered) and its expiry (a session heard within fifteen minutes is
-never expired). See `session_guard.py`'s docstring for why. An extension newer than its
+never expired). See `session_guard.py`'s docstring for why. Bridge 1.9.0 adds the theme
+hijack: `THEME_STATE` may carry a skin and the Forge page's own palette, the bridge's
+stylesheet covers WanGP's studio look, and the handshake says `capabilities.theme_palette`
+(see *What the WanGP page wears*, below). An extension newer than its
 bridge says `BRIDGE_VERSION_MISMATCH` until the bridge is installed again from setup step 4
 and WanGP restarted.
 
@@ -398,6 +401,48 @@ each component it needs through WanGP's plugin API and reports what it actually 
 handshake. A build that is missing a mandatory one answers `ready=false` with
 `BRIDGE_COMPONENT_INCOMPATIBLE`, and the Send menu offers nothing rather than sending into
 something that looked about right.
+
+## What the WanGP page wears
+
+The WanGP page is a document of its own, so nothing the Forge page wears reaches into it;
+what dresses it is a stylesheet the bridge plugin injects (`theme.css`, bridge 1.9.0),
+which overrides whichever theme WanGP's own settings picked - Blue Sky, Emerald, Amethyst,
+Rose or Classic. It is a hijack rather than a sixth entry in that dropdown because WanGP's
+plugin API can add a script but not a theme or a stylesheet, and a stylesheet the script
+injects outranks the built-in ones; nothing in WanGP's own files is changed.
+
+Where the colours come from is one entry in Settings → *miniPaint / Canvas*, **WanGP tab:
+what the WanGP page is dressed in**:
+
+* **Match this page's theme** (the default) — the WanGP tab's browser half samples this
+  page's own colours (Gradio's theme variables, resolved by the browser, so a night theme
+  such as Lobe's is exactly what WanGP wears too), sends them across as the page's palette,
+  and reads dark or light off the page colour. Sent after every handshake and again whenever
+  the tab comes back on screen, so a theme switched meanwhile is picked up on return.
+* **Mini Paint's own dark and light** — the bridge's built-in palette, in the mode this page
+  is in.
+* **WanGP's own theme** — the hijack steps aside entirely: WanGP looks as it does on its own.
+
+The setting reaches the page at the next Reload UI (the tab's view is painted then). It
+needs bridge 1.9.0 installed from setup step 4 and WanGP restarted; an older bridge reads
+only whether the page is dark or light and wears its own dark palette for a dark page, which
+is what it always did. The page's log says `theme: host (9 of 9 colours sampled from this
+page), dark` once per change; fewer than nine means a variable this theme leaves unset or
+paints with a gradient, and the bridge keeps its own colour for that slot. The whole design,
+and what it replaced, is `docs/wangp/THEME_HIJACK_2026-09-28.txt`.
+
+## Focus mode: the frame is the window
+
+SD-Neo-ModelSwitchRefiner's assistant has a focus mode that gives one workspace the whole
+window. On the WanGP tab the workspace *is* the WanGP page, so under focus the tab is the
+frame and nothing else: the panel's padding and border go, *Integration management* is not
+displayed, and the frame is given the panel's whole height - nothing under it. Nothing is
+reloaded or repainted and the iframe is not moved (a moved iframe reloads its document);
+three presses on the assistant's header or launcher turn focus on and off, and leaving it
+puts the accordion back. The contract is the one class that extension writes on the tab's
+panel, `forge-assistant-focus-root`; `style.css` and `browser/minipaint_wangp.js` read it,
+and `tests/browser_intercept.py` measures the result in a real browser against a copy of
+that extension's own rule.
 
 ## When the WanGP view stops answering
 

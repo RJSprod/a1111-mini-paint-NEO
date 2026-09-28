@@ -276,16 +276,22 @@ save at a time; `state().settings` says whether the record is current.
 `{mode, accent, skin, palette}` after READY and again whenever the tab comes back on
 screen; `samplePalette()` is the page's own colours, one solid colour per slot of
 `PALETTE_SLOTS` (`ink, ink-dim, page, panel, raised, line, line-soft, accent,
-accent-ink`), resolved by painting a probe from each slot's Gradio variables in turn
-(`PALETTE_SOURCES`, first choice first - a gradient or an unset variable computes to
-transparent and the next is tried; a slot nothing paints is left out) and read back as
-what the browser computed; `state().theme` is `{mode, skin}`. `skin` is the look from
+accent-ink`). Five are read off the page - the text, the page colour and the accent -
+by painting a probe from each slot's Gradio variables in turn (`PALETTE_SOURCES`, first
+choice first - a gradient or an unset variable computes to transparent and the next is
+tried; a slot nothing paints is left out) and reading back what the browser computed.
+The four surfaces are DERIVED (`SURFACE_STEPS`, `settlePalette`): steps of luminance
+from the page colour towards the ink - a group's box 0.08 above the page, an input
+0.05 above the box, a hover 0.04 and a border 0.10 above the input - because Gradio's
+variables for them say what the theme's base declares and not what the page shows
+(Lobe paints its blocks and inputs with rules of its own). `state().theme` is
+`{mode, skin}`, and the journal line lists the colours sent. `skin` is the look from
 Settings as the tab's view JSON carries it (`look`): `host` sends the palette and the mode
 read off the page colour sampled (dark below half luminance), `bridge` sends no palette,
 `off` sends none and says `mode: "light"` - the one word that leaves WanGP alone on a
 bridge older than the skins, which reads `mode` and nothing else. A look word the bundle
-does not know is `host`. The journal says `theme: host (9 of 9 colours sampled from this
-page), dark` once per change, never once per send.
+does not know is `host`. The journal says `theme: host, dark; ink rgb(...), ... accent-ink
+rgb(...)` once per change, never once per send.
 
 **Focus mode** (SD-Neo-ModelSwitchRefiner's assistant): the class it puts on the tab's
 panel, `forge-assistant-focus-root`, is the contract. Under it the stylesheet makes the
@@ -331,7 +337,10 @@ variables - declared `!important` on `[id^="component-"]`, because `ui_studio.py
 rewrites its `.wangp-studio-*` classes to `#component-N` ids when it builds the page's
 CSS and only importance gets past an id - plus the fixed colours of `ui_styles.css`
 that no variable reaches (the model selector's slab, the title rules, the editor's
-buttons, the queue table, the progress bar). The handshake says
+buttons, the queue table, the progress bar). Groups: every `.form` and `.gr-group` is a
+box of the panel colour (`!important`, over the transparency the studio look gives
+them), a selected tab is the accent on the raised surface, and in dark mode a ticked box
+is the accent pulled towards the page so a white check shows on a white accent. The handshake says
 `capabilities.theme_palette`; a parent that never hears it sends `mode` alone, and
 the script's first paint is the bridge's own dark until the parent speaks.
 

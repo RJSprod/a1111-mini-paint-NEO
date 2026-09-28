@@ -1722,11 +1722,14 @@ const PAGE_VARS = MODE === "themeGradient" ? {
   "--input-background-fill": "rgb(238, 240, 244)", "--border-color-primary": "rgb(211, 216, 224)",
   "--color-accent-soft": "rgb(228, 232, 238)", "--color-accent": "rgb(63, 127, 216)", "--button-primary-text-color": "rgb(255, 255, 255)"
 } : {
+  // The surfaces are what Gradio's dark theme declares - slate - and not
+  // what a page like Lobe's shows, which is why the bundle derives them.
   "--body-text-color": "rgb(230, 232, 238)", "--body-text-color-subdued": "rgb(164, 170, 184)",
-  "--body-background-fill": "rgb(20, 22, 27)", "--block-background-fill": "rgb(27, 30, 37)",
-  "--input-background-fill": "rgb(33, 37, 46)", "--border-color-primary": "rgb(47, 52, 63)",
-  "--color-accent-soft": "rgb(38, 43, 52)", "--color-accent": "rgb(110, 168, 254)", "--button-primary-text-color": "rgb(13, 17, 23)"
+  "--body-background-fill": "rgb(20, 22, 27)", "--block-background-fill": "rgb(55, 65, 81)",
+  "--input-background-fill": "rgb(55, 65, 81)", "--border-color-primary": "rgb(75, 85, 99)",
+  "--color-accent-soft": "rgb(200, 210, 230)", "--color-accent": "rgb(110, 168, 254)", "--button-primary-text-color": "rgb(13, 17, 23)"
 };
+function lum(colour) { const m = /(\d+),\s*(\d+),\s*(\d+)/.exec(colour || ""); return m ? (0.2126 * m[1] + 0.7152 * m[2] + 0.0722 * m[3]) / 255 : null; }
 // The tab's view JSON, with the look from Settings, for the theme scenarios.
 if (MODE.indexOf("theme") === 0) {
   const stateBox = new El("div"); stateBox.id = "wangp_state";
@@ -1765,8 +1768,10 @@ async function themeScenario() {
   // tells the bridge again - and says nothing new when nothing changed.
   selectTab(false); await advance(50);
   selectTab(true); await advance(50);
+  const palette = (atReady[0] && atReady[0].palette) || {};
+  const lums = {}; Object.keys(palette).forEach((k) => { lums[k] = lum(palette[k]); });
   return { atReady, later: B.themes.slice(atReady.length), saidAtReady, said: linesWith("theme:"),
-           state: api.state().theme, probes: docRoot.children.filter((c) => c.tagName === "SPAN").length };
+           state: api.state().theme, probes: docRoot.children.filter((c) => c.tagName === "SPAN").length, lums };
 }
 
 const scenarios = {
@@ -2242,17 +2247,30 @@ def theme_send_checks(r: Results) -> None:
         r.check(f"the {mode} scenario ran", isinstance(answer, dict) and "error" not in answer and "atReady" in answer, str(answer)[:300])
     host = answers.get("themeHost") or {}
     sent = (host.get("atReady") or [{}])[0] if host.get("atReady") else {}
+    palette = sent.get("palette") or {}
+    lums = host.get("lums") or {}
     r.check("with the host look, the ready handshake is followed by one THEME_STATE carrying this page's nine colours",
             len(host.get("atReady") or []) == 1 and sent.get("skin") == "host"
-            and sorted((sent.get("palette") or {}).keys()) == sorted(protocol.PALETTE_SLOTS), str(sent))
-    r.check("each the colour the page's first-choice variable resolved to",
-            (sent.get("palette") or {}).get("page") == "rgb(20, 22, 27)" and (sent.get("palette") or {}).get("accent") == "rgb(110, 168, 254)"
+            and sorted(palette.keys()) == sorted(protocol.PALETTE_SLOTS), str(sent))
+    r.check("the text, the page and the accent are what the page's first-choice variables resolved to",
+            palette.get("page") == "rgb(20, 22, 27)" and palette.get("ink") == "rgb(230, 232, 238)"
+            and palette.get("accent") == "rgb(110, 168, 254)" and palette.get("accent-ink") == "rgb(13, 17, 23)"
             and sent.get("accent") == "rgb(110, 168, 254)", str(sent))
+    # The surfaces are never the variables' word: Gradio's dark theme says
+    # slate for a block and an input, and a page like Lobe's paints neither.
+    r.check("the surfaces are derived from the page and its ink, not read from the variables that name them",
+            palette.get("panel") not in ("rgb(55, 65, 81)", None) and palette.get("raised") != "rgb(55, 65, 81)"
+            and palette.get("line") != "rgb(75, 85, 99)" and palette.get("line-soft") != "rgb(200, 210, 230)", str(palette))
+    r.check("each a step lighter than the one it sits on, on a dark page: box on page, input on box, hover and border on input",
+            lums.get("panel", 0) - lums.get("page", 1) >= 0.08 and lums.get("raised", 0) - lums.get("panel", 1) >= 0.05
+            and lums.get("line-soft", 0) - lums.get("raised", 1) >= 0.04 and lums.get("line", 0) - lums.get("raised", 1) >= 0.10
+            and lums.get("line", 0) < 0.5, str(lums))
     r.check("and the mode read off the page colour: dark", sent.get("mode") == "dark" and (host.get("state") or {}).get("mode") == "dark"
             and (host.get("state") or {}).get("skin") == "host", str(host.get("state")))
     r.check("the probe the colours were read through is taken away again", host.get("probes") == 0, str(host.get("probes")))
-    r.check("said once in the journal, with how many colours the page gave",
-            host.get("saidAtReady") == 1 and any("theme: host (9 of 9 colours sampled from this page), dark" in line for line in host.get("said") or []),
+    r.check("said once in the journal, with the colours themselves",
+            host.get("saidAtReady") == 1 and any(line.startswith("theme: host, dark; ink rgb(230, 232, 238), ") and "page rgb(20, 22, 27)" in line
+                                               and "panel rgb(" in line and "accent rgb(110, 168, 254)" in line for line in host.get("said") or []),
             str(host.get("said")))
     r.check("back on screen the tab tells the bridge again, and says nothing new when nothing changed",
             len(host.get("later") or []) == 1 and len(host.get("said") or []) == 1, str(host.get("later")) + " " + str(host.get("said")))
@@ -2260,13 +2278,18 @@ def theme_send_checks(r: Results) -> None:
     gradient = answers.get("themeGradient") or {}
     sent = (gradient.get("atReady") or [{}])[0] if gradient.get("atReady") else {}
     palette = sent.get("palette") or {}
-    r.check("a page background that is a gradient falls to the slot's second choice, and a slot with nothing solid is left out",
-            palette.get("page") == "rgb(30, 30, 30)" and "line-soft" not in palette and len(palette) == 8, str(palette))
+    r.check("a page background that is a gradient falls to the slot's second choice, and the surfaces step from that",
+            palette.get("page") == "rgb(30, 30, 30)" and len(palette) == 9
+            and (gradient.get("lums") or {}).get("panel", 0) > (gradient.get("lums") or {}).get("page", 1), str(palette))
 
     light = answers.get("themeLight") or {}
     sent = (light.get("atReady") or [{}])[0] if light.get("atReady") else {}
-    r.check("a light page is told as light", sent.get("mode") == "light" and sent.get("skin") == "host"
-            and (sent.get("palette") or {}).get("page") == "rgb(246, 247, 249)", str(sent))
+    lums = light.get("lums") or {}
+    r.check("a light page is told as light, and its surfaces step the other way, towards its dark ink",
+            sent.get("mode") == "light" and sent.get("skin") == "host"
+            and (sent.get("palette") or {}).get("page") == "rgb(246, 247, 249)"
+            and lums.get("page", 0) - lums.get("panel", 1) >= 0.08 and lums.get("panel", 0) - lums.get("raised", 1) >= 0.05
+            and lums.get("raised", 0) - lums.get("line", 1) >= 0.10, str(lums))
 
     bridge = answers.get("themeBridge") or {}
     sent = (bridge.get("atReady") or [{}])[0] if bridge.get("atReady") else {}
@@ -2871,13 +2894,39 @@ def theme_checks(r: Results) -> None:
             and len(re.findall(r"--studio-[a-z-]+:", studio)) == len(WANGP_STUDIO_VARIABLES), studio[:200])
     r.check("Gradio's palette is remapped under the attribute alone, so both modes share one set of rules and no attribute is WanGP untouched",
             ":root[data-minipaint-theme] .gradio-container,\n:root[data-minipaint-theme] body {" in css
-            and '="off"' not in css and ':root[data-minipaint-theme="dark"] .gradio-container' not in css, "")
+            and '="off"' not in css
+            # The one mode-keyed rule on the container is the ticked box, below.
+            and css.count(':root[data-minipaint-theme="dark"] .gradio-container') == 1, "")
     tail = css[css.find("/* Gradio's palette, remapped."):]
     literal = re.findall(r"#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(", tail)
     r.check("and nothing after the two palettes names a colour of its own: every rule reads a slot",
             literal == [] and tail.count("var(--mp-") > 60, str(literal[:5]))
     r.check("no rule selects a control by its text, and none touches layout, visibility or a value",
             ":contains" not in css and "display:" not in tail and "visibility:" not in tail and "content:" not in tail, "")
+    # Round two, from the first screenshot: a selected tab was the soft accent
+    # under accent-coloured text, which on a page whose accent is white is
+    # white on pale; the groups Lobe draws were missing; the model slab kept
+    # WanGP's slate.
+    tab = css[css.find(":root[data-minipaint-theme] .gradio-container .tab-wrapper"):]
+    tab = tab[:tab.find("}") + 1]
+    r.check("a selected tab is the accent on the raised surface, with the importance WanGP's id-scoped rule needs",
+            ".tab-container button.selected," in tab and ".tab-nav > button.selected {" in tab
+            and "color: var(--mp-accent) !important" in tab and "background: var(--mp-raised) !important" in tab, tab)
+    r.check("and the soft studio surface is the raised one, never the soft accent",
+            "--studio-soft: var(--mp-raised) !important;" in studio and "--studio-soft: var(--mp-line-soft)" not in css, studio)
+    groups = css[css.find(":root[data-minipaint-theme] .gradio-container .form,"):]
+    groups = groups[:groups.find("}") + 1]
+    r.check("a form and a group are boxes of the panel colour, over the transparency WanGP's studio look gives them",
+            ".gr-group > .styler {" in groups and "background: var(--mp-panel) !important" in groups
+            and "padding" not in groups and "margin" not in groups and "gap" not in groups, groups)
+    slab = css[css.find(":is(#model_list, #family_list, #model_base_types_list) {"):]
+    slab = slab[:slab.find("}") + 1]
+    r.check("the model selector's slab is the panel colour with importance, so no build of WanGP's rule can keep the slate",
+            "background-color: var(--mp-panel) !important" in slab, slab)
+    r.check("a ticked box is the accent pulled towards the page in dark mode only, so a white check shows on a white accent",
+            ':root[data-minipaint-theme="dark"] .gradio-container,' in css
+            and "--checkbox-background-color-selected: color-mix(in srgb, var(--mp-accent) 60%, var(--mp-page))" in css
+            and css.count("color-mix(") == 1, "")
 
 
 def bridge_liveness_checks(r: Results) -> None:

@@ -89,22 +89,33 @@ window.minipaintWanGP = (function () {
     const THEME_SKINS = [SKIN_HOST, SKIN_BRIDGE, SKIN_OFF];
     const PALETTE_SLOTS = ["ink", "ink-dim", "page", "panel", "raised", "line", "line-soft", "accent", "accent-ink"];
     const COLOUR_RE = /^(#[0-9a-fA-F]{3,8}|(rgb|rgba|hsl|hsla|hwb|lab|lch|oklab|oklch|color)\([-0-9a-zA-Z.%,/ ]{1,80}\))$/;
-    //: Where each slot is read from on this page: Gradio's own theme
-    //: variables, first choice first, so a Forge theme that sets them - Lobe
-    //: does - is what the WanGP page ends up wearing. A slot that resolves
-    //: to nothing solid (a gradient, a variable nobody set) is left out, and
-    //: the bridge keeps its own default for it.
+    //: What is read off this page: the text, the page colour and the accent,
+    //: from Gradio's own theme variables, first choice first, so a Forge
+    //: theme that sets them - Lobe does - is what the WanGP page ends up
+    //: wearing. A slot that resolves to nothing solid (a gradient, a variable
+    //: nobody set) is left out, and the bridge keeps its own default for it.
+    //:
+    //: The SURFACES are not read; they are derived (SURFACE_STEPS). Gradio's
+    //: variables for them say what the theme's base declares, not what the
+    //: page shows: Lobe paints its blocks and inputs with rules of its own and
+    //: leaves --block-background-fill and --input-background-fill at Gradio's
+    //: defaults, which put slate inputs and no group boxes on a black WanGP
+    //: page. What the page shows is its colour and its ink, and the surfaces
+    //: between them are steps of the one towards the other.
     const PALETTE_SOURCES = {
         "ink": ["--body-text-color"],
         "ink-dim": ["--body-text-color-subdued", "--body-text-color"],
         "page": ["--body-background-fill", "--background-fill-primary"],
-        "panel": ["--block-background-fill", "--background-fill-primary"],
-        "raised": ["--input-background-fill", "--background-fill-secondary"],
-        "line": ["--border-color-primary", "--block-border-color"],
-        "line-soft": ["--color-accent-soft", "--background-fill-secondary"],
         "accent": ["--color-accent", "--button-primary-background-fill"],
         "accent-ink": ["--button-primary-text-color"]
     };
+    //: The surfaces, each a step of luminance from its base towards the ink:
+    //: a group's box on the page, an input or a button on the box, a hovered
+    //: or selected one, and a border. The steps are Lobe's night mode as
+    //: measured - #141414 boxes on black, #222 inputs, #3c3c3c borders - and
+    //: read the same way from a light page, towards its dark ink.
+    const SURFACE_STEPS = [["panel", "page", 0.08], ["raised", "panel", 0.05],
+                           ["line-soft", "raised", 0.04], ["line", "raised", 0.10]];
     //: What a browser computes for "no colour at all".
     const TRANSPARENT_RE = /^rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0\s*\)$/;
     const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED, PONG, FORM_CHANGED];
@@ -3876,17 +3887,64 @@ window.minipaintWanGP = (function () {
             }
         } catch (e) { /* no palette, then: the bridge keeps its own */ }
         try { if (probe && probe.parentNode) { probe.parentNode.removeChild(probe); } } catch (e) { /* already gone */ }
-        return out;
+        return settlePalette(out);
+    }
+
+    /** The three channels of a colour a browser computed - rgb() or rgba() -
+     * or null for anything else. */
+    function channels(colour) {
+        const parts = typeof colour === "string" ? /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(colour) : null;
+        return parts ? [Number(parts[1]), Number(parts[2]), Number(parts[3])] : null;
+    }
+
+    /** How light a colour is, 0 to 1: the weighted mean of its channels.
+     * Not the photometric luminance; the same measure the steps are set in. */
+    function luminance(rgb) {
+        return (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255;
+    }
+
+    function rgbText(rgb) {
+        return "rgb(" + rgb.map(function (v) { return Math.max(0, Math.min(255, Math.round(v))); }).join(", ") + ")";
+    }
+
+    /** The colour `delta` of luminance from `base` in the direction of `ink`:
+     * the least mixture of the two that is that far from the base, or the
+     * most that will be tried when the ink is too close to give it. */
+    function stepFrom(base, ink, delta) {
+        const from = luminance(base);
+        let mixed = base;
+        for (let t = 0.02; t <= 0.6; t += 0.02) {
+            mixed = base.map(function (v, i) { return v + (ink[i] - v) * t; });
+            if (Math.abs(luminance(mixed) - from) >= delta) { break; }
+        }
+        return mixed;
+    }
+
+    /** The surfaces a palette wears between its page and its ink, derived
+     * as SURFACE_STEPS says. A palette with no page colour keeps whatever the
+     * bridge's own defaults are for them; one with no ink is stepped towards
+     * white on a dark page and towards black on a light one. */
+    function settlePalette(palette) {
+        const page = channels(palette.page);
+        if (!page) { return palette; }
+        const ink = channels(palette.ink) || (luminance(page) < 0.5 ? [255, 255, 255] : [0, 0, 0]);
+        const bases = { page: page };
+        SURFACE_STEPS.forEach(function (step) {
+            const base = bases[step[1]];
+            if (!base) { return; }
+            const made = stepFrom(base, ink, step[2]);
+            bases[step[0]] = made;
+            palette[step[0]] = rgbText(made);
+        });
+        return palette;
     }
 
     /** Dark or light, from the page colour a palette carries - a browser
      * computes it as rgb() - or "" when it carries none it can read. */
     function paletteMode(palette) {
-        const page = palette && palette.page;
-        const parts = typeof page === "string" ? /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(page) : null;
-        if (!parts) { return ""; }
-        const luminance = (0.2126 * Number(parts[1]) + 0.7152 * Number(parts[2]) + 0.0722 * Number(parts[3])) / 255;
-        return luminance < 0.5 ? THEME_DARK : THEME_LIGHT;
+        const page = channels(palette && palette.page);
+        if (!page) { return ""; }
+        return luminance(page) < 0.5 ? THEME_DARK : THEME_LIGHT;
     }
 
     /**
@@ -3919,8 +3977,12 @@ window.minipaintWanGP = (function () {
         };
         const sent = post(THEME_STATE, hex32(), payload);
         if (sent) {
-            const summary = "theme: " + skin + (skin === SKIN_HOST ? " (" + Object.keys(palette).length + " of "
-                + PALETTE_SLOTS.length + " colours sampled from this page)" : "") + ", " + wanted;
+            // The colours themselves, because "it looks wrong" is answered by
+            // what was sent and not by how many things were.
+            const summary = "theme: " + skin + ", " + wanted + (skin === SKIN_HOST
+                ? "; " + PALETTE_SLOTS.filter(function (slot) { return palette[slot]; })
+                    .map(function (slot) { return slot + " " + palette[slot]; }).join(", ")
+                : "");
             if (summary !== S.themeSaid) {
                 S.themeSaid = summary;
                 say(summary);

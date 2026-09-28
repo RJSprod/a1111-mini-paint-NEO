@@ -176,12 +176,48 @@
   --studio-border: var(--mp-line) !important;
   --studio-label: var(--mp-ink-dim) !important;
   --studio-accent: var(--mp-accent) !important;
-  --studio-soft: var(--mp-line-soft) !important;
+  --studio-soft: var(--mp-raised) !important;
   --studio-button: var(--mp-raised) !important;
   --studio-button-hover: var(--mp-line) !important;
   --studio-button-text: var(--mp-ink) !important;
   --studio-disabled: var(--mp-panel) !important;
   --studio-disabled-text: var(--mp-ink-dim) !important;
+}
+
+/* A selected tab: its own colour for the text on a surface a step above the
+   page, said outright rather than left to the two studio variables above.
+   The first round mapped the tab's background to the soft accent, and a page
+   whose accent is white - Lobe's night mode - got white text on a pale tab.
+   The importance is WanGP's rule's specificity (an id, through :is()); its
+   own declarations carry none. */
+:root[data-minipaint-theme] .gradio-container .tab-wrapper > .tab-container button.selected,
+:root[data-minipaint-theme] .gradio-container .tab-nav > button.selected {
+  color: var(--mp-accent) !important;
+  background: var(--mp-raised) !important;
+  border-color: var(--mp-accent) !important;
+}
+
+/* Groups. Lobe draws each group of controls in a box a shade lighter than
+   the page and the inputs a shade lighter again, and that is what makes its
+   page readable at a glance; WanGP's studio look makes the form containers
+   transparent and gives each field a surface instead. Under the hijack the
+   form is the box - the panel colour, the fields inside it the same colour so
+   they merge into it, the inputs and buttons on it the raised colour. Colour
+   and radius only: the gaps, padding and order WanGP laid out are untouched. */
+:root[data-minipaint-theme] .gradio-container .form,
+:root[data-minipaint-theme] .gradio-container .gr-group,
+:root[data-minipaint-theme] .gradio-container .gr-group > .styler {
+  background: var(--mp-panel) !important;
+  border-color: var(--mp-line-soft);
+  border-radius: 8px;
+}
+
+/* A ticked box in dark mode is the accent pulled towards the page, so the
+   check Gradio draws in white shows on a white accent as well as a blue one;
+   in light mode the accent is dark against a white check already. */
+:root[data-minipaint-theme="dark"] .gradio-container,
+:root[data-minipaint-theme="dark"] body {
+  --checkbox-background-color-selected: color-mix(in srgb, var(--mp-accent) 60%, var(--mp-page));
 }
 
 /* The fixed colours in WanGP's own ui_styles.css that no variable reaches:
@@ -191,7 +227,7 @@
    !important only where WanGP's own rule is. Each is a colour a night page
    would otherwise show as a slab of daylight, or a light one as a hole. */
 :root[data-minipaint-theme] :is(#model_list, #family_list, #model_base_types_list) {
-  background-color: var(--mp-raised);
+  background-color: var(--mp-panel) !important;
 }
 
 :root[data-minipaint-theme] .title-with-lines .line {
@@ -293,10 +329,10 @@
 }
 
 /* Restraint on borders and radius, applied only to Gradio's own block class so
-   that a WanGP-authored element keeps whatever WanGP gave it. */
-:root[data-minipaint-theme] .gradio-container .block,
-:root[data-minipaint-theme] .gradio-container .form {
-  border-color: var(--mp-line);
+   that a WanGP-authored element keeps whatever WanGP gave it. The border is
+   the soft line: a box is told apart by its surface, not by an outline. */
+:root[data-minipaint-theme] .gradio-container .block {
+  border-color: var(--mp-line-soft);
   border-radius: 8px;
 }
 

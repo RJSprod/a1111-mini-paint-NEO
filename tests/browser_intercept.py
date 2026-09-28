@@ -677,6 +677,196 @@ def check_the_page_palette_is_sampled(r: Results, page) -> None:
             "monospace" in (seen.get("mono") or "") and isinstance(seen.get("faces"), list), str(seen.get("mono")))
 
 
+#: The CDN: another origin (the next port), CORS on, serving a Lobe-shaped
+#: webfont sheet at npmmirror's path shape - relative urls, a charset - and
+#: the font file it names; the same sheet from a path that sends no CORS
+#: header; and a KaTeX-like sheet whose faces no list on the page names.
+FONT_PORT = PORT + 1
+CDN_SHEET = "/cdn/@lobehub/webfont-harmony-sans/1.0.0/files/css/index.css"
+CDN_FONT = "/cdn/@lobehub/webfont-harmony-sans/1.0.0/files/fonts/test-face.ttf"
+
+
+def _system_font():
+    """A sans TTF this machine has, to serve as the page's webfont - or None,
+    and the checks that need a face to actually load say they were skipped."""
+    for pattern in ("**/*Sans-Regular.ttf", "**/DejaVuSans.ttf", "**/*Sans*.ttf", "**/*.ttf"):
+        for root in ("/usr/share/fonts", "/usr/local/share/fonts", "/Library/Fonts", "C:/Windows/Fonts"):
+            base = pathlib.Path(root)
+            if base.is_dir():
+                found = sorted(base.glob(pattern))
+                if found:
+                    return found[0]
+    return None
+
+
+def _serve_cdn(font_file):
+    import http.server
+    import threading
+
+    sheet = ('@charset "UTF-8";\n/* Regular */\n@font-face {\n  font-family: \'HarmonyOS Sans\';\n'
+             '  src: local(HarmonyOS_Sans_Regular), url(\'../fonts/test-face.ttf\') format(\'truetype\');\n'
+             '  font-weight: 400;\n  font-style: normal;\n  font-display: swap;\n}\n').encode("utf-8")
+    katex = (b".katex { font: normal 1.21em KaTeX_Main, Times New Roman, serif; }\n"
+             b"@font-face { font-family: KaTeX_Main; src: url(fonts/KaTeX_Main-Regular.woff2) format('woff2'); }\n")
+    font = font_file.read_bytes() if font_file else b""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            routes = {CDN_SHEET: (sheet, "text/css", True), CDN_FONT: (font, "font/ttf", True),
+                      "/nocors/index.css": (sheet, "text/css", False), "/cdn/katex/katex.min.css": (katex, "text/css", True)}
+            if path not in routes or not routes[path][0]:
+                self.send_response(404)
+                self.end_headers()
+                return
+            body, kind, cors = routes[path]
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            if cors:
+                self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", FONT_PORT), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+LOBE_PAGE_JS = """([font, mono, origin]) => {
+    const style = document.createElement("style");
+    style.id = "mp-lobe-font";
+    style.textContent = ":root, .dark { --font: " + font + "; --font-mono: " + mono + "; }";
+    document.head.appendChild(style);
+    for (const path of ["/cdn/@lobehub/webfont-harmony-sans/1.0.0/files/css/index.css", "/nocors/index.css", "/cdn/katex/katex.min.css"]) {
+        const link = document.createElement("link");
+        link.rel = "stylesheet"; link.href = origin + path; link.className = "mp-lobe-sheet";
+        document.head.appendChild(link);
+    }
+    return true;
+}"""
+LOBE_PAGE_AWAY_JS = """() => {
+    document.querySelectorAll("#mp-lobe-font, .mp-lobe-sheet, #mp-wangp-font-frame").forEach((node) => node.remove());
+    return true;
+}"""
+#: A WanGP-shaped document in a same-origin frame: Gradio 5's own stack as
+#: WanGP's studio themes leave it - a quoted 'Verdana' and nothing behind it
+#: - read through --font, as Gradio's components read it.
+WANGP_FRAME_JS = """(script) => new Promise((resolve) => {
+    const frame = document.createElement("iframe");
+    frame.id = "mp-wangp-font-frame";
+    frame.style.cssText = "position:fixed;left:0;top:0;width:600px;height:200px;border:0;visibility:hidden";
+    frame.srcdoc = "<!doctype html><html><head><style>:root { --font: 'Verdana'; } "
+        + ".gradio-container, .gradio-container * { font-family: var(--font); }</style></head>"
+        + "<body><div class='gradio-container'><span id='probe' style='font-size:16px;white-space:nowrap'>"
+        + "Sampling Method 1024 Generate</span></div></body></html>";
+    frame.addEventListener("load", () => {
+        const tag = frame.contentDocument.createElement("script");
+        tag.textContent = script;
+        frame.contentDocument.head.appendChild(tag);
+        resolve(!!frame.contentWindow.__minipaintBridge);
+    });
+    document.body.appendChild(frame);
+})"""
+WANGP_FRAME_APPLY_JS = """async (payload) => {
+    const win = document.getElementById("mp-wangp-font-frame").contentWindow;
+    const doc = win.document;
+    const before = win.getComputedStyle(doc.getElementById("probe")).fontFamily;
+    win.__minipaintBridge.theme(payload);
+    const after = win.getComputedStyle(doc.getElementById("probe")).fontFamily;
+    let loaded = [];
+    try { loaded = await doc.fonts.load('16px "HarmonyOS Sans"'); } catch (e) { loaded = []; }
+    await doc.fonts.ready;
+    const width = (family) => {
+        const span = doc.createElement("span");
+        span.textContent = "Sampling Method 1024 Generate";
+        span.style.cssText = "position:absolute;font-size:16px;white-space:nowrap" + (family ? ";font-family:" + family : "");
+        doc.querySelector(".gradio-container").appendChild(span);
+        const w = span.getBoundingClientRect().width; span.remove(); return w;
+    };
+    return { before: before, after: after, mark: doc.documentElement.getAttribute("data-minipaint-font"),
+             sheet: (doc.getElementById("minipaint-bridge-fonts") || {}).textContent || "",
+             loaded: loaded.length,
+             faces: [...doc.fonts].filter((f) => f.family.replace(/"/g, "") === "HarmonyOS Sans").map((f) => f.status),
+             probe: doc.getElementById("probe").getBoundingClientRect().width,
+             harmony: width('"HarmonyOS Sans"'), serif: width("serif") };
+}"""
+
+
+def check_the_page_typeface_reaches_wangp(r: Results, page) -> None:
+    """The Lobe theme's typeface, from its page to a WanGP-shaped document.
+
+    The first version of this passed every check and did nothing on the
+    user's page: the Lobe theme's font list is 380 characters and the tab
+    allowed 300, and its HarmonyOS Sans comes from a CDN stylesheet another
+    origin serves, which the tab skipped. Both are here for real: the page
+    carries Lobe's own lists, and the sheet is served from another origin
+    (the next port) with CORS, as npmmirror and unpkg serve it - beside the
+    same sheet with no CORS header, and a KaTeX-like sheet whose faces no list
+    names. The frame runs the bridge's own document script and stylesheet, so
+    what is measured at the end is the face loading in a document set in
+    Gradio 5's own 'Verdana'-and-nothing stack.
+    """
+    import sys as _sys
+
+    from test_wangp_protocol import LOBE_FONT, LOBE_MONO
+
+    folder = str(ROOT / "wan2gp_bridge" / "wan2gp-minipaint-bridge")
+    _sys.path.insert(0, folder)
+    try:
+        import bridge_js
+    finally:
+        if folder in _sys.path:
+            _sys.path.remove(folder)
+    theme_css = (ROOT / "wan2gp_bridge" / "wan2gp-minipaint-bridge" / "theme.css").read_text(encoding="utf-8")
+
+    font_file = _system_font()
+    server = _serve_cdn(font_file)
+    origin = f"http://127.0.0.1:{FONT_PORT}"
+    try:
+        page.evaluate(LOBE_PAGE_JS, [LOBE_FONT, LOBE_MONO, origin])
+        page.wait_for_timeout(800)
+        page.evaluate("() => window.minipaintWanGP.theme()")
+        sampled = {}
+        for _ in range(40):
+            sampled = page.evaluate("() => window.minipaintWanGP.sampleFont()")
+            if not (sampled.get("sheets") or {}).get("pending"):
+                break
+            page.wait_for_timeout(150)
+        faces = sampled.get("font_faces") or []
+        cdn = [one for one in faces if "HarmonyOS Sans" in one]
+        r.check("the Lobe theme's own font lists are read off the page whole - 380 and 313 characters",
+                sampled.get("font") == LOBE_FONT and sampled.get("font_mono") == LOBE_MONO,
+                str(len(sampled.get("font") or "")) + " " + str(sampled.get("refused")))
+        r.check("the CDN's sheet is read across origins, and its face made absolute against it",
+                len(cdn) == 1 and f"url('{origin}{CDN_FONT}')" in cdn[0], str(faces)[:300])
+        r.check("the same sheet from an address with no CORS header is named unreadable, and no face of the KaTeX sheet rides",
+                any(one.startswith(f"127.0.0.1:{FONT_PORT} (not readable across origins") for one in (sampled.get("sheets") or {}).get("unreadable") or [])
+                and not any("KaTeX" in one for one in faces), str(sampled.get("sheets")))
+
+        ready = page.evaluate(WANGP_FRAME_JS, bridge_js.document_script(theme_css))
+        r.check("a WanGP-shaped frame runs the bridge's own script and stylesheet", ready is True, str(ready))
+        seen = page.evaluate(WANGP_FRAME_APPLY_JS, {"mode": "dark", "skin": "host", "palette": {},
+                                                    "font": sampled.get("font"), "font_mono": sampled.get("font_mono"),
+                                                    "font_faces": faces})
+        r.check("in it the text is set in the page's list, where Gradio 5's stack had left it 'Verdana' and nothing behind it",
+                seen.get("before") == "Verdana" and (seen.get("after") or "").startswith('"HarmonyOS Sans", "Segoe UI"')
+                and seen.get("mark") == "host" and "HarmonyOS Sans" in (seen.get("sheet") or ""), str(seen)[:300])
+        if font_file:
+            r.check("and the CDN's face loads there, from the other origin, and is what the text is drawn in",
+                    seen.get("loaded", 0) >= 1 and "loaded" in (seen.get("faces") or [])
+                    and abs(seen.get("probe", 0) - seen.get("harmony", -1)) < 0.5
+                    and abs(seen.get("probe", 0) - seen.get("serif", 0)) > 2, str(seen)[:300])
+        else:
+            r.check("no system font to serve as the CDN's face, so its loading is not measured here (skipped)", True)
+    finally:
+        page.evaluate(LOBE_PAGE_AWAY_JS)
+        server.shutdown()
+
+
 def check_the_direct_route_when_the_queue_is_dead(r: Results, page) -> None:
     """Gradio's queue cut: the takeover never needed it, so nothing changes."""
     open_txt2img(page)
@@ -739,6 +929,7 @@ def run() -> Results:
                 check_the_wangp_panel_is_parked_not_hidden(r, page)
                 check_focus_mode_makes_the_frame_the_window(r, page)
                 check_the_page_palette_is_sampled(r, page)
+                check_the_page_typeface_reaches_wangp(r, page)
                 check_the_direct_route_when_the_queue_is_dead(r, page)
             finally:
                 browser.close()

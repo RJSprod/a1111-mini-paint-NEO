@@ -430,7 +430,7 @@ theme* (the default: this page's text, page colour and accent, read by the tab, 
 surfaces between them derived a shade apart the way Lobe lays a black page out, so Lobe's
 night mode is what WanGP wears too), *Mini Paint's own dark and light*, or *WanGP's own
 theme*, which leaves WanGP alone. With either of the first two the WanGP page is also set in
-this page's typeface, the faces it loaded included (bridge 1.10.0). Needs the bridge installed
+this page's typeface, the faces it loaded included - from a CDN too, as Lobe's are (bridge 1.10.1). Needs the bridge installed
 from setup step 4 and WanGP restarted, and reaches the page at the next Reload UI. `docs/wangp/README.md` has the
 detail, and `docs/wangp/THEME_HIJACK_2026-09-28.txt` the design.
 
@@ -600,7 +600,7 @@ same server-owned queue as the tab's presses, ids are never paths, and the answe
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
 API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 rewrite (the page's model
 travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
-and its place in WanGP. Bridge plugin 1.10.0 carries the queue, start and track operations
+and its place in WanGP. Bridge plugin 1.10.1 carries the queue, start and track operations
 (protocol 5) and the control plane server-owned execution runs on (protocol 6), answers the
 WanGP tab's heartbeat and says when its form is touched, guards the page's Gradio session
 (below), dresses the WanGP page in the colours this page sends (above) and refuses
@@ -642,7 +642,7 @@ Every job then says where its settings came from — on its card in the Queue, i
 History, in the Send to WanGP popup's history, and in the log: *saved from the WanGP page at
 send*, *WanGP's last saved settings (the page didn't answer)*, *WanGP's last saved settings
 (WanGP was loading a model's settings at send)*, or *the model's defaults (nothing saved
-yet)*. Saving as you change needs bridge 1.7.0, the session guard 1.8.0, the page's colours 1.9.0 and its typeface 1.10.0; with an older bridge the save before every
+yet)*. Saving as you change needs bridge 1.7.0, the session guard 1.8.0, the page's colours 1.9.0 and its typeface 1.10.1; with an older bridge the save before every
 send still happens, and waits up to two seconds each time because it cannot know nothing
 changed.
 

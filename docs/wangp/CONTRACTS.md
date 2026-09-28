@@ -286,14 +286,27 @@ from the page colour towards the ink - a group's box 0.08 above the page, an inp
 variables for them say what the theme's base declares and not what the page shows
 (Lobe paints its blocks and inputs with rules of its own). `state().theme` is
 `{mode, skin}`, and the journal line lists the colours sent. **The typeface** (bridge
-1.10.0): `sampleFont()` is the page's `--font` and `--font-mono` as its stylesheet states
-them (Lobe writes its own stacks into both; the container's `font-family` when `--font`
-is unset) and, for the families they name, the `@font-face` rules of this origin's own
-stylesheets with their `url()` made absolute against the sheet (`font_faces`, twelve at
-most; a sheet another origin makes unreadable is skipped, so a Google Fonts family falls
-through to the next in the list). It rides with any skin but off - it is not a colour -
-and is validated on both sides (`valid_font_list`, `valid_font_face`: one plain
-`@font-face` block, its `url()` http(s) or root-relative, never `data:`). `skin` is the look from
+1.10.0, fixed in 1.10.1): `sampleFont()` is the page's `--font` and `--font-mono` as its
+stylesheet states them (Lobe writes its own stacks into both - 380 and 313 characters; a
+list may be 1000; the container's `font-family` when `--font` is unset) and, for the
+families they name, the `@font-face` rules that declare them, their `url()` made absolute
+against the sheet: from this origin's own stylesheets through the CSSOM (into `@media`,
+`@supports` and `@layer` blocks and a readable `@import`), and from a stylesheet another
+origin serves - a CDN's webfont CSS, where Lobe's HarmonyOS Sans and Hack come from - by
+reading it once more over CORS (`readFontSheet`: `fetch` with `mode: "cors"`, no
+credentials, `force-cache`, aborted after `FONT_SHEET_TIMEOUT_MS` = 4 s; at most
+`MAX_FONT_SHEETS` = 12; faces made absolute against the address the response came from,
+after redirects). What was read is remembered for the page's life (`FONT_SHEETS`); a sheet
+that could not be read is tried again after `FONT_SHEET_RETRY_MS` = 2 min at the next send.
+The first send carries what is known at once; when a sheet brings faces the theme is sent
+again (`resendTheme`), which finds it read and starts nothing. `font_faces` holds at most
+`MAX_FONT_FACES` = 48 faces and `MAX_FONT_BYTES` = 48 KiB, so THEME_STATE never nears
+`MAX_ENVELOPE_BYTES` (a message that size is dropped whole). It rides with any skin but
+off - it is not a colour - and is validated on both sides (`valid_font_list`,
+`valid_font_face`: one plain `@font-face` block, its `url()` http(s) or root-relative -
+an `@` allowed, since CDN paths carry the version after one - never `data:`).
+`state().theme` adds `font` (the list's first family), `faces`, `sheets` (`read`,
+`pending`, `unreadable` as `host (why)`) and `refused` (a list the bundle could not carry). `skin` is the look from
 Settings as the tab's view JSON carries it (`look`): `host` sends the palette and the mode
 read off the page colour sampled (dark below half luminance), `bridge` sends no palette,
 `off` sends none and says `mode: "light"` - the one word that leaves WanGP alone on a

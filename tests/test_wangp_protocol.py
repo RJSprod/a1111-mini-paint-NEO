@@ -287,7 +287,8 @@ def browser_checks(r: Results) -> None:
     r.check("and the same shapes of a font list and a face",
             js_regex(source, "FONT_LIST_RE") == as_javascript(protocol.FONT_LIST_RE.pattern)
             and js_regex(source, "FONT_FACE_RE") == as_javascript(protocol.FONT_FACE_RE.pattern)
-            and js_number(source, "MAX_FONT_FACES") == protocol.MAX_FONT_FACES, js_regex(source, "FONT_FACE_RE"))
+            and js_number(source, "MAX_FONT_FACES") == protocol.MAX_FONT_FACES
+            and js_number(source, "MAX_FONT_BYTES") == protocol.MAX_FONT_BYTES, js_regex(source, "FONT_FACE_RE"))
     r.check("the browser allows the same types out of the parent",
             set(js_strings(source, "TO_BRIDGE")) == set(protocol.TO_BRIDGE), str(js_strings(source, "TO_BRIDGE")))
     r.check("the browser allows the same types out of the iframe",
@@ -1451,6 +1452,35 @@ def proactive_flush_checks(r: Results) -> None:
 #: moment after a press that had something to carry. It can be told to stop
 #: answering, and the frame can be reloaded - which loses the document, fires
 #: ``pagehide`` in it, and fires the frame's ``load`` when the new one is up.
+#: The Lobe theme's two font lists, exactly as its @lobehub/ui 1.141 tokens
+#: join them (styles/theme/token/base.js: an English, a Chinese and an emoji
+#: stack; the mono list leads with Hack). 380 and 313 characters. Bridge
+#: 1.10.0 allowed 300, so on the one page the typeface was built for it sent
+#: no font at all and the WanGP page stayed a serif - with every check green,
+#: because none of them used a real theme's list.
+LOBE_FONT = ('"HarmonyOS Sans","Segoe UI","SF Pro Display",-apple-system,BlinkMacSystemFont,Roboto,Oxygen,Ubuntu,'
+             'Cantarell,"Open Sans","Helvetica Neue",sans-serif,"HarmonyOS Sans SC","PingFang SC","Hiragino Sans GB",'
+             '"Microsoft Yahei UI","Microsoft Yahei","Source Han Sans CN",sans-serif,"Segoe UI Emoji","Segoe UI Symbol",'
+             '"Apple Color Emoji","Twemoji Mozilla","Noto Color Emoji","Android Emoji"')
+LOBE_MONO = ('Hack,ui-monospace,SFMono-Regular,SF Mono,Menlo,Consolas,Liberation Mono,monospace,"HarmonyOS Sans SC",'
+             '"PingFang SC","Hiragino Sans GB","Microsoft Yahei UI","Microsoft Yahei","Source Han Sans CN",sans-serif,'
+             '"Segoe UI Emoji","Segoe UI Symbol","Apple Color Emoji","Twemoji Mozilla","Noto Color Emoji","Android Emoji"')
+#: Its HarmonyOS Sans stylesheet as registry.npmmirror.com serves it
+#: (@lobehub/webfont-harmony-sans 1.0.0, css/index.css): a charset, four
+#: faces, relative urls.
+LOBE_HARMONY_CSS = '@charset "UTF-8";\n' + "".join(
+    "/* %s */\n@font-face {\n  font-family: 'HarmonyOS Sans';\n  src: local(HarmonyOS_Sans_%s), local('HarmonyOS Sans %s'),\n"
+    "    url('../fonts/HarmonyOS_Sans_%s.woff2') format('woff2'),\n    url('../fonts/HarmonyOS_Sans_%s.woff') format('woff');\n"
+    "  font-weight: %d;\n  font-style: normal;\n  font-display: swap;\n}\n" % (name, name, name, name, name, weight)
+    for name, weight in (("Light", 300), ("Regular", 400), ("Medium", 500), ("Bold", 700)))
+
+#: One of those faces as the tab sends it: made absolute against the
+#: npmmirror address, so its path carries the package's version after "@".
+MIRROR_FACE = ("@font-face { font-family: 'HarmonyOS Sans'; src: local(HarmonyOS_Sans_Regular), "
+               "local('HarmonyOS Sans Regular'), url('https://registry.npmmirror.com/@lobehub/webfont-harmony-sans/1.0.0/"
+               "files/fonts/HarmonyOS_Sans_Regular.woff2') format('woff2'); font-weight: 400; font-style: normal; "
+               "font-display: swap; }")
+
 _LIVE_HARNESS = r"""
 const fs = require("fs");
 const MODE = process.argv[3] || "save";
@@ -1739,24 +1769,34 @@ const PAGE_VARS = MODE === "themeGradient" ? {
   "--color-accent-soft": "rgb(200, 210, 230)", "--color-accent": "rgb(110, 168, 254)", "--button-primary-text-color": "rgb(13, 17, 23)"
 };
 function lum(colour) { const m = /(\d+),\s*(\d+),\s*(\d+)/.exec(colour || ""); return m ? (0.2126 * m[1] + 0.7152 * m[2] + 0.0722 * m[3]) / 255 : null; }
-// The page's typeface, as Lobe writes it into Gradio's variables, for the
-// theme scenarios; the other scenarios' page names none.
+// The page's typeface, as the Lobe theme writes it into Gradio's variables,
+// for the theme scenarios; the other scenarios' page names none.
 if (MODE.indexOf("theme") === 0) {
-  PAGE_VARS["--font"] = "'Inter', -apple-system, 'Segoe UI', sans-serif";
-  PAGE_VARS["--font-mono"] = "'JetBrains Mono', monospace";
+  PAGE_VARS["--font"] = __LOBE_FONT__;
+  PAGE_VARS["--font-mono"] = __LOBE_MONO__;
 }
-// Two stylesheets: the page's own, readable, with a face for Inter (a
-// relative url, to be made absolute against the sheet), a rule that is not
-// a face, and a face for a family the page does not use; and Google's,
-// which another origin makes unreadable.
+// The stylesheets. The page's own, readable: a face for Hack inside an
+// @media block (a relative url, to be made absolute against the sheet), a
+// rule that is not a face, a face for a family the page does not use, and an
+// @import of Google's sheet, which another origin makes unreadable. Then two
+// of another origin's: the npmmirror sheet Lobe loads HarmonyOS Sans from,
+// answered from where it was redirected to, and one that never answers.
+const SAME_ORIGIN_SHEET = "http://forge.test/file=extensions/lobe/style.css";
+const MIRROR = "https://registry.npmmirror.com/@lobehub/webfont-harmony-sans/1.0.0/files/css/index.css";
+const MIRROR_FINAL = "https://cdn.npmmirror.com/packages/@lobehub/webfont-harmony-sans/1.0.0/files/css/index.css";
+const GOOGLE = "https://fonts.googleapis.com/css2?family=Source+Sans+Pro";
+const SLOW = "https://slow.example/webfont.css";
 const STYLE_SHEETS = [
-  { href: "http://forge.test/file=extensions/lobe/style.css", cssRules: [
-      { type: 5, style: { getPropertyValue: (k) => k === "font-family" ? "\"Inter\"" : "" },
-        cssText: "@font-face { font-family: \"Inter\"; src: url(fonts/inter.woff2) format(\"woff2\"); font-weight: 400; }" },
+  { href: SAME_ORIGIN_SHEET, cssRules: [
+      { type: 4, cssRules: [
+          { type: 5, style: { getPropertyValue: (k) => k === "font-family" ? "Hack" : "" },
+            cssText: "@font-face { font-family: Hack; src: url(\"fonts/hack.woff2\") format(\"woff2\"); font-weight: 400; }" } ] },
       { type: 1, style: { getPropertyValue: () => "" }, cssText: "body { color: red; }" },
       { type: 5, style: { getPropertyValue: (k) => k === "font-family" ? "\"Other\"" : "" },
-        cssText: "@font-face { font-family: \"Other\"; src: url(/other.woff2); }" } ] },
-  { href: "https://fonts.googleapis.com/css2?family=Inter", get cssRules() { throw new Error("SecurityError"); } }
+        cssText: "@font-face { font-family: \"Other\"; src: url(/other.woff2); }" },
+      { type: 3, href: GOOGLE, styleSheet: { href: GOOGLE, get cssRules() { throw new Error("SecurityError"); } } } ] },
+  { href: MIRROR, get cssRules() { throw new Error("SecurityError"); } },
+  { href: SLOW, get cssRules() { throw new Error("SecurityError"); } }
 ];
 // The tab's view JSON, with the look from Settings, for the theme scenarios.
 if (MODE.indexOf("theme") === 0) {
@@ -1771,7 +1811,24 @@ if (MODE === "pull" || MODE === "pulloff") {
 }
 global.window = win; global.document = doc;
 global.MutationObserver = win.MutationObserver;
-global.fetch = () => Promise.resolve({ ok: true, status: 204, type: "basic", json: () => Promise.resolve({}), text: () => Promise.resolve("") });
+// Every request the bundle makes, by address; the three foreign sheets are
+// answered as their hosts would, everything else as before.
+const FETCHES = [];
+global.fetch = function (url, options) {
+  FETCHES.push(String(url));
+  if (url === MIRROR) {
+    return Promise.resolve({ ok: true, status: 200, url: MIRROR_FINAL, text: () => Promise.resolve(__LOBE_HARMONY_CSS__) });
+  }
+  if (url === GOOGLE) { return Promise.reject(new TypeError("Failed to fetch")); }
+  if (url === SLOW) {
+    return new Promise(function (resolve, reject) {
+      if (options && options.signal) {
+        options.signal.addEventListener("abort", function () { const e = new Error("The operation was aborted."); e.name = "AbortError"; reject(e); });
+      }
+    });
+  }
+  return Promise.resolve({ ok: true, status: 204, type: "basic", json: () => Promise.resolve({}), text: () => Promise.resolve("") });
+};
 new Function("window", "document", "fetch", fs.readFileSync(process.argv[2], "utf8"))(win, doc, global.fetch);
 const api = win.minipaintWanGP;
 
@@ -1791,14 +1848,26 @@ async function themeScenario() {
   api.attach(null);
   await advance(1000);
   const atReady = B.themes.slice();
-  const saidAtReady = linesWith("theme:").length;
+  const saidAtReady = linesWith("theme:").slice();
+  await advance(5000);                              // the slow sheet's deadline passes
+  const afterDeadline = api.state().theme;
   // Away and back: the page's theme may have changed meanwhile, so the tab
-  // tells the bridge again - and says nothing new when nothing changed.
-  selectTab(false); await advance(50);
-  selectTab(true); await advance(50);
-  const palette = (atReady[0] && atReady[0].palette) || {};
+  // tells the bridge again - and, the second time, says nothing new.
+  selectTab(false); await advance(50); selectTab(true); await advance(50);
+  const later1 = B.themes.slice(atReady.length);
+  const said1 = linesWith("theme:").slice();
+  selectTab(false); await advance(50); selectTab(true); await advance(50);
+  const later2 = B.themes.slice(atReady.length + later1.length);
+  const said2 = linesWith("theme:").slice();
+  const fetchedBeforeRetry = FETCHES.filter((u) => u === MIRROR || u === GOOGLE || u === SLOW);
+  await advance(125000);                            // past the retry time
+  selectTab(false); await advance(50); selectTab(true); await advance(50);
+  const fetchedAll = FETCHES.filter((u) => u === MIRROR || u === GOOGLE || u === SLOW);
+  const last = atReady[atReady.length - 1] || {};
+  const palette = last.palette || {};
   const lums = {}; Object.keys(palette).forEach((k) => { lums[k] = lum(palette[k]); });
-  return { atReady, later: B.themes.slice(atReady.length), saidAtReady, said: linesWith("theme:"),
+  return { atReady, saidAtReady, afterDeadline, later1, said1, later2, said2,
+           fetchedBeforeRetry, retried: fetchedAll.slice(fetchedBeforeRetry.length),
            state: api.state().theme, probes: docRoot.children.filter((c) => c.tagName === "SPAN").length, lums };
 }
 
@@ -2139,6 +2208,9 @@ const scenarios = {
   process.exit(0);
 });
 """
+_LIVE_HARNESS = (_LIVE_HARNESS.replace("__LOBE_FONT__", json.dumps(LOBE_FONT))
+                 .replace("__LOBE_MONO__", json.dumps(LOBE_MONO))
+                 .replace("__LOBE_HARMONY_CSS__", json.dumps(LOBE_HARMONY_CSS)))
 
 
 def _run_live(modes, source=None):
@@ -2265,7 +2337,10 @@ def theme_send_checks(r: Results) -> None:
     colours are sampled by resolving each slot's chain of variables the way
     a browser would, and the mode is read off the page colour sampled. What
     an older bridge reads - the mode alone - says "light" for the off skin,
-    because that is what leaves WanGP alone there.
+    because that is what leaves WanGP alone there. The page's typeface is the
+    Lobe theme's, as its tokens really are, and its faces come from four kinds
+    of stylesheet: the page's own, one another origin serves and answers over
+    CORS, one another origin refuses, and one that never answers.
     """
     answers = _run_live(("themeHost", "themeBridge", "themeOff", "themeGradient", "themeLight", "themeUnknownLook"))
     if answers is None:
@@ -2273,17 +2348,22 @@ def theme_send_checks(r: Results) -> None:
         return
     for mode, answer in answers.items():
         r.check(f"the {mode} scenario ran", isinstance(answer, dict) and "error" not in answer and "atReady" in answer, str(answer)[:300])
+
+    def last(answer):
+        sends = (answer or {}).get("atReady") or []
+        return sends[-1] if sends else {}
+
     host = answers.get("themeHost") or {}
-    sent = (host.get("atReady") or [{}])[0] if host.get("atReady") else {}
+    sent = last(host)
     palette = sent.get("palette") or {}
     lums = host.get("lums") or {}
-    r.check("with the host look, the ready handshake is followed by one THEME_STATE carrying this page's nine colours",
-            len(host.get("atReady") or []) == 1 and sent.get("skin") == "host"
-            and sorted(palette.keys()) == sorted(protocol.PALETTE_SLOTS), str(sent))
+    r.check("with the host look, the ready handshake is followed by THEME_STATE carrying this page's nine colours",
+            sent.get("skin") == "host" and sorted(palette.keys()) == sorted(protocol.PALETTE_SLOTS)
+            and all(one.get("palette") == palette for one in host.get("atReady") or []), str(sent)[:300])
     r.check("the text, the page and the accent are what the page's first-choice variables resolved to",
             palette.get("page") == "rgb(20, 22, 27)" and palette.get("ink") == "rgb(230, 232, 238)"
             and palette.get("accent") == "rgb(110, 168, 254)" and palette.get("accent-ink") == "rgb(13, 17, 23)"
-            and sent.get("accent") == "rgb(110, 168, 254)", str(sent))
+            and sent.get("accent") == "rgb(110, 168, 254)", str(sent)[:300])
     # The surfaces are never the variables' word: Gradio's dark theme says
     # slate for a block and an input, and a page like Lobe's paints neither.
     r.check("the surfaces are derived from the page and its ink, not read from the variables that name them",
@@ -2296,22 +2376,53 @@ def theme_send_checks(r: Results) -> None:
     r.check("and the mode read off the page colour: dark", sent.get("mode") == "dark" and (host.get("state") or {}).get("mode") == "dark"
             and (host.get("state") or {}).get("skin") == "host", str(host.get("state")))
     r.check("the probe the colours were read through is taken away again", host.get("probes") == 0, str(host.get("probes")))
-    r.check("said once in the journal, with the colours themselves",
-            host.get("saidAtReady") == 1 and any(line.startswith("theme: host, dark; ink rgb(230, 232, 238), ") and "page rgb(20, 22, 27)" in line
-                                               and "panel rgb(" in line and "accent rgb(110, 168, 254)" in line for line in host.get("said") or []),
-            str(host.get("said")))
-    r.check("back on screen the tab tells the bridge again, and says nothing new when nothing changed",
-            len(host.get("later") or []) == 1 and len(host.get("said") or []) == 1, str(host.get("later")) + " " + str(host.get("said")))
+
+    # The typeface. The regression first: the Lobe theme's lists are 380 and
+    # 313 characters, and bridge 1.10.0's tab sent neither.
+    first = (host.get("atReady") or [{}])[0]
+    r.check("the Lobe theme's own font lists ride with the palette, whole - 380 and 313 characters",
+            sent.get("font") == LOBE_FONT and sent.get("font_mono") == LOBE_MONO
+            and first.get("font") == LOBE_FONT and first.get("font_mono") == LOBE_MONO, str(sent.get("font"))[:120])
+    hack = '@font-face { font-family: Hack; src: url("http://forge.test/file=extensions/lobe/fonts/hack.woff2") format("woff2"); font-weight: 400; }'
+    r.check("the first send carries at once the face the page's own sheet declares, from inside its @media block, made absolute against the sheet",
+            first.get("font_faces") == [hack], str(first.get("font_faces")))
+    faces = sent.get("font_faces") or []
+    harmony = [one for one in faces if "HarmonyOS Sans" in one]
+    r.check("and once the CDN's sheet is read over CORS, a second carries its four faces too",
+            len(host.get("atReady") or []) == 2 and faces[:1] == [hack] and len(harmony) == 4, str(faces)[:300])
+    r.check("made absolute against the address the sheet was answered from, not the one it was asked at",
+            all("url('https://cdn.npmmirror.com/packages/@lobehub/webfont-harmony-sans/1.0.0/files/fonts/HarmonyOS_Sans_" in one
+                for one in harmony) and not any("registry.npmmirror.com" in one for one in harmony), str(harmony)[:300])
+    r.check("each a face the bridge will take, and never a face for a family the page does not use",
+            all(protocol.valid_font_face(one) for one in faces) and not any("Other" in one for one in faces)
+            and protocol.normalize_theme(sent)["font_faces"] == faces, str(faces)[:200])
+    said = host.get("saidAtReady") or []
+    r.check("the journal says what was carried and what was still being read",
+            len(said) == 2 and said[0].endswith("; font HarmonyOS Sans (1 faces, 3 being read)")
+            and said[1].endswith("; font HarmonyOS Sans (5 faces, 1 sheets read across origins, 1 being read; "
+                                 "unreadable: fonts.googleapis.com (not readable across origins: Failed to fetch))"), str(said))
+    r.check("a sheet that never answers is given up on at its deadline, and named",
+            any(line.endswith("unreadable: fonts.googleapis.com (not readable across origins: Failed to fetch), slow.example (no answer in 4s))")
+                for line in host.get("said1") or []), str((host.get("said1") or [])[-1:]))
+    r.check("back on screen the tab tells the bridge again, and the second time says nothing new",
+            len(host.get("later1") or []) == 1 and len(host.get("later2") or []) == 1
+            and len(host.get("said2") or []) == len(host.get("said1") or []), str(len(host.get("said2") or [])))
+    r.check("each foreign sheet was read once; the ones that failed are tried again after the retry time, and the one that answered is not",
+            sorted(host.get("fetchedBeforeRetry") or []) == sorted([
+                "https://fonts.googleapis.com/css2?family=Source+Sans+Pro",
+                "https://registry.npmmirror.com/@lobehub/webfont-harmony-sans/1.0.0/files/css/index.css",
+                "https://slow.example/webfont.css"])
+            and sorted(host.get("retried") or []) == ["https://fonts.googleapis.com/css2?family=Source+Sans+Pro", "https://slow.example/webfont.css"],
+            str(host.get("fetchedBeforeRetry")) + " " + str(host.get("retried")))
 
     gradient = answers.get("themeGradient") or {}
-    sent = (gradient.get("atReady") or [{}])[0] if gradient.get("atReady") else {}
-    palette = sent.get("palette") or {}
+    palette = last(gradient).get("palette") or {}
     r.check("a page background that is a gradient falls to the slot's second choice, and the surfaces step from that",
             palette.get("page") == "rgb(30, 30, 30)" and len(palette) == 9
             and (gradient.get("lums") or {}).get("panel", 0) > (gradient.get("lums") or {}).get("page", 1), str(palette))
 
     light = answers.get("themeLight") or {}
-    sent = (light.get("atReady") or [{}])[0] if light.get("atReady") else {}
+    sent = last(light)
     lums = light.get("lums") or {}
     r.check("a light page is told as light, and its surfaces step the other way, towards its dark ink",
             sent.get("mode") == "light" and sent.get("skin") == "host"
@@ -2320,39 +2431,25 @@ def theme_send_checks(r: Results) -> None:
             and lums.get("raised", 0) - lums.get("line", 1) >= 0.10, str(lums))
 
     bridge = answers.get("themeBridge") or {}
-    sent = (bridge.get("atReady") or [{}])[0] if bridge.get("atReady") else {}
+    sent = last(bridge)
     r.check("with the bridge look no colour is sampled and the bridge's own palette is asked for",
             sent.get("skin") == "bridge" and sent.get("palette") == {} and sent.get("mode") == "dark"
-            and bridge.get("probes") == 0, str(sent))
+            and bridge.get("probes") == 0, str(sent)[:300])
+    r.check("the typeface rides with the bridge's own palette too: it is not a colour",
+            sent.get("font") == LOBE_FONT and len(sent.get("font_faces") or []) == 5, str(sent.get("font"))[:120])
 
     off = answers.get("themeOff") or {}
-    sent = (off.get("atReady") or [{}])[0] if off.get("atReady") else {}
+    sent = last(off)
     r.check("with the off look the bridge is told off - and light, which is what leaves WanGP alone on a bridge older than the skins",
             sent.get("skin") == "off" and sent.get("mode") == "light" and sent.get("palette") == {}, str(sent))
+    r.check("and no typeface, and no stylesheet of another origin's is read for it",
+            len(off.get("atReady") or []) == 1 and sent.get("font") == "" and sent.get("font_mono") == "" and sent.get("font_faces") == []
+            and off.get("fetchedBeforeRetry") == [], str(off.get("fetchedBeforeRetry")))
 
     unknown = answers.get("themeUnknownLook") or {}
-    sent = (unknown.get("atReady") or [{}])[0] if unknown.get("atReady") else {}
+    sent = last(unknown)
     r.check("a look word this bundle does not know is the host look, not an error",
-            sent.get("skin") == "host" and len(sent.get("palette") or {}) == 9, str(sent))
-
-    # The typeface (bridge 1.10.0): the page's two font lists as its
-    # stylesheet states them, and the faces its own sheets declare for the
-    # families they name - made absolute against the sheet, never a family
-    # the page does not use, never a rule that is not a face, and never a
-    # sheet another origin makes unreadable.
-    sent = (host.get("atReady") or [{}])[0] if host.get("atReady") else {}
-    r.check("the page's font lists ride with the host palette",
-            sent.get("font") == "'Inter', -apple-system, 'Segoe UI', sans-serif"
-            and sent.get("font_mono") == "'JetBrains Mono', monospace", str(sent.get("font")))
-    r.check("with the faces the page's own sheets declare for those families, their urls made absolute against the sheet",
-            sent.get("font_faces") == ['@font-face { font-family: "Inter"; src: url(http://forge.test/file=extensions/lobe/fonts/inter.woff2) format("woff2"); font-weight: 400; }'],
-            str(sent.get("font_faces")))
-    r.check("and said in the journal", any("font 'Inter'" in line and "(1 faces)" in line for line in host.get("said") or []), str(host.get("said")))
-    sent = (bridge.get("atReady") or [{}])[0] if bridge.get("atReady") else {}
-    r.check("the typeface rides with the bridge's own palette too: it is not a colour",
-            sent.get("font") == "'Inter', -apple-system, 'Segoe UI', sans-serif" and len(sent.get("font_faces") or []) == 1, str(sent.get("font")))
-    sent = (off.get("atReady") or [{}])[0] if off.get("atReady") else {}
-    r.check("and not with off", sent.get("font") == "" and sent.get("font_mono") == "" and sent.get("font_faces") == [], str(sent))
+            sent.get("skin") == "host" and len(sent.get("palette") or {}) == 9, str(sent)[:200])
 
 
 def heartbeat_checks(r: Results) -> None:
@@ -2852,9 +2949,21 @@ send("WANGP_THEME_STATE", { mode: "dark", skin: "host", font: "'Inter', sans-ser
 send("WANGP_THEME_STATE", { mode: "light", skin: "off", font: "'Inter', sans-serif", font_faces: faces }, channel, "t10");
 out.fontOff = { attr: root.attrs["data-minipaint-font"] || null, props: Object.assign({}, root.style.props),
                 sheet: made["minipaint-bridge-fonts"] ? made["minipaint-bridge-fonts"].textContent : null };
+// The Lobe theme's own lists and one of its CDN faces, as the tab sends them.
+send("WANGP_THEME_STATE", { mode: "dark", skin: "host", font: __LOBE_FONT__, font_mono: __LOBE_MONO__, font_faces: [__MIRROR_FACE__] }, channel, "t11");
+out.lobe = { attr: root.attrs["data-minipaint-font"] || null, props: Object.assign({}, root.style.props),
+             sheet: made["minipaint-bridge-fonts"] ? made["minipaint-bridge-fonts"].textContent : null };
+// Forty faces of 2 KB each: more than the byte budget lets through.
+const big = "@font-face { font-family: 'X'; src: url(/x.woff2); unicode-range: " + Array.from({ length: 160 }, (_, n) => "U+4E" + (n < 16 ? "0" : "") + n.toString(16).toUpperCase() + "0-4EFF").join(", ") + "; }";
+send("WANGP_THEME_STATE", { mode: "dark", skin: "host", font: "Arial", font_faces: Array.from({ length: 40 }, () => big) }, channel, "t12");
+out.budget = { each: big.length, kept: made["minipaint-bridge-fonts"] ? made["minipaint-bridge-fonts"].textContent.split("\n").length : 0,
+               bytes: made["minipaint-bridge-fonts"] ? made["minipaint-bridge-fonts"].textContent.length : 0 };
 console.log(JSON.stringify(out));
 process.exit(0);
 """
+_THEME_HARNESS = (_THEME_HARNESS.replace("__LOBE_FONT__", json.dumps(LOBE_FONT))
+                  .replace("__LOBE_MONO__", json.dumps(LOBE_MONO))
+                  .replace("__MIRROR_FACE__", json.dumps(MIRROR_FACE)))
 
 
 def theme_checks(r: Results) -> None:
@@ -2894,7 +3003,17 @@ def theme_checks(r: Results) -> None:
             all(protocol.valid_font_list(v) for v in ("'Source Sans Pro', 'ui-sans-serif', 'system-ui', sans-serif",
                                                        "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
                                                        '"Segoe UI", Arial', "monospace"))
-            and not any(protocol.valid_font_list(v) for v in ("Arial; background: url(x)", "", None, "x" * 301, "Arial{}", "<b>")))
+            and not any(protocol.valid_font_list(v) for v in ("Arial; background: url(x)", "", None, "x" * 1001, "Arial{}", "<b>")))
+    r.check("and as long as a real theme makes it: the Lobe theme's two lists, 380 and 313 characters, are lists",
+            protocol.valid_font_list(LOBE_FONT) and protocol.valid_font_list(LOBE_MONO)
+            and len(LOBE_FONT) == 380 and len(LOBE_MONO) == 313)
+    mirror = ("@font-face { font-family: 'HarmonyOS Sans'; src: local(HarmonyOS_Sans_Light), local('HarmonyOS Sans Light'), "
+              "url('https://registry.npmmirror.com/@lobehub/webfont-harmony-sans/1.0.0/files/fonts/HarmonyOS_Sans_Light.woff2') "
+              "format('woff2'); font-weight: 300; font-style: normal; font-display: swap; }")
+    r.check("a face from a CDN whose path carries the package version after an @ is a face",
+            protocol.valid_font_face(mirror)
+            and protocol.valid_font_face(mirror.replace("registry.npmmirror.com/@lobehub/webfont-harmony-sans/1.0.0/files",
+                                                        "unpkg.com/@lobehub/webfont-harmony-sans@1.0.0")))
     r.check("a face is one plain @font-face block whose url is http(s) or root-relative",
             protocol.valid_font_face(good_face) and protocol.valid_font_face("@font-face { font-family: 'X'; src: url(/file=x.woff) }")
             and not any(protocol.valid_font_face(v) for v in (
@@ -2910,9 +3029,16 @@ def theme_checks(r: Results) -> None:
             kept["font"] == "'Inter', sans-serif" and kept["font_mono"] == "'JetBrains Mono', monospace" and kept["font_faces"] == [good_face]
             and protocol.normalize_theme({"skin": "off", "font": "'Inter', sans-serif", "font_faces": [good_face]})["font_faces"] == []
             and protocol.normalize_theme({"skin": "off", "font": "'Inter', sans-serif"})["font"] == "", str(kept))
-    r.check("a mono list or a face without a font list is nothing, and faces stop at twelve",
+    r.check("a mono list or a face without a font list is nothing, and faces stop at the count",
             protocol.normalize_theme({"skin": "host", "font_mono": "monospace", "font_faces": [good_face]}) ["font_faces"] == []
-            and len(protocol.normalize_theme({"skin": "host", "font": "Arial", "font_faces": [good_face] * 20})["font_faces"]) == protocol.MAX_FONT_FACES)
+            and protocol.MAX_FONT_FACES == 48
+            and len(protocol.normalize_theme({"skin": "host", "font": "Arial", "font_faces": [good_face] * 60})["font_faces"]) == protocol.MAX_FONT_FACES)
+    big = "@font-face { font-family: 'X'; src: url(/x.woff2); unicode-range: " + ", ".join(["U+4E00-4E%02X" % n for n in range(200)]) + "; }"
+    kept = protocol.normalize_theme({"skin": "host", "font": "Arial", "font_faces": [big] * 40 + [good_face]})["font_faces"]
+    r.check("and at the byte budget, so THEME_STATE can never outgrow an envelope and be dropped whole, colours and all",
+            protocol.valid_font_face(big) and sum(len(one) for one in kept) <= protocol.MAX_FONT_BYTES
+            and kept[-1] == good_face and len(kept) < 41
+            and protocol.MAX_FONT_BYTES * 4 < protocol.MAX_ENVELOPE_BYTES, str(len(kept)))
 
     folder = str(BRIDGE_COPY.parent)
     added = folder not in _sys.path
@@ -2932,7 +3058,8 @@ def theme_checks(r: Results) -> None:
     r.check("and the typeface's shapes",
             config.get("fontListPattern") == as_javascript(protocol.FONT_LIST_RE.pattern)
             and config.get("fontFacePattern") == as_javascript(protocol.FONT_FACE_RE.pattern)
-            and config.get("fontUrlPattern") == protocol.FONT_URL_RE.pattern and config.get("maxFontFaces") == protocol.MAX_FONT_FACES,
+            and config.get("fontUrlPattern") == protocol.FONT_URL_RE.pattern and config.get("maxFontFaces") == protocol.MAX_FONT_FACES
+            and config.get("maxFontBytes") == protocol.MAX_FONT_BYTES,
             str(config.get("fontFacePattern")))
 
     # ---- the script in the WanGP document ----
@@ -2984,6 +3111,15 @@ def theme_checks(r: Results) -> None:
         off = out.get("fontOff") or {}
         r.check("and so does the off skin, whatever it was sent",
                 off.get("attr") is None and "--mp-font" not in (off.get("props") or {}) and off.get("sheet") == "", str(off))
+        lobe = out.get("lobe") or {}
+        budget = out.get("budget") or {}
+        r.check("the bridge's script keeps the same byte budget: forty 2 KB faces are cut to what fits",
+                budget.get("each", 0) > 1500 and 0 < budget.get("kept", 0) < 40
+                and budget.get("bytes", 0) <= protocol.MAX_FONT_BYTES + 40, str(budget))
+        r.check("the Lobe theme's own lists and a CDN face with an @ in its url are taken whole by the bridge's script",
+                lobe.get("attr") == "host" and (lobe.get("props") or {}).get("--mp-font") == LOBE_FONT
+                and (lobe.get("props") or {}).get("--mp-font-mono") == LOBE_MONO and lobe.get("sheet") == MIRROR_FACE,
+                str(lobe)[:300])
 
     # ---- the stylesheet ----
     css = (BRIDGE_COPY.parent / "theme.css").read_text(encoding="utf-8")

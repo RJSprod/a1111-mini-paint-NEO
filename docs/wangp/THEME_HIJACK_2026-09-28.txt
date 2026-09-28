@@ -227,3 +227,57 @@ root-relative, never data: or protocol-relative; twelve faces at most.
 1.10.0 because a bridge that ignores the fields is fine but a parent should
 know (capabilities.theme_font), and because the version rule is exact
 equality, which is what gets the stylesheet reinstalled.
+
+10. It did not work: bridge 1.10.1 (2026-09-28, later still)
+-----------------------------------------------------------
+Reported after #108 merged and the bridge was reinstalled: nothing changed.
+Two causes, both found by reading the Lobe theme's real values rather than
+the test's.
+
+The list was too long. @lobehub/ui 1.141's tokens (styles/theme/token/
+base.js) join FONT_EN, FONT_CN and FONT_EMOJI into the font list - 380
+characters, "HarmonyOS Sans","Segoe UI",... - and FONT_CODE, FONT_CN and
+FONT_EMOJI into the mono list - 313. FONT_LIST_RE allowed 300, so
+sampleFont() sent no font at all, and the WanGP page stayed exactly as it
+was. The browser suite had passed because Gradio's default list is short.
+Lists may be 1000 characters now, on both sides.
+
+The faces were on another origin. Lobe's ThemeProvider loads
+@lobehub/webfont-mono, -harmony-sans and -harmony-sans-sc as <link>
+stylesheets from registry.npmmirror.com by default (unpkg.com when set),
+each a charset and four @font-face blocks with relative urls. Their CSSOM is
+unreadable from the page, and 1.10.0 skipped them - so even with the list
+through, HarmonyOS Sans would not have loaded in WanGP, and the text would
+have fallen to Segoe UI. The tab now reads such a sheet once more over CORS
+(readFontSheet: mode cors, no credentials, force-cache, aborted at 4 s),
+takes its @font-face blocks for the families the lists name, makes their
+urls absolute against the address the response came from (after
+redirects), remembers the result for the page's life, retries a failure
+after two minutes, and sends the theme again when a sheet brings faces. The
+CDN paths carry the package version after an "@", which a face's url() now
+allows. Faces are capped at 48 and 48 KiB together, so THEME_STATE can
+never approach the envelope limit and be dropped whole.
+
+Checked, this time, against the real thing, once (in the session's
+scratchpad, not the suite - it needs Gradio 5 beside the suite's pinned
+4.40): a Gradio 5.29 page built with WanGP's own ui_studio.Blocks, its
+default studio theme and ui_styles.css; a parent page with Lobe's exact
+lists and <link>s to a second local origin serving Lobe's real webfont
+packages from their npm tarballs, CORS on; the real tab bundle sampling it
+and the real bridge script and stylesheet applying it. Before: every label,
+textarea, button, tab, dropdown and number field computed 'Verdana', and
+text measured the width of the default serif - the user's screenshot. The
+parent read 380/313-character lists and, 1.5 s later, twelve faces from the
+three sheets. After: every element computed Lobe's list, and text measured
+exactly the width of "HarmonyOS Sans", with two of its faces loaded from the
+other origin.
+
+In the suite: the vocabulary, the virtual clock (Lobe's lists; a same-origin
+face inside @media; an @import of a sheet another origin refuses; the
+npmmirror sheet answered from its redirect; one that never answers, aborted
+at 4 s; the retry), the bridge's script in Node (the lists, a CDN face, the
+byte budget), and tests/browser_intercept.py, which serves the sheet and a
+font file from the next port with CORS and a copy without, and applies the
+result in a frame running the bridge's own script and stylesheet, where the
+face loads and draws the text. Seventeen mutations, each caught by the check
+written for it.

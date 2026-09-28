@@ -120,10 +120,23 @@ window.minipaintWanGP = (function () {
     const TRANSPARENT_RE = /^rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0\s*\)$/;
     //: The page's typeface, as protocol.py spells it: a font-family list, and
     //: one plain @font-face block whose url() is http(s) or root-relative.
-    const FONT_LIST_RE = /^[-A-Za-z0-9'"][-A-Za-z0-9 _'",.]{0,299}$/;
-    const FONT_FACE_RE = /^@font-face\s*\{[-A-Za-z0-9 _'",.:;/()%+#?=&\n\t]{1,1800}\}$/;
+    const FONT_LIST_RE = /^[-A-Za-z0-9'"][-A-Za-z0-9 _'",.]{0,999}$/;
+    const FONT_FACE_RE = /^@font-face\s*\{[-A-Za-z0-9 _'",.:;/()%+#?=&@~\n\t]{1,4000}\}$/;
     const FONT_URL_RE = /url\(\s*['"]?([^'")]*)/g;
-    const MAX_FONT_FACES = 12;
+    const MAX_FONT_FACES = 48;
+    const MAX_FONT_BYTES = 48 * 1024;
+    //: A stylesheet another origin serves - a CDN's webfont CSS, which is
+    //: where the Lobe theme's HarmonyOS Sans and Hack come from - cannot be
+    //: read through this page's CSSOM. It is read once more over CORS, with a
+    //: deadline, at most MAX_FONT_SHEETS of them, and remembered for the life
+    //: of the page; one that could not be read is tried again after
+    //: FONT_SHEET_RETRY_MS, at the next time the theme is sent.
+    const FONT_SHEET_TIMEOUT_MS = 4000;
+    const FONT_SHEET_RETRY_MS = 120000;
+    const MAX_FONT_SHEETS = 12;
+    //: What was read, per sheet address: {state: pending|read|failed, faces:
+    //: [{family, face}], why, at}. Page-lifetime, like the sheets themselves.
+    const FONT_SHEETS = new Map();
     const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED, PONG, FORM_CHANGED];
 
     // The flush outcomes, as protocol.py names them.
@@ -3731,7 +3744,16 @@ window.minipaintWanGP = (function () {
             // The tab's panel: parked - rendered, invisible - while another
             // tab is selected, never hidden. See watchTabPanel.
             // What the WanGP page was last told to wear. See theme().
-            theme: { mode: S.theme || "", skin: S.skin || "" },
+            theme: {
+                mode: S.theme || "", skin: S.skin || "",
+                font: S.themeFont && S.themeFont.font ? firstFamily(S.themeFont.font) : "",
+                faces: S.themeFont && S.themeFont.font_faces ? S.themeFont.font_faces.length : 0,
+                sheets: S.themeFont && S.themeFont.sheets ? {
+                    read: S.themeFont.sheets.read, pending: S.themeFont.sheets.pending,
+                    unreadable: S.themeFont.sheets.unreadable.slice()
+                } : null,
+                refused: S.themeFont && S.themeFont.refused ? S.themeFont.refused : ""
+            },
             tab: {
                 found: !!T.panel,
                 selected: T.selected,
@@ -3959,53 +3981,194 @@ window.minipaintWanGP = (function () {
      * Nothing here fails a theme: no font is a WanGP in its own typeface.
      */
     function sampleFont() {
-        const out = { font: "", font_mono: "", font_faces: [] };
+        const out = { font: "", font_mono: "", font_faces: [], sheets: { read: 0, pending: 0, unreadable: [] } };
         try {
             const scope = app();
             const host = (scope.querySelector ? scope.querySelector(".gradio-container") : null) || document.body;
             if (!host || typeof window.getComputedStyle !== "function") { return out; }
             const style = window.getComputedStyle(host);
-            const font = text(style.getPropertyValue("--font"), 320).trim() || text(style.fontFamily, 320).trim();
-            if (!FONT_LIST_RE.test(font)) { return out; }
+            const font = text(style.getPropertyValue("--font"), 1000).trim() || text(style.fontFamily, 1000).trim();
+            if (!FONT_LIST_RE.test(font)) {
+                if (font) { out.refused = "a font list of " + font.length + " characters this bundle cannot carry"; }
+                return out;
+            }
             out.font = font;
-            const mono = text(style.getPropertyValue("--font-mono"), 320).trim();
+            const mono = text(style.getPropertyValue("--font-mono"), 1000).trim();
             if (FONT_LIST_RE.test(mono)) { out.font_mono = mono; }
-            out.font_faces = sampleFontFaces(families(font).concat(out.font_mono ? families(out.font_mono) : []));
+            out.font_faces = sampleFontFaces(families(font).concat(out.font_mono ? families(out.font_mono) : []), out.sheets);
         } catch (e) { /* the WanGP page keeps its own typeface */ }
         return out;
     }
 
     /** The family names a font-family list names, lower-cased, unquoted. */
     function families(list) {
-        return String(list).split(",").map(function (one) {
-            return one.trim().replace(/^['"]|['"]$/g, "").toLowerCase();
-        }).filter(function (one) { return one && one.indexOf("-") !== 0; });
+        return String(list).split(",").map(familyName)
+            .filter(function (one) { return one && one.indexOf("-") !== 0; });
     }
 
-    function sampleFontFaces(wanted) {
+    function familyName(value) {
+        return String(value || "").trim().replace(/^['"]|['"]$/g, "").toLowerCase();
+    }
+
+    /** The first family a list names, as it is written: for the journal. */
+    function firstFamily(list) {
+        return text(String(list || "").split(",")[0].trim().replace(/^['"]|['"]$/g, ""), 60);
+    }
+
+    /** A face with every url() in it made absolute against `base`, the
+     * address of the sheet it came from - the address after redirects, which
+     * is what the browser resolved it against when the page loaded it. */
+    function absoluteFace(face, base) {
+        return String(face || "").replace(/\s+/g, " ").replace(FONT_URL_RE, function (whole, target) {
+            let absolute = target;
+            try { absolute = new URL(target, base).href; } catch (e) { /* left as written */ }
+            return whole.slice(0, whole.length - target.length) + absolute;
+        });
+    }
+
+    /**
+     * The @font-face rules, from every stylesheet on the page, that name a
+     * family in `wanted`. A sheet this page can read is walked through its
+     * rules, into @media, @supports and @layer blocks and into an @import it
+     * can read; a sheet another origin serves is looked up in FONT_SHEETS,
+     * and read over CORS when it is not there yet (readFontSheet). `tally`
+     * says how many were read that way, how many are still being read, and
+     * which could not be.
+     */
+    function sampleFontFaces(wanted, tally) {
         const faces = [];
-        const sheets = document.styleSheets;
-        if (!sheets || !sheets.length || !wanted.length) { return faces; }
-        for (let i = 0; i < sheets.length && faces.length < MAX_FONT_FACES; i += 1) {
-            const sheet = sheets[i];
-            let rules = null;
-            try { rules = sheet.cssRules; } catch (e) { continue; }   // another origin's: unreadable
-            if (!rules) { continue; }
-            for (let j = 0; j < rules.length && faces.length < MAX_FONT_FACES; j += 1) {
+        let bytes = 0;
+        const add = function (face) {
+            if (faces.length >= MAX_FONT_FACES || faces.indexOf(face) !== -1) { return; }
+            if (!FONT_FACE_RE.test(face) || bytes + face.length > MAX_FONT_BYTES) { return; }
+            bytes += face.length;
+            faces.push(face);
+        };
+        const foreign = [];
+        const walk = function (rules, base, depth) {
+            for (let j = 0; j < rules.length; j += 1) {
                 const rule = rules[j];
-                if (!rule || rule.type !== 5 || !rule.style) { continue; }   // 5: CSSFontFaceRule
-                const family = String(rule.style.getPropertyValue("font-family") || "").trim().replace(/^['"]|['"]$/g, "").toLowerCase();
-                if (!family || wanted.indexOf(family) === -1) { continue; }
-                const base = sheet.href || (window.location && window.location.href) || "";
-                const face = String(rule.cssText || "").replace(FONT_URL_RE, function (whole, target) {
-                    let absolute = target;
-                    try { absolute = new URL(target, base).href; } catch (e) { /* left as written */ }
-                    return whole.slice(0, whole.length - target.length) + absolute;
-                });
-                if (FONT_FACE_RE.test(face) && faces.indexOf(face) === -1) { faces.push(face); }
+                if (!rule) { continue; }
+                if (rule.type === 5 && rule.style) {   // CSSFontFaceRule
+                    if (wanted.indexOf(familyName(rule.style.getPropertyValue("font-family"))) !== -1) {
+                        add(absoluteFace(rule.cssText, base));
+                    }
+                } else if (rule.type === 3) {          // CSSImportRule
+                    let href = "";
+                    try { href = new URL(rule.href, base).href; } catch (e) { href = ""; }
+                    visit(rule.styleSheet, href, depth + 1);
+                } else if (rule.cssRules && depth < 4) {
+                    walk(rule.cssRules, base, depth + 1);
+                }
             }
-        }
+        };
+        const visit = function (sheet, href, depth) {
+            let rules = null;
+            try { rules = sheet ? sheet.cssRules : null; } catch (e) { rules = null; }
+            const address = (sheet && sheet.href) || href || "";
+            if (rules) { walk(rules, address || (window.location && window.location.href) || "", depth); return; }
+            if (/^https?:\/\//i.test(address) && foreign.indexOf(address) === -1) { foreign.push(address); }
+        };
+        const sheets = document.styleSheets;
+        if (!wanted.length || !sheets) { return faces; }
+        for (let i = 0; i < sheets.length; i += 1) { visit(sheets[i], "", 0); }
+
+        const now = Date.now();
+        let started = 0;
+        foreign.slice(0, MAX_FONT_SHEETS).forEach(function (href) {
+            let entry = FONT_SHEETS.get(href);
+            if (!entry || (entry.state === "failed" && now - entry.at > FONT_SHEET_RETRY_MS)) {
+                entry = readFontSheet(href);
+                started += 1;
+            }
+            if (entry.state === "read") {
+                tally.read += 1;
+                entry.faces.forEach(function (one) { if (wanted.indexOf(one.family) !== -1) { add(one.face); } });
+            } else if (entry.state === "pending") {
+                tally.pending += 1;
+            } else {
+                tally.unreadable.push(hostOf(href) + " (" + entry.why + ")");
+            }
+        });
         return faces;
+    }
+
+    function hostOf(href) {
+        try { return new URL(href).host; } catch (e) { return "a stylesheet"; }
+    }
+
+    /**
+     * One stylesheet another origin serves, read over CORS: its @font-face
+     * blocks, each with its family and made absolute against the address
+     * the response came from. Bounded - FONT_SHEET_TIMEOUT_MS, then the
+     * request is aborted - because a request without a deadline is a page
+     * waiting on nothing. When it brings faces the page's lists name, the
+     * theme is sent again with them; that re-send finds this sheet read and
+     * starts nothing, so it cannot loop.
+     */
+    function readFontSheet(href) {
+        const entry = { state: "pending", faces: [], why: "", at: Date.now() };
+        FONT_SHEETS.set(href, entry);
+        const Abort = typeof AbortController === "function" ? AbortController : null;
+        if (!Abort || typeof fetch !== "function") {
+            entry.state = "failed";
+            entry.why = "this browser cannot read it";
+            return entry;
+        }
+        const controller = new Abort();
+        const timer = setTimeout(function () { try { controller.abort(); } catch (e) { /* settled */ } }, FONT_SHEET_TIMEOUT_MS);
+        Promise.resolve().then(function () {
+            return fetch(href, { mode: "cors", credentials: "omit", cache: "force-cache", signal: controller.signal });
+        }).then(function (response) {
+            if (!response || !response.ok) { throw new Error("HTTP " + (response ? response.status : "no answer")); }
+            const base = response.url || href;
+            return response.text().then(function (css) { return { css: css, base: base }; });
+        }).then(function (got) {
+            entry.faces = facesIn(got.css, got.base);
+            entry.state = "read";
+        }).catch(function (error) {
+            entry.state = "failed";
+            entry.why = error && error.name === "AbortError" ? "no answer in " + seconds(FONT_SHEET_TIMEOUT_MS)
+                : "not readable across origins: " + text(String((error && error.message) || error), 60);
+        }).then(function () {
+            clearTimeout(timer);
+            entry.at = Date.now();
+            if (entry.state === "read" && entry.faces.length) { resendTheme(); }
+        });
+        return entry;
+    }
+
+    /** The @font-face blocks of a stylesheet's text, as {family, face}. */
+    function facesIn(css, base) {
+        const plain = String(css || "").slice(0, 512 * 1024).replace(/\/\*[\s\S]*?\*\//g, "");
+        const blocks = plain.match(/@font-face\s*\{[^{}]*\}/g) || [];
+        const found = [];
+        for (let i = 0; i < blocks.length && found.length < 200; i += 1) {
+            const family = /font-family\s*:\s*([^;}]+)/i.exec(blocks[i]);
+            if (family) { found.push({ family: familyName(family[1]), face: absoluteFace(blocks[i], base) }); }
+        }
+        return found;
+    }
+
+    /** The typeface's part of the journal line: the list's first family,
+     * how many faces went with it and where the rest are. */
+    function fontSummary(type) {
+        if (!type || !type.font) { return type && type.refused ? "; no font: " + type.refused : ""; }
+        const first = firstFamily(type.font);
+        const sheets = type.sheets || { read: 0, pending: 0, unreadable: [] };
+        return "; font " + first + " (" + type.font_faces.length + " faces"
+            + (sheets.read ? ", " + sheets.read + " sheets read across origins" : "")
+            + (sheets.pending ? ", " + sheets.pending + " being read" : "")
+            + (sheets.unreadable.length ? "; unreadable: " + sheets.unreadable.join(", ") : "") + ")";
+    }
+
+    /** Send the theme again once, soon: a font sheet has just been read. */
+    function resendTheme() {
+        if (S.themeResend) { return; }
+        S.themeResend = setTimeout(function () {
+            S.themeResend = 0;
+            try { theme(); } catch (e) { /* section 27.1 */ }
+        }, 0);
     }
 
     /** Dark or light, from the page colour a palette carries - a browser
@@ -4034,7 +4197,8 @@ window.minipaintWanGP = (function () {
         const skin = look();
         const palette = skin === SKIN_HOST ? samplePalette() : {};
         // The typeface rides with any skin but off: it is not a colour.
-        const type = skin === SKIN_OFF ? { font: "", font_mono: "", font_faces: [] } : sampleFont();
+        const type = skin === SKIN_OFF ? { font: "", font_mono: "", font_faces: [], sheets: null } : sampleFont();
+        S.themeFont = type;
         let wanted = mode === THEME_LIGHT || mode === THEME_DARK ? mode : "";
         if (!wanted) { wanted = paletteMode(palette) || detectTheme(); }
         S.theme = wanted;
@@ -4056,7 +4220,7 @@ window.minipaintWanGP = (function () {
             const summary = "theme: " + skin + ", " + wanted + (skin === SKIN_HOST
                 ? "; " + PALETTE_SLOTS.filter(function (slot) { return palette[slot]; })
                     .map(function (slot) { return slot + " " + palette[slot]; }).join(", ")
-                : "") + (type.font ? "; font " + text(type.font, 80) + " (" + type.font_faces.length + " faces)" : "");
+                : "") + fontSummary(type);
             if (summary !== S.themeSaid) {
                 S.themeSaid = summary;
                 say(summary);

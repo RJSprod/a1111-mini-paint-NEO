@@ -161,6 +161,7 @@ def configuration(theme_css: str = "") -> dict:
         "fontFacePattern": protocol.FONT_FACE_RE.pattern.replace("\\A", "^").replace("\\Z", "$"),
         "fontUrlPattern": protocol.FONT_URL_RE.pattern,
         "maxFontFaces": protocol.MAX_FONT_FACES,
+        "maxFontBytes": protocol.MAX_FONT_BYTES,
     }
 
 
@@ -954,13 +955,18 @@ __MINIPAINT_FRAME_WRAPPER__
     }
     // The typeface rides with any skin but off, and word by word: a list
     // that is a list of families, faces that are one plain @font-face block
-    // each with a url() that is http(s) or root-relative, twelve at most.
+    // each with a url() that is http(s) or root-relative, within the count
+    // and the byte budget protocol.py sets.
     var font = skin !== CONFIG.skinOff && typeof source.font === "string" && FONT_LIST.test(source.font) ? source.font : "";
     var fontMono = font && typeof source.font_mono === "string" && FONT_LIST.test(source.font_mono) ? source.font_mono : "";
     var faces = [];
+    var spent = 0;
     if (font && Array.isArray(source.font_faces)) {
       for (var j = 0; j < source.font_faces.length && faces.length < CONFIG.maxFontFaces; j += 1) {
-        if (validFace(source.font_faces[j])) { faces.push(source.font_faces[j]); }
+        var face = source.font_faces[j];
+        if (!validFace(face) || spent + face.length > CONFIG.maxFontBytes) { continue; }
+        spent += face.length;
+        faces.push(face);
       }
     }
     return { mode: mode, skin: skin, palette: palette, font: font, fontMono: fontMono, fontFaces: faces };

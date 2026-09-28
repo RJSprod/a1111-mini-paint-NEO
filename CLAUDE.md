@@ -399,9 +399,23 @@ themes say `gr.themes.Soft(font=['Verdana'])`, and Gradio writes that as
 generic names go unquoted). A browser that will not use Verdana - LibreWolf
 under its fingerprinting defence, a phone without it - falls to its default,
 a serif, and that is the Times-like WanGP of the first screenshot. The hijack
-sets the page in the Forge page's own lists (bridge 1.10.0), which always end
+sets the page in the Forge page's own lists (bridge 1.10.1), which always end
 in a generic family; if the WanGP page is ever a serif again, the mark
-`data-minipaint-font` on its `<html>` is the first thing to look for.
+`data-minipaint-font` on its `<html>` is the first thing to look for, and the
+page journal's `theme:` line says what was sent or why nothing was.
+
+**Test a theme feature against the theme's real values.** Bridge 1.10.0 passed
+every check and did nothing on the user's page. The checks used a short font
+list and a same-origin face; the Lobe theme's list joins three stacks into 380
+characters (the vocabulary allowed 300, so no font was sent at all) and its
+faces live in CDN stylesheets on another origin (skipped as unreadable). The
+tests now carry Lobe's own lists (`LOBE_FONT`, `LOBE_MONO` in
+`tests/test_wangp_protocol.py`, from `@lobehub/ui`'s tokens) and its webfont
+sheet, and `tests/browser_intercept.py` serves a sheet from a second origin
+with CORS; the fix was also checked once against real Gradio 5.29 with
+WanGP's own theme and stylesheet (`THEME_HIJACK_2026-09-28.txt` §10). A
+length cap on something a theme writes is a guess about every theme there is:
+measure the one that matters and leave room.
 
 **A variable holding a gradient is not unset.** `var(--a, var(--b, transparent))`
 never reaches `--b` when `--a` holds a gradient: the variable is defined, so it
@@ -492,7 +506,7 @@ settings save's in `minipaintWanGP.state().settings`; every miss, bar, dismissal
 and reload is a `heartbeat:` line in the page journal. Saving as the form
 changes and the heartbeat need bridge 1.7.0 installed in WanGP, the session guard
 bridge 1.8.0, the theme hijack - the page's colours on the WanGP page, over
-WanGP's own themes - bridge 1.9.0, and the page's typeface bridge 1.10.0. The hijack has been checked against WanGP's
+WanGP's own themes - bridge 1.9.0, and the page's typeface bridge 1.10.1. The hijack has been checked against WanGP's
 stylesheets as read from its repository on 2026-09-28 (`ui_studio.css` and the
 four theme files, `ui_styles.css`), never on the user's own install: what the
 eleven `--studio-*` remaps and the fixed-colour overrides look like in a real

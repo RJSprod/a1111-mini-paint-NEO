@@ -298,15 +298,27 @@ COLOUR_RE = re.compile(r"\A(#[0-9a-fA-F]{3,8}|(rgb|rgba|hsl|hsla|hwb|lab|lch|okl
 #: The page's typeface, carried with the palette (bridge 1.10.0). ``font``
 #: and ``font_mono`` are font-family lists as the page's stylesheet states
 #: them: family names, quotes, commas, spaces. ``font_faces`` are the
-#: @font-face rules of the page's own stylesheets that name a family in
-#: those lists, absolute-URL'd, so a face the page loaded loads in the WanGP
-#: page too. A face is one @font-face block of plain declarations - no
-#: nested braces, no backslashes, no angle brackets, and a url() that is
-#: http(s) or root-relative, never data: or javascript:.
-FONT_LIST_RE = re.compile(r"""\A[-A-Za-z0-9'"][-A-Za-z0-9 _'",.]{0,299}\Z""")
-FONT_FACE_RE = re.compile(r"""\A@font-face\s*\{[-A-Za-z0-9 _'",.:;/()%+#?=&\n\t]{1,1800}\}\Z""")
+#: @font-face rules that name a family in those lists, absolute-URL'd, so a
+#: face the page loaded loads in the WanGP page too: from the page's own
+#: stylesheets, and from the ones another origin serves (a CDN's webfont
+#: CSS), read once more over CORS. A face is one @font-face block of plain
+#: declarations - no nested braces, no backslashes, no angle brackets, and a
+#: url() that is http(s) or root-relative, never data: or javascript:.
+#:
+#: The sizes are the Lobe theme's, measured, with room (bridge 1.10.1). Its
+#: list joins an English, a Chinese and an emoji stack and is 380
+#: characters; its mono list is 313. 1.10.0 allowed 300, so the tab sent no
+#: font at all on the one page this was built for. Its webfont stylesheets
+#: come from registry.npmmirror.com or unpkg.com, whose paths carry the
+#: package's version after an "@", which a face's url() has to be allowed.
+FONT_LIST_RE = re.compile(r"""\A[-A-Za-z0-9'"][-A-Za-z0-9 _'",.]{0,999}\Z""")
+FONT_FACE_RE = re.compile(r"""\A@font-face\s*\{[-A-Za-z0-9 _'",.:;/()%+#?=&@~\n\t]{1,4000}\}\Z""")
 FONT_URL_RE = re.compile(r"""url\(\s*['"]?([^'")]*)""")
-MAX_FONT_FACES = 12
+MAX_FONT_FACES = 48
+#: Every face together, so a page with a font split into many subsets
+#: cannot push THEME_STATE past MAX_ENVELOPE_BYTES - a message that size is
+#: dropped whole, colours included.
+MAX_FONT_BYTES = 48 * 1024
 
 
 def valid_handoff_id(value: typing.Any) -> bool:
@@ -355,7 +367,8 @@ def normalize_theme(payload: typing.Any) -> dict:
     rides with any skin but off - it is not a colour, and a page that says
     what its text is set in says it for the built-in palette as well - and
     is dropped word by word: a list that is not a list of families, a face
-    that is not one plain @font-face block, and every face past the twelfth.
+    that is not one plain @font-face block, every face past the 48th, and
+    any face that would take them all past MAX_FONT_BYTES.
     """
     source = payload if isinstance(payload, dict) else {}
     mode = source.get("mode")
@@ -374,7 +387,14 @@ def normalize_theme(payload: typing.Any) -> dict:
     faces: typing.List[str] = []
     raw_faces = source.get("font_faces")
     if font and isinstance(raw_faces, list):
-        faces = [face for face in raw_faces if valid_font_face(face)][:MAX_FONT_FACES]
+        spent = 0
+        for face in raw_faces:
+            if len(faces) >= MAX_FONT_FACES:
+                break
+            if not valid_font_face(face) or spent + len(face) > MAX_FONT_BYTES:
+                continue
+            spent += len(face)
+            faces.append(face)
     return {"mode": mode, "skin": skin, "palette": palette,
             "font": font, "font_mono": font_mono, "font_faces": faces}
 

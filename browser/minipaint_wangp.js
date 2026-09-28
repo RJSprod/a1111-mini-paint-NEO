@@ -118,6 +118,12 @@ window.minipaintWanGP = (function () {
                            ["line-soft", "raised", 0.04], ["line", "raised", 0.10]];
     //: What a browser computes for "no colour at all".
     const TRANSPARENT_RE = /^rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0\s*\)$/;
+    //: The page's typeface, as protocol.py spells it: a font-family list, and
+    //: one plain @font-face block whose url() is http(s) or root-relative.
+    const FONT_LIST_RE = /^[-A-Za-z0-9'"][-A-Za-z0-9 _'",.]{0,299}$/;
+    const FONT_FACE_RE = /^@font-face\s*\{[-A-Za-z0-9 _'",.:;/()%+#?=&\n\t]{1,1800}\}$/;
+    const FONT_URL_RE = /url\(\s*['"]?([^'")]*)/g;
+    const MAX_FONT_FACES = 12;
     const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED, PONG, FORM_CHANGED];
 
     // The flush outcomes, as protocol.py names them.
@@ -3939,6 +3945,69 @@ window.minipaintWanGP = (function () {
         return palette;
     }
 
+    /**
+     * What the page's text is set in, for the WanGP page to be set in too.
+     *
+     * `--font` and `--font-mono` as the page's stylesheet states them (Lobe
+     * writes its own stacks into both), and for every family they name, the
+     * @font-face rules of this page's own stylesheets - a face the page
+     * loaded is then loaded in the WanGP document as well, from the same
+     * place, since its url() is made absolute against the sheet it came from.
+     * A stylesheet from another origin cannot be read and is skipped; a
+     * Google Fonts sheet is one of those, and its family then falls through
+     * to the next in the list, which is what a page without it does too.
+     * Nothing here fails a theme: no font is a WanGP in its own typeface.
+     */
+    function sampleFont() {
+        const out = { font: "", font_mono: "", font_faces: [] };
+        try {
+            const scope = app();
+            const host = (scope.querySelector ? scope.querySelector(".gradio-container") : null) || document.body;
+            if (!host || typeof window.getComputedStyle !== "function") { return out; }
+            const style = window.getComputedStyle(host);
+            const font = text(style.getPropertyValue("--font"), 320).trim() || text(style.fontFamily, 320).trim();
+            if (!FONT_LIST_RE.test(font)) { return out; }
+            out.font = font;
+            const mono = text(style.getPropertyValue("--font-mono"), 320).trim();
+            if (FONT_LIST_RE.test(mono)) { out.font_mono = mono; }
+            out.font_faces = sampleFontFaces(families(font).concat(out.font_mono ? families(out.font_mono) : []));
+        } catch (e) { /* the WanGP page keeps its own typeface */ }
+        return out;
+    }
+
+    /** The family names a font-family list names, lower-cased, unquoted. */
+    function families(list) {
+        return String(list).split(",").map(function (one) {
+            return one.trim().replace(/^['"]|['"]$/g, "").toLowerCase();
+        }).filter(function (one) { return one && one.indexOf("-") !== 0; });
+    }
+
+    function sampleFontFaces(wanted) {
+        const faces = [];
+        const sheets = document.styleSheets;
+        if (!sheets || !sheets.length || !wanted.length) { return faces; }
+        for (let i = 0; i < sheets.length && faces.length < MAX_FONT_FACES; i += 1) {
+            const sheet = sheets[i];
+            let rules = null;
+            try { rules = sheet.cssRules; } catch (e) { continue; }   // another origin's: unreadable
+            if (!rules) { continue; }
+            for (let j = 0; j < rules.length && faces.length < MAX_FONT_FACES; j += 1) {
+                const rule = rules[j];
+                if (!rule || rule.type !== 5 || !rule.style) { continue; }   // 5: CSSFontFaceRule
+                const family = String(rule.style.getPropertyValue("font-family") || "").trim().replace(/^['"]|['"]$/g, "").toLowerCase();
+                if (!family || wanted.indexOf(family) === -1) { continue; }
+                const base = sheet.href || (window.location && window.location.href) || "";
+                const face = String(rule.cssText || "").replace(FONT_URL_RE, function (whole, target) {
+                    let absolute = target;
+                    try { absolute = new URL(target, base).href; } catch (e) { /* left as written */ }
+                    return whole.slice(0, whole.length - target.length) + absolute;
+                });
+                if (FONT_FACE_RE.test(face) && faces.indexOf(face) === -1) { faces.push(face); }
+            }
+        }
+        return faces;
+    }
+
     /** Dark or light, from the page colour a palette carries - a browser
      * computes it as rgb() - or "" when it carries none it can read. */
     function paletteMode(palette) {
@@ -3964,6 +4033,8 @@ window.minipaintWanGP = (function () {
     function theme(mode, accent) {
         const skin = look();
         const palette = skin === SKIN_HOST ? samplePalette() : {};
+        // The typeface rides with any skin but off: it is not a colour.
+        const type = skin === SKIN_OFF ? { font: "", font_mono: "", font_faces: [] } : sampleFont();
         let wanted = mode === THEME_LIGHT || mode === THEME_DARK ? mode : "";
         if (!wanted) { wanted = paletteMode(palette) || detectTheme(); }
         S.theme = wanted;
@@ -3973,7 +4044,10 @@ window.minipaintWanGP = (function () {
             mode: skin === SKIN_OFF ? THEME_LIGHT : wanted,
             accent: text(accent, 40) || (typeof palette.accent === "string" ? palette.accent : ""),
             skin: skin,
-            palette: palette
+            palette: palette,
+            font: type.font,
+            font_mono: type.font_mono,
+            font_faces: type.font_faces
         };
         const sent = post(THEME_STATE, hex32(), payload);
         if (sent) {
@@ -3982,7 +4056,7 @@ window.minipaintWanGP = (function () {
             const summary = "theme: " + skin + ", " + wanted + (skin === SKIN_HOST
                 ? "; " + PALETTE_SLOTS.filter(function (slot) { return palette[slot]; })
                     .map(function (slot) { return slot + " " + palette[slot]; }).join(", ")
-                : "");
+                : "") + (type.font ? "; font " + text(type.font, 80) + " (" + type.font_faces.length + " faces)" : "");
             if (summary !== S.themeSaid) {
                 S.themeSaid = summary;
                 say(summary);
@@ -4279,6 +4353,7 @@ window.minipaintWanGP = (function () {
         switchToWanGP: switchToWanGP,
         theme: theme,
         samplePalette: samplePalette,
+        sampleFont: sampleFont,
         message: sentence,
         // Protocol 3, the queue. window.minipaintInterop is the public face
         // of these; they are the mechanics, and their shapes may change.

@@ -193,3 +193,37 @@ Gradio's white check shows on a white accent too.
 The slab is the panel colour with importance now; why the first round's
 plain rule did not win on the user's page is not known and does not need to
 be - importance ends the question.
+
+9. The typeface (2026-09-28, later still; bridge 1.10.0)
+-------------------------------------------------------
+"Is it possible to match the font that is used in my WebUI Lobe theme?"
+Yes, and the screenshot showed why it was needed anyway: the WanGP page was
+in a serif. WanGP's studio themes hand Gradio font=['Verdana'], Gradio writes
+--font: 'Verdana' with no generic family behind it (Font.__str__ quotes every
+name but the five generic ones), and a browser that will not use Verdana -
+LibreWolf under its fingerprinting defence, a phone without it - falls to its
+default, a serif.
+
+Lobe writes its own stacks into Gradio's --font and --font-mono on the Forge
+page (src/styles/tokens.ts: token.fontFamily and token.fontFamilyCode from
+antd / @lobehub/ui). So the tab reads those two variables off the container
+(the container's font-family when --font is unset), and for every family
+they name copies the @font-face rules of this origin's own stylesheets, the
+url() made absolute against the sheet it came from - a face the page loaded
+is then loaded in the WanGP document too, from the same place. A stylesheet
+another origin serves (Google Fonts) cannot be read and is skipped; its
+family falls through to the next in the list, which is what a page without
+the font does as well.
+
+The bridge marks <html> data-minipaint-font, puts --mp-font and
+--mp-font-mono on it inline and the faces in <style id="minipaint-bridge-
+fonts">; under the mark the container reads them as --font and --font-mono
+and sets itself in the first, and the one stack WanGP writes by hand (the
+queue table's Segoe UI) reads --font too. The typeface rides with the host
+and bridge skins - it is not a colour - and never with off. Validated on
+both sides: a font list is family names, quotes, commas and spaces, never a
+declaration; a face is one plain @font-face block whose url() is http(s) or
+root-relative, never data: or protocol-relative; twelve faces at most.
+1.10.0 because a bridge that ignores the fields is fine but a parent should
+know (capabilities.theme_font), and because the version rule is exact
+equality, which is what gets the stylesheet reinstalled.

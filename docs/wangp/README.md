@@ -386,7 +386,9 @@ session, every beat is remembered) and its expiry (a session heard within fiftee
 never expired). See `session_guard.py`'s docstring for why. Bridge 1.9.0 adds the theme
 hijack: `THEME_STATE` may carry a skin and the Forge page's own palette, the bridge's
 stylesheet covers WanGP's studio look, and the handshake says `capabilities.theme_palette`
-(see *What the WanGP page wears*, below). An extension newer than its
+(see *What the WanGP page wears*, below). Bridge 1.10.0 adds the typeface: `THEME_STATE`
+may carry the page's font lists and the `@font-face` rules behind them, and the WanGP page
+is set in them (`capabilities.theme_font`). An extension newer than its
 bridge says `BRIDGE_VERSION_MISMATCH` until the bridge is installed again from setup step 4
 and WanGP restarted.
 
@@ -423,6 +425,16 @@ what the WanGP page is dressed in**:
   whenever the tab comes back on screen, so a theme switched meanwhile is picked up on return.
 * **Mini Paint's own dark and light** — the bridge's built-in palette, in the mode this page
   is in.
+
+With either of those, the WanGP page is also set in **this page's typeface** (bridge
+1.10.0): the font lists Gradio's `--font` and `--font-mono` hold on this page - Lobe writes
+its own into both - and, for the families they name, the `@font-face` rules this origin's own
+stylesheets declare, so a face the page loaded is loaded in the WanGP page from the same place.
+A family that comes from another origin's stylesheet (Google Fonts) cannot be copied and falls
+through to the next in the list. Worth having on its own: WanGP's studio themes hand Gradio
+`'Verdana'` with nothing behind it, and a browser that will not use Verdana - LibreWolf under
+its fingerprinting defence, a phone - showed WanGP in its default serif. The page's log adds
+`font <list> (N faces)` to the `theme:` line.
 * **WanGP's own theme** — the hijack steps aside entirely: WanGP looks as it does on its own.
 
 The setting reaches the page at the next Reload UI (the tab's view is painted then). It

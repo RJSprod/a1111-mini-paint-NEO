@@ -156,6 +156,11 @@ def configuration(theme_css: str = "") -> dict:
         "skinOff": protocol.SKIN_OFF,
         "paletteSlots": list(protocol.PALETTE_SLOTS),
         "colourPattern": protocol.COLOUR_RE.pattern.replace("\\A", "^").replace("\\Z", "$"),
+        # The typeface (bridge 1.10.0): what a font list and a face may be.
+        "fontListPattern": protocol.FONT_LIST_RE.pattern.replace("\\A", "^").replace("\\Z", "$"),
+        "fontFacePattern": protocol.FONT_FACE_RE.pattern.replace("\\A", "^").replace("\\Z", "$"),
+        "fontUrlPattern": protocol.FONT_URL_RE.pattern,
+        "maxFontFaces": protocol.MAX_FONT_FACES,
     }
 
 
@@ -291,6 +296,9 @@ _SCRIPT = r"""
   var TOKEN = /^[A-Za-z0-9._:-]{1,64}$/;
   // One solid colour, as protocol.py spells it: what a palette slot may hold.
   var COLOUR = new RegExp(CONFIG.colourPattern);
+  var FONT_LIST = new RegExp(CONFIG.fontListPattern);
+  var FONT_FACE = new RegExp(CONFIG.fontFacePattern);
+  var FONT_URL = new RegExp(CONFIG.fontUrlPattern, "g");
 
   var channelId = "";
   var focusable = Object.create(null);
@@ -944,7 +952,30 @@ __MINIPAINT_FRAME_WRAPPER__
         if (typeof value === "string" && COLOUR.test(value)) { palette[slot] = value; }
       }
     }
-    return { mode: mode, skin: skin, palette: palette };
+    // The typeface rides with any skin but off, and word by word: a list
+    // that is a list of families, faces that are one plain @font-face block
+    // each with a url() that is http(s) or root-relative, twelve at most.
+    var font = skin !== CONFIG.skinOff && typeof source.font === "string" && FONT_LIST.test(source.font) ? source.font : "";
+    var fontMono = font && typeof source.font_mono === "string" && FONT_LIST.test(source.font_mono) ? source.font_mono : "";
+    var faces = [];
+    if (font && Array.isArray(source.font_faces)) {
+      for (var j = 0; j < source.font_faces.length && faces.length < CONFIG.maxFontFaces; j += 1) {
+        if (validFace(source.font_faces[j])) { faces.push(source.font_faces[j]); }
+      }
+    }
+    return { mode: mode, skin: skin, palette: palette, font: font, fontMono: fontMono, fontFaces: faces };
+  }
+
+  function validFace(face) {
+    if (typeof face !== "string" || !FONT_FACE.test(face)) { return false; }
+    var found;
+    FONT_URL.lastIndex = 0;
+    while ((found = FONT_URL.exec(face)) !== null) {
+      var target = String(found[1] || "").trim().toLowerCase();
+      if (target.indexOf("//") === 0) { return false; }
+      if (!(target.indexOf("https://") === 0 || target.indexOf("http://") === 0 || target.indexOf("/") === 0)) { return false; }
+    }
+    return true;
   }
 
   // The stylesheet is keyed on one attribute of <html>: its value is the
@@ -966,7 +997,34 @@ __MINIPAINT_FRAME_WRAPPER__
         else { root.style.removeProperty("--mp-" + slot); }
       }
     } catch (error) {}
+    // The typeface: an attribute the stylesheet's font rule is keyed on,
+    // the two lists as inline properties, and the faces in a sheet of
+    // their own - all three off again when no font came.
+    try {
+      if (wanted.font) {
+        root.setAttribute("data-minipaint-font", "host");
+        root.style.setProperty("--mp-font", wanted.font);
+        if (wanted.fontMono) { root.style.setProperty("--mp-font-mono", wanted.fontMono); }
+        else { root.style.removeProperty("--mp-font-mono"); }
+      } else {
+        root.removeAttribute("data-minipaint-font");
+        root.style.removeProperty("--mp-font");
+        root.style.removeProperty("--mp-font-mono");
+      }
+      fontSheet(wanted.fontFaces.join("\n"));
+    } catch (error) {}
     return wanted;
+  }
+
+  function fontSheet(css) {
+    var tag = document.getElementById("minipaint-bridge-fonts");
+    if (!tag) {
+      if (!css) { return; }
+      tag = document.createElement("style");
+      tag.id = "minipaint-bridge-fonts";
+      (document.head || document.documentElement).appendChild(tag);
+    }
+    if (tag.textContent !== css) { tag.textContent = css; }
   }
 
   function style() {

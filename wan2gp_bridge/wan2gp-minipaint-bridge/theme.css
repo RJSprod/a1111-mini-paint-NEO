@@ -220,6 +220,29 @@
   --checkbox-background-color-selected: color-mix(in srgb, var(--mp-accent) 60%, var(--mp-page));
 }
 
+/* The page's typeface (bridge 1.10.0).
+
+   WanGP's studio themes hand Gradio `font=['Verdana']`, and Gradio writes
+   that as `--font: 'Verdana'` with no generic family behind it - so a
+   browser that will not use Verdana (LibreWolf under its fingerprinting
+   defence, a phone without it) falls all the way to its default, a serif.
+   When the parent sent what its own page is set in, the script puts that
+   list on <html> and marks it; under the mark the container reads the list
+   for Gradio's `--font` and `--font-mono` and sets itself in it, and the
+   faces the page loaded are in the script's own sheet. Without the mark
+   nothing here applies and WanGP keeps its own. */
+:root[data-minipaint-theme][data-minipaint-font] .gradio-container,
+:root[data-minipaint-theme][data-minipaint-font] body {
+  --font: var(--mp-font, sans-serif);
+  --font-mono: var(--mp-font-mono, monospace);
+  font-family: var(--font);
+}
+
+/* The one place WanGP names a stack of its own instead of reading --font. */
+:root[data-minipaint-theme][data-minipaint-font] #queue_html_container table {
+  font-family: var(--font);
+}
+
 /* The fixed colours in WanGP's own ui_styles.css that no variable reaches:
    the model selector's slab, the title rules, the image editor's two
    buttons, the queue table and the progress bar. Selected by the ids and

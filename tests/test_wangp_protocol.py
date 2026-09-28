@@ -284,6 +284,10 @@ def browser_checks(r: Results) -> None:
             and js_strings(source, "PALETTE_SLOTS") == protocol.PALETTE_SLOTS, str(js_strings(source, "THEME_SKINS")))
     r.check("and requires the same shape of a colour",
             js_regex(source, "COLOUR_RE") == as_javascript(protocol.COLOUR_RE.pattern), js_regex(source, "COLOUR_RE"))
+    r.check("and the same shapes of a font list and a face",
+            js_regex(source, "FONT_LIST_RE") == as_javascript(protocol.FONT_LIST_RE.pattern)
+            and js_regex(source, "FONT_FACE_RE") == as_javascript(protocol.FONT_FACE_RE.pattern)
+            and js_number(source, "MAX_FONT_FACES") == protocol.MAX_FONT_FACES, js_regex(source, "FONT_FACE_RE"))
     r.check("the browser allows the same types out of the parent",
             set(js_strings(source, "TO_BRIDGE")) == set(protocol.TO_BRIDGE), str(js_strings(source, "TO_BRIDGE")))
     r.check("the browser allows the same types out of the iframe",
@@ -1676,7 +1680,10 @@ const doc = {
   querySelectorAll: function () { return []; },
   createElement: function (tag) { return new El(tag); },
   documentElement: { classList: { contains: () => false }, style: {}, getAttribute: () => null },
-  body: docRoot, head: new El("head")
+  body: docRoot, head: new El("head"),
+  // A getter: the sheets are declared further down, and the bundle reads
+  // them long after this object is made.
+  get styleSheets() { return STYLE_SHEETS; }
 };
 const win = {
   location: { href: ORIGIN + "/", origin: ORIGIN },
@@ -1703,7 +1710,9 @@ const win = {
       if (held) { seen = held; break; }
       chain = m[2];
     }
-    return { position: "static", display: "block", backgroundColor: seen };
+    return { position: "static", display: "block", backgroundColor: seen,
+             fontFamily: PAGE_VARS["font-family"] || "",
+             getPropertyValue: function (name) { return PAGE_VARS[name] || ""; } };
   },
   requestAnimationFrame: (f) => vSet(f, 16), innerHeight: 900,
   crypto: { getRandomValues: (b) => { for (let i = 0; i < b.length; i++) { b[i] = Math.floor(Math.random() * 256); } return b; } }
@@ -1730,6 +1739,25 @@ const PAGE_VARS = MODE === "themeGradient" ? {
   "--color-accent-soft": "rgb(200, 210, 230)", "--color-accent": "rgb(110, 168, 254)", "--button-primary-text-color": "rgb(13, 17, 23)"
 };
 function lum(colour) { const m = /(\d+),\s*(\d+),\s*(\d+)/.exec(colour || ""); return m ? (0.2126 * m[1] + 0.7152 * m[2] + 0.0722 * m[3]) / 255 : null; }
+// The page's typeface, as Lobe writes it into Gradio's variables, for the
+// theme scenarios; the other scenarios' page names none.
+if (MODE.indexOf("theme") === 0) {
+  PAGE_VARS["--font"] = "'Inter', -apple-system, 'Segoe UI', sans-serif";
+  PAGE_VARS["--font-mono"] = "'JetBrains Mono', monospace";
+}
+// Two stylesheets: the page's own, readable, with a face for Inter (a
+// relative url, to be made absolute against the sheet), a rule that is not
+// a face, and a face for a family the page does not use; and Google's,
+// which another origin makes unreadable.
+const STYLE_SHEETS = [
+  { href: "http://forge.test/file=extensions/lobe/style.css", cssRules: [
+      { type: 5, style: { getPropertyValue: (k) => k === "font-family" ? "\"Inter\"" : "" },
+        cssText: "@font-face { font-family: \"Inter\"; src: url(fonts/inter.woff2) format(\"woff2\"); font-weight: 400; }" },
+      { type: 1, style: { getPropertyValue: () => "" }, cssText: "body { color: red; }" },
+      { type: 5, style: { getPropertyValue: (k) => k === "font-family" ? "\"Other\"" : "" },
+        cssText: "@font-face { font-family: \"Other\"; src: url(/other.woff2); }" } ] },
+  { href: "https://fonts.googleapis.com/css2?family=Inter", get cssRules() { throw new Error("SecurityError"); } }
+];
 // The tab's view JSON, with the look from Settings, for the theme scenarios.
 if (MODE.indexOf("theme") === 0) {
   const stateBox = new El("div"); stateBox.id = "wangp_state";
@@ -2307,6 +2335,25 @@ def theme_send_checks(r: Results) -> None:
     r.check("a look word this bundle does not know is the host look, not an error",
             sent.get("skin") == "host" and len(sent.get("palette") or {}) == 9, str(sent))
 
+    # The typeface (bridge 1.10.0): the page's two font lists as its
+    # stylesheet states them, and the faces its own sheets declare for the
+    # families they name - made absolute against the sheet, never a family
+    # the page does not use, never a rule that is not a face, and never a
+    # sheet another origin makes unreadable.
+    sent = (host.get("atReady") or [{}])[0] if host.get("atReady") else {}
+    r.check("the page's font lists ride with the host palette",
+            sent.get("font") == "'Inter', -apple-system, 'Segoe UI', sans-serif"
+            and sent.get("font_mono") == "'JetBrains Mono', monospace", str(sent.get("font")))
+    r.check("with the faces the page's own sheets declare for those families, their urls made absolute against the sheet",
+            sent.get("font_faces") == ['@font-face { font-family: "Inter"; src: url(http://forge.test/file=extensions/lobe/fonts/inter.woff2) format("woff2"); font-weight: 400; }'],
+            str(sent.get("font_faces")))
+    r.check("and said in the journal", any("font 'Inter'" in line and "(1 faces)" in line for line in host.get("said") or []), str(host.get("said")))
+    sent = (bridge.get("atReady") or [{}])[0] if bridge.get("atReady") else {}
+    r.check("the typeface rides with the bridge's own palette too: it is not a colour",
+            sent.get("font") == "'Inter', -apple-system, 'Segoe UI', sans-serif" and len(sent.get("font_faces") or []) == 1, str(sent.get("font")))
+    sent = (off.get("atReady") or [{}])[0] if off.get("atReady") else {}
+    r.check("and not with off", sent.get("font") == "" and sent.get("font_mono") == "" and sent.get("font_faces") == [], str(sent))
+
 
 def heartbeat_checks(r: Results) -> None:
     """The WanGP page asked every five seconds whether it is there.
@@ -2744,6 +2791,7 @@ const column = { id: "minipaint_bridge_1", parentElement: null,
     return null;
   } };
 let styled = null;
+const made = {};
 const window = {
   location: { origin: ORIGIN }, parent: parent,
   addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
@@ -2754,9 +2802,10 @@ const window = {
 const document = {
   getElementsByClassName(name) { return name === "minipaint-bridge-column" ? [column] : []; },
   getElementById() { return null; }, addEventListener() {},
-  documentElement: root, head: { appendChild(tag) { styled = tag; } }, body: null,
+  documentElement: root, head: { appendChild(tag) { if (!styled) { styled = tag; } made[tag.id] = tag; } }, body: null,
   createElement() { return { textContent: "" }; }
 };
+document.getElementById = function (id) { return made[id] || null; };
 globalThis.Event = class { constructor(type) { this.type = type; } };
 globalThis.TextEncoder = require("util").TextEncoder;
 new Function("window", "document", script)(window, document);
@@ -2786,6 +2835,23 @@ send("WANGP_THEME_STATE", { mode: "light" }, channel, "t5");
 out.oldParentLight = snap();
 send("WANGP_THEME_STATE", { mode: "dark", skin: "host", palette: { page: "rgb(9, 9, 9)" } }, "d".repeat(32), "t6");
 out.stranger = snap();
+// The typeface: two lists and three faces, one of them not a face, one
+// pointing at data:, one good.
+const faces = [
+  "@font-face { font-family: \"Inter\"; src: url(https://forge.test/file=inter.woff2) format(\"woff2\"); font-weight: 400; }",
+  "@font-face { font-family: \"Inter\"; src: url(data:font/woff2;base64,AAAA); }",
+  "body { color: red; } @font-face { font-family: \"X\"; }"
+];
+send("WANGP_THEME_STATE", { mode: "dark", skin: "bridge", font: "'Inter', 'Segoe UI', sans-serif", font_mono: "'JetBrains Mono', monospace", font_faces: faces }, channel, "t7");
+out.font = { attr: root.attrs["data-minipaint-font"] || null, props: Object.assign({}, root.style.props),
+             sheet: made["minipaint-bridge-fonts"] ? made["minipaint-bridge-fonts"].textContent : null };
+send("WANGP_THEME_STATE", { mode: "dark", skin: "host", font: "Arial; background: url(x)", font_faces: faces }, channel, "t8");
+out.badFont = { attr: root.attrs["data-minipaint-font"] || null, props: Object.assign({}, root.style.props),
+                sheet: made["minipaint-bridge-fonts"] ? made["minipaint-bridge-fonts"].textContent : null };
+send("WANGP_THEME_STATE", { mode: "dark", skin: "host", font: "'Inter', sans-serif", font_faces: faces }, channel, "t9");
+send("WANGP_THEME_STATE", { mode: "light", skin: "off", font: "'Inter', sans-serif", font_faces: faces }, channel, "t10");
+out.fontOff = { attr: root.attrs["data-minipaint-font"] || null, props: Object.assign({}, root.style.props),
+                sheet: made["minipaint-bridge-fonts"] ? made["minipaint-bridge-fonts"].textContent : null };
 console.log(JSON.stringify(out));
 process.exit(0);
 """
@@ -2805,12 +2871,13 @@ def theme_checks(r: Results) -> None:
         "page": "rgb(1, 2, 3)", "ink": "#e6e8ee", "accent": "oklch(0.7 0.1 250 / 50%)",
         "panel": "url(https://example.test/x.png)", "raised": "linear-gradient(red, blue)",
         "line": "var(--x)", "line-soft": 7, "bogus": "#ffffff"}})
+    no_type = {"font": "", "font_mono": "", "font_faces": []}
     r.check("a theme keeps only the slots it knows, and only a solid colour in each",
-            kept == {"mode": "light", "skin": "host", "palette": {"page": "rgb(1, 2, 3)", "ink": "#e6e8ee", "accent": "oklch(0.7 0.1 250 / 50%)"}},
+            kept == dict({"mode": "light", "skin": "host", "palette": {"page": "rgb(1, 2, 3)", "ink": "#e6e8ee", "accent": "oklch(0.7 0.1 250 / 50%)"}}, **no_type),
             str(kept))
     r.check("no mode is dark, no skin is the bridge's own, and no payload at all is both",
-            protocol.normalize_theme(None) == {"mode": "dark", "skin": "bridge", "palette": {}}
-            and protocol.normalize_theme({"mode": "sepia", "skin": "neon"}) == {"mode": "dark", "skin": "bridge", "palette": {}})
+            protocol.normalize_theme(None) == dict({"mode": "dark", "skin": "bridge", "palette": {}}, **no_type)
+            and protocol.normalize_theme({"mode": "sepia", "skin": "neon"}) == dict({"mode": "dark", "skin": "bridge", "palette": {}}, **no_type))
     r.check("a palette rides only with the host skin",
             protocol.normalize_theme({"skin": "bridge", "palette": {"page": "#fff"}})["palette"] == {}
             and protocol.normalize_theme({"skin": "off", "palette": {"page": "#fff"}})["palette"] == {})
@@ -2821,6 +2888,31 @@ def theme_checks(r: Results) -> None:
                                                              "rgb(1,2,3); background: url(x)", "", None, 7, "#gg0000", "x" * 90)))
     r.check("the skins and slots are the closed lists the stylesheet is written against",
             protocol.THEME_SKINS == ("host", "bridge", "off") and len(protocol.PALETTE_SLOTS) == 9)
+    # The typeface (bridge 1.10.0).
+    good_face = '@font-face { font-family: "Inter"; src: url(https://forge.test/file=inter.woff2) format("woff2"); font-weight: 400; }'
+    r.check("a font list is family names, quotes, commas and spaces, never a declaration",
+            all(protocol.valid_font_list(v) for v in ("'Source Sans Pro', 'ui-sans-serif', 'system-ui', sans-serif",
+                                                       "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+                                                       '"Segoe UI", Arial', "monospace"))
+            and not any(protocol.valid_font_list(v) for v in ("Arial; background: url(x)", "", None, "x" * 301, "Arial{}", "<b>")))
+    r.check("a face is one plain @font-face block whose url is http(s) or root-relative",
+            protocol.valid_font_face(good_face) and protocol.valid_font_face("@font-face { font-family: 'X'; src: url(/file=x.woff) }")
+            and not any(protocol.valid_font_face(v) for v in (
+                "@font-face { font-family: 'X'; src: url(data:font/woff2;base64,AAAA); }",
+                "@font-face { font-family: 'X'; src: url(//evil.test/x.woff); }",
+                "@font-face { font-family: 'X'; src: url(javascript:alert(1)); }",
+                "body { color: red; } @font-face { font-family: 'X'; }",
+                "@font-face { font-family: 'X'; src: url(/x) } body { }",
+                "@font-face { font-family: 'X'; } <script>", "", None)))
+    kept = protocol.normalize_theme({"skin": "bridge", "font": "'Inter', sans-serif", "font_mono": "'JetBrains Mono', monospace",
+                                     "font_faces": [good_face, "body { }", "@font-face { font-family: 'X'; src: url(data:x); }"]})
+    r.check("the typeface rides with any skin but off, faces dropped one by one",
+            kept["font"] == "'Inter', sans-serif" and kept["font_mono"] == "'JetBrains Mono', monospace" and kept["font_faces"] == [good_face]
+            and protocol.normalize_theme({"skin": "off", "font": "'Inter', sans-serif", "font_faces": [good_face]})["font_faces"] == []
+            and protocol.normalize_theme({"skin": "off", "font": "'Inter', sans-serif"})["font"] == "", str(kept))
+    r.check("a mono list or a face without a font list is nothing, and faces stop at twelve",
+            protocol.normalize_theme({"skin": "host", "font_mono": "monospace", "font_faces": [good_face]}) ["font_faces"] == []
+            and len(protocol.normalize_theme({"skin": "host", "font": "Arial", "font_faces": [good_face] * 20})["font_faces"]) == protocol.MAX_FONT_FACES)
 
     folder = str(BRIDGE_COPY.parent)
     added = folder not in _sys.path
@@ -2837,6 +2929,11 @@ def theme_checks(r: Results) -> None:
             and tuple(config.get("themeModes") or ()) == protocol.THEME_MODES
             and config.get("colourPattern") == as_javascript(protocol.COLOUR_RE.pattern)
             and (config.get("skinHost"), config.get("skinBridge"), config.get("skinOff")) == protocol.THEME_SKINS, str(config.get("colourPattern")))
+    r.check("and the typeface's shapes",
+            config.get("fontListPattern") == as_javascript(protocol.FONT_LIST_RE.pattern)
+            and config.get("fontFacePattern") == as_javascript(protocol.FONT_FACE_RE.pattern)
+            and config.get("fontUrlPattern") == protocol.FONT_URL_RE.pattern and config.get("maxFontFaces") == protocol.MAX_FONT_FACES,
+            str(config.get("fontFacePattern")))
 
     # ---- the script in the WanGP document ----
     node = shutil.which("node")
@@ -2875,6 +2972,18 @@ def theme_checks(r: Results) -> None:
                 (out.get("oldParentLight") or {}).get("attr") == "light" and (out.get("oldParentLight") or {}).get("props") == {}, str(out.get("oldParentLight")))
         r.check("and a stranger's channel changes nothing",
                 (out.get("stranger") or {}).get("attr") == "light" and (out.get("stranger") or {}).get("props") == {}, str(out.get("stranger")))
+        font = out.get("font") or {}
+        r.check("a typeface marks <html>, puts both lists on it and the one good face in a sheet of its own",
+                font.get("attr") == "host" and (font.get("props") or {}).get("--mp-font") == "'Inter', 'Segoe UI', sans-serif"
+                and (font.get("props") or {}).get("--mp-font-mono") == "'JetBrains Mono', monospace"
+                and font.get("sheet") == '@font-face { font-family: "Inter"; src: url(https://forge.test/file=inter.woff2) format("woff2"); font-weight: 400; }',
+                str(font))
+        bad = out.get("badFont") or {}
+        r.check("a font list that is not one takes the mark and the faces off",
+                bad.get("attr") is None and "--mp-font" not in (bad.get("props") or {}) and bad.get("sheet") == "", str(bad))
+        off = out.get("fontOff") or {}
+        r.check("and so does the off skin, whatever it was sent",
+                off.get("attr") is None and "--mp-font" not in (off.get("props") or {}) and off.get("sheet") == "", str(off))
 
     # ---- the stylesheet ----
     css = (BRIDGE_COPY.parent / "theme.css").read_text(encoding="utf-8")
@@ -2923,6 +3032,14 @@ def theme_checks(r: Results) -> None:
     slab = slab[:slab.find("}") + 1]
     r.check("the model selector's slab is the panel colour with importance, so no build of WanGP's rule can keep the slate",
             "background-color: var(--mp-panel) !important" in slab, slab)
+    typeface = css[css.find(":root[data-minipaint-theme][data-minipaint-font] .gradio-container,"):]
+    typeface = typeface[:typeface.find("}") + 1]
+    r.check("the page's typeface applies only under the script's mark, as Gradio's own two font variables and the container's family",
+            ":root[data-minipaint-theme][data-minipaint-font] body {" in typeface
+            and "--font: var(--mp-font, sans-serif);" in typeface and "--font-mono: var(--mp-font-mono, monospace);" in typeface
+            and "font-family: var(--font);" in typeface and css.count("[data-minipaint-font]") == 3, typeface)
+    r.check("and reaches the one stack WanGP names itself",
+            ":root[data-minipaint-theme][data-minipaint-font] #queue_html_container table {\n  font-family: var(--font);" in css, "")
     r.check("a ticked box is the accent pulled towards the page in dark mode only, so a white check shows on a white accent",
             ':root[data-minipaint-theme="dark"] .gradio-container,' in css
             and "--checkbox-background-color-selected: color-mix(in srgb, var(--mp-accent) 60%, var(--mp-page))" in css

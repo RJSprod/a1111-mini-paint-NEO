@@ -642,8 +642,11 @@ def check_focus_mode_makes_the_frame_the_window(r: Results, page) -> None:
 PALETTE_JS = """() => {
     const api = window.minipaintWanGP;
     const palette = api.samplePalette();
+    const type = api.sampleFont();
     api.theme();
-    return { palette: palette, theme: api.state().theme, probes: document.querySelectorAll("span[aria-hidden='true']").length };
+    return { palette: palette, theme: api.state().theme, probes: document.querySelectorAll("span[aria-hidden='true']").length,
+             font: type.font, mono: type.font_mono, faces: type.font_faces,
+             declared: getComputedStyle(document.querySelector(".gradio-container")).getPropertyValue("--font").trim() };
 }"""
 
 
@@ -664,6 +667,14 @@ def check_the_page_palette_is_sampled(r: Results, page) -> None:
     r.check("and the mode is read off the page colour: this page is light, and the look is the host's",
             (seen.get("theme") or {}).get("mode") == "light" and (seen.get("theme") or {}).get("skin") == "host", str(seen.get("theme")))
     r.check("the probe it was read through is gone", seen.get("probes") == 0, str(seen.get("probes")))
+    # The typeface: what Gradio's own theme declares for this page, read
+    # back as the browser resolved the variable, with the faces of its own
+    # sheets - Gradio's font comes from Google's, another origin, so none.
+    r.check("the page's typeface is read off Gradio's --font, as a list of families",
+            seen.get("font") and seen.get("font") == seen.get("declared") and "sans-serif" in seen.get("font")
+            and re.match(r"^[-A-Za-z0-9'\"][-A-Za-z0-9 _'\",.]{0,299}$", seen.get("font")) is not None, str(seen.get("font")))
+    r.check("with its mono list, and the faces this origin's sheets declare for them",
+            "monospace" in (seen.get("mono") or "") and isinstance(seen.get("faces"), list), str(seen.get("mono")))
 
 
 def check_the_direct_route_when_the_queue_is_dead(r: Results, page) -> None:

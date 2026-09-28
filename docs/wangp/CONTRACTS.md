@@ -285,11 +285,20 @@ from the page colour towards the ink - a group's box 0.08 above the page, an inp
 0.05 above the box, a hover 0.04 and a border 0.10 above the input - because Gradio's
 variables for them say what the theme's base declares and not what the page shows
 (Lobe paints its blocks and inputs with rules of its own). `state().theme` is
-`{mode, skin}`, and the journal line lists the colours sent. `skin` is the look from
+`{mode, skin}`, and the journal line lists the colours sent. **The typeface** (bridge
+1.10.0): `sampleFont()` is the page's `--font` and `--font-mono` as its stylesheet states
+them (Lobe writes its own stacks into both; the container's `font-family` when `--font`
+is unset) and, for the families they name, the `@font-face` rules of this origin's own
+stylesheets with their `url()` made absolute against the sheet (`font_faces`, twelve at
+most; a sheet another origin makes unreadable is skipped, so a Google Fonts family falls
+through to the next in the list). It rides with any skin but off - it is not a colour -
+and is validated on both sides (`valid_font_list`, `valid_font_face`: one plain
+`@font-face` block, its `url()` http(s) or root-relative, never `data:`). `skin` is the look from
 Settings as the tab's view JSON carries it (`look`): `host` sends the palette and the mode
 read off the page colour sampled (dark below half luminance), `bridge` sends no palette,
 `off` sends none and says `mode: "light"` - the one word that leaves WanGP alone on a
-bridge older than the skins, which reads `mode` and nothing else. A look word the bundle
+bridge older than the skins, which reads `mode` and nothing else; `font`, `font_mono` and
+`font_faces` ride with host and bridge (a bridge older than 1.10.0 ignores them). A look word the bundle
 does not know is `host`. The journal says `theme: host, dark; ink rgb(...), ... accent-ink
 rgb(...)` once per change, never once per send.
 
@@ -340,7 +349,14 @@ that no variable reaches (the model selector's slab, the title rules, the editor
 buttons, the queue table, the progress bar). Groups: every `.form` and `.gr-group` is a
 box of the panel colour (`!important`, over the transparency the studio look gives
 them), a selected tab is the accent on the raised surface, and in dark mode a ticked box
-is the accent pulled towards the page so a white check shows on a white accent. The handshake says
+is the accent pulled towards the page so a white check shows on a white accent. The
+typeface (1.10.0): the script marks `<html>` `data-minipaint-font` and puts `--mp-font`
+and `--mp-font-mono` on it inline, with the faces in `<style id="minipaint-bridge-fonts">`;
+under the mark the container reads them as Gradio's `--font` and `--font-mono` and sets
+itself in the first, and WanGP's one hand-written stack (the queue table) reads it too.
+Without the mark WanGP keeps its own - which, for its studio themes, is `--font: 'Verdana'`
+with no generic family behind it, a serif on any browser that will not use Verdana. The
+handshake says `capabilities.theme_font`. The handshake says
 `capabilities.theme_palette`; a parent that never hears it sends `mode` alone, and
 the script's first paint is the bridge's own dark until the parent speaks.
 

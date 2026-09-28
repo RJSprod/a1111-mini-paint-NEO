@@ -295,6 +295,18 @@ PALETTE_SLOTS = ("ink", "ink-dim", "page", "panel", "raised", "line", "line-soft
 #: spaces and keywords. Never a url(), a gradient or a var(): the value is
 #: written into a custom property the stylesheet paints backgrounds from.
 COLOUR_RE = re.compile(r"\A(#[0-9a-fA-F]{3,8}|(rgb|rgba|hsl|hsla|hwb|lab|lch|oklab|oklch|color)\([-0-9a-zA-Z.%,/ ]{1,80}\))\Z")
+#: The page's typeface, carried with the palette (bridge 1.10.0). ``font``
+#: and ``font_mono`` are font-family lists as the page's stylesheet states
+#: them: family names, quotes, commas, spaces. ``font_faces`` are the
+#: @font-face rules of the page's own stylesheets that name a family in
+#: those lists, absolute-URL'd, so a face the page loaded loads in the WanGP
+#: page too. A face is one @font-face block of plain declarations - no
+#: nested braces, no backslashes, no angle brackets, and a url() that is
+#: http(s) or root-relative, never data: or javascript:.
+FONT_LIST_RE = re.compile(r"""\A[-A-Za-z0-9'"][-A-Za-z0-9 _'",.]{0,299}\Z""")
+FONT_FACE_RE = re.compile(r"""\A@font-face\s*\{[-A-Za-z0-9 _'",.:;/()%+#?=&\n\t]{1,1800}\}\Z""")
+FONT_URL_RE = re.compile(r"""url\(\s*['"]?([^'")]*)""")
+MAX_FONT_FACES = 12
 
 
 def valid_handoff_id(value: typing.Any) -> bool:
@@ -309,6 +321,29 @@ def valid_colour(value: typing.Any) -> bool:
     return isinstance(value, str) and bool(COLOUR_RE.match(value))
 
 
+def valid_font_list(value: typing.Any) -> bool:
+    return isinstance(value, str) and bool(FONT_LIST_RE.match(value))
+
+
+def valid_font_face(value: typing.Any) -> bool:
+    """One @font-face block a page may hand the WanGP document.
+
+    The shape first, then every url() in it: a face is loaded from where the
+    page loaded it, over http(s) or from this origin's root, and nothing
+    else - a data: URL is a font nobody can size, and anything stranger is
+    not a font at all.
+    """
+    if not isinstance(value, str) or not FONT_FACE_RE.match(value):
+        return False
+    for target in FONT_URL_RE.findall(value):
+        lowered = target.strip().lower()
+        if not (lowered.startswith("https://") or lowered.startswith("http://") or lowered.startswith("/")):
+            return False
+        if lowered.startswith("//"):
+            return False
+    return True
+
+
 def normalize_theme(payload: typing.Any) -> dict:
     """A THEME_STATE payload as the bridge's script applies it, on either side.
 
@@ -316,7 +351,11 @@ def normalize_theme(payload: typing.Any) -> dict:
     an unknown or missing mode is dark, an unknown or missing skin is the
     bridge's own palette (so a parent older than this vocabulary gets what it
     always got), and a palette is kept only for the host skin and only slot
-    by slot, dropping every value that is not one solid colour.
+    by slot, dropping every value that is not one solid colour. The typeface
+    rides with any skin but off - it is not a colour, and a page that says
+    what its text is set in says it for the built-in palette as well - and
+    is dropped word by word: a list that is not a list of families, a face
+    that is not one plain @font-face block, and every face past the twelfth.
     """
     source = payload if isinstance(payload, dict) else {}
     mode = source.get("mode")
@@ -330,7 +369,14 @@ def normalize_theme(payload: typing.Any) -> dict:
             value = raw.get(slot)
             if valid_colour(value):
                 palette[slot] = value
-    return {"mode": mode, "skin": skin, "palette": palette}
+    font = source.get("font") if skin != SKIN_OFF and valid_font_list(source.get("font")) else ""
+    font_mono = source.get("font_mono") if font and valid_font_list(source.get("font_mono")) else ""
+    faces: typing.List[str] = []
+    raw_faces = source.get("font_faces")
+    if font and isinstance(raw_faces, list):
+        faces = [face for face in raw_faces if valid_font_face(face)][:MAX_FONT_FACES]
+    return {"mode": mode, "skin": skin, "palette": palette,
+            "font": font, "font_mono": font_mono, "font_faces": faces}
 
 
 def canonical_json(value: typing.Any) -> str:

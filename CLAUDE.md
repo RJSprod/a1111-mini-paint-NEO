@@ -393,6 +393,16 @@ the four surfaces as fixed luminance steps from the page towards the ink
 (`SURFACE_STEPS`); the numbers are Lobe's night mode measured. Read a page's
 variables for its *colours*, never for its *layout of tones*.
 
+**Gradio quotes a theme's font and puts nothing behind it.** WanGP's studio
+themes say `gr.themes.Soft(font=['Verdana'])`, and Gradio writes that as
+`--font: 'Verdana'` - a quoted family with no generic fallback (only the five
+generic names go unquoted). A browser that will not use Verdana - LibreWolf
+under its fingerprinting defence, a phone without it - falls to its default,
+a serif, and that is the Times-like WanGP of the first screenshot. The hijack
+sets the page in the Forge page's own lists (bridge 1.10.0), which always end
+in a generic family; if the WanGP page is ever a serif again, the mark
+`data-minipaint-font` on its `<html>` is the first thing to look for.
+
 **A variable holding a gradient is not unset.** `var(--a, var(--b, transparent))`
 never reaches `--b` when `--a` holds a gradient: the variable is defined, so it
 is substituted, and a gradient in `background-color` makes the declaration
@@ -481,8 +491,8 @@ The heartbeat's whole state is in `minipaintWanGP.state().heartbeat`, and the
 settings save's in `minipaintWanGP.state().settings`; every miss, bar, dismissal
 and reload is a `heartbeat:` line in the page journal. Saving as the form
 changes and the heartbeat need bridge 1.7.0 installed in WanGP, the session guard
-bridge 1.8.0, and the theme hijack - the page's colours on the WanGP page, over
-WanGP's own themes - bridge 1.9.0. The hijack has been checked against WanGP's
+bridge 1.8.0, the theme hijack - the page's colours on the WanGP page, over
+WanGP's own themes - bridge 1.9.0, and the page's typeface bridge 1.10.0. The hijack has been checked against WanGP's
 stylesheets as read from its repository on 2026-09-28 (`ui_studio.css` and the
 four theme files, `ui_styles.css`), never on the user's own install: what the
 eleven `--studio-*` remaps and the fixed-colour overrides look like in a real

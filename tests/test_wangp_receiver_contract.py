@@ -859,6 +859,26 @@ def tab_checks(r: Results) -> None:
             r.check("as a fixed box in the viewport, invisible and untouchable, at the width it has in its place",
                     "position: fixed" in parked and "visibility: hidden" in parked and "pointer-events: none" in parked
                     and "width: var(--minipaint-wangp-parked-width, 100vw)" in parked, parked)
+            # Focus mode, the other extension's. Its class on the panel means
+            # the panel is the window; for this tab the workspace is the
+            # WanGP page, so the frame is all of it and nothing else shows.
+            focus = tab[tab.find("#tab_wangp.forge-assistant-focus-root"):]
+            focus = focus[:focus.find("/* -- the panel is parked")]
+            r.check("under the assistant's focus mode the panel is keyed on that extension's class, by id and by the bundle's mark",
+                    focus.startswith("#tab_wangp.forge-assistant-focus-root,\n.minipaint-wangp-tab.forge-assistant-focus-root {")
+                    and focus.count(".minipaint-wangp-tab.forge-assistant-focus-root") == 3, focus[:200])
+            root_rule = focus[:focus.find("}") + 1]
+            r.check("and loses its padding and border, over that extension's own rule",
+                    "padding: 0 !important" in root_rule and "border: 0 !important" in root_rule, root_rule)
+            r.check("the Integration management accordion is not displayed there",
+                    "#tab_wangp.forge-assistant-focus-root #wangp_manage_root" in focus
+                    and "display: none !important" in focus[focus.find("#wangp_manage_root"):], focus)
+            r.check("and the browser's own notice is laid over the frame rather than below the fold, against the panel and not the window",
+                    "#tab_wangp.forge-assistant-focus-root .minipaint-wangp-recovery" in focus
+                    and "position: absolute" in focus[focus.find(".minipaint-wangp-recovery"):]
+                    and "position: fixed" not in focus, focus)
+            r.check("the frame itself is never moved or hidden by that rule",
+                    ".minipaint-wangp-frame" not in focus and "#wangp_iframe" not in focus, focus)
             # One measurement, and the script that makes it, RUN rather than
             # read. The offset above the column is a theme's header plus
             # Forge's tab bar plus whether another extension's focus mode has
@@ -893,6 +913,16 @@ def tab_checks(r: Results) -> None:
                 r.check("and left alone when there is no tab strip to measure from", fit["parkedNoStrip"] == 0, str(fit))
                 r.check("shown again it is measured where it is, and the panel's width is kept for the next park",
                         fit["shownAgain"] == 900 - 120 - 40 - 4 and fit["keptWidth"] == "1200px", str(fit))
+                # The assistant's focus mode: the frame is the panel's whole
+                # height - nothing under it, the accordion not measured even
+                # when it still measures, and the panel's bottom rather than
+                # the window's, which is taller on a phone.
+                r.check("under the assistant's focus mode the frame is the panel's whole height, with nothing under it",
+                        fit["fullPage"] == 900 and fit["fullPageWrote"] == "900px", str(fit))
+                r.check("whatever the accordion still measures and however tall the window is",
+                        fit["fullPageUnstyled"] == 900, str(fit))
+                r.check("and the room under the frame is back when the class comes off",
+                        fit["afterFocus"] == 900 - 120 - 40 - 4, str(fit))
 
             # ---- the wizard offers the last setup back ----
             # After a Reinitialize the config keeps the folder and environment
@@ -960,6 +990,40 @@ def tab_checks(r: Results) -> None:
             script_callbacks.callbacks["after_component"][:] = saved_hooks
             host.reset_capture()
             config.use_config_dir(None)
+
+
+def look_checks(r: Results) -> None:
+    """The WanGP look: one Settings entry, read into the tab's view JSON as
+    the protocol's skin word, which is where the browser half reads it."""
+    from modules import shared
+    from minipaint_neo import settings
+    from minipaint_neo.wangp import ui as wangp_ui
+
+    settings.on_ui_settings()
+    labels = shared.opts.data_labels
+    info = labels.get(settings.WANGP_LOOK)
+    r.check("the look is one Settings entry with the three choices, matching this page first",
+            info is not None and info.component_args == {"choices": settings.WANGP_LOOK_CHOICES}
+            and info.default == settings.WANGP_LOOK_HOST and info.section == settings.SECTION
+            and settings.WANGP_LOOK_CHOICES == [settings.WANGP_LOOK_HOST, settings.WANGP_LOOK_BRIDGE, settings.WANGP_LOOK_OFF], str(info and info.__dict__))
+    r.check("and says it needs a Reload UI, which is when the tab's view is painted again",
+            info is not None and info.reload_ui is True)
+    before = shared.opts.data.get(settings.WANGP_LOOK)
+    try:
+        for stored, skin in ((settings.WANGP_LOOK_HOST, "host"), (settings.WANGP_LOOK_BRIDGE, "bridge"), (settings.WANGP_LOOK_OFF, "off")):
+            shared.opts.data[settings.WANGP_LOOK] = stored
+            r.check(f"'{stored}' is the skin word {skin}", settings.wangp_look() == skin and wangp_ui.current_look() == skin, settings.wangp_look())
+            r.check("and the tab's view carries it", wangp_ui.decide_view([], {}).get("look") == skin, str(wangp_ui.decide_view([], {})))
+        shared.opts.data[settings.WANGP_LOOK] = "a word from another build"
+        r.check("a stored word the page does not offer is the host look, never an error",
+                settings.wangp_look() == "host" and wangp_ui.decide_view([], {}).get("look") == "host")
+        shared.opts.data.pop(settings.WANGP_LOOK, None)
+        r.check("and so is no setting at all", settings.wangp_look() == "host")
+    finally:
+        if before is None:
+            shared.opts.data.pop(settings.WANGP_LOOK, None)
+        else:
+            shared.opts.data[settings.WANGP_LOOK] = before
 
 
 def handoff_release_checks(r: Results) -> None:
@@ -1836,6 +1900,26 @@ panel.box = {top: 100, left: 0, bottom: 900, width: 1200, height: 800};
 column.box = {top: 120, left: 0, width: 1200, height: 700};
 out.shownAgain = api.fitFrame();
 out.keptWidth = panel.style.props["--minipaint-wangp-parked-width"];
+// The assistant's focus mode: its class on the panel, the panel the whole
+// window with no padding, the management panel out of the layout. The
+// frame is the panel's whole height, with nothing left under it.
+panel.classList.contains = function (c) { return c === "forge-assistant-focus-root"; };
+panel.box = {top: 0, left: 0, bottom: 900, width: 1400, height: 900};
+column.box = {top: 0, left: 0, width: 1400, height: 900};
+manage.box = {top: 0, left: 0, width: 1400, height: 0};
+out.fullPage = api.fitFrame();
+out.fullPageWrote = column.style.props["--minipaint-wangp-frame"];
+// Still the panel's height when the accordion measures (a stylesheet that
+// did not apply) and the window is taller than the panel (a phone's bar).
+manage.box = {top: 0, left: 0, width: 1400, height: 40};
+window.innerHeight = 1000;
+out.fullPageUnstyled = api.fitFrame();
+window.innerHeight = 900;
+manage.box = {top: 0, left: 0, width: 1200, height: 40};
+panel.classList.contains = function () { return false; };
+panel.box = {top: 100, left: 0, bottom: 900, width: 1200, height: 800};
+column.box = {top: 120, left: 0, width: 1200, height: 700};
+out.afterFocus = api.fitFrame();
 process.stdout.write(JSON.stringify(out) + "\n");
 process.exit(0);
 """
@@ -1867,6 +1951,7 @@ def run() -> Results:
     r = Results("wangp receiver contract")
     try:
         gate_checks(r)
+        look_checks(r)
         isolation_checks(r)
         reload_checks(r)
         restart_checks(r)

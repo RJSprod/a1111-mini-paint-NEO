@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.8.0"
+BRIDGE_VERSION = "1.9.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -1980,6 +1980,11 @@ class Compatibility:
                 # without taking image handoff with it, so it is reported
                 # separately and never gates ``ready``.
                 "theme": True,
+                # Bridge 1.9.0: THEME_STATE may carry a skin and the parent
+                # page's own palette, and the stylesheet covers WanGP's studio
+                # look. A parent that never hears this word sends the mode
+                # alone, which is all an older bridge ever read.
+                "theme_palette": True,
             },
             # Live, and process-wide: true while any page's generation runs,
             # false when none does, None when this build cannot say.

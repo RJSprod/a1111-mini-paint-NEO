@@ -53,6 +53,22 @@ DISPLAY_OBJECTS = "minipaint_display_objects"
 #: Inheriting is the better promise and the more fragile one, and a person
 #: who wants it should get to say so.
 INHERIT_SETTINGS = "minipaint_inherit_wangp_settings"
+#: What the WanGP page is dressed in.
+#:
+#: The bridge plugin inside WanGP carries a stylesheet that overrides
+#: whichever theme WanGP's own settings picked - a hijack, because WanGP's
+#: plugin API can add a script but not a theme or a stylesheet - and this is
+#: where that stylesheet's colours come from: this page's own, sampled by
+#: the WanGP tab's browser half and sent across (so Lobe's night mode is
+#: what WanGP wears too); Mini Paint's built-in dark and light; or nothing,
+#: WanGP untouched. Stored as the words on the Settings page and turned
+#: into the protocol's skin word by ``wangp_look``.
+WANGP_LOOK = "minipaint_wangp_look"
+WANGP_LOOK_HOST = "Match this page's theme"
+WANGP_LOOK_BRIDGE = "Mini Paint's own dark and light"
+WANGP_LOOK_OFF = "WanGP's own theme"
+WANGP_LOOK_CHOICES = [WANGP_LOOK_HOST, WANGP_LOOK_BRIDGE, WANGP_LOOK_OFF]
+WANGP_LOOK_SKINS = {WANGP_LOOK_HOST: "host", WANGP_LOOK_BRIDGE: "bridge", WANGP_LOOK_OFF: "off"}
 
 SNAP_CHOICES = ["Off", "8", "16", "32", "64"]
 KEEP_TRANSPARENT = "Keep transparent"
@@ -68,6 +84,7 @@ DEFAULTS: dict[str, typing.Any] = {
     UNATTENDED_QUEUE: True,
     DISPLAY_OBJECTS: False,
     INHERIT_SETTINGS: False,
+    WANGP_LOOK: WANGP_LOOK_HOST,
 }
 
 # The setting is the way to switch editors - but it lives in a UI, and the one
@@ -130,6 +147,19 @@ def unattended_queue() -> bool:
     checkbox moved.
     """
     return bool(get(UNATTENDED_QUEUE, True))
+
+
+def wangp_look() -> str:
+    """The WanGP look, as the skin word the WanGP protocol knows.
+
+    ``host`` (this page's colours), ``bridge`` (Mini Paint's own palette) or
+    ``off`` (WanGP untouched). Anything stored that is not one of the three
+    words on the Settings page - a value from a build that spelled them
+    differently, say - is the default rather than an error: a look is
+    presentation, and never a reason the tab cannot be painted.
+    """
+    chosen = get(WANGP_LOOK, DEFAULTS[WANGP_LOOK])
+    return WANGP_LOOK_SKINS.get(str(chosen), WANGP_LOOK_SKINS[WANGP_LOOK_HOST])
 
 
 def inherit_settings() -> bool:
@@ -281,6 +311,24 @@ def on_ui_settings() -> None:
             "is carried: WanGP fills the job in from that model's own saved defaults, which is the same "
             "answer with fewer moving parts if your defaults are already what you want"
         ),
+    )
+
+    _add(
+        WANGP_LOOK,
+        OptionInfo(
+            DEFAULTS[WANGP_LOOK],
+            "WanGP tab: what the WanGP page is dressed in",
+            gr.Radio,
+            {"choices": WANGP_LOOK_CHOICES},
+            section=SECTION,
+            category_id=category,
+        ).info(
+            "the bridge plugin inside WanGP dresses its page over whichever theme WanGP's own settings "
+            "picked: in this page's colours (a night theme such as Lobe's included - they are sampled "
+            "here and sent across), in Mini Paint's own dark or light palette, or not at all. Needs "
+            "bridge 1.9.0, installed from the WanGP tab's setup (step 4, Install or update it) with "
+            "WanGP restarted; reaches the page the next time the WebUI is reloaded"
+        ).needs_reload_ui(),
     )
 
     _add(

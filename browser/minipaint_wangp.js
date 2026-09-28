@@ -75,6 +75,38 @@ window.minipaintWanGP = (function () {
     const FORM_CHANGED = "WANGP_FORM_CHANGED";
 
     const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH, PING];
+
+    //: THEME_STATE's vocabulary, as protocol.py spells it. `mode` is which of
+    //: the bridge's built-in palettes is in force; `skin` is where the colours
+    //: come from - this page's own, sampled here (SKIN_HOST), the bridge's
+    //: built-in ones (SKIN_BRIDGE), or none, WanGP untouched (SKIN_OFF); and a
+    //: palette is one solid colour per slot, sent only for the host skin.
+    const THEME_DARK = "dark";
+    const THEME_LIGHT = "light";
+    const SKIN_HOST = "host";
+    const SKIN_BRIDGE = "bridge";
+    const SKIN_OFF = "off";
+    const THEME_SKINS = [SKIN_HOST, SKIN_BRIDGE, SKIN_OFF];
+    const PALETTE_SLOTS = ["ink", "ink-dim", "page", "panel", "raised", "line", "line-soft", "accent", "accent-ink"];
+    const COLOUR_RE = /^(#[0-9a-fA-F]{3,8}|(rgb|rgba|hsl|hsla|hwb|lab|lch|oklab|oklch|color)\([-0-9a-zA-Z.%,/ ]{1,80}\))$/;
+    //: Where each slot is read from on this page: Gradio's own theme
+    //: variables, first choice first, so a Forge theme that sets them - Lobe
+    //: does - is what the WanGP page ends up wearing. A slot that resolves
+    //: to nothing solid (a gradient, a variable nobody set) is left out, and
+    //: the bridge keeps its own default for it.
+    const PALETTE_SOURCES = {
+        "ink": ["--body-text-color"],
+        "ink-dim": ["--body-text-color-subdued", "--body-text-color"],
+        "page": ["--body-background-fill", "--background-fill-primary"],
+        "panel": ["--block-background-fill", "--background-fill-primary"],
+        "raised": ["--input-background-fill", "--background-fill-secondary"],
+        "line": ["--border-color-primary", "--block-border-color"],
+        "line-soft": ["--color-accent-soft", "--background-fill-secondary"],
+        "accent": ["--color-accent", "--button-primary-background-fill"],
+        "accent-ink": ["--button-primary-text-color"]
+    };
+    //: What a browser computes for "no colour at all".
+    const TRANSPARENT_RE = /^rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0\s*\)$/;
     const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED, PONG, FORM_CHANGED];
 
     // The flush outcomes, as protocol.py names them.
@@ -223,6 +255,12 @@ window.minipaintWanGP = (function () {
     //: by id, and marked with this so the stylesheet parks it whatever a
     //: host named it. See watchTabPanel.
     const TAB_PANEL_CLASS = "minipaint-wangp-tab";
+    //: The class SD-Neo-ModelSwitchRefiner's assistant puts on the tab's panel
+    //: while its focus mode has given that panel the whole window. The
+    //: stylesheet's rule of the same name makes the frame all of it; the
+    //: sizer below reads it to leave nothing under the frame. The name is the
+    //: contract with that extension (docs/wangp/CONTRACTS.md).
+    const FOCUS_ROOT_CLASS = "forge-assistant-focus-root";
     //: The panel's width in its place, kept across a park so the WanGP
     //: page's layout never changes with the tab. See keepPanelWidth.
     const PARKED_WIDTH_PROPERTY = "--minipaint-wangp-parked-width";
@@ -1468,7 +1506,7 @@ window.minipaintWanGP = (function () {
         if (declared) { flushProactively("the WanGP page became ready"); }
         heartbeatReady();
         // Presentation only, and never a reason a picture cannot be sent.
-        try { theme(S.theme || detectTheme()); } catch (e) { /* section 27.1 */ }
+        try { theme(); } catch (e) { /* section 27.1 */ }
         // A bridge that introduced itself is the whole definition of the
         // controls being back. The cycle ends silently, and any notice a
         // previous episode left behind is taken away explicitly - a repaint
@@ -2174,6 +2212,17 @@ window.minipaintWanGP = (function () {
         return panelSwitchedOff(T.panel || tabPanel());
     }
 
+    /** The tab's panel while the assistant's focus mode has given it the
+     * whole window, else null. Read from the class that extension writes,
+     * never from the panel's geometry: a panel that happens to fill the
+     * window is not one somebody asked to. */
+    function focusedPanel() {
+        const panel = T.panel || tabPanel();
+        try {
+            return panel && panel.classList && panel.classList.contains(FOCUS_ROOT_CLASS) ? panel : null;
+        } catch (e) { return null; }
+    }
+
     function watchTabPanel() {
         const panel = tabPanel();
         if (!panel) { return false; }
@@ -2220,7 +2269,12 @@ window.minipaintWanGP = (function () {
                 + (T.parkedAt ? " again after " + seconds(Date.now() - T.parkedAt) + " parked" : "") + meanwhile);
             T.parkedAt = 0;
             T.framesAtPark = null;
-            if (!first) { sessionCheck("the WanGP tab came on screen"); }
+            if (!first) {
+                sessionCheck("the WanGP tab came on screen");
+                // The page's theme may have been switched while the tab was
+                // away; presentation only, and silent unless it changed.
+                try { theme(); } catch (e) { /* section 27.1 */ }
+            }
         }
         syncOnScreen("the WanGP tab left the screen");
     }
@@ -3659,6 +3713,8 @@ window.minipaintWanGP = (function () {
             },
             // The tab's panel: parked - rendered, invisible - while another
             // tab is selected, never hidden. See watchTabPanel.
+            // What the WanGP page was last told to wear. See theme().
+            theme: { mode: S.theme || "", skin: S.skin || "" },
             tab: {
                 found: !!T.panel,
                 selected: T.selected,
@@ -3768,13 +3824,109 @@ window.minipaintWanGP = (function () {
         return "dark";
     }
 
-    /** Presentation, and nothing else. Section 27.1: a theme that does not
-     * arrive must never be a reason an image cannot be handed over. */
+    /** The WanGP look from Settings, as the tab's view JSON carries it: the
+     * skin word, or the host skin when the tab has not said. */
+    function look() {
+        const raw = box(STATE_ELEM_ID);
+        if (!raw || !raw.value) { return SKIN_HOST; }
+        try {
+            const state = JSON.parse(raw.value);
+            const word = state && typeof state.look === "string" ? state.look : "";
+            return THEME_SKINS.indexOf(word) !== -1 ? word : SKIN_HOST;
+        } catch (e) { return SKIN_HOST; }
+    }
+
+    /**
+     * This page's own colours, one solid colour per palette slot.
+     *
+     * Read by resolving, not by reading: a theme's variable may hold another
+     * variable, a colour-mix, a gradient or nothing at all, and the one
+     * thing all of those have in common is what a browser computes for a
+     * background painted from it. So a probe element is painted from each
+     * of a slot's variables in turn, and what the browser computed for the
+     * first that paints - `rgb(...)` - is what is sent. A gradient and an
+     * unset variable both compute to transparent, and a variable that holds
+     * a gradient is not unset, so its fallback would never be reached: that
+     * is why the variables are tried one at a time rather than as one chain
+     * of fallbacks. A slot none of them paints is left out, and the bridge
+     * keeps its own default for it. The probe sits inside Gradio's container
+     * so it inherits whatever the theme declared there, and is taken away
+     * again before this returns.
+     */
+    function samplePalette() {
+        const out = {};
+        let probe = null;
+        try {
+            const scope = app();
+            const host = (scope.querySelector ? scope.querySelector(".gradio-container") : null) || document.body;
+            if (!host || typeof host.appendChild !== "function" || typeof window.getComputedStyle !== "function") { return out; }
+            probe = document.createElement("span");
+            probe.setAttribute("aria-hidden", "true");
+            probe.style.cssText = "position:absolute;width:0;height:0;overflow:hidden;visibility:hidden;pointer-events:none;";
+            host.appendChild(probe);
+            for (const slot of PALETTE_SLOTS) {
+                for (const source of PALETTE_SOURCES[slot] || []) {
+                    probe.style.setProperty("background-color", "var(" + source + ", transparent)");
+                    const seen = window.getComputedStyle(probe).backgroundColor;
+                    if (typeof seen === "string" && COLOUR_RE.test(seen) && !TRANSPARENT_RE.test(seen)) {
+                        out[slot] = seen;
+                        break;
+                    }
+                }
+            }
+        } catch (e) { /* no palette, then: the bridge keeps its own */ }
+        try { if (probe && probe.parentNode) { probe.parentNode.removeChild(probe); } } catch (e) { /* already gone */ }
+        return out;
+    }
+
+    /** Dark or light, from the page colour a palette carries - a browser
+     * computes it as rgb() - or "" when it carries none it can read. */
+    function paletteMode(palette) {
+        const page = palette && palette.page;
+        const parts = typeof page === "string" ? /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(page) : null;
+        if (!parts) { return ""; }
+        const luminance = (0.2126 * Number(parts[1]) + 0.7152 * Number(parts[2]) + 0.0722 * Number(parts[3])) / 255;
+        return luminance < 0.5 ? THEME_DARK : THEME_LIGHT;
+    }
+
+    /**
+     * Presentation, and nothing else. Section 27.1: a theme that does not
+     * arrive must never be a reason an image cannot be handed over.
+     *
+     * What the WanGP page wears is decided here and sent to the bridge as
+     * THEME_STATE: the skin from Settings, this page's colours when the skin
+     * is the host's, and the mode - given by the caller, else read off the
+     * page colour sampled, else guessed from the page's classes. `mode` is
+     * also all a bridge older than 1.9.0 reads, and "light" leaves WanGP
+     * alone there, so that is what such a bridge is told for the off skin.
+     * Said in the journal once per change, not once per send: the tab
+     * re-sends whenever it comes back on screen, because the page's theme
+     * may have been switched meanwhile.
+     */
     function theme(mode, accent) {
-        const wanted = mode === "light" ? "light" : "dark";
+        const skin = look();
+        const palette = skin === SKIN_HOST ? samplePalette() : {};
+        let wanted = mode === THEME_LIGHT || mode === THEME_DARK ? mode : "";
+        if (!wanted) { wanted = paletteMode(palette) || detectTheme(); }
         S.theme = wanted;
+        S.skin = skin;
         if (!S.ready) { return false; }
-        return post(THEME_STATE, hex32(), { mode: wanted, accent: text(accent, 40) });
+        const payload = {
+            mode: skin === SKIN_OFF ? THEME_LIGHT : wanted,
+            accent: text(accent, 40) || (typeof palette.accent === "string" ? palette.accent : ""),
+            skin: skin,
+            palette: palette
+        };
+        const sent = post(THEME_STATE, hex32(), payload);
+        if (sent) {
+            const summary = "theme: " + skin + (skin === SKIN_HOST ? " (" + Object.keys(palette).length + " of "
+                + PALETTE_SLOTS.length + " colours sampled from this page)" : "") + ", " + wanted;
+            if (summary !== S.themeSaid) {
+                S.themeSaid = summary;
+                say(summary);
+            }
+        }
+        return sent;
     }
 
     /** The WanGP top-level tab, through the Canvas's one tab switcher. There
@@ -3960,17 +4112,32 @@ window.minipaintWanGP = (function () {
             keepPanelWidth();
         }
 
-        let below = 0;
-        const panel = managePanel();
-        if (panel) {
-            try {
-                below = panel.getBoundingClientRect().height || 0;
-            } catch (error) { below = 0; }
+        // Under the assistant's focus mode (the stylesheet's rule of the
+        // same name) the tab's panel is the window and the frame is all of
+        // it: nothing is left under the frame, and the management panel -
+        // which that rule takes out of the layout - is not measured either,
+        // so the frame is the whole panel even on a page whose stylesheet
+        // has not applied. The bottom is the panel's own rather than the
+        // window's: on a phone the two disagree while the browser's bar is
+        // showing, and the panel is the box the frame has to fill.
+        const focused = parked() ? null : focusedPanel();
+        let room;
+        if (focused) {
+            let bottom = window.innerHeight;
+            try { bottom = focused.getBoundingClientRect().bottom || bottom; } catch (error) { /* the window's, then */ }
+            room = Math.max(FRAME_MIN_HEIGHT, Math.floor(bottom - top));
+        } else {
+            let below = 0;
+            const panel = managePanel();
+            if (panel) {
+                try {
+                    below = panel.getBoundingClientRect().height || 0;
+                } catch (error) { below = 0; }
+            }
+            room = Math.max(FRAME_MIN_HEIGHT,
+                            Math.round(window.innerHeight - top - below
+                                       - FRAME_BOTTOM_ROOM));
         }
-
-        const room = Math.max(FRAME_MIN_HEIGHT,
-                              Math.round(window.innerHeight - top - below
-                                         - FRAME_BOTTOM_ROOM));
         const wanted = room + "px";
         try {
             if (column.style.getPropertyValue(FRAME_PROPERTY) === wanted) { return room; }
@@ -4049,6 +4216,7 @@ window.minipaintWanGP = (function () {
         reportFrames: reportFrames,
         switchToWanGP: switchToWanGP,
         theme: theme,
+        samplePalette: samplePalette,
         message: sentence,
         // Protocol 3, the queue. window.minipaintInterop is the public face
         // of these; they are the mechanics, and their shapes may change.

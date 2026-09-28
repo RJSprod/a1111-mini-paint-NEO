@@ -277,6 +277,13 @@ def browser_checks(r: Results) -> None:
     r.check("and the admissions and statuses", js_strings(source, "ADMISSIONS") == protocol.ADMISSIONS
             and js_strings(source, "QUEUE_STATUSES") == protocol.QUEUE_STATUSES)
 
+    # THEME_STATE's vocabulary: the skins, the palette's slots and the shape
+    # of a colour are the same on both sides of the frame.
+    r.check("the browser knows the same skins and palette slots",
+            js_strings(source, "THEME_SKINS") == protocol.THEME_SKINS
+            and js_strings(source, "PALETTE_SLOTS") == protocol.PALETTE_SLOTS, str(js_strings(source, "THEME_SKINS")))
+    r.check("and requires the same shape of a colour",
+            js_regex(source, "COLOUR_RE") == as_javascript(protocol.COLOUR_RE.pattern), js_regex(source, "COLOUR_RE"))
     r.check("the browser allows the same types out of the parent",
             set(js_strings(source, "TO_BRIDGE")) == set(protocol.TO_BRIDGE), str(js_strings(source, "TO_BRIDGE")))
     r.check("the browser allows the same types out of the iframe",
@@ -1535,7 +1542,13 @@ function matchesOne(el, sel) {
 }
 function matches(el, sel) { return sel.split(",").some(function (one) { return matchesOne(el, one); }); }
 function find(node, sel) {
-  if (sel.indexOf(",") === -1 && sel.indexOf(" ") !== -1) { return null; }
+  if (sel.indexOf(",") === -1 && sel.indexOf(" ") !== -1) {
+    // One descendant step - "#wangp_state textarea" - is all the bundle asks.
+    const parts = sel.split(" ").filter(Boolean);
+    if (parts.length !== 2) { return null; }
+    const outer = find(node, parts[0]);
+    return outer ? find(outer, parts[1]) : null;
+  }
   for (const c of node.children) { if (matches(c, sel)) { return c; } const deep = find(c, sel); if (deep) { return deep; } }
   return null;
 }
@@ -1569,6 +1582,8 @@ const B = {
     : MODE === "noping" ? { queue: true, start: true, track: true, form_watch: true }
     : { queue: true, start: true, track: true, ping: true, form_watch: true, session: true },
   hellos: [], presses: 0, looks: 0, pings: 0, busyMs: 0, channel: "", navigations: 0, reloadMs: 500,
+  // Every THEME_STATE the parent sent, in order.
+  themes: [],
   // The bridge's word on the page's Gradio session, carried on every answer
   // from 1.8.0 on; null until a scenario sets it.
   session: null,
@@ -1604,6 +1619,7 @@ function toBridge(message) {
     return;
   }
   if (message.channel_id !== B.channel) { return; }
+  if (message.type === "WANGP_THEME_STATE") { B.themes.push(message.payload || {}); return; }
   if (message.type === "WANGP_PING") {
     B.pings += 1;
     if (B.answerPing) { reply("WANGP_PONG", message.request_id, { busy_ms: B.busyMs, op: "queue", waiting: 0 }); }
@@ -1673,10 +1689,51 @@ const win = {
     disconnect() { this.target = null; }
   },
   IntersectionObserver: class { constructor(fn) { this.fn = fn; observers.push(this); } observe() {} disconnect() {} },
-  getComputedStyle: function () { return { position: "static", display: "block" }; },
+  // What the browser computes for a probe painted from a chain of the
+  // page's variables: the first one that holds a colour, the transparent it
+  // computes for a gradient (not a colour) or for a chain that ends in none.
+  getComputedStyle: function (el) {
+    let chain = el && el.style && el.style.props ? el.style.props["background-color"] || "" : "";
+    let seen = "rgba(0, 0, 0, 0)";
+    for (;;) {
+      const m = /^var\((--[a-z-]+),\s*(.*)\)$/.exec(chain);
+      if (!m) { break; }
+      const held = PAGE_VARS[m[1]];
+      if (held === "gradient") { break; }
+      if (held) { seen = held; break; }
+      chain = m[2];
+    }
+    return { position: "static", display: "block", backgroundColor: seen };
+  },
   requestAnimationFrame: (f) => vSet(f, 16), innerHeight: 900,
   crypto: { getRandomValues: (b) => { for (let i = 0; i < b.length; i++) { b[i] = Math.floor(Math.random() * 256); } return b; } }
 };
+// The Forge page's theme variables, for the theme scenarios: a dark page
+// with every slot's first choice set; one whose page background is a
+// gradient and whose soft accent nobody set; a light page.
+const PAGE_VARS = MODE === "themeGradient" ? {
+  "--body-text-color": "rgb(230, 232, 238)", "--body-text-color-subdued": "rgb(164, 170, 184)",
+  "--body-background-fill": "gradient", "--background-fill-primary": "rgb(30, 30, 30)",
+  "--block-background-fill": "rgb(27, 30, 37)", "--input-background-fill": "rgb(33, 37, 46)",
+  "--border-color-primary": "rgb(47, 52, 63)", "--color-accent": "rgb(110, 168, 254)", "--button-primary-text-color": "rgb(13, 17, 23)"
+} : MODE === "themeLight" ? {
+  "--body-text-color": "rgb(29, 33, 41)", "--body-text-color-subdued": "rgb(95, 102, 115)",
+  "--body-background-fill": "rgb(246, 247, 249)", "--block-background-fill": "rgb(255, 255, 255)",
+  "--input-background-fill": "rgb(238, 240, 244)", "--border-color-primary": "rgb(211, 216, 224)",
+  "--color-accent-soft": "rgb(228, 232, 238)", "--color-accent": "rgb(63, 127, 216)", "--button-primary-text-color": "rgb(255, 255, 255)"
+} : {
+  "--body-text-color": "rgb(230, 232, 238)", "--body-text-color-subdued": "rgb(164, 170, 184)",
+  "--body-background-fill": "rgb(20, 22, 27)", "--block-background-fill": "rgb(27, 30, 37)",
+  "--input-background-fill": "rgb(33, 37, 46)", "--border-color-primary": "rgb(47, 52, 63)",
+  "--color-accent-soft": "rgb(38, 43, 52)", "--color-accent": "rgb(110, 168, 254)", "--button-primary-text-color": "rgb(13, 17, 23)"
+};
+// The tab's view JSON, with the look from Settings, for the theme scenarios.
+if (MODE.indexOf("theme") === 0) {
+  const stateBox = new El("div"); stateBox.id = "wangp_state";
+  const stateArea = new El("textarea");
+  stateArea.value = JSON.stringify({ view: "iframe", look: MODE === "themeBridge" ? "bridge" : MODE === "themeOff" ? "off" : MODE === "themeUnknownLook" ? "neon" : "host" });
+  stateBox.appendChild(stateArea); docRoot.appendChild(stateBox);
+}
 if (MODE === "pull" || MODE === "pulloff") {
   // The public API loaded first and has already had its snapshot.
   win.minipaintInterop = { wangp: { snapshotState: function () { return { inherit: true, unattended: MODE === "pull" }; } } };
@@ -1699,7 +1756,22 @@ function settleSend(promise) { const box = { answer: null, at: 0 }; promise.then
 async function bootOnScreen() { api.attach(null); await advance(100); const first = now; screen(true); await advance(1); return first; }
 async function until(at) { await advance(Math.max(0, at - now)); }
 
+async function themeScenario() {
+  api.attach(null);
+  await advance(1000);
+  const atReady = B.themes.slice();
+  const saidAtReady = linesWith("theme:").length;
+  // Away and back: the page's theme may have changed meanwhile, so the tab
+  // tells the bridge again - and says nothing new when nothing changed.
+  selectTab(false); await advance(50);
+  selectTab(true); await advance(50);
+  return { atReady, later: B.themes.slice(atReady.length), saidAtReady, said: linesWith("theme:"),
+           state: api.state().theme, probes: docRoot.children.filter((c) => c.tagName === "SPAN").length };
+}
+
 const scenarios = {
+  themeHost: themeScenario, themeBridge: themeScenario, themeOff: themeScenario,
+  themeGradient: themeScenario, themeLight: themeScenario, themeUnknownLook: themeScenario,
   // Saving as the form changes.
   save: async function () {
     api.inheritSettings(true);
@@ -2153,6 +2225,66 @@ def live_settings_checks(r: Results) -> None:
             pulloff.get("wanted") is False and pulloff.get("presses") == 0, repr(pulloff))
 
 
+def theme_send_checks(r: Results) -> None:
+    """What the tab tells the bridge to wear, run on the virtual clock.
+
+    The look comes from Settings through the tab's view JSON, the page's
+    colours are sampled by resolving each slot's chain of variables the way
+    a browser would, and the mode is read off the page colour sampled. What
+    an older bridge reads - the mode alone - says "light" for the off skin,
+    because that is what leaves WanGP alone there.
+    """
+    answers = _run_live(("themeHost", "themeBridge", "themeOff", "themeGradient", "themeLight", "themeUnknownLook"))
+    if answers is None:
+        r.check("node is available for the theme send checks (skipped)", True)
+        return
+    for mode, answer in answers.items():
+        r.check(f"the {mode} scenario ran", isinstance(answer, dict) and "error" not in answer and "atReady" in answer, str(answer)[:300])
+    host = answers.get("themeHost") or {}
+    sent = (host.get("atReady") or [{}])[0] if host.get("atReady") else {}
+    r.check("with the host look, the ready handshake is followed by one THEME_STATE carrying this page's nine colours",
+            len(host.get("atReady") or []) == 1 and sent.get("skin") == "host"
+            and sorted((sent.get("palette") or {}).keys()) == sorted(protocol.PALETTE_SLOTS), str(sent))
+    r.check("each the colour the page's first-choice variable resolved to",
+            (sent.get("palette") or {}).get("page") == "rgb(20, 22, 27)" and (sent.get("palette") or {}).get("accent") == "rgb(110, 168, 254)"
+            and sent.get("accent") == "rgb(110, 168, 254)", str(sent))
+    r.check("and the mode read off the page colour: dark", sent.get("mode") == "dark" and (host.get("state") or {}).get("mode") == "dark"
+            and (host.get("state") or {}).get("skin") == "host", str(host.get("state")))
+    r.check("the probe the colours were read through is taken away again", host.get("probes") == 0, str(host.get("probes")))
+    r.check("said once in the journal, with how many colours the page gave",
+            host.get("saidAtReady") == 1 and any("theme: host (9 of 9 colours sampled from this page), dark" in line for line in host.get("said") or []),
+            str(host.get("said")))
+    r.check("back on screen the tab tells the bridge again, and says nothing new when nothing changed",
+            len(host.get("later") or []) == 1 and len(host.get("said") or []) == 1, str(host.get("later")) + " " + str(host.get("said")))
+
+    gradient = answers.get("themeGradient") or {}
+    sent = (gradient.get("atReady") or [{}])[0] if gradient.get("atReady") else {}
+    palette = sent.get("palette") or {}
+    r.check("a page background that is a gradient falls to the slot's second choice, and a slot with nothing solid is left out",
+            palette.get("page") == "rgb(30, 30, 30)" and "line-soft" not in palette and len(palette) == 8, str(palette))
+
+    light = answers.get("themeLight") or {}
+    sent = (light.get("atReady") or [{}])[0] if light.get("atReady") else {}
+    r.check("a light page is told as light", sent.get("mode") == "light" and sent.get("skin") == "host"
+            and (sent.get("palette") or {}).get("page") == "rgb(246, 247, 249)", str(sent))
+
+    bridge = answers.get("themeBridge") or {}
+    sent = (bridge.get("atReady") or [{}])[0] if bridge.get("atReady") else {}
+    r.check("with the bridge look no colour is sampled and the bridge's own palette is asked for",
+            sent.get("skin") == "bridge" and sent.get("palette") == {} and sent.get("mode") == "dark"
+            and bridge.get("probes") == 0, str(sent))
+
+    off = answers.get("themeOff") or {}
+    sent = (off.get("atReady") or [{}])[0] if off.get("atReady") else {}
+    r.check("with the off look the bridge is told off - and light, which is what leaves WanGP alone on a bridge older than the skins",
+            sent.get("skin") == "off" and sent.get("mode") == "light" and sent.get("palette") == {}, str(sent))
+
+    unknown = answers.get("themeUnknownLook") or {}
+    sent = (unknown.get("atReady") or [{}])[0] if unknown.get("atReady") else {}
+    r.check("a look word this bundle does not know is the host look, not an error",
+            sent.get("skin") == "host" and len(sent.get("palette") or {}) == 9, str(sent))
+
+
 def heartbeat_checks(r: Results) -> None:
     """The WanGP page asked every five seconds whether it is there.
 
@@ -2302,8 +2434,8 @@ _SESSION_MUTATIONS = (
     ),
     (
         "a return to the tab asks nothing",
-        '            if (!first) { sessionCheck("the WanGP tab came on screen"); }',
-        "            if (!first) { }",
+        '                sessionCheck("the WanGP tab came on screen");',
+        "                /* asks nothing */",
         "probed", 1, 0,
     ),
     (
@@ -2558,6 +2690,194 @@ async function main() {
 }
 main();
 """
+
+
+#: WanGP's eleven studio variables, as shared/gradio/ui_studio.css declares
+#: them on its studio scope (and each of its theme files redeclares them).
+#: The hijack has to remap every one, or the theme WanGP's dropdown picked
+#: bleeds through in the slot that was missed.
+WANGP_STUDIO_VARIABLES = ("surface", "input", "border", "label", "accent", "soft", "button",
+                          "button-hover", "button-text", "disabled", "disabled-text")
+
+_THEME_HARNESS = r"""
+const fs = require("fs");
+const script = fs.readFileSync(process.argv[2], "utf8");
+const ORIGIN = "http://forge.test";
+const listeners = {};
+const parent = { postMessage() {} };
+// The <html> element, as the bridge dresses it: one attribute, and inline
+// custom properties for the page's colours.
+const root = { attrs: {}, style: { props: {},
+  setProperty(k, v) { this.props[k] = v; }, removeProperty(k) { delete this.props[k]; } },
+  setAttribute(k, v) { this.attrs[k] = String(v); }, removeAttribute(k) { delete this.attrs[k]; } };
+const box = { tagName: "TEXTAREA", value: "", dispatchEvent() {} };
+const ack = { tagName: "TEXTAREA", value: "" };
+const button = { tagName: "BUTTON", click() {} };
+const column = { id: "minipaint_bridge_1", parentElement: null,
+  querySelector(selector) {
+    if (selector === ".minipaint-bridge-request") { return box; }
+    if (selector === ".minipaint-bridge-ack") { return ack; }
+    if (selector === ".minipaint-bridge-trigger") { return button; }
+    return null;
+  } };
+let styled = null;
+const window = {
+  location: { origin: ORIGIN }, parent: parent,
+  addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+  setTimeout: setTimeout, clearTimeout: clearTimeout, setInterval: setInterval, clearInterval: clearInterval,
+  performance: { now() { return Date.now(); } },
+  requestAnimationFrame(callback) { return setTimeout(callback, 1); }, cancelAnimationFrame(id) { clearTimeout(id); }
+};
+const document = {
+  getElementsByClassName(name) { return name === "minipaint-bridge-column" ? [column] : []; },
+  getElementById() { return null; }, addEventListener() {},
+  documentElement: root, head: { appendChild(tag) { styled = tag; } }, body: null,
+  createElement() { return { textContent: "" }; }
+};
+globalThis.Event = class { constructor(type) { this.type = type; } };
+globalThis.TextEncoder = require("util").TextEncoder;
+new Function("window", "document", script)(window, document);
+const snap = () => ({ attr: root.attrs["data-minipaint-theme"] === undefined ? null : root.attrs["data-minipaint-theme"],
+                      props: Object.assign({}, root.style.props) });
+function send(type, payload, channel, request) {
+  (listeners.message || []).forEach(function (fn) {
+    fn({ origin: ORIGIN, source: parent, data: { protocol: 5, type: type, channel_id: channel, request_id: request || "r" + Math.random().toString(16).slice(2, 10), payload: payload || {} } });
+  });
+}
+const channel = "c".repeat(32);
+const out = { first: snap(), styled: styled ? { id: styled.id, css: styled.textContent } : null };
+send("WANGP_BRIDGE_HELLO", { watch_form: true }, channel, "hello1");
+out.afterHello = snap();
+send("WANGP_THEME_STATE", { mode: "dark", skin: "host", palette: {
+  page: "rgb(20, 22, 27)", ink: "#e6e8ee", accent: "oklch(0.7 0.1 250 / 50%)",
+  panel: "url(https://example.test/x.png)", raised: "linear-gradient(red, blue)", line: "var(--x)", "line-soft": 7, bogus: "#ffffff"
+} }, channel, "t1");
+out.host = snap();
+send("WANGP_THEME_STATE", { mode: "light", skin: "bridge", palette: { page: "rgb(1, 2, 3)" } }, channel, "t2");
+out.bridgeLight = snap();
+send("WANGP_THEME_STATE", { mode: "light", skin: "off" }, channel, "t3");
+out.off = snap();
+send("WANGP_THEME_STATE", { mode: "sepia", skin: "neon", palette: { page: "rgb(1, 2, 3)" } }, channel, "t4");
+out.unknown = snap();
+send("WANGP_THEME_STATE", { mode: "light" }, channel, "t5");
+out.oldParentLight = snap();
+send("WANGP_THEME_STATE", { mode: "dark", skin: "host", palette: { page: "rgb(9, 9, 9)" } }, "d".repeat(32), "t6");
+out.stranger = snap();
+console.log(JSON.stringify(out));
+process.exit(0);
+"""
+
+
+def theme_checks(r: Results) -> None:
+    """The hijack, bridge 1.9.0: what a THEME_STATE may say, what the script
+    in the WanGP document does with it, and what the stylesheet covers."""
+    import json as _json
+    import shutil
+    import subprocess
+    import sys as _sys
+    import tempfile
+
+    # ---- the vocabulary, on either side ----
+    kept = protocol.normalize_theme({"mode": "light", "skin": "host", "palette": {
+        "page": "rgb(1, 2, 3)", "ink": "#e6e8ee", "accent": "oklch(0.7 0.1 250 / 50%)",
+        "panel": "url(https://example.test/x.png)", "raised": "linear-gradient(red, blue)",
+        "line": "var(--x)", "line-soft": 7, "bogus": "#ffffff"}})
+    r.check("a theme keeps only the slots it knows, and only a solid colour in each",
+            kept == {"mode": "light", "skin": "host", "palette": {"page": "rgb(1, 2, 3)", "ink": "#e6e8ee", "accent": "oklch(0.7 0.1 250 / 50%)"}},
+            str(kept))
+    r.check("no mode is dark, no skin is the bridge's own, and no payload at all is both",
+            protocol.normalize_theme(None) == {"mode": "dark", "skin": "bridge", "palette": {}}
+            and protocol.normalize_theme({"mode": "sepia", "skin": "neon"}) == {"mode": "dark", "skin": "bridge", "palette": {}})
+    r.check("a palette rides only with the host skin",
+            protocol.normalize_theme({"skin": "bridge", "palette": {"page": "#fff"}})["palette"] == {}
+            and protocol.normalize_theme({"skin": "off", "palette": {"page": "#fff"}})["palette"] == {})
+    r.check("a colour is a hex triplet or one colour function, never a url, a gradient or a variable",
+            all(protocol.valid_colour(v) for v in ("#fff", "#0d1117", "#0d1117ff", "rgb(1, 2, 3)", "rgba(0, 0, 0, 0)",
+                                                     "hsl(210 40% 50%)", "color(display-p3 0.1 0.2 0.3)"))
+            and not any(protocol.valid_colour(v) for v in ("url(x)", "linear-gradient(red, blue)", "var(--x)", "rgb(1,2,3)) ;",
+                                                             "rgb(1,2,3); background: url(x)", "", None, 7, "#gg0000", "x" * 90)))
+    r.check("the skins and slots are the closed lists the stylesheet is written against",
+            protocol.THEME_SKINS == ("host", "bridge", "off") and len(protocol.PALETTE_SLOTS) == 9)
+
+    folder = str(BRIDGE_COPY.parent)
+    added = folder not in _sys.path
+    if added:
+        _sys.path.insert(0, folder)
+    try:
+        import bridge_js
+    finally:
+        if added and folder in _sys.path:
+            _sys.path.remove(folder)
+    config = bridge_js.configuration("")
+    r.check("the script is handed the same vocabulary",
+            tuple(config.get("themeSkins") or ()) == protocol.THEME_SKINS and tuple(config.get("paletteSlots") or ()) == protocol.PALETTE_SLOTS
+            and tuple(config.get("themeModes") or ()) == protocol.THEME_MODES
+            and config.get("colourPattern") == as_javascript(protocol.COLOUR_RE.pattern)
+            and (config.get("skinHost"), config.get("skinBridge"), config.get("skinOff")) == protocol.THEME_SKINS, str(config.get("colourPattern")))
+
+    # ---- the script in the WanGP document ----
+    node = shutil.which("node")
+    if not node:
+        r.check("node is available for the theme script checks (skipped)", True)
+    else:
+        with tempfile.TemporaryDirectory(prefix="minipaint-wangp-theme-") as scratch:
+            root = pathlib.Path(scratch)
+            (root / "bridge.js").write_text(bridge_js.document_script("/* the stylesheet */"), encoding="utf-8")
+            (root / "harness.js").write_text(_THEME_HARNESS, encoding="utf-8")
+            try:
+                run = subprocess.run([node, str(root / "harness.js"), str(root / "bridge.js")],
+                                     capture_output=True, text=True, timeout=30, check=False)
+                lines = run.stdout.strip().splitlines()
+                out = _json.loads(lines[-1]) if lines else {"error": run.stderr[-300:]}
+            except Exception as error:
+                out = {"error": str(error)[:300]}
+        r.check("the script ran", "error" not in out, str(out)[:300])
+        r.check("before the parent has said anything the page wears the bridge's own dark, with no colour of the page's",
+                (out.get("first") or {}).get("attr") == "dark" and (out.get("first") or {}).get("props") == {}
+                and (out.get("afterHello") or {}).get("attr") == "dark", str(out.get("first")))
+        r.check("and the stylesheet is on the page, once, under its own id",
+                (out.get("styled") or {}).get("id") == "minipaint-bridge-theme" and (out.get("styled") or {}).get("css") == "/* the stylesheet */", str(out.get("styled")))
+        host = out.get("host") or {}
+        r.check("the host skin writes the page's colours as inline properties on <html>, dropping every slot that is not one solid colour",
+                host.get("attr") == "dark" and host.get("props") == {"--mp-page": "rgb(20, 22, 27)", "--mp-ink": "#e6e8ee", "--mp-accent": "oklch(0.7 0.1 250 / 50%)"},
+                str(host))
+        bridge = out.get("bridgeLight") or {}
+        r.check("the bridge skin sets the mode and takes every inline colour off, palette or no palette",
+                bridge.get("attr") == "light" and bridge.get("props") == {}, str(bridge))
+        r.check("the off skin takes the attribute itself off: WanGP untouched",
+                (out.get("off") or {}).get("attr") is None and (out.get("off") or {}).get("props") == {}, str(out.get("off")))
+        r.check("an unknown mode and skin are the bridge's own dark, and a palette does not ride with them",
+                (out.get("unknown") or {}).get("attr") == "dark" and (out.get("unknown") or {}).get("props") == {}, str(out.get("unknown")))
+        r.check("a parent older than the skins, saying light alone, gets the light palette",
+                (out.get("oldParentLight") or {}).get("attr") == "light" and (out.get("oldParentLight") or {}).get("props") == {}, str(out.get("oldParentLight")))
+        r.check("and a stranger's channel changes nothing",
+                (out.get("stranger") or {}).get("attr") == "light" and (out.get("stranger") or {}).get("props") == {}, str(out.get("stranger")))
+
+    # ---- the stylesheet ----
+    css = (BRIDGE_COPY.parent / "theme.css").read_text(encoding="utf-8")
+    palettes = {}
+    for mode in protocol.THEME_MODES:
+        block = css[css.find(f':root[data-minipaint-theme="{mode}"] {{'):]
+        block = block[:block.find("}") + 1]
+        palettes[mode] = block
+    r.check("each mode has the bridge's own palette, every slot of it, and its colour scheme",
+            all(f"--mp-{slot}:" in palettes[mode] for mode in protocol.THEME_MODES for slot in protocol.PALETTE_SLOTS)
+            and "color-scheme: dark" in palettes["dark"] and "color-scheme: light" in palettes["light"], str({m: len(p) for m, p in palettes.items()}))
+    studio = css[css.find(':root[data-minipaint-theme] [id^="component-"] {'):]
+    studio = studio[:studio.find("}") + 1]
+    r.check("WanGP's eleven studio variables are all remapped onto the palette, with the importance that beats the id WanGP declares them on",
+            studio.startswith(':root[data-minipaint-theme] [id^="component-"]')
+            and all(re.search(rf"--studio-{name}: var\(--mp-[a-z-]+\) !important;", studio) for name in WANGP_STUDIO_VARIABLES)
+            and len(re.findall(r"--studio-[a-z-]+:", studio)) == len(WANGP_STUDIO_VARIABLES), studio[:200])
+    r.check("Gradio's palette is remapped under the attribute alone, so both modes share one set of rules and no attribute is WanGP untouched",
+            ":root[data-minipaint-theme] .gradio-container,\n:root[data-minipaint-theme] body {" in css
+            and '="off"' not in css and ':root[data-minipaint-theme="dark"] .gradio-container' not in css, "")
+    tail = css[css.find("/* Gradio's palette, remapped."):]
+    literal = re.findall(r"#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(", tail)
+    r.check("and nothing after the two palettes names a colour of its own: every rule reads a slot",
+            literal == [] and tail.count("var(--mp-") > 60, str(literal[:5]))
+    r.check("no rule selects a control by its text, and none touches layout, visibility or a value",
+            ":contains" not in css and "display:" not in tail and "visibility:" not in tail and "content:" not in tail, "")
 
 
 def bridge_liveness_checks(r: Results) -> None:
@@ -4845,6 +5165,8 @@ def run() -> Results:
     frame_fallback_checks(r)
     proactive_flush_checks(r)
     live_settings_checks(r)
+    theme_send_checks(r)
+    theme_checks(r)
     heartbeat_checks(r)
     panel_checks(r)
     session_checks(r)

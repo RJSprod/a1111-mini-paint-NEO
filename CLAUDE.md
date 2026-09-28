@@ -370,6 +370,28 @@ browser had frozen it. A thaw is not a return to the screen either.
 rather than adding a fourth value, because the protocol test holds that
 vocabulary closed.
 
+**WanGP's studio classes do not exist in its DOM.** `shared/gradio/ui_studio.py`
+rewrites every `.wangp-studio-*` selector to `#component-N` ids when it builds
+the page's CSS, and declares the eleven `--studio-*` variables its themes are
+painted from on that id. No class selector can outrank an id, so the bridge's
+theme hijack (`theme.css`, bridge 1.9.0) declares its remaps `!important` on
+`[id^="component-"]` - importance beats specificity - and the elements WanGP
+gave ids of its own inherit from the nearest of those. A remap without the
+`!important`, or keyed on the class name, applies to nothing and looks fine
+in a test that reads the file; `tests/test_wangp_protocol.py` checks both the
+selector and the importance, variable by variable. The look is keyed on one
+attribute of `<html>` (`data-minipaint-theme`, the mode); no attribute is
+WanGP untouched, and the "off" skin removes it rather than writing a value.
+
+**A variable holding a gradient is not unset.** `var(--a, var(--b, transparent))`
+never reaches `--b` when `--a` holds a gradient: the variable is defined, so it
+is substituted, and a gradient in `background-color` makes the declaration
+invalid at computed-value time - transparent, the same as nothing. The tab's
+palette sampler (`samplePalette` in `browser/minipaint_wangp.js`) therefore
+paints its probe from each of a slot's variables one at a time and takes the
+first that computes to a colour; a chain of fallbacks was the first version
+and dropped the page colour under any theme whose background is a gradient.
+
 ## The sibling repositories
 
 `RJSprod/NEO-webui-auto-tls-https` gives Forge its certificate and, since
@@ -404,6 +426,20 @@ keeps a parked WanGP panel - a rendered box, `visibility: hidden` - from being
 mistaken for the workspace on screen. The parked rule in `style.css` says so;
 a change to either side has to keep the other true.
 
+A fourth is shared since 2026-09-28: **a class, `forge-assistant-focus-root`.**
+The assistant's focus mode puts it on the workspace's tab panel (with
+`forge-assistant-focused` on the body and `forge-assistant-focus-path` on the
+panel's ancestors) and its stylesheet makes that panel fixed over the whole
+window with eight pixels of padding, `!important` throughout. The WanGP tab
+reads the same class: `style.css` takes the panel's padding and border off,
+does not display `#wangp_manage_root` and lays the recovery notice over the
+frame, and `fitFrame()` gives the frame the panel's whole height. So under
+focus the WanGP tab is the frame alone. Renaming that class on either side
+breaks the other silently - the tab would simply keep its accordion and its
+padding - and `tests/browser_intercept.py` carries a copy of the assistant's
+rule for that reason (`FOCUS_STAND_IN_CSS`): a change to the rule there has
+to be made here too, or the measurement stops measuring the real thing.
+
 `RJSprod/SD-Neo-ModelSwitchRefiner` runs a local LLM. Its logs showed
 `llama-server` taking every CPU core for nine minutes with its model on the
 CPU, and its GPU placement pointing at the card WanGP owns. That starves WanGP
@@ -434,5 +470,12 @@ HTTP/2 misbehaves, `--autotls-http1` puts the old server back with one flag.
 The heartbeat's whole state is in `minipaintWanGP.state().heartbeat`, and the
 settings save's in `minipaintWanGP.state().settings`; every miss, bar, dismissal
 and reload is a `heartbeat:` line in the page journal. Saving as the form
-changes and the heartbeat need bridge 1.7.0 installed in WanGP, and the session guard
-bridge 1.8.0.
+changes and the heartbeat need bridge 1.7.0 installed in WanGP, the session guard
+bridge 1.8.0, and the theme hijack - the page's colours on the WanGP page, over
+WanGP's own themes - bridge 1.9.0. The hijack has been checked against WanGP's
+stylesheets as read from its repository on 2026-09-28 (`ui_studio.css` and the
+four theme files, `ui_styles.css`), never on the user's own install: what the
+eleven `--studio-*` remaps and the fixed-colour overrides look like in a real
+WanGP page, and whether a theme of Lobe's samples nine solid colours, is the
+first thing to look at when it is reported. The page journal's `theme:` line
+says how many of the nine the page gave.

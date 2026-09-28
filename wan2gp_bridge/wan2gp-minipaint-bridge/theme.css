@@ -1,12 +1,19 @@
 /*
- * A dark WanGP, built out of Gradio's own theme variables.
+ * The hijack: WanGP in the colours of the page around it.
  *
  * The iframe is a separate document, so nothing the Forge page wears reaches
- * in here; this is the whole of the integration's night mode. It is written
- * as variable overrides rather than as rules against WanGP's markup, because
+ * in here; this file is the whole of the integration's look. It is written as
+ * variable overrides rather than as rules against WanGP's markup, because
  * every rule that names a WanGP element is a rule that breaks the next time
- * WanGP moves one. Gradio resolves these variables itself, so a control this
- * file has never heard of still comes out dark.
+ * WanGP moves one. Gradio resolves its own variables, so a control this file
+ * has never heard of still comes out right; and WanGP's studio look - its
+ * ui_studio.css, and the Blue Sky, Emerald, Amethyst and Rose themes its
+ * settings offer - is painted from eleven `--studio-*` variables, which are
+ * remapped here too. So whichever theme WanGP's own dropdown picked, the page
+ * shows the palette below. That is what makes this a hijack rather than a
+ * sixth entry in that dropdown: WanGP's plugin API can add a script, not a
+ * theme or a stylesheet, and the stylesheet the script injects outranks the
+ * built-in ones.
  *
  * Two prohibitions from section 27, both load-bearing. Nothing here selects a
  * control by its English text label - that would break on the first
@@ -15,8 +22,18 @@
  * WanGP look different and must never make it behave differently. If this
  * file fails to load at all, image handoff carries on exactly as before.
  *
- * The scope is one attribute the bridge's own script sets on <html>. WanGP
- * running on its own never has it, so an unmanaged install is untouched.
+ * THE SCOPE is one attribute the bridge's own script sets on <html>,
+ * `data-minipaint-theme`, whose value is the mode: "dark" or "light". No
+ * attribute at all is WanGP untouched - the script removes it for the "off"
+ * skin - and a WanGP running on its own never has it, so an unmanaged
+ * install is untouched by construction.
+ *
+ * THE PALETTE is nine `--mp-*` slots. The two rules right below give each
+ * mode the bridge's own defaults. For the "host" skin the script writes the
+ * Forge page's colours - sampled there, one solid colour per slot, validated
+ * on both sides - as inline properties on <html>, which outrank these and
+ * come off with the skin. Everything else in this file reads the slots and
+ * names no colour of its own.
  */
 
 :root[data-minipaint-theme="dark"] {
@@ -33,10 +50,27 @@
   --mp-accent-ink: #0d1117;
 }
 
+:root[data-minipaint-theme="light"] {
+  color-scheme: light;
+
+  --mp-ink: #1d2129;
+  --mp-ink-dim: #5f6673;
+  --mp-page: #f6f7f9;
+  --mp-panel: #ffffff;
+  --mp-raised: #eef0f4;
+  --mp-line: #d3d8e0;
+  --mp-line-soft: #e4e8ee;
+  --mp-accent: #3f7fd8;
+  --mp-accent-ink: #ffffff;
+}
+
 /* Gradio's palette, remapped. These are the variables every Gradio component
-   reads, which is why so few explicit rules are needed below. */
-:root[data-minipaint-theme="dark"] .gradio-container,
-:root[data-minipaint-theme="dark"] body {
+   reads, which is why so few explicit rules are needed below. Declared on
+   both the container and the body because Gradio's own dark values live on
+   whichever of them carries its `dark` class, and a declaration on the
+   element itself is what beats them. */
+:root[data-minipaint-theme] .gradio-container,
+:root[data-minipaint-theme] body {
   --body-background-fill: var(--mp-page);
   --body-text-color: var(--mp-ink);
   --body-text-color-subdued: var(--mp-ink-dim);
@@ -46,11 +80,13 @@
   --block-background-fill: var(--mp-panel);
   --block-label-background-fill: var(--mp-raised);
   --block-label-text-color: var(--mp-ink-dim);
+  --block-info-text-color: var(--mp-ink-dim);
   --block-title-text-color: var(--mp-ink);
   --block-border-color: var(--mp-line);
   --block-shadow: none;
   --panel-background-fill: var(--mp-panel);
   --panel-border-color: var(--mp-line);
+  --section-header-text-color: var(--mp-ink);
 
   --border-color-primary: var(--mp-line);
   --border-color-accent: var(--mp-accent);
@@ -62,21 +98,25 @@
   --input-border-color-focus: var(--mp-accent);
   --input-placeholder-color: var(--mp-ink-dim);
   --input-shadow: none;
+  --code-background-fill: var(--mp-raised);
 
   --button-secondary-background-fill: var(--mp-raised);
   --button-secondary-background-fill-hover: var(--mp-line-soft);
   --button-secondary-border-color: var(--mp-line);
   --button-secondary-text-color: var(--mp-ink);
+  --button-secondary-text-color-hover: var(--mp-ink);
   --button-primary-background-fill: var(--mp-accent);
   --button-primary-background-fill-hover: var(--mp-accent);
   --button-primary-border-color: var(--mp-accent);
   --button-primary-text-color: var(--mp-accent-ink);
+  --button-primary-text-color-hover: var(--mp-accent-ink);
   --button-cancel-background-fill: var(--mp-raised);
   --button-cancel-text-color: var(--mp-ink);
 
   --table-border-color: var(--mp-line);
   --table-even-background-fill: var(--mp-panel);
   --table-odd-background-fill: var(--mp-raised);
+  --table-row-focus: var(--mp-line-soft);
   --table-text-color: var(--mp-ink);
 
   --checkbox-background-color: var(--mp-raised);
@@ -89,6 +129,7 @@
   --checkbox-label-text-color: var(--mp-ink);
 
   --slider-color: var(--mp-accent);
+  --stat-background-fill: var(--mp-accent);
   --accordion-text-color: var(--mp-ink);
   --link-text-color: var(--mp-accent);
   --link-text-color-hover: var(--mp-accent);
@@ -96,7 +137,7 @@
 
   --color-accent: var(--mp-accent);
   --color-accent-soft: var(--mp-line-soft);
-  --neutral-950: #0f1115;
+  --neutral-950: var(--mp-page);
   --neutral-900: var(--mp-page);
   --neutral-800: var(--mp-panel);
   --neutral-700: var(--mp-raised);
@@ -112,44 +153,149 @@
 /* The page itself. Gradio paints the container; the document behind it is the
    browser's, and a light strip under a dark app is the one thing variables
    alone will not fix. */
-:root[data-minipaint-theme="dark"] body {
+:root[data-minipaint-theme] body {
   background-color: var(--mp-page);
+}
+
+/* WanGP's studio variables, remapped.
+
+   WanGP declares these on the element that scopes its studio look, and by
+   id: ui_studio.py rewrites its `.wangp-studio-*` class selectors to
+   `#component-N` ids when it builds the page's stylesheet, so no class of
+   that name exists in the document, and an id outranks anything a class can
+   say. The way past an id is importance: an author declaration marked
+   !important beats an unmarked one whatever its specificity. So these are
+   declared !important on every element whose id Gradio generated - which
+   includes that scope element - and the elements WanGP gave ids of its own
+   inherit from the nearest of those. Custom properties only: nothing here
+   is a colour of an element, so nothing can fight a rule of WanGP's that
+   reads one. */
+:root[data-minipaint-theme] [id^="component-"] {
+  --studio-surface: var(--mp-panel) !important;
+  --studio-input: var(--mp-raised) !important;
+  --studio-border: var(--mp-line) !important;
+  --studio-label: var(--mp-ink-dim) !important;
+  --studio-accent: var(--mp-accent) !important;
+  --studio-soft: var(--mp-line-soft) !important;
+  --studio-button: var(--mp-raised) !important;
+  --studio-button-hover: var(--mp-line) !important;
+  --studio-button-text: var(--mp-ink) !important;
+  --studio-disabled: var(--mp-panel) !important;
+  --studio-disabled-text: var(--mp-ink-dim) !important;
+}
+
+/* The fixed colours in WanGP's own ui_styles.css that no variable reaches:
+   the model selector's slab, the title rules, the image editor's two
+   buttons, the queue table and the progress bar. Selected by the ids and
+   classes that file uses for exactly these, never by text, and marked
+   !important only where WanGP's own rule is. Each is a colour a night page
+   would otherwise show as a slab of daylight, or a light one as a hole. */
+:root[data-minipaint-theme] :is(#model_list, #family_list, #model_base_types_list) {
+  background-color: var(--mp-raised);
+}
+
+:root[data-minipaint-theme] .title-with-lines .line {
+  background-color: var(--mp-line);
+}
+
+:root[data-minipaint-theme] #edit_tab_apply_button {
+  background-color: var(--mp-accent) !important;
+  color: var(--mp-accent-ink) !important;
+}
+
+:root[data-minipaint-theme] #edit_tab_cancel_button {
+  background-color: var(--mp-raised) !important;
+  color: var(--mp-ink) !important;
+}
+
+:root[data-minipaint-theme] #queue_html_container th {
+  color: var(--mp-ink-dim);
+  border-bottom-color: var(--mp-line);
+}
+
+:root[data-minipaint-theme] #queue_html_container td {
+  border-bottom-color: var(--mp-line);
+}
+
+:root[data-minipaint-theme] #queue_html_container .alternating-grey-row.even-row {
+  background-color: var(--mp-raised);
+}
+
+:root[data-minipaint-theme] #queue_html_container tr:hover td {
+  background-color: var(--mp-line-soft) !important;
+}
+
+:root[data-minipaint-theme] #queue_html_container .action-button {
+  color: var(--mp-ink-dim);
+}
+
+:root[data-minipaint-theme] #queue_html_container .action-button:hover {
+  color: var(--mp-ink);
+}
+
+:root[data-minipaint-theme] #queue_html_container tr.dragging {
+  background: var(--mp-raised);
+}
+
+:root[data-minipaint-theme] #queue_html_container tr.drag-over-top {
+  border-top-color: var(--mp-accent);
+}
+
+:root[data-minipaint-theme] #queue_html_container tr.drag-over-bottom {
+  border-bottom-color: var(--mp-accent);
+}
+
+:root[data-minipaint-theme] .progress-container-custom {
+  background-color: var(--mp-raised);
+}
+
+:root[data-minipaint-theme] .progress-bar-custom {
+  background-color: var(--mp-accent);
+  color: var(--mp-accent-ink);
+}
+
+:root[data-minipaint-theme] .progress-bar-custom.idle {
+  background-color: var(--mp-line);
+}
+
+:root[data-minipaint-theme] #image-modal-container .modal-content-wrapper {
+  background: var(--mp-panel);
 }
 
 /* Native controls Gradio renders without a variable of their own: the dropdown
    list, the scrollbar, and the file-drop surface. Selected structurally, never
    by what they say. */
-:root[data-minipaint-theme="dark"] select,
-:root[data-minipaint-theme="dark"] option,
-:root[data-minipaint-theme="dark"] input,
-:root[data-minipaint-theme="dark"] textarea {
+:root[data-minipaint-theme] select,
+:root[data-minipaint-theme] option,
+:root[data-minipaint-theme] input,
+:root[data-minipaint-theme] textarea {
   background-color: var(--mp-raised);
   color: var(--mp-ink);
   border-color: var(--mp-line);
 }
 
-:root[data-minipaint-theme="dark"] ::placeholder {
+:root[data-minipaint-theme] ::placeholder {
   color: var(--mp-ink-dim);
   opacity: 1;
 }
 
-:root[data-minipaint-theme="dark"] * {
+:root[data-minipaint-theme] * {
   scrollbar-color: var(--mp-line) var(--mp-panel);
 }
 
-:root[data-minipaint-theme="dark"] ::-webkit-scrollbar-track {
+:root[data-minipaint-theme] ::-webkit-scrollbar-track {
   background: var(--mp-panel);
 }
 
-:root[data-minipaint-theme="dark"] ::-webkit-scrollbar-thumb {
+:root[data-minipaint-theme] ::-webkit-scrollbar-thumb {
   background: var(--mp-line);
   border-radius: 6px;
 }
 
 /* Restraint on borders and radius, applied only to Gradio's own block class so
    that a WanGP-authored element keeps whatever WanGP gave it. */
-:root[data-minipaint-theme="dark"] .gradio-container .block,
-:root[data-minipaint-theme="dark"] .gradio-container .form {
+:root[data-minipaint-theme] .gradio-container .block,
+:root[data-minipaint-theme] .gradio-container .form {
   border-color: var(--mp-line);
   border-radius: 8px;
 }
@@ -167,10 +313,4 @@
   white-space: nowrap !important;
   border: 0 !important;
   pointer-events: none !important;
-}
-
-/* Light is the untouched WanGP. The bridge sets the attribute either way so a
-   parent switching back gets its own theme, not a half-overridden dark one. */
-:root[data-minipaint-theme="light"] {
-  color-scheme: light;
 }

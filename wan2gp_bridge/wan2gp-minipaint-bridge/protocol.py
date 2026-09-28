@@ -264,6 +264,29 @@ QUEUE_CODE_MODEL_CHANGED = "MODEL_CHANGED"
 #: The shape of a failure code, so a bridge cannot hand the menu a sentence.
 CODE_RE = re.compile(r"\A[A-Z][A-Z0-9_]{2,59}\Z")
 
+#: THEME_STATE, parent to bridge: presentation, and nothing else (section
+#: 27.1 - a theme that never arrives is never a reason a picture cannot be
+#: handed over). ``mode`` is which of the bridge's built-in palettes is in
+#: force and what the page's colour scheme says; ``skin`` is where the
+#: colours come from; ``palette`` is the Forge page's own colours, one solid
+#: colour per slot, sent only for SKIN_HOST. A bridge older than 1.9.0 reads
+#: ``mode`` alone, and "light" leaves WanGP untouched there, which is the
+#: nearest such a bridge has to SKIN_OFF - so a parent sends "light" for it.
+THEME_DARK = "dark"
+THEME_LIGHT = "light"
+THEME_MODES = (THEME_DARK, THEME_LIGHT)
+SKIN_HOST = "host"        #: the Forge page's own colours, sampled there
+SKIN_BRIDGE = "bridge"    #: the bridge's built-in palette for the mode
+SKIN_OFF = "off"          #: WanGP's own theme, untouched
+THEME_SKINS = (SKIN_HOST, SKIN_BRIDGE, SKIN_OFF)
+#: The slots of the bridge's palette (``--mp-<slot>`` in its stylesheet).
+PALETTE_SLOTS = ("ink", "ink-dim", "page", "panel", "raised", "line", "line-soft", "accent", "accent-ink")
+#: One solid colour as a browser computes one: a hex triplet or one colour
+#: function holding nothing but numbers, percentages, slashes, commas,
+#: spaces and keywords. Never a url(), a gradient or a var(): the value is
+#: written into a custom property the stylesheet paints backgrounds from.
+COLOUR_RE = re.compile(r"\A(#[0-9a-fA-F]{3,8}|(rgb|rgba|hsl|hsla|hwb|lab|lch|oklab|oklch|color)\([-0-9a-zA-Z.%,/ ]{1,80}\))\Z")
+
 
 def valid_handoff_id(value: typing.Any) -> bool:
     return isinstance(value, str) and bool(HANDOFF_ID_RE.match(value))
@@ -271,6 +294,34 @@ def valid_handoff_id(value: typing.Any) -> bool:
 
 def valid_request_id(value: typing.Any) -> bool:
     return isinstance(value, str) and bool(REQUEST_ID_RE.match(value))
+
+
+def valid_colour(value: typing.Any) -> bool:
+    return isinstance(value, str) and bool(COLOUR_RE.match(value))
+
+
+def normalize_theme(payload: typing.Any) -> dict:
+    """A THEME_STATE payload as the bridge's script applies it, on either side.
+
+    Everything unknown falls to what a bridge did before there was a skin:
+    an unknown or missing mode is dark, an unknown or missing skin is the
+    bridge's own palette (so a parent older than this vocabulary gets what it
+    always got), and a palette is kept only for the host skin and only slot
+    by slot, dropping every value that is not one solid colour.
+    """
+    source = payload if isinstance(payload, dict) else {}
+    mode = source.get("mode")
+    mode = mode if mode in THEME_MODES else THEME_DARK
+    skin = source.get("skin")
+    skin = skin if skin in THEME_SKINS else SKIN_BRIDGE
+    palette: typing.Dict[str, str] = {}
+    raw = source.get("palette")
+    if skin == SKIN_HOST and isinstance(raw, dict):
+        for slot in PALETTE_SLOTS:
+            value = raw.get(slot)
+            if valid_colour(value):
+                palette[slot] = value
+    return {"mode": mode, "skin": skin, "palette": palette}
 
 
 def canonical_json(value: typing.Any) -> str:

@@ -422,6 +422,20 @@ chosen GPU before and after so the report can say how much memory came back, inv
 every browser session and any queue request in flight, and starts a fresh WanGP. It never
 touches a WanGP you started yourself or any other process on the card.
 
+**What the WanGP page wears.** The bridge plugin carries a stylesheet that dresses the
+WanGP page over whichever theme WanGP's own settings picked — a hijack, since WanGP's plugin
+API can add a script but not a theme — and Settings → *miniPaint / Canvas* → **WanGP tab:
+what the WanGP page is dressed in** says where its colours come from: *Match this page's
+theme* (the default: this page's own colours, sampled by the tab and sent across, so Lobe's
+night mode is what WanGP wears too), *Mini Paint's own dark and light*, or *WanGP's own
+theme*, which leaves WanGP alone. Needs bridge 1.9.0 installed from setup step 4 and WanGP
+restarted, and reaches the page at the next Reload UI. `docs/wangp/README.md` has the
+detail, and `docs/wangp/THEME_HIJACK_2026-09-28.txt` the design.
+
+**Focus mode.** With the Forge Assistant's focus mode on (SD-Neo-ModelSwitchRefiner; three
+presses on its header or launcher), the WanGP tab is the frame alone — the whole window, no
+*Integration management*, nothing reloaded and nothing moved; leaving focus puts it all back.
+
 **Reinitialize.** Settings → *miniPaint / Canvas* has one WanGP entry, and it is a
 paragraph with a link rather than a switch — the wizard's fields are not duplicated there,
 and there is no checkbox that would mean "reinitialize" forever. The button itself is in
@@ -584,10 +598,10 @@ same server-owned queue as the tab's presses, ids are never paths, and the answe
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
 API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 rewrite (the page's model
 travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
-and its place in WanGP. Bridge plugin 1.8.0 carries the queue, start and track operations
+and its place in WanGP. Bridge plugin 1.9.0 carries the queue, start and track operations
 (protocol 5) and the control plane server-owned execution runs on (protocol 6), answers the
 WanGP tab's heartbeat and says when its form is touched, guards the page's Gradio session
-(below) and refuses
+(below), dresses the WanGP page in the colours this page sends (above) and refuses
 a request composed for a model the page has since left (`MODEL_CHANGED`), so WanGP's bridge
 must be updated and WanGP restarted; a build lacking one of the six queue components keeps
 the image send and refuses the queue with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking
@@ -626,7 +640,7 @@ Every job then says where its settings came from — on its card in the Queue, i
 History, in the Send to WanGP popup's history, and in the log: *saved from the WanGP page at
 send*, *WanGP's last saved settings (the page didn't answer)*, *WanGP's last saved settings
 (WanGP was loading a model's settings at send)*, or *the model's defaults (nothing saved
-yet)*. Saving as you change needs bridge 1.7.0 and the session guard 1.8.0; with an older bridge the save before every
+yet)*. Saving as you change needs bridge 1.7.0, the session guard 1.8.0 and the page's colours 1.9.0; with an older bridge the save before every
 send still happens, and waits up to two seconds each time because it cannot know nothing
 changed.
 

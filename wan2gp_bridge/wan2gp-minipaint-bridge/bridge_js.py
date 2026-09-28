@@ -146,6 +146,16 @@ def configuration(theme_css: str = "") -> dict:
         # reports the timeout and this only ever unwedges the queue behind it.
         "roundTripMs": protocol.RECEIVE_TIMEOUT_MS + 5000,
         "themeCss": str(theme_css or ""),
+        # THEME_STATE's vocabulary, so the script applies a theme exactly as
+        # protocol.normalize_theme would: the modes, the skins, the palette's
+        # slots and the one shape a colour may have.
+        "themeModes": list(protocol.THEME_MODES),
+        "themeSkins": list(protocol.THEME_SKINS),
+        "skinHost": protocol.SKIN_HOST,
+        "skinBridge": protocol.SKIN_BRIDGE,
+        "skinOff": protocol.SKIN_OFF,
+        "paletteSlots": list(protocol.PALETTE_SLOTS),
+        "colourPattern": protocol.COLOUR_RE.pattern.replace("\\A", "^").replace("\\Z", "$"),
     }
 
 
@@ -279,6 +289,8 @@ _SCRIPT = r"""
 
   var HEX32 = /^[0-9a-f]{32}$/;
   var TOKEN = /^[A-Za-z0-9._:-]{1,64}$/;
+  // One solid colour, as protocol.py spells it: what a palette slot may hold.
+  var COLOUR = new RegExp(CONFIG.colourPattern);
 
   var channelId = "";
   var focusable = Object.create(null);
@@ -845,7 +857,7 @@ __MINIPAINT_FRAME_WRAPPER__
     }
 
     if (message.type === CONFIG.types.themeState) {
-      theme(message.payload && message.payload.mode);
+      theme(message.payload);
       return;
     }
   }
@@ -916,9 +928,45 @@ __MINIPAINT_FRAME_WRAPPER__
     try { target.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (error) {}
   }
 
-  function theme(mode) {
-    var wanted = (mode === "light") ? "light" : "dark";
-    try { document.documentElement.setAttribute("data-minipaint-theme", wanted); } catch (error) {}
+  // A THEME_STATE payload as protocol.normalize_theme reads it: an unknown
+  // mode is dark, an unknown skin is the bridge's own palette (what a parent
+  // older than the skins asked for), and a palette is kept only for the host
+  // skin and slot by slot, dropping anything that is not one solid colour.
+  function normaliseTheme(payload) {
+    var source = payload && typeof payload === "object" ? payload : {};
+    var mode = CONFIG.themeModes.indexOf(source.mode) !== -1 ? source.mode : CONFIG.themeModes[0];
+    var skin = CONFIG.themeSkins.indexOf(source.skin) !== -1 ? source.skin : CONFIG.skinBridge;
+    var palette = {};
+    if (skin === CONFIG.skinHost && source.palette && typeof source.palette === "object") {
+      for (var i = 0; i < CONFIG.paletteSlots.length; i += 1) {
+        var slot = CONFIG.paletteSlots[i];
+        var value = source.palette[slot];
+        if (typeof value === "string" && COLOUR.test(value)) { palette[slot] = value; }
+      }
+    }
+    return { mode: mode, skin: skin, palette: palette };
+  }
+
+  // The stylesheet is keyed on one attribute of <html>: its value is the
+  // mode, and no attribute at all is WanGP untouched - the "off" skin. The
+  // page's own colours go on the same element as inline custom properties,
+  // which outrank the stylesheet's defaults for the mode and come off with
+  // the skin; a slot the parent did not send keeps the default.
+  function theme(payload) {
+    var wanted = normaliseTheme(payload);
+    var root = document.documentElement;
+    try {
+      if (wanted.skin === CONFIG.skinOff) { root.removeAttribute("data-minipaint-theme"); }
+      else { root.setAttribute("data-minipaint-theme", wanted.mode); }
+    } catch (error) {}
+    try {
+      for (var i = 0; i < CONFIG.paletteSlots.length; i += 1) {
+        var slot = CONFIG.paletteSlots[i];
+        if (wanted.palette[slot]) { root.style.setProperty("--mp-" + slot, wanted.palette[slot]); }
+        else { root.style.removeProperty("--mp-" + slot); }
+      }
+    } catch (error) {}
+    return wanted;
   }
 
   function style() {
@@ -936,9 +984,11 @@ __MINIPAINT_FRAME_WRAPPER__
     }
   }
 
-  window.__minipaintBridge = { deliver: deliver };
+  window.__minipaintBridge = { deliver: deliver, theme: theme };
 
-  theme("dark");
+  // The bridge's own dark palette until the parent says what it wears - the
+  // same first paint a managed WanGP has always had.
+  theme({ mode: CONFIG.themeModes[0], skin: CONFIG.skinBridge });
   style();
   watchTouches();
   window.addEventListener("message", onMessage, false);

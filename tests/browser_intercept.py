@@ -516,6 +516,156 @@ def check_the_wangp_panel_is_parked_not_hidden(r: Results, page) -> None:
             and any("tab: the WanGP tab left the screen; its page is parked" in line for line in journal), str(tab))
 
 
+#: What SD-Neo-ModelSwitchRefiner's focus mode does to the page, as its own
+#: stylesheet does it (its style.css, "Focus mode"): the workspace's tab
+#: panel fixed over the whole window with eight pixels of padding and a
+#: scroller of its own, its ancestors marked, and every other child of
+#: theirs out of the layout. A stand-in, like the Forge gallery helper the
+#: Clipboard suite carries: this page has no assistant, and the rule the
+#: WanGP tab writes against is that extension's, so it has to be on the page
+#: for the tab's rule to have anything to beat - the padding in particular,
+#: which that rule states with !important.
+FOCUS_STAND_IN_CSS = """
+.forge-assistant-focus-root { position: fixed !important; inset: 0 !important; z-index: 1100 !important;
+  width: auto !important; height: auto !important; max-width: none !important; max-height: none !important;
+  margin: 0 !important; padding: 8px !important; box-sizing: border-box !important; overflow: auto !important;
+  display: block !important; overscroll-behavior: contain !important; }
+body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistant-focus-path):not(.forge-assistant-focus-root) { display: none !important; }
+"""
+
+#: The WanGP tab painted on its iframe view - this machine has no WanGP, so
+#: the tab is on its setup card - and then focus mode entered the way the
+#: assistant enters it: ancestors marked, the class on the panel, the class
+#: on the body. The frame points at a blank document; what is measured is
+#: the box the page gives it.
+FOCUS_ENTER_JS = """([css, markup]) => {
+    const style = document.createElement("style");
+    style.id = "mp-focus-stand-in"; style.textContent = css;
+    document.head.appendChild(style);
+    const holder = document.getElementById("wangp_iframe_root");
+    const setup = document.getElementById("wangp_setup_root");
+    if (setup) { setup.dataset.mpWas = setup.getAttribute("style") || ""; setup.style.display = "none"; }
+    holder.dataset.mpWas = holder.getAttribute("style") || "";
+    holder.dataset.mpHad = holder.className;
+    holder.classList.remove("hide"); holder.style.display = "flex";
+    const slot = holder.querySelector(".prose") || holder.firstElementChild || holder;
+    slot.innerHTML = markup;
+    const panel = document.getElementById("tab_wangp");
+    let walk = panel.parentElement;
+    while (walk) {
+        walk.classList.add("forge-assistant-focus-path");
+        if (walk === document.body) { break; }
+        walk = walk.parentElement;
+    }
+    panel.classList.add("forge-assistant-focus-root");
+    document.body.classList.add("forge-assistant-focused");
+    return true;
+}"""
+FOCUS_MEASURE_JS = """() => {
+    const panel = document.getElementById("tab_wangp");
+    const frame = document.getElementById("wangp_iframe");
+    const manage = document.getElementById("wangp_manage_root");
+    const column = document.getElementById("wangp_root");
+    const box = frame ? frame.getBoundingClientRect() : {top: -1, left: -1, width: 0, height: 0};
+    const ps = getComputedStyle(panel);
+    return { top: box.top, left: box.left, width: Math.round(box.width), height: Math.round(box.height),
+             viewport: [window.innerWidth, window.innerHeight],
+             position: ps.position, padding: ps.paddingTop, border: ps.borderLeftWidth,
+             overflowY: panel.scrollHeight - panel.clientHeight, overflowX: panel.scrollWidth - panel.clientWidth,
+             manage: manage ? getComputedStyle(manage).display : "missing",
+             tabs: getComputedStyle(document.querySelector("#tabs > .tab-nav")).display,
+             wrote: column.style.getPropertyValue("--minipaint-wangp-frame") };
+}"""
+FOCUS_LEAVE_JS = """() => {
+    document.getElementById("tab_wangp").classList.remove("forge-assistant-focus-root");
+    document.body.classList.remove("forge-assistant-focused");
+    document.querySelectorAll(".forge-assistant-focus-path").forEach((node) => node.classList.remove("forge-assistant-focus-path"));
+    return true;
+}"""
+FOCUS_RESTORE_JS = """() => {
+    const style = document.getElementById("mp-focus-stand-in");
+    if (style) { style.remove(); }
+    const frame = document.getElementById("wangp_iframe");
+    if (frame) { frame.remove(); }
+    const holder = document.getElementById("wangp_iframe_root");
+    holder.className = holder.dataset.mpHad || holder.className;
+    holder.setAttribute("style", holder.dataset.mpWas || "");
+    const setup = document.getElementById("wangp_setup_root");
+    if (setup) { setup.setAttribute("style", setup.dataset.mpWas || ""); }
+    return true;
+}"""
+
+
+def check_focus_mode_makes_the_frame_the_window(r: Results, page) -> None:
+    """Under the sibling assistant's focus mode the WanGP tab is the frame
+    alone: the whole window, no padding, no Integration management, nothing
+    to scroll to - and the room under the frame is back when focus ends.
+
+    Measured in a browser because this is the stylesheet's rule and the
+    sizer's arithmetic together, against the other extension's own rule for
+    the same panel, and the last height fix passed every source check while
+    the page was wrong. The assistant is not on this page; its focus rule is
+    (FOCUS_STAND_IN_CSS), copied from its stylesheet, and the classes go on
+    the way its focus module puts them.
+    """
+    import re
+
+    from minipaint_neo.wangp import ui as wangp_ui
+
+    page.locator("#tabs > .tab-nav > button", has_text="WanGP").first.click()
+    time.sleep(0.8)
+    markup = re.sub(r'src="[^"]*"', 'src="about:blank"', wangp_ui.iframe_html())
+    page.evaluate(FOCUS_ENTER_JS, [FOCUS_STAND_IN_CSS, markup])
+    time.sleep(1.2)
+    full = page.evaluate(FOCUS_MEASURE_JS)
+    r.check("under the assistant's focus mode the WanGP frame is the whole window",
+            full["top"] == 0 and full["left"] == 0 and full["width"] == full["viewport"][0]
+            and full["height"] == full["viewport"][1], str(full))
+    r.check("with the panel fixed over the page and stripped of the padding and border that extension gives it",
+            full["position"] == "fixed" and full["padding"] == "0px" and full["border"] == "0px"
+            and full["tabs"] == "none", str(full))
+    r.check("nothing to scroll to, and the Integration management accordion not displayed",
+            full["overflowY"] <= 0 and full["overflowX"] <= 0 and full["manage"] == "none", str(full))
+    r.check("the frame's height written by the sizer for the panel's box, not guessed by the stylesheet",
+            full["wrote"] == f"{full['viewport'][1]}px", str(full))
+    page.evaluate(FOCUS_LEAVE_JS)
+    time.sleep(1.2)
+    back = page.evaluate(FOCUS_MEASURE_JS)
+    r.check("and when the class comes off the accordion is back, the tab bar too, and the frame leaves them room",
+            back["manage"] != "none" and back["tabs"] != "none" and back["position"] != "fixed"
+            and 480 <= back["height"] < back["viewport"][1] - 20 and back["top"] > 0, str(back))
+    page.evaluate(FOCUS_RESTORE_JS)
+    open_txt2img(page)
+    time.sleep(0.5)
+
+
+PALETTE_JS = """() => {
+    const api = window.minipaintWanGP;
+    const palette = api.samplePalette();
+    api.theme();
+    return { palette: palette, theme: api.state().theme, probes: document.querySelectorAll("span[aria-hidden='true']").length };
+}"""
+
+
+def check_the_page_palette_is_sampled(r: Results, page) -> None:
+    """The colours the WanGP page is told to wear are this page's own,
+    resolved by the browser: nine slots, each what Gradio's theme variables
+    compute to, and the mode read off the page colour. A Node stub can only
+    pretend to resolve a variable; this is the real thing, on the default
+    Gradio theme this page is built with, which is light.
+    """
+    import re
+
+    seen = page.evaluate(PALETTE_JS)
+    palette = seen.get("palette") or {}
+    r.check("the page's palette is sampled slot by slot, each a colour the browser computed",
+            sorted(palette.keys()) == sorted(["ink", "ink-dim", "page", "panel", "raised", "line", "line-soft", "accent", "accent-ink"])
+            and all(re.match(r"^rgba?\(", value) for value in palette.values()), str(palette))
+    r.check("and the mode is read off the page colour: this page is light, and the look is the host's",
+            (seen.get("theme") or {}).get("mode") == "light" and (seen.get("theme") or {}).get("skin") == "host", str(seen.get("theme")))
+    r.check("the probe it was read through is gone", seen.get("probes") == 0, str(seen.get("probes")))
+
+
 def check_the_direct_route_when_the_queue_is_dead(r: Results, page) -> None:
     """Gradio's queue cut: the takeover never needed it, so nothing changes."""
     open_txt2img(page)
@@ -576,6 +726,8 @@ def run() -> Results:
                 check_escape_queues_nothing(r, page)
                 check_the_menu_offers_the_destinations(r, page)
                 check_the_wangp_panel_is_parked_not_hidden(r, page)
+                check_focus_mode_makes_the_frame_the_window(r, page)
+                check_the_page_palette_is_sampled(r, page)
                 check_the_direct_route_when_the_queue_is_dead(r, page)
             finally:
                 browser.close()

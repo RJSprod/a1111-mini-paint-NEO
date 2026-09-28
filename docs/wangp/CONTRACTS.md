@@ -219,6 +219,10 @@ def on_ui_tabs() -> list        # [(blocks, TAB_LABEL, TAB_ID)] — one tab, alw
 def create_ui() -> None         # the four roots: setup / starting / error / iframe
 # settings.py
 def on_ui_settings() -> None    # ONE entry, pointing at the tab's Reinitialize; no fake boolean
+# minipaint_neo/settings.py (the extension's own page): the WanGP look
+WANGP_LOOK = "minipaint_wangp_look"   # "Match this page's theme" (default) | "Mini Paint's own dark and light" | "WanGP's own theme"
+def wangp_look() -> str                # the protocol's skin word: "host" | "bridge" | "off"; anything else stored is "host"
+# ui.py: every view dict carries "look": current_look(), read by the browser half (see below)
 # diagnostics.py
 def report() -> str             # redacted, paste-into-a-bug text
 def redact_path(path) -> str
@@ -268,6 +272,30 @@ and `unavailable` when there is no bridge session or it did not answer in
 time. The page also commits about a second after the last `FORM_CHANGED`, one
 save at a time; `state().settings` says whether the record is current.
 
+**What the WanGP page wears** (bridge 1.9.0): `theme(mode?)` sends `THEME_STATE`
+`{mode, accent, skin, palette}` after READY and again whenever the tab comes back on
+screen; `samplePalette()` is the page's own colours, one solid colour per slot of
+`PALETTE_SLOTS` (`ink, ink-dim, page, panel, raised, line, line-soft, accent,
+accent-ink`), resolved by painting a probe from each slot's Gradio variables in turn
+(`PALETTE_SOURCES`, first choice first - a gradient or an unset variable computes to
+transparent and the next is tried; a slot nothing paints is left out) and read back as
+what the browser computed; `state().theme` is `{mode, skin}`. `skin` is the look from
+Settings as the tab's view JSON carries it (`look`): `host` sends the palette and the mode
+read off the page colour sampled (dark below half luminance), `bridge` sends no palette,
+`off` sends none and says `mode: "light"` - the one word that leaves WanGP alone on a
+bridge older than the skins, which reads `mode` and nothing else. A look word the bundle
+does not know is `host`. The journal says `theme: host (9 of 9 colours sampled from this
+page), dark` once per change, never once per send.
+
+**Focus mode** (SD-Neo-ModelSwitchRefiner's assistant): the class it puts on the tab's
+panel, `forge-assistant-focus-root`, is the contract. Under it the stylesheet makes the
+frame the whole window (the panel's padding and border off, `#wangp_manage_root` not
+displayed, the browser's recovery notice laid over the frame) and `fitFrame()` gives the
+frame the panel's whole height - nothing under it and the accordion not measured, the
+panel's bottom rather than the window's. Nothing is moved in the DOM and nothing is
+repainted; leaving focus is the class coming off. Its side of the contract is that
+extension's `docs/22-forge-assistant.md`.
+
 The heartbeat: while the WanGP tab is on screen and the page is visible, a
 bridge whose READY said `capabilities.ping` is sent `PING` every 5 s and
 answers `PONG` `{busy_ms, op, waiting}` from its page script, never through
@@ -286,6 +314,26 @@ SHARED block is byte-identical to `minipaint_neo/wangp/protocol.py`'s.
 `compatibility.py` is the only file allowed to know a WanGP component id, and
 every id it wants is version-gated and reported in the handshake so a build
 that lacks one fails closed with `BRIDGE_COMPONENT_INCOMPATIBLE`.
+
+**The theme hijack** (`theme.css`, injected by the document script as
+`<style id="minipaint-bridge-theme">`, bridge 1.9.0). WanGP's plugin API adds a
+script, never a theme or a stylesheet, so the look is not a sixth entry in WanGP's
+theme dropdown: it is a stylesheet that outranks whichever entry that dropdown
+picked. Keyed on one attribute the script sets on `<html>`, `data-minipaint-theme`,
+whose value is the mode (`dark` | `light`); no attribute is WanGP untouched, and an
+unmanaged WanGP never has one. Nine `--mp-*` slots: the bridge's own defaults per
+mode, or - for the `host` skin - the parent page's colours written as inline
+properties on `<html>` (`normalize_theme` on both sides keeps only known slots
+holding one solid colour, `COLOUR_RE`: a hex triplet or one colour function, never
+`url()`, a gradient or `var()`). Everything else in the file reads a slot: Gradio's
+theme variables on `.gradio-container` and `body`, and WanGP's eleven `--studio-*`
+variables - declared `!important` on `[id^="component-"]`, because `ui_studio.py`
+rewrites its `.wangp-studio-*` classes to `#component-N` ids when it builds the page's
+CSS and only importance gets past an id - plus the fixed colours of `ui_styles.css`
+that no variable reaches (the model selector's slab, the title rules, the editor's
+buttons, the queue table, the progress bar). The handshake says
+`capabilities.theme_palette`; a parent that never hears it sends `mode` alone, and
+the script's first paint is the bridge's own dark until the parent speaks.
 
 A receiver descriptor carries `enabled` (offered: switched on now, *or* allowed
 by this page's model definition and switchable), `selected` (switched on now)

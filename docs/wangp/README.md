@@ -414,11 +414,13 @@ injects outranks the built-in ones; nothing in WanGP's own files is changed.
 Where the colours come from is one entry in Settings → *miniPaint / Canvas*, **WanGP tab:
 what the WanGP page is dressed in**:
 
-* **Match this page's theme** (the default) — the WanGP tab's browser half samples this
-  page's own colours (Gradio's theme variables, resolved by the browser, so a night theme
-  such as Lobe's is exactly what WanGP wears too), sends them across as the page's palette,
-  and reads dark or light off the page colour. Sent after every handshake and again whenever
-  the tab comes back on screen, so a theme switched meanwhile is picked up on return.
+* **Match this page's theme** (the default) — the WanGP tab's browser half reads this
+  page's text, page colour and accent (Gradio's theme variables, resolved by the browser,
+  so a night theme such as Lobe's is exactly what WanGP wears too), derives the surfaces
+  between them - a group's box a shade above the page, inputs a shade above that, borders
+  above those, the way Lobe lays a black page out - sends the nine across as the page's
+  palette, and reads dark or light off the page colour. Sent after every handshake and again
+  whenever the tab comes back on screen, so a theme switched meanwhile is picked up on return.
 * **Mini Paint's own dark and light** — the bridge's built-in palette, in the mode this page
   is in.
 * **WanGP's own theme** — the hijack steps aside entirely: WanGP looks as it does on its own.
@@ -426,10 +428,10 @@ what the WanGP page is dressed in**:
 The setting reaches the page at the next Reload UI (the tab's view is painted then). It
 needs bridge 1.9.0 installed from setup step 4 and WanGP restarted; an older bridge reads
 only whether the page is dark or light and wears its own dark palette for a dark page, which
-is what it always did. The page's log says `theme: host (9 of 9 colours sampled from this
-page), dark` once per change; fewer than nine means a variable this theme leaves unset or
-paints with a gradient, and the bridge keeps its own colour for that slot. The whole design,
-and what it replaced, is `docs/wangp/THEME_HIJACK_2026-09-28.txt`.
+is what it always did. The page's log says `theme: host, dark; ink rgb(...), ...` once per
+change, with the nine colours sent; a slot missing from it is a variable this theme leaves
+unset or paints with a gradient, and the bridge keeps its own colour for it. The whole
+design, and what it replaced, is `docs/wangp/THEME_HIJACK_2026-09-28.txt`.
 
 ## Focus mode: the frame is the window
 

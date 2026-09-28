@@ -383,6 +383,16 @@ selector and the importance, variable by variable. The look is keyed on one
 attribute of `<html>` (`data-minipaint-theme`, the mode); no attribute is
 WanGP untouched, and the "off" skin removes it rather than writing a value.
 
+**Gradio's surface variables say what the theme's base declares, not what
+the page shows.** Lobe paints its blocks and inputs with rules of its own and
+leaves `--block-background-fill` and `--input-background-fill` at Gradio's
+dark defaults - slate - so a palette sampled from them put slate inputs and
+no group boxes on a black WanGP page (the first screenshot of the hijack).
+The tab now reads only the text, the page colour and the accent, and derives
+the four surfaces as fixed luminance steps from the page towards the ink
+(`SURFACE_STEPS`); the numbers are Lobe's night mode measured. Read a page's
+variables for its *colours*, never for its *layout of tones*.
+
 **A variable holding a gradient is not unset.** `var(--a, var(--b, transparent))`
 never reaches `--b` when `--a` holds a gradient: the variable is defined, so it
 is substituted, and a gradient in `background-color` makes the declaration

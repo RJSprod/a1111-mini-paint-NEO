@@ -152,3 +152,44 @@ of nine colours the page gave, and which mode), the iframe's <html> attribute
 and inline --mp-* properties, and whether the studio controls took the
 palette - if they did not, the scope element's id no longer starts with
 "component-" and the selector in theme.css is the thing to change.
+
+8. The second round, from the first screenshot (2026-09-28, later)
+-------------------------------------------------------------------
+The user's Lobe night page, through the hijack: a black page, black buttons
+with pale outlines, the selected tabs a pale block with white text, the
+model selector's slab still WanGP's slate, and none of the grey boxes Lobe
+draws around its groups. Three findings.
+
+Sampled surfaces are the theme's base, not its page. Lobe paints its blocks
+and inputs by rules of its own and leaves --block-background-fill and
+--input-background-fill at Gradio's dark defaults (neutral-800, slate) - so
+"raised" came back slate, which is where the slab's colour came from, and
+"panel" came back the page's black, which is why nothing was boxed. The tab
+now samples only what a page cannot lie about - its text, its page colour,
+its accent - and derives the four surfaces as fixed steps of luminance from
+the page towards the ink (settlePalette, SURFACE_STEPS: box +0.08 on the
+page, input +0.05 on the box, hover +0.04 and border +0.10 on the input; the
+steps are Lobe's night mode measured, #141414 boxes on black, #222 inputs,
+#3c3c3c borders). A light page steps the other way, towards its dark ink.
+The journal line now lists the nine colours sent, so the next screenshot
+comes with the palette behind it.
+
+The pale tabs were --studio-soft mapped to the soft accent, and Lobe's
+accent is white: white text on a pale tab. --studio-soft is the raised
+surface now, and a selected tab is said outright - accent text on the raised
+surface, !important, since WanGP's rule is id-scoped through :is() and its
+own declarations carry no importance.
+
+The groups. WanGP's studio look makes every form container transparent and
+gives each field a surface; Lobe does the opposite, a box around the group
+and the inputs a shade lighter inside it. Under the hijack the form and the
+group are boxes of the panel colour (!important over the studio rule), the
+fields keep the same surface and so merge into the box, and the inputs and
+buttons are the raised colour on it. Colour and radius only. The block
+border became the soft line: a box is told apart by its surface. And a
+ticked box in dark mode is the accent pulled 60% towards the page, so
+Gradio's white check shows on a white accent too.
+
+The slab is the panel colour with importance now; why the first round's
+plain rule did not win on the user's page is not known and does not need to
+be - importance ends the question.

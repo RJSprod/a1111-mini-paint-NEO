@@ -426,7 +426,8 @@ touches a WanGP you started yourself or any other process on the card.
 WanGP page over whichever theme WanGP's own settings picked — a hijack, since WanGP's plugin
 API can add a script but not a theme — and Settings → *miniPaint / Canvas* → **WanGP tab:
 what the WanGP page is dressed in** says where its colours come from: *Match this page's
-theme* (the default: this page's own colours, sampled by the tab and sent across, so Lobe's
+theme* (the default: this page's text, page colour and accent, read by the tab, with the
+surfaces between them derived a shade apart the way Lobe lays a black page out, so Lobe's
 night mode is what WanGP wears too), *Mini Paint's own dark and light*, or *WanGP's own
 theme*, which leaves WanGP alone. Needs bridge 1.9.0 installed from setup step 4 and WanGP
 restarted, and reaches the page at the next Reload UI. `docs/wangp/README.md` has the

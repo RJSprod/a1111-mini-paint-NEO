@@ -389,7 +389,10 @@ stylesheet covers WanGP's studio look, and the handshake says `capabilities.them
 (see *What the WanGP page wears*, below). Bridge 1.10.0 adds the typeface: `THEME_STATE`
 may carry the page's font lists and the `@font-face` rules behind them, and the WanGP page
 is set in them (`capabilities.theme_font`); 1.10.1 takes a real theme's list and a CDN's
-faces, which 1.10.0 refused. An extension newer than its
+faces, which 1.10.0 refused. Bridge 1.11.0 adds the compact page under focus: `LAYOUT_STATE`
+`{compact}` hides WanGP's title, tab strip, model row and model description while focus
+mode gives the tab the window (`capabilities.layout_compact`; see *Focus mode*, below).
+An extension newer than its
 bridge says `BRIDGE_VERSION_MISMATCH` until the bridge is installed again from setup step 4
 and WanGP restarted.
 
@@ -468,6 +471,23 @@ puts the accordion back. The contract is the one class that extension writes on 
 panel, `forge-assistant-focus-root`; `style.css` and `browser/minipaint_wangp.js` read it,
 and `tests/browser_intercept.py` measures the result in a real browser against a copy of
 that extension's own rule.
+
+The WanGP page inside the frame goes compact too (bridge 1.11.0): WanGP's title, its main
+tab strip, the model row (the output filter, both model pickers and their tools) and the
+model's description with its attention line are hidden, so the page starts at the Lora
+preset row with the galleries beside it. Everything below is untouched - the form's own
+tabs (Text to Video, Text to Image), the galleries' tabs, the generation time - and every
+hidden control keeps its value and its events, since nothing is removed from the page.
+Leaving focus shows them again. With the strip hidden the WanGP tab you were on is the one
+you stay on; to change model or open another WanGP tab, leave focus. The journal says
+`layout: compact under focus - ...` and `layout: whole - ...` on each change;
+`minipaintWanGP.state().layout` is `{offered, compact}`. In the WanGP page, `<html>` has
+`data-minipaint-layout="compact"` while compact, and each element taken out carries
+`data-minipaint-chrome` (`title`, `tabs` or `model`). With a bridge older than 1.11.0 the
+journal says once that the page keeps its header under focus. The parts are found from the
+one id WanGP gives its gallery tabs for bridges, `#wangp-gallery-tabs`, and never from a
+label; a WanGP that drops that id keeps its page whole under focus, and the page's console
+says `compact layout: no #wangp-gallery-tabs on this page; it stays whole`.
 
 ## When the WanGP view stops answering
 

@@ -867,6 +867,148 @@ def check_the_page_typeface_reaches_wangp(r: Results, page) -> None:
         server.shutdown()
 
 
+#: WanGP's page as Gradio 5.29 renders it - Gradio's own markup, captured;
+#: the file's comment says how - in a same-origin frame, running the
+#: bridge's own document script. The frame's stylesheet stands in for a
+#: theme that says !important about every tab strip, which is what the
+#: inline !important the bridge writes has to beat.
+COMPACT_FRAME_JS = """([markup, script, css]) => new Promise((resolve) => {
+    const old = document.getElementById("mp-wangp-compact-frame");
+    if (old) { old.remove(); }
+    const frame = document.createElement("iframe");
+    frame.id = "mp-wangp-compact-frame";
+    frame.style.cssText = "position:fixed;left:0;top:0;width:1200px;height:800px;border:0;visibility:hidden";
+    frame.srcdoc = "<!doctype html><html><head><style>" + css + "</style></head><body>" + markup + "</body></html>";
+    frame.addEventListener("load", () => {
+        const tag = frame.contentDocument.createElement("script");
+        tag.textContent = script;
+        frame.contentDocument.head.appendChild(tag);
+        resolve(!!frame.contentWindow.__minipaintBridge);
+    });
+    document.body.appendChild(frame);
+})"""
+COMPACT_APPLY_JS = """(payload) => document.getElementById("mp-wangp-compact-frame").contentWindow.__minipaintBridge.layout(payload)"""
+COMPACT_MEASURE_JS = """() => {
+    const doc = document.getElementById("mp-wangp-compact-frame").contentDocument;
+    const q = (s) => doc.querySelector(s);
+    const shown = (el) => !!el && el.getClientRects().length > 0;
+    const gallery = q("#wangp-gallery-tabs");
+    const panel = gallery ? gallery.parentElement.closest("[role='tabpanel']") : null;
+    const main = panel ? panel.parentElement : null;
+    const title = main ? main.parentElement.querySelector("h1") : null;
+    return {
+        title: shown(title), strip: shown(main && main.querySelector(":scope > .tab-wrapper")),
+        filter: shown(q("#wangp_model_output_filter")), family: shown(q("#family_list")),
+        tools: shown(q("#wangp_model_tool_search")), header: shown(q(".header-markdown-group")),
+        lset: Math.round(q("#lset").getBoundingClientRect().top),
+        gallery: shown(gallery), galleryStrip: shown(gallery && gallery.querySelector(":scope > .tab-wrapper")),
+        modeStrip: shown(q("#lset").closest(".column").querySelector(".tabs > .tab-wrapper")),
+        generationTime: shown(q("#gentime")), bridge: !!q(".minipaint-bridge-column") && !q(".minipaint-bridge-column").closest("[data-minipaint-chrome]"),
+        inline: [...doc.querySelectorAll("[data-minipaint-chrome]")].map((e) => e.style.getPropertyValue("display") + " " + e.style.getPropertyPriority("display")),
+        marks: [...doc.querySelectorAll("[data-minipaint-chrome]")].map((e) => e.getAttribute("data-minipaint-chrome")),
+        leftovers: [...doc.querySelectorAll("[style*='display: none']")].filter((e) => !e.classList.contains("tabitem") && !e.hasAttribute("data-minipaint-chrome")).length,
+        attr: doc.documentElement.getAttribute("data-minipaint-layout")
+    };
+}"""
+COMPACT_HOSTILE_CSS = ".tabs > .tab-wrapper { display: flex !important; } .header-markdown-group { display: block !important; }"
+
+
+def check_focus_compacts_the_wangp_page(r: Results, page) -> None:
+    """Under focus the WanGP page is its generator form alone (bridge 1.11.0).
+
+    The bridge's own script runs on WanGP's page as Gradio 5.29 really draws
+    it (tests/wangp_page_gradio_5_29.html) and is told compact, then whole:
+    the title, the main tab strip, the model row and the model's description
+    go, the form moves to the top with its own tabs and the galleries, the
+    bridge's column stays, and everything comes back exactly as it was - the
+    inline display each element had included. Measured in a browser because
+    what is asked is whether a real layout lost those boxes; the numbers are
+    the form's top edge before and after.
+
+    Two decisions are reverted to prove the checks can see them: without the
+    inline !important, a theme's own !important keeps the tab strip; without
+    putting back on whole, the page stays compact after focus ends.
+    """
+    import sys as _sys
+
+    folder = str(ROOT / "wan2gp_bridge" / "wan2gp-minipaint-bridge")
+    _sys.path.insert(0, folder)
+    try:
+        import bridge_js
+    finally:
+        if folder in _sys.path:
+            _sys.path.remove(folder)
+    markup = (ROOT / "tests" / "wangp_page_gradio_5_29.html").read_text(encoding="utf-8")
+    script = bridge_js.document_script("")
+
+    def run(source):
+        ready = page.evaluate(COMPACT_FRAME_JS, [markup, source, COMPACT_HOSTILE_CSS])
+        before = page.evaluate(COMPACT_MEASURE_JS)
+        told = page.evaluate(COMPACT_APPLY_JS, {"compact": True})
+        compact = page.evaluate(COMPACT_MEASURE_JS)
+        page.evaluate(COMPACT_APPLY_JS, {"compact": False})
+        whole = page.evaluate(COMPACT_MEASURE_JS)
+        return ready, before, told, compact, whole
+
+    try:
+        ready, before, told, compact, whole = run(script)
+        r.check("WanGP's page as Gradio 5.29 draws it runs the bridge's own script", ready is True, str(ready))
+        r.check("whole, it shows the title, the main tab strip, the model row and the model's description",
+                all(before.get(k) for k in ("title", "strip", "filter", "family", "tools", "header")) and before.get("attr") is None,
+                str(before))
+        r.check("told compact, the title, the main tab strip, the model row and the description are gone",
+                not any(compact.get(k) for k in ("title", "strip", "filter", "family", "tools", "header"))
+                and compact.get("attr") == "compact" and told.get("hidden") == len(compact.get("marks") or []),
+                str(compact) + " " + str(told))
+        r.check("each named for what it is, and hidden inline with !important, over a theme's own !important",
+                sorted(set(compact.get("marks") or [])) == ["model", "tabs", "title"]
+                and all(one == "none important" for one in compact.get("inline") or []), str(compact.get("marks")) + str(compact.get("inline")))
+        r.check("the form is at the top: the Lora preset row rises by the height of what went",
+                before.get("lset", 0) - compact.get("lset", 0) > 150 and compact.get("lset", 999) < 40,
+                f"{before.get('lset')} -> {compact.get('lset')}")
+        r.check("and the form keeps its own tab strip, the generation time, the galleries and theirs, and the bridge's column",
+                compact.get("modeStrip") and compact.get("generationTime") and compact.get("gallery") and compact.get("galleryStrip")
+                and compact.get("bridge"), str(compact))
+        r.check("told whole, every part is back where it was, with nothing left marked or hidden",
+                {k: whole.get(k) for k in ("title", "strip", "filter", "family", "tools", "header", "lset")}
+                == {k: before.get(k) for k in ("title", "strip", "filter", "family", "tools", "header", "lset")}
+                and whole.get("marks") == [] and whole.get("attr") is None and whole.get("leftovers") == before.get("leftovers"),
+                str(whole))
+
+        # A form not drawn yet: nothing is hidden and nothing is claimed,
+        # and the layout lands when the form appears.
+        page.evaluate(COMPACT_FRAME_JS, [markup, script, ""])
+        page.evaluate("""() => document.getElementById("mp-wangp-compact-frame").contentDocument
+                          .getElementById("wangp-gallery-tabs").id = "not-yet" """)
+        early = page.evaluate(COMPACT_APPLY_JS, {"compact": True})
+        early_seen = page.evaluate(COMPACT_MEASURE_JS.replace('q("#wangp-gallery-tabs")', 'q("#not-yet")'))
+        page.evaluate("""() => document.getElementById("mp-wangp-compact-frame").contentDocument
+                          .getElementById("not-yet").id = "wangp-gallery-tabs" """)
+        page.wait_for_timeout(700)
+        late = page.evaluate(COMPACT_MEASURE_JS)
+        r.check("with no form drawn yet nothing is hidden and the page is not called compact",
+                early.get("hidden") == 0 and early_seen.get("marks") == [] and early_seen.get("attr") is None
+                and early_seen.get("title") and early_seen.get("strip"), str(early) + str(early_seen))
+        r.check("and when the form appears the layout lands after all",
+                late.get("attr") == "compact" and not late.get("strip") and not late.get("header"), str(late))
+
+        # Every decision here has a mutation that must break its check.
+        for name, old, new, broken in (
+            ("without the inline !important a theme's own keeps the tab strip",
+             'element.style.setProperty("display", "none", "important");', 'element.style.setProperty("display", "none");',
+             lambda c, w: c.get("strip") is True),
+            ("without putting it all back on whole the page stays compact after focus",
+             "    if (!layoutWanted) {\n      showChrome();", "    if (!layoutWanted) {\n",
+             lambda c, w: w.get("strip") is False),
+        ):
+            anchored = old in script
+            _ready, _before, _told, mutated, mutated_whole = run(script.replace(old, new)) if anchored else (None, {}, {}, {}, {})
+            r.check(f"mutation: {name}", anchored and broken(mutated, mutated_whole),
+                    "anchor gone from the script" if not anchored else str(mutated)[:200] + str(mutated_whole)[:200])
+    finally:
+        page.evaluate("""() => { const f = document.getElementById("mp-wangp-compact-frame"); if (f) { f.remove(); } }""")
+
+
 def check_the_direct_route_when_the_queue_is_dead(r: Results, page) -> None:
     """Gradio's queue cut: the takeover never needed it, so nothing changes."""
     open_txt2img(page)
@@ -930,6 +1072,7 @@ def run() -> Results:
                 check_focus_mode_makes_the_frame_the_window(r, page)
                 check_the_page_palette_is_sampled(r, page)
                 check_the_page_typeface_reaches_wangp(r, page)
+                check_focus_compacts_the_wangp_page(r, page)
                 check_the_direct_route_when_the_queue_is_dead(r, page)
             finally:
                 browser.close()

@@ -468,7 +468,11 @@ window with eight pixels of padding, `!important` throughout. The WanGP tab
 reads the same class: `style.css` takes the panel's padding and border off,
 does not display `#wangp_manage_root` and lays the recovery notice over the
 frame, and `fitFrame()` gives the frame the panel's whole height. So under
-focus the WanGP tab is the frame alone. Renaming that class on either side
+focus the WanGP tab is the frame alone. Since 2026-09-29 (bridge 1.11.0) the
+class also reaches *into* the frame: the tab's panel observer hears it and
+sends `LAYOUT_STATE {compact}`, and the bridge hides WanGP's own title, tab
+strip, model row and model description, so the WanGP page is its generator
+form alone. Renaming that class on either side
 breaks the other silently - the tab would simply keep its accordion and its
 padding - and `tests/browser_intercept.py` carries a copy of the assistant's
 rule for that reason (`FOCUS_STAND_IN_CSS`): a change to the rule there has
@@ -506,7 +510,13 @@ settings save's in `minipaintWanGP.state().settings`; every miss, bar, dismissal
 and reload is a `heartbeat:` line in the page journal. Saving as the form
 changes and the heartbeat need bridge 1.7.0 installed in WanGP, the session guard
 bridge 1.8.0, the theme hijack - the page's colours on the WanGP page, over
-WanGP's own themes - bridge 1.9.0, and the page's typeface bridge 1.10.1. The hijack has been checked against WanGP's
+WanGP's own themes - bridge 1.9.0, the page's typeface bridge 1.10.1, and the
+compact WanGP page under focus bridge 1.11.0. The compact page has been checked
+against Gradio 5.29's own markup of WanGP 13.14's structure
+(`tests/wangp_page_gradio_5_29.html`), never against the user's own WanGP: if
+the header is still there under focus, the WanGP page's console line
+`compact layout: no #wangp-gallery-tabs` and `<html data-minipaint-layout>` are
+the first things to look at. The hijack has been checked against WanGP's
 stylesheets as read from its repository on 2026-09-28 (`ui_studio.css` and the
 four theme files, `ui_styles.css`), never on the user's own install: what the
 eleven `--studio-*` remaps and the fixed-colour overrides look like in a real

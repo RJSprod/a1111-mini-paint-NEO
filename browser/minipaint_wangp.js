@@ -73,8 +73,11 @@ window.minipaintWanGP = (function () {
     const PING = "WANGP_PING";
     const PONG = "WANGP_PONG";
     const FORM_CHANGED = "WANGP_FORM_CHANGED";
+    // Bridge 1.11.0: how much of WanGP's own page to show. Compact while the
+    // assistant's focus mode gives this tab the whole window. See layout().
+    const LAYOUT_STATE = "WANGP_LAYOUT_STATE";
 
-    const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH, PING];
+    const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH, PING, LAYOUT_STATE];
 
     //: THEME_STATE's vocabulary, as protocol.py spells it. `mode` is which of
     //: the bridge's built-in palettes is in force; `skin` is where the colours
@@ -415,6 +418,12 @@ window.minipaintWanGP = (function () {
         runtimePress: { at: 0, timer: 0, running: null },
         lastCode: "",
         theme: "",
+        // Whether the bridge hides WanGP's title, tab strip and model row on
+        // request (its READY said `layout_compact`), what it was last told,
+        // and what the journal last said about it. See layout().
+        layout: false,
+        layoutSent: null,
+        layoutSaid: "",
         // Whether the bridge in this page can take a queue request at all: the
         // handshake says, and a build that lacks a queue-critical component
         // says no while still taking an image send.
@@ -1518,6 +1527,7 @@ window.minipaintWanGP = (function () {
         S.ping = declared && !!(payload.capabilities && payload.capabilities.ping === true);
         S.formWatch = declared && !!(payload.capabilities && payload.capabilities.form_watch === true);
         S.session = declared && !!(payload.capabilities && payload.capabilities.session === true);
+        S.layout = declared && !!(payload.capabilities && payload.capabilities.layout_compact === true);
         noteSession(payload.session, "ready");
         // A session this page has saved nothing from yet: whatever WanGP has
         // recorded may be from before, so no send may take it as current.
@@ -1537,6 +1547,9 @@ window.minipaintWanGP = (function () {
         heartbeatReady();
         // Presentation only, and never a reason a picture cannot be sent.
         try { theme(); } catch (e) { /* section 27.1 */ }
+        // A new page is whole until told otherwise, so it is always told.
+        S.layoutSent = null;
+        try { layout(); } catch (e) { /* section 27.1 */ }
         // A bridge that introduced itself is the whole definition of the
         // controls being back. The cycle ends silently, and any notice a
         // previous episode left behind is taken away explicitly - a repaint
@@ -2265,9 +2278,14 @@ window.minipaintWanGP = (function () {
         }
         if (typeof MutationObserver === "function") {
             try {
-                // One element, one attribute: the inline style Gradio writes.
-                T.observer = new MutationObserver(function () { panelChanged(); });
-                T.observer.observe(panel, { attributes: true, attributeFilter: ["style"] });
+                // One element, two attributes: the inline style Gradio writes
+                // on every tab change, and the class the assistant's focus
+                // mode puts on and takes off (FOCUS_ROOT_CLASS).
+                T.observer = new MutationObserver(function () {
+                    panelChanged();
+                    try { layout(); } catch (e) { /* section 27.1 */ }
+                });
+                T.observer.observe(panel, { attributes: true, attributeFilter: ["style", "class"] });
             } catch (e) { T.observer = null; }
         }
         panelChanged();
@@ -3754,6 +3772,8 @@ window.minipaintWanGP = (function () {
                 } : null,
                 refused: S.themeFont && S.themeFont.refused ? S.themeFont.refused : ""
             },
+            // What the WanGP page was last told to show. See layout().
+            layout: { offered: S.layout, compact: S.layoutSent },
             tab: {
                 found: !!T.panel,
                 selected: T.selected,
@@ -4229,6 +4249,47 @@ window.minipaintWanGP = (function () {
         return sent;
     }
 
+    /**
+     * How much of WanGP's own page to show, sent to the bridge as
+     * LAYOUT_STATE: compact while the assistant's focus mode has given this
+     * tab the whole window (the class that extension puts on the panel, read
+     * by focusedPanel), whole otherwise. Compact is the WanGP page without its
+     * title, its tab strip, its model row and the model's description - under
+     * focus somebody is creating, not choosing a model - and the bridge puts
+     * them all back when told whole.
+     *
+     * Presentation, like theme(): never a reason a picture cannot be sent,
+     * never answered. Sent when the page becomes ready - a new page is whole
+     * until told - and whenever focus starts or ends; the same answer twice
+     * is not sent twice. A bridge older than 1.11.0 never said
+     * `layout_compact` and is not sent it: the journal says once, the first
+     * time focus would have asked, that the page keeps its header.
+     */
+    function layout() {
+        const compact = !!focusedPanel();
+        if (!S.ready) { return false; }
+        if (!S.layout) {
+            if (compact && !S.layoutSaid) {
+                S.layoutSaid = "layout: this WanGP bridge (" + (S.bridgeVersion || "unknown")
+                    + ") is older than 1.11.0; the WanGP page keeps its header under focus";
+                say(S.layoutSaid);
+            }
+            return false;
+        }
+        if (S.layoutSent === compact) { return false; }
+        const sent = post(LAYOUT_STATE, hex32(), { compact: compact });
+        if (!sent) { return false; }
+        S.layoutSent = compact;
+        const summary = compact
+            ? "layout: compact under focus - WanGP's title, tab strip, model row and description hidden"
+            : "layout: whole - WanGP's title, tab strip, model row and description shown";
+        if (summary !== S.layoutSaid) {
+            S.layoutSaid = summary;
+            say(summary);
+        }
+        return true;
+    }
+
     /** The WanGP top-level tab, through the Canvas's one tab switcher. There
      * is deliberately no second one in this file. */
     function switchToWanGP() {
@@ -4516,6 +4577,7 @@ window.minipaintWanGP = (function () {
         reportFrames: reportFrames,
         switchToWanGP: switchToWanGP,
         theme: theme,
+        layout: layout,
         samplePalette: samplePalette,
         sampleFont: sampleFont,
         message: sentence,

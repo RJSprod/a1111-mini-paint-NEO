@@ -48,9 +48,45 @@ and obtain a durable admission. After that it is an observer.
                        │                                        service.command(...)
                        └─ WANGP_*        control.status() ────▶ ledger + queue
   ◀── events ─────   events.publish()
+
+                     every step first: turns.drive() ──────▶ hold.py (the card lease)
 ```
 
 Nothing on the left is required for anything on the right to finish.
+
+---
+
+## 2b. When the card is lent: the gate
+
+Another extension in Forge's process may borrow the card WanGP runs on, between WanGP's
+jobs (`minipaint_neo.wangp.turns`, the card lease; `CONTRACTS.md` has the contract). The
+moment a lease is live the executor's gate is closed: **no job advances through
+`ENSURING_WANGP`, `COMPOSING`, `WAITING_FOR_CARD` or `SUBMITTING_WANGP`.** That is two gates
+in one list, and both are needed - `ENSURING_WANGP` is the stage that can *start* WanGP, which
+puts a CUDA context and possibly a preloaded model on the lent card, and `WAITING_FOR_CARD` /
+`SUBMITTING_WANGP` are where a task is handed over, which the bridge's hold would then only
+park in WanGP's queue. `COMPOSING` is held as well, so no settings are frozen during somebody
+else's turn and no compose is asked of a WanGP the gate is keeping stopped. A held job says
+*Waiting: WanGP's card is lent to <owner>; this job goes on when the card is given back.*
+Everything before - admission, its turn, its prompt being written - goes on; everything after
+is a job WanGP already has, followed to its end and never aborted.
+
+**The 60-second rule does not apply to a lease.** `CARD_WAIT_MAX_SECONDS` bounds the
+*courtesy* wait in `WAITING_FOR_CARD`'s own handler, because the signal it waits on (WanGP's
+worker handle) can stay set for ever and submitting behind it pre-empts nothing. A job held
+for a lease never reaches that handler, so nothing "submits anyway": a lease ends by being
+given back, or expires by itself twenty seconds after its owner stopped renewing it. When the
+card comes back the held job gets its own stage text back through a transition, which starts
+the courtesy clock afresh - a job that sat out a twenty-minute lease must not come back already
+"busy for twenty minutes" and skip the wait it is owed.
+
+The executor is also the thread that drives the lease, because it is the one thread allowed to
+use the control plane: every step begins with `turns.drive()` - hold asked or renewed, a flush
+done, a resume sent - and while a lease is live and there is no job the loop wakes every
+second instead of sleeping until pressed. A lease request nudges it (`executor.nudge`), which
+also cuts a stage's pause short, so a lease asked for during a two-minute back-off is not left
+waiting two minutes. The path a page drives waits at the same gate: `outbox.claim` answers
+`{"wait": 3000, "reason": "lent"}` while the card is lent.
 
 ---
 
@@ -277,7 +313,9 @@ have.
 Forge keeps a second loopback port before it launches the child and exports
 it, exactly as it does the Gradio port. The child's plugin binds it and
 answers six operations: `hello`, `compose`, `submit`, `status`, `cancel`,
-`forget`.
+`forget` - and, from bridge 1.12.0, the card lease's `hold`, `resume` and
+`flush` (section 2b), which a bridge advertises in hello as
+`capabilities.hold` so that an older one is never sent them.
 
 Four rules:
 
@@ -472,6 +510,8 @@ reason the review refused B7.
   to a browser on the shared event stream, where only the count goes.
 * **Parallelism with the user's own WanGP work.** One card, one generation.
   A job waits, visibly, and the wait can be as long as the user's own run.
+  The same holds for another extension's turn on the card (section 2b): the
+  job waits as long as the card is lent, and the lease is what bounds it.
 
 ---
 

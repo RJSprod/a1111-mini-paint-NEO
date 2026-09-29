@@ -392,7 +392,10 @@ is set in them (`capabilities.theme_font`); 1.10.1 takes a real theme's list and
 faces, which 1.10.0 refused. Bridge 1.11.0 adds the compact page under focus: `LAYOUT_STATE`
 `{compact}` hides WanGP's title, tab strip, model row and model description while focus
 mode gives the tab the window (`capabilities.layout_compact`; see *Focus mode*, below).
-An extension newer than its
+Bridge 1.12.0 adds the card lease's `hold`, `resume` and `flush` on the control plane
+(`capabilities.hold`), which let another extension borrow WanGP's card between tasks -
+see *Sharing the machine*, below; an older bridge keeps working for everything else and
+is simply never held. An extension newer than its
 bridge says `BRIDGE_VERSION_MISMATCH` until the bridge is installed again from setup step 4
 and WanGP restarted.
 
@@ -665,6 +668,31 @@ bridge plugin's `generation_running` flag, which the control plane already cache
 its `hello`, is the only thing the report adds to what the tab already knew. Its README's
 *WanGP on the other card* section documents the settings on its side.
 
+### Lending WanGP's card between tasks (the card lease)
+
+Since 2026-09-29 that extension's Voice Box can also put a text-to-speech model of eighteen
+to twenty gigabytes on WanGP's card, and for that it *borrows* the card through
+`minipaint_neo.wangp.turns` (bridge 1.12.0). What you see when it does:
+
+* the job WanGP is running finishes - it is never cut off - and then WanGP stops before its
+  next task: its status line says *Queue paused for editing...* when it has more queued, and
+  a Generate pressed in the WanGP tab says *Media generation is waiting for <name> to release
+  GPU resources...* until the card comes back;
+* Clipboard jobs wait: a job not yet handed to WanGP stays where it is, its card saying
+  *Waiting: WanGP's card is lent to <name>; this job goes on when the card is given back*, and
+  no job starts WanGP in the meantime. The usual one-minute limit on waiting for a busy WanGP
+  does not apply while the card is lent;
+* WanGP's weights may be moved off the card while it is lent - into RAM, or released so its
+  next task loads them again from disk (the log says which, and how long it took);
+* when the card is given back WanGP picks up where it stopped and the Clipboard's next job
+  goes on. If Forge dies meanwhile, WanGP lets go by itself within 45 seconds; if the other
+  extension stops renewing its lease, Mini Paint takes the card back after 20.
+
+Every step is a line in `logs/wangp-log.txt` (column `turns`) and in WanGP's own console
+(`[wan2gp-minipaint-bridge] hold: ...`). With a bridge older than 1.12.0 installed, Clipboard
+jobs are still held but WanGP itself cannot be: the other extension is told so and uses the
+card only while WanGP is not running. `docs/wangp/CONTRACTS.md` has the contract.
+
 ## Known limits
 
 * **One managed WanGP.** The extension runs a single child per machine: a second Forge
@@ -682,7 +710,8 @@ its `hello`, is the only thing the report adds to what the tab already knew. Its
   inputs on the live page and runs WanGP's own chain: the generate one when Wan2GP's own
   process-wide flag says nothing is generating, the add-to-queue one otherwise, and the
   queue one whenever that flag cannot be read. It never aborts, reports no progress and
-  changes no setting; and a gallery it wrote is compared for the restore by a coarse
+  changes no setting (the one thing that ever makes WanGP wait is the card lease, above, and
+  only between tasks and at Forge's request); and a gallery it wrote is compared for the restore by a coarse
   signature with a tolerance, because Gradio caches what a gallery shows as lossy WebP. A
   person pressing Generate in the same instant as the bridge writes the trigger is a race
   the bridge cannot exclude, only make small; it is logged so a double start is

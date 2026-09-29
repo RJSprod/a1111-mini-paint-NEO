@@ -42,6 +42,14 @@ conservative one:
 Nothing here may raise into WanGP. A control surface that breaks is a Forge
 that cannot run unattended jobs and says so; it is not an exception in
 somebody else's process.
+
+Bridge 1.12.0 adds three operations, and they are the first on this surface
+that make WanGP wait rather than work: ``hold``, ``resume`` and ``flush``, the
+bridge's half of Forge's card lease (``hold.py`` has the whole of it). The
+hello says the bridge speaks them - ``capabilities.hold`` - and carries what a
+hold needs to know of WanGP's activity: whether a worker exists, whether a
+task is on the card and whose, how long the queue is, whether work is waiting
+on a hold, and the card's free and total memory.
 """
 
 from __future__ import annotations
@@ -54,11 +62,12 @@ import typing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
-    from . import compatibility, compose, execution, ledger, protocol
+    from . import compatibility, compose, execution, hold, ledger, protocol
 except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import compatibility  # type: ignore[no-redef]
     import compose  # type: ignore[no-redef]
     import execution  # type: ignore[no-redef]
+    import hold  # type: ignore[no-redef]
     import ledger  # type: ignore[no-redef]
     import protocol  # type: ignore[no-redef]
 
@@ -97,6 +106,9 @@ class ControlSurface:
         self.ledger: typing.Optional[ledger.Ledger] = None
         self.executor: typing.Optional[execution.Executor] = None
         self.composer: typing.Optional[compose.Composer] = None
+        #: The card lease's hold. Built here rather than in ``start`` because it
+        #: needs nothing but the compatibility layer, and hello reports it.
+        self.holder = hold.Holder(compat, note=self._note)
         self._server: typing.Optional[ThreadingHTTPServer] = None
         self._thread: typing.Optional[threading.Thread] = None
         self._lock = threading.RLock()
@@ -153,10 +165,12 @@ class ControlSurface:
         return True
 
     def stop(self) -> None:
-        """Close the surface. The child is going away; nothing is aborted."""
+        """Close the surface. The child is going away; nothing is aborted,
+        and a hold is let go rather than left behind with nobody to renew it."""
         with self._lock:
             server, self._server = self._server, None
             executor, self.executor = self.executor, None
+        self.holder.shutdown()
         if executor is not None:
             executor.stop()
         if server is not None:
@@ -202,9 +216,18 @@ class ControlSurface:
                 return self._cancel(payload)
             if operation == protocol.CONTROL_FORGET:
                 return self._forget(payload)
+            if operation == protocol.CONTROL_HOLD:
+                return self._hold(payload)
+            if operation == protocol.CONTROL_RESUME:
+                return self._resume(payload)
+            if operation == protocol.CONTROL_FLUSH:
+                return self._flush(payload)
         except execution.ExecutionError as error:
             return 409, {"ok": False, "code": error.code, "message": error.detail[:200]}
         except compose.ComposeError as error:
+            return 409, {"ok": False, "code": error.code, "message": error.detail[:200]}
+        except hold.HoldError as error:
+            self._note(f"control {operation}: refused ({error.code}: {error.detail[:160]})")
             return 409, {"ok": False, "code": error.code, "message": error.detail[:200]}
         except Exception as error:  # pragma: no cover - a handler that throws is a refusal
             self._note(f"control {operation}: failed ({type(error).__name__})")
@@ -227,6 +250,11 @@ class ControlSurface:
         depth = None
         if isinstance(gen, dict) and isinstance(gen.get(compatibility.GEN_QUEUE_KEY), (list, tuple)):
             depth = len(gen[compatibility.GEN_QUEUE_KEY])
+        # Bridge 1.12.0: the hold's view of WanGP, the same seven fields every
+        # hold answer carries, and where a hold stands ("none" with none).
+        held = self.holder.status()
+        activity = {key: held.get(key) for key in (
+            "worker", "task_running", "active_client_id", "queue_length", "waiter", "vram_free", "vram_total")}
         return {
             "ok": True,
             "control_version": protocol.CONTROL_VERSION,
@@ -254,7 +282,30 @@ class ControlSurface:
             "ledger_open": self.ledger.open_count() if self.ledger is not None else 0,
             "code": code,
             "message": "",
+            # The flag an older bridge leaves out, which is how Forge knows
+            # not to send it hold, resume or flush at all.
+            "capabilities": {"hold": True},
+            "hold": held.get("hold") or protocol.HOLD_NONE,
+            **activity,
         }
+
+    def _hold(self, payload: typing.Any) -> typing.Tuple[int, dict]:
+        request, code = protocol.normalize_hold_request(payload)
+        if code:
+            return 400, {"ok": False, "code": code, "message": "a hold names a lease and a timer"}
+        return 200, self.holder.hold(request["lease"], request["ttl_s"], request["label"])
+
+    def _resume(self, payload: typing.Any) -> typing.Tuple[int, dict]:
+        request, code = protocol.normalize_lease_request(payload)
+        if code:
+            return 400, {"ok": False, "code": code, "message": "a resume names a lease"}
+        return 200, self.holder.resume(request["lease"])
+
+    def _flush(self, payload: typing.Any) -> typing.Tuple[int, dict]:
+        request, code = protocol.normalize_flush_request(payload)
+        if code:
+            return 400, {"ok": False, "code": code, "message": "a flush names a lease and soft or hard"}
+        return 200, self.holder.flush(request["lease"], request["level"])
 
     def _compose(self, payload: typing.Any) -> typing.Tuple[int, dict]:
         request, code = protocol.normalize_compose_request(payload)

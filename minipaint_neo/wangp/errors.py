@@ -118,6 +118,14 @@ ENHANCE_API_TOO_NEW = "ENHANCE_API_TOO_NEW"
 #: is visible rather than read as a generic refusal.
 JOB_INPUT_MISSING = "JOB_INPUT_MISSING"
 
+# -- the card lease: holding WanGP between tasks (bridge 1.12.0) ------------
+#: What the bridge's hold, resume and flush can refuse with. Spelled in both
+#: protocol copies too (``protocol.HOLD_CODE_*``), for the reason above.
+HOLD_NOT_HELD = "HOLD_NOT_HELD"
+HOLD_TASK_RUNNING = "HOLD_TASK_RUNNING"
+HOLD_UNSUPPORTED = "HOLD_UNSUPPORTED"
+FLUSH_HARD_REFUSED = "FLUSH_HARD_REFUSED"
+
 # -- the gallery's Send to WanGP popup ---------------------------------------
 #: The picture the popup froze is no longer staged - swept by age, or a Forge
 #: that restarted in between. Pressing the gallery button again freezes it
@@ -213,6 +221,10 @@ MESSAGES: dict[str, str] = {
     ENHANCE_NOT_CONFIGURED: "LLM Studio has no enhancement model set up; choose one there first.",
     ENHANCE_API_TOO_NEW: "ModelSwitchRefiner's external LLM API is a newer major version than this extension understands.",
     JOB_INPUT_MISSING: "An image this job owns is no longer on disk, so the job was not run with a picture missing.",
+    HOLD_NOT_HELD: "WanGP is not held for that lease, so nothing was done to it.",
+    HOLD_TASK_RUNNING: "A WanGP run is still going, so its weights were left where they are; a soft flush can move them once no task is running, a hard one once the run has ended.",
+    HOLD_UNSUPPORTED: "This WanGP build does not expose what holding it between tasks, or flushing its memory, needs.",
+    FLUSH_HARD_REFUSED: "WanGP is set to load its model at start and would wait for ever for a model a hard flush released, so only a soft flush is possible.",
     INTERCEPT_IMAGE_EXPIRED: "The picture this request froze is no longer there; press the gallery button again. Nothing was queued.",
     INTERCEPT_NO_IMAGE_ROLE: "The current WanGP model takes no image, so the picture has nowhere to go. Nothing was queued.",
 }

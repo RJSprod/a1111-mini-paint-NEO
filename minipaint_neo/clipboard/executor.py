@@ -53,6 +53,15 @@ The stages, in order, and what each waits for:
     WAITING_FOR_CARD -> whatever is generating now, ours or the user's
     SUBMITTING_WANGP -> the child recording the task
     WANGP_*          -> the generation
+
+And one wait that is none of these: WanGP's card lent to another extension
+(``minipaint_neo.wangp.turns``, the card lease). While a lease is live no job
+advances through any stage from ENSURING_WANGP to SUBMITTING_WANGP - so no job
+starts WanGP, and none is handed to it - and the generation already running is
+followed to its end exactly as always, never aborted. This thread is also the
+one that drives the lease: every step begins by asking the bridge to hold
+WanGP, renewing the hold, flushing when asked, or telling it to resume, because
+this is the one thread allowed to use the control plane.
 """
 
 from __future__ import annotations
@@ -110,10 +119,45 @@ MAX_RETRYABLE_ATTEMPTS = 40
 #: queue, drained by the one worker, and pre-empts nothing.
 CARD_WAIT_MAX_SECONDS = 60.0
 
+#: The stages a job does not advance through while WanGP's card is lent (the
+#: card lease): from bringing WanGP up to handing it the task. Two gates in one
+#: list, and both are needed. ENSURING_WANGP is the one that can START WanGP -
+#: a cold start puts a CUDA context and possibly a preloaded model on the very
+#: card that was lent - and SUBMITTING_WANGP (with WAITING_FOR_CARD before it)
+#: is the one that hands WanGP a task, which the bridge's hold would then only
+#: park in WanGP's queue. COMPOSING touches no card, and is gated anyway: a job
+#: composed during a lease would freeze settings the user may still change
+#: before the card comes back, and composing needs a running WanGP the gate is
+#: keeping stopped. Everything earlier - admission, waiting its turn, the
+#: prompt being written, the language model giving its memory back - is not
+#: WanGP's card and goes on; everything later is a job WanGP already has,
+#: which is followed to its end and never aborted.
+#:
+#: WAITING_FOR_CARD's 60-second courtesy bound (``CARD_WAIT_MAX_SECONDS``) does
+#: not apply here: a job held for a lease is not in that stage's handler at
+#: all, so nothing can "queue behind it anyway". A lease ends by being given
+#: back, or expires on its own when its owner stops renewing it.
+LENT_GATED = (outbox.ENSURING_WANGP, outbox.COMPOSING, outbox.WAITING_FOR_CARD, outbox.SUBMITTING_WANGP)
+#: What a job held for a lease says, and how the stage it goes back to knows
+#: to start its clock again.
+LENT_STAGE_PREFIX = "Waiting: WanGP's card is lent to "
+
 _lock = threading.RLock()
 _wake = threading.Event()
+#: Set when the card lease changes, so a stage's pause ends at once: a lease
+#: asked for during a two-minute back-off is not left waiting two minutes for
+#: the thread that has to act on it.
+_nudge = threading.Event()
 _state: typing.Dict[str, typing.Any] = {"thread": None, "stopping": False, "started": False, "last_error": ""}
-_seams: typing.Dict[str, typing.Any] = {"clock": time.time, "sleep": time.sleep, "enabled": True}
+
+
+def _nap(seconds: float) -> None:
+    """How a stage waits in production: a sleep that ``nudge`` can cut short."""
+    _nudge.wait(max(0.0, float(seconds)))
+    _nudge.clear()
+
+
+_seams: typing.Dict[str, typing.Any] = {"clock": time.time, "sleep": _nap, "enabled": True}
 
 #: What a job says when this WanGP can never run it unattended. The next
 #: press is routed to the page-driven path, so pressing again is the fix.
@@ -129,7 +173,7 @@ def use_clock(clock: typing.Optional[typing.Callable[[], float]]) -> None:
 
 def use_sleep(sleeper: typing.Optional[typing.Callable[[float], None]]) -> None:
     """Test seam: how a stage waits. Tests step the clock instead."""
-    _seams["sleep"] = sleeper or time.sleep
+    _seams["sleep"] = sleeper or _nap
 
 
 def use_thread(enabled: bool) -> None:
@@ -140,9 +184,10 @@ def use_thread(enabled: bool) -> None:
 def reset_for_tests() -> None:
     stop()
     _seams["clock"] = time.time
-    _seams["sleep"] = time.sleep
+    _seams["sleep"] = _nap
     _seams["enabled"] = False
     _state["last_error"] = ""
+    _state.pop("lease_error", None)
 
 
 def _now() -> float:
@@ -177,6 +222,18 @@ def wake() -> None:
     """
     _wake.set()
     ensure_running()
+
+
+def nudge() -> None:
+    """WanGP's card lease changed: act on it now.
+
+    ``wake`` ends an idle wait; this also ends a stage's pause, because the
+    thing that has to happen next - a hold asked for, a flush, a resume - is
+    this thread's to do and nobody else's. Called by ``wangp.turns`` after it
+    has let go of its own lock.
+    """
+    _nudge.set()
+    wake()
 
 
 def ensure_running() -> None:
@@ -225,13 +282,17 @@ def _loop() -> None:
                 continue
             if worked:
                 continue
-            # Nothing to do. Sleep until somebody says otherwise.
-            _wake.wait(IDLE_SECONDS)
+            # Nothing to do. Sleep until somebody says otherwise - or, while
+            # WanGP's card is lent, for a second: the lease is this thread's
+            # to drive even when there is no job, and a hold nobody renews is
+            # one the bridge lets go of by itself.
+            lent = _lease_owes()
+            _wake.wait(_lease_interval() if lent else IDLE_SECONDS)
             _wake.clear()
             with _lock:
                 if _state.get("stopping"):
                     return
-                if outbox.next_executable() is None:
+                if outbox.next_executable() is None and not _lease_owes():
                     _state["thread"] = None
                     return
     finally:
@@ -246,15 +307,109 @@ def step() -> bool:
     Public because it is also how a test drives the executor: everything the
     coordinator does is in here, and the thread around it only decides when
     to call it.
+
+    The card lease comes first, every time: whatever this step is about to do
+    to a job, the bridge has been asked to hold WanGP (or told to resume it)
+    before, so a job is never submitted a moment before a hold that was
+    already owed. Driving the lease returns no work done, so a live lease with
+    no job paces itself on the loop's wait rather than spinning.
     """
+    _drive_lease()
     job = outbox.next_executable()
     if job is None:
         return False
     state = job["state"]
+    if state in LENT_GATED:
+        owner = _lent_to()
+        if owner is not None:
+            return _stage_lent(job, owner)
+        if str(job.get("stage") or "").startswith(LENT_STAGE_PREFIX):
+            return _stage_given_back(job)
     handler = _STAGES.get(state)
     if handler is None:
         return False
     return bool(handler(job))
+
+
+# ------------------------------------------------------------ the card lease --
+
+
+def _drive_lease() -> None:
+    """The lease's own work for this step. Never fatal to the queue."""
+    try:
+        from ..wangp import turns
+
+        turns.drive()
+        _state.pop("lease_error", None)
+    except Exception as error:  # noqa: BLE001 - a lease that breaks is a lease, not the queue
+        said = f"{type(error).__name__}"
+        if _state.get("lease_error") != said:
+            _state["lease_error"] = said
+            _journal(f"the card lease could not be driven ({said}); the queue goes on")
+
+
+def _lent_to() -> typing.Optional[str]:
+    """Who WanGP's card is lent to, or None while it is not.
+
+    Open on failure: a lease that cannot be read is not a reason to stop the
+    queue for ever, and the bridge's own hold is the other half of the
+    guarantee.
+    """
+    try:
+        from ..wangp import turns
+
+        return turns.gate_owner()
+    except Exception:
+        return None
+
+
+def _lease_owes() -> bool:
+    try:
+        from ..wangp import turns
+
+        return bool(turns.needs_driver())
+    except Exception:
+        return False
+
+
+def _lease_interval() -> float:
+    try:
+        from ..wangp import turns
+
+        return float(turns.driver_interval())
+    except Exception:
+        return POLL_SECONDS
+
+
+def _stage_lent(job: dict, owner: str) -> bool:
+    """Hold a job at its stage while WanGP's card is lent. Says so, once.
+
+    No work is done on the job, so nothing can be undone when the card comes
+    back: it resumes in the stage it was in. And this is where the 60-second
+    bound on WAITING_FOR_CARD does not reach - that bound lives in the stage's
+    own handler, which does not run while the card is lent.
+    """
+    stage = f"{LENT_STAGE_PREFIX}{owner}; this job goes on when the card is given back."
+    if job.get("stage") != stage:
+        moved = outbox.transition(job["job_id"], job["state"], expect_revision=job["revision"], stage=stage)
+        if moved is not None:
+            _journal(f"job {job['job_id'][:8]}: held at {job['state']} - WanGP's card is lent to {owner}")
+    _pause(POLL_SECONDS)
+    return True
+
+
+def _stage_given_back(job: dict) -> bool:
+    """The card is back: the job's own stage text again, with a fresh clock.
+
+    The transition is the point, not the words. WAITING_FOR_CARD measures its
+    courtesy wait from the job's last update, and a job that sat out a lease
+    of twenty minutes must not come back already "busy for twenty minutes"
+    and skip the wait it is owed.
+    """
+    moved = outbox.transition(job["job_id"], job["state"], expect_revision=job["revision"])
+    if moved is not None:
+        _journal(f"job {job['job_id'][:8]}: WanGP's card is back; goes on from {job['state']}")
+    return True
 
 
 # -------------------------------------------------------------- the stages --
@@ -872,6 +1027,7 @@ def snapshot() -> dict:
 __all__ = [
     "BACKOFF_MAX", "BACKOFF_START", "CARD_POLL_SECONDS", "IDLE_SECONDS", "MAX_RETRYABLE_ATTEMPTS",
     "CARD_WAIT_MAX_SECONDS", "POLL_SECONDS", "RETRYABLE", "SUBMIT_TIMEOUT", "WANGP_READY_TIMEOUT",
-    "ensure_running", "reconcile", "recover", "reset_for_tests", "running", "snapshot", "step",
+    "LENT_GATED", "LENT_STAGE_PREFIX",
+    "ensure_running", "nudge", "reconcile", "recover", "reset_for_tests", "running", "snapshot", "step",
     "stop", "use_clock", "use_sleep", "use_thread", "wake",
 ]

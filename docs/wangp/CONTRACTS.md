@@ -498,6 +498,12 @@ def compose(model_type="", session_hash="", timeout=COMPOSE_TIMEOUT) -> dict
 def submit(execution_id, settings, prompt=None, media=None, model_type="", priority=False) -> record
 def status(execution_ids) -> {id: record}; def cancel(execution_id) -> record; def forget(execution_ids) -> int
 def available() -> (bool, code)                              # never raises; for a status line and the executor's gate
+# bridge 1.12.0, the card lease (only ``turns.drive`` calls these; see below)
+HOLD_TIMEOUT = 10.0; FLUSH_TIMEOUT = 90.0
+def hold(lease, ttl_s, label="") -> answer                   # ask, or renew; normalize_hold_answer
+def resume(lease) -> answer                                  # idempotent: a lease not held is resumed False
+def flush(lease, level) -> answer                            # "soft" | "hard"; a refusal raises with the bridge's code
+def can_hold(answer=None) -> bool | None                     # the hello's capabilities.hold; None when nothing recent said
 ```
 
 The destination comes off the runtime object and nowhere else — the host and scheme are
@@ -553,6 +559,132 @@ The rules, each of which its suite holds:
 
 Suite: `tests/test_wangp_presence.py`.
 
+## `turns.py` — the card lease: another extension borrowing WanGP's card
+
+```python
+TURNS_VERSION = 1
+LEASE_KEYS = ("version", "lease", "owner", "phase", "reason", "card_uuid", "wanted", "bridge_hold", "expires_in_s", "wangp")
+WANGP_KEYS = ("running", "task_running", "queue_length", "jobs_waiting", "vram_free_bytes", "vram_total_bytes")
+REPORT_KEYS = ("version", "available", "configured", "card_uuid", "running", "lease", "owner", "phase", "wanted",
+               "can_hold", "bridge_hold", "wangp")
+PENDING, HOLDING, HELD, RELEASED, EXPIRED, REFUSED   # the phases
+LEASE_TTL_SECONDS = 20.0      # unrenewed this long, a lease expires
+BRIDGE_TTL_SECONDS = 45.0     # the timer every hold hands the bridge
+
+# for the owner - never raise, return at once, never touch the control plane, never from an ASGI handler
+def request(owner, *, purpose="", need_bytes=0) -> record
+def state(lease) -> record                  # and renews it
+def flush(lease, level) -> record           # "soft" | "hard", only while held
+def release(lease, *, reason="") -> record
+def report() -> dict                        # exactly REPORT_KEYS, with or without a lease
+# for the executor
+def gate_closed() -> bool; def gate_owner() -> str | None; def needs_driver() -> bool
+def driver_interval() -> float; def drive() -> None           # the one place the lease calls the control plane
+```
+
+Written for `RJSprod/SD-Neo-ModelSwitchRefiner`, whose Voice Box can put a text-to-speech
+model of eighteen to twenty gigabytes on the card WanGP runs on. Its user's rules are this
+module's: the speech request goes NEXT on that card; the WanGP job that is running is never
+cut off; the Clipboard's next job waits until the card is given back; the guest may stay warm
+while WanGP is idle and gives the card back when WanGP work wants it. It is read like
+`presence` - by name, once the host has imported this package - and its side of the contract
+is section 6 of that repository's `docs/23-voice-box.md`.
+
+**The phases.** *pending*: a WanGP task of Mini Paint's is still running on the card (the hold
+has already been asked for, so WanGP stops after it rather than taking its next task).
+*holding*: the bridge has been asked to hold WanGP and has not said the card is clear -
+somebody else's task is finishing, WanGP is starting or stopping, another of WanGP's own GPU
+processes has the card, the bridge did not answer, or a flush is being done; `reason` says
+which. *held*: nothing is running on WanGP's card for WanGP and nothing will start - the
+bridge says so, or WanGP is not running at all (and no Clipboard job will start it). The owner
+may use the card. *released* / *expired*: the gate is open, and the executor tells the bridge
+to resume on its next pass (`bridge_hold` then reads `none`). *refused*: WanGP is not set up,
+another Forge on this machine runs it, or it is running and cannot be held - a bridge older
+than 1.12.0, or a WanGP build without what a hold needs; `reason` says which.
+
+The rules, each held by a check:
+
+* **The gate closes the moment `request` returns a live lease.** No Clipboard job advances
+  through `ENSURING_WANGP`, `COMPOSING`, `WAITING_FOR_CARD` or `SUBMITTING_WANGP`, so none
+  starts WanGP and none is handed to it (the executor's `LENT_GATED`), and `outbox.claim`
+  hands no page a job (`WAIT_LENT_MS`). The job WanGP is running is followed to its end and
+  never aborted. `WAITING_FOR_CARD`'s 60-second "submit anyway" does not reach a held job,
+  and a job given back starts that courtesy clock again.
+* **One lease at a time.** A second request by the same owner returns (and renews) the live
+  lease; anybody else is refused and told whose the card is.
+* **Renew or lose it.** `state` renews; a lease not renewed for twenty seconds expires. The
+  owner renews through a render too. The bridge's own timer (`BRIDGE_TTL_SECONDS`, renewed by
+  every executor pass) covers a Forge that died.
+* **The functions only record and read.** The executor - the one thread allowed to use the
+  control plane - drives the lease at the top of every step, and once a second while a lease
+  is live and there is no job: hello (can this bridge hold at all), hold (asked, renewed, where
+  it stands), flush when one is owed and WanGP is held, resume once the lease has ended. A
+  lease change nudges it, cutting a stage's pause short.
+* **`flush` is asynchronous.** It returns at once with the lease `holding` ("WanGP's weights
+  are being moved off its card"); `held` again means the flush is done - `reason` then says
+  what the card has free (`Soft flush done in 1.2 s; 29.8 GB of 31.8 GB is free on WanGP's
+  card.`) or why it was refused. An owner measures after `held`, not after `flush` returns.
+  With WanGP not running there is nothing to flush and the lease says so at once.
+* **Held is never taken back by refusal.** A lease the owner was told was `held` (say with
+  WanGP stopped) is not refused if WanGP then comes up unholdable: it says `holding` with
+  `bridge_hold: unsupported`, and the gate stays closed until it is released. Phases are not
+  monotonic in general - a flush, WanGP started from its tab, a restart (a WanGP run that was
+  never asked) and a task that slips past the hold all take `held` back to `holding`.
+* **`wanted`** is a Clipboard job waiting for the card (`outbox.card_demand`: a server job in
+  `CARD_WAITING`, a page-driven one pending or being sent - not one whose prompt is still being
+  written) or WanGP work waiting on the hold (the bridge's `waiter`).
+* **`bridge_hold`** is the bridge's own word: `none` (nothing asked, or let go), `holding`,
+  `held`, or `unsupported` - WanGP running with a bridge or a build that cannot hold, or,
+  with WanGP stopped, an installed bridge older than 1.12.0 (so an owner knows not to stay
+  warm on a card WanGP could take back unasked).
+* **`wangp`** is the freshest bridge answer: WanGP running, a task on the card, WanGP's queue
+  length, the Clipboard jobs waiting, and the card's free and total bytes as the driver
+  reports them; any of them `None` when unknown. With WanGP stopped `task_running` is `False`.
+
+The bridge's half is the next section. Suites: `tests/test_wangp_turns.py` (the lease, both
+gates, the control client) and `tests/test_wangp_hold.py` (the bridge).
+
+## Bridge 1.12.0: `hold`, `resume`, `flush`
+
+Three operations on the authenticated control plane, additive (`CONTROL_VERSION` stays 1) and
+advertised in hello as `capabilities.hold`, so an older bridge is recognised rather than
+refused - it answers everything else as before. `hello` gains `worker`, `task_running`,
+`active_client_id` (only when it is one of Forge's execution ids), `queue_length`, `hold`,
+`waiter`, `vram_free` and `vram_total`; every hold answer carries the same seven activity
+fields plus `hold`, `claim`, `busy_with`, `expires_in_s` and, for a flush, `flushed` and
+`parts` (`protocol.normalize_hold_answer`). The state machine is `hold.py`; every WanGP
+internal it touches is a method of `compatibility.py`, read live out of `sys.modules`, never
+imported and checked for before use.
+
+* `hold {lease, ttl_s, label}` sets WanGP's between-task pause flag (`queue_paused_for_edit`,
+  which WanGP's worker checks before taking each task) and re-asserts it every 0.1 s (WanGP's
+  own edit feature clears it). While no generation worker exists it takes the idle claim on
+  WanGP's GPU lock (`try_acquire_GPU_ressources`, named `label` in WanGP's own "waiting for
+  <name> to release GPU resources"), so a run started from the WanGP tab waits; it never asks
+  for the claim while a worker exists, so it can never suspend a run. A claim refused by the
+  run flag a crash leaves set falls back to the flag alone; one refused by another of WanGP's
+  GPU processes keeps the hold `holding`, naming it. Answers `holding` while a task is running
+  (the task marker `api_active_queue_task` where WanGP has it; the worker's own "paused"
+  status and its loop's state where it does not) and `held` otherwise. A hold for a new lease
+  takes the old one over without letting go. Not renewed within `ttl_s` (5 to 300 s), it lets
+  go by itself.
+* `resume {lease}` undoes it in reverse order: the claim, then the flag - and the flag only if
+  the hold set it (an edit that had it set before keeps it). A lease not held is `resumed:
+  false`, changing nothing.
+* `flush {lease, level}`: `soft` moves the video model and the prompt enhancer off the card
+  (`unload_all`), releases every GPU resident through its own callback, unloads the extensions'
+  offload objects and empties the allocator's cache - weights stay in RAM. `hard` then runs
+  `release_model()` inside `model_unload_guard()`, so the next task reloads from disk.
+  Refused while a task runs (`HOLD_TASK_RUNNING`); hard also while a run is paused between
+  tasks (as WanGP's own Unload is), where WanGP preloads its model at start and would wait for
+  ever for a released one (`FLUSH_HARD_REFUSED`), and on a build without the guard
+  (`HOLD_UNSUPPORTED`). A flush renews the hold, and the timer cannot run out under it.
+
+The one window: WanGP's edit clearing the flag between two re-assertions (at most 0.1 s) can
+let its worker - which looks every half second - take the next task. The hold then says
+`holding` again until that task ends, and the lease reports it; WanGP's plugin API has no
+hook before a task that could close it.
+
 ## Tests
 
 `tests/test_wangp_*.py`, in the existing style: a `run()` returning
@@ -560,4 +692,5 @@ Suite: `tests/test_wangp_presence.py`.
 Add the new suites to `tests/run.py`. The queue's own suites are `tests/test_wangp_queue.py`,
 `tests/test_wangp_start.py`, `tests/test_interop.py`, `tests/test_clipboard_store.py`,
 `tests/test_clipboard_outbox.py`, `tests/test_clipboard_enhance.py`, `tests/test_clipboard_ui.py` and `tests/test_queue_e2e.py`;
-the lock, the GPU report and the emergency restart are in `tests/test_wangp_runtime.py`.
+the lock, the GPU report and the emergency restart are in `tests/test_wangp_runtime.py`; the card
+lease is `tests/test_wangp_turns.py` (Forge's half) and `tests/test_wangp_hold.py` (the bridge's).

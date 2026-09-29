@@ -604,11 +604,14 @@ same server-owned queue as the tab's presses, ids are never paths, and the answe
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
 API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 rewrite (the page's model
 travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
-and its place in WanGP. Bridge plugin 1.11.0 carries the queue, start and track operations
+and its place in WanGP. Bridge plugin 1.12.0 carries the queue, start and track operations
 (protocol 5) and the control plane server-owned execution runs on (protocol 6), answers the
 WanGP tab's heartbeat and says when its form is touched, guards the page's Gradio session
-(below), dresses the WanGP page in the colours this page sends (above) and refuses
-a request composed for a model the page has since left (`MODEL_CHANGED`), so WanGP's bridge
+(below), dresses the WanGP page in the colours this page sends (above), refuses
+a request composed for a model the page has since left (`MODEL_CHANGED`), and holds WanGP
+between two tasks when SD-Neo-ModelSwitchRefiner borrows its card (the card lease: the task
+running finishes, the next waits, and Clipboard jobs wait with it until the card is given
+back - `docs/wangp/README.md`, *Sharing the machine*), so WanGP's bridge
 must be updated and WanGP restarted; a build lacking one of the six queue components keeps
 the image send and refuses the queue with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking
 the generate trigger queues but never starts.

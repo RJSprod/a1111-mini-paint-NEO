@@ -60,6 +60,15 @@ CONNECT_TIMEOUT = 5.0
 CALL_TIMEOUT = 30.0
 #: The compose call reads settings off a live process and can be slower.
 COMPOSE_TIMEOUT = 60.0
+#: The card lease (bridge 1.12.0). A hold or a resume is a few dictionary
+#: writes inside WanGP and is answered in milliseconds, so a short deadline:
+#: the executor renews a hold every couple of seconds, and a call that hangs
+#: is one that should give way to the next rather than eat the bridge's timer.
+HOLD_TIMEOUT = 10.0
+#: A flush moves a model's weights off the card, or releases it outright, and
+#: that is seconds for a large model - more for a hard one with gigabytes of
+#: pinned RAM to give back. Still finite, because the executor is one thread.
+FLUSH_TIMEOUT = 90.0
 
 _LOG_PREFIX = "MiniPaint WanGP:"
 _lock = threading.RLock()
@@ -285,6 +294,57 @@ def forget(execution_ids: typing.Sequence[str], timeout: float = CALL_TIMEOUT) -
     return int(count) if isinstance(count, int) else 0
 
 
+def hold(lease: str, ttl_s: float, label: str = "", timeout: float = HOLD_TIMEOUT) -> dict:
+    """Ask the bridge to hold WanGP between tasks, or renew the hold. Bridge 1.12.0.
+
+    The answer says where the hold stands - ``holding`` while a task is still
+    running on the card, ``held`` once nothing is and nothing will start -
+    with WanGP's activity beside it. Every call renews the bridge's own timer,
+    which is the whole of how a Forge that died gives WanGP back: stop calling
+    and WanGP resumes by itself ``ttl_s`` later.
+
+    Only for a bridge whose hello said ``capabilities.hold``; an older one has
+    no such operation and answers 404. See ``minipaint_neo.wangp.turns``,
+    which is the one caller.
+    """
+    answer = call(protocol.CONTROL_HOLD, {"lease": lease, "ttl_s": float(ttl_s), "label": label}, timeout)
+    return protocol.normalize_hold_answer(answer)
+
+
+def resume(lease: str, timeout: float = HOLD_TIMEOUT) -> dict:
+    """Let WanGP go: the bridge undoes what ``hold`` did, in reverse order.
+
+    Idempotent. A lease the bridge is not holding for is answered with
+    ``resumed`` False and changes nothing, so a resume that arrives after the
+    bridge's own timer already let go is not an error.
+    """
+    answer = call(protocol.CONTROL_RESUME, {"lease": lease}, timeout)
+    return protocol.normalize_hold_answer(answer)
+
+
+def flush(lease: str, level: str, timeout: float = FLUSH_TIMEOUT) -> dict:
+    """Move WanGP's weights off the card while it is held: ``soft`` or ``hard``.
+
+    Refused (an IntegrationError carrying the bridge's code) while a WanGP
+    task runs, for a lease the bridge is not holding for, and - hard only -
+    while a WanGP run is paused between tasks or when WanGP would never get a
+    released model back. See the bridge's ``hold.py``.
+    """
+    answer = call(protocol.CONTROL_FLUSH, {"lease": lease, "level": level}, timeout)
+    return protocol.normalize_hold_answer(answer)
+
+
+def can_hold(answer: typing.Optional[dict] = None) -> typing.Optional[bool]:
+    """Whether the bridge speaks hold, resume and flush: from ``answer`` (a
+    normalised hello) or the last recent one, and None when nothing recent
+    has said. Never asks."""
+    found = answer if answer is not None else last_hello()
+    if not isinstance(found, dict):
+        return None
+    capabilities = found.get("capabilities")
+    return bool(capabilities.get("hold")) if isinstance(capabilities, dict) else False
+
+
 def available() -> typing.Tuple[bool, str]:
     """Whether unattended execution can run right now, and the code if not.
 
@@ -324,7 +384,7 @@ def why_not() -> str:
 
 
 __all__ = [
-    "CALL_TIMEOUT", "COMPOSE_TIMEOUT", "CONNECT_TIMEOUT", "LOOPBACK",
-    "HELLO_TTL", "available", "call", "cancel", "compose", "forget", "hello", "last_hello", "reset_for_tests",
-    "executable_ever", "status", "submit", "use_transport", "why_not",
+    "CALL_TIMEOUT", "COMPOSE_TIMEOUT", "CONNECT_TIMEOUT", "FLUSH_TIMEOUT", "HOLD_TIMEOUT", "LOOPBACK",
+    "HELLO_TTL", "available", "call", "can_hold", "cancel", "compose", "flush", "forget", "hello", "hold",
+    "last_hello", "reset_for_tests", "executable_ever", "resume", "status", "submit", "use_transport", "why_not",
 ]

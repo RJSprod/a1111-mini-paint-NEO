@@ -254,6 +254,7 @@ def browser_checks(r: Results) -> None:
         ("RECEIVE_RESULT", protocol.RECEIVE_RESULT),
         ("FOCUS_RECEIVER", protocol.FOCUS_RECEIVER),
         ("THEME_STATE", protocol.THEME_STATE),
+        ("LAYOUT_STATE", protocol.LAYOUT_STATE),
         ("RUNTIME_STATE", protocol.RUNTIME_STATE),
         ("QUEUE_REQUEST", protocol.QUEUE_REQUEST),
         ("QUEUE_RESULT", protocol.QUEUE_RESULT),
@@ -1608,16 +1609,30 @@ function selectTab(on) {
   }
 }
 
+// The assistant's focus mode starting or ending on this panel: the class it
+// puts on and takes off, heard by the same attribute observer.
+function focusMode(on) {
+  if (on) { panel.classList.add("forge-assistant-focus-root"); } else { panel.classList.remove("forge-assistant-focus-root"); }
+  for (const o of mutationObservers) {
+    if (o.target === panel && (!o.options || !o.options.attributeFilter || o.options.attributeFilter.indexOf("class") !== -1)) {
+      o.fn([{ type: "attributes", attributeName: "class", target: panel }]);
+    }
+  }
+}
+
 // ---- WanGP, inside the frame -------------------------------------------------
 const B = {
   loaded: true, answerPing: true, answerFlush: true, answerLook: true, suppress: false, dirty: false, fp: 1, commitMs: 100, flushReplyMs: 5,
   // The page attaches while it loads, so an older bridge is one from the start.
   capabilities: MODE === "legacy" ? { queue: true, start: true, track: true }
     : MODE === "noping" ? { queue: true, start: true, track: true, form_watch: true }
-    : { queue: true, start: true, track: true, ping: true, form_watch: true, session: true },
+    : MODE === "layoutLegacy" ? { queue: true, start: true, track: true, ping: true, form_watch: true, session: true }
+    : { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true },
   hellos: [], presses: 0, looks: 0, pings: 0, busyMs: 0, channel: "", navigations: 0, reloadMs: 500,
   // Every THEME_STATE the parent sent, in order.
   themes: [],
+  // And every LAYOUT_STATE (bridge 1.11.0).
+  layouts: [],
   // The bridge's word on the page's Gradio session, carried on every answer
   // from 1.8.0 on; null until a scenario sets it.
   session: null,
@@ -1654,6 +1669,7 @@ function toBridge(message) {
   }
   if (message.channel_id !== B.channel) { return; }
   if (message.type === "WANGP_THEME_STATE") { B.themes.push(message.payload || {}); return; }
+  if (message.type === "WANGP_LAYOUT_STATE") { B.layouts.push(message.payload || {}); return; }
   if (message.type === "WANGP_PING") {
     B.pings += 1;
     if (B.answerPing) { reply("WANGP_PONG", message.request_id, { busy_ms: B.busyMs, op: "queue", waiting: 0 }); }
@@ -1872,6 +1888,34 @@ async function themeScenario() {
 }
 
 const scenarios = {
+  // The compact layout (bridge 1.11.0): focus mode on the panel decides it.
+  layout: async function () {
+    api.attach(null);
+    await advance(1000);
+    const atReady = B.layouts.slice();
+    focusMode(true); await advance(50);
+    const onFocus = B.layouts.slice(atReady.length);
+    // The same class written again, and the tab away and back meanwhile.
+    focusMode(true); await advance(50);
+    selectTab(false); await advance(50); selectTab(true); await advance(50);
+    const repeated = B.layouts.length - atReady.length - onFocus.length;
+    focusMode(false); await advance(50);
+    const onLeave = B.layouts.slice(atReady.length + onFocus.length + repeated);
+    const said = linesWith("layout:");
+    // The WanGP page reloading while focus is on: its new page is whole
+    // until told, and is told at its ready.
+    focusMode(true); await advance(50);
+    const beforeReload = B.layouts.length;
+    frame.setAttribute("src", "/wan2gp/?again"); await advance(4000);
+    const afterReload = B.layouts.slice(beforeReload);
+    return { atReady, onFocus, repeated, onLeave, said, afterReload, ready: api.state().ready, state: api.state().layout };
+  },
+  layoutLegacy: async function () {
+    api.attach(null);
+    await advance(1000);
+    focusMode(true); await advance(50); focusMode(false); await advance(50); focusMode(true); await advance(50);
+    return { sent: B.layouts.length, said: linesWith("layout:"), state: api.state().layout };
+  },
   themeHost: themeScenario, themeBridge: themeScenario, themeOff: themeScenario,
   themeGradient: themeScenario, themeLight: themeScenario, themeUnknownLook: themeScenario,
   // Saving as the form changes.
@@ -2450,6 +2494,87 @@ def theme_send_checks(r: Results) -> None:
     sent = last(unknown)
     r.check("a look word this bundle does not know is the host look, not an error",
             sent.get("skin") == "host" and len(sent.get("palette") or {}) == 9, str(sent)[:200])
+
+
+def layout_checks(r: Results) -> None:
+    """Under focus the WanGP page is its form alone (bridge 1.11.0).
+
+    The vocabulary on both sides of the frame, and the tab's half on the
+    virtual clock: the assistant's focus class on the tab's panel is what
+    decides compact, a page is told at its ready and whenever focus starts or
+    ends and never twice the same, a page reloaded under focus is told again,
+    and a bridge older than 1.11.0 is never sent the message at all. What
+    the bridge does with it is measured in a browser, on WanGP's page as
+    Gradio 5.29 draws it (browser_intercept.check_focus_compacts_the_wangp_page).
+    """
+    r.check("a layout is compact only for a real true; anything else is WanGP's page whole",
+            protocol.normalize_layout({"compact": True}) == {"compact": True}
+            and all(protocol.normalize_layout(v) == {"compact": False}
+                    for v in (None, {}, {"compact": "true"}, {"compact": 1}, {"compact": False}, [True], "compact")))
+    r.check("the parent may send it, the WanGP page never does",
+            protocol.LAYOUT_STATE in protocol.TO_BRIDGE and protocol.LAYOUT_STATE not in protocol.TO_PARENT)
+    config = bridge_js_config()
+    r.check("the script finds WanGP's page from the id WanGP gives its gallery tabs for bridges",
+            config.get("chromeAnchorId") == "wangp-gallery-tabs" and config.get("types", {}).get("layoutState") == protocol.LAYOUT_STATE
+            and config.get("layoutAttribute") == "data-minipaint-layout" and config.get("chromeAttribute") == "data-minipaint-chrome",
+            str({k: config.get(k) for k in ("chromeAnchorId", "layoutAttribute", "chromeAttribute")}))
+
+    answers = _run_live(("layout", "layoutLegacy"))
+    if answers is None:
+        r.check("node is available for the layout checks (skipped)", True)
+        return
+    live = answers.get("layout") or {}
+    r.check("the layout scenario ran", "error" not in live and not live.get("thrown") and "atReady" in live, str(live)[:300])
+    r.check("a page that becomes ready outside focus is told whole, once",
+            live.get("atReady") == [{"compact": False}], str(live.get("atReady")))
+    r.check("focus starting on the panel tells it compact at once",
+            live.get("onFocus") == [{"compact": True}], str(live.get("onFocus")))
+    r.check("the same class again, or the tab away and back, tells it nothing new",
+            live.get("repeated") == 0, str(live.get("repeated")))
+    r.check("focus ending tells it whole", live.get("onLeave") == [{"compact": False}], str(live.get("onLeave")))
+    r.check("and the journal says each change once",
+            live.get("said") == ["layout: whole - WanGP's title, tab strip, model row and description shown",
+                                 "layout: compact under focus - WanGP's title, tab strip, model row and description hidden",
+                                 "layout: whole - WanGP's title, tab strip, model row and description shown"],
+            str(live.get("said")))
+    r.check("a WanGP page reloaded under focus is told compact again at its ready",
+            live.get("ready") is True and (live.get("afterReload") or [])[-1:] == [{"compact": True}]
+            and (live.get("state") or {}).get("compact") is True, str(live.get("afterReload")) + str(live.get("state")))
+    legacy = answers.get("layoutLegacy") or {}
+    r.check("a bridge older than 1.11.0 is never sent it, and the journal says so once",
+            legacy.get("sent") == 0 and len(legacy.get("said") or []) == 1
+            and "older than 1.11.0" in (legacy.get("said") or [""])[0]
+            and (legacy.get("state") or {}).get("offered") is False, str(legacy))
+
+    # The decision a check has to see: the class is watched, not only the style.
+    import tempfile
+    source = BROWSER_COPY.read_text(encoding="utf-8")
+    old = 'attributeFilter: ["style", "class"]'
+    anchored = old in source
+    mutated = {}
+    if anchored:
+        with tempfile.TemporaryDirectory(prefix="minipaint-wangp-layout-") as scratch:
+            path = pathlib.Path(scratch) / "minipaint_wangp.js"
+            path.write_text(source.replace(old, 'attributeFilter: ["style"]'), encoding="utf-8")
+            mutated = (_run_live(("layout",), source=path) or {}).get("layout") or {}
+    r.check("mutation: a panel watched for its style alone never hears focus start",
+            anchored and mutated.get("onFocus") == [], "anchor gone" if not anchored else str(mutated.get("onFocus")))
+
+
+def bridge_js_config() -> dict:
+    """The configuration the bridge's document script is built with."""
+    import sys
+
+    folder = str(BRIDGE_COPY.parent)
+    added = folder not in sys.path
+    if added:
+        sys.path.insert(0, folder)
+    try:
+        import bridge_js
+    finally:
+        if added and folder in sys.path:
+            sys.path.remove(folder)
+    return bridge_js.configuration("")
 
 
 def heartbeat_checks(r: Results) -> None:
@@ -3851,8 +3976,11 @@ def placement_checks(r: Results) -> None:
     # The browser half looks for the set that is on screen, by class.
     script = bridge_js.document_script("")
     r.check("the script finds the controls by class", "columnClass" in script and "getElementsByClassName" in script)
+    # By id is fine for an element of WanGP's own (the compact layout's
+    # anchor, CONFIG.chromeAnchorId); what must never be is a control of ours.
     r.check("and never one of them by id",
-            "getElementById(CONFIG" not in script and "requestElemId" not in script and "triggerElemId" not in script)
+            re.search(r"getElementById\(CONFIG\.(?!chromeAnchorId\))", script) is None
+            and "requestElemId" not in script and "triggerElemId" not in script)
     r.check("and prefers the set whose surroundings are displayed", "surroundingsDisplayed" in script)
     config = bridge_js.configuration()
     r.check("the classes in the script are the ones the components carry",
@@ -5469,6 +5597,7 @@ def run() -> Results:
     live_settings_checks(r)
     theme_send_checks(r)
     theme_checks(r)
+    layout_checks(r)
     heartbeat_checks(r)
     panel_checks(r)
     session_checks(r)

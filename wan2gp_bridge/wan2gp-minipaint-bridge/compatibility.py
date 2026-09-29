@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.10.1"
+BRIDGE_VERSION = "1.11.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -1989,6 +1989,11 @@ class Compatibility:
                 # typeface - its font lists and the @font-face rules behind
                 # them - and the page is set in it.
                 "theme_font": True,
+                # Bridge 1.11.0: LAYOUT_STATE. While the parent's focus mode
+                # gives the WanGP tab the whole window, the page hides what
+                # sits above its generator form. Presentation too, so it is
+                # offered whatever the form made of this build.
+                "layout_compact": True,
             },
             # Live, and process-wide: true while any page's generation runs,
             # false when none does, None when this build cannot say.

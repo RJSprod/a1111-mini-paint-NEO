@@ -324,6 +324,15 @@ panel's bottom rather than the window's. Nothing is moved in the DOM and nothing
 repainted; leaving focus is the class coming off. Its side of the contract is that
 extension's `docs/22-forge-assistant.md`.
 
+**The compact page** (bridge 1.11.0): `layout()` sends `LAYOUT_STATE` `{compact}` -
+`compact` true while `focusedPanel()` finds that class on the tab's panel - at READY
+(`layoutSent` reset, so a page reloaded under focus is told again) and whenever the panel's
+attribute observer hears the class change (`attributeFilter: ["style", "class"]`); the
+same answer is never sent twice. Only to a bridge whose READY said
+`capabilities.layout_compact`; otherwise the journal says once, when focus would have
+asked, that the page keeps its header. Presentation like `THEME_STATE`: never answered,
+never a reason a send fails. `state().layout` is `{offered, compact}`.
+
 The heartbeat: while the WanGP tab is on screen and the page is visible, a
 bridge whose READY said `capabilities.ping` is sent `PING` every 5 s and
 answers `PONG` `{busy_ms, op, waiting}` from its page script, never through
@@ -369,7 +378,20 @@ under the mark the container reads them as Gradio's `--font` and `--font-mono` a
 itself in the first, and WanGP's one hand-written stack (the queue table) reads it too.
 Without the mark WanGP keeps its own - which, for its studio themes, is `--font: 'Verdana'`
 with no generic family behind it, a serif on any browser that will not use Verdana. The
-handshake says `capabilities.theme_font`. The handshake says
+handshake says `capabilities.theme_font`. The compact page (1.11.0): on `LAYOUT_STATE`
+the script's `layout()` takes `compact` only for a real `true` (`protocol.normalize_layout`)
+and finds the parts from WanGP's `#wangp-gallery-tabs` (`CHROME_ANCHOR_ID`, an id WanGP
+gives only the Media Generator form's gallery tabs, for bridges): the tab panel around it,
+the main `.tabs` holding that panel and its `.tab-wrapper`, every element before the main
+tabs (the title), and every block of the panel's column before the one holding the anchor
+(the model row, the hidden search panel, the header group). Each is hidden with an inline
+`display: none !important` - nothing in a stylesheet beats it - and marked
+`data-minipaint-chrome`; `<html>` gets `data-minipaint-layout="compact"`. Whole puts back
+the inline display each had and removes both marks. A part holding the bridge's own column
+is never taken. No anchor yet: up to `TRIGGER_ATTEMPTS` looks `TRIGGER_RETRY_MS` apart,
+then the page stays whole. `window.__minipaintBridge.layout(payload)` returns
+`{compact, hidden}`. Measured on Gradio 5.29's own markup of WanGP's structure
+(`tests/wangp_page_gradio_5_29.html`) by `tests/browser_intercept.py`. The handshake says
 `capabilities.theme_palette`; a parent that never hears it sends `mode` alone, and
 the script's first paint is the bridge's own dark until the parent speaks.
 

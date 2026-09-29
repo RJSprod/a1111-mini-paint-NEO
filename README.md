@@ -436,7 +436,11 @@ detail, and `docs/wangp/THEME_HIJACK_2026-09-28.txt` the design.
 
 **Focus mode.** With the Forge Assistant's focus mode on (SD-Neo-ModelSwitchRefiner; three
 presses on its header or launcher), the WanGP tab is the frame alone — the whole window, no
-*Integration management*, nothing reloaded and nothing moved; leaving focus puts it all back.
+*Integration management*, nothing reloaded and nothing moved — and the WanGP page inside it is
+its generator form alone: WanGP's title, its tab strip (Media Generator … About), the model row
+and the model's description are hidden, so the frame starts at the Lora preset row and the
+galleries (bridge 1.11.0). Leaving focus puts it all back. Under focus you are creating, not
+choosing a model; to change model or open another WanGP tab, leave focus first.
 
 **Reinitialize.** Settings → *miniPaint / Canvas* has one WanGP entry, and it is a
 paragraph with a link rather than a switch — the wizard's fields are not duplicated there,
@@ -600,7 +604,7 @@ same server-owned queue as the tab's presses, ids are never paths, and the answe
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
 API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 rewrite (the page's model
 travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
-and its place in WanGP. Bridge plugin 1.10.1 carries the queue, start and track operations
+and its place in WanGP. Bridge plugin 1.11.0 carries the queue, start and track operations
 (protocol 5) and the control plane server-owned execution runs on (protocol 6), answers the
 WanGP tab's heartbeat and says when its form is touched, guards the page's Gradio session
 (below), dresses the WanGP page in the colours this page sends (above) and refuses
@@ -642,7 +646,7 @@ Every job then says where its settings came from — on its card in the Queue, i
 History, in the Send to WanGP popup's history, and in the log: *saved from the WanGP page at
 send*, *WanGP's last saved settings (the page didn't answer)*, *WanGP's last saved settings
 (WanGP was loading a model's settings at send)*, or *the model's defaults (nothing saved
-yet)*. Saving as you change needs bridge 1.7.0, the session guard 1.8.0, the page's colours 1.9.0 and its typeface 1.10.1; with an older bridge the save before every
+yet)*. Saving as you change needs bridge 1.7.0, the session guard 1.8.0, the page's colours 1.9.0, its typeface 1.10.1 and the compact page under focus 1.11.0; with an older bridge the save before every
 send still happens, and waits up to two seconds each time because it cannot know nothing
 changed.
 

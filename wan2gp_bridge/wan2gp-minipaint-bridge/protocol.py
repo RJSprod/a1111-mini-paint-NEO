@@ -61,10 +61,18 @@ PONG = "WANGP_PONG"
 #: the parent commits the form about a second after the last one. It says
 #: that something changed and nothing about what: no value crosses.
 FORM_CHANGED = "WANGP_FORM_CHANGED"
+#: How much of WanGP's own page to show (bridge 1.11.0). ``compact`` is true
+#: while the Forge Assistant's focus mode has given the WanGP tab the whole
+#: window, and the page then hides what sits above its generator form: the
+#: title, the main tab strip, the model row and the model's description.
+#: Presentation, like THEME_STATE: never a reason a picture cannot be handed
+#: over, never answered, and sent only to a bridge whose READY said
+#: ``layout_compact`` - an older one drops a type it does not know.
+LAYOUT_STATE = "WANGP_LAYOUT_STATE"
 
 #: What the parent page may send into the iframe.
 TO_BRIDGE = frozenset({HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH,
-                       PING})
+                       PING, LAYOUT_STATE})
 #: What the iframe may send out to the parent page.
 TO_PARENT = frozenset({READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED,
                        PONG, FORM_CHANGED})
@@ -388,6 +396,17 @@ def normalize_theme(payload: typing.Any) -> dict:
             faces.append(face)
     return {"mode": mode, "skin": skin, "palette": palette,
             "font": font, "font_mono": font_mono, "font_faces": faces}
+
+
+def normalize_layout(payload: typing.Any) -> dict:
+    """A LAYOUT_STATE payload as the bridge's script applies it, on either side.
+
+    Compact only when the parent said so with a real ``true``: anything else -
+    no payload, a string, a number - is WanGP's page whole, which is what it
+    was before there was a layout to ask for.
+    """
+    source = payload if isinstance(payload, dict) else {}
+    return {"compact": source.get("compact") is True}
 
 
 def canonical_json(value: typing.Any) -> str:

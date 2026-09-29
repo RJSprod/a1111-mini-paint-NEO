@@ -29,7 +29,9 @@ own button - the request channel is the bridge's, not WanGP's - and every
 value that reaches a receiver is returned by the Python callback so that
 Gradio applies it the way it applies a human upload. The theme is injected
 here too, in its own try/catch, because a stylesheet that fails to apply must
-not take image handoff with it.
+not take image handoff with it; and so is the compact layout (bridge 1.11.0),
+which hides WanGP's own header while the parent's focus mode gives the tab the
+window - presentation again, touching no value and no event.
 
 The script is generated from Python so that the protocol constants have one
 definition rather than two: they are interpolated as JSON from ``protocol``.
@@ -88,6 +90,19 @@ IDLE_FRAME_FALLBACK_MS = 150
 #: truth; in between, one message per gap however busy the hand.
 FORM_CHANGE_THROTTLE_MS = 500
 
+#: The compact layout (bridge 1.11.0) finds everything it hides from this one
+#: element: the gallery tabs of the Media Generator form, an id WanGP gives
+#: for bridges and only in that form (``main_bridge_elem_ids`` in wgp.py).
+#: From it: the Media Generator panel, the main tabs around that panel and
+#: their strip, what stands before the main tabs (the title), and what the
+#: panel holds above the form (the model row, the model's description). No
+#: English label, no ``component-N`` id: those change with every build.
+CHROME_ANCHOR_ID = "wangp-gallery-tabs"
+#: On ``<html>`` while the page is compact, so the page says which it is.
+LAYOUT_ATTRIBUTE = "data-minipaint-layout"
+#: On every element the compact layout took out, naming which part it is.
+CHROME_ATTRIBUTE = "data-minipaint-chrome"
+
 #: What ``.then(js=...)`` runs with the acknowledgement textbox's value. It
 #: names one method on one object and swallows its own failures, so a bridge
 #: that is not present cannot turn into a console error on every event.
@@ -107,6 +122,7 @@ def configuration(theme_css: str = "") -> dict:
             "receiveResult": protocol.RECEIVE_RESULT,
             "focusReceiver": protocol.FOCUS_RECEIVER,
             "themeState": protocol.THEME_STATE,
+            "layoutState": protocol.LAYOUT_STATE,
             "queueRequest": protocol.QUEUE_REQUEST,
             "queueResult": protocol.QUEUE_RESULT,
             "queueConfirm": protocol.QUEUE_CONFIRM,
@@ -146,6 +162,10 @@ def configuration(theme_css: str = "") -> dict:
         # reports the timeout and this only ever unwedges the queue behind it.
         "roundTripMs": protocol.RECEIVE_TIMEOUT_MS + 5000,
         "themeCss": str(theme_css or ""),
+        # The compact layout (bridge 1.11.0). See CHROME_ANCHOR_ID.
+        "chromeAnchorId": CHROME_ANCHOR_ID,
+        "layoutAttribute": LAYOUT_ATTRIBUTE,
+        "chromeAttribute": CHROME_ATTRIBUTE,
         # THEME_STATE's vocabulary, so the script applies a theme exactly as
         # protocol.normalize_theme would: the modes, the skins, the palette's
         # slots and the one shape a colour may have.
@@ -321,6 +341,13 @@ _SCRIPT = r"""
   var changeSent = 0;
   var changeTouches = 0;
   var changeSeq = 0;
+  // The compact layout: what the parent last asked for, the elements taken out
+  // with the inline display each had before, and the bounded retry for a page
+  // that has not rendered its form yet. See layout.
+  var layoutWanted = false;
+  var layoutHidden = [];
+  var layoutAttempts = 0;
+  var layoutTimer = 0;
 
   function log(message) {
     try { if (typeof console !== "undefined" && console.debug) { console.debug("[minipaint bridge] " + message); } }
@@ -869,6 +896,11 @@ __MINIPAINT_FRAME_WRAPPER__
       theme(message.payload);
       return;
     }
+
+    if (message.type === CONFIG.types.layoutState) {
+      layout(message.payload);
+      return;
+    }
   }
 
   // -- the heartbeat and the change notices -------------------------------------
@@ -1048,7 +1080,120 @@ __MINIPAINT_FRAME_WRAPPER__
     }
   }
 
-  window.__minipaintBridge = { deliver: deliver, theme: theme };
+  // -- the compact layout (bridge 1.11.0) ---------------------------------------
+  //
+  // While the parent's focus mode gives the WanGP tab the whole window, the
+  // page shows only what somebody creating needs: the generator form and its
+  // galleries. Out go the title, the main tab strip, the model row (the
+  // output filter, both model pickers and their tools) and the model's
+  // description with its attention line - everything the Media Generator
+  // panel holds above its form, and everything above the main tabs.
+  //
+  // Hidden with an inline `display: none !important`, which no rule in any
+  // stylesheet can beat - WanGP's own studio rules key on ids, a theme's may
+  // say !important about a tab strip - and taken off again exactly: the
+  // inline display each element had before is put back, and nothing is
+  // removed from the page, so every control keeps its value and its events.
+  function childHolding(parent, node) {
+    var walk = node;
+    while (walk && walk.parentElement !== parent) { walk = walk.parentElement; }
+    return walk || null;
+  }
+
+  function chromeParts() {
+    var anchor = document.getElementById(CONFIG.chromeAnchorId);
+    if (!anchor || !anchor.parentElement || typeof anchor.parentElement.closest !== "function") { return null; }
+    // The anchor is itself a set of tabs; the panel wanted is the nearest
+    // one *around* it - Media Generator's - and the tabs holding that panel
+    // are WanGP's main tabs.
+    var panel = anchor.parentElement.closest("[role='tabpanel'], .tabitem");
+    var tabs = panel ? panel.parentElement : null;
+    if (!tabs || !tabs.classList || !tabs.classList.contains("tabs")) { return null; }
+    var parts = [];
+    var sibling;
+    for (sibling = tabs.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+      parts.push([sibling, "title"]);
+    }
+    for (var i = 0; i < tabs.children.length; i += 1) {
+      if (tabs.children[i].classList && tabs.children[i].classList.contains("tab-wrapper")) { parts.push([tabs.children[i], "tabs"]); }
+    }
+    // Gradio puts a tab's content in one column; its rows are the panel's
+    // blocks, and the form is the one holding the anchor.
+    var column = childHolding(panel, anchor);
+    var form = column ? childHolding(column, anchor) : null;
+    if (form) {
+      for (sibling = form.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+        parts.push([sibling, "model"]);
+      }
+    }
+    // Never the bridge's own controls, wherever a later WanGP puts them.
+    return parts.filter(function (part) {
+      try { return !(part[0].querySelector && part[0].querySelector("." + CONFIG.columnClass)); } catch (error) { return false; }
+    });
+  }
+
+  function showChrome() {
+    for (var i = 0; i < layoutHidden.length; i += 1) {
+      var held = layoutHidden[i];
+      try {
+        held.element.style.removeProperty("display");
+        if (held.display) { held.element.style.setProperty("display", held.display, held.priority); }
+        held.element.removeAttribute(CONFIG.chromeAttribute);
+      } catch (error) {}
+    }
+    layoutHidden = [];
+  }
+
+  function hideChrome(parts) {
+    showChrome();
+    for (var i = 0; i < parts.length; i += 1) {
+      var element = parts[i][0];
+      try {
+        layoutHidden.push({ element: element, display: element.style.getPropertyValue("display"),
+                            priority: element.style.getPropertyPriority("display") });
+        element.style.setProperty("display", "none", "important");
+        element.setAttribute(CONFIG.chromeAttribute, parts[i][1]);
+      } catch (error) {}
+    }
+  }
+
+  function applyLayout() {
+    layoutTimer = 0;
+    var root = document.documentElement;
+    if (!layoutWanted) {
+      showChrome();
+      try { root.removeAttribute(CONFIG.layoutAttribute); } catch (error) {}
+      return 0;
+    }
+    var parts = chromeParts();
+    if (!parts) {
+      // The form not drawn yet: a few more looks, as for the trigger, and
+      // then WanGP's page stays whole - never a half-compact page.
+      if (layoutAttempts < CONFIG.triggerAttempts) {
+        layoutAttempts += 1;
+        layoutTimer = window.setTimeout(applyLayout, CONFIG.triggerRetryMs);
+      } else {
+        log("compact layout: no #" + CONFIG.chromeAnchorId + " on this page; it stays whole");
+      }
+      return 0;
+    }
+    hideChrome(parts);
+    try { root.setAttribute(CONFIG.layoutAttribute, "compact"); } catch (error) {}
+    return parts.length;
+  }
+
+  // A LAYOUT_STATE payload as protocol.normalize_layout reads it: compact
+  // only for a real true. Presentation, and never answered.
+  function layout(payload) {
+    layoutWanted = !!(payload && typeof payload === "object" && payload.compact === true);
+    layoutAttempts = 0;
+    if (layoutTimer) { window.clearTimeout(layoutTimer); layoutTimer = 0; }
+    var hidden = 0;
+    try { hidden = applyLayout(); } catch (error) { hidden = 0; }
+    return { compact: layoutWanted, hidden: hidden };
+  }
+
+  window.__minipaintBridge = { deliver: deliver, theme: theme, layout: layout };
 
   // The bridge's own dark palette until the parent says what it wears - the
   // same first paint a managed WanGP has always had.

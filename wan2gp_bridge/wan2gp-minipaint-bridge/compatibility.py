@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.11.0"
+BRIDGE_VERSION = "1.12.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -79,6 +79,11 @@ ADMISSION_UNCONFIRMED = "ADMISSION_UNCONFIRMED"
 WANGP_VALIDATION_REFUSED = "WANGP_VALIDATION_REFUSED"
 #: Protocol 5: a request composed for one model reached a page on another.
 MODEL_CHANGED = "MODEL_CHANGED"
+#: Bridge 1.12.0, the card lease: what hold, resume and flush refuse with.
+HOLD_NOT_HELD = "HOLD_NOT_HELD"
+HOLD_TASK_RUNNING = "HOLD_TASK_RUNNING"
+HOLD_UNSUPPORTED = "HOLD_UNSUPPORTED"
+FLUSH_HARD_REFUSED = "FLUSH_HARD_REFUSED"
 
 
 class BridgeError(Exception):
@@ -415,6 +420,66 @@ PLUGIN_DATA_KEY = "plugin_data"
 #: a permanent unrecoverable wait.
 GEN_QUEUE_KEY = "queue"
 GEN_IN_PROGRESS_KEY = "in_progress"
+
+# ------------------------------------------------ the card lease (1.12.0) --
+#
+# Holding WanGP between tasks at Forge's request (``hold.py``). Every name
+# below is WanGP's, and each is read at the moment it is needed - never
+# imported, never requested through the plugin API (which copies a value
+# once, at start, and ``offloadobj`` is replaced every time a model loads),
+# never cached - and checked for being there before it is used. A build that
+# lacks one holds with what it has and says what it lacked. Confirmed against
+# Wan2GP 91301f0 (WanGP 13.14) and the pinned execution revision below,
+# except where a line says otherwise.
+
+#: WanGP's between-task pause flag, in the shared generation record. The
+#: worker loop (``_process_tasks`` in wgp.py) checks it at the top of every
+#: iteration - after one task has been finished and removed, before the next
+#: is taken - and sleeps while it is set. WanGP's own edit feature sets it
+#: while a queued task is being edited and CLEARS it when the edit is saved or
+#: cancelled, which is why a hold re-asserts it rather than setting it once.
+PAUSE_FLAG_KEY = "queue_paused_for_edit"
+#: The task the worker is running, set as it takes one and popped as it ends.
+#: Added to Wan2GP after the pinned execution revision (absent at cd832e9),
+#: so its absence proves nothing until it has been seen once in this process.
+ACTIVE_TASK_KEY = "api_active_queue_task"
+#: What the worker writes into the record's status line when it first finds
+#: the pause flag set: on a build without the marker above, the one sign that
+#: it is paused between tasks rather than running one.
+PAUSED_STATUS_TEXT = "Queue paused for editing..."
+GEN_STATUS_KEY = "status"
+#: WanGP's GPU lock lives in the same record: ``process_status`` says who has
+#: the card - "process:main" for a generation run, "process:<id>" for another
+#: of WanGP's own GPU processes, "request:<id>" for one asking a run to pause
+#: - and ``process_names`` what to call them. ``main_process_running`` is set
+#: one line before a call that can raise and cleared two branches later, so a
+#: crash can leave it True for ever, and that is the one case in which the
+#: claim gives way to the pause flag alone.
+PROCESS_STATUS_KEY = "process_status"
+PROCESS_NAMES_KEY = "process_names"
+MAIN_PROCESS_STATUS = "process:main"
+GPU_RESIDENTS_KEY = "gpu_residents"
+#: Where the functions live, looked up in ``sys.modules`` and never imported:
+#: WanGP imports them itself at start, and a build that has not is not the
+#: WanGP this was written against. ``try_acquire_GPU_ressources`` "claims an
+#: idle GPU without suspending an active generation" - its own words - and a
+#: run started afterwards waits in ``acquire_main_GPU_ressources``, telling
+#: the user it "is waiting for <name> to release GPU resources".
+PROCESS_LOCKS_MODULE = "shared.utils.process_locks"
+MODEL_UNLOAD_MODULE = "shared.utils.model_unload"
+OFFLOAD_REGISTRY_MODULE = "shared.utils.offload_registry"
+#: wgp's own module object: ``__main__``, because WanGP runs as
+#: ``python wgp.py``; ``wgp`` for a host that imported it instead.
+WGP_HOLDERS: typing.Tuple[str, ...] = ("__main__", "wgp")
+#: The globals of that module a flush reads, live.
+MAIN_MODEL_OFFLOAD = "offloadobj"
+ENHANCER_OFFLOAD = "enhancer_offloadobj"
+RELEASE_MODEL = "release_model"
+PRELOAD_POLICY = "preload_model_policy"
+#: The claim's id in WanGP's GPU lock, and what WanGP calls the holder when
+#: Forge sent no name.
+HOLD_PROCESS_ID = "minipaint_card_lease"
+HOLD_PROCESS_NAME = "Forge"
 
 #: What the queue operation cannot do without. The image send keeps working
 #: on a build that lacks any of these; a queue request is refused with
@@ -1926,6 +1991,274 @@ class Compatibility:
         found = self.host.read_global("model_type")
         return found if isinstance(found, str) else ""
 
+    # -- the card lease (bridge 1.12.0) --------------------------------------
+    #
+    # What ``hold.py`` does to WanGP, one internal per method. That module
+    # keeps the hold's own state - which lease, until when, what it changed -
+    # and never names a key, a module or a global of WanGP's; this file never
+    # decides anything about a hold.
+
+    def hold_view(self) -> typing.Tuple[typing.Any, typing.Optional[dict], typing.Optional[bool]]:
+        """``(service, shared record, worker running)``, looked up once.
+
+        The worker is the service's own thread handle (see
+        ``service_generation_running``): True while a generation run exists -
+        running a task, paused between two, or waiting for the GPU - False
+        when none does, None when the service cannot be found.
+        """
+        service = self.service()
+        gen = self.shared_gen(service)
+        return service, (gen if isinstance(gen, dict) else None), self.service_generation_running(service)
+
+    @staticmethod
+    def pause_flag(gen: typing.Any) -> bool:
+        return isinstance(gen, dict) and bool(gen.get(PAUSE_FLAG_KEY))
+
+    @staticmethod
+    def set_pause_flag(gen: typing.Any, value: bool) -> None:
+        """Set or clear WanGP's between-task pause, the way its edit feature does."""
+        if isinstance(gen, dict):
+            gen[PAUSE_FLAG_KEY] = bool(value)
+
+    @staticmethod
+    def queue_length(gen: typing.Any) -> typing.Optional[int]:
+        queue = gen.get(GEN_QUEUE_KEY) if isinstance(gen, dict) else None
+        return len(queue) if isinstance(queue, (list, tuple)) else None
+
+    def task_on_card(self, gen: typing.Any, worker: typing.Optional[bool]) -> typing.Tuple[typing.Optional[bool], str]:
+        """``(task running, its client id)``: whether a WanGP task is on the card now.
+
+        Read in the order of how sure each answer is:
+
+        *   WanGP's own marker of the running task - present means running,
+            and seeing it once proves this build keeps it;
+        *   no generation worker at all - nothing can be running;
+        *   a build proved to keep the marker, with the marker absent - the
+            worker is between tasks: paused at the flag, waiting for the GPU,
+            or finishing its run;
+        *   the worker's own announcement that it has paused, written into the
+            status line the first time it finds the flag set;
+        *   a worker whose run has not reached (or has left) its loop -
+            ``in_progress`` unset - is not running a task;
+        *   otherwise a worker with tasks is taken to be running one. That is
+            the conservative reading, and on a build without the marker it
+            means a hold says ``holding`` until the worker's status shows it
+            paused.
+
+        The client id is the running task's own (``params.client_id``), which
+        for a job Forge submitted is its execution id.
+        """
+        if not isinstance(gen, dict):
+            return None, ""
+        task = gen.get(ACTIVE_TASK_KEY)
+        if task is not None:
+            self._learned["marks_active_task"] = True
+            return True, _client_of(task)
+        if worker is False:
+            return False, ""
+        if self._learned.get("marks_active_task"):
+            return False, ""
+        if gen.get(GEN_STATUS_KEY) == PAUSED_STATUS_TEXT:
+            return False, ""
+        if worker is True:
+            if gen.get(GEN_IN_PROGRESS_KEY) is not True:
+                return False, ""
+            queue = gen.get(GEN_QUEUE_KEY)
+            if isinstance(queue, list) and queue:
+                return True, _client_of(queue[0])
+            return False, ""
+        return None, ""
+
+    def claim_gpu(self, gen: typing.Any, label: str = "") -> typing.Tuple[str, str]:
+        """Take WanGP's GPU lock while it is idle: ``(outcome, holder)``.
+
+        Through WanGP's own ``try_acquire_GPU_ressources`` - which also asks
+        every resident that registered a release (Deepy's model, say) to give
+        its VRAM back, the same as any of WanGP's own GPU processes would -
+        and only ever called while no generation worker exists, so it can
+        never suspend a run. The outcome is one of ``protocol.HOLD_CLAIMS``:
+
+        *   ``taken``: WanGP's GPU lock names the hold; a run started now waits.
+        *   ``flag_only``: refused because the lock says a generation run holds
+            it while no worker exists - the flag a crash leaves set, which
+            would refuse the claim for ever. The pause flag holds on its own:
+            a run started now passes the lock and stops at the flag.
+        *   ``busy``: another of WanGP's own GPU processes has the card; the
+            holder's name is returned so the lease can say who.
+        *   ``absent``: this build has no such lock.
+        """
+        import sys
+
+        locks = sys.modules.get(PROCESS_LOCKS_MODULE)
+        acquire = getattr(locks, "try_acquire_GPU_ressources", None)
+        release = getattr(locks, "release_GPU_ressources", None)
+        if not isinstance(gen, dict) or not callable(acquire) or not callable(release):
+            return protocol.CLAIM_ABSENT, ""
+        if self.gpu_claimed(gen):
+            return protocol.CLAIM_TAKEN, ""
+        try:
+            taken = bool(acquire({"gen": gen}, HOLD_PROCESS_ID, label or HOLD_PROCESS_NAME))
+        except Exception:
+            return protocol.CLAIM_ABSENT, ""
+        if taken or self.gpu_claimed(gen):
+            return protocol.CLAIM_TAKEN, ""
+        status = gen.get(PROCESS_STATUS_KEY)
+        if status is None or status == MAIN_PROCESS_STATUS:
+            return protocol.CLAIM_FLAG_ONLY, ""
+        holder = str(status).split(":", 1)[-1]
+        names = gen.get(PROCESS_NAMES_KEY)
+        name = names.get(holder) if isinstance(names, dict) else None
+        return protocol.CLAIM_BUSY, _short(name if isinstance(name, str) and name else holder, 60)
+
+    @staticmethod
+    def gpu_claimed(gen: typing.Any) -> bool:
+        """Whether WanGP's GPU lock names the hold right now."""
+        return isinstance(gen, dict) and gen.get(PROCESS_STATUS_KEY) == "process:" + HOLD_PROCESS_ID
+
+    def release_gpu(self, gen: typing.Any) -> bool:
+        """Give WanGP's GPU lock back - only if it is still the hold's."""
+        import sys
+
+        release = getattr(sys.modules.get(PROCESS_LOCKS_MODULE), "release_GPU_ressources", None)
+        if not callable(release) or not self.gpu_claimed(gen):
+            return False
+        try:
+            release({"gen": gen}, HOLD_PROCESS_ID)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def vram() -> typing.Tuple[typing.Optional[int], typing.Optional[int]]:
+        """``(free, total)`` bytes on WanGP's card as the driver reports it, or Nones.
+
+        Only once torch has initialised CUDA in this process: asking earlier
+        would create a CUDA context on the very card a lease may have lent,
+        which is exactly the memory the answer is about.
+        """
+        import sys
+
+        cuda = getattr(sys.modules.get("torch"), "cuda", None)
+        try:
+            if cuda is None or not cuda.is_available() or not cuda.is_initialized():
+                return None, None
+            free, total = cuda.mem_get_info()
+            return int(free), int(total)
+        except Exception:
+            return None, None
+
+    @staticmethod
+    def _wgp() -> typing.Any:
+        """wgp's module object, found by what it defines, or None."""
+        import sys
+
+        for name in WGP_HOLDERS:
+            module = sys.modules.get(name)
+            if module is not None and callable(getattr(module, RELEASE_MODEL, None)):
+                return module
+        return None
+
+    def flush_soft(self, gen: typing.Any) -> typing.List[str]:
+        """Move WanGP's weights off the card, keeping them in RAM. Returns what moved.
+
+        What WanGP itself does after every sample and on every model switch,
+        done once more on purpose: the video model's offload object and the
+        prompt enhancer's move their weights to RAM (``unload_all``), every GPU
+        resident that registered a release gives its VRAM back, every
+        extension offload object in WanGP's registry unloads its VRAM, and the
+        allocator's cache is emptied. Nothing is discarded; the next task
+        starts without a disk read. Each part is tried on its own, so one that
+        fails leaves the rest done.
+        """
+        import gc
+        import sys
+
+        done: typing.List[str] = []
+        wgp = self._wgp()
+        for attribute, part in ((MAIN_MODEL_OFFLOAD, "model"), (ENHANCER_OFFLOAD, "enhancer")):
+            holder = getattr(wgp, attribute, None) if wgp is not None else None
+            unload = getattr(holder, "unload_all", None)
+            if callable(unload):
+                try:
+                    unload()
+                    done.append(part)
+                except Exception:
+                    pass
+        locks = sys.modules.get(PROCESS_LOCKS_MODULE)
+        force = getattr(locks, "force_release_GPU_resident", None)
+        residents = gen.get(GPU_RESIDENTS_KEY) if isinstance(gen, dict) else None
+        if callable(force) and isinstance(residents, dict):
+            released = 0
+            for resident in [key for key in list(residents) if key != HOLD_PROCESS_ID]:
+                try:
+                    force({"gen": gen}, resident)
+                    released += 1
+                except Exception:
+                    pass
+            if released:
+                done.append("residents")
+        registry = sys.modules.get(OFFLOAD_REGISTRY_MODULE)
+        unload_vram = getattr(registry, "unload_vram", None)
+        if callable(unload_vram):
+            try:
+                if unload_vram():
+                    done.append("extensions")
+            except Exception:
+                pass
+        gc.collect()
+        cuda = getattr(sys.modules.get("torch"), "cuda", None)
+        try:
+            if cuda is not None and cuda.is_available() and cuda.is_initialized():
+                cuda.empty_cache()
+                done.append("cache")
+        except Exception:
+            pass
+        return done
+
+    def hard_flush_blocker(self) -> typing.Tuple[str, str]:
+        """``(code, why)`` a hard flush may not happen on this build, or ``("", "")``.
+
+        ``release_model`` must run inside ``model_unload_guard`` - the lock a
+        model load takes - and a build without both is not asked to. And a
+        WanGP set to load its model at start (``P`` in ``preload_model_policy``
+        without ``U``) waits in ``generate_media`` for ``wan_model`` to be set
+        again - ``while wan_model == None: time.sleep(1)`` - by nothing: the
+        load that would set it only happens at start. A hard flush there
+        would park WanGP's next task for ever, so it is refused and only a
+        soft one is offered. WanGP's own Unload button has the same hazard;
+        this is not the place to copy it.
+        """
+        import sys
+
+        wgp = self._wgp()
+        guard = getattr(sys.modules.get(MODEL_UNLOAD_MODULE), "model_unload_guard", None)
+        if wgp is None or not callable(guard):
+            return HOLD_UNSUPPORTED, "release_model or model_unload_guard is not where WanGP keeps them"
+        policy = getattr(wgp, PRELOAD_POLICY, None)
+        letters = "".join(str(item) for item in policy) if isinstance(policy, (list, tuple, set)) else str(policy or "")
+        if "P" in letters and "U" not in letters:
+            return FLUSH_HARD_REFUSED, "WanGP loads its model at start and would wait for ever for a released one"
+        return "", ""
+
+    def flush_hard(self) -> typing.List[str]:
+        """Release WanGP's model outright, inside the guard a load takes.
+
+        ``release_model`` drops the model and its offload object - the pinned
+        RAM copy with it - empties the caches and sets ``reload_needed``, so
+        the next task loads from disk exactly as a model switch does. Only
+        called when ``hard_flush_blocker`` said nothing.
+        """
+        import sys
+
+        wgp = self._wgp()
+        guard = getattr(sys.modules.get(MODEL_UNLOAD_MODULE), "model_unload_guard", None)
+        release = getattr(wgp, RELEASE_MODEL, None) if wgp is not None else None
+        if not callable(guard) or not callable(release):
+            return []
+        with guard():
+            release()
+        return ["released"]
+
     # -- the handshake -------------------------------------------------------
 
     def handshake(self, bridge_session: str = "", environ: typing.Optional[typing.Mapping[str, str]] = None) -> dict:
@@ -2138,6 +2471,17 @@ def _first_scalar(value: typing.Any) -> typing.Any:
     """The one scalar to report a selection by. See ``_scalars``."""
     found = _scalars(value)
     return found[0] if found else ""
+
+
+def _client_of(task: typing.Any) -> str:
+    """A queue entry's client id - ``params.client_id``, where WanGP's own
+    ``save_inputs`` and the control plane's submission both write it."""
+    if not isinstance(task, dict):
+        return ""
+    params = task.get("params")
+    params = params if isinstance(params, dict) else task
+    client = params.get("client_id")
+    return client if isinstance(client, str) else ""
 
 
 def _short(value: typing.Any, limit: int = 80) -> str:

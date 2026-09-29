@@ -869,7 +869,18 @@ CONTROL_SUBMIT = "submit"
 CONTROL_STATUS = "status"
 CONTROL_CANCEL = "cancel"
 CONTROL_FORGET = "forget"
-CONTROL_OPERATIONS = (CONTROL_HELLO, CONTROL_COMPOSE, CONTROL_SUBMIT, CONTROL_STATUS, CONTROL_CANCEL, CONTROL_FORGET)
+#: Bridge 1.12.0, the card lease: hold WanGP between tasks at Forge's request,
+#: let it go again, and move its weights off the card while it is held. See
+#: the card lease section at the end of this block. Additive, so
+#: CONTROL_VERSION does not move: an older bridge keeps doing everything else
+#: it did, and says it cannot hold by leaving ``capabilities.hold`` out of its
+#: hello - which is how Forge knows not to ask rather than learning it from a
+#: 404.
+CONTROL_HOLD = "hold"
+CONTROL_RESUME = "resume"
+CONTROL_FLUSH = "flush"
+CONTROL_OPERATIONS = (CONTROL_HELLO, CONTROL_COMPOSE, CONTROL_SUBMIT, CONTROL_STATUS, CONTROL_CANCEL, CONTROL_FORGET,
+                      CONTROL_HOLD, CONTROL_RESUME, CONTROL_FLUSH)
 
 #: An execution id is the same grammar as a request id, for the same reason.
 #: It is the ledger key, and the bridge writes it into WanGP's own
@@ -1160,6 +1171,14 @@ def normalize_control_hello(raw: typing.Any) -> dict:
         "model_type": str(raw.get("model_type") or "")[:200],
         "code": _code_or(raw.get("code")),
         "message": str(raw.get("message") or "")[:200],
+        # Bridge 1.12.0, the card lease. ``capabilities.hold`` is the flag that
+        # says this bridge understands hold, resume and flush at all; an older
+        # one leaves it out, which reads as False here, and ``hold`` reads as
+        # "" - "this bridge does not say", never "none". The rest is WanGP's
+        # activity as the hold sees it, each None when it cannot be read.
+        "capabilities": {"hold": isinstance(raw.get("capabilities"), dict) and raw["capabilities"].get("hold") is True},
+        **_activity(raw),
+        "hold": raw.get("hold") if raw.get("hold") in HOLD_STATES else "",
     }
 
 
@@ -1179,6 +1198,166 @@ def normalize_compose_answer(raw: typing.Any) -> dict:
         "model": model_block(raw.get("model")),
         "code": "" if ok else _code_or(raw.get("code"), COMPOSE_UNAVAILABLE),
         "message": str(raw.get("message") or "")[:200],
+    }
+
+
+# -- the card lease: holding WanGP between tasks (bridge 1.12.0) -------------
+#
+# Another extension in Forge's process - SD-Neo-ModelSwitchRefiner, for a
+# text-to-speech model of eighteen to twenty gigabytes - may borrow the card
+# WanGP runs on, between WanGP's jobs and by WanGP's leave. Forge closes its
+# own gate first (no Clipboard job is started or submitted while the card is
+# lent) and then asks the bridge to HOLD WanGP: WanGP's own between-task pause
+# flag, re-asserted while held, and - when no WanGP worker is running - the
+# idle claim on WanGP's GPU lock, so a run started in the WanGP tab waits for
+# the card instead of starting under the guest. A task that is running is
+# never cut off: the hold says ``holding`` until it has finished, and ``held``
+# only when nothing is running on the card for WanGP and nothing will start.
+#
+# The bridge lets go by itself when a hold is not renewed within its
+# ``ttl_s``, so a Forge that died cannot leave WanGP held. Nothing here starts
+# a run, aborts one, or presses Generate.
+
+#: Where a hold stands, as the bridge reports it. ``unsupported`` is a bridge
+#: that speaks the operation on a WanGP build that lacks what a hold needs
+#: (the shared queue record cannot be reached), which is a different answer
+#: from an older bridge that does not speak it at all.
+HOLD_NONE = "none"
+HOLD_HOLDING = "holding"
+HOLD_HELD = "held"
+HOLD_UNSUPPORTED = "unsupported"
+HOLD_STATES = (HOLD_NONE, HOLD_HOLDING, HOLD_HELD, HOLD_UNSUPPORTED)
+#: How the claim on WanGP's GPU lock stands, for the log: taken; not taken
+#: because a flag somebody left set makes WanGP refuse it for ever (the pause
+#: flag holds on its own then); refused because another of WanGP's own GPU
+#: processes has the card; or not available on this build.
+CLAIM_NONE = "none"
+CLAIM_TAKEN = "taken"
+CLAIM_FLAG_ONLY = "flag_only"
+CLAIM_BUSY = "busy"
+CLAIM_ABSENT = "absent"
+HOLD_CLAIMS = (CLAIM_NONE, CLAIM_TAKEN, CLAIM_FLAG_ONLY, CLAIM_BUSY, CLAIM_ABSENT)
+#: What a flush may do while WanGP is held. ``soft`` moves WanGP's weights off
+#: the card into RAM and empties the allocator's cache, so its next task starts
+#: without a disk read; ``hard`` releases the model, pinned RAM copy and all,
+#: so its next task reloads it from disk.
+FLUSH_SOFT = "soft"
+FLUSH_HARD = "hard"
+FLUSH_LEVELS = (FLUSH_SOFT, FLUSH_HARD)
+#: A lease id is the handoff grammar again, for the same reason as every other
+#: id on this plane.
+LEASE_ID_RE = HANDOFF_ID_RE
+#: The bridge's own timer, bounded both ways: long enough that a Forge busy
+#: for a few seconds does not lose the hold, short enough that a Forge that
+#: died gives WanGP back within minutes.
+HOLD_TTL_MIN_SECONDS = 5.0
+HOLD_TTL_MAX_SECONDS = 300.0
+#: What WanGP's own status line may call the holder ("Media generation is
+#: waiting for <label> to release GPU resources"). A short name, never text a
+#: user typed.
+HOLD_LABEL_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9 ._:()/+-]{0,47}\Z")
+#: One thing a flush did, for the log: "model", "residents", "cache"...
+FLUSH_PART_RE = re.compile(r"\A[a-z_]{1,24}\Z")
+#: The refusals the three operations can name. Spelled here as well as in
+#: errors.py for the reason every other code on this plane is.
+HOLD_CODE_NOT_HELD = "HOLD_NOT_HELD"
+HOLD_CODE_TASK_RUNNING = "HOLD_TASK_RUNNING"
+HOLD_CODE_UNSUPPORTED = "HOLD_UNSUPPORTED"
+HOLD_CODE_FLUSH_REFUSED = "FLUSH_HARD_REFUSED"
+
+
+def valid_lease_id(value: typing.Any) -> bool:
+    return isinstance(value, str) and bool(LEASE_ID_RE.match(value))
+
+
+def clean_hold_label(value: typing.Any) -> str:
+    """A holder's name as WanGP may show it, or "" for none.
+
+    Characters outside the grammar are dropped rather than the whole name
+    refused, because the name comes from another extension's own words and a
+    parenthesis or an accent in them is not worth losing the label over.
+    """
+    if not isinstance(value, str):
+        return ""
+    kept = re.sub(r"[^A-Za-z0-9 ._:()/+-]", "", value)
+    kept = re.sub(r"\s+", " ", kept).strip()[:48].strip()
+    return kept if HOLD_LABEL_RE.match(kept) else ""
+
+
+def normalize_hold_request(raw: typing.Any) -> typing.Tuple[dict, str]:
+    """``hold {lease, ttl_s, label}``: the lease, a clamped timer, a name."""
+    if not isinstance(raw, dict) or not valid_lease_id(raw.get("lease")):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    ttl = raw.get("ttl_s")
+    if isinstance(ttl, bool) or not isinstance(ttl, (int, float)):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    ttl = min(HOLD_TTL_MAX_SECONDS, max(HOLD_TTL_MIN_SECONDS, float(ttl)))
+    return {"lease": raw["lease"], "ttl_s": ttl, "label": clean_hold_label(raw.get("label"))}, ""
+
+
+def normalize_lease_request(raw: typing.Any) -> typing.Tuple[dict, str]:
+    """``resume {lease}``: the lease and nothing else."""
+    if not isinstance(raw, dict) or not valid_lease_id(raw.get("lease")):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    return {"lease": raw["lease"]}, ""
+
+
+def normalize_flush_request(raw: typing.Any) -> typing.Tuple[dict, str]:
+    """``flush {lease, level}``: which lease, and soft or hard."""
+    if not isinstance(raw, dict) or not valid_lease_id(raw.get("lease")):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    if raw.get("level") not in FLUSH_LEVELS:
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    return {"lease": raw["lease"], "level": raw["level"]}, ""
+
+
+def _activity(raw: typing.Mapping[str, typing.Any]) -> dict:
+    """WanGP's activity as a hold sees it: the same seven fields in hello and
+    in every hold, resume and flush answer, each None when it cannot be read.
+
+    ``active_client_id`` is kept only when it is the grammar Mini Paint's own
+    execution ids use, because the one question Forge asks of it is "is the
+    task on the card ours" - a page's own client id answers that as well by
+    being absent, and carries nothing anybody here needs.
+    """
+    active = raw.get("active_client_id")
+    return {
+        "worker": _tristate(raw.get("worker")),
+        "task_running": _tristate(raw.get("task_running")),
+        "active_client_id": active if valid_execution_id(active) else "",
+        "queue_length": _depth(raw.get("queue_length")),
+        "waiter": _tristate(raw.get("waiter")),
+        "vram_free": _depth(raw.get("vram_free")),
+        "vram_total": _depth(raw.get("vram_total")),
+    }
+
+
+def normalize_hold_answer(raw: typing.Any) -> dict:
+    """One answer to hold, resume or flush, as Forge will read it.
+
+    An answer that does not name a hold state is not an answer about a hold:
+    it is "", never ``held``, because ``held`` is the one word that lets
+    another extension put eighteen gigabytes on the card.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    ok = raw.get("ok") is True and raw.get("hold") in HOLD_STATES
+    expires = raw.get("expires_in_s")
+    parts = raw.get("parts") if isinstance(raw.get("parts"), (list, tuple)) else []
+    return {
+        "ok": ok,
+        "lease": raw.get("lease") if valid_lease_id(raw.get("lease")) else "",
+        "hold": raw.get("hold") if ok else "",
+        **_activity(raw),
+        "claim": raw.get("claim") if raw.get("claim") in HOLD_CLAIMS else "",
+        "busy_with": re.sub(r"[^A-Za-z0-9 ._:()/+-]", "", str(raw.get("busy_with") or ""))[:60],
+        "expires_in_s": (round(float(expires), 1)
+                         if isinstance(expires, (int, float)) and not isinstance(expires, bool) and expires >= 0 else None),
+        "resumed": raw.get("resumed") is True,
+        "flushed": raw.get("flushed") if raw.get("flushed") in FLUSH_LEVELS else "",
+        "parts": [part for part in parts if isinstance(part, str) and FLUSH_PART_RE.match(part)][:8],
+        "code": "" if ok else _code_or(raw.get("code"), CONTROL_UNAVAILABLE),
+        "message": str(raw.get("message") or "")[:200],
+        "detail": str(raw.get("detail") or "")[:200],
     }
 
 # ------------------------------------------------------------ END SHARED --

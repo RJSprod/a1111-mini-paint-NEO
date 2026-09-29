@@ -53,6 +53,10 @@ SUITES = [
     # the one worker both submission paths funnel through - which is where
     # "at most one generation, whoever started it" is actually established.
     "test_wangp_control",
+    # Bridge 1.12.0: holding WanGP between tasks at Forge's request - the
+    # pause flag, the idle GPU claim, resume, flush - against a working model
+    # of WanGP's worker loop, its GPU lock and its unloaders.
+    "test_wangp_hold",
     # What another extension in the process may ask about the managed WanGP:
     # one dict, held to its documented shape, read by ModelSwitchRefiner to
     # keep its llama-server out of WanGP's VRAM and off WanGP's cores.
@@ -70,6 +74,11 @@ SUITES = [
     # The server executor: press, walk away, come back to a generated file.
     # Ahead of the tab, because the tab is one of its screens.
     "test_clipboard_executor",
+    # The card lease another extension borrows WanGP's card through: the
+    # record, its phases, the executor's gate and the page path's, driven
+    # against a fake bridge 1.12.0 (and 1.11.0). After the executor, because
+    # the gate is the executor's.
+    "test_wangp_turns",
     # What WanGP made, kept where a restart can find it. After the executor,
     # because the exact half of it is the executor's own record.
     "test_clipboard_outputs",

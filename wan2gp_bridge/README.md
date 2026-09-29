@@ -9,9 +9,10 @@ model and the mode the user is actually looking at, in the browser tab they
 are actually looking at it in. Something has to be inside WanGP to give that
 answer and to put the picture where it belongs. That is this plugin.
 
-It is deliberately small. It adds no generation UI, changes no generation
-behaviour, touches no WanGP setting, and never presses Generate. It answers
-two questions and performs two actions:
+It is deliberately small. It adds no generation UI, touches no WanGP
+setting, never presses Generate and never aborts a run; the one way it
+changes what WanGP does is the last item below, and only when Forge asks.
+It answers two questions and performs these actions:
 
 * *what image inputs can this exact page accept right now?*
 * *here is one PNG; put it in the start frame / the end frame / the reference
@@ -30,6 +31,18 @@ two questions and performs two actions:
   back afterwards - each only where the page still holds what the bridge
   wrote. When in doubt - a build that cannot say whether it is generating,
   or lacks the trigger - it never starts.
+* *hold WanGP between two tasks until I say, or until I stop asking*
+  (bridge 1.12.0, the card lease). **This is the one thing the bridge does
+  that makes WanGP wait, and it does it only at Forge's request**, over the
+  authenticated control plane: Forge lends the card WanGP runs on to another
+  extension in its process for a while - a text-to-speech model on the same
+  GPU - and asks the bridge to keep WanGP off it meanwhile. The task that is
+  running finishes exactly as it would have; the next one does not start
+  until Forge lets go, or until Forge has not renewed the hold for its timer
+  (45 seconds from Forge), after which WanGP resumes by itself. While held,
+  Forge may also ask for WanGP's weights to be moved off the card - into RAM
+  (*soft*), or released outright so the next task reloads them (*hard*).
+  `hold.py` is the whole of it.
 
 It also carries a dark stylesheet, because the embedded WanGP is a separate
 document and nothing the Forge page wears reaches into it.
@@ -69,6 +82,14 @@ Forge, in the browser or in Mini Paint changes.
   is never called directly, a running WanGP is only ever joined, and a
   request nobody confirmed is reported as *unconfirmed*, never as queued
   and never as refused.
+* It will not stop WanGP unasked. What it can do since 1.12.0 is **hold WanGP
+  between tasks at Forge's request**: WanGP's own between-task pause flag (the
+  one its queue editor uses), re-asserted while held, and - only while no
+  generation worker exists - WanGP's own idle claim on its GPU lock, so a run
+  started in the WanGP tab waits too. It never suspends a run that is going
+  (the claim is never asked for then), never cuts a task off, and lets go by
+  itself when Forge stops renewing the hold. A hard flush is refused wherever
+  it could leave WanGP waiting for ever for a model it will not reload.
 * It will not clear a WanGP field on a caller's behalf. A field the caller
   leaves out is the page's own; a field it supplies overrides the page for
   that one task and is restored.
@@ -100,6 +121,8 @@ The installed layout:
     receiver_adapters.py   how each input is read, filled and verified
     handoff.py             validating the PNG that Forge left behind an id
     admission.py           one pending queue request per page: confirm, refuse, expire, restore
+    control.py             the authenticated loopback control surface Forge talks to
+    hold.py                holding WanGP between tasks at Forge's request, resume, flush
     bridge_ui.py           three invisible Gradio components, placed by WanGP's insert_after
     bridge_js.py           the script that runs in the WanGP document
     page_head.py           the frame timer, placed in the page head before Gradio's modules
@@ -156,6 +179,19 @@ on another model refuses it with `MODEL_CHANGED` before anything is written.
 The model block gains `architecture`, through `get_base_model_type` when the
 definition does not carry one.
 
+The hold (bridge 1.12.0) reads its WanGP internals the way the unattended
+path reads the generation service - live, out of `sys.modules`, never
+imported - and checks each one before using it: the shared generation
+record (without it a hold answers `unsupported`), the pause flag in it, the
+running-task marker (newer than the pinned revision; without it the worker's
+own "paused" status says when it is between tasks), `try_acquire_GPU_ressources`
+and `release_GPU_ressources` in `shared.utils.process_locks` (without them it
+holds with the flag alone and says `claim: absent`), and, for a flush, wgp's
+`offloadobj`, `enhancer_offloadobj`, `release_model` and
+`preload_model_policy`, `model_unload_guard` and WanGP's offload registry.
+Hello says the bridge speaks the operations (`capabilities.hold`), so a Forge
+talking to an older bridge never sends them.
+
 Adding a new receiver - a control image, a positioned reference - is three
 declarations and no new machinery: a row in `compatibility.COMPONENTS`, a row
 in `RECEIVER_COMPONENTS` and `SELECTION_RULES`, and a small subclass in
@@ -192,6 +228,14 @@ once per WanGP revision:
    join the run without a second run starting. If a second run ever starts,
    `is_generation_in_progress` on that build is not the flag `process_tasks`
    raises, and `compatibility.GLOBALS` is the row to correct.
+6. The hold: queue two tasks in the WanGP tab, start them, and have Forge
+   hold WanGP (a card lease) while the first runs. The first must finish, the
+   second must not start, and WanGP's status line must say *Queue paused for
+   editing...*; releasing the lease must start the second. With WanGP idle,
+   hold it and press Generate: WanGP must say *Media generation is waiting for
+   <name> to release GPU resources...* until the lease is released. If a task
+   starts under a hold, `compatibility.PAUSE_FLAG_KEY` is no longer the flag
+   the worker loop checks on that build.
 
 ## Licence
 

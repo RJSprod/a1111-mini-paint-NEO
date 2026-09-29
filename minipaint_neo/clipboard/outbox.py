@@ -139,6 +139,17 @@ SERVER_TERMINAL = (COMPLETED, FAILED, CANCELLED, EXECUTION_UNKNOWN)
 #: a second generation. Recovery reconciles these against the child's ledger
 #: and never resubmits one on its own.
 SERVER_SUBMITTED = (SUBMITTING_WANGP, GENERATION_WAITING, GENERATION_RUNNING)
+#: The server-executed stages of a job that wants WanGP's card next: nothing
+#: left to write for it, and either not handed to WanGP yet or waiting in
+#: WanGP's own queue. What the card lease (``minipaint_neo.wangp.turns``)
+#: counts as ``jobs_waiting``, and one of the two things that make it say
+#: ``wanted``. A job whose prompt is still being written is not here - it
+#: does not want the card yet - and neither is the one WanGP is generating,
+#: which has it.
+CARD_WAITING = (
+    ADMITTED, WAITING_TURN, ENHANCED, ENSURING_WANGP, COMPOSING, WAITING_FOR_CARD,
+    SUBMITTING_WANGP, GENERATION_WAITING,
+)
 
 #: Who advances a job. A document with neither is a legacy one, because that
 #: is all there used to be.
@@ -228,6 +239,10 @@ PAGE_ACTIVE_SECONDS = 15.0
 WAIT_BUSY_MS = 400
 WAIT_TURN_MS = 250
 WAIT_ENHANCE_MS = 1000
+#: While WanGP's card is lent to another extension (the card lease). Longer
+#: than the others because the wait is: a lease lasts a render, not a
+#: handshake.
+WAIT_LENT_MS = 3000
 #: How often the server looks at the LLM side on its own while a
 #: browser-executed job is enhancing, so a finished prompt is collected even
 #: when no page is asking.
@@ -1345,6 +1360,13 @@ def claim(page: typing.Any) -> dict:
         mine = [job for job in theirs if job["state"] in WAITING and job["page"] == page_id]
         if any(job["state"] == SENDING for job in theirs):
             return answer({"wait": WAIT_BUSY_MS, "reason": "busy", "pending": len(mine)})
+        if mine and _card_lent():
+            # The card lease's gate, on the path a page drives. A job handed
+            # out now would be written into WanGP's form and become a WanGP
+            # task on a card another extension has been lent; it waits here
+            # instead, in press order, exactly as a server job waits in the
+            # executor. The page's pump already waits on any "wait" answer.
+            return answer({"wait": WAIT_LENT_MS, "reason": "lent", "pending": len(mine)})
         head = next((job for job in theirs if job["state"] in WAITING), None)
         if head is None:
             return answer({"empty": True, "pending": 0})
@@ -2050,6 +2072,64 @@ def recover(child_instance: str = "") -> dict:
     return counted
 
 
+def _card_lent() -> bool:
+    """Whether WanGP's card is lent to another extension right now.
+
+    Contained, and deliberately open on failure: a lease that cannot be read
+    is not a reason to stop the queue, and the bridge's own hold is the other
+    half of the guarantee. ``gate_closed`` takes nothing but the lease's own
+    lock and wakes nobody, which is what makes it safe to ask with this
+    module's lock held.
+    """
+    try:
+        from ..wangp import turns
+
+        return bool(turns.gate_closed())
+    except Exception:
+        return False
+
+
+def card_demand() -> dict:
+    """What wants WanGP's card, for the card lease: ``{"waiting", "running", "submitted"}``.
+
+    ``waiting`` counts the jobs that want the card next - a server job in
+    ``CARD_WAITING``, a page-driven one that is pending or being sent.
+    ``running`` names the execution ids of ours WanGP is generating, as far as
+    the executor's last status read knows, and ``submitted`` every one WanGP
+    has been handed and has not finished: the bridge names the task on the
+    card by that id, and it may be ahead of the status read. Together they
+    are how the lease tells "Mini Paint's own job is still on the card" from
+    "WanGP is busy with somebody else's". A server job that is going to have
+    its prompt written first is not waiting for the card yet, even before the
+    executor has moved it into ``ENHANCING``.
+
+    A read of the document and nothing else: no sweep, no write, no publish.
+    """
+    with _lock:
+        listed = _load()
+    waiting = 0
+    running: typing.List[str] = []
+    submitted: typing.List[str] = []
+    for job in listed:
+        state = job["state"]
+        if job.get("executor") == EXECUTOR_SERVER:
+            if state in SERVER_SUBMITTED and job.get("execution_id"):
+                submitted.append(job["execution_id"])
+            if state == GENERATION_RUNNING and job.get("execution_id"):
+                running.append(job["execution_id"])
+                continue
+            if state not in CARD_WAITING:
+                continue
+            record = job.get("enhance")
+            if (state == ADMITTED and job.get("enhance_requested") and record
+                    and record.get("state") not in ("done", "failed", "cancelled", "lost")):
+                continue
+            waiting += 1
+        elif state in (PENDING, SENDING):
+            waiting += 1
+    return {"waiting": waiting, "running": running, "submitted": submitted}
+
+
 def submitted_jobs() -> typing.List[dict]:
     """Server jobs whose submission exists and whose outcome does not.
 
@@ -2070,6 +2150,7 @@ def counts() -> dict:
 
 
 __all__ = [
+    "CARD_WAITING", "WAIT_LENT_MS", "card_demand",
     "ADMITTED", "CANCELLED", "COMPLETED", "COMPOSING", "ENHANCED", "ENHANCING", "ENSURING_WANGP",
     "EXECUTION_UNKNOWN", "EXECUTORS", "EXECUTOR_BROWSER", "EXECUTOR_SERVER", "FAILED",
     "GENERATION_RUNNING", "GENERATION_WAITING", "LEASE_SECONDS", "LEGACY_TERMINAL", "MAX_JOBS",

@@ -491,6 +491,27 @@ closed by `tests/test_wangp_presence.py`: a key that goes missing, or a pid
 that creeps in, breaks that extension and not this one. `generating` is
 three-valued on purpose; `None` is "nobody has said", never `False`.
 
+A fifth is shared since 2026-09-29: **the card lease, `minipaint_neo.wangp.turns`**
+(bridge 1.12.0). That extension's Voice Box borrows WanGP's card between WanGP's
+jobs - `request`, `state` (which renews), `flush`, `release`, `report`, read by
+name like `presence`. What it promises: the gate closes the moment a lease is
+live (no Clipboard job starts WanGP, is composed or is submitted, and the
+executor's 60-second "submit anyway" does not reach a held job), the WanGP task
+that is running is never cut off, the bridge holds WanGP between tasks (its own
+pause flag, re-asserted, plus the idle claim on its GPU lock while no worker
+exists) and says `held` only when nothing is running and nothing will start,
+one lease at a time, and a lease not renewed for 20 seconds expires while an
+unrenewed bridge hold lets go by itself after 45. Two things that are easy to
+break from this side: the functions only record and read - the executor thread
+drives the bridge, because it is the one thread allowed to use the control
+plane - and `flush` is asynchronous (the lease says `holding` until it is done,
+`held` again after), which that extension's code must wait out before it
+measures the card. The record's keys are held closed by `tests/test_wangp_turns.py`,
+the bridge's behaviour against a working model of WanGP's worker loop and GPU
+lock by `tests/test_wangp_hold.py`; that extension's `docs/23-voice-box.md`
+section 6 is the other half, and `mc_wangp.py` there checks every one of the
+record's keys before it trusts an answer.
+
 ## The host
 
 Windows, Python 3.13, Forge Neo 2.29, one NVIDIA card, ~96 GB of RAM, launched
@@ -510,13 +531,19 @@ settings save's in `minipaintWanGP.state().settings`; every miss, bar, dismissal
 and reload is a `heartbeat:` line in the page journal. Saving as the form
 changes and the heartbeat need bridge 1.7.0 installed in WanGP, the session guard
 bridge 1.8.0, the theme hijack - the page's colours on the WanGP page, over
-WanGP's own themes - bridge 1.9.0, the page's typeface bridge 1.10.1, and the
-compact WanGP page under focus bridge 1.11.0. The compact page has been checked
-against Gradio 5.29's own markup of WanGP 13.14's structure
-(`tests/wangp_page_gradio_5_29.html`), never against the user's own WanGP: if
-the header is still there under focus, the WanGP page's console line
-`compact layout: no #wangp-gallery-tabs` and `<html data-minipaint-layout>` are
-the first things to look at. The hijack has been checked against WanGP's
+WanGP's own themes - bridge 1.9.0, the page's typeface bridge 1.10.1, the
+compact WanGP page under focus bridge 1.11.0, and the card lease's hold bridge
+1.12.0. The compact page has been checked against Gradio 5.29's own markup of
+WanGP 13.14's structure (`tests/wangp_page_gradio_5_29.html`), never against the
+user's own WanGP: if the header is still there under focus, the WanGP page's
+console line `compact layout: no #wangp-gallery-tabs` and
+`<html data-minipaint-layout>` are the first things to look at. The hold has been
+checked against a working model of WanGP's worker loop and GPU lock and read
+against Wan2GP 91301f0 and cd832e9, never against a real WanGP generating on the
+user's card: a hold asked for while a task runs (the task must finish and the
+next must not start), a Generate pressed while held (WanGP must say it is
+waiting), and a hard flush (the next task must load the model again) are the
+first things to watch. The hijack has been checked against WanGP's
 stylesheets as read from its repository on 2026-09-28 (`ui_studio.css` and the
 four theme files, `ui_styles.css`), never on the user's own install: what the
 eleven `--studio-*` remaps and the fixed-colour overrides look like in a real

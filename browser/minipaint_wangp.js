@@ -2956,6 +2956,22 @@ window.minipaintWanGP = (function () {
         });
     }
 
+    /**
+     * WanGP's own Generate, pressed from outside its page: the live page, as
+     * it is, added to WanGP's queue - generating at once when WanGP is idle
+     * (route "generate"), joining the queue when it is busy (route "queue").
+     * A queue request with no overrides is exactly that: the bridge writes
+     * WanGP's own generate or add-to-queue trigger and WanGP's own chain
+     * reads the form, so nothing is composed here or on the server and no
+     * saved settings stand in for what is on screen. For the sibling
+     * extension's assistant panel, whose button this is; it resolves - never
+     * rejects - with queueAndConfirm's answer.
+     */
+    function generate() {
+        say("generate: the page as it is, from outside it");
+        return queueAndConfirm({ start: START_MODES[0] });
+    }
+
     /** One bounded admission check for a request this page asked for. */
     function confirmQueue(requestId) {
         if (!HEX32.test(String(requestId || ""))) { return Promise.resolve(failure(REQUEST_INVALID, "not a request id")); }
@@ -4586,6 +4602,10 @@ window.minipaintWanGP = (function () {
         queue: queue,
         confirmQueue: confirmQueue,
         queueAndConfirm: queueAndConfirm,
+        // The live page as it is, generated or queued: WanGP's own Generate
+        // pressed from outside it. A contract with the sibling extension's
+        // assistant panel; see docs/wangp/CONTRACTS.md.
+        generate: generate,
         trackQueue: trackQueue,
         flushForm: flushForm,
         // Save WanGP's form just before a send; see saveForSend. What the

@@ -4734,6 +4734,24 @@ S["queue request loses its answer"] = async function () {
     return await snap(w, api, { status: result.status, code: result.code, ok: result.ok });
 };
 
+// generate(): the live page as it is - a queue request with nothing in it to
+// override, starting when WanGP can. Anything more and it is no longer
+// WanGP's own Generate.
+S["generate sends the page as it is"] = async function () {
+    const { w, api } = await healthy();
+    const pending = api.generate();
+    await w.tick.advance(10);
+    const sent = w.posted.filter(function (m) { return m.type === "WANGP_QUEUE_REQUEST"; });
+    const keys = sent.length ? Object.keys(sent[0].payload || {}).sort().join(",") : "";
+    w.removeFrame();
+    w.mutate([]);
+    await w.tick.advance(50);
+    const result = await pending;
+    return await snap(w, api, { sent: sent.length, keys: keys,
+                                start: sent.length ? sent[0].payload.start : "",
+                                status: result.status });
+};
+
 // 14.6 -- a non-mutating query keeps today's behaviour exactly.
 S["a query keeps its refusal"] = async function () {
     const { w, api } = await healthy();
@@ -5467,6 +5485,14 @@ def recovery_checks(r: Results) -> None:
               "replaced under a queue request", "status", "unconfirmed")
         check("and the journal says so from the code that decided it",
               "replaced under a queue request", "saidUnconfirmed", True)
+        check("generate() sends one queue request",
+              "generate sends the page as it is", "sent", 1)
+        check("and overrides nothing: no prompt, no pictures, no model",
+              "generate sends the page as it is", "keys", "bridge_session,request_id,start")
+        check("and starts when WanGP can",
+              "generate sends the page as it is", "start", "auto")
+        check("and an answer lost with the frame is unconfirmed, as for any queue request",
+              "generate sends the page as it is", "status", "unconfirmed")
         check("a query keeps today's refusal exactly",
               "a query keeps its refusal", "code", "BRIDGE_SESSION_MISMATCH")
         check("and is not dressed up as unconfirmed",

@@ -249,6 +249,19 @@ Protocol 3 adds `queue(request)`, `confirmQueue(requestId)`, `queueAndConfirm(re
 and `capabilities()`, and `state().queue` from the handshake's `capabilities.queue`;
 the shapes are in `docs/clipboard/CONTRACTS.md`.
 
+`generate()` (2026-10-02) is WanGP's own Generate pressed from outside its
+page, for the sibling extension's assistant panel, whose ▶ button calls it on
+the WanGP tab: `queueAndConfirm({start: "auto"})` and nothing else, so the
+bridge writes WanGP's own generate trigger when WanGP is idle (route
+`generate`, status `started`) and its add-to-queue trigger when it is busy
+(route `queue`, status `queued`), and WanGP's own chain reads the live form.
+It deliberately does not go through `minipaintInterop.wangp.enqueue`: a job
+there is composed from WanGP's *recorded* form, or the model's defaults with
+inheritance off, which is not what is on screen. Its name and its answer's
+`ok`, `status`, `route` and `message` are read by that extension; renaming it
+there or here breaks the button silently, and `tests/test_wangp_protocol.py`
+holds that it overrides nothing.
+
 Protocol 6 adds `flushForm({timeoutMs, settleMs, callTimeoutMs})`: ask WanGP to
 commit this page's live settings form so a job composed later — on the server,
 with this page shut — runs at what was on screen. It writes one hidden trigger

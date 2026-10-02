@@ -512,6 +512,14 @@ lock by `tests/test_wangp_hold.py`; that extension's `docs/23-voice-box.md`
 section 6 is the other half, and `mc_wangp.py` there checks every one of the
 record's keys before it trusts an answer.
 
+A sixth is shared since 2026-10-02: **`minipaintWanGP.generate()`**. The
+assistant panel shows a ▶ button on the WanGP tab and calls it: the live WanGP
+page added to WanGP's queue with nothing overridden - WanGP's own Generate when
+idle, its Add to Queue when busy. It is the queue request with no fields, not
+`enqueue()`, because the outbox composes from WanGP's recorded form and that is
+not what is on screen. `docs/wangp/CONTRACTS.md` has it; renaming it breaks the
+button with nothing said.
+
 ## The host
 
 Windows, Python 3.13, Forge Neo 2.29, one NVIDIA card, ~96 GB of RAM, launched

@@ -739,6 +739,15 @@ def snapshot(page: str = "") -> dict:
         payload["unattended"] = False
         payload["inherit_settings"] = False
     try:
+        # What the WanGP tab warns about over its frame: GGUF kernels older
+        # than this WanGP asks for, or missing. In the snapshot every page
+        # already takes, so it costs no route and no request.
+        from .wangp import kernels
+
+        payload["wangp_warnings"] = kernels.warnings()
+    except Exception:
+        payload["wangp_warnings"] = []
+    try:
         from .clipboard import executor
 
         payload["executor"] = executor.snapshot()

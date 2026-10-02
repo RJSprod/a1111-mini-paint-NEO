@@ -927,6 +927,22 @@
     line-height: 1.4;
 }
 
+/* The setup warning - WanGP's GGUF kernels older than it asks for, or
+   missing - laid over the bottom of the frame by the browser half from the
+   interop snapshot. Placed inline like the bar above; this only dresses it. */
+#wangp_iframe_root .minipaint-wangp-setup {
+    padding: 0.55em 0.8em;
+    border-radius: 8px;
+    border-left: 4px solid var(--color-accent, #f0ad4e);
+    background: var(--background-fill-primary, #1f1f1f);
+    color: var(--body-text-color, inherit);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+    font-size: 0.95em;
+    line-height: 1.4;
+    max-width: 70ch;
+}
+
+#wangp_iframe_root .minipaint-wangp-setup button,
 #wangp_iframe_root .minipaint-wangp-stuck button {
     padding: 0.25em 0.8em;
     border-radius: 6px;

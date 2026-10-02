@@ -2442,6 +2442,14 @@ window.minipaintWanGP = (function () {
     const BUSY_NOTE_MS = 15000;
     const STUCK_BAR_ID = "minipaint-wangp-stuck";
     const STUCK_BAR_CLASS = "minipaint-wangp-stuck";
+    //: The setup warning: WanGP's GGUF kernels older than it asks for, or
+    //: missing, as the server found (minipaint_neo/wangp/kernels.py). Laid
+    //: over the bottom of the frame, so it never covers the heartbeat's bar.
+    const SETUP_BAR_ID = "minipaint-wangp-setup-warning";
+    const SETUP_BAR_CLASS = "minipaint-wangp-setup";
+    //: What the server may say, and how much of it is shown.
+    const SETUP_CODES = ["GGUF_KERNELS_OUTDATED", "GGUF_KERNELS_UNAVAILABLE"];
+    const W = { shown: [], dismissed: {}, said: {} };
 
     const H = {
         //: A bridge that answers pings has been ready in this page. Before
@@ -2792,6 +2800,88 @@ window.minipaintWanGP = (function () {
             line += " It has been reloaded automatically " + RELOADS_MAX + " times; reload it yourself if it stays stuck.";
         }
         words.textContent = line;
+    }
+
+    /**
+     * What the server found wrong with WanGP's setup, from the interop
+     * snapshot: shown over the bottom of the frame until it is dismissed or
+     * the server stops saying it. A warning dismissed once stays dismissed
+     * for this page unless its versions change. Every word comes from the
+     * server's fixed sentences, written as text.
+     */
+    function setupWarnings(found) {
+        const list = [];
+        for (const item of Array.isArray(found) ? found : []) {
+            if (!item || SETUP_CODES.indexOf(item.code) === -1) { continue; }
+            const key = [item.code, text(item.installed, 40), text(item.wanted, 40)].join("|");
+            if (W.dismissed[key]) { continue; }
+            list.push({ key: key, message: text(item.message, 400), fix: text(item.fix, 400) });
+            if (!W.said[key]) {
+                W.said[key] = true;
+                say("setup: " + item.code + " shown (installed " + (text(item.installed, 40) || "?")
+                    + ", wanted " + (text(item.wanted, 40) || "?") + ")");
+            }
+        }
+        W.shown = list;
+        if (!list.length) { removeSetupBar(); return 0; }
+        drawSetupBar();
+        return list.length;
+    }
+
+    function setupBarElement() {
+        const scope = app();
+        const direct = scope.getElementById ? scope.getElementById(SETUP_BAR_ID) : null;
+        if (direct) { return direct; }
+        return scope.querySelector ? scope.querySelector("#" + SETUP_BAR_ID) : null;
+    }
+
+    function removeSetupBar() {
+        const bar = setupBarElement();
+        if (bar && bar.parentNode && typeof bar.parentNode.removeChild === "function") {
+            try { bar.parentNode.removeChild(bar); } catch (e) { /* already gone */ }
+        }
+    }
+
+    function drawSetupBar() {
+        const holder = rootElement();
+        if (!holder || typeof holder.appendChild !== "function") { return false; }
+        let bar = setupBarElement();
+        if (!bar) {
+            try {
+                bar = document.createElement("div");
+                bar.id = SETUP_BAR_ID;
+                bar.className = SETUP_BAR_CLASS;
+                bar.setAttribute("role", "status");
+                bar.style.cssText = "position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:29;"
+                    + "display:flex;flex-wrap:wrap;align-items:center;gap:0.6em;max-width:calc(100% - 16px);box-sizing:border-box;";
+                const words = document.createElement("span");
+                words.className = SETUP_BAR_CLASS + "-text";
+                const dismiss = document.createElement("button");
+                dismiss.type = "button";
+                dismiss.className = SETUP_BAR_CLASS + "-dismiss";
+                dismiss.textContent = "Dismiss";
+                dismiss.addEventListener("click", function () {
+                    for (const item of W.shown) { W.dismissed[item.key] = true; }
+                    say("setup: warning dismissed");
+                    W.shown = [];
+                    removeSetupBar();
+                });
+                bar.appendChild(words);
+                bar.appendChild(dismiss);
+            } catch (e) {
+                return false;
+            }
+            try {
+                if (window.getComputedStyle && window.getComputedStyle(holder).position === "static") { holder.style.position = "relative"; }
+            } catch (e) { /* the bar still shows, only less precisely placed */ }
+            try { holder.appendChild(bar); } catch (e) { return false; }
+        }
+        const words = bar.querySelector ? bar.querySelector("." + SETUP_BAR_CLASS + "-text") : null;
+        if (words) {
+            words.textContent = W.shown.map(function (item) { return item.message + " " + item.fix; }).join(" ");
+        }
+        bar.hidden = false;
+        return true;
     }
 
     /** What the bar is saying: a page that stopped answering, or one that
@@ -4404,8 +4494,10 @@ window.minipaintWanGP = (function () {
             const removed = (record && record.removedNodes) || [];
             if (!added.length && !removed.length) { return false; }
             for (const node of Array.prototype.slice.call(added).concat(Array.prototype.slice.call(removed))) {
-                // The heartbeat's bar lives in the same node, for the same reason.
-                if (!node || (node.id !== RECOVERY_NOTICE_ID && node.id !== STUCK_BAR_ID)) { return false; }
+                // The heartbeat's bar lives in the same node, for the same
+                // reason, and so does the setup warning.
+                if (!node || (node.id !== RECOVERY_NOTICE_ID && node.id !== STUCK_BAR_ID
+                              && node.id !== SETUP_BAR_ID)) { return false; }
             }
         }
         return true;
@@ -4613,6 +4705,9 @@ window.minipaintWanGP = (function () {
         // enqueue all wait on, for two seconds at most.
         saveForSend: saveForSend,
         inheritSettings: inheritSettings,
+        // What the server found wrong with WanGP's setup, from the interop
+        // snapshot; see setupWarnings.
+        setupWarnings: setupWarnings,
         capabilities: capabilities,
         // One line into the same journal the handshake and the queries write
         // to, for the Canvas's half of a send. Text only; nothing is parsed.

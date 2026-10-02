@@ -894,6 +894,16 @@ window.minipaintInterop = (function () {
         try { bridge.inheritSettings(stream.inherit && stream.unattended !== false); } catch (e) { /* never load-bearing */ }
     }
 
+    /** Hand the WanGP tab what the server found wrong with WanGP's setup -
+     * GGUF kernels older than it asks for, or missing - for its bar over the
+     * frame. Only a list is passed on; anything else says nothing. */
+    function tellWarnings(found) {
+        if (!Array.isArray(found)) { return; }
+        const bridge = window.minipaintWanGP;
+        if (!bridge || typeof bridge.setupWarnings !== "function") { return; }
+        try { bridge.setupWarnings(found); } catch (e) { /* never load-bearing */ }
+    }
+
     function hidden() {
         try { return document.visibilityState === "hidden"; } catch (e) { return false; }
     }
@@ -943,6 +953,7 @@ window.minipaintInterop = (function () {
                 if (typeof payload.unattended === "boolean") { stream.unattended = payload.unattended; }
                 if (typeof payload.inherit_settings === "boolean") { stream.inherit = payload.inherit_settings; }
                 tellBridge();
+                tellWarnings(payload.wangp_warnings);
                 stream.jobs.clear();
                 for (const job of Array.isArray(payload.jobs) ? payload.jobs : []) {
                     stream.jobs.set(job.job_id, { job_id: job.job_id, state: job.state, stage: job.stage || "", revision: job.revision || 0 });

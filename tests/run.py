@@ -61,6 +61,8 @@ SUITES = [
     # one dict, held to its documented shape, read by ModelSwitchRefiner to
     # keep its llama-server out of WanGP's VRAM and off WanGP's cores.
     "test_wangp_presence",
+    # WanGP's GGUF kernels older than it asks for, said before a run does.
+    "test_wangp_kernels",
     "test_interop",
     # The browser half of walking away: a page that is told rather than
     # asking, and that can be closed without the job noticing.

@@ -4734,6 +4734,37 @@ S["queue request loses its answer"] = async function () {
     return await snap(w, api, { status: result.status, code: result.code, ok: result.ok });
 };
 
+// The setup warning: what the server found wrong with WanGP's GGUF kernels,
+// handed over by the interop snapshot and laid over the frame. Only the known
+// codes, dismissed for good unless the versions change, and never mistaken by
+// the frame watcher for a change of the page's own.
+S["setup warning"] = async function () {
+    const { w, api } = await healthy();
+    const old = { code: "GGUF_KERNELS_OUTDATED", installed: "1.0.11", wanted: "1.0.25",
+                  message: "Kernels are old.", fix: "Update them." };
+    const bar = function () {
+        return w.rootNode().children.filter(function (c) { return c.id === "minipaint-wangp-setup-warning"; })[0] || null;
+    };
+    const shown = api.setupWarnings([old, { code: "SOMETHING_ELSE", message: "no" }]);
+    w.mutate([]);
+    await w.tick.advance(400);
+    const first = bar();
+    const words = first ? first.children.filter(function (c) { return c.className === "minipaint-wangp-setup-text"; })[0] : null;
+    const dismiss = first ? first.children.filter(function (c) { return c.className === "minipaint-wangp-setup-dismiss"; })[0] : null;
+    if (dismiss && dismiss.on && dismiss.on.click) { dismiss.on.click.forEach(function (fn) { fn(); }); }
+    const afterDismiss = !!bar();
+    const again = api.setupWarnings([old]);
+    const againBar = !!bar();
+    const newer = api.setupWarnings([Object.assign({}, old, { wanted: "1.0.26" })]);
+    const newerBar = !!bar();
+    api.setupWarnings([]);
+    return await snap(w, api, {
+        shown: shown, text: words ? words.textContent : "", afterDismiss: afterDismiss,
+        again: again, againBar: againBar, newer: newer, newerBar: newerBar, cleared: !bar(),
+        said: w.said("setup: GGUF_KERNELS_OUTDATED shown (installed 1.0.11, wanted 1.0.25)")
+    });
+};
+
 // generate(): the live page as it is - a queue request with nothing in it to
 // override, starting when WanGP can. Anything more and it is no longer
 // WanGP's own Generate.
@@ -5195,6 +5226,12 @@ main().catch(function (e) { console.error("ERR", (e && e.stack) || e); process.e
 #: and nobody came back to ask whether the check still bites.
 _RECOVERY_MUTATIONS = (
     (
+        "the setup warning shows any code the server sends",
+        "if (!item || SETUP_CODES.indexOf(item.code) === -1) { continue; }",
+        "if (!item) { continue; }",
+        "setup warning", "shown", 1, 2,
+    ),
+    (
         "the observer only ever handled arrival",
         """            const frame = frameElement();
             if (frame) {
@@ -5485,6 +5522,22 @@ def recovery_checks(r: Results) -> None:
               "replaced under a queue request", "status", "unconfirmed")
         check("and the journal says so from the code that decided it",
               "replaced under a queue request", "saidUnconfirmed", True)
+        check("a setup warning shows the known codes only",
+              "setup warning", "shown", 1)
+        check("in the server's own words, message then fix",
+              "setup warning", "text", "Kernels are old. Update them.")
+        check("and the journal says which was shown",
+              "setup warning", "said", True)
+        check("Dismiss takes it away",
+              "setup warning", "afterDismiss", False)
+        check("and the same warning does not come back",
+              "setup warning", "againBar", False)
+        check("but new versions are a new warning",
+              "setup warning", "newerBar", True)
+        check("and a snapshot with nothing to say clears it",
+              "setup warning", "cleared", True)
+        check("the bar is not taken for the page changing: nothing is pressed",
+              "setup warning", "presses", 0)
         check("generate() sends one queue request",
               "generate sends the page as it is", "sent", 1)
         check("and overrides nothing: no prompt, no pictures, no model",

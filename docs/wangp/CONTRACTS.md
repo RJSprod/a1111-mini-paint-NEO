@@ -249,6 +249,17 @@ Protocol 3 adds `queue(request)`, `confirmQueue(requestId)`, `queueAndConfirm(re
 and `capabilities()`, and `state().queue` from the handshake's `capabilities.queue`;
 the shapes are in `docs/clipboard/CONTRACTS.md`.
 
+`setupWarnings(list)` (2026-10-02) shows what the server found wrong with
+WanGP's setup as a bar over the bottom of the frame, with a Dismiss that
+holds for the page until the versions in the warning change. The list comes
+from the interop snapshot's `wangp_warnings`: entries of
+`{code, installed, wanted, source, message, fix}`, `code` one of
+`GGUF_KERNELS_OUTDATED` and `GGUF_KERNELS_UNAVAILABLE` (any other is ignored),
+written by `minipaint_neo/wangp/kernels.py` from the environment's
+`llamacpp_gguf_cuda` `.dist-info` against WanGP's `docs/INSTALLATION.md`, and
+from WanGP's own lines saying the kernels are too old or missing. Cleared at
+every launch. Every word on the bar is the server's, set as text.
+
 `generate()` (2026-10-02) is WanGP's own Generate pressed from outside its
 page, for the sibling extension's assistant panel, whose ▶ button calls it on
 the WanGP tab: `queueAndConfirm({start: "auto"})` and nothing else, so the

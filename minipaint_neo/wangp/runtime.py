@@ -50,7 +50,7 @@ import time
 import typing
 
 from .. import scrub
-from . import discovery, errors, journal, lock, process_log, vram
+from . import discovery, errors, journal, kernels, lock, process_log, vram
 from .config import DEFAULT_PROXY_PATH, runtime_dir
 from .errors import IntegrationError
 
@@ -640,6 +640,8 @@ def _drain(child: _Child) -> None:
             # only place it says so.
             if stripped.strip():
                 journal.note("wangp", stripped)
+                # WanGP saying its GGUF kernels are too old or missing.
+                kernels.observe(stripped)
             if ECHO_CHILD_STDERR:
                 try:
                     # The child's own line ending, kept: a chunk that arrived
@@ -935,6 +937,9 @@ class Runtime:
             scrub.register_root("wangp", root_text)
             scrub.register_root("runtime", _text(_section(config, "runtime").get("prefix")))
             process_log.begin(instance_id, f"root {scrub.line(root_text)}")
+            # Before the child prints anything: the kernels' version against
+            # what this WanGP's install guide names. See ``kernels``.
+            kernels.begin_run(root_text, _section(config, "runtime").get("prefix"))
 
             last_detail = ""
             # Protocol 6: one more loopback port, kept the same way and for

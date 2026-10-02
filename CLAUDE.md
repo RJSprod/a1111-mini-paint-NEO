@@ -426,6 +426,23 @@ paints its probe from each of a slot's variables one at a time and takes the
 first that computes to a colour; a chain of fallbacks was the first version
 and dropped the page colour under any theme whose background is a gradient.
 
+**WanGP's GGUF kernels are not in its requirements.txt.** They are a
+compiled wheel, `llamacpp_gguf_cuda`, installed by hand from the version
+WanGP's `docs/INSTALLATION.md` names, so a WanGP updated the ordinary way (a
+pull, then the requirements) keeps the kernels it had. On 2026-10-02 that left
+WanGP's newer GGUF path on 1.0.11 kernels where it asked for 1.0.13 or newer:
+every GGUF step of LTX 2.3 took about 100 s on an RTX 5090 that runs the same
+model in int8 at 3, standalone as much as embedded, and the only sign was one
+line from WanGP's prompt enhancer - the one feature WanGP checks the version
+for. A day went on pinned RAM, text encoders and VRAM contention before the
+wheel was found. `minipaint_neo/wangp/kernels.py` now reads the installed
+version against the guide at every launch and recognises WanGP's own
+"do not meet the ... requirement" and "kernels unavailable" lines; the
+warning is a `kernels:` journal line, a line in Forge's console, and a bar
+over the bottom of the WanGP frame (`wangp_warnings` in the interop
+snapshot). It is advice, never a gate: nothing is installed for the user,
+and a file it cannot read is no warning.
+
 ## The sibling repositories
 
 `RJSprod/NEO-webui-auto-tls-https` gives Forge its certificate and, since

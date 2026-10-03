@@ -528,6 +528,10 @@ def hold(lease, ttl_s, label="") -> answer                   # ask, or renew; no
 def resume(lease) -> answer                                  # idempotent: a lease not held is resumed False
 def flush(lease, level) -> answer                            # "soft" | "hard"; a refusal raises with the bridge's code
 def can_hold(answer=None) -> bool | None                     # the hello's capabilities.hold; None when nothing recent said
+# bridge 1.13.0, the model check (only ``clipboard.targets`` calls this)
+MODEL_TIMEOUT = 8.0
+def model(model_type) -> facts                               # normalize_model_facts; raises like every call here
+def can_check_models(answer=None) -> bool | None             # the hello's capabilities.model
 ```
 
 The destination comes off the runtime object and nowhere else — the host and scheme are
@@ -537,8 +541,9 @@ nothing a caller passes reaches the URL. Both the port and the secret come off t
 like a configuration problem rather than the restart it is.
 
 `urllib`, not the proxy's httpx client: this is not an async path and must never borrow a
-client that belongs to another event loop. Every caller is the executor thread; no route
-calls any of this.
+client that belongs to another event loop. Every caller is the executor thread, except the
+model check, which the Clipboard's readiness asks from routes that run it on the thread pool
+(never on the event loop) and from the press; no coroutine calls any of this.
 
 READY is **not** an admission fact. It says a process is alive and answered an HTTP request.
 Whether the bridge is on the page, the generation service resolved and a settings base can be
@@ -708,6 +713,27 @@ The one window: WanGP's edit clearing the flag between two re-assertions (at mos
 let its worker - which looks every half second - take the next task. The hold then says
 `holding` again until that task ends, and the lease reports it; WanGP's plugin API has no
 hook before a task that could close it.
+
+## Bridge 1.13.0: `model`
+
+One more read-only operation on the control plane, additive (`CONTROL_VERSION` stays 1) and
+advertised in hello as `capabilities.model`. `model {model_type}` answers **facts about one
+model**, never a verdict (`protocol.normalize_model_facts`): `defined` (WanGP's
+`get_model_def` knows it), `label` and `architecture` from the definition, `pipeline` (the
+`ltx2_pipeline` a distilled LTX-2 checkpoint declares), and - when `checked` - how many files
+WanGP would fetch before generating with it are not on disk (`missing_count`) and their base
+names (`missing`, at most `MODEL_MISSING_NAMES_MAX`, never a path). `model_check.py` walks
+WanGP's own download path without downloading: the transformer `get_model_filename` picks for
+the user's quantization and dtype, a second one and the definition's modules (skipping what a
+`source` builds), `preload_URLs` and `VAE_URLs` through the file locator with the model's LoRA
+folder, the definition's own LoRAs in that folder, the handler's `query_model_files` through
+WanGP's `download_def_missing_files`, and the text encoder from `text_encoder_URLs` and its
+quantization in its own folder - the order `load_models` and `download_models` take them in.
+Nothing is downloaded, loaded or written, and no network is touched. A step that raises
+answers `checked: false` with its name in `diagnosis`: "could not tell", which Forge reports
+as such and never as a missing file. Forge's Clipboard (`clipboard/targets.py`) is the one
+caller: it blocks its WanGP section on a model it does not send to, or one not defined or not
+downloaded.
 
 ## Tests
 

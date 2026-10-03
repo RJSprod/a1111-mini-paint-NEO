@@ -870,8 +870,17 @@ CONTROL_FORGET = "forget"
 CONTROL_HOLD = "hold"
 CONTROL_RESUME = "resume"
 CONTROL_FLUSH = "flush"
+#: Bridge 1.13.0: is one model set up in this WanGP - its definition known,
+#: and every file WanGP would fetch before generating with it already on
+#: disk? Asked by the Clipboard tab before it lets a request be made for the
+#: model the WanGP page is on, so that a model that would start a forty
+#: gigabyte download, or one this WanGP does not define, is said before the
+#: press rather than discovered by the job. Read-only and quick: nothing is
+#: downloaded and nothing is loaded. Additive, so CONTROL_VERSION does not
+#: move; an older bridge answers 404, which Forge reads as "cannot say".
+CONTROL_MODEL = "model"
 CONTROL_OPERATIONS = (CONTROL_HELLO, CONTROL_COMPOSE, CONTROL_SUBMIT, CONTROL_STATUS, CONTROL_CANCEL, CONTROL_FORGET,
-                      CONTROL_HOLD, CONTROL_RESUME, CONTROL_FLUSH)
+                      CONTROL_HOLD, CONTROL_RESUME, CONTROL_FLUSH, CONTROL_MODEL)
 
 #: An execution id is the same grammar as a request id, for the same reason.
 #: It is the ledger key, and the bridge writes it into WanGP's own
@@ -1167,7 +1176,10 @@ def normalize_control_hello(raw: typing.Any) -> dict:
         # one leaves it out, which reads as False here, and ``hold`` reads as
         # "" - "this bridge does not say", never "none". The rest is WanGP's
         # activity as the hold sees it, each None when it cannot be read.
-        "capabilities": {"hold": isinstance(raw.get("capabilities"), dict) and raw["capabilities"].get("hold") is True},
+        # Bridge 1.13.0, the model check: ``capabilities.model`` says the bridge
+        # answers CONTROL_MODEL; an older one leaves it out, which reads False.
+        "capabilities": {"hold": isinstance(raw.get("capabilities"), dict) and raw["capabilities"].get("hold") is True,
+                         "model": isinstance(raw.get("capabilities"), dict) and raw["capabilities"].get("model") is True},
         **_activity(raw),
         "hold": raw.get("hold") if raw.get("hold") in HOLD_STATES else "",
     }
@@ -1349,6 +1361,64 @@ def normalize_hold_answer(raw: typing.Any) -> dict:
         "code": "" if ok else _code_or(raw.get("code"), CONTROL_UNAVAILABLE),
         "message": str(raw.get("message") or "")[:200],
         "detail": str(raw.get("detail") or "")[:200],
+    }
+
+
+# -- is a model set up: the model check (bridge 1.13.0) ----------------------
+#
+# The answer to CONTROL_MODEL is facts, never a verdict: whether WanGP defines
+# the model, the two keys of its definition that say what it is (architecture,
+# and the LTX-2 pipeline a distilled checkpoint declares), and which of the
+# files WanGP would fetch before generating are not on disk - found the way
+# WanGP's own download path finds them, without fetching anything. Which
+# models a caller supports, and what it does about a missing file, is the
+# caller's business: the Clipboard tab blocks its WanGP section.
+
+#: How many missing file names one answer carries. The count is always exact;
+#: the names are for the journal and a bug report, and a model with more
+#: missing than this is "not downloaded" whatever the rest are called.
+MODEL_MISSING_NAMES_MAX = 32
+#: What a file name in an answer may look like: a base name, never a path.
+MODEL_FILE_NAME_RE = re.compile(r"\A[^/\\\x00-\x1f]{1,160}\Z")
+
+
+def normalize_model_request(raw: typing.Any) -> typing.Tuple[dict, str]:
+    """What the model check takes: one WanGP model type, and nothing else."""
+    if not isinstance(raw, dict):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    model_type = raw.get("model_type")
+    if not isinstance(model_type, str) or not MODEL_TYPE_RE.match(model_type):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    return {"model_type": model_type}, ""
+
+
+def normalize_model_facts(raw: typing.Any) -> dict:
+    """The child's facts about one model, as Forge will read them.
+
+    ``checked`` is the one that matters most: True only when the file check
+    ran to its end, so ``missing_count`` 0 with ``checked`` False is "could
+    not tell", never "everything is there".
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    ok = raw.get("ok") is True
+    names = raw.get("missing") if isinstance(raw.get("missing"), (list, tuple)) else []
+    kept = [name for name in names if isinstance(name, str) and MODEL_FILE_NAME_RE.match(name)][:MODEL_MISSING_NAMES_MAX]
+    checked = ok and raw.get("checked") is True
+    count = _whole(raw.get("missing_count")) if checked else 0
+    return {
+        "ok": ok,
+        "model_type": str(raw.get("model_type") or "")[:200],
+        "defined": ok and raw.get("defined") is True,
+        "label": str(raw.get("label") or "")[:120],
+        "architecture": str(raw.get("architecture") or "")[:120],
+        "pipeline": str(raw.get("pipeline") or "")[:40],
+        "checked": checked,
+        "files": _whole(raw.get("files")) if checked else 0,
+        "missing_count": max(count, len(kept)) if checked else 0,
+        "missing": kept if checked else [],
+        "diagnosis": str(raw.get("diagnosis") or "")[:200],
+        "code": "" if ok else _code_or(raw.get("code"), CONTROL_UNAVAILABLE),
+        "message": str(raw.get("message") or "")[:200],
     }
 
 # ------------------------------------------------------------ END SHARED --

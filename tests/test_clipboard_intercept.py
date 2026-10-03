@@ -288,8 +288,13 @@ def describe_checks(r: Results, tab, token: str) -> None:
     outbox.use_executor(outbox.EXECUTOR_SERVER)
     outbox.use_running(lambda: False)
     told = intercept.describe(handoff, None, None)
-    r.check("under the unattended queue Generate is a button even while WanGP is off, and the status says the server starts it",
-            told["generate"]["enabled"] is True and told["wangp"]["state"] == "off" and "starts it" in told["wangp"]["text"], str(told["wangp"]))
+    # Under the gate as it was (this suite's), an unattended press is let
+    # through cold; the status line says only that WanGP is off now, because
+    # since 2026-10-03 the real gate blocks the popup while it is - see
+    # test_clipboard_targets for that half.
+    r.check("under the unattended queue the old gate leaves Generate a button while WanGP is off, and the status says it is off",
+            told["generate"]["enabled"] is True and told["wangp"]["state"] == "off" and told["wangp"]["text"] == "WanGP is not running",
+            str(told["wangp"]))
     outbox.use_running(lambda: True)
     r.check("the frozen picture is described by size and tab, never by path",
             told["image"] == {"width": 64, "height": 48, "tab": "txt2img"} and str(interop.staging_root()) not in json.dumps(told))

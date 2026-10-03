@@ -43,7 +43,7 @@ import types  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from minipaint_neo import events, interop  # noqa: E402
-from minipaint_neo.clipboard import config, enhance, executor, job_inputs, outbox  # noqa: E402
+from minipaint_neo.clipboard import config, enhance, executor, job_inputs, outbox, targets  # noqa: E402
 from minipaint_neo.clipboard import store as clipboard_store  # noqa: E402
 from minipaint_neo.wangp import config as wangp_config  # noqa: E402
 from minipaint_neo.wangp import control, errors, handoff, process_log  # noqa: E402
@@ -189,6 +189,13 @@ def _setup(clock):
     outbox.use_clock(clock)
     outbox.use_executor(outbox.EXECUTOR_SERVER)
     outbox.use_running(lambda: False)
+    # What happens AFTER admission is this suite's subject, cold start
+    # included, and ``outbox.reset_for_tests`` leaves the press gate as it
+    # was before the Clipboard's targets existed. Since 2026-10-03 the
+    # Clipboard's own presses are refused while WanGP is stopped
+    # (``targets``; test_clipboard_targets has the whole of it): a job admitted
+    # here cold is a public-API caller's, or one pressed while WanGP was up.
+    # ``admission_checks`` states the gate itself.
     job_inputs.use_clock(clock)
     executor.reset_for_tests()
     executor.use_clock(clock)
@@ -246,10 +253,10 @@ def _restore(monkey):
 
 
 def admission_checks(r: Results, clock) -> None:
-    """A press with WanGP stopped is admitted. The whole cold case."""
+    """A job past the gate with WanGP stopped is admitted. The whole cold case."""
     _setup(clock)
     job = outbox.submit(_request(), PAGE)
-    r.check("a press while WanGP is stopped is admitted, not refused",
+    r.check("a job the gate let through while WanGP is stopped is admitted, not refused",
             job["state"] == outbox.ADMITTED and job["executor"] == outbox.EXECUTOR_SERVER, job["state"])
     r.check("and it has an execution id before anything external exists",
             len(job["execution_id"]) == 32, job["execution_id"])
@@ -258,7 +265,20 @@ def admission_checks(r: Results, clock) -> None:
     r.check("no page claims it, whichever page asks",
             outbox.claim(PAGE).get("empty") is True, str(outbox.claim(PAGE)))
     r.check("and a press is still refused for the browser path, which has nothing to drive",
-            _refused(lambda: outbox.submit(_request(), PAGE, executor=outbox.EXECUTOR_BROWSER)) == errors.WANGP_NOT_RUNNING)
+            _refused(lambda: outbox.submit(_request(), PAGE, executor=outbox.EXECUTOR_BROWSER,
+                                           origin=outbox.ORIGIN_API)) == errors.WANGP_NOT_RUNNING)
+    # The Clipboard's own gate, as it stands: its presses and the gallery's
+    # are refused while WanGP is stopped, and a public-API caller is not
+    # gated - it is admitted cold, and the server starts WanGP for it.
+    targets.use_readiness(None)
+    r.check("a Clipboard press while WanGP is stopped is refused: its section is blocked",
+            _refused(lambda: outbox.submit(_request(), PAGE)) == errors.WANGP_NOT_RUNNING)
+    r.check("and so is the gallery popup's",
+            _refused(lambda: outbox.submit(_request(), PAGE, origin=outbox.ORIGIN_GALLERY)) == errors.WANGP_NOT_RUNNING)
+    cold = outbox.submit(_request("from another extension"), PAGE, origin=outbox.ORIGIN_API)
+    r.check("while a public-API request is admitted cold, as it always was",
+            cold["state"] == outbox.ADMITTED and cold["executor"] == outbox.EXECUTOR_SERVER, cold["state"])
+    targets.use_readiness(targets.always_ready)
 
 
 def _refused(call) -> str:

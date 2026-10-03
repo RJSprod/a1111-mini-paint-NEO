@@ -173,7 +173,7 @@ progress bar, no settings.
 Protocol 5 adds: a job may be **enhanced** first (`enhance: true`, or the
 tab's switch when the option is absent) - the prompt is rewritten by
 ModelSwitchRefiner's MiniMax H3 writer for the H3 variant the page's model
-is, the job waits as `enhancing` and holds the line behind it, and the
+is, or (since 2026-10-03) by its LTX 2.3 writer for LTX 2.3 Distilled, the job waits as `enhancing` and holds the line behind it, and the
 request is refused rather than queued as typed when that cannot be done;
 the whole line can be cancelled at once; a job composed for one model
 (`model_type` on the wire) is refused with `MODEL_CHANGED` when the page
@@ -190,6 +190,8 @@ Codes a caller can meet: `REQUEST_INVALID`, `PROMPT_TOO_LONG`,
 `ENHANCE_MODEL_UNSUPPORTED`, `ENHANCE_PROMPT_REQUIRED`, `ENHANCE_NO_VISION`,
 `ENHANCE_IMAGE_UNREADABLE`, `ENHANCE_QUEUE_FULL`, `ENHANCE_SYSTEM_PROMPT_EMPTY`,
 `ENHANCE_REFUSED`, `ENHANCE_FAILED`, `ENHANCE_CANCELLED`, `ENHANCE_LOST`,
+`ENHANCE_LTX_UNSUPPORTED`, `TARGET_UNKNOWN`, `TARGET_UNSUPPORTED`, `TARGET_NOT_DEFINED`,
+`TARGET_NOT_DOWNLOADED`, `TARGET_CHECK_UNAVAILABLE` (the Clipboard's own presses only),
 `HANDOFF_*`, `AUTH_BOUNDARY_FAILED`, `INTERNAL_ERROR`. Every one has a
 sentence in `minipaint_neo/wangp/errors.py`.
 
@@ -326,8 +328,12 @@ LEASE_SECONDS = 90.0; PAGE_ACTIVE_SECONDS = 15.0; WAIT_BUSY_MS = 400; WAIT_TURN_
 MAX_JOBS = 500; MAX_PENDING = 200; KEEP_TERMINAL_SECONDS = 7 days; PAGE_RE = 8..32 lowercase hex
 def use_clock(fn); def use_running(fn); def use_watcher(bool); def reset_for_tests()      # seams (tests run without the watcher thread)
 def wangp_running() -> bool                                        # runtime.current().snapshot()["running"], contained
-def submit(request, page, origin="clipboard", require_running=True, enhance=None, model=None) -> Job
-    # normalises through interop; WANGP_NOT_RUNNING; QUEUE_BUSY past MAX_PENDING; enhance None -> enhance.enabled(); True -> enhance.plan + enhance.submit
+def submit(request, page, origin="clipboard", require_running=True, enhance=None, model=None, ..., require_ready=None) -> Job
+    # normalises through interop; QUEUE_BUSY past MAX_PENDING; enhance None -> enhance.enabled(); True -> enhance.plan + enhance.submit
+    # require_ready None means "a Clipboard or gallery origin": targets.require_ready(model), FRESH, refuses with the
+    # readiness view on the IntegrationError (extra["readiness"]) - WANGP_NOT_RUNNING under either executor, TARGET_*;
+    # then targets.narrow(request, target) takes out what that model is not sent (a reference, for LTX 2.3 Distilled),
+    # and the answer names it as "narrowed". An "api" origin is not gated, and keeps WANGP_NOT_RUNNING for a page-run job.
     # BEFORE the job is stored (a refusal stores nothing); the job is then ENHANCING with an enhance record, else PENDING; the model block is kept
 def refresh() -> counts                                            # _sweep: expired leases, then _advance (every ENHANCING job against enhance.status), then pruning
 def claim(page) -> {"job", "lease", "pending"} | {"wait", "reason": "busy"|"turn"|"enhancing", "pending"[, "job_id"]} | {"empty": True, ...}
@@ -455,26 +461,30 @@ asymmetry is deliberate. Recovery registers pins before any sweeper runs.
 ```python
 ENHANCE_NAME = "clipboard-enhance.json"        # {"schema": 1, "enabled": bool, "overrides": {variant: {text|image: str}}}
 API_MODULE = "mc_llm_api"; API_VERSION_SUPPORTED = 1; ORIGIN = "minipaint-clipboard"; CANCEL_REASON
-FL2VA = "fl2va"; REF2VA = "ref2va"; VARIANTS; VARIANT_LABELS; MODEL_KEY = "minimax"
+FL2VA = "fl2va"; REF2VA = "ref2va"; LTX23 = "ltx23"; MINIMAX_VARIANTS; VARIANTS (all three); VARIANT_LABELS; MODEL_KEY = "minimax"; LTX_KIND = "ltx"
 MODE_TEXT = "text"; MODE_IMAGE = "image"; MODES; MODE_LABELS
 SLOT_FIRST = "first_frame"; SLOT_LAST = "last_frame"; SLOT_REFERENCE = "reference"; SLOTS
-SLOTS_FOR = {fl2va: {start: first_frame, end: last_frame}, ref2va: {references: reference}}   # anything not listed is dropped from the enhancement
+SLOTS_FOR = {fl2va: {start: first_frame, end: last_frame}, ref2va: {references: reference}, ltx23: {start: first_frame}}   # anything not listed is dropped from the enhancement
 LLM_QUEUED, LLM_RUNNING, LLM_DONE, LLM_FAILED, LLM_CANCELLED; LLM_STATES; LLM_TERMINAL
 REJECTIONS = {disabled: ENHANCE_UNAVAILABLE, empty_prompt: ENHANCE_PROMPT_REQUIRED, empty_system_prompt: ENHANCE_SYSTEM_PROMPT_EMPTY,
               bad_image: ENHANCE_IMAGE_UNREADABLE, no_vision: ENHANCE_NO_VISION, queue_full: ENHANCE_QUEUE_FULL}   # anything else: ENHANCE_REFUSED
 def use_api(module); def reset_for_tests()                      # seams
 def api() -> module | None            # sys.modules, then the other extension's folder (its imported modules' folders, the host's extension list,
                                       # the host's extension dirs, this extension's parent), imported with the folder APPENDED to sys.path; cached; never raises
-def capabilities() -> {found, available, api_version, enabled, configured, vision, model, variants, max_queued, reason}   # available = enabled and configured
+def capabilities() -> {found, available, api_version, enabled, configured, vision, model, variants, max_queued, reason, ltx}   # available = enabled and configured;
+                                                                 # ltx: the API lists kind "ltx" and has submit_ltx, and then variants ends in "ltx23"
 def variant_for_model(model) -> "fl2va" | "ref2va" | ""          # from type, architecture, family, label; "minimax" required; neither variant -> ""
+def target_for_model(model) -> "fl2va" | "ref2va" | "ltx23" | ""   # targets.classify: the writer a model is written for
 def model_block(raw) -> {type, label, family, architecture}
-def plan(request, model) -> {variant, slots: {slot: handle}, dropped: [field], extra_references, has_image, model}   # ENHANCE_MODEL_UNSUPPORTED, ENHANCE_PROMPT_REQUIRED
+def plan(request, model, target="") -> {variant, slots: {slot: handle}, dropped: [field], extra_references, has_image, model}   # ENHANCE_MODEL_UNSUPPORTED, ENHANCE_PROMPT_REQUIRED;
+                                                                 # target: the press's own fresh reading (targets.require_ready), else target_for_model
 def preflight(planned) -> (code, sentence)       # "" is yes. A READ, not a start: the shipped API brings a cold runtime
                                                 # to readiness as part of running the job, so there is nothing to pre-warm.
                                                 # Four things one "unavailable" used to flatten: ENHANCE_EXTENSION_MISSING,
                                                 # ENHANCE_SWITCHED_OFF (a user's own choice; nothing here turns it back on),
                                                 # ENHANCE_NOT_CONFIGURED, ENHANCE_NO_VISION. A cold runtime is none of them
                                                 # and is not a state at all - it is stage text on a job already running.
+                                                # ENHANCE_LTX_UNSUPPORTED for an LTX plan on an API without the LTX writer.
 def follow(llm_id, timeout=FEED_WAIT_SECONDS) -> {state, stage, position, terminal} | {}
                                                 # the API's own feed. Content-bearing events (FEED_CONTENT_EVENTS) are
                                                 # discarded unread: a re-subscribe replays the whole written prompt. A feed
@@ -488,7 +498,9 @@ def enabled() -> bool; def set_enabled(flag) -> bool               # read from d
 def override(variant, mode) -> str; def set_override(variant, mode, text) -> str; def clear_override(variant, mode) -> bool; def overrides() -> {variant: {mode: bool}}
 def default_prompt(variant, mode) -> str; def effective_prompt(variant, mode) -> (text, "override"|"default"|"unavailable"); def system_prompts() -> dict
 def submit(prompt, planned) -> {llm_id, system_override, variant}   # interop.open_handle for each slot (pictures, never paths); the override for (variant, image|text) when saved;
-                                                                      # mc_llm_api.submit_minimax(prompt, variant=, first_frame=, last_frame=, reference=, system_prompt=, origin=ORIGIN, remember=True)
+                                                                      # mc_llm_api.submit_minimax(prompt, variant=, first_frame=, last_frame=, reference=, system_prompt=, origin=ORIGIN, remember=True);
+                                                                      # for ltx23, mc_llm_api.submit_ltx(prompt, first_frame=, system_prompt=, origin=ORIGIN, remember=True) -
+                                                                      # the first frame only, shown to the model; ENHANCE_LTX_UNSUPPORTED without it
 def status(llm_id) -> {state, stage, position, elapsed, queued_for, image_used, image_ignored, system_override, cancelling, error, reason, prompt} | None
 def cancel(llm_id, reason=CANCEL_REASON) -> dict; def cancel_all(reason=CANCEL_REASON) -> int   # ours only, by origin
 def availability(model=None) -> {state: ready|blocked|model|unknown, text, variant, capabilities}   # the tab's line
@@ -732,6 +744,35 @@ canonical** version — read from the file, not from the index — and
 `private, max-age=3600` for anything else. An unversioned or falsely versioned
 URL must never be blessed immutable.
 
+## `minipaint_neo/clipboard/targets.py` — which WanGP models it sends to, and when
+
+```python
+TARGET_FL2VA = "fl2va"; TARGET_REF2VA = "ref2va"; TARGET_LTX23 = "ltx23"; TARGETS; LABELS; SUPPORTED_SENTENCE
+FIELDS = {fl2va: (start, end, references), ref2va: (start, end, references), ltx23: (start, end)}   # what each is SENT; LTX 2.3 never a reference
+LTX23_ARCHITECTURE = "ltx2_22B"; LTX23_PIPELINE = "distilled"          # WanGP's own keys: architecture, ltx2_pipeline
+CHECK_TTL = 10.0; FAILURE_TTL = 3.0                                     # a screen's read is cached; the press never reads the cache
+def classify(model, facts=None) -> target | ""      # MiniMax the enhancer's way less a TTS model; LTX 2.3 by architecture and the definition's
+                                                    # pipeline (facts), else "distilled" in its names. 2.3 Dev, 2.5, 2.0, EditAnything, MSR: ""
+def fields_for(target) -> (field, ...); def narrow(request, target) -> [field removed]
+def readiness(model=None, *, fresh=False) -> {ready, code, message, target, target_label, model, fields, checked, missing_count, supported}
+    # never raises. WANGP_NOT_RUNNING (the bridge not asked) -> TARGET_UNKNOWN (no model from the page, none in WanGP's last hello)
+    # -> TARGET_CHECK_UNAVAILABLE (control.model refused or silent: a bridge older than 1.13.0, or not answering) -> TARGET_UNSUPPORTED
+    # (named, with the three) -> TARGET_NOT_DEFINED -> TARGET_NOT_DOWNLOADED (with the count) -> ready. A check the bridge could not
+    # finish ("checked" False) is ready with "Its files could not be checked." - never read as a missing file.
+def require_ready(model=None) -> view               # fresh; raises IntegrationError(code, ..., readiness=view)
+def use_readiness(fn | None); def always_ready(model, fresh) -> view; def reset_for_tests(); def forget()
+    # seams: every suite runs under always_ready - the gate as it was before (a page-run job refused while WanGP is stopped,
+    # nothing else) - which outbox.reset_for_tests installs; use_readiness(None) is the real decision.
+```
+
+The block is drawn by the browser from this answer: the composer writes
+`data-wangp-ready` ("1" only when ready) and `data-wangp-target` on
+`#minipaint_clipboard_root`, and `style.css` hides the WanGP line, the cards,
+the prompt, `sp_open`, Add to Queue and +First / +Last / +Ref until it is "1"
+(and the reference card and +Ref for `ltx23`), showing `#minipaint_clipboard_blocked`
+(`ui.BLOCKED_HTML`: one quiet line and Check again) instead. The popup puts
+`minipaint-intercept-is-blocked` on its root from `describe().readiness`.
+
 ## `minipaint_neo/clipboard/` — the tab
 
 ```python
@@ -750,18 +791,22 @@ STATUS_OFF | STATUS_IDLE | STATUS_BUSY | STATUS_RUNNING | STATUS_UNKNOWN
 def handoff_text(token, width, height, tab="") -> "wangp:<token>:<w>x<h>:<tab>"; def parse_handoff(text) -> {token, width, height, tab} | None
 def stage(image, tab="") -> handoff                                          # interop.stage_image(): the staging folder, swept by age; never the library, never the index
 def staged_exists(token) -> bool; def discard(token) -> bool; def preview(token, side=PREVIEW_SIDE) -> (bytes, mime)
-def capabilities(model=None, inputs=None) -> {roles: [{id, label, ...}], default_roles, ...}   # from the page's inputs, else enhance's mapping for the model; one default
+def capabilities(model=None, inputs=None) -> {roles: [{id, label, ...}], default_roles, ...}   # from the page's inputs, else enhance's mapping for the model; one default;
+                                                                             # never a role whose field targets.FIELDS does not send the model (no Reference for LTX 2.3)
 def reconcile_roles(wanted, caps) -> (kept, dropped)                         # the defaults only when nothing valid remains
 def wangp_status() -> {state, running, generating, text}                     # outbox.wangp_running() and control.last_hello(): never a fresh call into the child
-def generate_button() -> {label, enabled}                                    # ClipboardTab._queue_button_view(): one rule for the popup's button and the composer's
+def generate_button(ready=None) -> {label, enabled, reason}                 # ClipboardTab._queue_button_view(): one rule for the popup's button and the composer's;
+                                                                             # never a button while `ready` (targets.readiness) says not ready, its message the reason
 def load_history() -> [entry] (pinned first, newest first); add_history(entry); delete_history(id) -> bool; pin_history(id, pinned) -> entry | None
 def get_history(id) -> entry | None; trim(entries) -> entries                # MAX_UNPINNED oldest-out, MAX_PINNED likewise; pinned never make room for unpinned
 def history_view(model=None, inputs=None) -> [row]; def recipe(entry_id, model=None, inputs=None) -> {prompt, roles, dropped_roles, inherit, enhance, ...}
 def build_request(prompt, roles, token, inherit) -> request                  # history.public_request(draft) with the staged token in every ticked role; inherit=False leaves the composer's cards out
-def describe(handoff, model=None, inputs=None) -> dict; def save_prompt(prompt) -> dict; def cancel(handoff) -> dict
+def describe(handoff, model=None, inputs=None, fresh=False) -> dict           # + readiness: targets.readiness(model, fresh) - the popup is drawn blocked from it
+def save_prompt(prompt) -> dict; def cancel(handoff) -> dict
 def submit(handoff, prompt, roles, inherit, enhance_wanted, page, model=None, inputs=None) -> {ok, instruction, status, notes, roles, dropped_roles, history}
                                                                              # saves the prompt to the draft, repairs the enhance switch, outbox.submit(..., ORIGIN_GALLERY, ...), records the recipe;
-                                                                             # a job the server runs adopts the token at admission, so the popup's cancel afterwards is a no-op
+                                                                             # a job the server runs adopts the token at admission, so the popup's cancel afterwards is a no-op;
+                                                                             # a refusal by the readiness gate answers {ok: false, code, message, notes, readiness}
 
 # store.py
 THUMBNAIL_CACHE_SIZE = 512; THUMBNAIL_DIR_NAME = "clipboard-thumbnails"; THUMBNAIL_DISK_BUDGET = 64 MiB; THUMBNAIL_NAME_RE
@@ -773,7 +818,9 @@ class Store:
 # import_bytes / import_image / rename / delete / set_root / a refresh that found a difference all call moved()
 
 # routes.py
-LIBRARY_ROUTE; SETTINGS_ROUTE; QUEUE_ROUTE; ENHANCE_SETTINGS_ROUTE; OUTPUTS_ROUTE; OUTPUT_FILE_ROUTE; PAGE_SIZE = 60; PAGE_SIZE_MIN = 10; PAGE_SIZE_MAX = 250
+LIBRARY_ROUTE; SETTINGS_ROUTE; QUEUE_ROUTE; READINESS_ROUTE; ENHANCE_SETTINGS_ROUTE; OUTPUTS_ROUTE; OUTPUT_FILE_ROUTE; PAGE_SIZE = 60; PAGE_SIZE_MIN = 10; PAGE_SIZE_MAX = 250
+# READINESS_ROUTE = /minipaint-clipboard/readiness: POST {model, fresh} -> {ok: true, readiness: targets.readiness(...)} - a blocked answer is an answer.
+# The queue route's add, the readiness route and every intercept action run on the thread pool: each may ask the WanGP bridge, over a socket.
 IMMUTABLE_CACHE; REVALIDATED_CACHE; RANGE_CHUNK = 4 MiB
 def library_page(sort, page, size, selected="", refresh=False) -> dict; def apply_settings(changes) -> dict
 def outputs_page(page=0, size=PAGE_SIZE) -> dict                                      # the gallery; syncs the ledger first, joins the prompt on from the history

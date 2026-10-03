@@ -12,7 +12,7 @@ because it was learned the hard way.
 ```
 pip install -r tests/requirements.txt
 python -m playwright install chromium
-python tests/run.py                    # 30 suites; every one must run
+python tests/run.py                    # 34 suites; every one must run
 ```
 
 Gradio is pinned to 4.40.0 because that is what the target Forge ships, and the
@@ -535,7 +535,26 @@ page added to WanGP's queue with nothing overridden - WanGP's own Generate when
 idle, its Add to Queue when busy. It is the queue request with no fields, not
 `enqueue()`, because the outbox composes from WanGP's recorded form and that is
 not what is on screen. `docs/wangp/CONTRACTS.md` has it; renaming it breaks the
-button with nothing said.
+button with nothing said. It is deliberately outside the Clipboard's readiness
+gate (below): the user wants it to press WanGP's Generate on whatever model the
+page is on.
+
+A seventh is shared since 2026-10-03, and it is that extension's rather than
+this one's: **its external LLM API, `mc_llm_api`** (`docs/21-external-llm-api.md`
+there), which `clipboard/enhance.py` imports from its folder. MiniMax H3 presses
+call `submit_minimax`; LTX 2.3 Distilled presses call `submit_ltx` (the first
+frame only, shown to the model) once `capabilities()["kinds"]` lists `"ltx"`, and
+an older ModelSwitchRefiner without it is refused with `ENHANCE_LTX_UNSUPPORTED`
+rather than sent to the MiniMax writer. The enhancement view edits
+`system_prompts()["ltx23"]` beside MiniMax's two.
+
+The Clipboard's own presses - the tab's Add to Queue and the gallery popup's
+Generate - are gated since 2026-10-03 by `clipboard/targets.py`: WanGP running,
+the bridge answering the model check (bridge 1.13.0, `control.model`), the page
+on MiniMax H3 FL2VA, Ref2VA or LTX 2.3 Distilled, and that model defined and
+downloaded. Both screens draw their block from the same answer the press is
+refused with. The public queue API (`origin` `api`) and the ▶ button are not
+gated.
 
 ## The host
 
@@ -574,4 +593,11 @@ four theme files, `ui_styles.css`), never on the user's own install: what the
 eleven `--studio-*` remaps and the fixed-colour overrides look like in a real
 WanGP page, and whether a theme of Lobe's samples nine solid colours, is the
 first thing to look at when it is reported. The page journal's `theme:` line
-says how many of the nine the page gave.
+says how many of the nine the page gave. The model check (bridge 1.13.0,
+`wan2gp_bridge/.../model_check.py`) walks WanGP's download path as read from
+Wan2GP b8b18f8 and has been run against a fake of it, never against the user's
+WanGP: if the Clipboard calls a downloaded model incomplete, the process log's
+`clipboard` line `press refused: TARGET_NOT_DOWNLOADED` and the `missing` names
+in `control.model(<type>)`'s answer are the first things to look at, and an LTX
+2.3 GGUF build is the likeliest to differ (WanGP picks its transformer file by
+the quantization setting).

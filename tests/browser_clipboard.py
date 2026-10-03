@@ -3277,6 +3277,63 @@ def check_hidden_tab_is_not_offered(r: Results, targets) -> None:
             "img2img" in hidden and "inpaint" in hidden, str(sorted(hidden)))
 
 
+def check_the_section_is_blocked_until_wangp_is_ready(r: Results, page) -> None:
+    """The WanGP section exists only while WanGP can take what it makes.
+
+    The readiness answer is the server's (``targets``); this is what the page
+    draws from it on a real page: nothing that sends while it says not ready -
+    no cards, no prompt, no enhancement button, no Add to Queue, no +First,
+    +Last or +Ref - and one quiet line instead; no reference card for LTX 2.3
+    Distilled; and everything back the moment it says ready again.
+    """
+    from minipaint_neo.clipboard import enhance, targets
+
+    open_clipboard(page)
+    wan = {"type": "t2v_2_2", "label": "Wan2.2 Text2Video 14B", "family": "wan", "architecture": "t2v_2_2"}
+    blocked = targets._blocked("TARGET_UNSUPPORTED", enhance.model_block(wan),
+                               message="WanGP is on Wan2.2 Text2Video 14B. This sends only to MiniMax H3 FL2VA, MiniMax H3 Ref2VA or LTX 2.3 Distilled; choose one in the WanGP tab.")
+    shown = """() => {
+        const root = document.getElementById('minipaint_clipboard_root');
+        const visible = (id) => { const e = document.getElementById(id); if (!e) { return null; }
+            const s = getComputedStyle(e); return s.display !== 'none' && s.visibility !== 'hidden' && e.getClientRects().length > 0; };
+        const line = document.querySelector('#minipaint_clipboard_blocked .minipaint-clip-blocked');
+        return { ready: root ? root.dataset.wangpReady : null, target: root ? root.dataset.wangpTarget : null,
+                 cards: visible('minipaint_clipboard_cards'), prompt: visible('minipaint_clipboard_prompt'),
+                 enhance: visible('minipaint_clipboard_sp_open'), queue: visible('minipaint_clipboard_queue'),
+                 first: visible('minipaint_clipboard_to_first'), ref: visible('minipaint_clipboard_to_ref'),
+                 cardFirst: visible('minipaint_clipboard_card_first'), cardRef: visible('minipaint_clipboard_card_ref'),
+                 outbox: visible('minipaint_clipboard_outbox_list'), blocked: visible('minipaint_clipboard_blocked'),
+                 text: line ? line.textContent : '', size: line ? getComputedStyle(line).fontSize : '' }; }"""
+    try:
+        targets.use_readiness(lambda model=None, fresh=False: blocked)
+        page.evaluate("() => window.minipaintClipboard.refreshReadiness(true)")
+        time.sleep(1.0)
+        state = page.evaluate(shown)
+        r.check("blocked: no cards, prompt, enhancement button, Add to Queue or +First / +Ref",
+                state["ready"] == "0" and not any(state[key] for key in ("cards", "prompt", "enhance", "queue", "first", "ref")), str(state))
+        r.check("one quiet line in their place, with the reason and Check again, at a hint's size",
+                state["blocked"] and "Wan2.2 Text2Video 14B" in state["text"] and "Check again" in state["text"]
+                and state["size"] == "12px", str(state))
+        r.check("and the queue - the record of what was sent - stays", state["outbox"] is True, str(state))
+        ltx = {"type": "ltx2_22B_distilled", "label": "LTX-2 2.3 Distilled 1.0 22B", "family": "ltx2", "architecture": "ltx2_22B"}
+        ready = targets._view(True, "", "Ready.", enhance.model_block(ltx), "ltx23", checked=True)
+        targets.use_readiness(lambda model=None, fresh=False: ready)
+        page.locator("#minipaint_clipboard_blocked .minipaint-clip-blocked-check").click()
+        time.sleep(1.0)
+        state = page.evaluate(shown)
+        r.check("Check again asks afresh, and a ready answer brings the section back",
+                state["ready"] == "1" and state["cards"] and state["prompt"] and state["enhance"] and state["queue"]
+                and state["first"] and not state["blocked"], str(state))
+        r.check("for LTX 2.3 Distilled: a first-frame card and no reference card, no +Ref",
+                state["target"] == "ltx23" and state["cardFirst"] and state["cardRef"] is False and state["ref"] is False, str(state))
+    finally:
+        targets.use_readiness(targets.always_ready)
+        page.evaluate("() => window.minipaintClipboard.refreshReadiness(true)")
+        time.sleep(0.8)
+    state = page.evaluate(shown)
+    r.check("and ready for MiniMax, every card is there again", state["ready"] == "1" and state["cardRef"] and state["ref"], str(state))
+
+
 def run() -> Results:
     r = Results("browser clipboard")
     from playwright.sync_api import sync_playwright  # noqa: F401  (ImportError -> run.py skips)
@@ -3300,6 +3357,12 @@ def run() -> Results:
     # serves rather than a subset of it.
     from minipaint_neo import interop as interop_routes
     interop_routes.install(demo.app)
+    # The WanGP section's gate, as it was before targets existed: these checks
+    # are about the tab, and there is no WanGP here. The gate itself has
+    # check_the_section_is_blocked_until_wangp_is_ready, and the whole of its
+    # decision test_clipboard_targets.
+    from minipaint_neo.clipboard import targets as clip_targets
+    clip_targets.use_readiness(clip_targets.always_ready)
     targets = host.destinations()
     try:
         with sync_playwright() as p:
@@ -3317,6 +3380,7 @@ def run() -> Results:
                 check_patching(r, page, library)
                 check_sorting_is_separate_from_drawing(r, page)
                 check_the_failure_modes_have_answers(r, page, library)
+                check_the_section_is_blocked_until_wangp_is_ready(r, page)
                 check_the_queue_section_is_the_browsers(r, page)
                 check_queue_reads_are_one_at_a_time(r, page)
                 check_the_prompt_editor_fills_the_window(r, page)

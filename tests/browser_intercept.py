@@ -370,6 +370,53 @@ def check_escape_queues_nothing(r: Results, page) -> None:
     r.check("and the frozen picture is let go", gone)
 
 
+def check_the_popup_is_blocked_when_the_clipboard_is(r: Results, page) -> None:
+    """The popup is blocked by the same answer as the composer.
+
+    While the Clipboard's readiness says WanGP cannot take a request, the
+    popup draws one quiet line with Check again and nothing to send with -
+    only Cancel - and Check again brings it back once it can.
+    """
+    from minipaint_neo.clipboard import enhance, targets
+
+    wan = {"type": "t2v_2_2", "label": "Wan2.2 Text2Video 14B", "family": "wan", "architecture": "t2v_2_2"}
+    blocked = targets._blocked("TARGET_UNSUPPORTED", enhance.model_block(wan),
+                               message="WanGP is on Wan2.2 Text2Video 14B. This sends only to MiniMax H3 FL2VA, MiniMax H3 Ref2VA or LTX 2.3 Distilled.")
+    looks = """() => {
+        const root = document.querySelector('.minipaint-intercept');
+        const shown = (selector) => { const e = root && root.querySelector(selector); if (!e) { return null; }
+            const s = getComputedStyle(e); return s.display !== 'none' && !e.hidden && e.getClientRects().length > 0; };
+        const line = root && root.querySelector('.minipaint-intercept-blocked-text');
+        return { blocked: !!(root && root.classList.contains('minipaint-intercept-is-blocked')),
+                 prompt: shown('.minipaint-intercept-prompt'), roles: shown('.minipaint-intercept-roles-row'),
+                 enhance: shown('.minipaint-intercept-check'), generate: shown('.minipaint-intercept-generate'),
+                 history: shown('.minipaint-intercept-history-toggle'), cancel: shown('.minipaint-intercept-cancel'),
+                 line: shown('.minipaint-intercept-blocked'), text: line ? line.textContent : '' }; }"""
+    try:
+        targets.use_readiness(lambda model=None, fresh=False: blocked)
+        open_txt2img(page)
+        r.check("the button opens the popup while WanGP is on another model", press_send(page) and wait_popup(page, True), str(popup_state(page)))
+        time.sleep(1.5)
+        state = page.evaluate(looks)
+        r.check("blocked: no prompt, roles, Enhance, Inherit, History or Generate - only Cancel",
+                state["blocked"] and not any(state[key] for key in ("prompt", "roles", "enhance", "generate", "history")) and state["cancel"],
+                str(state))
+        r.check("and one quiet line saying why", state["line"] and "Wan2.2 Text2Video 14B" in state["text"], str(state))
+        page.keyboard.press("Control+Enter")
+        time.sleep(0.8)
+        r.check("Ctrl+Enter sends nothing while it is blocked", popup_shown(page) and (popup_state(page) or {}).get("blocked") is True)
+        targets.use_readiness(targets.always_ready)
+        page.locator(".minipaint-intercept-blocked-check").click()
+        time.sleep(1.5)
+        state = page.evaluate(looks)
+        r.check("Check again, once WanGP is ready, brings the popup's body back",
+                not state["blocked"] and state["prompt"] and state["generate"] and not state["line"], str(state))
+    finally:
+        targets.use_readiness(targets.always_ready)
+        page.keyboard.press("Escape")
+        wait_popup(page, False, 10.0)
+
+
 def check_the_menu_offers_the_destinations(r: Results, page) -> None:
     clip.open_clipboard(page)
     page.evaluate("() => window.minipaintClipboard.toggleMenu()")
@@ -1055,6 +1102,11 @@ def run() -> Results:
     outbox.use_running(lambda: True)
     outbox.use_executor(outbox.EXECUTOR_BROWSER)
     executor.use_thread(False)
+    # The Clipboard's gate as it was before targets existed: there is no
+    # WanGP bridge here to say which model is ready. The gate's own look is
+    # check_the_popup_is_blocked_when_the_clipboard_is.
+    from minipaint_neo.clipboard import targets as clip_targets
+    clip_targets.use_readiness(clip_targets.always_ready)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(executable_path=chromium) if chromium else p.chromium.launch()
@@ -1067,6 +1119,7 @@ def run() -> Results:
                 check_the_button_opens_the_popup(r, page, library)
                 check_generate_queues_and_closes(r, page, library)
                 check_escape_queues_nothing(r, page)
+                check_the_popup_is_blocked_when_the_clipboard_is(r, page)
                 check_the_menu_offers_the_destinations(r, page)
                 check_the_wangp_panel_is_parked_not_hidden(r, page)
                 check_focus_mode_makes_the_frame_the_window(r, page)

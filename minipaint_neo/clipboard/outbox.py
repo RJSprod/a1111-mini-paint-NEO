@@ -420,6 +420,13 @@ def reset_for_tests() -> None:
     # calls ``use_executor(EXECUTOR_SERVER)`` and says so.
     _seams["executor"] = EXECUTOR_BROWSER
     _pages.clear()
+    # The press's readiness gate, to its permissive answer: a suite that is
+    # not about which model WanGP is on still meets WANGP_NOT_RUNNING when it
+    # stops WanGP, and nothing else. The readiness suite asks for the real
+    # decision itself (``targets.use_readiness(None)``).
+    from . import targets
+
+    targets.reset_for_tests()
 
 
 def _now() -> float:
@@ -1132,9 +1139,21 @@ def submit(
     executor: typing.Optional[str] = None,
     settings_flush: str = "",
     inherit: typing.Optional[bool] = None,
+    require_ready: typing.Optional[bool] = None,
 ) -> dict:
     """Append a job. The request is normalised here, so a bad one is refused
     before it is stored.
+
+    ``require_ready`` is the Clipboard's gate (``targets``): None means "for
+    this extension's own screens" - the Clipboard tab and the gallery's
+    popup - whose presses are refused unless the model the WanGP page is on
+    is one of the three they send to and is ready to take a request: WanGP
+    running, its bridge answering, the model defined and downloaded. The
+    check is fresh at the press, whatever the screen last showed, and it is
+    what the screens draw their block from, so the two cannot disagree. A
+    public-API caller is not gated: it chooses its own model. A request for
+    LTX 2.3 Distilled loses any reference here (``targets.narrow``): that
+    model is sent a first and a last frame and nothing else.
 
     ``enhance`` None means the tab's switch decides; True or False is a
     caller's own choice. ``model`` is the WanGP model the pressing page is
@@ -1155,8 +1174,12 @@ def submit(
         a cold WanGP is one of the stages it does: a press while WanGP is
         stopped is therefore **admitted**, not refused, which is exactly the
         case the old rule existed to prevent and the new design exists to
-        serve. Its images are copied into durable objects of its own and
-        pinned at admission, because the handles it was composed from - a
+        serve - for a caller that is not gated. The Clipboard's and the
+        gallery's own presses are, above, and a stopped WanGP fails that
+        gate; their jobs still get the cold start when WanGP stops between
+        the press and the run. Its images are copied into durable objects
+        of its own and pinned at admission, because the handles it was
+        composed from - a
         staging token, an asset the user may rename - belong to somebody
         else's lifetime and this job may outlive both.
 
@@ -1175,12 +1198,22 @@ def submit(
         origin = ORIGIN_API
     who = executor if executor in EXECUTORS else chosen_executor()
     server = who == EXECUTOR_SERVER
-    if require_running and not server and not wangp_running():
+    gated = origin in (ORIGIN_CLIPBOARD, ORIGIN_GALLERY) if require_ready is None else bool(require_ready)
+    ready: typing.Optional[dict] = None
+    narrowed: typing.List[str] = []
+    if gated:
+        from . import targets
+
+        ready = targets.require_ready(model)
+        narrowed = targets.narrow(normalised, ready.get("target", ""))
+    elif require_running and not server and not wangp_running():
         raise IntegrationError(errors.WANGP_NOT_RUNNING, "the managed WanGP is not serving")
     enhancer = _enhancer()
     wanted = enhancer.enabled() if enhance is None else bool(enhance)
     block = _model(model)
-    planned = enhancer.plan(normalised, block) if wanted else None
+    if ready is not None and not block.get("type") and (ready.get("model") or {}).get("type"):
+        block = _model(ready["model"])
+    planned = enhancer.plan(normalised, block, (ready or {}).get("target", "")) if wanted else None
     # The pictures, before the lock and before the document: resolving a
     # handle can read a file and decode an image, and the outbox lock is not
     # something to hold while that happens. A pin written for a job that then
@@ -1190,7 +1223,7 @@ def submit(
     if server:
         owned = _adopt_inputs(normalised)
     try:
-        return _store(
+        answer = _store(
             normalised, page_id, origin, who, block, wanted, planned, owned, enhancer,
             settings_flush if settings_flush in protocol.FLUSH_OUTCOMES else "",
             inherit_settings() if inherit is None else bool(inherit),
@@ -1199,6 +1232,13 @@ def submit(
         if owned:
             _release_inputs(_flatten_inputs(owned))
         raise
+    if narrowed:
+        # Said to the screen that pressed, once; the job itself simply never
+        # had the field, which is the whole of what "not sent" means.
+        answer["narrowed"] = list(narrowed)
+        _journal(f"job {answer['job_id'][:8]}: {', '.join(narrowed)} not sent - "
+                 f"{(ready or {}).get('target_label') or 'this model'} takes no such input")
+    return answer
 
 
 def _flatten_inputs(inputs: typing.Mapping[str, typing.Any]) -> typing.List[str]:

@@ -469,12 +469,26 @@ to Queue**. It is the first client of a **public browser API** any extension may
 
 **The rule.** A request is an overlay on the live WanGP page. A card left at *Use WanGP* and
 an empty prompt mean *whatever the WanGP page has right now*; a filled card or a typed
-prompt overrides the page for that one queued task and is put back afterwards. So the
-button is a button whenever WanGP is running: an empty composer asks WanGP to run the page
-exactly as it is, a card put back with its × changes nothing on the WanGP page, and a
-picture the current model cannot use is kept, badged *Not used by current model*, sent, and
-reported as ignored rather than refused. While WanGP is not running the button says so and
-is off, and a press is refused rather than stored.
+prompt overrides the page for that one queued task and is put back afterwards. So an empty
+composer asks WanGP to run the page exactly as it is, a card put back with its × changes
+nothing on the WanGP page, and a picture a MiniMax model cannot use is kept, badged *Not
+used by current model*, sent, and reported as ignored rather than refused.
+
+**Three models, and only when WanGP is ready for them.** The composer sends to **MiniMax H3
+FL2VA**, **MiniMax H3 Ref2VA** and **LTX 2.3 Distilled** (WanGP's `ltx2_22B` on its distilled
+pipeline, the GGUF builds included) - to LTX a first and a last frame and never a reference:
+no Reference card, no +Ref, and an inherited one is taken out of the request. Not LTX 2.3
+Dev, not 2.5, nothing else in WanGP. The WanGP section - the cards, the prompt, the
+enhancement button, Add to Queue and the toolbar's +First / +Last / +Ref - is simply not
+there until WanGP is running, its bridge answers, its page is on one of the three, and that
+WanGP defines the model and already has every file it would fetch before generating (so a
+press never starts a download). One quiet line says which of those is missing, with **Check
+again** beside it. It is asked when the tab opens (which is when a model chosen in the WanGP
+tab shows here), after a job this page ran ends and on Check again - never on a timer - and
+every press is asked again on the server, fresh, so a refused press stores nothing. The queue, Cancel everything and View
+Outputs stay. A file check WanGP could not finish is said (*Its files could not be
+checked.*) rather than read as a missing file. The public API (below) is not gated: another
+extension chooses its own model.
 
 **Press as often as you like.** Every press is a job in a queue the **server** owns, kept
 beside the draft and the history, so a refresh, a closed tab or a second browser loses
@@ -497,15 +511,19 @@ asking the bridge where its task is and the card says so: *In WanGP's queue, 2 a
 it*, *WanGP is generating it*, *Left WanGP's queue*.
 
 **Enhanced prompts** (off by default). With the *SD-Neo-ModelSwitchRefiner* extension
-installed and its LLM Studio set up, the enhancement switch sends the typed prompt - and the
-pictures the model reads - to its MiniMax H3 writer first, for whichever H3 model
-(FL2VA or Ref2VA) the WanGP page is on, and WanGP gets the written prompt. The job waits in
-the Queue as *Enhancing* with the writer's own progress, and goes to WanGP in press order
-once its prompt exists; a page on any other model is refused, not enhanced. One button under
-the prompt opens a view that fills the window and holds the switch and the four system
-prompts the writer runs under (each variant, with and without a picture), opened on the pair
-the next press would use; it takes an override that is kept across sessions, and restores
-the default.
+installed and its LLM Studio set up, the enhancement switch sends the typed prompt to one of
+its writers first, and WanGP gets the written prompt: the **MiniMax H3** writer, with the
+pictures the model reads, for whichever H3 model (FL2VA or Ref2VA) the WanGP page is on; or
+the **LTX 2.3** writer, which is shown the first frame itself (the language model's vision,
+not a caption) and nothing else, and turns whatever was typed - a line, a list, a shot plan -
+into one paragraph in the shape Lightricks' prompting guide asks for, without adding a
+style, a camera move or a mood nobody asked for. ModelSwitchRefiner keeps each LTX prompt it
+writes in Prompt Studio's history as a **[No settings]** entry. The job waits in the Queue as
+*Enhancing* with the writer's own progress, and goes to WanGP in press order once its prompt
+exists. One button under the prompt opens a view that fills the window and holds the switch
+and the six system prompts the writers run under (FL2VA, Ref2VA and LTX 2.3, each with and
+without a picture), opened on the pair the next press would use; it takes an override that
+is kept across sessions, and restores the default.
 **Cancel everything** empties the whole line - the writer's requests and the pending jobs -
 in one press; jobs already being sent finish, and nothing in WanGP's own queue is touched.
 
@@ -570,9 +588,12 @@ passed through to the Canvas with the reason when Clipboard cannot take it — o
 **Send to WanGP from the gallery.** With that third option ticked, the 🖌️ button freezes
 the result under an opaque token (never in the library) and opens a compact popup over
 the gallery: the composer's prompt and its *Enhanced prompts* switch, the image roles the
-WanGP page's model reads (first frame, last frame, reference, several at once), *Inherit
-Clipboard inputs* for everything the popup does not override, a dot saying whether WanGP
-is idle, generating or not running, and Generate. The press itself is finished by the
+WanGP page's model reads (first frame, last frame, reference, several at once - for LTX 2.3
+a first and a last frame, never a reference), *Inherit Clipboard inputs* for everything the
+popup does not override, a dot saying whether WanGP is idle, generating or not running, and
+Generate. It is blocked by the same answer as the Clipboard's section: until WanGP is ready
+for its page's model, the popup holds the same quiet line and Check again where the prompt,
+the roles, the history and Generate would be. The press itself is finished by the
 page, the way the Clipboard tab's own sends are: no Gradio event, no queue, the picture
 fetched from the host and frozen over the staging route. The request goes down the
 composer's own path into the same server-owned queue, marked *from the gallery*, and the
@@ -602,25 +623,28 @@ fields inherit, `start` defaults to `"auto"` (`"never"` stages only), the reques
 same server-owned queue as the tab's presses, ids are never paths, and the answer is
 `started`, `queued`, `refused` (with a code) or `unconfirmed`. `docs/clipboard/README.md`
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
-API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 rewrite (the page's model
-travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
-and its place in WanGP. Bridge plugin 1.12.0 carries the queue, start and track operations
+API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 or LTX 2.3 rewrite (the page's
+model travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
+and its place in WanGP. Bridge plugin 1.13.0 carries the queue, start and track operations
 (protocol 5) and the control plane server-owned execution runs on (protocol 6), answers the
 WanGP tab's heartbeat and says when its form is touched, guards the page's Gradio session
 (below), dresses the WanGP page in the colours this page sends (above), refuses
 a request composed for a model the page has since left (`MODEL_CHANGED`), and holds WanGP
 between two tasks when SD-Neo-ModelSwitchRefiner borrows its card (the card lease: the task
 running finishes, the next waits, and Clipboard jobs wait with it until the card is given
-back - `docs/wangp/README.md`, *Sharing the machine*), so WanGP's bridge
-must be updated and WanGP restarted; a build lacking one of the six queue components keeps
-the image send and refuses the queue with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking
-the generate trigger queues but never starts.
+back - `docs/wangp/README.md`, *Sharing the machine*), and answers whether a model is set up
+(defined, and its files on disk) without downloading anything - the check the Clipboard's
+WanGP section is blocked on - so WanGP's bridge must be updated and WanGP restarted; a
+build lacking one of the six queue components keeps the image send and refuses the queue
+with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking the generate trigger queues but never
+starts.
 
 **Press it and walk away.** With *WanGP queue: run queued jobs on the server* on — which is
-the default — Forge runs the job itself. It starts WanGP if it is cold, waits if you are
-generating in the WanGP tab (and says so, and never interrupts you), writes the enhanced
-prompt if you asked for one, submits into WanGP's own queue and follows the generation to a
-file. The browser may be hidden, frozen, closed or on a phone that has gone to sleep; come
+the default — Forge runs the job itself. It starts WanGP again if it has stopped since the
+press (a press here needs it running; a public-API job may find it cold from the start),
+waits if you are generating in the WanGP tab (and says so, and never interrupts you), writes
+the enhanced prompt if you asked for one, submits into WanGP's own queue and follows the
+generation to a file. The browser may be hidden, frozen, closed or on a phone that has gone to sleep; come
 back on any device and one sync shows you where it got to. Three things worth knowing: the
 job **is** in the WanGP tab's queue and can be cancelled there; it may wait for the card
 because of your own work; and on Windows a Forge crash loses a generation that was in flight,

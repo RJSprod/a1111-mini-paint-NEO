@@ -42,6 +42,9 @@ SEND_ROUTE = ROUTE_PREFIX + "/send"
 LIBRARY_ROUTE = ROUTE_PREFIX + "/library"
 SETTINGS_ROUTE = ROUTE_PREFIX + "/settings"
 QUEUE_ROUTE = ROUTE_PREFIX + "/queue"
+#: Whether the WanGP section may be used: the model the page is on, checked
+#: against the three the Clipboard sends to (``targets.readiness``).
+READINESS_ROUTE = ROUTE_PREFIX + "/readiness"
 ENHANCE_SETTINGS_ROUTE = ROUTE_PREFIX + "/enhance-settings"
 OUTPUTS_ROUTE = ROUTE_PREFIX + "/outputs"
 OUTPUT_FILE_ROUTE = ROUTE_PREFIX + "/output/{file_id}"
@@ -415,9 +418,16 @@ async def _queue(request: typing.Any) -> typing.Any:
     page = body.get("page") or ""
     try:
         if action == "add":
-            answer = tab.add_to_queue(body.get("prompt") or "", page, body.get("model"),
-                                      body.get("enhance") if isinstance(body.get("enhance"), bool) else None,
-                                      settings_flush=body.get("settings_flush"))
+            # Off the event loop: a press asks the WanGP bridge, over a
+            # socket, whether the model is ready (``targets.require_ready``),
+            # and a blocking read in a coroutine would stall every other
+            # request this Forge is serving for as long as it took.
+            from starlette.concurrency import run_in_threadpool
+
+            answer = await run_in_threadpool(
+                tab.add_to_queue, body.get("prompt") or "", page, body.get("model"),
+                body.get("enhance") if isinstance(body.get("enhance"), bool) else None,
+                settings_flush=body.get("settings_flush"))
         elif action == "cancel_all":
             answer = tab.cancel_all(page)
         elif action in ("cancel", "retry", "adopt", "dismiss"):
@@ -671,6 +681,36 @@ async def _enhance_settings(request: typing.Any) -> typing.Any:
     return _json({"ok": False, "code": errors.REQUEST_INVALID, "message": f"{action or 'that'} is not a settings action."}, 400)
 
 
+async def _readiness(request: typing.Any) -> typing.Any:
+    """Whether the WanGP section may be used, for the model the page is on.
+
+    POST ``{model, fresh}``; answers ``{ok, readiness}`` with the view both
+    the composer and the popup draw themselves from (``targets.readiness``).
+    ``fresh`` is Check again's: it skips the few seconds a check is cached
+    for. Never refused for being blocked - a blocked answer is an answer.
+    """
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    model = body.get("model") if isinstance(body.get("model"), dict) else None
+    from starlette.concurrency import run_in_threadpool
+
+    from . import targets
+
+    try:
+        # Off the event loop, for the reason the press is: the check is a
+        # socket read into the WanGP child.
+        view = await run_in_threadpool(targets.readiness, model, fresh=body.get("fresh") is True)
+    except Exception as error:
+        scrub.console(f"readiness could not be read ({type(error).__name__}).", _LOG_PREFIX)
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    return _json({"ok": True, "readiness": view})
+
+
 def _refused_here(error: IntegrationError) -> typing.Any:
     return _json(dict(error.as_dict(), status=errors.message(error.code)), 400)
 
@@ -700,7 +740,7 @@ def intercept_action(body: typing.Mapping[str, typing.Any]) -> typing.Tuple[dict
     inputs = body.get("inputs") if isinstance(body.get("inputs"), dict) else None
     try:
         if action == "describe":
-            answer = intercept.describe(body.get("handoff"), model, inputs)
+            answer = intercept.describe(body.get("handoff"), model, inputs, fresh=body.get("fresh") is True)
         elif action == "submit":
             answer = intercept.submit(
                 body.get("handoff"), body.get("prompt") or "", body.get("roles"), body.get("inherit"),
@@ -741,8 +781,12 @@ async def _intercept(request: typing.Any) -> typing.Any:
         body = await request.json()
     except Exception:
         body = {}
+    from starlette.concurrency import run_in_threadpool
+
     try:
-        answer, status = intercept_action(body)
+        # Off the event loop: describe and submit ask the WanGP bridge whether
+        # the model is ready, over a socket.
+        answer, status = await run_in_threadpool(intercept_action, body)
     except Exception as error:
         scrub.console(f"a Send to WanGP action failed ({type(error).__name__}).", _LOG_PREFIX)
         return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
@@ -895,6 +939,7 @@ def install(app: typing.Any) -> None:
             Route(LIBRARY_ROUTE, endpoint=_library, methods=["GET"]),
             Route(SETTINGS_ROUTE, endpoint=_settings, methods=["POST"]),
             Route(QUEUE_ROUTE, endpoint=_queue, methods=["GET", "POST"]),
+            Route(READINESS_ROUTE, endpoint=_readiness, methods=["POST"]),
             Route(ENHANCE_SETTINGS_ROUTE, endpoint=_enhance_settings, methods=["GET", "POST"]),
             Route(OUTPUTS_ROUTE, endpoint=_outputs, methods=["GET"]),
             Route(OUTPUT_FILE_ROUTE, endpoint=_output_file, methods=["GET", "HEAD"]),
@@ -921,6 +966,6 @@ def install(app: typing.Any) -> None:
 __all__ = ["IMAGE_ROUTE", "IMMUTABLE_CACHE", "IMPORT_ROUTE", "INTERCEPT_ACTIONS", "INTERCEPT_IMAGE_ROUTE",
            "INTERCEPT_ROUTE", "INTERCEPT_SENTENCES", "LIBRARY_ROUTE", "PAGE_SIZE",
            "PAGE_SIZE_MAX", "PAGE_SIZE_MIN", "REVALIDATED_CACHE", "ROUTE_PREFIX",
-           "SEND_ROUTE", "SETTINGS_ROUTE", "QUEUE_ROUTE", "ENHANCE_SETTINGS_ROUTE", "REQUEST_MEMORY_SECONDS",
+           "SEND_ROUTE", "SETTINGS_ROUTE", "QUEUE_ROUTE", "READINESS_ROUTE", "ENHANCE_SETTINGS_ROUTE", "REQUEST_MEMORY_SECONDS",
            "apply_settings", "clamp_size", "forget_request", "image_url", "install", "intercept_action", "library_page",
            "menu_facts", "page_of", "recent_request", "remember_request"]

@@ -64,6 +64,50 @@ the loaded model. A caller that wants staging only says `start: "never"`.
 Nothing is aborted and no progress is watched. WanGP's own validation decides whether a
 task is taken, and WanGP's own queue and status show what it is doing.
 
+## Which WanGP models it sends to, and when it will not
+
+Since 2026-10-03 the composer and the gallery's Send to WanGP popup send to **three**
+WanGP models, and only while WanGP can take what they make:
+
+| WanGP model | sent | not sent |
+| --- | --- | --- |
+| **MiniMax H3 FL2VA** (`minimax_h3_fl2va`, and its pruned, PDD and VDN builds) | first frame, last frame (a reference card is kept and badged *Not used by current model*, as before) | |
+| **MiniMax H3 Ref2VA** (`minimax_h3_ref2va`, and its pruned and PDD builds) | references (frame cards kept and badged, as before) | |
+| **LTX 2.3 Distilled** (WanGP's `ltx2_22B` on its distilled pipeline: `ltx2_22B_distilled`, `_distilled_1_1`, the GGUF builds of both, and a finetune that declares the same) | first frame, last frame | **a reference, ever**: no reference card, no +Ref, and an inherited one is taken out of the request |
+
+LTX 2.3 Dev, LTX 2.5, LTX 2.0 and the EditAnything and MSR workflows on 2.3 are other models,
+and so is everything else in WanGP.
+
+**The WanGP section is blocked until WanGP is ready.** Ready means all four of:
+
+1. WanGP is running (the tab no longer starts a stopped WanGP for a press);
+2. its bridge answers (bridge **1.13.0**, which can say whether a model is set up);
+3. the WanGP page is on one of the three models above;
+4. this WanGP defines that model and **has every file it would fetch before generating** - so a
+   press can never start a forty-gigabyte download.
+
+Until then the cards, the prompt, the ⤢ enhancement button, Add to Queue and the toolbar's
++First / +Last / +Ref are not there, and one quiet line says why - *WanGP is not running…*,
+*WanGP is on Wan2.2 Text2Video 14B. This sends only to MiniMax H3 FL2VA, MiniMax H3 Ref2VA or
+LTX 2.3 Distilled…*, *LTX-2 2.3 Distilled 1.0 22B is not downloaded yet (3 files missing).
+Generate with it once in the WanGP tab so WanGP fetches them.* - with **Check again** beside it.
+The queue, Cancel everything and View Outputs stay: they are the record of what was sent. The
+popup is blocked the same way (below).
+
+It is asked when the tab is opened (which is when a model chosen in the WanGP tab shows here),
+when the page learns which model WanGP is on, after a job this page ran ends and on Check
+again - never on a timer - and every press is checked again on the server,
+fresh, whatever the page last drew: a model deleted a moment ago is refused at the press with
+the same sentence, and nothing is stored. A check WanGP's bridge could not finish (a WanGP
+whose internals moved) is said - *Its files could not be checked.* - and is not read as a
+missing file. A request from another extension through the public queue API is not gated: it
+chooses its own model.
+
+How the files are found is WanGP's own download path walked without downloading: the
+transformer file its quantization setting picks, the modules, preload and VAE files, the
+definition's LoRAs, the handler's own files and the text encoder in its folder
+(`wan2gp_bridge/.../model_check.py`). `TARGET_*` in `errors.py` are the codes.
+
 ## Setting it up
 
 Open the tab. Until a folder is chosen the grid says so and the folder panel is open:
@@ -146,11 +190,11 @@ text-only model and a first frame, say) is **kept** and badged *Not used by curr
 the request is still sent and WanGP is told to ignore that field. That is reported, not
 refused.
 
-**Add to Queue** is a button while the WanGP this extension manages is running. While it is
-not, the button reads *WanGP is not running* and is off, and a press that reaches the
-server anyway is refused with `WANGP_NOT_RUNNING` rather than stored — nothing is queued
-for a process that may never come. Open the WanGP tab, let it start, and the button comes
-back on the next refresh.
+**Add to Queue** is there while WanGP is ready for the model its page is on (see *Which WanGP
+models it sends to* above). While WanGP is not running the whole section is blocked with that
+sentence, and a press that reaches the server anyway is refused with `WANGP_NOT_RUNNING`
+rather than stored — nothing is queued for a process that may never come. Open the WanGP
+tab, let it start, and press Check again.
 
 A press does this, in order:
 
@@ -185,6 +229,20 @@ A press does this, in order:
 
 ## Enhanced prompts (ModelSwitchRefiner)
 
+*Two writers since 2026-10-03.* For MiniMax H3 the writer is ModelSwitchRefiner's MiniMax H3
+enhancer, as below. For **LTX 2.3 Distilled** it is ModelSwitchRefiner's **LTX 2.3 writer**
+(`mc_llm_api.submit_ltx`): instructions written from Lightricks' own LTX prompt enhancer
+without its biases (no style, camera move, mood or look of the writer's own; structured notes
+turned into LTX's single chronological paragraph with nothing dropped; the soundtrack woven
+in), the **first frame shown to the language model itself** - a vision request, not a caption
+first - and nothing else: the last frame goes to WanGP and is left out of the enhancement,
+and there is no reference. The written prompt is one line, because WanGP reads an LTX prompt
+one line per prompt. ModelSwitchRefiner files it in **LLM Studio → Prompt Studio → Saved
+generations** as a **[No settings]** entry. Its two instruction sets (with a first frame,
+without one) are in the same view as MiniMax's four, under *LTX 2.3 Distilled (first frame)*,
+and are overridden the same way. A ModelSwitchRefiner without the writer refuses an LTX press
+with `ENHANCE_LTX_UNSUPPORTED` rather than sending it to MiniMax.
+
 Under the prompt box, one button: **⤢ Prompt enhancement and system prompts**. It opens a
 view that fills the window; the panel has no shape on the tab itself, so the composer stays
 the composer, and everything this section describes lives in that view - the switch, the
@@ -195,8 +253,8 @@ says which of them is not: the *SD-Neo-ModelSwitchRefiner* extension is installe
 (its external LLM API, `mc_llm_api`, is imported straight from that extension's folder -
 there is no URL, port or token to configure), its **LLM Studio** is switched on with a
 language model set up, and the WanGP page is on a **MiniMax H3** model - `minimax_h3_fl2va`
-or `minimax_h3_ref2va`, or a finetune of one. The line follows the WanGP tab: switch the
-model there and it changes here.
+or `minimax_h3_ref2va`, or a finetune of one - or on **LTX 2.3 Distilled**. The line follows
+the WanGP tab: switch the model there and it changes here.
 
 **What a press does with the switch on.** The prompt you typed - it is required; the WanGP
 page's own prompt is WanGP's and is not read from here - goes to LLM Studio's MiniMax H3
@@ -215,12 +273,13 @@ the job; the card and the status line say what was left out.
 | --- | --- | --- |
 | FL2VA (`minimax_h3_fl2va`) | the **First Frame** (the Last Frame is sent too; the writer says which one it described) | the Reference |
 | Ref2VA (`minimax_h3_ref2va`) | the first **Reference** | the First and Last Frame (and any further reference) |
+| LTX 2.3 Distilled | the **First Frame**, shown to the model | the Last Frame (still sent to WanGP); a reference is never sent at all |
 
 A picture at all needs a language model that can see; one that cannot refuses the press
 (`ENHANCE_NO_VISION`), and the line says so beforehand.
 
-**The system prompt.** The writer runs under one of four instruction sets - each variant,
-with and without a picture - and the view shows them: pick the variant and *Instructions
+**The system prompt.** The writer runs under one of six instruction sets - each variant
+(FL2VA, Ref2VA, LTX 2.3 Distilled), with and without a picture - and the view shows them: pick the variant and *Instructions
 used*, and the box holds the text with its provenance under it (*Default, as
 ModelSwitchRefiner ships it* or *Override saved*). **Opening the view picks the pair the next
 press would use**: the variant of whichever H3 model the WanGP page is on, and the picture
@@ -411,7 +470,7 @@ What the popup shows, top to bottom:
 * **Roles** — where the picture goes in the request: *First frame*, *Last frame*,
   *Reference*, several at once. Only the roles the page's current model reads are offered
   (from the page's live inputs, or the enhancer's mapping for the model when the page has
-  not said), and one is ticked by default. What was ticked is checked again at Generate,
+  not said) - and never *Reference* for LTX 2.3 Distilled - and one is ticked by default. What was ticked is checked again at Generate,
   so a request whose picture has nowhere left to go is refused
   (`INTERCEPT_NO_IMAGE_ROLE`) rather than sent without it.
 * **Inherit Clipboard inputs** — on by default. On, the composer's own cards fill every
@@ -421,6 +480,13 @@ What the popup shows, top to bottom:
   *Add to Queue* rule, so it is a button exactly when a press there would be and greyed
   with the reason otherwise; a refused press stores nothing.
 * **Cancel** and **Generate**. Escape cancels; Ctrl+Enter generates.
+
+**Blocked when the Clipboard is.** The popup asks the same readiness question as the composer
+(WanGP running, its bridge answering, the page on MiniMax H3 FL2VA, Ref2VA or LTX 2.3
+Distilled, defined and downloaded). Until it is ready the popup shows one quiet line with the
+reason and **Check again**, and nothing to send with - no prompt, Enhance, roles, Inherit,
+History or Generate; Cancel still lets the frozen picture go, and Ctrl+Enter only asks again.
+A Generate refused for the same reason redraws the popup that way from the refusal itself.
 
 Generate builds the request through the composer's own path (the draft, the public
 request, the outbox), so the job appears in **the Queue** like any other press, marked
@@ -907,8 +973,8 @@ library is `minipaint_neo.clipboard.store.store()`.
   Clipboard tab, the pump or the tracking loop.
 * **ModelSwitchRefiner's API is written to its document, not yet run against it.** The
   enhancer follows `docs/21-external-llm-api.md` of that repository (`submit_minimax`,
-  `status`, `cancel`, `cancel_all` by origin, `capabilities`, the four system prompts) and
-  is exercised here against a fake shaped like it; the H3 model types it recognises
+  `submit_ltx`, `status`, `cancel`, `cancel_all` by origin, `capabilities` and its `kinds`,
+  the six system prompts) and is exercised here against a fake shaped like it; the H3 model types it recognises
   (`minimax_h3_fl2va`, `minimax_h3_ref2va`, or a finetune whose architecture names one) are
   the names that extension itself documents. `docs/wangp/PHASE0.md` Part 6 has the checks.
 * **Tracking is the page's.** Only the page that queued a job can ask WanGP where its task

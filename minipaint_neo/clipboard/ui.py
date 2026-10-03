@@ -23,14 +23,23 @@ WanGP is not running the button says so and is off.
 
 Prompt enhancement sits under the prompt, off by default. Switched on, a
 press first hands the typed prompt - and the pictures the model reads - to
-ModelSwitchRefiner's MiniMax H3 writer, for the H3 variant the WanGP page
-is on; the job waits in the queue as *enhancing* and goes to WanGP, in
-press order, once the prompt is written. The same panel shows and edits the
-four system prompts the writer uses (with and without a picture, for each
-variant): the default is read from the other extension, an override is
+ModelSwitchRefiner's writer for the model the WanGP page is on: MiniMax
+H3's, in its FL2VA or Ref2VA variant, or the LTX 2.3 writer, which is shown
+the first frame; the job waits in the queue as *enhancing* and goes to
+WanGP, in press order, once the prompt is written. The same panel shows and
+edits the six system prompts the writers use (with and without a picture,
+for each): the default is read from the other extension, an override is
 kept on disk across sessions, and Restore default forgets it. Each job in
 the list says where its enhancement is and, once WanGP has it, where its
 task is in WanGP's queue; Cancel everything empties the line at once.
+
+The composer only exists while WanGP can take what it makes. It sends to
+three models - MiniMax H3 FL2VA, MiniMax H3 Ref2VA and LTX 2.3 Distilled -
+and while WanGP is not running, its bridge is not answering, or the page
+is on any other model or one that is not downloaded, the cards, the
+prompt, the enhancement button and Add to Queue are not there: one quiet
+line says why, with Check again beside it (``targets``). LTX 2.3 Distilled
+is offered a first and a last frame and no reference.
 
 The tab is built once, inside the same guard the WanGP tab uses, and a tab
 that cannot be built is a tab that says so under the same label and id.
@@ -214,6 +223,15 @@ SP_VARIANT_CHOICES = [(enhance.VARIANT_LABELS[variant], variant) for variant in 
 SP_MODE_CHOICES = [(enhance.MODE_LABELS[mode], mode) for mode in enhance.MODES]
 QUEUE_BUTTON_LABEL = "Add to Queue"
 QUEUE_BUTTON_BLOCKED = "WanGP is not running"
+#: The composer's quiet line while its WanGP section is blocked: what the
+#: server renders before the page has asked, and what the page rewrites with
+#: the readiness answer's own sentence. No "x" anywhere in it - the Lobe
+#: theme replaces a span holding one with an icon - and nothing loud: a
+#: muted line, and a plain text button to look again.
+BLOCKED_CHECKING = "Checking whether WanGP is ready…"
+BLOCKED_HTML = ('<div class="minipaint-clip-blocked" data-code="checking" role="status">'
+                f'<span class="minipaint-clip-blocked-text">{BLOCKED_CHECKING}</span> '
+                '<button type="button" class="minipaint-clip-blocked-check">Check again</button></div>')
 #: The page id a press carries when no browser script supplied one. Jobs
 #: under it are shown as waiting for a page that never pumps, with "Run
 #: from this page" offered.
@@ -1202,12 +1220,20 @@ class ClipboardTab:
                                 settings_flush=str(settings_flush or ""))
         except IntegrationError as error:
             self._journal(f"queue clicked; refused - {error.code}")
+            view = error.extra.get("readiness") if isinstance(error.extra.get("readiness"), dict) else None
             notes = ["nothing was stored; press it again once WanGP is running"] if error.code == errors.WANGP_NOT_RUNNING else []
             if error.code.startswith("ENHANCE_"):
                 notes.append("nothing was stored; switch enhanced prompts off to queue the prompt as typed")
-            return {"ok": False, "code": error.code, "instruction": None,
-                    "status": _status(errors.message(error.code), notes),
-                    "jobs": self._outbox_view(page_id), "queue_button": self._queue_button_view()}
+            elif view is not None and error.code != errors.WANGP_NOT_RUNNING:
+                notes.append("nothing was stored")
+            refused = {"ok": False, "code": error.code, "instruction": None,
+                       "status": _status((view or {}).get("message") or errors.message(error.code), notes),
+                       "jobs": self._outbox_view(page_id), "queue_button": self._queue_button_view()}
+            if view is not None:
+                # The press's own fresh answer, so the page redraws itself
+                # blocked from it without asking again.
+                refused["readiness"] = view
+            return refused
         pending = outbox.pending_count()
         record = job.get("enhance") or {}
         self._journal(f"queue clicked: job {job['job_id'][:8]} (overrides {', '.join(history.draft_overrides(draft)) or 'none'}"
@@ -1219,6 +1245,9 @@ class ClipboardTab:
             # difference matters to whoever is about to walk away: the job
             # runs, but only while this page is open.
             notes.append("this WanGP cannot run queued jobs on its own, so this one runs from this page - keep the tab open")
+        if job.get("narrowed"):
+            notes.append(", ".join(FIELD_LABELS.get(item, item) for item in job["narrowed"])
+                         + " not sent: this model takes a first and a last frame only")
         if record:
             dropped = [FIELD_LABELS.get(item, item).lower() for item in record.get("dropped") or []]
             if dropped:
@@ -1751,6 +1780,11 @@ class ClipboardTab:
                 # ---- the composer --------------------------------------------------
                 with gr.Column(scale=1, min_width=280, elem_id=_id("composer"), elem_classes=["minipaint-clip-composer"]):
                     gr.Markdown("**WanGP request**", elem_classes=["minipaint-clip-title"])
+                    # The section's block: shown, and everything that makes a
+                    # request hidden, until the readiness answer says WanGP
+                    # can take one (the stylesheet keys both on the root's
+                    # data-wangp-ready, which only the page script sets).
+                    gr.HTML(BLOCKED_HTML, elem_id=_id("blocked"))
                     wangp_line = gr.HTML('<div class="minipaint-clip-wangp-line" data-state="unknown">WanGP: not checked yet</div>', elem_id=_id("wangp_line"))
                     with gr.Row(elem_id=_id("cards"), elem_classes=["minipaint-clip-cards"]):
                         card_first = gr.HTML(cards[0], elem_id=_id("card_first"), elem_classes=["minipaint-clip-card-host"])
@@ -1780,14 +1814,14 @@ class ClipboardTab:
                     sp_open = gr.Button("⤢ Prompt enhancement and system prompts", elem_id=_id("sp_open"),
                                         elem_classes=["minipaint-clip-sp-open"])
                     with gr.Column(elem_id=_id("enhance_panel"), elem_classes=["minipaint-clip-enhance-panel"]):
-                        gr.Markdown("**Prompt enhancement** (ModelSwitchRefiner MiniMax H3)",
+                        gr.Markdown("**Prompt enhancement** (ModelSwitchRefiner: MiniMax H3, LTX 2.3)",
                                     elem_classes=["minipaint-clip-title"])
                         enhance_line = gr.HTML(self._enhance_line(), elem_id=_id("enhance_line"))
                         enhance_toggle = gr.Checkbox(
-                            value=enhanced_on, label="Enhance the prompt through MiniMax H3 before it reaches WanGP",
+                            value=enhanced_on, label="Enhance the prompt through ModelSwitchRefiner before it reaches WanGP",
                             elem_classes=["minipaint-clip-enhance-toggle"], elem_id=_id("enhance_toggle"),
                         )
-                        gr.Markdown("**System prompt** - the instructions the writer runs under. Four sets: each variant, with and without a picture.",
+                        gr.Markdown("**System prompt** - the instructions the writer runs under. Six sets: each variant, with and without a picture.",
                                     elem_classes=["minipaint-clip-hint"])
                         with gr.Row(elem_classes=["minipaint-clip-pair"]):
                             sp_variant = gr.Dropdown(SP_VARIANT_CHOICES, value=enhance.FL2VA, label="Variant", elem_id=_id("sp_variant"), min_width=140)

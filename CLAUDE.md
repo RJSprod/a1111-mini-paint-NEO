@@ -290,6 +290,16 @@ written as pixels on the element itself, with nothing styled in between - see
 a real browser; a Node stub has no layout and every source check passed while
 the page was wrong.
 
+**A Gradio column given a height wraps instead of scrolling.** Gradio 4.40's
+row says `flex-wrap: wrap` about every one of its children, so each column
+inside a row is a wrapping flex column. Given a height and `overflow: auto`,
+it does not scroll what it cannot hold: it starts a second column of blocks
+beside the first, out of sight, and its scroll height is only as tall as the
+tallest block. The Clipboard's request column, held to the window since
+2026-10-03, pins `flex-wrap: nowrap` with its height (`COMPOSER_WINDOW` in
+`browser/minipaint_clipboard.js`); any other column given a window needs the
+same, and a check that reads only "is it scrollable" passes without it.
+
 **Never observe the box you resize.** The same sizer watched the column and
 wrote a custom property on the column, which is a ResizeObserver loop waiting
 for a layout that oscillates. It watches only boxes it never sizes, and writes

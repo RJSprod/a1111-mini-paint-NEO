@@ -556,12 +556,16 @@ and *Send selected to* Mini Paint, img2img, Inpaint, Extras or ImageStitch by th
 routes the Canvas takes. A Forge PNG keeps every byte, so its generation parameters
 survive.
 
-The tab **fills the window**. The thumbnail grid runs down to the bottom of it, and the
-Prompt box takes whatever the request column has left over, in or out of focus mode - both
-measured and re-measured when the window, the queue or the layout changes. When the queue
-needs more room than there is, the Prompt box goes back to its own size and the page scrolls,
-as it always did; on a narrow window the columns stack and the grid keeps its old share so the
-request is still in reach.
+The tab **fills the window, and fits in it**. The thumbnail grid runs down to the bottom of
+it, and so does the request column, whose Prompt box takes whatever the column has left
+over, in or out of focus mode - both measured and re-measured when the window, the queue or
+the layout changes. When the queue needs more room than there is, the Prompt box goes back to
+its own size first, and what still does not fit **scrolls inside the request column**: the
+column is a window of its own, and the page - the grid, the toolbar, the tab bar - stays where
+it is, even once the column's scroll reaches its end. The system prompt editor and View
+Outputs still fill the whole window from a scrolled column. On a narrow window the columns
+stack, the grid keeps its old share, and the request column under it is the page's to scroll
+to, as it always was.
 
 The grid **pages, sixty pictures at a time**, with Back / Next / go-to under it and the
 whole library's count beside them; the selection is yours and survives paging, because a

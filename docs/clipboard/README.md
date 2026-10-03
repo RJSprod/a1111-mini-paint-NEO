@@ -170,6 +170,13 @@ symlink, and a file that has moved outside the folder (`CLIPBOARD_ASSET_OUTSIDE_
 
 ## The composer
 
+The composer ends at the bottom of the window, as the browser column does, and is never
+longer than that: its Prompt box takes what the column has spare, gives it back as the queue
+grows, and whatever still does not fit scrolls inside the composer rather than taking the
+page with it (`fitTab` in `browser/minipaint_clipboard.js` measures it and pins the height).
+On a window narrow enough to stack the two columns it is simply the part of the page under
+the browser.
+
 Each card is in one of three states: **Use WanGP** (empty — inherit), a picture (override),
 or **Missing image** (its file left the folder; press Refresh and it goes back to Use
 WanGP). Each card has *Choose a file…* for a file that is not in the library yet, and × to

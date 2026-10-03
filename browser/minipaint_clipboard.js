@@ -1139,13 +1139,28 @@ window.minipaintClipboard = (function () {
     // the composer's other blocks - and writes only when a number changed,
     // which is what keeps it out of the loop the WanGP frame once fell into.
     //
+    // THE COMPOSER IS A WINDOW, NOT A PAGE. Its queue grows with every
+    // request, and a Prompt box at its floor cannot give back more than it
+    // had, so a long enough queue made the column taller than the window and
+    // the whole page scrolled to reach the bottom of it - the grid, the
+    // toolbar and the tab bar going with it. Asked for: "the entire clipboard
+    // tab to fit, and if scrolling happens, the column should be windowed so
+    // it scrolls and the entire page does not". So the composer is held to
+    // the same bottom as the browser column (a measured max-height, pinned
+    // like the grid's) and scrolls inside itself; what it holds beyond that
+    // is read as its overflow and taken out of the Prompt box first, down to
+    // the box's floor. Its two full-window views are `position: fixed`, so
+    // the column's scroll box does not clip them.
+    //
     // Stacked on a narrow window, the composer is under the grid rather than
     // beside it, and "to the bottom of the window" would mean a grid that
-    // pushed the composer off the screen: the grid keeps the old cap and the
-    // Prompt box its own size.
+    // pushed the composer off the screen: the grid keeps the old cap, the
+    // Prompt box its own size, and the composer is the page's to scroll to,
+    // as it always was - a column under another one has no window of its own
+    // to fit, and a scroller inside a page a finger scrolls takes the swipe.
 
     //: The least the grid is given, whatever the window. Below it the page
-    //: scrolls, as it always did.
+    //: scrolls, as it always did. The composer's window has the same floor.
     const FIT_FLOOR = 240;
     //: The Prompt box's own floor, the stylesheet's `min-height`.
     const PROMPT_FLOOR = 96;
@@ -1153,6 +1168,23 @@ window.minipaintClipboard = (function () {
     const FIT_GAP = 12;
     //: The share of the window the grid keeps when the columns are stacked.
     const STACKED_SHARE = 0.7;
+    //: What makes the composer a window, pinned while it is beside the
+    //: browser. `contain` keeps a scroll that reaches the column's end from
+    //: carrying on into the page; the stable gutter keeps a scrollbar that
+    //: comes and goes from narrowing the column under the reader, which
+    //: would also rewrap it and move every number the fit just read. And
+    //: `nowrap`, because Gradio gives every column in a row `flex-wrap:
+    //: wrap` (its rule for a row's children), and a wrapping column given a
+    //: height does not scroll what it cannot hold - it starts a second
+    //: column of blocks beside the first, out of sight to the right.
+    const COMPOSER_WINDOW = {
+        "flex-wrap": "nowrap",
+        "overflow-y": "auto",
+        "overscroll-behavior": "contain",
+        "scrollbar-gutter": "stable"
+    };
+    //: Less than this past the window is a rounding, not a queue.
+    const OVERFLOW_SLACK = 1;
 
     /** How far everything above this node has been scrolled. */
     function scrolledAbove(node) {
@@ -1181,6 +1213,27 @@ window.minipaintClipboard = (function () {
         return changed;
     }
 
+    /** Hold the composer to `room` pixels with a scroll of its own, or let it go (null). */
+    function windowComposer(composer, room) {
+        const on = room !== null;
+        let changed = writeSize(composer, ["max-height"], room);
+        for (const property in COMPOSER_WINDOW) {
+            if (!Object.prototype.hasOwnProperty.call(COMPOSER_WINDOW, property)) { continue; }
+            const wanted = on ? COMPOSER_WINDOW[property] : "";
+            if (composer.style.getPropertyValue(property) === wanted) { continue; }
+            changed = true;
+            if (wanted) { composer.style.setProperty(property, wanted, "important"); }
+            else { composer.style.removeProperty(property); }
+        }
+        // The stylesheet's readable copy is keyed on this, and so is a check.
+        if (on !== (composer.dataset.minipaintWindowed === "1")) {
+            changed = true;
+            if (on) { composer.dataset.minipaintWindowed = "1"; }
+            else { delete composer.dataset.minipaintWindowed; }
+        }
+        return changed;
+    }
+
     function fitTab() {
         S.fitFrame = 0;
         if (!tabVisible()) { return null; }
@@ -1201,17 +1254,40 @@ window.minipaintClipboard = (function () {
         let height = view - top - below - FIT_GAP;
         if (stacked) { height = Math.min(height, view * STACKED_SHARE); }
         height = Math.max(FIT_FLOOR, height);
-        const result = { grid: Math.round(height), prompt: null, stacked: stacked };
+        const result = { grid: Math.round(height), prompt: null, stacked: stacked,
+                         composer: null, overflow: 0 };
         writeSize(grid, ["height", "max-height"], height);
+        if (!composer || !k) {
+            S.fitted = result;
+            return result;
+        }
         const box = promptBox();
-        if (box && k && !stacked) {
-            const bottom = k.bottom + scrolledAbove(composer);
-            const current = box.getBoundingClientRect().height;
-            const wanted = Math.max(PROMPT_FLOOR, current + (view - bottom - FIT_GAP));
-            result.prompt = Math.round(wanted);
+        if (stacked) {
+            windowComposer(composer, null);
+            if (box) { writeSize(box, ["min-height"], null); }
+            S.fitted = result;
+            return result;
+        }
+        // Everything is read before the composer is written, so the two
+        // readings describe one layout. Where the composer ends plus what it
+        // holds past its window is where its content ends, whatever window
+        // it had: so the room this fit gives it does not depend on the room
+        // the last one did.
+        const composerTop = k.top + scrolledAbove(composer);
+        const bottom = k.bottom + scrolledAbove(composer);
+        let overflow = composer.scrollHeight - composer.clientHeight;
+        if (overflow <= OVERFLOW_SLACK) { overflow = 0; }
+        const current = box ? box.getBoundingClientRect().height : 0;
+        // Rounded out, and the box's share rounded in, so a column that fits
+        // to the pixel is never half a pixel over and given a scrollbar.
+        const room = Math.ceil(Math.max(FIT_FLOOR, view - composerTop - FIT_GAP));
+        result.composer = room;
+        result.overflow = overflow;
+        windowComposer(composer, room);
+        if (box) {
+            const wanted = Math.floor(Math.max(PROMPT_FLOOR, current + (view - bottom - FIT_GAP) - overflow));
+            result.prompt = wanted;
             writeSize(box, ["min-height"], wanted);
-        } else if (box) {
-            writeSize(box, ["min-height"], null);
         }
         S.fitted = result;
         return result;

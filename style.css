@@ -1459,6 +1459,32 @@
     gap: var(--minipaint-clip-gap);
 }
 
+/* THE COMPOSER IS A WINDOW. Beside the browser it ends where the browser
+   column does, at the bottom of the window, and what it holds past that -
+   a long queue, the history - scrolls inside it rather than taking the
+   whole page down with it. The height is measured and written by the
+   script (fitTab, pinned inline like the grid's), because a height said
+   here would resolve to auto inside Gradio's containers; this is the
+   readable copy of the rest. Stacked under the browser on a narrow window
+   it has no window of its own and the attribute is not set.
+
+   Its blocks do not shrink to fit the window: a block a theme makes a
+   scroll box of would otherwise be squeezed to nothing by the column's
+   height instead of scrolled to. And the two full-window views inside it
+   are position: fixed, which a scroll box does not clip. */
+#minipaint_clipboard_root .minipaint-clip-composer[data-minipaint-windowed="1"] {
+    /* Gradio's row gives its columns flex-wrap: wrap, and a wrapping column
+       with a height starts a second column of blocks instead of scrolling. */
+    flex-wrap: nowrap;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+}
+
+#minipaint_clipboard_root .minipaint-clip-composer[data-minipaint-windowed="1"] > * {
+    flex-shrink: 0 !important;
+}
+
 /* -- toolbar ---------------------------------------------------------- */
 
 #minipaint_clipboard_root .minipaint-clip-toolbar {

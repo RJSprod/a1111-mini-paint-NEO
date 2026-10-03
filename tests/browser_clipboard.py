@@ -2152,22 +2152,20 @@ def check_the_tab_fills_the_window(r: Results, page) -> None:
                 or first["columnBottom"] >= first["view"] - GAP - 4, str(first))
         r.check("the browser column ends at the bottom of the window",
                 abs(first["columnBottom"] - (first["view"] - GAP)) <= 4, str(first))
-        # The queue under the Prompt box grows with every request, and when it
-        # needs more than the window has the box goes back to its own floor
-        # and the page scrolls, as it always did. Either is right; which one
-        # depends on how long the queue is by now in this run.
-        r.check("and so does the request column, or its Prompt box is back at its floor because the queue needs the room",
-                abs(first["composerBottom"] - (first["view"] - GAP)) <= 4
-                or (first["promptMin"] == "96px" and first["composerBottom"] > first["view"]), str(first))
+        # However long the queue is by now in this run: either the Prompt box
+        # took what was left, or the column is held to the window and the
+        # rest of it scrolls inside. Never past the bottom of the window.
+        r.check("and so does the request column, whatever the queue under it holds",
+                abs(first["composerBottom"] - (first["view"] - GAP)) <= 4, str(first))
 
         page.set_viewport_size({"width": 1400, "height": 1600})
         page.wait_for_timeout(500)
         taller = measure()
         r.check("a taller window gives the grid the difference",
                 abs((taller["grid"] - first["grid"]) - 650) <= 6, f"{first['grid']} -> {taller['grid']}")
-        # How tall the request column is with its Prompt box at the floor:
-        # if that fits in this window, the box must have grown to fill it.
-        at_floor = first["composerBottom"] - first["prompt"] + 96
+        # How tall the request column's content is with its Prompt box at the
+        # floor: if that fits in this window, the box must have grown to fill it.
+        at_floor = first["composerBottom"] + (first["fitted"] or {}).get("overflow", 0) - first["prompt"] + 96
         if at_floor < taller["view"] - GAP:
             r.check("and the Prompt box takes whatever the request column has left over",
                     abs(taller["composerBottom"] - (taller["view"] - GAP)) <= 4 and taller["prompt"] > first["prompt"],
@@ -2180,13 +2178,19 @@ def check_the_tab_fills_the_window(r: Results, page) -> None:
         writes = page.evaluate("""() => new Promise((resolve) => {
             const grid = document.querySelector('#minipaint_clipboard_grid .minipaint-clip-grid');
             const box = document.querySelector('#minipaint_clipboard_prompt textarea');
+            const composer = document.getElementById('minipaint_clipboard_composer');
             let count = 0;
             const watch = new MutationObserver((records) => { count += records.length; });
             watch.observe(grid, { attributes: true, attributeFilter: ['style'] });
             if (box) { watch.observe(box, { attributes: true, attributeFilter: ['style'] }); }
+            watch.observe(composer, { attributes: true, attributeFilter: ['style', 'data-minipaint-windowed'] });
             setTimeout(() => { watch.disconnect(); resolve(count); }, 1500);
         })""")
         r.check("left alone it writes nothing, so nothing is feeding itself", writes == 0, str(writes))
+
+        page.set_viewport_size({"width": 1400, "height": 950})
+        page.wait_for_timeout(500)
+        check_a_long_request_column_scrolls_inside_itself(r, page)
 
         page.set_viewport_size({"width": 560, "height": 900})
         page.wait_for_timeout(600)
@@ -2199,9 +2203,188 @@ def check_the_tab_fills_the_window(r: Results, page) -> None:
         r.check("stacked on a narrow window the grid keeps a share of it, so the request is still reachable",
                 narrow["grid"] <= narrow["view"] * 0.7 + 1, str(narrow))
         r.check("and the Prompt box is its own size again", narrow["promptMin"] == "", str(narrow))
+        stacked = page.evaluate("""() => {
+            const composer = document.getElementById('minipaint_clipboard_composer');
+            return { windowed: composer.dataset.minipaintWindowed || '',
+                     cap: composer.style.getPropertyValue('max-height'),
+                     scroll: getComputedStyle(composer).overflowY };
+        }""")
+        r.check("and the request column, under the browser, is the page's to scroll to rather than a window of its own",
+                stacked["windowed"] == "" and stacked["cap"] == "" and stacked["scroll"] == "visible", str(stacked))
     finally:
         page.set_viewport_size({"width": 1400, "height": 950})
         page.wait_for_timeout(400)
+
+
+def check_a_long_request_column_scrolls_inside_itself(r: Results, page) -> None:
+    """Asked for: "the right column ... grows in size to be off page and
+    require scrolling. i want the entire clipboard tab to fit, and if
+    scrolling happens, the column should be windowed so it scrolls and the
+    entire page does not, just the right column".
+
+    The queue grows with every request, and the Prompt box at its floor has
+    nothing left to give, so the column used to run off the bottom of the
+    window and the page scrolled - the grid and the tab bar with it. A queue
+    made taller than any window stands in for a long one: the mount the
+    queue is drawn into keeps its style across redraws, and growing it is
+    what a real queue does to the column - the fit hears it through the same
+    observer, not through a call from here.
+    """
+    GAP = 12
+
+    def state():
+        return page.evaluate("""() => {
+            const composer = document.getElementById('minipaint_clipboard_composer');
+            const root = document.getElementById('minipaint_clipboard_root');
+            const box = document.querySelector('#minipaint_clipboard_prompt textarea');
+            const k = composer.getBoundingClientRect();
+            return { view: window.innerHeight, scrolled: window.scrollY,
+                     composerBottom: k.bottom + window.scrollY,
+                     rootBottom: root.getBoundingClientRect().bottom + window.scrollY,
+                     scrollHeight: composer.scrollHeight, clientHeight: composer.clientHeight,
+                     scrollTop: composer.scrollTop,
+                     overflowY: getComputedStyle(composer).overflowY,
+                     windowed: composer.dataset.minipaintWindowed || '',
+                     promptMin: box ? box.style.getPropertyValue('min-height') : '',
+                     fitted: window.minipaintClipboard.debug().fitted };
+        }""")
+
+    def grow(pixels):
+        page.evaluate("""(pixels) => {
+            const list = document.querySelector('#minipaint_clipboard_outbox_list .minipaint-clip-outbox');
+            if (!list) { return; }
+            if (pixels) {
+                list.style.setProperty('min-height', pixels + 'px', 'important');
+                list.style.setProperty('max-height', 'none', 'important');
+            } else {
+                list.style.removeProperty('min-height');
+                list.style.removeProperty('max-height');
+            }
+        }""", pixels)
+
+    open_clipboard(page)
+    page.evaluate("() => { document.getElementById('minipaint_clipboard_composer').scrollTop = 0; window.scrollTo(0, 0); }")
+    r.check("the queue is on the page to make long",
+            page.evaluate("() => !!document.querySelector('#minipaint_clipboard_outbox_list .minipaint-clip-outbox')"))
+    before = state()
+    try:
+        grow(1800)
+        page.wait_for_timeout(700)
+        long = state()
+        r.check("a request column longer than the window still ends at the bottom of it",
+                abs(long["composerBottom"] - (long["view"] - GAP)) <= 4, str(long))
+        r.check("and so does the whole tab, so the page has nothing of it to scroll to",
+                long["rootBottom"] <= long["view"] + 1, str(long))
+        r.check("what does not fit is the column's own to scroll",
+                long["windowed"] == "1" and long["overflowY"] == "auto"
+                and long["scrollHeight"] > long["clientHeight"] + 1000, str(long))
+        r.check("and the Prompt box gave back what it could first, down to its floor",
+                long["promptMin"] == "96px", str(long))
+
+        # A theme that makes every block of the column a box that clips (a
+        # flex item that clips may shrink to nothing): the blocks keep their
+        # height and the column scrolls to them, rather than squeezing them
+        # into its window.
+        heights = """() => Array.from(document.getElementById('minipaint_clipboard_composer').children)
+            .filter(e => e.getBoundingClientRect().height > 0)
+            .map(e => [e.id || e.className.slice(0, 30), Math.round(e.getBoundingClientRect().height)])"""
+        own = page.evaluate(heights)
+        page.evaluate("""() => {
+            const style = document.createElement('style');
+            style.id = 'minipaint-test-clipping-theme';
+            style.textContent = '#minipaint_clipboard_composer > * { overflow: hidden !important; }';
+            document.head.appendChild(style);
+        }""")
+        page.wait_for_timeout(500)
+        clipped = page.evaluate(heights)
+        # Shorter is what squeezing does; a block that clips may come out a
+        # margin taller, because it no longer lets its children's margins
+        # collapse through it.
+        squeezed = [(pair, other) for pair, other in zip(own, clipped)
+                    if pair[0] != other[0] or other[1] < pair[1] - 2]
+        r.check("a theme that clips the column's blocks cannot squeeze them into its window",
+                not squeezed and len(own) == len(clipped), f"{own} -> {clipped}")
+        page.evaluate("() => { const s = document.getElementById('minipaint-test-clipping-theme'); if (s) { s.remove(); } }")
+        page.wait_for_timeout(300)
+
+        # A page that goes on below the tab, as Forge's does with its footer:
+        # there is a page to scroll now, and it still must not move.
+        page.evaluate("""() => {
+            const footer = document.createElement('div');
+            footer.id = 'minipaint-test-footer';
+            footer.style.height = '900px';
+            document.body.appendChild(footer);
+            window.scrollTo(0, 0);
+        }""")
+        r.check("the page under this check has somewhere to scroll to",
+                page.evaluate("() => document.documentElement.scrollHeight > window.innerHeight + 400"))
+
+        # A wheel over the column turns the column, and the page stays put -
+        # past the column's end too, where a scroll would otherwise carry on
+        # into the page.
+        box = page.evaluate("""() => { const k = document.getElementById('minipaint_clipboard_composer').getBoundingClientRect();
+            return { x: k.left + k.width / 2, y: k.top + Math.min(k.height / 2, 120) }; }""")
+        page.mouse.move(box["x"], box["y"])
+        for _ in range(4):
+            page.mouse.wheel(0, 400)
+            page.wait_for_timeout(150)
+        page.wait_for_timeout(400)
+        turned = state()
+        r.check("a wheel over it scrolls the request column",
+                turned["scrollTop"] > 0, str(turned))
+        r.check("and not the page", turned["scrolled"] == 0, str(turned))
+        for _ in range(12):
+            page.mouse.wheel(0, 1200)
+            page.wait_for_timeout(80)
+        page.wait_for_timeout(500)
+        end = state()
+        r.check("not even once the column has reached its end",
+                end["scrolled"] == 0 and end["scrollTop"] >= end["scrollHeight"] - end["clientHeight"] - 2, str(end))
+
+        # The two full-window views live inside this column. Scrolled or not,
+        # its scroll box must not clip them: they are the window, not a part
+        # of the column.
+        page.evaluate("""() => {
+            const host = document.getElementById('minipaint_clipboard_sp_open');
+            const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
+            if (b) { b.click(); }
+        }""")
+        page.wait_for_timeout(1500)
+        view = page.evaluate("""() => {
+            const panel = document.getElementById('minipaint_clipboard_enhance_panel');
+            const p = panel.getBoundingClientRect();
+            const inside = (x, y) => { const hit = document.elementFromPoint(x, y); return !!hit && panel.contains(hit); };
+            const w = window.innerWidth, h = window.innerHeight;
+            return { open: window.minipaintClipboard.debug().editorOpen,
+                     width: p.width, height: p.height, w: w, h: h,
+                     corners: [inside(12, h - 12), inside(w - 24, h - 12), inside(w / 2, h / 2), inside(12, h / 2)],
+                     columnScrolled: document.getElementById('minipaint_clipboard_composer').scrollTop };
+        }""")
+        r.check("the system prompt editor, opened from a scrolled column, still fills the window",
+                view["open"] is True and view["columnScrolled"] > 0
+                and view["width"] >= view["w"] * 0.9 and view["height"] >= view["h"] * 0.9, str(view))
+        r.check("and none of it is cut off by the column it came from",
+                all(view["corners"]), str(view))
+        page.evaluate("""() => document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))""")
+        page.wait_for_timeout(800)
+        r.check("and Escape puts it back", page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False)
+    finally:
+        grow(0)
+        page.evaluate("""() => {
+            for (const id of ['minipaint-test-footer', 'minipaint-test-clipping-theme']) {
+                const node = document.getElementById(id);
+                if (node) { node.remove(); }
+            }
+            document.getElementById('minipaint_clipboard_composer').scrollTop = 0;
+            window.scrollTo(0, 0);
+        }""")
+        page.wait_for_timeout(700)
+    back = state()
+    r.check("a queue that is short again gives the Prompt box back the room it had, and the column what it held before",
+            back["promptMin"] == before["promptMin"]
+            and abs((back["scrollHeight"] - back["clientHeight"]) - (before["scrollHeight"] - before["clientHeight"])) <= 2
+            and abs(back["composerBottom"] - (back["view"] - GAP)) <= 4,
+            f"before {before} after {back}")
 
 
 def check_a_thumbnail_is_fetched_once(r: Results, page) -> None:

@@ -21,6 +21,19 @@
  * talks to the WanGP iframe, knows a bridge session, holds a queue, or
  * sees a file path.
  *
+ * The WanGP section exists only while WanGP can take what it makes. The
+ * readiness route (``targets.readiness`` on the server) says whether WanGP
+ * is running, its bridge answering, and the page on one of the three models
+ * this sends to, defined and downloaded; this file writes the answer onto
+ * the tab root as ``data-wangp-ready`` and ``data-wangp-target`` and the
+ * stylesheet does the rest - no cards, no prompt, no enhancement, no Add to
+ * Queue and no +First / +Last / +Ref while it is not, one quiet line with
+ * Check again in their place, and no reference card for LTX 2.3 Distilled.
+ * It is asked when the tab opens, when the page learns WanGP's model, after
+ * a job ends, on Check again and in every refused press's answer; never on
+ * a timer. The press is checked again on the server, fresh, whatever this
+ * page last drew.
+ *
  * Nothing polls. The one bounded watcher runs for a few seconds after the
  * Add to Queue click, in case the chained change never reaches this page,
  * and stops the moment the instruction is delivered either way; the pump
@@ -139,6 +152,11 @@ window.minipaintClipboard = (function () {
     const S = {
         attached: false,
         selected: "",
+        //: The server's last readiness answer for the WanGP section, the
+        //: read in flight, and the last line the journal was given about it.
+        readiness: null,
+        readinessRead: null,
+        readinessSaid: "",
         //: Set when a send went unanswered, cleared by the next
         //: acknowledgement: how long the page is willing to wait next time.
         queueDown: false,
@@ -3847,6 +3865,9 @@ window.minipaintClipboard = (function () {
             });
         }).then(function (answer) {
             if (!answer) { toast("Forge is not answering; nothing was queued.", true); return null; }
+            // A refused press carries the server's fresh readiness answer:
+            // the section redraws itself blocked from it, with its reason.
+            if (answer.readiness) { applyReadiness(answer.readiness); }
             if (answer.instruction) { queue(JSON.stringify(answer.instruction), "the queue route"); }
             return answer;
         });
@@ -3941,13 +3962,16 @@ window.minipaintClipboard = (function () {
     /** One bounded question to the public API, throttled, never on a timer. */
     function refreshCapabilities(force) {
         const api = interop();
-        if (!api || typeof api.wangp.capabilities !== "function") { setLine("WanGP: not available in this page", "off"); S.capabilities = null; refreshBadges(); return; }
+        if (!api || typeof api.wangp.capabilities !== "function") { setLine("WanGP: not available in this page", "off"); S.capabilities = null; refreshBadges(); refreshReadiness(false); return; }
         if (!force && Date.now() - S.capabilitiesAt < CAPABILITY_THROTTLE_MS) { return; }
         S.capabilitiesAt = Date.now();
         setLine("WanGP: checking…", "checking");
         api.wangp.capabilities().then(function (answer) {
             S.capabilities = answer;
             sendModel(answer);
+            // The model is what readiness is about, so it is asked again the
+            // moment the page knows which one WanGP is on.
+            refreshReadiness(false);
             if (!answer || !answer.ok) {
                 setLine("WanGP unavailable" + (answer && answer.code ? " (" + answer.code + ")" : "") + " — Add to Queue will ask anyway", "off");
             } else {
@@ -3964,7 +3988,87 @@ window.minipaintClipboard = (function () {
             setLine("WanGP unavailable — Add to Queue will ask anyway", "off");
             S.capabilities = null;
             refreshBadges();
+            refreshReadiness(false);
         });
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* WanGP readiness: the section, only while WanGP can take it           */
+    /* ------------------------------------------------------------------ */
+
+    const READINESS_ROUTE = "/minipaint-clipboard/readiness";
+    const BLOCKED_ID = "minipaint_clipboard_blocked";
+    //: One ask of the readiness route. The check behind it is milliseconds
+    //: inside WanGP and the server has its own, shorter deadline for a
+    //: bridge that is not answering; this one is for a Forge that is not.
+    const READINESS_TIMEOUT_MS = 15000;
+    const READINESS_CHECKING = "Checking whether WanGP is ready…";
+    const READINESS_SILENT = "Forge did not say whether WanGP is ready. Press Check again.";
+
+    /** The answer, onto the page: the root's two attributes, the quiet line. */
+    function applyReadiness(view) {
+        S.readiness = view && typeof view === "object" ? view : null;
+        const ready = !!(S.readiness && S.readiness.ready === true);
+        const element = root();
+        if (element) {
+            element.dataset.wangpReady = ready ? "1" : "0";
+            element.dataset.wangpTarget = ready ? String(S.readiness.target || "") : "";
+        }
+        const host = byId(BLOCKED_ID);
+        const box = host ? host.querySelector(".minipaint-clip-blocked") : null;
+        const text = box ? box.querySelector(".minipaint-clip-blocked-text") : null;
+        if (box) { box.dataset.code = ready ? "" : String((S.readiness && S.readiness.code) || "checking"); }
+        if (text) { text.textContent = ready ? "" : String((S.readiness && S.readiness.message) || READINESS_CHECKING); }
+        // A blocked section has no enhancement button, so it has no editor
+        // open over the window either.
+        if (!ready && editorOpen()) { closePromptEditor(); }
+        const said = ready ? "ready for " + String(S.readiness.target || "?")
+            : "blocked - " + String((S.readiness && S.readiness.code) || "no answer");
+        if (said !== S.readinessSaid) {
+            S.readinessSaid = said;
+            note("readiness: " + said);
+        }
+        return ready;
+    }
+
+    /**
+     * Ask whether the section may be used, for the model this page last
+     * learned WanGP is on. Reads coalesce; ``fresh`` (Check again) skips the
+     * server's few seconds of cache. An answer for a model the page has since
+     * moved off is followed by one more ask, for the model it is on now.
+     */
+    function refreshReadiness(fresh) {
+        if (S.readinessRead && !fresh) { return S.readinessRead; }
+        const asked = modelJson();
+        let model = null;
+        try { model = JSON.parse(asked || "null"); } catch (e) { model = null; }
+        let controller = null;
+        let cutoff = 0;
+        try { controller = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { controller = null; }
+        if (controller) {
+            cutoff = setTimeout(function () { try { controller.abort(); } catch (e) { /* settled */ } }, READINESS_TIMEOUT_MS);
+        }
+        const read = fetch(READINESS_ROUTE, Object.assign({
+            method: "POST", credentials: "same-origin", cache: "no-store",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model: model, fresh: !!fresh, page: pageId() })
+        }, controller ? { signal: controller.signal } : {})).then(function (response) {
+            return response.json();
+        }).then(function (answer) {
+            if (answer && answer.ok && answer.readiness) { return answer.readiness; }
+            return { ready: false, code: (answer && answer.code) || "UNANSWERED", message: (answer && answer.message) || READINESS_SILENT };
+        }, function () {
+            return { ready: false, code: "UNANSWERED", message: READINESS_SILENT };
+        }).then(function (view) {
+            if (cutoff) { clearTimeout(cutoff); }
+            if (S.readinessRead === settled) { S.readinessRead = null; }
+            applyReadiness(view);
+            if (modelJson() !== asked) { refreshReadiness(false); }
+            return view;
+        });
+        const settled = read;
+        S.readinessRead = settled;
+        return settled;
     }
 
     /* ------------------------------------------------------------------ */
@@ -3977,6 +4081,13 @@ window.minipaintClipboard = (function () {
         const item = target.closest(".minipaint-clip-item");
         if (item) {
             select(item.dataset.asset === S.selected ? "" : item.dataset.asset);
+            return;
+        }
+        const recheck = target.closest(".minipaint-clip-blocked-check");
+        if (recheck) {
+            event.preventDefault();
+            refreshCapabilities(true);
+            refreshReadiness(true);
             return;
         }
         const clear = target.closest(".minipaint-clip-card-clear");
@@ -4033,6 +4144,9 @@ window.minipaintClipboard = (function () {
                     // moved underneath it.
                     fetchLibrary({ quiet: true, refresh: true });
                     refreshCapabilities(false);
+                    // Whatever the throttle above decided: coming back to
+                    // the tab is when a model changed in the WanGP tab shows.
+                    refreshReadiness(false);
                 }
             }, 50);
         });
@@ -4086,6 +4200,10 @@ window.minipaintClipboard = (function () {
         // could never have received.
         askQueue(null);
         afterRender();
+        // Blocked until the first answer: the server rendered the quiet line
+        // and nothing else of the section is drawn before this page says so.
+        applyReadiness(null);
+        refreshReadiness(false);
         if (tabVisible()) { refreshCapabilities(false); }
         setTimeout(pump, 250);
         setTimeout(function () {
@@ -4101,6 +4219,8 @@ window.minipaintClipboard = (function () {
                  menuStandalone: S.menuStandalone,
                  capabilities: S.capabilities, lastInstruction: S.lastInstruction.slice(0, 40), page: pageId(),
                  model: S.lastModel, retrying: S.retrying || !!S.retryTimer || S.retryPending,
+                 readiness: S.readiness ? { ready: S.readiness.ready === true, code: S.readiness.code || "",
+                                            target: S.readiness.target || "" } : null,
                  retryDelay: S.retryDelay,
                  offline: { server: S.offline.server, queue: S.offline.queue },
                  editorOpen: editorOpen(),
@@ -4158,6 +4278,8 @@ window.minipaintClipboard = (function () {
         pageId: pageId,
         modelJson: modelJson,
         refreshCapabilities: refreshCapabilities,
+        refreshReadiness: refreshReadiness,
+        readiness: function () { return S.readiness ? Object.assign({}, S.readiness) : null; },
         pressHidden: pressHidden,
         showOffline: connectionNotice,
         receiveOverHttp: receiveOverHttp,

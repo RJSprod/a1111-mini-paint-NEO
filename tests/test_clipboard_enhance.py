@@ -369,7 +369,8 @@ def override_checks(r: Results) -> None:
     r.check("an override is saved with its newlines normalised", saved == "Write it MY way\nwith two lines" and enhance.override("fl2va", "image") == saved)
     text, source = enhance.effective_prompt("fl2va", "image")
     r.check("and is what an enhanced request runs under", source == "override" and text == saved)
-    r.check("the other three sets are untouched", enhance.effective_prompt("fl2va", "text")[1] == "default" and enhance.overrides() == {"fl2va": {"text": False, "image": True}, "ref2va": {"text": False, "image": False}})
+    r.check("the other five sets are untouched (LTX 2.3's two included)", enhance.effective_prompt("fl2va", "text")[1] == "default" and enhance.overrides() == {
+        "fl2va": {"text": False, "image": True}, "ref2va": {"text": False, "image": False}, "ltx23": {"text": False, "image": False}})
     document = json.loads((config.config_dir() / enhance.ENHANCE_NAME).read_text(encoding="utf-8"))
     r.check("it lives in its own document, beside the outbox, and would survive a restart",
             document["overrides"]["fl2va"]["image"] == saved and document["enabled"] is False and document["schema"] == 1)

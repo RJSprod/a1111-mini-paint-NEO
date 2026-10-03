@@ -69,6 +69,10 @@ HOLD_TIMEOUT = 10.0
 #: that is seconds for a large model - more for a hard one with gigabytes of
 #: pinned RAM to give back. Still finite, because the executor is one thread.
 FLUSH_TIMEOUT = 90.0
+#: The model check (bridge 1.13.0) reads a model definition and stats a few
+#: dozen files. Answered in milliseconds; a short deadline, because it is
+#: asked on behalf of a page waiting to know whether to show its composer.
+MODEL_TIMEOUT = 8.0
 
 _LOG_PREFIX = "MiniPaint WanGP:"
 _lock = threading.RLock()
@@ -334,6 +338,31 @@ def flush(lease: str, level: str, timeout: float = FLUSH_TIMEOUT) -> dict:
     return protocol.normalize_hold_answer(answer)
 
 
+def model(model_type: str, timeout: float = MODEL_TIMEOUT) -> dict:
+    """Whether one model is set up in the running WanGP. Bridge 1.13.0.
+
+    Facts, never a verdict: whether WanGP defines it, its architecture and
+    LTX-2 pipeline, and which of the files WanGP would fetch before generating
+    with it are not on disk (``checked`` False when the bridge could not tell).
+    Raises IntegrationError like every call here - ``WANGP_NOT_RUNNING``,
+    ``CONTROL_UNAVAILABLE``, or the bridge's own refusal; an older bridge has
+    no such operation and answers 404, which arrives as ``REQUEST_INVALID``.
+    The caller is ``minipaint_neo.clipboard.targets``.
+    """
+    answer = call(protocol.CONTROL_MODEL, {"model_type": str(model_type or "")}, timeout)
+    return protocol.normalize_model_facts(answer)
+
+
+def can_check_models(answer: typing.Optional[dict] = None) -> typing.Optional[bool]:
+    """Whether the bridge answers the model check (1.13.0): from ``answer`` or
+    the last recent hello, None when nothing recent has said. Never asks."""
+    found = answer if answer is not None else last_hello()
+    if not isinstance(found, dict):
+        return None
+    capabilities = found.get("capabilities")
+    return bool(capabilities.get("model")) if isinstance(capabilities, dict) else False
+
+
 def can_hold(answer: typing.Optional[dict] = None) -> typing.Optional[bool]:
     """Whether the bridge speaks hold, resume and flush: from ``answer`` (a
     normalised hello) or the last recent one, and None when nothing recent
@@ -384,7 +413,8 @@ def why_not() -> str:
 
 
 __all__ = [
-    "CALL_TIMEOUT", "COMPOSE_TIMEOUT", "CONNECT_TIMEOUT", "FLUSH_TIMEOUT", "HOLD_TIMEOUT", "LOOPBACK",
-    "HELLO_TTL", "available", "call", "can_hold", "cancel", "compose", "flush", "forget", "hello", "hold",
-    "last_hello", "reset_for_tests", "executable_ever", "resume", "status", "submit", "use_transport", "why_not",
+    "CALL_TIMEOUT", "COMPOSE_TIMEOUT", "CONNECT_TIMEOUT", "FLUSH_TIMEOUT", "HOLD_TIMEOUT", "LOOPBACK", "MODEL_TIMEOUT",
+    "HELLO_TTL", "available", "call", "can_check_models", "can_hold", "cancel", "compose", "flush", "forget", "hello",
+    "hold", "last_hello", "model", "reset_for_tests", "executable_ever", "resume", "status", "submit", "use_transport",
+    "why_not",
 ]

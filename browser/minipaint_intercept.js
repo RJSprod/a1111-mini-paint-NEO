@@ -20,6 +20,16 @@
  * Nothing here parses a model name, names a WanGP component, or holds a
  * queue of its own.
  *
+ * THE POPUP IS BLOCKED WHEN THE CLIPBOARD IS. The describe answer carries
+ * the Clipboard's readiness (``readiness``: WanGP running, its bridge
+ * answering, the page on one of the models the Clipboard sends to, defined
+ * and downloaded). While it says not ready, the popup draws one quiet line
+ * with Check again and nothing to send with: no prompt, no Enhance, no
+ * roles, no Inherit, no History and no Generate - only Cancel. A Generate
+ * the server refuses for the same reason redraws the popup the same way,
+ * from the refusal's own answer. Which models those are is the server's
+ * business; this file only renders the answer.
+ *
  * Fetched lazily - the first time a gallery send is actually pointed at
  * WanGP - and never parsed by a session that keeps the button on Mini Paint.
  * The WanGP bridge and the public queue API are loaded beside it, for the
@@ -406,6 +416,20 @@ window.minipaintIntercept = (function () {
         head.appendChild(close);
         root.appendChild(head);
 
+        // The block: one quiet line in place of everything that sends,
+        // shown only while the Clipboard's readiness says not ready. A
+        // text button to look again; no icon, no colour of alarm.
+        const blocked = el("div", CLASS + "-blocked");
+        blocked.setAttribute("role", "status");
+        blocked.hidden = true;
+        const blockedText = el("span", CLASS + "-blocked-text", "");
+        const recheck = el("button", CLASS + "-blocked-check", "Check again");
+        recheck.type = "button";
+        recheck.addEventListener("click", function () { recheckReadiness(); });
+        blocked.appendChild(blockedText);
+        blocked.appendChild(recheck);
+        root.appendChild(blocked);
+
         const prompt = el("textarea", CLASS + "-prompt");
         prompt.rows = 3;
         prompt.placeholder = "Use current WanGP prompt";
@@ -483,7 +507,8 @@ window.minipaintIntercept = (function () {
         root.appendChild(actions);
 
         (document.body || document.documentElement).appendChild(root);
-        S.dom = { root: root, thumb: thumb, sub: sub, prompt: prompt, enhance: enhance, enhanceNote: enhanceNote,
+        S.dom = { root: root, thumb: thumb, sub: sub, blocked: blocked, blockedText: blockedText, recheck: recheck,
+                  prompt: prompt, enhance: enhance, enhanceNote: enhanceNote,
                   roles: roles, inherit: inherit, inheritNote: inheritNote, dot: dot, statusText: statusText,
                   historyToggle: historyToggle, message: message, history: history, cancel: cancelButton, generate: generate };
         return S.dom;
@@ -596,6 +621,37 @@ window.minipaintIntercept = (function () {
         const generate = (S.describe && S.describe.generate) || { enabled: true };
         dom.generate.disabled = !!S.busy || generate.enabled === false;
         dom.generate.title = generate.enabled === false ? String(generate.reason || "WanGP is not running") : "Ctrl+Enter";
+    }
+
+    /** Whether the popup's sending half exists: the Clipboard's readiness. */
+    function blockedView() {
+        const view = S.describe && S.describe.readiness;
+        return view && typeof view === "object" && view.ready === false ? view : null;
+    }
+
+    /** The block, drawn from the last answer: one class on the root hides
+     * everything that sends (the stylesheet), and the line says why. */
+    function renderBlocked() {
+        const dom = S.dom;
+        if (!dom) { return; }
+        const view = blockedView();
+        dom.root.classList.toggle(CLASS + "-is-blocked", !!view);
+        dom.blocked.hidden = !view;
+        dom.blockedText.textContent = view ? String(view.message || "WanGP is not ready to take a request.") : "";
+        if (view) { S.historyOpen = false; }
+    }
+
+    /** Check again: the server asked afresh, then the popup redrawn. */
+    function recheckReadiness() {
+        if (!S.open) { return Promise.resolve(null); }
+        const dom = S.dom;
+        if (dom) { dom.blockedText.textContent = "Checking whether WanGP is ready…"; }
+        const token = S.token;
+        return post(Object.assign({ action: "describe", handoff: S.handoff, fresh: true }, factsBody())).then(function (answer) {
+            if (!S.open || S.token !== token) { return answer; }
+            if (answer && answer.ok) { applyDescribe(answer); } else { renderBlocked(); }
+            return answer;
+        });
     }
 
     function showMessage(text, failure) {
@@ -738,6 +794,7 @@ window.minipaintIntercept = (function () {
         renderEnhanceNote();
         renderInheritNote();
         renderStatus();
+        renderBlocked();
         renderHistory();
         dom.sub.textContent = (S.tab ? S.tab + " · " : "") + (S.size || "") + (caps.known === false ? " · WanGP page not open here" : "");
         position();
@@ -946,6 +1003,11 @@ window.minipaintIntercept = (function () {
 
     function submit() {
         if (!S.open || S.busy) { return Promise.resolve(null); }
+        if (blockedView()) {
+            // Nothing to send with: Generate is not drawn, and Ctrl+Enter
+            // asks again rather than sending what the server would refuse.
+            return recheckReadiness();
+        }
         const dom = S.dom;
         const body = planSubmission();
         if (!body.roles.length && S.roles.available.length) {
@@ -968,6 +1030,15 @@ window.minipaintIntercept = (function () {
             dom.generate.textContent = "Generate";
             if (!answer || !answer.ok) {
                 S.last = { action: "submit", code: (answer && answer.code) || "", message: (answer && answer.message) || "" };
+                if (answer && answer.readiness && S.describe) {
+                    // Refused because WanGP is not ready: the popup becomes
+                    // the block, from this answer, without asking again.
+                    S.describe.readiness = answer.readiness;
+                    renderBlocked();
+                    renderStatus();
+                    note("generate refused - " + (answer.code || "not ready"));
+                    return answer;
+                }
                 const notes = answer && Array.isArray(answer.notes) && answer.notes.length ? " " + answer.notes[0] + "." : "";
                 showMessage(((answer && answer.message) || "The request was not queued.") + notes, true);
                 renderStatus();
@@ -1205,6 +1276,10 @@ window.minipaintIntercept = (function () {
             seen: Object.keys(S.seen).length,
             wangp: S.dom ? S.dom.dot.dataset.state : "",
             generateEnabled: S.dom ? !S.dom.generate.disabled : false,
+            blocked: !!blockedView(),
+            readiness: S.describe && S.describe.readiness ? { ready: S.describe.readiness.ready === true,
+                                                             code: S.describe.readiness.code || "",
+                                                             target: S.describe.readiness.target || "" } : null,
             historyOpen: S.historyOpen,
             historyCount: S.describe && Array.isArray(S.describe.history) ? S.describe.history.length : 0,
             last: Object.assign({}, S.last)

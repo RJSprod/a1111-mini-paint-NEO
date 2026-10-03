@@ -135,6 +135,25 @@ INTERCEPT_IMAGE_EXPIRED = "INTERCEPT_IMAGE_EXPIRED"
 #: could fill. Said rather than sending a request the picture is not in.
 INTERCEPT_NO_IMAGE_ROLE = "INTERCEPT_NO_IMAGE_ROLE"
 
+# -- the Clipboard's WanGP targets and their readiness (bridge 1.13.0) --------
+#: The Clipboard tab and the gallery's Send to WanGP popup send to three
+#: models - MiniMax H3 FL2VA, MiniMax H3 Ref2VA and LTX 2.3 Distilled - and
+#: block their WanGP section when the one the WanGP page is on is not ready
+#: to take a request. These say why. ``clipboard/targets.py`` decides.
+#: WanGP has not said which model it is on.
+TARGET_UNKNOWN = "TARGET_UNKNOWN"
+#: The page is on a model the Clipboard does not send to.
+TARGET_UNSUPPORTED = "TARGET_UNSUPPORTED"
+#: The model is not defined in this WanGP.
+TARGET_NOT_DEFINED = "TARGET_NOT_DEFINED"
+#: Some of the files WanGP would fetch before generating are not on disk.
+TARGET_NOT_DOWNLOADED = "TARGET_NOT_DOWNLOADED"
+#: The bridge in WanGP is not answering, or cannot be asked whether a model
+#: is set up (a bridge older than 1.13.0).
+TARGET_CHECK_UNAVAILABLE = "TARGET_CHECK_UNAVAILABLE"
+#: The LTX 2.3 writer is not in the installed ModelSwitchRefiner.
+ENHANCE_LTX_UNSUPPORTED = "ENHANCE_LTX_UNSUPPORTED"
+
 # -- everything else --------------------------------------------------------
 WANGP_RESTARTED = "WANGP_RESTARTED"
 INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -195,7 +214,7 @@ MESSAGES: dict[str, str] = {
     ADMISSION_UNCONFIRMED: "WanGP did not confirm that the request was added to the queue.",
     WANGP_VALIDATION_REFUSED: "WanGP declined the queue request; check the WanGP page for details.",
     ENHANCE_UNAVAILABLE: "Prompt enhancement is not available: ModelSwitchRefiner's LLM Studio is not installed, is switched off, or has no model set up.",
-    ENHANCE_MODEL_UNSUPPORTED: "Enhanced prompts need a MiniMax H3 model (FL2VA or Ref2VA) loaded in WanGP; the WanGP page is on another model.",
+    ENHANCE_MODEL_UNSUPPORTED: "Enhanced prompts need MiniMax H3 (FL2VA or Ref2VA) or LTX 2.3 Distilled loaded in WanGP; the WanGP page is on another model.",
     ENHANCE_PROMPT_REQUIRED: "Enhanced mode needs a prompt typed in Clipboard; the WanGP page's own prompt cannot be enhanced from here.",
     ENHANCE_NO_VISION: "The language model running in LLM Studio cannot see pictures, so a request with an image cannot be enhanced.",
     ENHANCE_IMAGE_UNREADABLE: "One of the pictures could not be read for the enhancement.",
@@ -227,6 +246,12 @@ MESSAGES: dict[str, str] = {
     FLUSH_HARD_REFUSED: "WanGP is set to load its model at start and would wait for ever for a model a hard flush released, so only a soft flush is possible.",
     INTERCEPT_IMAGE_EXPIRED: "The picture this request froze is no longer there; press the gallery button again. Nothing was queued.",
     INTERCEPT_NO_IMAGE_ROLE: "The current WanGP model takes no image, so the picture has nowhere to go. Nothing was queued.",
+    TARGET_UNKNOWN: "WanGP has not said which model it is on yet. Open the WanGP tab and choose MiniMax H3 FL2VA, MiniMax H3 Ref2VA or LTX 2.3 Distilled.",
+    TARGET_UNSUPPORTED: "WanGP is on a model this sends nothing to. Choose MiniMax H3 FL2VA, MiniMax H3 Ref2VA or LTX 2.3 Distilled in the WanGP tab.",
+    TARGET_NOT_DEFINED: "The model the WanGP page is on is not defined in this WanGP.",
+    TARGET_NOT_DOWNLOADED: "The model the WanGP page is on is not downloaded yet. Generate with it once in the WanGP tab so WanGP fetches its files.",
+    TARGET_CHECK_UNAVAILABLE: "WanGP's bridge cannot say whether its model is set up yet. Wait for WanGP to finish starting, or install the bridge again from the WanGP tab's setup.",
+    ENHANCE_LTX_UNSUPPORTED: "The installed ModelSwitchRefiner cannot write LTX 2.3 prompts yet; update it, or switch enhanced prompts off.",
 }
 
 #: Codes that mean "the setup on disk no longer describes reality". The tab

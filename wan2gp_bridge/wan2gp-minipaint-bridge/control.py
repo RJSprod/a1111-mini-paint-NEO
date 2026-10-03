@@ -50,6 +50,12 @@ hello says the bridge speaks them - ``capabilities.hold`` - and carries what a
 hold needs to know of WanGP's activity: whether a worker exists, whether a
 task is on the card and whose, how long the queue is, whether work is waiting
 on a hold, and the card's free and total memory.
+
+Bridge 1.13.0 adds ``model``: whether one model is set up in this WanGP - its
+definition known, and every file WanGP would fetch before generating with it
+already on disk (``model_check.py``). Read-only: the Clipboard tab asks it
+before it lets a request be pressed. The hello says the bridge speaks it -
+``capabilities.model``.
 """
 
 from __future__ import annotations
@@ -62,13 +68,14 @@ import typing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
-    from . import compatibility, compose, execution, hold, ledger, protocol
+    from . import compatibility, compose, execution, hold, ledger, model_check, protocol
 except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import compatibility  # type: ignore[no-redef]
     import compose  # type: ignore[no-redef]
     import execution  # type: ignore[no-redef]
     import hold  # type: ignore[no-redef]
     import ledger  # type: ignore[no-redef]
+    import model_check  # type: ignore[no-redef]
     import protocol  # type: ignore[no-redef]
 
 
@@ -222,6 +229,8 @@ class ControlSurface:
                 return self._resume(payload)
             if operation == protocol.CONTROL_FLUSH:
                 return self._flush(payload)
+            if operation == protocol.CONTROL_MODEL:
+                return self._model(payload)
         except execution.ExecutionError as error:
             return 409, {"ok": False, "code": error.code, "message": error.detail[:200]}
         except compose.ComposeError as error:
@@ -282,9 +291,10 @@ class ControlSurface:
             "ledger_open": self.ledger.open_count() if self.ledger is not None else 0,
             "code": code,
             "message": "",
-            # The flag an older bridge leaves out, which is how Forge knows
-            # not to send it hold, resume or flush at all.
-            "capabilities": {"hold": True},
+            # The flags an older bridge leaves out, which is how Forge knows
+            # not to send it hold, resume or flush (1.12.0) or ask it whether
+            # a model is set up (1.13.0) at all.
+            "capabilities": {"hold": True, "model": True},
             "hold": held.get("hold") or protocol.HOLD_NONE,
             **activity,
         }
@@ -306,6 +316,16 @@ class ControlSurface:
         if code:
             return 400, {"ok": False, "code": code, "message": "a flush names a lease and soft or hard"}
         return 200, self.holder.flush(request["lease"], request["level"])
+
+    def _model(self, payload: typing.Any) -> typing.Tuple[int, dict]:
+        """Bridge 1.13.0: the facts about one model - defined, and downloaded?"""
+        request, code = protocol.normalize_model_request(payload)
+        if code:
+            return 400, {"ok": False, "code": code, "message": "a model check names one model type"}
+        answer = model_check.facts(self.compat._wgp(), request["model_type"])
+        if answer.get("ok") and answer.get("defined") and not answer.get("checked"):
+            self._note(f"model check: {request['model_type'][:60]} could not be checked ({answer.get('diagnosis', '')[:120]})")
+        return 200, answer
 
     def _compose(self, payload: typing.Any) -> typing.Tuple[int, dict]:
         request, code = protocol.normalize_compose_request(payload)

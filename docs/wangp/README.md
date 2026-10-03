@@ -395,7 +395,11 @@ mode gives the tab the window (`capabilities.layout_compact`; see *Focus mode*, 
 Bridge 1.12.0 adds the card lease's `hold`, `resume` and `flush` on the control plane
 (`capabilities.hold`), which let another extension borrow WanGP's card between tasks -
 see *Sharing the machine*, below; an older bridge keeps working for everything else and
-is simply never held. An extension newer than its
+is simply never held. Bridge 1.13.0 adds the read-only `model` check
+(`capabilities.model`): whether one model is defined in this WanGP and has every file WanGP
+would fetch before generating with it, found by WanGP's own download path without
+downloading anything. The Clipboard tab blocks its WanGP section on it
+(`docs/clipboard/README.md`, *Which WanGP models it sends to*). An extension newer than its
 bridge says `BRIDGE_VERSION_MISMATCH` until the bridge is installed again from setup step 4
 and WanGP restarted.
 

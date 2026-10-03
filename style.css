@@ -1310,6 +1310,38 @@
     color: var(--error-text-color, inherit);
 }
 .minipaint-intercept-message[hidden] { display: none; }
+/* The popup's block: while the Clipboard's readiness says WanGP cannot take a
+ * request, one quiet line with Check again stands where the prompt was, and
+ * nothing that sends is drawn - Cancel alone stays, to let the picture go.
+ * The same voice as the composer's line: a hint's colour and a hairline. */
+.minipaint-intercept-blocked {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+    font-size: 12px;
+    line-height: 1.45;
+    padding: 6px 10px;
+    border-left: 2px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    color: var(--body-text-color-subdued, inherit);
+}
+.minipaint-intercept-blocked[hidden] { display: none !important; }
+.minipaint-intercept-blocked-text { flex: 1 1 200px; min-width: 0; }
+.minipaint-intercept-blocked-check {
+    background: none;
+    border: 0;
+    padding: 0;
+    min-height: 0;
+    font: inherit;
+    color: var(--color-accent, inherit);
+    text-decoration: underline;
+    cursor: pointer;
+}
+.minipaint-intercept.minipaint-intercept-is-blocked :is(
+    .minipaint-intercept-prompt, .minipaint-intercept-check, .minipaint-intercept-roles-row,
+    .minipaint-intercept-history-toggle, .minipaint-intercept-history, .minipaint-intercept-generate) {
+    display: none !important;
+}
 .minipaint-intercept-history {
     display: flex;
     flex-direction: column;
@@ -2155,6 +2187,67 @@
 
 #minipaint_clipboard_root .minipaint-clip-wangp-line[data-state="ready"] {
     box-shadow: inset 3px 0 0 var(--color-accent, #ff7c00);
+}
+
+/* -- the WanGP section's block ------------------------------------------
+ *
+ * The section exists only while WanGP can take a request for the model its
+ * page is on (clipboard/targets.py): running, its bridge answering, and one
+ * of MiniMax H3 FL2VA, MiniMax H3 Ref2VA or LTX 2.3 Distilled, defined and
+ * downloaded. The page script writes the answer onto the root as
+ * data-wangp-ready ("1" only when it is) and data-wangp-target, and these
+ * rules do the rest: until it is "1" - including before the page has asked -
+ * the cards, the prompt, the enhancement button, Add to Queue, the WanGP line
+ * and the toolbar's +First / +Last / +Ref are not there, and one quiet line
+ * says why. The queue, its Cancel everything and View Outputs stay: they are
+ * the record of what was sent, not a way to send.
+ *
+ * !important because the host theme's own display rules would otherwise win
+ * (CLAUDE.md, "A theme's rule about button reaches the Clipboard tiles"), and
+ * nothing here is ever display-toggled inline. */
+#minipaint_clipboard_root:not([data-wangp-ready="1"]) :is(
+    #minipaint_clipboard_wangp_line, #minipaint_clipboard_cards, #minipaint_clipboard_prompt,
+    #minipaint_clipboard_sp_open, #minipaint_clipboard_queue,
+    #minipaint_clipboard_to_first, #minipaint_clipboard_to_last, #minipaint_clipboard_to_ref) {
+    display: none !important;
+}
+
+#minipaint_clipboard_root[data-wangp-ready="1"] #minipaint_clipboard_blocked {
+    display: none !important;
+}
+
+/* LTX 2.3 Distilled is sent a first and a last frame and no reference. */
+#minipaint_clipboard_root[data-wangp-target="ltx23"] :is(#minipaint_clipboard_card_ref, #minipaint_clipboard_to_ref) {
+    display: none !important;
+}
+
+/* Discreet: the colour of a hint, a hairline at the start, no fill and no
+ * icon - a note about the state of things, not an alarm. */
+#minipaint_clipboard_root .minipaint-clip-blocked {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+    font-size: 12px;
+    line-height: 1.45;
+    padding: 6px 10px;
+    border-left: 2px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    color: var(--body-text-color-subdued, inherit);
+}
+
+#minipaint_clipboard_root .minipaint-clip-blocked-text {
+    flex: 1 1 200px;
+    min-width: 0;
+}
+
+#minipaint_clipboard_root .minipaint-clip-blocked-check {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    color: var(--color-accent, inherit);
+    text-decoration: underline;
+    cursor: pointer;
 }
 
 /* -- history ---------------------------------------------------------- */

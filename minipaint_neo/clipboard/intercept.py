@@ -27,12 +27,21 @@ thin layer over what Clipboard already does:
 WHAT IS MODEL-AGNOSTIC HERE, AND WHY IT MATTERS. Roles are the three
 generic ids the enhancer already spells - ``first_frame``, ``last_frame``,
 ``reference`` - and which of them exist for the current model comes from
-the live page's own input support, as the bridge reports it. The *default*
-role is the one thing that leans on a model family, and it leans on the
-mapping ``enhance.SLOTS_FOR`` already holds rather than on a name spelled
-here. Nothing in the popup, and nothing in this file's public answers, says
-"MiniMax", "FL2VA" or "REF2VA": a future model family is a change to that
-mapping and to nothing in the intercept path.
+the live page's own input support, as the bridge reports it, narrowed by
+what Clipboard sends that model at all (``targets.FIELDS``: LTX 2.3
+Distilled is never sent a reference). The *default* role is the one thing
+that leans on a model family, and it leans on the mapping
+``enhance.SLOTS_FOR`` already holds rather than on a name spelled here.
+Nothing in the popup, and nothing in this file's public answers, says
+"MiniMax", "FL2VA", "REF2VA" or "LTX": a future model family is a change to
+those mappings and to nothing in the intercept path.
+
+THE POPUP IS BLOCKED THE WAY THE COMPOSER IS. ``describe`` carries the
+Clipboard's readiness answer (``targets.readiness``): unless WanGP is
+running, its bridge answering and the page on a supported, downloaded model,
+the popup shows that one quiet sentence instead of its prompt, its switch,
+its roles and Generate - and Generate, pressed anyway, is refused by the
+same fresh check every Clipboard press meets.
 
 Nothing here logs a prompt, a filename or a path. The journal sees roles,
 counts and the first eight characters of an id.
@@ -246,11 +255,15 @@ def capabilities(model: typing.Any = None, inputs: typing.Any = None) -> dict:
     refused. ``default_roles`` comes from the enhancer's slot mapping for
     the model's variant when it has one, else the first role on offer.
     """
+    from . import targets
+
     block = enhance.model_block(model)
     support = _support(inputs)
     known = support is not None
-    available = [role for role in ROLE_IDS if not known or support.get(ROLE_FIELDS[role], False)]
-    variant = enhance.variant_for_model(block)
+    variant = enhance.target_for_model(block)
+    sent = targets.fields_for(variant)
+    available = [role for role in ROLE_IDS
+                 if ROLE_FIELDS[role] in sent and (not known or support.get(ROLE_FIELDS[role], False))]
     preferred = [FIELD_ROLES[field] for field in enhance.SLOTS_FOR.get(variant, {}) if field in FIELD_ROLES]
     defaults = [role for role in preferred if role in available][:1] or available[:1]
     return {
@@ -288,10 +301,10 @@ def wangp_status() -> dict:
     # The same question the queue button asks, through the same seam, so
     # the dot and the button cannot disagree about whether WanGP is there.
     running = bool(outbox.wangp_running())
-    unattended = outbox.chosen_executor() == outbox.EXECUTOR_SERVER
     if not running:
-        text = "WanGP is not running" + ("; Generate queues on the server, which starts it" if unattended else "")
-        return {"state": STATUS_OFF, "running": False, "generating": None, "text": text}
+        # Not "Generate queues on the server, which starts it" any more: a
+        # press from here is refused while WanGP is stopped (see targets).
+        return {"state": STATUS_OFF, "running": False, "generating": None, "text": "WanGP is not running"}
     generating: typing.Optional[bool] = None
     try:
         from ..wangp import control
@@ -308,8 +321,14 @@ def wangp_status() -> dict:
     return {"state": STATUS_RUNNING, "running": True, "generating": None, "text": "WanGP is running"}
 
 
-def generate_button() -> dict:
-    """Whether Generate is a button: the same decision Add to Queue makes."""
+def generate_button(ready: typing.Optional[typing.Mapping[str, typing.Any]] = None) -> dict:
+    """Whether Generate is a button: the same decision Add to Queue makes.
+
+    ``ready`` is the Clipboard's readiness answer when the caller has one;
+    a section that is blocked has no Generate, whatever the executor says.
+    """
+    if ready is not None and not ready.get("ready"):
+        return {"label": "Generate", "enabled": False, "reason": str(ready.get("message") or "")}
     try:
         from . import ui
 
@@ -608,27 +627,32 @@ def build_request(prompt: typing.Any, roles: typing.Sequence[str], token: str, i
     return request
 
 
-def describe(handoff: typing.Any, model: typing.Any = None, inputs: typing.Any = None) -> dict:
-    """Everything the popup draws, in one answer."""
+def describe(handoff: typing.Any, model: typing.Any = None, inputs: typing.Any = None, fresh: bool = False) -> dict:
+    """Everything the popup draws, in one answer. ``fresh`` is Check again's:
+    the readiness check skips its few seconds of cache."""
     parsed = parse_handoff(handoff)
     if parsed is None:
         return {"ok": False, "code": errors.REQUEST_INVALID, "message": "That is not a WanGP request handoff."}
     if not staged_exists(parsed["token"]):
         return {"ok": False, "code": errors.INTERCEPT_IMAGE_EXPIRED, "message": errors.message(errors.INTERCEPT_IMAGE_EXPIRED)}
+    from . import targets
+
     draft = history.load_draft()
     current = config.load()
     availability = enhance.availability(model)
+    ready = targets.readiness(model, fresh=bool(fresh))
     return {
         "ok": True,
         "token": parsed["token"],
         "image": {"width": parsed["width"], "height": parsed["height"], "tab": parsed["tab"]},
+        "readiness": ready,
         "capabilities": capabilities(model, inputs),
         "prompt": draft["prompt_override"],
         "enhance": {"enabled": enhance.enabled(), "state": availability.get("state", "unknown"),
                     "text": availability.get("text", "")},
         "inherit": {"default": bool(current.intercept_inherit), "supported": True, "draft": _draft_images_summary(draft)},
         "wangp": wangp_status(),
-        "generate": generate_button(),
+        "generate": generate_button(ready),
         "executor": outbox.chosen_executor(),
         "history": history_view(model, inputs),
     }
@@ -703,13 +727,20 @@ def submit(
     except IntegrationError as error:
         _journal(f"generate refused before storing - {error.code}")
         notes = []
+        view = error.extra.get("readiness") if isinstance(error.extra.get("readiness"), dict) else None
         if error.code == errors.WANGP_NOT_RUNNING:
             notes.append("nothing was stored; open the WanGP tab and let it start")
         elif error.code.startswith("ENHANCE_"):
             notes.append("nothing was stored; switch Enhance off to send the prompt as typed")
         elif error.code == errors.CLIPBOARD_ASSET_UNKNOWN:
             notes.append("a Clipboard slot names a file that is gone; switch off Inherit, or press Refresh in Clipboard")
-        return {"ok": False, "code": error.code, "message": errors.message(error.code), "notes": notes}
+        elif view is not None:
+            notes.append("nothing was stored")
+        refused = {"ok": False, "code": error.code, "message": (view or {}).get("message") or errors.message(error.code),
+                   "notes": notes}
+        if view is not None:
+            refused["readiness"] = view
+        return refused
     config.update(intercept_inherit=use_draft)
     entry = add_history({
         "prompt": str(prompt or ""),
@@ -743,6 +774,9 @@ def submit(
     notes = [f"{pending - 1} ahead of it" if pending > 1 else "it goes next"]
     if dropped:
         notes.append(", ".join(ROLE_LABELS[role] for role in dropped) + " is not offered by the current model and was dropped")
+    if job.get("narrowed"):
+        notes.append(", ".join(ROLE_LABELS[FIELD_ROLES[field]] for field in job["narrowed"] if field in FIELD_ROLES)
+                     + " not sent: this model takes a first and a last frame only")
     if not server:
         notes.append("keep a page with the WanGP tab open until it is queued")
     return {

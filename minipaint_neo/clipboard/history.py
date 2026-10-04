@@ -278,6 +278,126 @@ def draft_from_record(record: typing.Mapping[str, typing.Any], available: typing
     return draft, missing
 
 
+# ---------------------------------------------------------------- recipes --
+#
+# What View Outputs' Load restores, kept on the output itself.
+#
+# A history record is made when a page next asks for the queue after its job
+# was confirmed, and only for the composer's own jobs; and a finished job is
+# swept from the queue two minutes after it finishes. So a long unattended run
+# - an LTX video the server generated while nobody had the tab open - could
+# finish, be swept and never be recorded, and its video in View Outputs had
+# nothing to load; nor did any video the gallery popup asked for, or one whose
+# record had aged out of the two hundred. The output ledger now keeps the
+# recipe of the request that made it, taken from the job while the job is
+# still there (``outputs.sync`` and the executor's ``outputs.remember``).
+# A recipe is the request as it was typed: the prompt the user wrote - never
+# the one an enhancement wrote, which is kept beside it as ``written`` - and
+# the library pictures by id. A picture that was not a library picture (the
+# gallery's frozen picture, another extension's upload) is named as
+# ``transient``: it is gone by the time anybody loads the recipe.
+
+_FIELD_KEYS = (
+    (protocol.QUEUE_FIELD_START, "first_asset_id"),
+    (protocol.QUEUE_FIELD_END, "last_asset_id"),
+    (protocol.QUEUE_FIELD_REFERENCES, "reference_asset_ids"),
+)
+
+
+def normalize_recipe(raw: typing.Any) -> typing.Optional[dict]:
+    """A recipe as an output keeps it, or None for anything that is not one."""
+    if not isinstance(raw, dict):
+        return None
+    prompt = raw.get("prompt") if isinstance(raw.get("prompt"), str) else ""
+    written = raw.get("written") if isinstance(raw.get("written"), str) else ""
+    transient = [field for field in (raw.get("transient") or []) if field in protocol.QUEUE_FIELDS] \
+        if isinstance(raw.get("transient"), (list, tuple)) else []
+    return {
+        "prompt": prompt[:protocol.PROMPT_MAX_CHARS],
+        "written": written[:protocol.PROMPT_MAX_CHARS],
+        "first_asset_id": _asset_id(raw.get("first_asset_id")),
+        "last_asset_id": _asset_id(raw.get("last_asset_id")),
+        "reference_asset_ids": _asset_ids(raw.get("reference_asset_ids")),
+        "transient": transient,
+        "model_type": str(raw.get("model_type") or "")[:120],
+        "model_label": str(raw.get("model_label") or "")[:120],
+        "origin": str(raw.get("origin") or "")[:16],
+    }
+
+
+def recipe_of_job(job: typing.Mapping[str, typing.Any]) -> typing.Optional[dict]:
+    """The recipe a queued job was made from, as an output keeps it.
+
+    ``job`` is the outbox's view of one job. The prompt is the one that was
+    typed: for an enhanced job that is the enhancement's ``prompt_original``,
+    because by the time WanGP has the job its request carries the written
+    prompt instead, which is kept as ``written``. None for anything that is
+    not a job.
+    """
+    if not isinstance(job, typing.Mapping) or not isinstance(job.get("request"), typing.Mapping):
+        return None
+    request = job["request"]
+    record = job.get("enhance") if isinstance(job.get("enhance"), typing.Mapping) else {}
+    asked = request.get("prompt") if isinstance(request.get("prompt"), str) else ""
+    finished = record.get("state") == "done" and isinstance(record.get("prompt_original"), str) and record.get("prompt_original")
+    images = request.get("images") if isinstance(request.get("images"), typing.Mapping) else {}
+    recipe: typing.Dict[str, typing.Any] = {
+        "prompt": record["prompt_original"] if finished else asked,
+        "written": asked if finished else "",
+        "first_asset_id": "", "last_asset_id": "", "reference_asset_ids": [], "transient": [],
+        "model_type": str((job.get("model") or {}).get("type") or ""),
+        "model_label": str((job.get("model") or {}).get("label") or ""),
+        "origin": str(job.get("origin") or ""),
+    }
+
+    def library_id(handle: typing.Any) -> str:
+        if isinstance(handle, typing.Mapping) and handle.get("kind") == "clipboard_asset":
+            return _asset_id(handle.get("id"))
+        return ""
+
+    for field, key in _FIELD_KEYS:
+        value = images.get(field)
+        if not value:
+            continue
+        handles = list(value) if field == protocol.QUEUE_FIELD_REFERENCES and isinstance(value, (list, tuple)) else [value]
+        ids = [library_id(handle) for handle in handles]
+        kept = [item for item in ids if item]
+        if len(kept) < len(handles):
+            recipe["transient"].append(field)
+        if field == protocol.QUEUE_FIELD_REFERENCES:
+            recipe[key] = kept
+        elif kept:
+            recipe[key] = kept[0]
+    return normalize_recipe(recipe)
+
+
+def draft_from_recipe(recipe: typing.Mapping[str, typing.Any], available: typing.Callable[[str], bool]) -> typing.Tuple[dict, typing.List[str]]:
+    """The composer's draft a recipe describes, and the slots it could not fill.
+
+    The rule ``draft_from_record`` keeps: what was inherited is inherited
+    again, a picture still in the library is put back, and one that is not -
+    deleted since, or never a library picture - leaves its slot on Use WanGP
+    and is named in the second value (``first``, ``last``, ``reference``).
+    """
+    recipe = normalize_recipe(recipe) or {}
+    missing: typing.List[str] = []
+    draft = empty_draft()
+    draft["prompt_override"] = recipe.get("prompt", "")
+    for key, field, name in (("first_asset_id", protocol.QUEUE_FIELD_START, "first"),
+                             ("last_asset_id", protocol.QUEUE_FIELD_END, "last")):
+        asset_id = recipe.get(key, "")
+        if asset_id and available(asset_id):
+            draft[key] = asset_id
+        elif asset_id or field in recipe.get("transient", []):
+            missing.append(name)
+    references = recipe.get("reference_asset_ids", [])
+    kept = [item for item in references if available(item)]
+    draft["reference_asset_ids"] = kept
+    if len(kept) < len(references) or protocol.QUEUE_FIELD_REFERENCES in recipe.get("transient", []):
+        missing.append("reference")
+    return draft, missing
+
+
 __all__ = [
     "DRAFT_KEYS",
     "MAX_HISTORY",
@@ -286,6 +406,7 @@ __all__ = [
     "MODE_OVERRIDE",
     "add_history",
     "delete_history",
+    "draft_from_recipe",
     "draft_from_record",
     "draft_overrides",
     "empty_draft",
@@ -293,7 +414,9 @@ __all__ = [
     "load_history",
     "make_record",
     "normalize_draft",
+    "normalize_recipe",
     "normalize_record",
     "public_request",
+    "recipe_of_job",
     "save_draft",
 ]

@@ -32,7 +32,7 @@
  * "queued". A press while WanGP is not running is refused, not stored.
  *
  * Protocol 5: a job may be *enhanced* first - its prompt rewritten by the
- * ModelSwitchRefiner extension's MiniMax H3 or LTX 2.3 writer for the model
+ * ModelSwitchRefiner extension's MiniMax H3 or LTX (2.3, 2.5) writer for the model
  * the page is on - and waits in the line as "enhancing" until that prompt exists; the
  * whole line can be cancelled at once; and once WanGP has a job, the page
  * that queued it keeps asking the bridge where its task is (waiting,
@@ -125,8 +125,8 @@ window.minipaintInterop = (function () {
         QUEUE_JOB_PENDING: "The request is waiting its turn in the queue outbox.",
         QUEUE_JOB_UNKNOWN: "That queue job is no longer in the outbox.",
         ENHANCE_UNAVAILABLE: "Prompt enhancement is not available: ModelSwitchRefiner's LLM Studio is not installed, is switched off, or has no model set up.",
-        ENHANCE_MODEL_UNSUPPORTED: "Enhanced prompts need MiniMax H3 (FL2VA or Ref2VA) or LTX 2.3 Distilled loaded in WanGP; the WanGP page is on another model.",
-        ENHANCE_LTX_UNSUPPORTED: "The installed ModelSwitchRefiner cannot write LTX 2.3 prompts yet; update it, or switch enhanced prompts off.",
+        ENHANCE_MODEL_UNSUPPORTED: "Enhanced prompts need MiniMax H3 (FL2VA or Ref2VA), LTX 2.3 Distilled or LTX 2.5 Distilled loaded in WanGP; the WanGP page is on another model.",
+        ENHANCE_LTX_UNSUPPORTED: "The installed ModelSwitchRefiner cannot write LTX prompts yet; update it, or switch enhanced prompts off.",
         ENHANCE_PROMPT_REQUIRED: "Enhanced mode needs a prompt typed in Clipboard; the WanGP page's own prompt cannot be enhanced from here.",
         ENHANCE_NO_VISION: "The language model running in LLM Studio cannot see pictures, so a request with an image cannot be enhanced.",
         ENHANCE_IMAGE_UNREADABLE: "One of the pictures could not be read for the enhancement.",
@@ -142,8 +142,8 @@ window.minipaintInterop = (function () {
         COMPOSE_UNAVAILABLE: "WanGP's settings for that model could not be read, so nothing was queued at settings nobody chose.",
         MODEL_UNAVAILABLE: "The model this job was composed for is not available in WanGP any more.",
         JOB_INPUT_MISSING: "An image this job owns is no longer on disk.",
-        TARGET_UNKNOWN: "WanGP has not said which model it is on yet. Open the WanGP tab and choose MiniMax H3 FL2VA, MiniMax H3 Ref2VA or LTX 2.3 Distilled.",
-        TARGET_UNSUPPORTED: "WanGP is on a model this sends nothing to. Choose MiniMax H3 FL2VA, MiniMax H3 Ref2VA or LTX 2.3 Distilled in the WanGP tab.",
+        TARGET_UNKNOWN: "WanGP has not said which model it is on yet. Open the WanGP tab and choose MiniMax H3 FL2VA, MiniMax H3 Ref2VA, LTX 2.3 Distilled or LTX 2.5 Distilled.",
+        TARGET_UNSUPPORTED: "WanGP is on a model this sends nothing to. Choose MiniMax H3 FL2VA, MiniMax H3 Ref2VA, LTX 2.3 Distilled or LTX 2.5 Distilled in the WanGP tab.",
         TARGET_NOT_DEFINED: "The model the WanGP page is on is not defined in this WanGP.",
         TARGET_NOT_DOWNLOADED: "The model the WanGP page is on is not downloaded yet. Generate with it once in the WanGP tab so WanGP fetches its files.",
         TARGET_CHECK_UNAVAILABLE: "WanGP's bridge cannot say whether its model is set up yet. Wait for WanGP to finish starting, or install the bridge again from the WanGP tab's setup.",
@@ -664,7 +664,7 @@ window.minipaintInterop = (function () {
      * ``pending`` with the job id, never a guess.
      *
      * {enhance: true|false} asks for, or declines, the MiniMax H3 or
-     * LTX 2.3 rewrite of the prompt before it is queued; left out, the Clipboard tab's
+     * LTX 2.3 / 2.5 rewrite of the prompt before it is queued; left out, the Clipboard tab's
      * switch decides. The model the page is on travels with the request so
      * the server can choose the H3 variant; pass {model} to say it yourself.
      */

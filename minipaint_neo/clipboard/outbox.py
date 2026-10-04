@@ -1140,6 +1140,7 @@ def submit(
     settings_flush: str = "",
     inherit: typing.Optional[bool] = None,
     require_ready: typing.Optional[bool] = None,
+    typed_prompt: typing.Optional[str] = None,
 ) -> dict:
     """Append a job. The request is normalised here, so a bad one is refused
     before it is stored.
@@ -1147,13 +1148,13 @@ def submit(
     ``require_ready`` is the Clipboard's gate (``targets``): None means "for
     this extension's own screens" - the Clipboard tab and the gallery's
     popup - whose presses are refused unless the model the WanGP page is on
-    is one of the three they send to and is ready to take a request: WanGP
+    is one of the four they send to and is ready to take a request: WanGP
     running, its bridge answering, the model defined and downloaded. The
     check is fresh at the press, whatever the screen last showed, and it is
     what the screens draw their block from, so the two cannot disagree. A
     public-API caller is not gated: it chooses its own model. A request for
-    LTX 2.3 Distilled loses any reference here (``targets.narrow``): that
-    model is sent a first and a last frame and nothing else.
+    LTX 2.3 or 2.5 Distilled loses any reference here (``targets.narrow``):
+    those models are sent a first and a last frame and nothing else.
 
     ``enhance`` None means the tab's switch decides; True or False is a
     caller's own choice. ``model`` is the WanGP model the pressing page is
@@ -1189,6 +1190,11 @@ def submit(
     composes at can be attributed honestly. "The settings you were looking
     at" and "the settings WanGP had recorded" are different promises, and a
     queue that cannot tell them apart cannot keep either.
+
+    A stored press from the Clipboard's own two doors puts its prompt, as
+    typed, at the top of the prompt history the composer's History button
+    shows (``prompts``). ``typed_prompt`` is that text when the request's own
+    prompt is not it - a retry that carries a prompt already written from it.
     """
     from .. import interop
 
@@ -1232,6 +1238,9 @@ def submit(
         if owned:
             _release_inputs(_flatten_inputs(owned))
         raise
+    if origin in (ORIGIN_CLIPBOARD, ORIGIN_GALLERY):
+        _remember_prompt(normalised.get("prompt") if typed_prompt is None else typed_prompt, block,
+                         (ready or {}).get("target", ""), wanted or typed_prompt is not None, origin)
     if narrowed:
         # Said to the screen that pressed, once; the job itself simply never
         # had the field, which is the whole of what "not sent" means.
@@ -1239,6 +1248,17 @@ def submit(
         _journal(f"job {answer['job_id'][:8]}: {', '.join(narrowed)} not sent - "
                  f"{(ready or {}).get('target_label') or 'this model'} takes no such input")
     return answer
+
+
+def _remember_prompt(prompt: typing.Any, block: typing.Mapping[str, typing.Any], target: str, enhanced: bool, origin: str) -> None:
+    """The prompt as typed, at the top of the prompt history. Never fatal: a
+    history that would not write is not a reason to fail a stored job."""
+    try:
+        from . import prompts
+
+        prompts.remember(prompt, model=block, target=target, enhanced=enhanced, origin=origin)
+    except Exception as error:  # noqa: BLE001 - a list of prompts is never worth a press
+        _journal(f"the prompt history could not be written ({type(error).__name__})")
 
 
 def _flatten_inputs(inputs: typing.Mapping[str, typing.Any]) -> typing.List[str]:
@@ -1700,7 +1720,8 @@ def retry(job_id: typing.Any, page: typing.Any) -> dict:
     reuse = bool(record and record.get("state") == "done" and request.get("prompt") and failed_code != errors.MODEL_CHANGED)
     if record and record.get("prompt_original") and not reuse:
         request["prompt"] = record["prompt_original"]
-    job = submit(request, page_id, old["origin"], enhance=(bool(old.get("enhance_requested")) and not reuse), model=old.get("model"))
+    job = submit(request, page_id, old["origin"], enhance=(bool(old.get("enhance_requested")) and not reuse), model=old.get("model"),
+                 typed_prompt=record["prompt_original"] if reuse and record.get("prompt_original") else None)
     with _lock:
         listed = _load()
         for item in listed:

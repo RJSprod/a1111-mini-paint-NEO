@@ -1,6 +1,6 @@
 """What Clipboard remembers between restarts, and where it keeps it.
 
-Four documents, each its own file under the extension's data directory -
+Five documents, each its own file under the extension's data directory -
 the same ``<data root>/a1111-mini-paint-NEO/`` the WanGP setup lives in - and
 none of them inside the user's chosen image folder, which stays an ordinary
 directory of pictures:
@@ -12,7 +12,9 @@ directory of pictures:
                                 every root Clipboard has known;
 * ``clipboard-draft.json``      the composer: a prompt override and up to
                                 three asset ids;
-* ``clipboard-history.json``    the recipes that were confirmed queued.
+* ``clipboard-history.json``    the recipes that were confirmed queued;
+* ``clipboard-prompts.json``    the last ten prompts sent to WanGP, as typed
+                                (the composer's History button).
 
 Every write is atomic - a temp file in the same directory, then a rename -
 and every read is forgiving: a document that will not parse is moved aside
@@ -42,6 +44,9 @@ CONFIG_NAME = "clipboard.json"
 INDEX_NAME = "clipboard-index.json"
 DRAFT_NAME = "clipboard-draft.json"
 HISTORY_NAME = "clipboard-history.json"
+#: The prompt history: the last ten prompts sent from here, as they were
+#: typed. See ``prompts``.
+PROMPTS_NAME = "clipboard-prompts.json"
 #: What WanGP made for this tab's requests, and where each file is.
 #:
 #: A document rather than a field on a job, because a job is swept

@@ -12,7 +12,7 @@ because it was learned the hard way.
 ```
 pip install -r tests/requirements.txt
 python -m playwright install chromium
-python tests/run.py                    # 34 suites; every one must run
+python tests/run.py                    # 35 suites; every one must run
 ```
 
 Gradio is pinned to 4.40.0 because that is what the target Forge ships, and the
@@ -571,19 +571,36 @@ page is on.
 A seventh is shared since 2026-10-03, and it is that extension's rather than
 this one's: **its external LLM API, `mc_llm_api`** (`docs/21-external-llm-api.md`
 there), which `clipboard/enhance.py` imports from its folder. MiniMax H3 presses
-call `submit_minimax`; LTX 2.3 Distilled presses call `submit_ltx` (the first
-frame only, shown to the model) once `capabilities()["kinds"]` lists `"ltx"`, and
-an older ModelSwitchRefiner without it is refused with `ENHANCE_LTX_UNSUPPORTED`
-rather than sent to the MiniMax writer. The enhancement view edits
-`system_prompts()["ltx23"]` beside MiniMax's two.
+call `submit_minimax`; LTX 2.3 and 2.5 Distilled presses call `submit_ltx` (the
+first frame only, shown to the model) once `capabilities()["kinds"]` lists
+`"ltx"`, and an older ModelSwitchRefiner without it is refused with
+`ENHANCE_LTX_UNSUPPORTED` rather than sent to the MiniMax writer. Since
+2026-10-04 an LTX 2.5 press also passes `model="ltx25"` - only when
+`capabilities()["ltx_models"]` lists it, because a writer from before 2.5 has no
+such keyword and writes the same prompt without it. LTX 2.5 runs under LTX 2.3's
+system prompt by the user's choice: the enhancement view edits
+`system_prompts()["ltx23"]` beside MiniMax's two, for both models, and an
+override is kept once under `ltx23` (`enhance.PROMPT_SET_OF`).
 
 The Clipboard's own presses - the tab's Add to Queue and the gallery popup's
 Generate - are gated since 2026-10-03 by `clipboard/targets.py`: WanGP running,
 the bridge answering the model check (bridge 1.13.0, `control.model`), the page
-on MiniMax H3 FL2VA, Ref2VA or LTX 2.3 Distilled, and that model defined and
-downloaded. Both screens draw their block from the same answer the press is
-refused with. The public queue API (`origin` `api`) and the ▶ button are not
-gated.
+on MiniMax H3 FL2VA, Ref2VA, LTX 2.3 Distilled or (since 2026-10-04) LTX 2.5
+Distilled, and that model defined and downloaded. Both screens draw their block
+from the same answer the press is refused with. The public queue API (`origin`
+`api`) and the ▶ button are not gated. LTX 2.5 needed no bridge change: WanGP's
+LTX handler gives 2.5 the image inputs it gives 2.3, and the model check walks
+WanGP's own functions. The composer hides its Reference card from the
+readiness answer's `fields` (`data-wangp-references`), not from a model's name.
+
+Since 2026-10-04 the composer has **History** (`clipboard/prompts.py`): the last
+ten prompts its own two doors stored, as typed, recorded in `outbox.submit` and
+loaded over `/minipaint-clipboard/prompts`. And every View Outputs entry keeps
+the **recipe** of its request (`history.recipe_of_job`, set by `outputs.sync`
+while the job is still in the queue and by the executor's `outputs.remember`),
+because a finished job is swept two minutes after it ends and Queue Send
+History is written only for the composer's jobs and only when a page next asks:
+a long unattended run used to leave a video with nothing to Load.
 
 ## The host
 

@@ -2219,7 +2219,7 @@
  *
  * The section exists only while WanGP can take a request for the model its
  * page is on (clipboard/targets.py): running, its bridge answering, and one
- * of MiniMax H3 FL2VA, MiniMax H3 Ref2VA or LTX 2.3 Distilled, defined and
+ * of MiniMax H3 FL2VA, MiniMax H3 Ref2VA, LTX 2.3 or LTX 2.5 Distilled, defined and
  * downloaded. The page script writes the answer onto the root as
  * data-wangp-ready ("1" only when it is) and data-wangp-target, and these
  * rules do the rest: until it is "1" - including before the page has asked -
@@ -2233,7 +2233,7 @@
  * nothing here is ever display-toggled inline. */
 #minipaint_clipboard_root:not([data-wangp-ready="1"]) :is(
     #minipaint_clipboard_wangp_line, #minipaint_clipboard_cards, #minipaint_clipboard_prompt,
-    #minipaint_clipboard_sp_open, #minipaint_clipboard_queue,
+    #minipaint_clipboard_prompt_history, #minipaint_clipboard_sp_open, #minipaint_clipboard_queue,
     #minipaint_clipboard_to_first, #minipaint_clipboard_to_last, #minipaint_clipboard_to_ref) {
     display: none !important;
 }
@@ -2242,8 +2242,12 @@
     display: none !important;
 }
 
-/* LTX 2.3 Distilled is sent a first and a last frame and no reference. */
-#minipaint_clipboard_root[data-wangp-target="ltx23"] :is(#minipaint_clipboard_card_ref, #minipaint_clipboard_to_ref) {
+/* A model that is sent no reference has no Reference card and no +Ref: LTX
+ * 2.3 and 2.5 Distilled, which are sent a first and a last frame only. The
+ * page writes data-wangp-references from the fields the server's readiness
+ * answer lists for the model (clipboard/targets.py's FIELDS), so the rule
+ * names no model. */
+#minipaint_clipboard_root[data-wangp-references="0"] :is(#minipaint_clipboard_card_ref, #minipaint_clipboard_to_ref) {
     display: none !important;
 }
 
@@ -2651,6 +2655,17 @@
 
 #minipaint_clipboard_root .minipaint-clip-output-name { flex: 0 0 auto; font-weight: 600; }
 
+/* The model that made it - LTX 2.3 or 2.5, MiniMax H3 - in a hint's colour. */
+#minipaint_clipboard_root .minipaint-clip-output-model {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 30%;
+    color: var(--body-text-color-subdued, inherit);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 #minipaint_clipboard_root .minipaint-clip-output-prompt {
     flex: 1 1 auto;
     min-width: 0;
@@ -2955,4 +2970,198 @@
   margin-top: 2px;
   color: var(--body-text-color-subdued, inherit);
   font-size: var(--text-sm, 0.85em);
+}
+
+/* -- History: the last ten prompts sent from here -----------------------
+ *
+ * The button sits under the Prompt box it fills, at the box's right edge and
+ * no wider than its word: it is a way back to a prompt, not a way to send
+ * one, and it goes with the box while the section is blocked (above).
+ *
+ * The dialog is a dialog: on the page's dialog layer, so nothing another
+ * extension floats over Forge covers it (the stacking contract above the Send
+ * to WanGP popup's rules), under the theme's pinned header like View Outputs,
+ * and over a transparent layer that takes a press outside it as Close. Its
+ * list is the one thing in it that scrolls. */
+#minipaint_clipboard_root .minipaint-clip-prompt-history {
+    align-self: flex-end;
+    flex: 0 0 auto;
+    width: auto !important;
+    min-width: 88px;
+    margin-top: -4px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts {
+    position: fixed;
+    inset: var(--minipaint-clip-top, 0px) 0 0 0;
+    z-index: var(--minipaint-dialog-layer, 2000);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: 6vh 12px 12px;
+    background: transparent;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts[hidden],
+#minipaint_clipboard_root .minipaint-clip-prompts [hidden] {
+    display: none !important;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-dialog {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: min(640px, 100%);
+    max-height: 100%;
+    min-height: 0;
+    box-sizing: border-box;
+    padding: 12px 14px;
+    border-radius: var(--block-radius, 8px);
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    border-left: 4px solid var(--color-accent, #ff7c00);
+    background: var(--background-fill-primary, rgba(32, 32, 32, 0.98));
+    color: var(--body-text-color, inherit);
+    box-shadow: var(--shadow-drop-lg, 0 8px 24px rgba(0, 0, 0, 0.35));
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 15px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-hint {
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 12px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-message {
+    padding: 6px 8px;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.12));
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-message.minipaint-clip-prompts-failure {
+    border-left: 3px solid var(--error-text-color, #d9534f);
+    color: var(--error-text-color, inherit);
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    margin: 0;
+    padding: 0 2px 0 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-entry {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm, 4px);
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.3));
+    background: var(--block-background-fill, transparent);
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-empty {
+    padding: 8px 2px;
+    color: var(--body-text-color-subdued, inherit);
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 8px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-meta {
+    flex: 1 1 240px;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 8px;
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 12px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-model {
+    min-width: 0;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* The words as they were typed, line breaks and all - to WanGP each line can
+   be a prompt of its own - four lines of them until More. */
+#minipaint_clipboard_root .minipaint-clip-prompts-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    overflow: hidden;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-text[data-expanded="1"] {
+    display: block;
+    -webkit-line-clamp: unset;
+    line-clamp: unset;
+    overflow: visible;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-actions {
+    flex: 0 0 auto;
+    margin-left: auto;
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-close,
+#minipaint_clipboard_root .minipaint-clip-prompts-more,
+#minipaint_clipboard_root .minipaint-clip-prompts-load {
+    min-height: 28px;
+    padding: 0 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    background: var(--button-secondary-background-fill, transparent);
+    color: var(--button-secondary-text-color, inherit);
+    font: inherit;
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-close:hover,
+#minipaint_clipboard_root .minipaint-clip-prompts-more:hover {
+    background: var(--button-secondary-background-fill-hover, rgba(127, 127, 127, 0.25));
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-load {
+    border-color: var(--button-primary-border-color, transparent);
+    background: var(--button-primary-background-fill, var(--color-accent, #ff7c00));
+    color: var(--button-primary-text-color, inherit);
+    font-weight: 600;
+}
+
+#minipaint_clipboard_root .minipaint-clip-prompts-load[disabled] {
+    opacity: 0.5;
+    cursor: default;
 }

@@ -844,13 +844,17 @@ def _remember_outputs(job: typing.Mapping[str, typing.Any], record: typing.Mappi
     line rather than an exception.
     """
     try:
-        from . import outputs
+        from . import history, outputs
 
         outputs.remember(
             job["job_id"],
             (record or {}).get("generated_files") or [],
             request_id=str((job.get("request") or {}).get("request_id") or ""),
             model=str((job.get("model") or {}).get("label") or ""),
+            # What View Outputs' Load puts back: the job is swept two
+            # minutes from now, and this run may have finished with nobody
+            # watching - an hour-long LTX video, say - so it is kept here.
+            recipe=history.recipe_of_job(job),
         )
     except Exception as error:  # noqa: BLE001 - a ledger is never worth a failed job
         _journal(f"job {job['job_id'][:8]}: the output ledger could not be written ({type(error).__name__})")

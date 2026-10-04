@@ -43,9 +43,13 @@ LIBRARY_ROUTE = ROUTE_PREFIX + "/library"
 SETTINGS_ROUTE = ROUTE_PREFIX + "/settings"
 QUEUE_ROUTE = ROUTE_PREFIX + "/queue"
 #: Whether the WanGP section may be used: the model the page is on, checked
-#: against the three the Clipboard sends to (``targets.readiness``).
+#: against the four the Clipboard sends to (``targets.readiness``).
 READINESS_ROUTE = ROUTE_PREFIX + "/readiness"
 ENHANCE_SETTINGS_ROUTE = ROUTE_PREFIX + "/enhance-settings"
+#: The composer's History: the last ten prompts sent from here, as typed
+#: (``prompts``). GET lists them; POST ``{action: "load", id}`` puts one in
+#: the composer's prompt.
+PROMPTS_ROUTE = ROUTE_PREFIX + "/prompts"
 OUTPUTS_ROUTE = ROUTE_PREFIX + "/outputs"
 OUTPUT_FILE_ROUTE = ROUTE_PREFIX + "/output/{file_id}"
 #: The gallery's Send to WanGP popup: everything it asks, over one POST, and
@@ -448,9 +452,14 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
     differently from the grid beside it would be a second thing to learn
     for no reason.
 
-    A prompt is joined on from the history rather than copied into the
-    ledger. The recipe already lives there, keyed by the request that made
-    it, and one copy of a prompt is enough.
+    What each output says about its request comes from the recipe the
+    ledger kept for it (``outputs``): the prompt as it was typed, the one an
+    enhancement wrote from it, and the model. An output from before recipes
+    were kept is joined to its Queue Send History record instead, as it
+    always was. ``recipe`` is what Load is offered from: the output's own id,
+    which ``ClipboardTab.history_action`` resolves the same two ways, or ""
+    when neither exists - and the gallery says so rather than offering a
+    button that would do nothing.
     """
     listed = outputs.files()
     wanted = clamp_size(size)
@@ -458,21 +467,27 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
     pages = max(1, -(-total // wanted))
     index = page_of(page, pages)
     shown = listed[index * wanted:(index + 1) * wanted]
-    prompts = {}
-    recipes = {}
+    records: typing.Dict[str, dict] = {}
     if shown:
-        wanted_ids = {item["request_id"] for item in shown if item["request_id"]}
+        wanted_ids = {item["request_id"] for item in shown if item["request_id"] and not item.get("recipe")}
         if wanted_ids:
             for record in history.load_history():
                 found = record.get("request_id")
-                if found in wanted_ids and found not in prompts:
-                    prompts[found] = record.get("enhanced_prompt") or record.get("prompt_override") or ""
-                    # The record itself, by its own id, for Load: the gallery
-                    # hands it to the same `history_action` History's own
-                    # Load button uses, so an output restores exactly what
-                    # its history entry would - and an output whose record
-                    # has gone has no recipe to offer, which it says.
-                    recipes[found] = str(record.get("history_id") or "")
+                if found in wanted_ids and found not in records:
+                    records[found] = record
+
+    def told(item: typing.Mapping[str, typing.Any]) -> dict:
+        recipe = item.get("recipe")
+        if recipe:
+            return {"prompt": recipe.get("prompt") or "", "written": recipe.get("written") or "",
+                    "model": recipe.get("model_label") or item.get("model") or recipe.get("model_type") or "",
+                    "recipe": item["id"]}
+        record = records.get(item["request_id"])
+        if record is not None:
+            return {"prompt": record.get("prompt_override") or "", "written": record.get("enhanced_prompt") or "",
+                    "model": record.get("model_label") or item.get("model") or "", "recipe": item["id"]}
+        return {"prompt": "", "written": "", "model": item.get("model") or "", "recipe": ""}
+
     where = outputs.folder()
     if where is None:
         reason = "unconfigured"
@@ -503,11 +518,15 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
                 # because a match is not a fact and pretending otherwise is
                 # how a user comes to trust the wrong video.
                 "exact": item["exact"],
-                "prompt": str(prompts.get(item["request_id"], ""))[:400],
-                "recipe": recipes.get(item["request_id"], ""),
+                # The prompt as it was typed - what Load puts back - and the
+                # one an enhancement wrote from it, which is what WanGP got.
+                "prompt": str(facts["prompt"])[:400],
+                "written": str(facts["written"])[:400],
+                "model": str(facts["model"])[:120],
+                "recipe": facts["recipe"],
                 "url": output_url(item["id"]),
             }
-            for item in shown
+            for item, facts in ((item, told(item)) for item in shown)
         ],
     }
 
@@ -679,6 +698,54 @@ async def _enhance_settings(request: typing.Any) -> typing.Any:
     except Exception:
         return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
     return _json({"ok": False, "code": errors.REQUEST_INVALID, "message": f"{action or 'that'} is not a settings action."}, 400)
+
+
+def prompts_action(method: str, body: typing.Mapping[str, typing.Any]) -> typing.Tuple[dict, int]:
+    """The History dialog's two questions: the list, and Load.
+
+    Load writes the composer's draft - the prompt and nothing else - and
+    answers with the text, so the page puts the same words in its box that
+    the draft now holds. A prompt that has left the list since the page drew
+    it is a 404 carrying the list as it is now.
+    """
+    from . import prompts as prompt_history
+
+    if method == "GET":
+        return {"ok": True, "entries": prompt_history.view(), "max": prompt_history.MAX_PROMPTS}, 200
+    action = str(body.get("action") or "")
+    if action == "load":
+        text = prompt_history.load(body.get("id"))
+        if text is None:
+            return {"ok": False, "code": errors.REQUEST_INVALID, "message": "That prompt is no longer in History.",
+                    "entries": prompt_history.view(), "max": prompt_history.MAX_PROMPTS}, 404
+        return {"ok": True, "prompt": text, "status": "Prompt loaded from History. Nothing was queued."}, 200
+    return {"ok": False, "code": errors.REQUEST_INVALID, "message": f"{action or 'that'} is not a History action."}, 400
+
+
+async def _prompts(request: typing.Any) -> typing.Any:
+    """The composer's History, over HTTP. See ``prompts_action``.
+
+    The reading and writing run in Starlette's thread pool: they are small
+    documents, and still a file each, and a file read on the event loop is
+    every other request this Forge serves waiting for it.
+    """
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    body: typing.Any = {}
+    if request.method == "POST":
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+    body = body if isinstance(body, dict) else {}
+    from starlette.concurrency import run_in_threadpool
+
+    try:
+        answer, status = await run_in_threadpool(prompts_action, request.method, body)
+    except Exception as error:
+        scrub.console(f"the prompt history could not be read ({type(error).__name__}).", _LOG_PREFIX)
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    return _json(answer, status)
 
 
 async def _readiness(request: typing.Any) -> typing.Any:
@@ -941,6 +1008,7 @@ def install(app: typing.Any) -> None:
             Route(QUEUE_ROUTE, endpoint=_queue, methods=["GET", "POST"]),
             Route(READINESS_ROUTE, endpoint=_readiness, methods=["POST"]),
             Route(ENHANCE_SETTINGS_ROUTE, endpoint=_enhance_settings, methods=["GET", "POST"]),
+            Route(PROMPTS_ROUTE, endpoint=_prompts, methods=["GET", "POST"]),
             Route(OUTPUTS_ROUTE, endpoint=_outputs, methods=["GET"]),
             Route(OUTPUT_FILE_ROUTE, endpoint=_output_file, methods=["GET", "HEAD"]),
             Route(IMPORT_ROUTE, endpoint=_import, methods=["POST"]),
@@ -966,6 +1034,6 @@ def install(app: typing.Any) -> None:
 __all__ = ["IMAGE_ROUTE", "IMMUTABLE_CACHE", "IMPORT_ROUTE", "INTERCEPT_ACTIONS", "INTERCEPT_IMAGE_ROUTE",
            "INTERCEPT_ROUTE", "INTERCEPT_SENTENCES", "LIBRARY_ROUTE", "PAGE_SIZE",
            "PAGE_SIZE_MAX", "PAGE_SIZE_MIN", "REVALIDATED_CACHE", "ROUTE_PREFIX",
-           "SEND_ROUTE", "SETTINGS_ROUTE", "QUEUE_ROUTE", "READINESS_ROUTE", "ENHANCE_SETTINGS_ROUTE", "REQUEST_MEMORY_SECONDS",
+           "SEND_ROUTE", "SETTINGS_ROUTE", "QUEUE_ROUTE", "READINESS_ROUTE", "ENHANCE_SETTINGS_ROUTE", "PROMPTS_ROUTE", "REQUEST_MEMORY_SECONDS",
            "apply_settings", "clamp_size", "forget_request", "image_url", "install", "intercept_action", "library_page",
-           "menu_facts", "page_of", "recent_request", "remember_request"]
+           "menu_facts", "page_of", "prompts_action", "recent_request", "remember_request"]

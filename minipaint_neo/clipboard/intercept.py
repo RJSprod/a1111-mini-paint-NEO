@@ -28,8 +28,8 @@ WHAT IS MODEL-AGNOSTIC HERE, AND WHY IT MATTERS. Roles are the three
 generic ids the enhancer already spells - ``first_frame``, ``last_frame``,
 ``reference`` - and which of them exist for the current model comes from
 the live page's own input support, as the bridge reports it, narrowed by
-what Clipboard sends that model at all (``targets.FIELDS``: LTX 2.3
-Distilled is never sent a reference). The *default* role is the one thing
+what Clipboard sends that model at all (``targets.FIELDS``: LTX 2.3 and
+2.5 Distilled are never sent a reference). The *default* role is the one thing
 that leans on a model family, and it leans on the mapping
 ``enhance.SLOTS_FOR`` already holds rather than on a name spelled here.
 Nothing in the popup, and nothing in this file's public answers, says

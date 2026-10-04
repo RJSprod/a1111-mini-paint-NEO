@@ -222,6 +222,8 @@ def page_checks(r: Results, base: pathlib.Path):
         "delete_open", "paste_open", "history_open", "selected", "sort_request", "slot_action", "send_request", "send_press", "send_backend",
         "history_action", "menu_state", "switch", "payload", "to_canvas", "mask_clear", "wangp_line", "cards",
         "card_first", "card_last", "card_ref", "slot_upload_first", "slot_upload_last", "slot_upload_ref", "prompt",
+        # the prompt history: the last ten prompts sent from here, as typed
+        "prompt_history",
         "queue", "queue_status", "outbox_list",
         "history_panel", "history_list", "history_close",
         # prompt enhancement, and the whole line's cancel
@@ -341,6 +343,18 @@ def page_checks(r: Results, base: pathlib.Path):
     r.check("and its panel is a MOUNT, shipped empty, like the grid and the queue",
             component_of(page, "minipaint_clipboard_outputs_panel")["props"].get("value", "") == "")
     r.check("no event renders the gallery either", all(cid("outputs_panel") not in d["outputs"] for d in deps))
+    asked = targeting("prompt_history", "click")
+    r.check("History is the browser's alone too: its dialog is drawn from this tab's own route, and Load writes over it",
+            len(asked) == 1 and not asked[0]["backend_fn"] and ".openPromptHistory(" in (asked[0].get("js") or ""),
+            str(asked[0].get("js") if asked else None))
+    history_button = component_of(page, "minipaint_clipboard_prompt_history")
+    r.check("and it is a visible button called History, in the composer, right after the Prompt box",
+            history_button["type"] == "button" and history_button["props"].get("value") == "History"
+            and history_button["props"].get("visible") is not False, str(history_button["props"])[:200])
+    order = [c["id"] for c in page["components"]
+             if c["props"].get("elem_id") in ("minipaint_clipboard_prompt", "minipaint_clipboard_prompt_history", "minipaint_clipboard_sp_open")]
+    r.check("between the Prompt box and the enhancement button",
+            order == sorted(order) and len(order) == 3 and cid("prompt") < cid("prompt_history") < cid("sp_open"), str(order))
 
     r.check("Cancel everything is the browser's too",
             all(not d["backend_fn"] and ".cancelAll(" in (d.get("js") or "") for d in targeting("cancel_all", "click"))
@@ -1075,9 +1089,16 @@ def theming_checks(r: Results) -> None:
         # text as the pair a theme promises are legible together.
         "--button-primary-background-fill", "--button-primary-border-color", "--button-primary-text-color",
     }
+    # And this extension's own dialog layer, the stacking contract the Send to
+    # WanGP popup's block declares: the composer's History is a dialog too,
+    # and draws on it rather than on a number of its own. Not a colour.
+    own = {"--minipaint-dialog-layer"}
     used = set(re.findall(r"var\((--[\w-]+)", block))
-    r.check("every variable is Gradio's own theme variable or the tab's own size",
-            used and all(name in gradio_vars or name.startswith("--minipaint-clip-") for name in used), str(sorted(name for name in used if name not in gradio_vars and not name.startswith("--minipaint-clip-"))))
+    r.check("every variable is Gradio's own theme variable, the tab's own size, or the page's dialog layer",
+            used and all(name in gradio_vars or name in own or name.startswith("--minipaint-clip-") for name in used),
+            str(sorted(name for name in used if name not in gradio_vars and name not in own and not name.startswith("--minipaint-clip-"))))
+    r.check("and the History dialog is drawn on that layer",
+            "z-index: var(--minipaint-dialog-layer" in block.split(".minipaint-clip-prompts {")[1].split("}")[0])
     r.check("and the ones a night theme recolours are among them", {"--background-fill-primary", "--block-background-fill", "--body-text-color", "--border-color-primary", "--color-accent"} <= used)
     r.check("a fallback colour is neutral, never white", all("255, 255, 255" not in v and "#fff" not in v.lower() for v in re.findall(r"var\(--[\w-]+,\s*([^)]+)\)", block)))
     r.check("the grid's thumbnail size is a CSS variable the browser sets", "--minipaint-clip-thumb" in block)

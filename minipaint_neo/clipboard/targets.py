@@ -1,7 +1,7 @@
 """Which WanGP models the Clipboard sends to, and whether the one in use is ready.
 
 The Clipboard tab and the gallery's Send to WanGP popup send a request to the
-model the WanGP page is on, and since 2026-10-03 only to three of them:
+model the WanGP page is on, and since 2026-10-03 only to these:
 
 * **MiniMax H3 FL2VA** (``minimax_h3_fl2va`` and its finetunes - pruned, PDD,
   VDN): a first and a last frame;
@@ -9,17 +9,24 @@ model the WanGP page is on, and since 2026-10-03 only to three of them:
 * **LTX 2.3 Distilled** (WanGP's ``ltx2_22B`` architecture on its distilled
   pipeline - ``ltx2_22B_distilled``, ``_distilled_1_1`` and the GGUF builds of
   both, and any finetune that declares the same): a first and a last frame,
-  and never a reference.
+  and never a reference;
+* **LTX 2.5 Distilled**, since 2026-10-04 (WanGP's ``ltx2_25_22B`` architecture
+  on its distilled pipeline - ``ltx2_25_22B_distilled`` and its NVFP4 build,
+  and any finetune that declares the same): exactly what LTX 2.3 Distilled is
+  sent. WanGP builds both from one handler with the same image inputs
+  (``image_prompt_types_allowed`` "TSEVL", the end frame always enabled, no
+  reference-image choice), so the bridge needs nothing new for it.
 
-Not LTX 2.3 Dev, not LTX 2.5, not the EditAnything or MSR workflows built on
-2.3, which are other architectures in WanGP's own definitions.
+Not LTX 2.3 or 2.5 Dev, not LTX 2.0, not the EditAnything or MSR workflows
+built on 2.3 and 2.5, which are other architectures (``ltx2_22B_msr``,
+``ltx2_25_22B_msr``, ...) or another pipeline in WanGP's own definitions.
 
 READY MEANS FOUR THINGS, and the section is blocked - prompt, enhancement,
 image cards, Add to Queue, the popup's body - until all four are true:
 
 1. WanGP is running (``WANGP_NOT_RUNNING``);
 2. its bridge answers the model check (``TARGET_CHECK_UNAVAILABLE``);
-3. the page is on one of the three (``TARGET_UNKNOWN`` when it has not said,
+3. the page is on one of the four (``TARGET_UNKNOWN`` when it has not said,
    ``TARGET_UNSUPPORTED`` when it is on another);
 4. this WanGP defines it and has every file it would fetch before generating
    (``TARGET_NOT_DEFINED``, ``TARGET_NOT_DOWNLOADED``).
@@ -55,32 +62,41 @@ from . import enhance
 TARGET_FL2VA = enhance.FL2VA
 TARGET_REF2VA = enhance.REF2VA
 TARGET_LTX23 = enhance.LTX23
-TARGETS = (TARGET_FL2VA, TARGET_REF2VA, TARGET_LTX23)
+TARGET_LTX25 = enhance.LTX25
+TARGETS = (TARGET_FL2VA, TARGET_REF2VA, TARGET_LTX23, TARGET_LTX25)
 LABELS = {
     TARGET_FL2VA: "MiniMax H3 FL2VA",
     TARGET_REF2VA: "MiniMax H3 Ref2VA",
     TARGET_LTX23: "LTX 2.3 Distilled",
+    TARGET_LTX25: "LTX 2.5 Distilled",
 }
-SUPPORTED_SENTENCE = "MiniMax H3 FL2VA, MiniMax H3 Ref2VA or LTX 2.3 Distilled"
+SUPPORTED_SENTENCE = "MiniMax H3 FL2VA, MiniMax H3 Ref2VA, LTX 2.3 Distilled or LTX 2.5 Distilled"
 
 #: The public request fields each target is sent. MiniMax keeps the overlay
 #: rule it always had - a field the model ignores is sent, badged and ignored
-#: by WanGP - so both its variants list all three. LTX 2.3 Distilled is sent a
-#: first and a last frame and nothing else: a reference is not offered, not
-#: staged and not sent (WanGP's LTX 2.3 can take an "ingredients" sheet
-#: through its control video, and that is exactly what must not happen by
-#: accident).
+#: by WanGP - so both its variants list all three. LTX 2.3 and 2.5 Distilled
+#: are sent a first and a last frame and nothing else: a reference is not
+#: offered, not staged and not sent (WanGP's LTX 2.3 and 2.5 can take an
+#: "ingredients" sheet through their control video, and that is exactly what
+#: must not happen by accident). The composer's Reference card follows this
+#: too: the page hides it for a target whose fields have no reference.
 FIELDS: typing.Dict[str, typing.Tuple[str, ...]] = {
     TARGET_FL2VA: (protocol.QUEUE_FIELD_START, protocol.QUEUE_FIELD_END, protocol.QUEUE_FIELD_REFERENCES),
     TARGET_REF2VA: (protocol.QUEUE_FIELD_START, protocol.QUEUE_FIELD_END, protocol.QUEUE_FIELD_REFERENCES),
     TARGET_LTX23: (protocol.QUEUE_FIELD_START, protocol.QUEUE_FIELD_END),
+    TARGET_LTX25: (protocol.QUEUE_FIELD_START, protocol.QUEUE_FIELD_END),
 }
 
-#: WanGP's own names for LTX 2.3: the architecture of every 2.3 checkpoint
-#: (its definitions' ``architecture``), and the pipeline a distilled one
-#: declares (``ltx2_pipeline``).
+#: WanGP's own names for LTX: the architecture of every 2.3 checkpoint and of
+#: every 2.5 one (its definitions' ``architecture``), and the pipeline a
+#: distilled one declares (``ltx2_pipeline``), the same word for both.
 LTX23_ARCHITECTURE = "ltx2_22B"
-LTX23_PIPELINE = "distilled"
+LTX25_ARCHITECTURE = "ltx2_25_22B"
+LTX_PIPELINE = "distilled"
+#: The name this was first written under; the same word.
+LTX23_PIPELINE = LTX_PIPELINE
+#: Which target each LTX architecture is, on its distilled pipeline.
+LTX_ARCHITECTURES = {LTX23_ARCHITECTURE: TARGET_LTX23, LTX25_ARCHITECTURE: TARGET_LTX25}
 
 #: How long a model check stays fresh for a screen. The press never reads
 #: the cache; a model downloaded meanwhile is seen at the next press, and on
@@ -159,9 +175,11 @@ def classify(model: typing.Any, facts: typing.Optional[typing.Mapping[str, typin
 
     MiniMax by the enhancer's own reading of the model's names (a finetune
     names its base architecture), less anything that is a text-to-speech
-    model. LTX 2.3 Distilled by architecture and pipeline: the bridge's facts
-    when there are any - they read the definition itself - and the model's
-    own names otherwise, where a distilled checkpoint says so.
+    model. LTX 2.3 and 2.5 Distilled by architecture and pipeline: the
+    bridge's facts when there are any - they read the definition itself - and
+    the model's own names otherwise, where a distilled checkpoint says so.
+    The architecture is matched whole, so ``ltx2_25_22B_msr`` (2.5's MSR
+    workflow) is no target, as ``ltx2_22B_msr`` is not.
     """
     block = enhance.model_block(model)
     names = " ".join(str(block.get(key) or "") for key in ("type", "label"))
@@ -171,12 +189,13 @@ def classify(model: typing.Any, facts: typing.Optional[typing.Mapping[str, typin
     if variant in (TARGET_FL2VA, TARGET_REF2VA):
         return "" if _TTS.search(names.replace("_", " ")) else variant
     architecture = str((facts or {}).get("architecture") or "") or str(block.get("architecture") or "")
-    if architecture != LTX23_ARCHITECTURE:
+    target = LTX_ARCHITECTURES.get(architecture, "")
+    if not target:
         return ""
     pipeline = str((facts or {}).get("pipeline") or "")
     if facts and facts.get("defined"):
-        return TARGET_LTX23 if pipeline == LTX23_PIPELINE else ""
-    return TARGET_LTX23 if LTX23_PIPELINE in names.lower() else ""
+        return target if pipeline == LTX_PIPELINE else ""
+    return target if LTX_PIPELINE in names.lower() else ""
 
 
 def fields_for(target: str) -> typing.Tuple[str, ...]:
@@ -187,7 +206,7 @@ def fields_for(target: str) -> typing.Tuple[str, ...]:
 def narrow(request: typing.MutableMapping[str, typing.Any], target: str) -> typing.List[str]:
     """Take out of a public request every image field the target is not sent.
 
-    Returns the fields removed. Today that is a reference for LTX 2.3
+    Returns the fields removed. Today that is a reference for LTX 2.3 and 2.5
     Distilled, and nothing for MiniMax.
     """
     images = request.get("images") if isinstance(request.get("images"), dict) else None
@@ -341,7 +360,8 @@ def require_ready(model: typing.Any = None) -> dict:
 
 
 __all__ = [
-    "CHECK_TTL", "FAILURE_TTL", "FIELDS", "LABELS", "LTX23_ARCHITECTURE", "LTX23_PIPELINE", "SUPPORTED_SENTENCE",
-    "TARGETS", "TARGET_FL2VA", "TARGET_LTX23", "TARGET_REF2VA", "always_ready", "classify", "fields_for", "forget",
+    "CHECK_TTL", "FAILURE_TTL", "FIELDS", "LABELS", "LTX23_ARCHITECTURE", "LTX23_PIPELINE", "LTX25_ARCHITECTURE",
+    "LTX_ARCHITECTURES", "LTX_PIPELINE", "SUPPORTED_SENTENCE",
+    "TARGETS", "TARGET_FL2VA", "TARGET_LTX23", "TARGET_LTX25", "TARGET_REF2VA", "always_ready", "classify", "fields_for", "forget",
     "narrow", "readiness", "require_ready", "reset_for_tests", "use_readiness",
 ]

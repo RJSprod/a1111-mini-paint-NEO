@@ -173,7 +173,7 @@ progress bar, no settings.
 Protocol 5 adds: a job may be **enhanced** first (`enhance: true`, or the
 tab's switch when the option is absent) - the prompt is rewritten by
 ModelSwitchRefiner's MiniMax H3 writer for the H3 variant the page's model
-is, or (since 2026-10-03) by its LTX 2.3 writer for LTX 2.3 Distilled, the job waits as `enhancing` and holds the line behind it, and the
+is, or (since 2026-10-03) by its LTX writer for LTX 2.3 Distilled and (since 2026-10-04) LTX 2.5 Distilled, under one system prompt for both, the job waits as `enhancing` and holds the line behind it, and the
 request is refused rather than queued as typed when that cannot be done;
 the whole line can be cancelled at once; a job composed for one model
 (`model_type` on the wire) is refused with `MODEL_CHANGED` when the page
@@ -332,9 +332,11 @@ def submit(request, page, origin="clipboard", require_running=True, enhance=None
     # normalises through interop; QUEUE_BUSY past MAX_PENDING; enhance None -> enhance.enabled(); True -> enhance.plan + enhance.submit
     # require_ready None means "a Clipboard or gallery origin": targets.require_ready(model), FRESH, refuses with the
     # readiness view on the IntegrationError (extra["readiness"]) - WANGP_NOT_RUNNING under either executor, TARGET_*;
-    # then targets.narrow(request, target) takes out what that model is not sent (a reference, for LTX 2.3 Distilled),
+    # then targets.narrow(request, target) takes out what that model is not sent (a reference, for LTX 2.3 and 2.5 Distilled),
     # and the answer names it as "narrowed". An "api" origin is not gated, and keeps WANGP_NOT_RUNNING for a page-run job.
-    # BEFORE the job is stored (a refusal stores nothing); the job is then ENHANCING with an enhance record, else PENDING; the model block is kept
+    # BEFORE the job is stored (a refusal stores nothing); the job is then ENHANCING with an enhance record, else PENDING; the model block is kept.
+    # A stored job from the "clipboard" or "gallery" origin puts its prompt AS TYPED at the top of prompts (History); typed_prompt= is that text
+    # when the request's own prompt is not it (retry() with a written prompt carried over). A history that will not write never fails the press.
 def refresh() -> counts                                            # _sweep: expired leases, then _advance (every ENHANCING job against enhance.status), then pruning
 def claim(page) -> {"job", "lease", "pending"} | {"wait", "reason": "busy"|"turn"|"enhancing", "pending"[, "job_id"]} | {"empty": True, ...}
 def report(job_id, lease, phase, payload=None) -> Job              # "sent": the overlay was written; "done": sanitize_result(payload) -> queued|started|failed|unconfirmed; sets wangp
@@ -459,22 +461,30 @@ asymmetry is deliberate. Recovery registers pins before any sweeper runs.
 ## `minipaint_neo/clipboard/enhance.py` — the prompt enhancer
 
 ```python
-ENHANCE_NAME = "clipboard-enhance.json"        # {"schema": 1, "enabled": bool, "overrides": {variant: {text|image: str}}}
+ENHANCE_NAME = "clipboard-enhance.json"        # {"schema": 1, "enabled": bool, "overrides": {set: {text|image: str}}} - keyed by PROMPT_SETS
 API_MODULE = "mc_llm_api"; API_VERSION_SUPPORTED = 1; ORIGIN = "minipaint-clipboard"; CANCEL_REASON
-FL2VA = "fl2va"; REF2VA = "ref2va"; LTX23 = "ltx23"; MINIMAX_VARIANTS; VARIANTS (all three); VARIANT_LABELS; MODEL_KEY = "minimax"; LTX_KIND = "ltx"
+FL2VA = "fl2va"; REF2VA = "ref2va"; LTX23 = "ltx23"; LTX25 = "ltx25"; MINIMAX_VARIANTS; LTX_VARIANTS = (ltx23, ltx25); VARIANTS (all four); VARIANT_LABELS
+MODEL_KEY = "minimax"; LTX_KIND = "ltx"
+PROMPT_SETS = (fl2va, ref2va, ltx23); PROMPT_SET_OF = {ltx25: ltx23}; PROMPT_SET_LABELS   # LTX 2.5 runs under LTX 2.3's instructions, by the user's choice:
+def prompt_set(variant) -> str                                                         # one default, one override, for both
+
 MODE_TEXT = "text"; MODE_IMAGE = "image"; MODES; MODE_LABELS
 SLOT_FIRST = "first_frame"; SLOT_LAST = "last_frame"; SLOT_REFERENCE = "reference"; SLOTS
-SLOTS_FOR = {fl2va: {start: first_frame, end: last_frame}, ref2va: {references: reference}, ltx23: {start: first_frame}}   # anything not listed is dropped from the enhancement
+SLOTS_FOR = {fl2va: {start: first_frame, end: last_frame}, ref2va: {references: reference}, ltx23: {start: first_frame}, ltx25: {start: first_frame}}
+                                                                 # anything not listed is dropped from the enhancement
 LLM_QUEUED, LLM_RUNNING, LLM_DONE, LLM_FAILED, LLM_CANCELLED; LLM_STATES; LLM_TERMINAL
 REJECTIONS = {disabled: ENHANCE_UNAVAILABLE, empty_prompt: ENHANCE_PROMPT_REQUIRED, empty_system_prompt: ENHANCE_SYSTEM_PROMPT_EMPTY,
               bad_image: ENHANCE_IMAGE_UNREADABLE, no_vision: ENHANCE_NO_VISION, queue_full: ENHANCE_QUEUE_FULL}   # anything else: ENHANCE_REFUSED
 def use_api(module); def reset_for_tests()                      # seams
 def api() -> module | None            # sys.modules, then the other extension's folder (its imported modules' folders, the host's extension list,
                                       # the host's extension dirs, this extension's parent), imported with the folder APPENDED to sys.path; cached; never raises
-def capabilities() -> {found, available, api_version, enabled, configured, vision, model, variants, max_queued, reason, ltx}   # available = enabled and configured;
-                                                                 # ltx: the API lists kind "ltx" and has submit_ltx, and then variants ends in "ltx23"
+def capabilities() -> {found, available, api_version, enabled, configured, vision, model, variants, max_queued, reason, ltx, ltx_models}
+                                                                 # available = enabled and configured;
+                                                                 # ltx: the API lists kind "ltx" and has submit_ltx, and then variants ends in "ltx23", "ltx25"
+                                                                 # (an older writer writes 2.5's prompts too: the same instructions);
+                                                                 # ltx_models: the API's capabilities()["ltx_models"], or ["ltx23"] for a writer from before 2.5
 def variant_for_model(model) -> "fl2va" | "ref2va" | ""          # from type, architecture, family, label; "minimax" required; neither variant -> ""
-def target_for_model(model) -> "fl2va" | "ref2va" | "ltx23" | ""   # targets.classify: the writer a model is written for
+def target_for_model(model) -> "fl2va" | "ref2va" | "ltx23" | "ltx25" | ""   # targets.classify: the writer a model is written for
 def model_block(raw) -> {type, label, family, architecture}
 def plan(request, model, target="") -> {variant, slots: {slot: handle}, dropped: [field], extra_references, has_image, model}   # ENHANCE_MODEL_UNSUPPORTED, ENHANCE_PROMPT_REQUIRED;
                                                                  # target: the press's own fresh reading (targets.require_ready), else target_for_model
@@ -495,16 +505,19 @@ def release_runtime() -> bool                   # the public VRAM seam, if the o
                                                 # direction, because WanGP sizes itself against the card with no ladder.
                                                 # Never mc_llm_runtime internals; a build without a seam answers False.
 def enabled() -> bool; def set_enabled(flag) -> bool               # read from disk on every call; off by default
-def override(variant, mode) -> str; def set_override(variant, mode, text) -> str; def clear_override(variant, mode) -> bool; def overrides() -> {variant: {mode: bool}}
-def default_prompt(variant, mode) -> str; def effective_prompt(variant, mode) -> (text, "override"|"default"|"unavailable"); def system_prompts() -> dict
+def override(variant, mode) -> str; def set_override(variant, mode, text) -> str; def clear_override(variant, mode) -> bool   # all three by prompt_set(variant):
+def overrides() -> {set: {mode: bool}}                                                                                      # ltx25's override IS ltx23's
+def default_prompt(variant, mode) -> str      # asked of the API by the set's name: ltx25's default is mc_llm_api.system_prompt("ltx23", ...)
+def effective_prompt(variant, mode) -> (text, "override"|"default"|"unavailable"); def system_prompts() -> {set: {...}}   # the three sets
 def submit(prompt, planned) -> {llm_id, system_override, variant}   # interop.open_handle for each slot (pictures, never paths); the override for (variant, image|text) when saved;
                                                                       # mc_llm_api.submit_minimax(prompt, variant=, first_frame=, last_frame=, reference=, system_prompt=, origin=ORIGIN, remember=True);
-                                                                      # for ltx23, mc_llm_api.submit_ltx(prompt, first_frame=, system_prompt=, origin=ORIGIN, remember=True) -
-                                                                      # the first frame only, shown to the model; ENHANCE_LTX_UNSUPPORTED without it
+                                                                      # for ltx23 and ltx25, mc_llm_api.submit_ltx(prompt, first_frame=, system_prompt=, origin=ORIGIN, remember=True) -
+                                                                      # the first frame only, shown to the model; ENHANCE_LTX_UNSUPPORTED without it;
+                                                                      # for ltx25 also model="ltx25", only when capabilities()["ltx_models"] lists it
 def status(llm_id) -> {state, stage, position, elapsed, queued_for, image_used, image_ignored, system_override, cancelling, error, reason, prompt} | None
 def cancel(llm_id, reason=CANCEL_REASON) -> dict; def cancel_all(reason=CANCEL_REASON) -> int   # ours only, by origin
 def availability(model=None) -> {state: ready|blocked|model|unknown, text, variant, capabilities}   # the tab's line
-def describe() -> {enabled, origin, variants, slots, overrides, capabilities}                         # GET /minipaint-interop/enhance
+def describe() -> {enabled, origin, variants, slots, prompt_sets, overrides, capabilities}          # GET /minipaint-interop/enhance
 ```
 
 Nothing here logs a prompt, an override, a caption or a picture; the journal
@@ -724,7 +737,15 @@ through so the server can reconcile roles without a call into the child.
 
     GET  /minipaint-clipboard/outputs?page&size
       -> {ok, total, page, pages, size, reason: ""|"empty"|"unconfigured", status,
-          items: [{id, name, kind: "video"|"image", size, at, exact, prompt, url}]}
+          items: [{id, name, kind: "video"|"image", size, at, exact, prompt, written, model, recipe, url}]}
+         prompt: as typed; written: what an enhancement wrote from it ("" when none); model: the model's label;
+         recipe: the output's own id when Load can restore something (its kept recipe, else its Queue Send History
+         record), "" when neither - the page then offers no Load
+    GET  /minipaint-clipboard/prompts
+      -> {ok, entries: prompts.view(), max: 10}
+    POST /minipaint-clipboard/prompts   {action: "load", id}
+      -> {ok, prompt, status}: the draft's prompt is now `prompt`, nothing else in the draft moved, nothing queued;
+         404 {ok: false, code: REQUEST_INVALID, message, entries, max} for a prompt no longer in the list; 400 for any other action
     GET  /minipaint-clipboard/output/{file_id}     (also HEAD)
       -> the bytes, or 206 + Content-Range for a Range request
 
@@ -747,17 +768,20 @@ URL must never be blessed immutable.
 ## `minipaint_neo/clipboard/targets.py` — which WanGP models it sends to, and when
 
 ```python
-TARGET_FL2VA = "fl2va"; TARGET_REF2VA = "ref2va"; TARGET_LTX23 = "ltx23"; TARGETS; LABELS; SUPPORTED_SENTENCE
-FIELDS = {fl2va: (start, end, references), ref2va: (start, end, references), ltx23: (start, end)}   # what each is SENT; LTX 2.3 never a reference
-LTX23_ARCHITECTURE = "ltx2_22B"; LTX23_PIPELINE = "distilled"          # WanGP's own keys: architecture, ltx2_pipeline
+TARGET_FL2VA = "fl2va"; TARGET_REF2VA = "ref2va"; TARGET_LTX23 = "ltx23"; TARGET_LTX25 = "ltx25"; TARGETS; LABELS; SUPPORTED_SENTENCE
+FIELDS = {fl2va: (start, end, references), ref2va: (start, end, references), ltx23: (start, end), ltx25: (start, end)}
+                                                                        # what each is SENT; LTX 2.3 and 2.5 never a reference
+LTX23_ARCHITECTURE = "ltx2_22B"; LTX25_ARCHITECTURE = "ltx2_25_22B"; LTX_PIPELINE = "distilled" (LTX23_PIPELINE, the same word)
+LTX_ARCHITECTURES = {ltx2_22B: ltx23, ltx2_25_22B: ltx25}               # WanGP's own keys: architecture (matched whole), ltx2_pipeline
 CHECK_TTL = 10.0; FAILURE_TTL = 3.0                                     # a screen's read is cached; the press never reads the cache
-def classify(model, facts=None) -> target | ""      # MiniMax the enhancer's way less a TTS model; LTX 2.3 by architecture and the definition's
-                                                    # pipeline (facts), else "distilled" in its names. 2.3 Dev, 2.5, 2.0, EditAnything, MSR: ""
+def classify(model, facts=None) -> target | ""      # MiniMax the enhancer's way less a TTS model; LTX 2.3 and 2.5 by architecture and the
+                                                    # definition's pipeline (facts), else "distilled" in its names. 2.3 and 2.5 Dev, 2.0,
+                                                    # EditAnything, MSR (ltx2_22B_msr, ltx2_25_22B_msr): ""
 def fields_for(target) -> (field, ...); def narrow(request, target) -> [field removed]
 def readiness(model=None, *, fresh=False) -> {ready, code, message, target, target_label, model, fields, checked, missing_count, supported}
     # never raises. WANGP_NOT_RUNNING (the bridge not asked) -> TARGET_UNKNOWN (no model from the page, none in WanGP's last hello)
     # -> TARGET_CHECK_UNAVAILABLE (control.model refused or silent: a bridge older than 1.13.0, or not answering) -> TARGET_UNSUPPORTED
-    # (named, with the three) -> TARGET_NOT_DEFINED -> TARGET_NOT_DOWNLOADED (with the count) -> ready. A check the bridge could not
+    # (named, with the four) -> TARGET_NOT_DEFINED -> TARGET_NOT_DOWNLOADED (with the count) -> ready. A check the bridge could not
     # finish ("checked" False) is ready with "Its files could not be checked." - never read as a missing file.
 def require_ready(model=None) -> view               # fresh; raises IntegrationError(code, ..., readiness=view)
 def use_readiness(fn | None); def always_ready(model, fresh) -> view; def reset_for_tests(); def forget()
@@ -766,10 +790,12 @@ def use_readiness(fn | None); def always_ready(model, fresh) -> view; def reset_
 ```
 
 The block is drawn by the browser from this answer: the composer writes
-`data-wangp-ready` ("1" only when ready) and `data-wangp-target` on
-`#minipaint_clipboard_root`, and `style.css` hides the WanGP line, the cards,
-the prompt, `sp_open`, Add to Queue and +First / +Last / +Ref until it is "1"
-(and the reference card and +Ref for `ltx23`), showing `#minipaint_clipboard_blocked`
+`data-wangp-ready` ("1" only when ready), `data-wangp-target` and
+`data-wangp-references` ("1" or "0" from the answer's `fields`, for a known
+target; "" otherwise) on `#minipaint_clipboard_root`, and `style.css` hides the
+WanGP line, the cards, the prompt, History, `sp_open`, Add to Queue and +First /
++Last / +Ref until it is "1" (and the reference card and +Ref while
+`data-wangp-references` is "0" - LTX 2.3 and 2.5 - so no rule names a model), showing `#minipaint_clipboard_blocked`
 (`ui.BLOCKED_HTML`: one quiet line and Check again) instead. The popup puts
 `minipaint-intercept-is-blocked` on its root from `describe().readiness`.
 
@@ -823,7 +849,9 @@ LIBRARY_ROUTE; SETTINGS_ROUTE; QUEUE_ROUTE; READINESS_ROUTE; ENHANCE_SETTINGS_RO
 # The queue route's add, the readiness route and every intercept action run on the thread pool: each may ask the WanGP bridge, over a socket.
 IMMUTABLE_CACHE; REVALIDATED_CACHE; RANGE_CHUNK = 4 MiB
 def library_page(sort, page, size, selected="", refresh=False) -> dict; def apply_settings(changes) -> dict
-def outputs_page(page=0, size=PAGE_SIZE) -> dict                                      # the gallery; syncs the ledger first, joins the prompt on from the history
+def outputs_page(page=0, size=PAGE_SIZE) -> dict                                      # the gallery; syncs the ledger first; prompt, written and model from each
+                                                                                      # entry's recipe, else joined on from its Queue Send History record
+def prompts_action(method, body) -> (answer, status)                                  # History's route as a function: GET the list; POST {action: "load", id}
 def output_url(file_id) -> str; def _byte_range(header, size) -> (start, end) | None  # single-range only; anything else is answered whole
 def clamp_size(value) -> int; def page_of(value, pages) -> int                        # zero-based; the pager shows page + 1
 def image_url(asset_id, thumb=True, version="")
@@ -832,23 +860,40 @@ def image_url(asset_id, thumb=True, version="")
 VIDEO_SUFFIXES (.mp4 .webm .mkv .mov .m4v); IMAGE_SUFFIXES (.png .jpg .jpeg .webp .gif)   # a GIF is an image: a <video> renders nothing from one
 MAX_ENTRIES = 2000; CLOSE_GRACE_SECONDS = 180; CLAIM_MAX_SECONDS = 24h; MAX_SCANNED = 5000; SCHEMA = 1
 def folder() -> Path | None                                                           # the outputs_folder setting, else <wangp root>/outputs; absent is not an error
-def remember(job_id, paths, request_id="", model="") -> entry                         # the EXACT half: WanGP named these. Called from executor while the job still holds them
-def sync()                                                                            # the PULL half: open a claim per admitted request, close the ones whose jobs are done or gone
-def files(refresh=True) -> [{id, name, kind, size, at, job_id, request_id, exact}]     # newest first; a file that has left the disk is dropped from the document
+def remember(job_id, paths, request_id="", model="", recipe=None) -> entry            # the EXACT half: WanGP named these. Called from executor while the job still holds them,
+                                                                                      # with the job's recipe; an entry that has a recipe keeps it
+def sync()                                                                            # the PULL half: open a claim per admitted request, close the ones whose jobs are done or gone,
+                                                                                      # and give every entry without a recipe its job's, while the job is still in the queue
+def files(refresh=True) -> [{id, name, kind, size, at, job_id, request_id, exact, model, recipe}]   # newest first; a file that has left the disk is dropped
+def entry_for_file(file_id) -> {job_id, request_id, model, recipe} | None             # facts about the request behind an output; never its path
 def path_of(file_id) -> Path | None                                                   # the only place an id becomes a path
 def forget_all() -> int; def use_clock(clock); def reset_for_tests()
-# An entry: {entry_id, job_id, request_id, opened_at, closed_at, floor, exact, model, files: [{file_id, path, name, size, at}]}
+# An entry: {entry_id, job_id, request_id, opened_at, closed_at, floor, exact, model, recipe | None, files: [{file_id, path, name, size, at}]}
+# recipe (history.recipe_of_job): {prompt (as typed), written (an enhancement's, or ""), first_asset_id, last_asset_id, reference_asset_ids,
+#                                  transient: [fields whose picture was not a library picture], model_type, model_label, origin}
 # floor = the newest file already in the folder when the claim opened. A window claims
 # what is strictly newer than that, never what it found - which beats "after the request"
 # on a folder full of copied, restored or touched files whose times nobody can vouch for.
 
 # history.py: a record also carries enhanced (bool) and enhanced_prompt (the written prompt; the typed one stays the recipe); make_record(draft, result, enhanced_prompt="")
+#   recipe_of_job(job) -> recipe | None        # the typed prompt (an enhancement's prompt_original), the written one, library ids, transient fields, the model
+#   normalize_recipe(raw) -> recipe | None; draft_from_recipe(recipe, available) -> (draft, missing: ["first"|"last"|"reference"])
+#                                              # inherit what was inherited; a deleted picture, or one never in the library, leaves its slot on Use WanGP
+
+# prompts.py: History - the last ten prompts sent from here, as typed (clipboard-prompts.json, {"schema": 1, "prompts": [entry]})
+MAX_PROMPTS = 10; SCHEMA = 1; ORIGIN_LABELS = {clipboard: "", gallery: "from the gallery"}
+def remember(prompt, *, model=None, target="", enhanced=False, origin="clipboard") -> entry | None   # protocol.clean_prompt'd; no text, no entry;
+                                                                                      # the same words already listed move to the top rather than twice
+def entries() -> [entry]; def get(id) -> entry | None; def view() -> [{id, at, when, prompt, model, target, target_label, enhanced, origin}]
+def load(id) -> str | None                     # the words into the draft's prompt_override and nothing else; None when it has left the list
+def reset_for_tests()
+# An entry: {id (16 hex), at (ISO, UTC), prompt, model: {type, label, family, architecture}, target (in targets.TARGETS or ""), enhanced, origin}
 
 # ui.py
 PREFIX = "minipaint_clipboard"; SLOTS = (("first", "First Frame", "start"), ("last", "Last Frame", "end"), ("ref", "Reference", "references"))
 QUEUE_BUTTON_LABEL = "Add to Queue"; QUEUE_BUTTON_BLOCKED = "WanGP is not running"; OUTBOX_LABELS (+ Enhancing); ENHANCE_LABELS; WANGP_LABELS; NO_PAGE = "00000000"; OUTBOX_SHOWN = 40
 SP_VARIANT_CHOICES; SP_MODE_CHOICES; QUEUE_JS (prompt, switch -> addToQueue); CANCEL_ALL_JS; MENU_STATE_JS; OPEN_PROMPT_EDITOR_JS (passes its inputs through); CLOSE_PROMPT_EDITOR_JS
-SORT_MENU_JS; SEND_MENU_JS (the toolbar's two flyouts); OPEN_OUTPUTS_JS; GRID_MOUNT = ""; LIST_MOUNT = ""
+SORT_MENU_JS; SEND_MENU_JS (the toolbar's two flyouts); OPEN_OUTPUTS_JS; OPEN_PROMPT_HISTORY_JS (History, browser-only); GRID_MOUNT = ""; LIST_MOUNT = ""
 def card_html(slot, label, field, assets, missing=False)                              # the one server-rendered section left; see the V2 list
 def outbox_view(jobs, page) -> [dict]; def history_view(records, asset_of) -> [dict]   # content, not nodes: the browser draws it
 def job_sentence(job) -> str; def enhance_sentence(job) -> str; def wangp_sentence(job) -> str; def enhance_line_html(availability, enabled) -> str
@@ -866,7 +911,8 @@ class ClipboardTab:
     add_to_queue(prompt, page, model=None, enhance_wanted=None) -> {ok, instruction {nonce, job_id, executor, state} | None, status, jobs, queue_button}
     queue_answer(page) -> {ok, page, jobs, history, status, queue_button, running}      # records history for unrecorded positive Clipboard jobs, once
     outbox_action("cancel|retry|adopt|dismiss:<job>:<page>", page) -> {ok, jobs, status, queue_button?}
-    show_history() -> gr.update(visible=True); history_action("load:<id>" | "delete:<id>", prompt)
+    show_history() -> gr.update(visible=True); history_action("load:<id>" | "delete:<id>" | "output:<file id>", prompt) -> (prompt, *cards, status)
+                                                                                      # output: View Outputs' Load - the output's recipe, else its Queue Send History record
     _queue_button_view(running=None) -> {label, enabled}                                # the same decision as _queue_button, as facts
     send("<target>:<asset id>:<nonce>", selected)          # minipaint | img2img | inpaint | extras | stitch_*
     choose_folder(text, create); open_folder; open_rename; rename; open_delete; delete
@@ -940,7 +986,15 @@ extension touches), `openPromptEditor` / `closePromptEditor`
 `markEditorChain`, which puts `minipaint-clip-grow` on every wrapper Gradio
 built between the panel and the textarea so the box can take the height - the
 chain is marked rather than selected because Gradio writes `flex-grow` and
-`display` inline), `debug()` (its `editorOpen` says whether the view is up). Job buttons call the queue
+`display` inline), `openPromptHistory` / `closePromptHistory` / `loadPrompt(id)`
+(History: a dialog inside the tab root on `--minipaint-dialog-layer`, announced
+with `minipaint:overlay` `{name: "clipboard-history", open, modal: true}`, its
+list read from `/minipaint-clipboard/prompts` when it opens and each request
+bounded at 15 s; Load posts `{action: "load", id}` and writes the answer's own
+words into the Prompt box through `minipaintWriteInput`; Escape, Close and a
+press outside close it, and a blocked section closes it), `debug()` (its
+`editorOpen` says whether the view is up, `promptHistory` whether History is,
+with its count). Job buttons call the queue
 route; retry and adopt kick the pump. It sets no colour of its own and
 journals no prompt and no filename.
 
@@ -1009,6 +1063,12 @@ ends, cancel everything, retry, tracking, the routes and the tab's panel),
 the exact half against WanGP's own paths, the window half against a folder
 whose files appear while a job runs, a claim a shutdown left open finished at
 the next sync, exclusive claiming, the 60-page, and the byte route's ranges),
+`tests/test_clipboard_prompts.py` (History: what goes in and what does not, ten
+and a resend moving up, the typed words of an enhanced press and of a retry,
+Load touching nothing but the prompt, the route, the journal; and the recipe
+every output keeps - from the job, through sync and the executor - and the
+tab's `output:` Load of an LTX 2.5 video, a gallery picture and an older
+output),
 `tests/test_clipboard_ui.py` (the tab on a Forge-shaped page, every event,
 the outbox flow, the blocked button, the intercept, Send to Clipboard, the
 fallback, the theming rules), `tests/test_clipboard_intercept.py` (Send to

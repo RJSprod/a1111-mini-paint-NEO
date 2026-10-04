@@ -115,6 +115,35 @@ FORGE_ALLOCATOR_VARIABLES = ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF")
 #: Forge's torch is not a decision about the child's.
 CHILD_ALLOCATOR_CONF = "expandable_segments:True"
 
+#: The environment variable mmgp - the offload library inside WanGP - reads for
+#: how much of the machine's RAM it may page-lock ("Reserved RAM", pinned
+#: memory): a fraction of physical RAM, as a decimal. Its own order, from
+#: ``offload.py``'s ``_get_perc_reserved_mem_max``: WanGP's
+#: ``--perc-reserved-mem-max`` argument when above zero (WanGP's default is 0),
+#: then this variable, then 0.40 on Windows and 0.5 elsewhere. The command line
+#: we start WanGP with is its network surface and nothing else
+#: (``command_line``), so the cap travels in the environment - which is also
+#: where mmgp's own messages tell a user to set it.
+#:
+#: Why it is capped at all: pinned pages are never paged out, so the pinned set
+#: is RAM the rest of the machine cannot have while WanGP holds a model. On a
+#: 96 GB machine mmgp's 0.40 let WanGP pin 39 GB for one LTX 2.3 model; with
+#: Forge's image model, a language model and WanGP's own working set beside it
+#: the machine ran out of RAM four times in a week, each time as a CUDA "out of
+#: memory" on a card with 17 GB free, because a pinned allocation that fails
+#: raises as a CUDA error. Above the cap mmgp pins what fits and streams the
+#: rest from ordinary memory ("Switching to partial pinning"): slower transfers
+#: for that part of a model, not a failure.
+RESERVED_RAM_VARIABLE = "perc_reserved_mem_max"
+
+#: The cap when the Settings page has not said otherwise, as a percentage of
+#: physical RAM. A quarter - 24 GB of the 96 above, enough to pin an LTX 2.3
+#: transformer whole. Zero means WanGP's own answer: the variable is not set
+#: and an inherited one is left alone, so the child sees what a WanGP started
+#: by hand would see. ``minipaint_neo.settings`` holds the same number as the
+#: option's default, and a test keeps the two equal.
+RESERVED_RAM_PERCENT = 25
+
 #: How many times a start may lose the port race before it gives up. The
 #: window between "this port was free" and "the child bound it" is small but
 #: real, and the only honest fix is to try again on a different number.
@@ -205,6 +234,7 @@ def build_environment(
     handoff_root: typing.Any = "",
     control_port: int = 0,
     ledger_root: typing.Any = "",
+    reserved_ram_percent: typing.Any = RESERVED_RAM_PERCENT,
 ) -> typing.Dict[str, str]:
     """The exact environment the child is started in.
 
@@ -229,6 +259,11 @@ def build_environment(
     as the command line - not because the arguments are insufficient, but so
     that an inherited ``GRADIO_SERVER_NAME=0.0.0.0`` in Forge's own
     environment cannot contradict them.
+
+    ``reserved_ram_percent`` is how much of the machine's RAM WanGP may pin,
+    told to it as mmgp reads it (``RESERVED_RAM_VARIABLE``). Zero sets
+    nothing and drops nothing, which is WanGP's own cap; anything else
+    replaces whatever spelling of the variable was inherited.
     """
     source = os.environ if environ is None else environ
     child: typing.Dict[str, str] = {str(key): str(value) for key, value in source.items()}
@@ -249,6 +284,16 @@ def build_environment(
     # ...and the one allocator setting we do want the child to have. See
     # CHILD_ALLOCATOR_CONF: it is the fragmentation fix, not the crash.
     child["PYTORCH_ALLOC_CONF"] = CHILD_ALLOCATOR_CONF
+    # How much RAM WanGP may page-lock. See RESERVED_RAM_VARIABLE. Set over
+    # every inherited spelling of the name, not beside one: Windows reads
+    # environment names without regard to case, and a child environment with
+    # two spellings of one name is at best the one CreateProcess happens to
+    # keep.
+    percent = reserved_ram_cap(reserved_ram_percent)
+    if percent > 0:
+        for key in [name for name in child if name.lower() == RESERVED_RAM_VARIABLE]:
+            child.pop(key, None)
+        child[RESERVED_RAM_VARIABLE] = reserved_ram_text(percent)
 
     child["CUDA_VISIBLE_DEVICES"] = _gpu_uuid_of(config)
     child["GRADIO_ROOT_PATH"] = DEFAULT_PROXY_PATH
@@ -268,6 +313,41 @@ def build_environment(
     child[ENV_CONTROL_PORT] = str(int(control_port)) if control_port else ""
     child[ENV_LEDGER_ROOT] = _text(ledger_root)
     return child
+
+
+def reserved_ram_cap(value: typing.Any) -> int:
+    """The reserved-RAM cap as a whole percentage of physical RAM, 0 to 100.
+
+    A value that is not a number is the default rather than zero. Zero is a
+    choice - WanGP's own 40% - and a setting that cannot be read is not that
+    choice.
+    """
+    try:
+        percent = int(round(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        percent = RESERVED_RAM_PERCENT
+    return max(0, min(100, percent))
+
+
+def reserved_ram_text(percent: typing.Any) -> str:
+    """The cap as mmgp reads it: a fraction of physical RAM, two decimals."""
+    return f"{reserved_ram_cap(percent) / 100:.2f}"
+
+
+def reserved_ram_percent() -> int:
+    """The cap the Settings page holds, or the default where there is no Forge.
+
+    Imported at the call, as ``ui.current_look`` does, so this module stays
+    loadable without a Forge on the path. Read at every launch rather than
+    once, so a change on the Settings page reaches the next start of WanGP
+    without a Reload UI.
+    """
+    try:
+        from .. import settings as extension_settings
+
+        return reserved_ram_cap(extension_settings.wangp_reserved_ram_percent())
+    except Exception:
+        return RESERVED_RAM_PERCENT
 
 
 def _forbidden_arguments(command: typing.Sequence[str]) -> typing.List[str]:
@@ -953,6 +1033,14 @@ class Runtime:
                 control = 0
                 journal.note("runtime", "no control port could be kept; unattended execution is off for this run")
             ledger_root = str(runtime_dir())
+            # How much RAM the child may pin, from the Settings page, read
+            # now so the journal says what this launch was given.
+            reserved = reserved_ram_percent()
+            journal.note("runtime", (
+                f"reserved RAM: WanGP may pin {reserved}% of the machine's RAM "
+                f"({RESERVED_RAM_VARIABLE}={reserved_ram_text(reserved)})"
+                if reserved > 0 else
+                "reserved RAM: WanGP's own cap (the setting is 0)"))
 
             for attempt in range(PORT_ATTEMPTS):
                 port = free_port()
@@ -960,6 +1048,7 @@ class Runtime:
                 environment = build_environment(
                     config, port, instance_id, secret, handoff_root=handoff,
                     control_port=control, ledger_root=ledger_root,
+                    reserved_ram_percent=reserved,
                 )
 
                 journal.note("runtime", f"launch attempt {attempt + 1}: {' '.join(command)}")
@@ -1491,7 +1580,10 @@ def _invalidate_bridge(instance_id: str) -> None:
 
 def build_environment_for(runtime: Runtime, config: typing.Any, port: int) -> typing.Dict[str, str]:
     """The environment for an already-identified run. Diagnostics only."""
-    return build_environment(config, port, runtime.instance_id, runtime.bridge_secret(), handoff_root=_handoff_root())
+    return build_environment(
+        config, port, runtime.instance_id, runtime.bridge_secret(), handoff_root=_handoff_root(),
+        reserved_ram_percent=reserved_ram_percent(),
+    )
 
 
 def start(config: typing.Any, **keywords: typing.Any) -> Runtime:

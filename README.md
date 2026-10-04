@@ -434,6 +434,14 @@ this page's typeface, the faces it loaded included - from a CDN too, as Lobe's a
 from setup step 4 and WanGP restarted, and reaches the page at the next Reload UI. `docs/wangp/README.md` has the
 detail, and `docs/wangp/THEME_HIJACK_2026-09-28.txt` the design.
 
+**How much RAM WanGP may pin.** WanGP's offload library page-locks the models it streams
+through the card, up to 40% of the machine's RAM on Windows unless told otherwise — RAM nothing
+else can have while a model is loaded. The managed WanGP is started with that cap at 25%, and
+Settings → *miniPaint / Canvas* → **WanGP: RAM it may pin for its models (% of system RAM)**
+moves it (0 leaves WanGP's own cap). Above the cap WanGP pins what fits and streams the rest
+from ordinary memory — slower for that part, not a failure. A change takes effect the next
+time WanGP starts. `docs/wangp/README.md` says why.
+
 **Focus mode.** With the Forge Assistant's focus mode on (SD-Neo-ModelSwitchRefiner; three
 presses on its header or launcher), the WanGP tab is the frame alone — the whole window, no
 *Integration management*, nothing reloaded and nothing moved — and the WanGP page inside it is

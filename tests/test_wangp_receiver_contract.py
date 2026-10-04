@@ -992,6 +992,46 @@ def tab_checks(r: Results) -> None:
             config.use_config_dir(None)
 
 
+def reserved_ram_checks(r: Results) -> None:
+    """The reserved-RAM cap: one slider on the Settings page, read by the
+    WanGP launch as the percentage mmgp is told in the child's environment."""
+    from modules import shared
+    from minipaint_neo import settings
+    from minipaint_neo.wangp import runtime as wangp_runtime
+
+    labels = shared.opts.data_labels
+    info = labels.get(settings.WANGP_RESERVED_RAM)
+    r.check("the cap is one slider on the Settings page, from 0 to the ceiling by whole percents",
+            info is not None and info.component_args == {"minimum": 0, "maximum": settings.WANGP_RESERVED_RAM_MAX, "step": 1}
+            and info.default == settings.WANGP_RESERVED_RAM_DEFAULT and info.section == settings.SECTION,
+            str(info and info.__dict__))
+    r.check("the slider's ceiling is above mmgp's own cap and below everything",
+            40 < settings.WANGP_RESERVED_RAM_MAX < 100, settings.WANGP_RESERVED_RAM_MAX)
+    r.check("the Settings default and the launch default are the same number",
+            settings.WANGP_RESERVED_RAM_DEFAULT == wangp_runtime.RESERVED_RAM_PERCENT == settings.DEFAULTS[settings.WANGP_RESERVED_RAM])
+    r.check("its description says it takes effect at the next start of WanGP",
+            info is not None and "next time WanGP starts" in str(getattr(info, "comment_after", "") or "") + str(getattr(info, "comment_before", "") or ""),
+            str(info and getattr(info, "comment_after", "")))
+
+    before = shared.opts.data.get(settings.WANGP_RESERVED_RAM)
+    try:
+        shared.opts.data.pop(settings.WANGP_RESERVED_RAM, None)
+        r.check("no setting is the default", settings.wangp_reserved_ram_percent() == 25 and wangp_runtime.reserved_ram_percent() == 25)
+        for stored, percent in ((30, 30), (30.0, 30), ("35", 35), (12.6, 13), (0, 0), (-5, 0), (250, 100)):
+            shared.opts.data[settings.WANGP_RESERVED_RAM] = stored
+            r.check(f"a stored {stored!r} is read as {percent}% by Settings and the launch alike",
+                    settings.wangp_reserved_ram_percent() == percent and wangp_runtime.reserved_ram_percent() == percent,
+                    (settings.wangp_reserved_ram_percent(), wangp_runtime.reserved_ram_percent()))
+        shared.opts.data[settings.WANGP_RESERVED_RAM] = "a word from another build"
+        r.check("a stored value that is not a number is the default, not zero",
+                settings.wangp_reserved_ram_percent() == 25 and wangp_runtime.reserved_ram_percent() == 25)
+    finally:
+        if before is None:
+            shared.opts.data.pop(settings.WANGP_RESERVED_RAM, None)
+        else:
+            shared.opts.data[settings.WANGP_RESERVED_RAM] = before
+
+
 def look_checks(r: Results) -> None:
     """The WanGP look: one Settings entry, read into the tab's view JSON as
     the protocol's skin word, which is where the browser half reads it."""
@@ -1952,6 +1992,7 @@ def run() -> Results:
     try:
         gate_checks(r)
         look_checks(r)
+        reserved_ram_checks(r)
         isolation_checks(r)
         reload_checks(r)
         restart_checks(r)

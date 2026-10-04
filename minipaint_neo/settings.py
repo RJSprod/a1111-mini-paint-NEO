@@ -69,6 +69,24 @@ WANGP_LOOK_BRIDGE = "Mini Paint's own dark and light"
 WANGP_LOOK_OFF = "WanGP's own theme"
 WANGP_LOOK_CHOICES = [WANGP_LOOK_HOST, WANGP_LOOK_BRIDGE, WANGP_LOOK_OFF]
 WANGP_LOOK_SKINS = {WANGP_LOOK_HOST: "host", WANGP_LOOK_BRIDGE: "bridge", WANGP_LOOK_OFF: "off"}
+#: How much of the machine's RAM WanGP may page-lock, as a percentage.
+#:
+#: mmgp, the offload library inside WanGP, pins ("Reserved RAM") the models it
+#: streams through the card so their transfers run at full speed, and caps the
+#: pinned set at 40% of physical RAM on Windows (50% elsewhere) unless told
+#: otherwise. Pinned pages are never paged out, so that cap is RAM nothing else
+#: on the machine can have while WanGP holds a model - 39 GB of 96 - and on a
+#: machine also running Forge's image model and a language model it was the
+#: difference between fitting and four out-of-memory failures in a week. The
+#: child is told the cap in its environment at launch
+#: (``wangp.runtime.RESERVED_RAM_VARIABLE``), so a change takes effect the next
+#: time WanGP starts. Zero leaves WanGP's own cap. The default is the same
+#: number as ``wangp.runtime.RESERVED_RAM_PERCENT``, held equal by a test.
+WANGP_RESERVED_RAM = "minipaint_wangp_reserved_ram"
+WANGP_RESERVED_RAM_DEFAULT = 25
+#: The slider's ceiling. mmgp's own 40 is already more than a shared machine
+#: can spare; 60 leaves room above it for a machine that is WanGP's alone.
+WANGP_RESERVED_RAM_MAX = 60
 
 SNAP_CHOICES = ["Off", "8", "16", "32", "64"]
 KEEP_TRANSPARENT = "Keep transparent"
@@ -85,6 +103,7 @@ DEFAULTS: dict[str, typing.Any] = {
     DISPLAY_OBJECTS: False,
     INHERIT_SETTINGS: False,
     WANGP_LOOK: WANGP_LOOK_HOST,
+    WANGP_RESERVED_RAM: WANGP_RESERVED_RAM_DEFAULT,
 }
 
 # The setting is the way to switch editors - but it lives in a UI, and the one
@@ -160,6 +179,21 @@ def wangp_look() -> str:
     """
     chosen = get(WANGP_LOOK, DEFAULTS[WANGP_LOOK])
     return WANGP_LOOK_SKINS.get(str(chosen), WANGP_LOOK_SKINS[WANGP_LOOK_HOST])
+
+
+def wangp_reserved_ram_percent() -> int:
+    """The share of the machine's RAM WanGP may pin, 0 to 100; 0 is WanGP's own cap.
+
+    See WANGP_RESERVED_RAM. Read at every WanGP launch rather than cached, so a
+    change on the Settings page reaches the next start without a Reload UI. A
+    stored value that is not a number is the default, not zero: zero is a
+    choice, and an unreadable setting is not that choice.
+    """
+    try:
+        percent = int(round(float(get(WANGP_RESERVED_RAM, WANGP_RESERVED_RAM_DEFAULT))))
+    except (TypeError, ValueError, OverflowError):
+        return WANGP_RESERVED_RAM_DEFAULT
+    return max(0, min(100, percent))
 
 
 def inherit_settings() -> bool:
@@ -329,6 +363,25 @@ def on_ui_settings() -> None:
             "bridge 1.9.0, installed from the WanGP tab's setup (step 4, Install or update it) with "
             "WanGP restarted; reaches the page the next time the WebUI is reloaded"
         ).needs_reload_ui(),
+    )
+
+    _add(
+        WANGP_RESERVED_RAM,
+        OptionInfo(
+            DEFAULTS[WANGP_RESERVED_RAM],
+            "WanGP: RAM it may pin for its models (% of system RAM)",
+            gr.Slider,
+            {"minimum": 0, "maximum": WANGP_RESERVED_RAM_MAX, "step": 1},
+            section=SECTION,
+            category_id=category,
+        ).info(
+            "WanGP page-locks (\"Reserved RAM\") the models it streams through the card, up to this "
+            "share of the machine's RAM; pinned pages are never paged out, so this is RAM nothing else "
+            "can have while a model is loaded. WanGP's own cap is 40% on Windows and 50% elsewhere, and "
+            "0 leaves it at that. Above the cap WanGP pins what fits and streams the rest from ordinary "
+            "memory - slower for that part, not a failure. Takes effect the next time WanGP starts "
+            "(Restart WanGP in its tab)"
+        ),
     )
 
     _add(

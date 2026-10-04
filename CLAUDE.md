@@ -453,6 +453,25 @@ over the bottom of the WanGP frame (`wangp_warnings` in the interop
 snapshot). It is advice, never a gate: nothing is installed for the user,
 and a file it cannot read is no warning.
 
+**mmgp pins 40% of RAM on Windows unless told otherwise, and the knob is an
+environment variable.** WanGP's offload library page-locks ("Reserved RAM")
+the models it streams through the card, up to `perc_reserved_mem_max` ×
+physical RAM: WanGP's `--perc-reserved-mem-max` argument when above zero
+(WanGP's default is 0), else the environment variable of that name, else 0.40
+on Windows and 0.5 elsewhere (`mmgp/offload.py`, `_get_perc_reserved_mem_max`,
+read from the 3.8.2 wheel). Pinned pages are never paged out, so on the user's
+96 GB machine that was 39 GB nothing else could have while LTX 2.3 was loaded,
+and a week's four "CUDA out of memory" failures on a 5090 with 17 GB free were
+RAM running out: a pinned allocation that fails raises as a CUDA error. The
+child is now started with the variable set from one Settings slider
+(`runtime.RESERVED_RAM_VARIABLE`, 25 by default, read at every launch). It
+travels in the environment and not on the command line because
+`command_line()` is the network surface and nothing else, and its tests say
+so; zero sets nothing and drops nothing, which is what a WanGP started by hand
+sees. Memory profiles do not change this: 1-4 pin (every model, or the
+transformer alone), 3+ and 5 pin nothing, and none of them makes the total
+smaller - a model that is not pinned is still in RAM, pageable.
+
 ## The sibling repositories
 
 `RJSprod/NEO-webui-auto-tls-https` gives Forge its certificate and, since
@@ -611,3 +630,8 @@ WanGP: if the Clipboard calls a downloaded model incomplete, the process log's
 in `control.model(<type>)`'s answer are the first things to look at, and an LTX
 2.3 GGUF build is the likeliest to differ (WanGP picks its transformer file by
 the quantization setting).
+The reserved-RAM cap has been checked against mmgp 3.8.2's resolution order as
+read from the wheel, never on the user's machine: if WanGP still pins too much,
+WanGP's own console line *Switching to partial pinning* (or its absence) and the
+`reserved RAM:` line in the `runtime` column of `logs/wangp-log.txt` are the
+first things to look at.

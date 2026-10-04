@@ -719,6 +719,63 @@ def run() -> Results:
         r.check("everything else is inherited", child["PATH"] == "/usr/bin")
         r.check("the parent environment is left alone", parent["CUDA_VISIBLE_DEVICES"] == FORGE_UUID)
 
+        # ---- the reserved-RAM cap: a quarter of RAM unless Settings says otherwise
+        VAR = runtime.RESERVED_RAM_VARIABLE
+        with_var = lambda env: [name for name in env if name.lower() == VAR]  # noqa: E731
+        r.check("the default cap is a quarter of RAM", runtime.RESERVED_RAM_PERCENT == 25)
+        r.check("the variable is the one mmgp's offload.py reads", VAR == "perc_reserved_mem_max")
+        r.check("the child is told the cap as mmgp reads it, a fraction with two decimals",
+                child.get(VAR) == "0.25", child.get(VAR))
+        r.check("the cap travels in the environment, not on the command line",
+                not any("reserved" in part for part in direct) and VAR not in json.dumps(direct))
+        shouting = dict(parent, perc_reserved_mem_max="0.5", PERC_RESERVED_MEM_MAX="0.5")
+        capped = runtime.build_environment(config, 7999, "0123456789abcdef", "s", environ=shouting,
+                                           handoff_root=handoff, reserved_ram_percent=30)
+        r.check("a chosen cap replaces an inherited one", capped.get(VAR) == "0.30", capped.get(VAR))
+        r.check("under one spelling of the name", with_var(capped) == [VAR], with_var(capped))
+        own = runtime.build_environment(config, 7999, "0123456789abcdef", "s", environ=parent,
+                                        handoff_root=handoff, reserved_ram_percent=0)
+        r.check("zero sets nothing: WanGP's own cap", with_var(own) == [], with_var(own))
+        by_hand = runtime.build_environment(config, 7999, "0123456789abcdef", "s",
+                                            environ=dict(parent, perc_reserved_mem_max="0.5"),
+                                            handoff_root=handoff, reserved_ram_percent=0)
+        r.check("zero leaves an inherited value alone, as a WanGP started by hand would see it",
+                by_hand.get(VAR) == "0.5", by_hand.get(VAR))
+        unreadable = runtime.build_environment(config, 7999, "0123456789abcdef", "s", environ=parent,
+                                               handoff_root=handoff, reserved_ram_percent="not a number")
+        r.check("a cap that cannot be read is the default, not zero",
+                unreadable.get(VAR) == "0.25" and runtime.reserved_ram_cap(None) == 25, unreadable.get(VAR))
+        r.check("a negative cap is zero", runtime.reserved_ram_cap(-5) == 0 and with_var(
+            runtime.build_environment(config, 7999, "0123456789abcdef", "s", environ=parent,
+                                      handoff_root=handoff, reserved_ram_percent=-5)) == [])
+        r.check("a cap over everything is everything, and a fraction of a percent rounds",
+                runtime.reserved_ram_cap(250) == 100 and runtime.reserved_ram_text(250) == "1.00"
+                and runtime.reserved_ram_cap(12.6) == 13 and runtime.reserved_ram_text(5) == "0.05",
+                (runtime.reserved_ram_cap(250), runtime.reserved_ram_text(5)))
+        r.check("without a Forge the launch reads the default", runtime.reserved_ram_percent() == 25)
+
+        # ...and the launch itself carries what the Settings page holds, read at
+        # the launch and not before: the same seam ui.current_look uses.
+        saved_reader = runtime.reserved_ram_percent
+        runtime.reserved_ram_percent = lambda: 10
+        try:
+            listener = Listener()
+            told = runtime.Runtime()
+            told_spawns = Spawns()
+            try:
+                with port_from(listener):
+                    told.start(config, spawn=told_spawns, probe=healthy, gpus=[gpu()], handoff_root=handoff, timeout=20.0)
+                r.check("the launch passes the Settings page's cap to the child",
+                        told_spawns.calls and told_spawns.calls[-1]["env"].get(VAR) == "0.10",
+                        told_spawns.calls and told_spawns.calls[-1]["env"].get(VAR))
+                r.check("the diagnostics environment says the same",
+                        runtime.build_environment_for(told, config, 7999).get(VAR) == "0.10")
+            finally:
+                told.stop()
+                listener.close()
+        finally:
+            runtime.reserved_ram_percent = saved_reader
+
         # ---- a missing GPU starts nothing at all (41)
         absent = runtime.Runtime()
         spawns = Spawns()

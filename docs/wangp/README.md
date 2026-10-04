@@ -56,6 +56,22 @@ destinations in the Canvas's *Send to* menu.
   `--expandable-segments` export (`PYTORCH_CUDA_ALLOC_CONF`, `PYTORCH_ALLOC_CONF`). WanGP
   launched by hand never sees those, and under `cudaMallocAsync` its prompt enhancer's
   CUDA-graph capture aborts the whole process.
+* **WanGP may pin a quarter of the machine's RAM, not the 40% it would take by itself.**
+  mmgp, WanGP's offload library, page-locks ("Reserved RAM") the models it streams through
+  the card so their transfers run at full speed, and caps that pinned set at 40% of physical
+  RAM on Windows (50% elsewhere) unless told otherwise. Pinned pages are never paged out, so
+  on a 96 GB machine that was 39 GB nothing else could have while a model was loaded — and
+  with Forge's image model and a language model beside it, four out-of-memory failures in a
+  week, each reported by CUDA on a card with 17 GB free. The child is therefore started with
+  `perc_reserved_mem_max=0.25` in its environment — the variable mmgp's own messages name;
+  WanGP's `--perc-reserved-mem-max` argument is not used, because the command line is the
+  network surface and nothing else — and Settings → *miniPaint / Canvas* → **WanGP: RAM it
+  may pin for its models (% of system RAM)** sets the share, 0 leaving WanGP's own cap. Above
+  the cap mmgp pins what fits and streams the rest from ordinary memory (*Switching to partial
+  pinning* in WanGP's console): slower transfers for that part of a model, not a failure. A
+  change reaches the next start of WanGP (*Restart WanGP now*, or the next Forge start), and
+  the `runtime` column of `logs/wangp-log.txt` has a `reserved RAM:` line per launch saying
+  what it was given.
 * **Startup is lazy.** Nothing is launched when Forge boots. Opening the tab (or opening
   *Send to*) asks for WanGP and returns immediately; the tab shows a "starting" card with
   a *Check again* button rather than blocking a Gradio event for a cold model load.

@@ -2104,6 +2104,49 @@ def check_an_output_loads_its_recipe(r: Results, page) -> None:
         r.check("and nothing was queued by it",
                 page.evaluate("() => { const s = document.getElementById('minipaint_clipboard_status'); return s ? s.textContent : ''; }").find("Nothing was queued") >= 0
                 or page.evaluate("() => document.body.textContent.indexOf('Nothing was queued') >= 0"))
+
+        # An LTX 2.5 video whose request is in no history at all - the gallery
+        # popup asked for it, or the server finished it with nobody watching -
+        # loads from the recipe the ledger kept for it.
+        assets = page.evaluate("() => [...document.querySelectorAll('.minipaint-clip-item')].map((c) => c.dataset.asset).slice(0, 2)")
+        first, last = (assets + ["", ""])[:2]
+        from minipaint_neo.clipboard import outputs as clip_outputs
+
+        made = folder / "ltx25"
+        made.mkdir(parents=True, exist_ok=True)
+        from PIL import Image
+
+        picture = made / "ltx25.png"
+        Image.new("RGB", (64, 36), (90, 40, 20)).save(picture)
+        clip_outputs.remember("e" * 16, [str(picture)], request_id="", model="LTX-2 2.5 Distilled 22B", recipe={
+            "prompt": "she turns from the window and waves", "written": "WRITTEN: she turns from the window and waves at the camera.",
+            "first_asset_id": first, "last_asset_id": last, "reference_asset_ids": [],
+            "model_type": "ltx2_25_22B_distilled", "model_label": "LTX-2 2.5 Distilled 22B", "origin": "gallery"})
+        _open_outputs_on(page, "ltx25.png")
+        page.wait_for_function("() => { const n = document.querySelector('.minipaint-clip-output-caption .minipaint-clip-output-name');"
+                               " return !!n && n.textContent === 'ltx25.png'; }", timeout=8000)
+        caption = page.evaluate("""() => {
+            const c = document.querySelector('.minipaint-clip-output-caption');
+            const load = c ? c.querySelector('.minipaint-clip-output-load') : null;
+            const prompt = c ? c.querySelector('.minipaint-clip-output-prompt') : null;
+            return { model: (c && c.querySelector('.minipaint-clip-output-model') || {}).textContent || '',
+                     prompt: prompt ? prompt.textContent : '', title: prompt ? prompt.title : '',
+                     enhanced: !!(c && [...c.querySelectorAll('.minipaint-clip-badge')].find((b) => b.textContent === 'enhanced')),
+                     load: load ? !load.disabled : null }; }""")
+        r.check("a video with no history record but a kept recipe offers Load, and names the model that made it",
+                caption["load"] is True and caption["model"] == "LTX-2 2.5 Distilled 22B", str(caption))
+        r.check("its caption is the prompt as it was typed, the written one under it on hover, marked enhanced",
+                caption["prompt"] == "she turns from the window and waves" and "Written for WanGP: WRITTEN:" in caption["title"]
+                and caption["enhanced"], str(caption))
+        page.evaluate("() => { const b = document.querySelector('.minipaint-clip-output-caption .minipaint-clip-output-load'); if (b) { b.click(); } }")
+        page.wait_for_function("""() => { const box = document.querySelector('#minipaint_clipboard_prompt textarea');
+            return !!box && box.value === 'she turns from the window and waves'; }""", timeout=10000)
+        r.check("Load puts back the typed prompt - not the one WanGP was given", True)
+        if first and last:
+            r.check("with its first and last frames", page.evaluate("""a => {
+                const f = document.getElementById('minipaint_clipboard_card_first'), l = document.getElementById('minipaint_clipboard_card_last');
+                return !!f && !!l && f.innerHTML.indexOf(a[0]) >= 0 && l.innerHTML.indexOf(a[1]) >= 0; }""", [first, last]),
+                    "the frame cards do not show the pictures")
     finally:
         if record:
             history.delete_history(record["history_id"])
@@ -3460,6 +3503,118 @@ def check_hidden_tab_is_not_offered(r: Results, targets) -> None:
             "img2img" in hidden and "inpaint" in hidden, str(sorted(hidden)))
 
 
+HISTORY_LONG = ("Scene: a rainy street at night.\n" + "\n".join(
+    f"Beat {index}: she crosses under the neon sign while the rain gets heavier." for index in range(1, 9)))
+
+
+def check_the_history_button_opens_the_last_prompts(r: Results, page) -> None:
+    """Asked for: "the history for the last ten prompts submitted from
+    clipboard to wangp. Not the enhanced, but the original raw input. Make
+    this viewable for recall by pressing a new button in the right column
+    'History' where i can view and load from. It should pop up a list that i
+    can scroll, view, and choose to load."
+    """
+    from minipaint_neo.clipboard import config as clip_config
+    from minipaint_neo.clipboard import history, prompts
+
+    ltx23 = {"type": "ltx2_22B_distilled", "label": "LTX-2 2.3 Distilled 1.0 22B", "family": "ltx2", "architecture": "ltx2_22B"}
+    ltx25 = {"type": "ltx2_25_22B_distilled", "label": "LTX-2 2.5 Distilled 22B", "family": "ltx2", "architecture": "ltx2_25_22B"}
+    stash = clip_config.read_document(clip_config.PROMPTS_NAME, None)
+    drawn = """() => {
+        const layer = document.querySelector('.minipaint-clip-prompts');
+        const dialog = layer ? layer.querySelector('.minipaint-clip-prompts-dialog') : null;
+        const list = layer ? layer.querySelector('.minipaint-clip-prompts-list') : null;
+        const entries = layer ? [...layer.querySelectorAll('.minipaint-clip-prompts-entry')] : [];
+        const text = (i) => entries[i] ? entries[i].querySelector('.minipaint-clip-prompts-text') : null;
+        const more = (i) => entries[i] ? entries[i].querySelector('.minipaint-clip-prompts-more') : null;
+        const box = dialog ? dialog.getBoundingClientRect() : null;
+        return { open: !!layer && !layer.hidden && !!box && box.width > 0,
+                 z: layer ? Number(getComputedStyle(layer).zIndex) : 0,
+                 role: dialog ? dialog.getAttribute('role') : null, modal: dialog ? dialog.getAttribute('aria-modal') : null,
+                 count: entries.length,
+                 firstText: text(0) ? text(0).textContent : '',
+                 firstClamped: text(0) ? text(0).scrollHeight > text(0).clientHeight + 1 : null,
+                 firstExpanded: text(0) ? text(0).dataset.expanded : null,
+                 firstMore: more(0) ? (more(0).hidden ? '' : more(0).textContent) : null,
+                 secondMore: more(1) ? !more(1).hidden : null,
+                 secondText: text(1) ? text(1).textContent : '',
+                 meta: entries[0] ? entries[0].querySelector('.minipaint-clip-prompts-meta').textContent : '',
+                 scrolls: list ? list.scrollHeight > list.clientHeight + 1 : null,
+                 inWindow: !!box && box.top >= 0 && box.bottom <= window.innerHeight + 1,
+                 overlays: (window.__historyOverlays || []).slice() }; }"""
+    try:
+        prompts.reset_for_tests()
+        for index in range(11):
+            prompts.remember(f"history prompt {index}", model=ltx25 if index % 2 else ltx23,
+                             target="ltx25" if index % 2 else "ltx23", enhanced=index % 3 == 0)
+        prompts.remember(HISTORY_LONG, model=ltx25, target="ltx25", enhanced=True)
+        open_clipboard(page)
+        page.evaluate("""() => { window.__historyOverlays = [];
+            document.addEventListener('minipaint:overlay', (e) => window.__historyOverlays.push(e.detail)); }""")
+        geometry = page.evaluate("""() => {
+            const b = document.getElementById('minipaint_clipboard_prompt_history');
+            const p = document.getElementById('minipaint_clipboard_prompt');
+            const c = document.getElementById('minipaint_clipboard_composer');
+            if (!b || !p || !c) { return null; }
+            const bb = b.getBoundingClientRect(), pb = p.getBoundingClientRect(), cb = c.getBoundingClientRect();
+            return { text: b.textContent.trim(), under: bb.top >= pb.bottom - 1, inside: bb.left >= cb.left - 1 && bb.right <= cb.right + 1,
+                     shown: bb.width > 0 && bb.height > 0 }; }""")
+        r.check("History is a button on the right column, under the Prompt box",
+                geometry is not None and geometry["text"] == "History" and geometry["shown"] and geometry["under"] and geometry["inside"],
+                str(geometry))
+        page.locator("#minipaint_clipboard_prompt_history").click()
+        page.wait_for_function("() => document.querySelectorAll('.minipaint-clip-prompts-entry').length > 0", timeout=10000)
+        page.wait_for_timeout(300)
+        state = page.evaluate(drawn)
+        r.check("it pops up a dialog, over everything else on the page",
+                state["open"] and state["role"] == "dialog" and state["modal"] == "true" and state["z"] >= 2000 and state["inWindow"], str(state))
+        r.check("listing the last ten, newest first, as typed - line breaks and all",
+                state["count"] == 10 and state["firstText"] == HISTORY_LONG and state["secondText"] == "history prompt 10", str(state)[:300])
+        r.check("each says when, for which model, and whether it was enhanced",
+                "UTC" in state["meta"] and "LTX-2 2.5 Distilled 22B" in state["meta"] and "enhanced" in state["meta"], state["meta"])
+        r.check("a long prompt is clamped with More beside it, and a short one has no More",
+                state["firstClamped"] is True and state["firstMore"] == "More" and state["secondMore"] is False, str(state))
+        r.check("and the list scrolls inside the dialog", state["scrolls"] is True, str(state))
+        r.check("the dialog says it has taken the page, so the Forge Assistant puts its panel away",
+                state["overlays"] == [{"name": "clipboard-history", "open": True, "modal": True}], str(state["overlays"]))
+
+        page.locator(".minipaint-clip-prompts-entry").first.locator(".minipaint-clip-prompts-more").click()
+        state = page.evaluate(drawn)
+        r.check("More shows the whole prompt, and becomes Less",
+                state["firstExpanded"] == "1" and state["firstClamped"] is False and state["firstMore"] == "Less", str(state))
+
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+        state = page.evaluate(drawn)
+        r.check("Escape closes it, and it says it has given the page back",
+                not state["open"] and state["overlays"][-1] == {"name": "clipboard-history", "open": False, "modal": True}, str(state["overlays"]))
+
+        page.locator("#minipaint_clipboard_prompt_history").click()
+        page.wait_for_function("() => document.querySelectorAll('.minipaint-clip-prompts-entry').length === 10", timeout=10000)
+        page.locator(".minipaint-clip-prompts-entry").nth(1).locator(".minipaint-clip-prompts-load").click()
+        page.wait_for_function("""() => { const box = document.querySelector('#minipaint_clipboard_prompt textarea');
+            return !!box && box.value === 'history prompt 10'; }""", timeout=10000)
+        state = page.evaluate(drawn)
+        r.check("Load puts those words in the Prompt box, and the dialog gets out of the way", not state["open"], str(state))
+        r.check("and the server's draft holds the same words, so the gallery popup and a reload agree",
+                history.load_draft()["prompt_override"] == "history prompt 10")
+
+        page.locator("#minipaint_clipboard_prompt_history").click()
+        page.wait_for_function("() => window.minipaintClipboard.debug().promptHistory.open === true", timeout=8000)
+        size = page.viewport_size or {"width": 1400, "height": 950}
+        page.mouse.click(8, size["height"] - 8)
+        page.wait_for_timeout(200)
+        r.check("a press outside the dialog closes it too", page.evaluate("() => window.minipaintClipboard.debug().promptHistory.open") is False)
+    finally:
+        if stash is None:
+            clip_config.path_of(clip_config.PROMPTS_NAME).unlink(missing_ok=True)
+        else:
+            clip_config.write_document(clip_config.PROMPTS_NAME, stash)
+        history.save_draft(history.empty_draft())
+        page.evaluate("""() => { const box = document.querySelector('#minipaint_clipboard_prompt textarea');
+            if (box && window.minipaintWriteInput) { window.minipaintWriteInput(box, ''); } }""")
+
+
 def check_the_section_is_blocked_until_wangp_is_ready(r: Results, page) -> None:
     """The WanGP section exists only while WanGP can take what it makes.
 
@@ -3483,6 +3638,8 @@ def check_the_section_is_blocked_until_wangp_is_ready(r: Results, page) -> None:
         return { ready: root ? root.dataset.wangpReady : null, target: root ? root.dataset.wangpTarget : null,
                  cards: visible('minipaint_clipboard_cards'), prompt: visible('minipaint_clipboard_prompt'),
                  enhance: visible('minipaint_clipboard_sp_open'), queue: visible('minipaint_clipboard_queue'),
+                 history: visible('minipaint_clipboard_prompt_history'),
+                 references: root ? root.dataset.wangpReferences : null,
                  first: visible('minipaint_clipboard_to_first'), ref: visible('minipaint_clipboard_to_ref'),
                  cardFirst: visible('minipaint_clipboard_card_first'), cardRef: visible('minipaint_clipboard_card_ref'),
                  outbox: visible('minipaint_clipboard_outbox_list'), blocked: visible('minipaint_clipboard_blocked'),
@@ -3492,8 +3649,8 @@ def check_the_section_is_blocked_until_wangp_is_ready(r: Results, page) -> None:
         page.evaluate("() => window.minipaintClipboard.refreshReadiness(true)")
         time.sleep(1.0)
         state = page.evaluate(shown)
-        r.check("blocked: no cards, prompt, enhancement button, Add to Queue or +First / +Ref",
-                state["ready"] == "0" and not any(state[key] for key in ("cards", "prompt", "enhance", "queue", "first", "ref")), str(state))
+        r.check("blocked: no cards, prompt, History, enhancement button, Add to Queue or +First / +Ref",
+                state["ready"] == "0" and not any(state[key] for key in ("cards", "prompt", "history", "enhance", "queue", "first", "ref")), str(state))
         r.check("one quiet line in their place, with the reason and Check again, at a hint's size",
                 state["blocked"] and "Wan2.2 Text2Video 14B" in state["text"] and "Check again" in state["text"]
                 and state["size"] == "12px", str(state))
@@ -3508,13 +3665,24 @@ def check_the_section_is_blocked_until_wangp_is_ready(r: Results, page) -> None:
                 state["ready"] == "1" and state["cards"] and state["prompt"] and state["enhance"] and state["queue"]
                 and state["first"] and not state["blocked"], str(state))
         r.check("for LTX 2.3 Distilled: a first-frame card and no reference card, no +Ref",
-                state["target"] == "ltx23" and state["cardFirst"] and state["cardRef"] is False and state["ref"] is False, str(state))
+                state["target"] == "ltx23" and state["cardFirst"] and state["cardRef"] is False and state["ref"] is False
+                and state["references"] == "0" and state["history"], str(state))
+        ltx25 = {"type": "ltx2_25_22B_distilled", "label": "LTX-2 2.5 Distilled 22B", "family": "ltx2", "architecture": "ltx2_25_22B"}
+        ready = targets._view(True, "", "Ready.", enhance.model_block(ltx25), "ltx25", checked=True)
+        targets.use_readiness(lambda model=None, fresh=False: ready)
+        page.evaluate("() => window.minipaintClipboard.refreshReadiness(true)")
+        page.wait_for_function("() => document.getElementById('minipaint_clipboard_root').dataset.wangpTarget === 'ltx25'", timeout=8000)
+        state = page.evaluate(shown)
+        r.check("and for LTX 2.5 Distilled the same: the frame cards, no reference card and no +Ref - from the fields the server lists",
+                state["ready"] == "1" and state["target"] == "ltx25" and state["cardFirst"] and state["cardRef"] is False
+                and state["ref"] is False and state["references"] == "0", str(state))
     finally:
         targets.use_readiness(targets.always_ready)
         page.evaluate("() => window.minipaintClipboard.refreshReadiness(true)")
         time.sleep(0.8)
     state = page.evaluate(shown)
     r.check("and ready for MiniMax, every card is there again", state["ready"] == "1" and state["cardRef"] and state["ref"], str(state))
+    r.check("a ready answer that names no model leaves the reference alone", state["references"] in ("", "1"), str(state))
 
 
 def run() -> Results:
@@ -3567,6 +3735,7 @@ def run() -> Results:
                 check_the_queue_section_is_the_browsers(r, page)
                 check_queue_reads_are_one_at_a_time(r, page)
                 check_the_prompt_editor_fills_the_window(r, page)
+                check_the_history_button_opens_the_last_prompts(r, page)
                 check_the_toolbar_flyouts_are_the_one_door(r, page)
                 check_view_outputs_is_a_gallery(r, page)
                 check_the_player_is_the_pages(r, page)

@@ -24,22 +24,24 @@ WanGP is not running the button says so and is off.
 Prompt enhancement sits under the prompt, off by default. Switched on, a
 press first hands the typed prompt - and the pictures the model reads - to
 ModelSwitchRefiner's writer for the model the WanGP page is on: MiniMax
-H3's, in its FL2VA or Ref2VA variant, or the LTX 2.3 writer, which is shown
-the first frame; the job waits in the queue as *enhancing* and goes to
-WanGP, in press order, once the prompt is written. The same panel shows and
-edits the six system prompts the writers use (with and without a picture,
-for each): the default is read from the other extension, an override is
-kept on disk across sessions, and Restore default forgets it. Each job in
-the list says where its enhancement is and, once WanGP has it, where its
-task is in WanGP's queue; Cancel everything empties the line at once.
+H3's, in its FL2VA or Ref2VA variant, or the LTX writer, for LTX 2.3 and 2.5
+alike, which is shown the first frame; the job waits in the queue as
+*enhancing* and goes to WanGP, in press order, once the prompt is written.
+The same panel shows and edits the six system prompts the writers use (with
+and without a picture, for FL2VA, Ref2VA and the one LTX set 2.3 and 2.5
+share): the default is read from the other extension, an override is kept
+on disk across sessions, and Restore default forgets it. Each job in the
+list says where its enhancement is and, once WanGP has it, where its task
+is in WanGP's queue; Cancel everything empties the line at once.
 
 The composer only exists while WanGP can take what it makes. It sends to
-three models - MiniMax H3 FL2VA, MiniMax H3 Ref2VA and LTX 2.3 Distilled -
-and while WanGP is not running, its bridge is not answering, or the page
-is on any other model or one that is not downloaded, the cards, the
-prompt, the enhancement button and Add to Queue are not there: one quiet
-line says why, with Check again beside it (``targets``). LTX 2.3 Distilled
-is offered a first and a last frame and no reference.
+four models - MiniMax H3 FL2VA, MiniMax H3 Ref2VA, LTX 2.3 Distilled and
+LTX 2.5 Distilled - and while WanGP is not running, its bridge is not
+answering, or the page is on any other model or one that is not
+downloaded, the cards, the prompt, the enhancement button and Add to Queue
+are not there: one quiet line says why, with Check again beside it
+(``targets``). LTX 2.3 and 2.5 Distilled are offered a first and a last
+frame and no reference.
 
 The tab is built once, inside the same guard the WanGP tab uses, and a tab
 that cannot be built is a tab that says so under the same label and id.
@@ -137,6 +139,10 @@ CLOSE_PROMPT_EDITOR_JS = f"() => {{ if ({_JS}) {_JS}.closePromptEditor(); }}"
 #: the view is drawn from /minipaint-clipboard/outputs and the press
 #: has nothing for the server to decide.
 OPEN_OUTPUTS_JS = f"() => {{ if ({_JS}) {_JS}.openOutputs(); }}"
+#: The prompt history under the prompt: the last ten prompts sent from here,
+#: as typed. Browser-only too: the list is drawn from this tab's own route,
+#: and Load writes the draft over HTTP and the box from its answer.
+OPEN_PROMPT_HISTORY_JS = f"() => {{ if ({_JS}) {_JS}.openPromptHistory(); }}"
 #: The toolbar's Paste. Reading the system clipboard is the browser's to do
 #: and needs its permission, so this has no server half at all.
 PASTE_JS = f"() => {{ if ({_JS}) {_JS}.pasteFromClipboard(); }}"
@@ -219,7 +225,10 @@ WANGP_LABELS = {
     outbox.WANGP_ACCEPTED: "accepted by WanGP", outbox.WANGP_WAITING: "in WanGP's queue", outbox.WANGP_GENERATING: "WanGP is generating it",
     outbox.WANGP_FINISHED: "left WanGP's queue (finished, or removed there)", outbox.WANGP_UNKNOWN: "no longer tracked (the WanGP page changed)",
 }
-SP_VARIANT_CHOICES = [(enhance.VARIANT_LABELS[variant], variant) for variant in enhance.VARIANTS]
+#: The instruction sets the editor offers: MiniMax's two variants and the one
+#: LTX set LTX 2.3 and 2.5 share. Not a choice per model, because there is no
+#: separate LTX 2.5 set to edit.
+SP_VARIANT_CHOICES = [(enhance.PROMPT_SET_LABELS[variant], variant) for variant in enhance.PROMPT_SETS]
 SP_MODE_CHOICES = [(enhance.MODE_LABELS[mode], mode) for mode in enhance.MODES]
 QUEUE_BUTTON_LABEL = "Add to Queue"
 QUEUE_BUTTON_BLOCKED = "WanGP is not running"
@@ -873,12 +882,13 @@ class ClipboardTab:
             return enhance_line_html({"state": "blocked", "text": f"The enhancement settings could not be read ({type(error).__name__})."}, False)
 
     def _system_prompt_view(self, variant, mode) -> typing.Tuple[typing.Any, str]:
-        """The box and the line under it for one of the four instruction sets."""
+        """The box and the line under it for one of the six instruction sets."""
         try:
             text, source = enhance.effective_prompt(variant, mode)
         except IntegrationError:
             return gr.update(value=""), "Choose a variant and whether a picture is sent."
-        label = f"{enhance.VARIANT_LABELS.get(variant, variant)}, {enhance.MODE_LABELS.get(mode, mode)}"
+        chosen = enhance.prompt_set(variant)
+        label = f"{enhance.PROMPT_SET_LABELS.get(chosen, chosen)}, {enhance.MODE_LABELS.get(mode, mode)}"
         if source == "override":
             line = f"**Override saved** for {label}. Restore default forgets it."
         elif source == "default":
@@ -919,12 +929,13 @@ class ClipboardTab:
     def open_prompt_editor(self, model, variant, mode):
         """Open the editor on the instructions a press would actually use.
 
-        THE FOUR SETS ARE NOT A MENU. Which one the writer runs under is
-        decided by two things this page already knows: the H3 variant WanGP
-        is on, and whether the composer is holding a picture that variant
-        reads. Opening on whichever pair happened to be selected last means
-        editing one set and finding out at the next press that another was
-        used - a quiet mistake, of the kind this tab has had enough of.
+        THE SIX SETS ARE NOT A MENU. Which one the writer runs under is
+        decided by two things this page already knows: the model WanGP is on
+        - an H3 variant, or LTX 2.3 or 2.5, which share one set - and whether
+        the composer is holding a picture that model's writer reads. Opening
+        on whichever pair happened to be selected last means editing one set
+        and finding out at the next press that another was used - a quiet
+        mistake, of the kind this tab has had enough of.
 
         A WanGP that has not said its model yet keeps the variant that is on
         screen: guessing one would be worse than leaving the question where
@@ -932,9 +943,10 @@ class ClipboardTab:
         draft is here.
         """
         block = _model_of(model)
-        chosen = enhance.variant_for_model(block)
+        chosen = enhance.target_for_model(block)
         if chosen not in enhance.VARIANTS:
             chosen = variant if variant in enhance.VARIANTS else enhance.FL2VA
+        chosen = enhance.prompt_set(chosen)
         wanted = enhance.MODE_IMAGE if self._draft_has_picture_for(chosen) else enhance.MODE_TEXT
         box, line = self._system_prompt_view(chosen, wanted)
         return gr.update(value=chosen), gr.update(value=wanted), box, line
@@ -1399,9 +1411,12 @@ class ClipboardTab:
         return gr.update(visible=True)
 
     def history_action(self, value, prompt):
-        """``load:<id>`` replaces the draft with that recipe; ``delete:<id>`` removes the record."""
+        """``load:<id>`` replaces the draft with that recipe; ``delete:<id>`` removes the record;
+        ``output:<file id>`` replaces it with the recipe of the request that made that output."""
         action, _, history_id = str(value or "").partition(":")
         history_id = history_id.split(":", 1)[0]
+        if action == "output":
+            return self._load_output(history_id)
         records = {record["history_id"]: record for record in history.load_history()}
         record = records.get(history_id)
         if record is None:
@@ -1415,6 +1430,47 @@ class ClipboardTab:
             notes = [f"{', '.join(missing)}: missing image, so that slot is Use WanGP"] if missing else []
             return draft["prompt_override"], *self._cards(draft), _status("Recipe loaded. Nothing was queued.", notes)
         return gr.skip(), *self._cards(), gr.skip()
+
+    def _load_output(self, file_id):
+        """View Outputs' Load: the request that made one output, back in the composer.
+
+        From the recipe the output ledger kept (``outputs``) - the prompt as it
+        was typed, never the one an enhancement wrote, and each library picture
+        still in the folder - or, for an output from before recipes were kept,
+        from its Queue Send History record. Queues nothing, whichever model
+        made it: an LTX 2.3 or 2.5 video gives back its first and last frames
+        and a MiniMax one its reference too.
+        """
+        from . import outputs
+
+        found = outputs.entry_for_file(file_id)
+        if found is None:
+            return gr.skip(), *self._cards(), _status("That output is no longer in View Outputs.")
+        available = lambda item: self._asset(item) is not None  # noqa: E731 - one predicate, used once
+        notes = []
+        if found.get("recipe"):
+            draft, missing = history.draft_from_recipe(found["recipe"], available)
+            transient = set(found["recipe"].get("transient") or [])
+            for name, field, label in (("first", protocol.QUEUE_FIELD_START, "first frame"),
+                                       ("last", protocol.QUEUE_FIELD_END, "last frame"),
+                                       ("reference", protocol.QUEUE_FIELD_REFERENCES, "reference")):
+                if name not in missing:
+                    continue
+                if field in transient:
+                    notes.append(f"the {label} was a picture from outside the Clipboard folder and is not kept, so that slot is Use WanGP")
+                else:
+                    notes.append(f"the {label} is no longer in the folder, so that slot is Use WanGP")
+        else:
+            record = next((item for item in history.load_history()
+                           if found.get("request_id") and item.get("request_id") == found["request_id"]), None)
+            if record is None:
+                return gr.skip(), *self._cards(), _status("No recipe was kept for this output, so there is nothing to load.")
+            draft, missing = history.draft_from_record(record, available)
+            if missing:
+                notes.append(f"{', '.join(missing)}: missing image, so that slot is Use WanGP")
+        history.save_draft(draft)
+        self._journal(f"output {str(file_id)[:8]}: its recipe loaded into the composer ({len(missing)} slot(s) missing)")
+        return draft["prompt_override"], *self._cards(draft), _status("Loaded the request that made this output. Nothing was queued.", notes)
 
     # -- send out -----------------------------------------------------------------
 
@@ -1798,6 +1854,13 @@ class ClipboardTab:
                         draft["prompt_override"], lines=4, max_lines=12, label="Prompt", placeholder="Use current WanGP prompt",
                         elem_id=_id("prompt"), elem_classes=["minipaint-clip-prompt"],
                     )
+                    # History: the last ten prompts sent to WanGP from here,
+                    # as they were typed - never the enhanced ones - in a
+                    # dialog to scroll, read and load from (``prompts``). Under
+                    # the box it fills, and gone with it while the section is
+                    # blocked.
+                    prompt_history = gr.Button("History", elem_id=_id("prompt_history"), size="sm", min_width=0,
+                                               elem_classes=["minipaint-clip-prompt-history"])
                     enhanced_on = enhance.enabled()
                     # A SYSTEM PROMPT IS A PAGE OF PROSE, AND THIS COLUMN IS
                     # A THIRD OF THE WINDOW WIDE. It used to be edited here,
@@ -1814,14 +1877,14 @@ class ClipboardTab:
                     sp_open = gr.Button("⤢ Prompt enhancement and system prompts", elem_id=_id("sp_open"),
                                         elem_classes=["minipaint-clip-sp-open"])
                     with gr.Column(elem_id=_id("enhance_panel"), elem_classes=["minipaint-clip-enhance-panel"]):
-                        gr.Markdown("**Prompt enhancement** (ModelSwitchRefiner: MiniMax H3, LTX 2.3)",
+                        gr.Markdown("**Prompt enhancement** (ModelSwitchRefiner: MiniMax H3, LTX 2.3 and 2.5)",
                                     elem_classes=["minipaint-clip-title"])
                         enhance_line = gr.HTML(self._enhance_line(), elem_id=_id("enhance_line"))
                         enhance_toggle = gr.Checkbox(
                             value=enhanced_on, label="Enhance the prompt through ModelSwitchRefiner before it reaches WanGP",
                             elem_classes=["minipaint-clip-enhance-toggle"], elem_id=_id("enhance_toggle"),
                         )
-                        gr.Markdown("**System prompt** - the instructions the writer runs under. Six sets: each variant, with and without a picture.",
+                        gr.Markdown("**System prompt** - the instructions the writer runs under. Six sets: each variant, with and without a picture; LTX 2.3 and 2.5 share theirs.",
                                     elem_classes=["minipaint-clip-hint"])
                         with gr.Row(elem_classes=["minipaint-clip-pair"]):
                             sp_variant = gr.Dropdown(SP_VARIANT_CHOICES, value=enhance.FL2VA, label="Variant", elem_id=_id("sp_variant"), min_width=140)
@@ -1872,7 +1935,7 @@ class ClipboardTab:
             grid=grid, status=status, selected_box=selected_box, menu_state=menu_state,
             cards=(card_first, card_last, card_ref), menu_btn=menu_btn, paste_btn=paste_btn, delete_btn=delete_btn, refresh_now_btn=refresh_now_btn, roles=(to_first, to_last, to_ref),
             sort_btn=sort_btn, send_btn=send_btn, sort_request=sort_request, thumb=thumb, refresh_btn=refresh_btn, upload_btn=upload_btn,
-            outputs_open=outputs_open, outputs_panel=outputs_panel,
+            outputs_open=outputs_open, outputs_panel=outputs_panel, prompt_history=prompt_history,
             intercept_request=intercept_request, folder_open=folder_open, folder_panel=folder_panel, folder_text=folder_text,
             folder_use=folder_use, folder_create=folder_create, folder_close=folder_close, folder_status=folder_status,
             rename_open=rename_open, rename_panel=rename_panel, rename_text=rename_text, rename_ok=rename_ok, rename_cancel=rename_cancel,
@@ -1930,6 +1993,7 @@ class ClipboardTab:
         # neither press has anything for the server to decide.
         p["sort_btn"].click(None, js=SORT_MENU_JS)
         p["outputs_open"].click(None, js=OPEN_OUTPUTS_JS)
+        p["prompt_history"].click(None, js=OPEN_PROMPT_HISTORY_JS)
         p["send_btn"].click(None, js=SEND_MENU_JS)
         p["thumb"].change(None, js=THUMB_JS, inputs=[p["thumb"]])
         p["thumb"].release(self.thumbnail_changed, inputs=[p["thumb"]], outputs=[p["menu_state"]], **quiet)

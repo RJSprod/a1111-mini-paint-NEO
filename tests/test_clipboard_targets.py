@@ -50,6 +50,11 @@ LTX_DISTILLED_11 = {"type": "ltx2_22B_distilled_1_1", "label": "LTX-2 2.3 Distil
 LTX_GGUF = {"type": "ltx2_22B_distilled_gguf_q8_0", "label": "LTX-2 2.3 Distilled 1.0 GGUF Q8_0 Light 22B", "family": "ltx2", "architecture": "ltx2_22B"}
 LTX_DEV = {"type": "ltx2_22B", "label": "LTX-2 2.3 Dev 1.0 22B", "family": "ltx2", "architecture": "ltx2_22B"}
 LTX_25 = {"type": "ltx2_25_22B_distilled", "label": "LTX-2 2.5 Distilled 22B", "family": "ltx2", "architecture": "ltx2_25_22B"}
+LTX_25_NVFP4 = {"type": "ltx2_25_22B_distilled_nvfp4", "label": "LTX-2 2.5 Distilled NVFP4 22B", "family": "ltx2",
+                "architecture": "ltx2_25_22B"}
+LTX_25_DEV = {"type": "ltx2_25_22B", "label": "LTX-2 2.5 Dev 22B", "family": "ltx2", "architecture": "ltx2_25_22B"}
+LTX_25_MSR = {"type": "ltx2_25_22B_msr", "label": "LTX-2 2.5 MSR Ref Distilled 22B", "family": "ltx2",
+              "architecture": "ltx2_25_22B_msr"}
 LTX_20 = {"type": "ltx2_distilled", "label": "LTX-2 2.0 Distilled 19B", "family": "ltx2", "architecture": "ltx2_19B"}
 LTX_EDIT = {"type": "ltx2_22B_distilled_edit_anything", "label": "LTX-2 2.3 EditAnything Ref V2V Distilled 1.0 22B",
             "family": "ltx2", "architecture": "ltx2_22B_edit_anything"}
@@ -129,9 +134,9 @@ def _refused(call) -> tuple:
 def classify_checks(r: Results) -> None:
     r.check("LTX 2.3 Distilled 1.0, 1.1 and a GGUF build of it are the LTX target, by their own names",
             all(targets.classify(model) == targets.TARGET_LTX23 for model in (LTX_DISTILLED, LTX_DISTILLED_11, LTX_GGUF)))
-    r.check("LTX 2.3 Dev, 2.5, 2.0, EditAnything and MSR are not",
-            all(targets.classify(model) == "" for model in (LTX_DEV, LTX_25, LTX_20, LTX_EDIT, LTX_MSR)),
-            str([targets.classify(model) for model in (LTX_DEV, LTX_25, LTX_20, LTX_EDIT, LTX_MSR)]))
+    r.check("LTX 2.3 Dev, 2.0, EditAnything and MSR are not",
+            all(targets.classify(model) == "" for model in (LTX_DEV, LTX_20, LTX_EDIT, LTX_MSR)),
+            str([targets.classify(model) for model in (LTX_DEV, LTX_20, LTX_EDIT, LTX_MSR)]))
     r.check("the definition's own pipeline wins over the names: a 2.3 finetune that declares distilled is the target",
             targets.classify({"type": "my_ltx_tune", "label": "My tune", "architecture": "ltx2_22B"},
                              _facts({"type": "my_ltx_tune", "label": "My tune", "architecture": "ltx2_22B"}, pipeline="distilled")) == targets.TARGET_LTX23)
@@ -387,8 +392,8 @@ def writer_checks(r: Results, library) -> None:
             and api.ltx_submissions[-1]["system_prompt"] is None)
     r.check("its defaults are read from the API by the LTX name",
             enhance.default_prompt("ltx23", "image") == "LTX image instructions" and enhance.effective_prompt("ltx23", "text") == ("LTX text instructions", "default"))
-    r.check("capabilities say the writer is there and offer it as a variant",
-            enhance.capabilities()["ltx"] is True and enhance.capabilities()["variants"] == ["fl2va", "ref2va", "ltx23"])
+    r.check("capabilities say the writer is there and offer it as a variant, for LTX 2.3 and 2.5 alike",
+            enhance.capabilities()["ltx"] is True and enhance.capabilities()["variants"] == ["fl2va", "ref2va", "ltx23", "ltx25"])
     line = enhance.availability(LTX_DISTILLED)
     r.check("the enhancement line names LTX 2.3 for an LTX page", line["state"] == "ready" and line["variant"] == "ltx23"
             and "LTX 2.3" in line["text"], line["text"])
@@ -405,6 +410,163 @@ def writer_checks(r: Results, library) -> None:
             code == errors.ENHANCE_LTX_UNSUPPORTED and not older.submissions)
     r.check("nor are MiniMax's instructions handed back as LTX's default", enhance.default_prompt("ltx23", "text") == "")
     r.check("its line says to update it", enhance.availability(LTX_DISTILLED)["state"] == "blocked")
+    enhance.use_api(None)
+
+
+class Ltx25Api(LtxApi):
+    """``mc_llm_api`` from 2026-10-04: the same writer, told which LTX model it writes for."""
+
+    def capabilities(self):
+        found = super().capabilities()
+        found["ltx_models"] = ["ltx23", "ltx25"]
+        return found
+
+    def submit_ltx(self, prompt, *, first_frame=None, system_prompt=None, seed=None, origin="", remember=True, model="ltx23"):
+        identifier = super().submit_ltx(prompt, first_frame=first_frame, system_prompt=system_prompt, seed=seed,
+                                        origin=origin, remember=remember)
+        self.ltx_submissions[-1]["model"] = model
+        self.jobs[identifier]["variant"] = model
+        return identifier
+
+    def system_prompt(self, variant="", *, has_image=False):
+        self.asked = getattr(self, "asked", []) + [variant]
+        return super().system_prompt(variant, has_image=has_image)
+
+
+def ltx25_checks(r: Results, library) -> None:
+    """LTX 2.5 Distilled: a fourth target, sent exactly what LTX 2.3 is sent,
+    and written for under LTX 2.3's instructions - one system prompt for both,
+    at the user's request."""
+    from minipaint_neo.clipboard import ui as clipboard_ui
+
+    # -- which models it is
+    r.check("LTX 2.5 Distilled and its NVFP4 build are the LTX 2.5 target, by their own names",
+            targets.classify(LTX_25) == targets.TARGET_LTX25 == "ltx25" and targets.classify(LTX_25_NVFP4) == "ltx25",
+            str([targets.classify(LTX_25), targets.classify(LTX_25_NVFP4)]))
+    r.check("LTX 2.5 Dev and the LTX 2.5 MSR workflow are not",
+            targets.classify(LTX_25_DEV) == "" and targets.classify(LTX_25_MSR) == "")
+    tune = {"type": "my_25_tune", "label": "My tune", "architecture": "ltx2_25_22B"}
+    r.check("the definition decides: a 2.5 finetune that declares distilled is the target, a distilled name on the two-stage pipeline is not",
+            targets.classify(tune, _facts(tune, pipeline="distilled")) == "ltx25"
+            and targets.classify(LTX_25, _facts(LTX_25, pipeline="two_stage")) == "")
+    r.check("and LTX 2.3 is still 2.3's", targets.classify(LTX_DISTILLED) == "ltx23" and targets.classify(LTX_GGUF) == "ltx23")
+    r.check("the enhancer reads it through the same function", enhance.target_for_model(LTX_25) == "ltx25")
+
+    # -- what it is sent
+    refs = [{"kind": "staged", "id": "3" * 32}]
+    start = {"kind": "staged", "id": "1" * 32}
+    request = {"prompt": "p", "images": {"start": start, "references": refs}}
+    r.check("a first and a last frame, and no reference: one is taken out and named",
+            targets.fields_for("ltx25") == ("start", "end") and targets.narrow(request, "ltx25") == ["references"]
+            and request["images"] == {"start": start}, str(request))
+
+    # -- ready, the same four ways
+    child = _real(FakeChild())
+    child.facts[LTX_25["type"]] = _facts(LTX_25, pipeline="distilled")
+    view = targets.readiness(LTX_25)
+    r.check("ready on LTX 2.5 Distilled: its own target and label, and a first and a last frame",
+            view["ready"] is True and view["target"] == "ltx25" and view["target_label"] == "LTX 2.5 Distilled"
+            and view["fields"] == ["start", "end"] and "LTX-2 2.5 Distilled 22B" in view["message"], json.dumps(view)[:300])
+    child.facts[LTX_25_DEV["type"]] = _facts(LTX_25_DEV)
+    view = targets.readiness(LTX_25_DEV)
+    r.check("LTX 2.5 Dev is blocked as another model, and the sentence names the four it could be",
+            view["code"] == errors.TARGET_UNSUPPORTED and "LTX 2.3 Distilled or LTX 2.5 Distilled" in view["message"], view["message"])
+    child.facts[LTX_25["type"]] = _facts(LTX_25, pipeline="distilled", missing=2)
+    view = targets.readiness(LTX_25, fresh=True)
+    r.check("not downloaded is blocked, as for every other target",
+            view["code"] == errors.TARGET_NOT_DOWNLOADED and view["target"] == "ltx25" and "2 files missing" in view["message"])
+    r.check("every sentence that lists the models names LTX 2.5 Distilled",
+            all("LTX 2.5 Distilled" in errors.message(code) for code in (errors.TARGET_UNKNOWN, errors.TARGET_UNSUPPORTED,
+                                                                         errors.ENHANCE_MODEL_UNSUPPORTED)))
+
+    # -- the press
+    outbox.use_executor(outbox.EXECUTOR_BROWSER)
+    child.facts[LTX_25["type"]] = _facts(LTX_25, pipeline="distilled")
+    job = outbox.submit({"prompt": "she waves", "images": {"start": dict(start), "references": [dict(refs[0])]}},
+                        PAGE, outbox.ORIGIN_CLIPBOARD, model=LTX_25)
+    stored = outbox.get(job["job_id"])
+    r.check("an LTX 2.5 press is stored without its reference, and says so",
+            job.get("narrowed") == ["references"] and "references" not in (stored["request"].get("images") or {}), json.dumps(stored["request"])[:200])
+    outbox.cancel(job["job_id"])
+    targets.use_readiness(targets.always_ready)
+
+    # -- the popup
+    caps = intercept.capabilities(LTX_25, None)
+    r.check("the popup offers a First and a Last frame and no Reference, the first by default",
+            [role["id"] for role in caps["roles"]] == ["first_frame", "last_frame"] and caps["default_roles"] == ["first_frame"])
+
+    # -- the writer: the LTX one, under LTX 2.3's instructions
+    api = Ltx25Api()
+    enhance.use_api(api)
+    first, last = (_asset(library, f"{name}25.png", colour) for name, colour in (("first", (200, 20, 20)), ("last", (20, 200, 20))))
+    handles = {"start": {"kind": "clipboard_asset", "id": first}, "end": {"kind": "clipboard_asset", "id": last}}
+    planned = enhance.plan({"prompt": "she turns and waves", "images": dict(handles)}, LTX_25)
+    r.check("LTX 2.5 reads the first frame and nothing else, as LTX 2.3 does",
+            planned["variant"] == "ltx25" and planned["slots"] == {"first_frame": handles["start"]} and planned["dropped"] == ["end"],
+            json.dumps(planned)[:300])
+    r.check("the writer is offered for it, and the installed one takes it by name",
+            "ltx25" in enhance.capabilities()["variants"] and enhance.capabilities()["ltx_models"] == ["ltx23", "ltx25"])
+    asked = enhance.submit("she turns and waves", planned)
+    sent = api.ltx_submissions[-1]
+    r.check("it goes to submit_ltx with the first frame, named for LTX 2.5 so its progress and Prompt Studio say so",
+            asked["variant"] == "ltx25" and sent["model"] == "ltx25" and sent["first_frame"] is not None and not api.submissions, str(sent)[:200])
+    enhance.submit("a dog runs", enhance.plan({"prompt": "a dog runs"}, LTX_DISTILLED))
+    r.check("and an LTX 2.3 press is still sent as the writer's default", api.ltx_submissions[-1]["model"] == "ltx23")
+
+    enhance.set_override("ltx23", "image", "One set of words for both.")
+    enhance.submit("she turns and waves", planned)
+    r.check("an override saved for LTX 2.3 is the one an LTX 2.5 press runs under: one system prompt for both",
+            api.ltx_submissions[-1]["system_prompt"] == "One set of words for both." and enhance.override("ltx25", "image") == "One set of words for both.")
+    enhance.set_override("ltx25", "text", "Saved from LTX 2.5's side.")
+    document = json.loads((config.config_dir() / enhance.ENHANCE_NAME).read_text(encoding="utf-8"))
+    r.check("and one saved for LTX 2.5 is LTX 2.3's too: one document entry, no second set",
+            enhance.override("ltx23", "text") == "Saved from LTX 2.5's side." and "ltx25" not in document["overrides"]
+            and set(enhance.overrides()) == {"fl2va", "ref2va", "ltx23"}, json.dumps(document["overrides"])[:200])
+    enhance.clear_override("ltx25", "text")
+    r.check("Restore default forgets it for both", enhance.override("ltx23", "text") == "" and enhance.override("ltx23", "image") != "")
+    enhance.clear_override("ltx23", "image")
+    api.asked = []
+    r.check("its default is the API's LTX 2.3 pair, asked for by that name",
+            enhance.default_prompt("ltx25", "image") == "LTX image instructions" and api.asked == ["ltx23"], str(api.asked))
+    r.check("the editor offers three sets, the LTX one named for both models, and no separate LTX 2.5 set",
+            [value for _label, value in clipboard_ui.SP_VARIANT_CHOICES] == ["fl2va", "ref2va", "ltx23"]
+            and "LTX 2.3 and 2.5" in dict((value, label) for label, value in clipboard_ui.SP_VARIANT_CHOICES)["ltx23"])
+    line = enhance.availability(LTX_25)
+    r.check("the enhancement line names LTX 2.5 and says whose instructions it is written under",
+            line["state"] == "ready" and line["variant"] == "ltx25" and "LTX 2.5 Distilled" in line["text"]
+            and "under the LTX 2.3 instructions" in line["text"], line["text"])
+
+    # The editor opens on the set a press would use. It used to read only
+    # MiniMax's variants off the page's model, so an LTX page opened on
+    # whatever was on screen - FL2VA, by default.
+    import forge_like  # noqa: F401  (Forge's patches, before any Gradio component)
+    from minipaint_neo.clipboard import history
+
+    tab = clipboard_ui.ClipboardTab()
+    history.save_draft(history.empty_draft())
+    variant, mode, box, _state = tab.open_prompt_editor(json.dumps(LTX_25), "fl2va", "image")
+    r.check("the system prompt editor opens on the LTX set for a page on LTX 2.5, without a picture when none is attached",
+            variant.get("value") == "ltx23" and mode.get("value") == "text" and box.get("value") == "LTX text instructions",
+            f"{variant.get('value')}/{mode.get('value')}")
+    draft = history.load_draft()
+    draft["first_asset_id"] = first
+    history.save_draft(draft)
+    variant, mode, box, _state = tab.open_prompt_editor(json.dumps(LTX_DISTILLED), "fl2va", "text")
+    r.check("and for LTX 2.3, with the picture instructions once a first frame is attached",
+            variant.get("value") == "ltx23" and mode.get("value") == "image" and box.get("value") == "LTX image instructions",
+            f"{variant.get('value')}/{mode.get('value')}")
+    history.save_draft(history.empty_draft())
+
+    older = LtxApi()
+    enhance.use_api(older)
+    r.check("an installed writer from before LTX 2.5 still writes its prompts: the same words, so it is offered",
+            "ltx25" in enhance.capabilities()["variants"] and enhance.capabilities()["ltx_models"] == ["ltx23"])
+    asked = enhance.submit("she turns and waves", planned)
+    r.check("and it is asked without the model it does not take, which it would refuse",
+            asked["variant"] == "ltx25" and "model" not in older.ltx_submissions[-1] and older.ltx_submissions[-1]["first_frame"] is not None)
+    enhance.use_api(FakeApi())
+    r.check("one with no LTX writer at all refuses an LTX 2.5 press with the sentence to update it",
+            enhance.preflight(planned)[0] == errors.ENHANCE_LTX_UNSUPPORTED and enhance.availability(LTX_25)["state"] == "blocked")
     enhance.use_api(None)
 
 
@@ -608,7 +770,9 @@ def screen_checks(r: Results) -> None:
             '#minipaint_clipboard_root:not([data-wangp-ready="1"]) :is(' in css
             and all(name in css for name in ("#minipaint_clipboard_cards", "#minipaint_clipboard_prompt", "#minipaint_clipboard_sp_open",
                                               "#minipaint_clipboard_queue,", "#minipaint_clipboard_to_first")))
-    r.check("hides no reference card for LTX 2.3", '#minipaint_clipboard_root[data-wangp-target="ltx23"] :is(#minipaint_clipboard_card_ref' in css)
+    r.check("hides the reference card for a model that is sent none, by the fields the server lists - not by a model's name",
+            '#minipaint_clipboard_root[data-wangp-references="0"] :is(#minipaint_clipboard_card_ref, #minipaint_clipboard_to_ref)' in css
+            and 'data-wangp-target="ltx' not in css)
     r.check("and the popup's body while it is blocked",
             ".minipaint-intercept.minipaint-intercept-is-blocked :is(" in css and ".minipaint-intercept-generate)" in css)
     script = (ROOT / "browser" / "minipaint_clipboard.js").read_text(encoding="utf-8")
@@ -666,6 +830,7 @@ def run() -> Results:
             readiness_checks(r)
             gate_checks(r)
             writer_checks(r, library)
+            ltx25_checks(r, library)
             popup_checks(r)
             bridge_checks(r)
             screen_checks(r)

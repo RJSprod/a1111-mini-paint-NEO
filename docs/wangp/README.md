@@ -220,7 +220,7 @@ ready.
 | the machine-wide lock | `…/runtime/wangp.lock.json`: the **Forge server's** pid and start time, taken when a managed WanGP starts, dropped when it stops; never the child's pid, a port or a secret |
 | the queue outbox | `…/clipboard-outbox.json`: every Add to Queue press as a job - see `docs/clipboard/README.md` |
 | images staged through the public queue API | `…/runtime/staging/<32 hex>.png`, swept after 30 minutes |
-| the Clipboard tab's folder, index, draft and history | `…/clipboard.json`, `…/clipboard-index.json`, `…/clipboard-draft.json`, `…/clipboard-history.json` — see `docs/clipboard/README.md` |
+| the Clipboard tab's folder, index, draft, history and prompt history | `…/clipboard.json`, `…/clipboard-index.json`, `…/clipboard-draft.json`, `…/clipboard-history.json`, `…/clipboard-prompts.json` — see `docs/clipboard/README.md` |
 | the bridge plugin, as installed | `<WanGP root>/plugins/wan2gp-minipaint-bridge/` |
 | the bridge plugin, as shipped | `wan2gp_bridge/wan2gp-minipaint-bridge/` in this repository |
 | transfer log lines | `extensions/a1111-mini-paint-NEO/logs/send-log.txt`, shared with Mini Paint |
@@ -248,7 +248,7 @@ to any other file:
 * the Gradio **session hash**
 * **handoff ids** and handoff **paths**
 * the last **receiver revision** and any **receiver cache**
-* **queue request ids**, staged **tokens**, and the **prompt text** of a queue request (the Clipboard tab's own history keeps a prompt only when you typed one there)
+* **queue request ids**, staged **tokens**, and the **prompt text** of a queue request (the Clipboard tab's own histories, and the recipe View Outputs keeps for Load, keep a prompt only when you typed one there)
 * the **child's pid**: the lock file names the Forge *server* so a second Forge can ask the operating system whether that process still exists, and nothing is ever signalled, killed or connected to on the strength of it
 
 `config.py` enforces this twice — a named `NEVER_PERSISTED` set is stripped from every

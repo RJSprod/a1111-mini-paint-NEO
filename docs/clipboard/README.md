@@ -66,30 +66,36 @@ task is taken, and WanGP's own queue and status show what it is doing.
 
 ## Which WanGP models it sends to, and when it will not
 
-Since 2026-10-03 the composer and the gallery's Send to WanGP popup send to **three**
-WanGP models, and only while WanGP can take what they make:
+Since 2026-10-03 the composer and the gallery's Send to WanGP popup send to these WanGP
+models - **four** since LTX 2.5 Distilled joined them on 2026-10-04 - and only while WanGP
+can take what they make:
 
 | WanGP model | sent | not sent |
 | --- | --- | --- |
 | **MiniMax H3 FL2VA** (`minimax_h3_fl2va`, and its pruned, PDD and VDN builds) | first frame, last frame (a reference card is kept and badged *Not used by current model*, as before) | |
 | **MiniMax H3 Ref2VA** (`minimax_h3_ref2va`, and its pruned and PDD builds) | references (frame cards kept and badged, as before) | |
 | **LTX 2.3 Distilled** (WanGP's `ltx2_22B` on its distilled pipeline: `ltx2_22B_distilled`, `_distilled_1_1`, the GGUF builds of both, and a finetune that declares the same) | first frame, last frame | **a reference, ever**: no reference card, no +Ref, and an inherited one is taken out of the request |
+| **LTX 2.5 Distilled** (WanGP's `ltx2_25_22B` on its distilled pipeline: `ltx2_25_22B_distilled`, its NVFP4 build `_distilled_nvfp4`, and a finetune that declares the same) | first frame, last frame | the same as LTX 2.3: never a reference |
 
-LTX 2.3 Dev, LTX 2.5, LTX 2.0 and the EditAnything and MSR workflows on 2.3 are other models,
-and so is everything else in WanGP.
+LTX 2.3 Dev, LTX 2.5 Dev, LTX 2.0 and the EditAnything and MSR workflows (`ltx2_22B_msr`,
+`ltx2_25_22B_msr`, ...) are other models, and so is everything else in WanGP. WanGP builds
+LTX 2.3 and 2.5 from one handler with the same image inputs, so the bridge needed nothing new
+for 2.5: its model check and its first and last frames are 2.3's. Which cards the composer
+shows follows the fields the readiness answer lists for the model (`targets.FIELDS`), so no
+rule anywhere names a model.
 
 **The WanGP section is blocked until WanGP is ready.** Ready means all four of:
 
 1. WanGP is running (the tab no longer starts a stopped WanGP for a press);
 2. its bridge answers (bridge **1.13.0**, which can say whether a model is set up);
-3. the WanGP page is on one of the three models above;
+3. the WanGP page is on one of the four models above;
 4. this WanGP defines that model and **has every file it would fetch before generating** - so a
    press can never start a forty-gigabyte download.
 
-Until then the cards, the prompt, the ⤢ enhancement button, Add to Queue and the toolbar's
-+First / +Last / +Ref are not there, and one quiet line says why - *WanGP is not running…*,
-*WanGP is on Wan2.2 Text2Video 14B. This sends only to MiniMax H3 FL2VA, MiniMax H3 Ref2VA or
-LTX 2.3 Distilled…*, *LTX-2 2.3 Distilled 1.0 22B is not downloaded yet (3 files missing).
+Until then the cards, the prompt, History, the ⤢ enhancement button, Add to Queue and the
+toolbar's +First / +Last / +Ref are not there, and one quiet line says why - *WanGP is not
+running…*, *WanGP is on Wan2.2 Text2Video 14B. This sends only to MiniMax H3 FL2VA, MiniMax H3
+Ref2VA, LTX 2.3 Distilled or LTX 2.5 Distilled…*, *LTX-2 2.3 Distilled 1.0 22B is not downloaded yet (3 files missing).
 Generate with it once in the WanGP tab so WanGP fetches them.* - with **Check again** beside it.
 The queue, Cancel everything and View Outputs stay: they are the record of what was sent. The
 popup is blocked the same way (below).
@@ -188,6 +194,25 @@ actually reads, so with WanGP's prompt wizard switched on it goes into the wizar
 Control characters are dropped, it is trimmed, and 12000 characters is the ceiling
 (`PROMPT_TOO_LONG`; protocol 5 raised it from 4000 so that a written H3 prompt fits).
 
+**History**, under the prompt box, is the last ten prompts sent to WanGP from here, **as they
+were typed** - never the prompt an enhancement wrote from them (`clipboard/prompts.py`,
+`clipboard-prompts.json`). What goes in: every press of the Clipboard's own two doors that
+carries a prompt and is stored - Add to Queue here and Generate in the gallery's popup - at
+the moment it is stored, whatever becomes of it afterwards; not a press that was refused,
+not a request that inherited the WanGP page's prompt, and not another extension's request
+over the public API. The same words sent again move to the top rather than taking a second
+place, and a retry is its typed words again. The button opens a dialog over the page, on the
+same dialog layer as the Send to WanGP popup and announced the same way (`minipaint:overlay`,
+name `clipboard-history`), so nothing floated over Forge covers it: newest first, each entry
+with when it was sent, the model it was sent to, whether it was enhanced and whether it came
+from the gallery, the text with its line breaks clamped to four lines and **More** to read the
+rest; the list scrolls inside the dialog. **Load** asks the server to put those words in the
+composer's draft and then puts the same words in the Prompt box - the pictures, the
+enhancement switch and the queue stay as they are, and nothing is queued. Escape, Close or a
+press outside the dialog closes it. It is read when it opens and loads over
+`/minipaint-clipboard/prompts`, each request with a deadline, so it works with the
+framework's channel gone.
+
 The line above the cards says what the live WanGP page can take right now — the model, the
 inputs it takes, whether it is *generating now* (new requests join the run) or *idle* (the
 next request starts one) — or why it cannot be asked (no WanGP page open, no model chosen,
@@ -237,8 +262,8 @@ A press does this, in order:
 ## Enhanced prompts (ModelSwitchRefiner)
 
 *Two writers since 2026-10-03.* For MiniMax H3 the writer is ModelSwitchRefiner's MiniMax H3
-enhancer, as below. For **LTX 2.3 Distilled** it is ModelSwitchRefiner's **LTX 2.3 writer**
-(`mc_llm_api.submit_ltx`): instructions written from Lightricks' own LTX prompt enhancer
+enhancer, as below. For **LTX 2.3 Distilled** and **LTX 2.5 Distilled** it is
+ModelSwitchRefiner's **LTX writer** (`mc_llm_api.submit_ltx`): instructions written from Lightricks' own LTX prompt enhancer
 without its biases (no style, camera move, mood or look of the writer's own; structured notes
 turned into LTX's single chronological paragraph with nothing dropped; the soundtrack woven
 in), the **first frame shown to the language model itself** - a vision request, not a caption
@@ -246,9 +271,15 @@ first - and nothing else: the last frame goes to WanGP and is left out of the en
 and there is no reference. The written prompt is one line, because WanGP reads an LTX prompt
 one line per prompt. ModelSwitchRefiner files it in **LLM Studio → Prompt Studio → Saved
 generations** as a **[No settings]** entry. Its two instruction sets (with a first frame,
-without one) are in the same view as MiniMax's four, under *LTX 2.3 Distilled (first frame)*,
-and are overridden the same way. A ModelSwitchRefiner without the writer refuses an LTX press
-with `ENHANCE_LTX_UNSUPPORTED` rather than sending it to MiniMax.
+without one) are in the same view as MiniMax's four, under *LTX 2.3 and 2.5 Distilled (first
+frame)*, and are overridden the same way. **LTX 2.5 is written for under the LTX 2.3 system
+prompt**, at the user's request: one pair of instructions and one override for both models
+(`enhance.PROMPT_SETS`, `PROMPT_SET_OF`), and an override saved from either is the other's.
+A 2.5 press is still sent as one (`submit_ltx(..., model="ltx25")`) when the installed
+ModelSwitchRefiner lists `ltx25` in `capabilities()["ltx_models"]`, so its progress line and
+its Prompt Studio entry say LTX 2.5; one from before LTX 2.5 writes the very same prompt
+without that keyword and files it as LTX 2.3's. A ModelSwitchRefiner without the writer
+refuses an LTX press with `ENHANCE_LTX_UNSUPPORTED` rather than sending it to MiniMax.
 
 Under the prompt box, one button: **⤢ Prompt enhancement and system prompts**. It opens a
 view that fills the window; the panel has no shape on the tab itself, so the composer stays
@@ -260,7 +291,7 @@ says which of them is not: the *SD-Neo-ModelSwitchRefiner* extension is installe
 (its external LLM API, `mc_llm_api`, is imported straight from that extension's folder -
 there is no URL, port or token to configure), its **LLM Studio** is switched on with a
 language model set up, and the WanGP page is on a **MiniMax H3** model - `minimax_h3_fl2va`
-or `minimax_h3_ref2va`, or a finetune of one - or on **LTX 2.3 Distilled**. The line follows
+or `minimax_h3_ref2va`, or a finetune of one - or on **LTX 2.3 or 2.5 Distilled**. The line follows
 the WanGP tab: switch the model there and it changes here.
 
 **What a press does with the switch on.** The prompt you typed - it is required; the WanGP
@@ -280,19 +311,20 @@ the job; the card and the status line say what was left out.
 | --- | --- | --- |
 | FL2VA (`minimax_h3_fl2va`) | the **First Frame** (the Last Frame is sent too; the writer says which one it described) | the Reference |
 | Ref2VA (`minimax_h3_ref2va`) | the first **Reference** | the First and Last Frame (and any further reference) |
-| LTX 2.3 Distilled | the **First Frame**, shown to the model | the Last Frame (still sent to WanGP); a reference is never sent at all |
+| LTX 2.3 and 2.5 Distilled | the **First Frame**, shown to the model | the Last Frame (still sent to WanGP); a reference is never sent at all |
 
 A picture at all needs a language model that can see; one that cannot refuses the press
 (`ENHANCE_NO_VISION`), and the line says so beforehand.
 
-**The system prompt.** The writer runs under one of six instruction sets - each variant
-(FL2VA, Ref2VA, LTX 2.3 Distilled), with and without a picture - and the view shows them: pick the variant and *Instructions
-used*, and the box holds the text with its provenance under it (*Default, as
-ModelSwitchRefiner ships it* or *Override saved*). **Opening the view picks the pair the next
-press would use**: the variant of whichever H3 model the WanGP page is on, and the picture
-half when the draft holds a picture that model reads - a First or Last Frame for FL2VA, a
-Reference for Ref2VA - which are the same two questions a press asks. A page on no H3 model
-leaves the selectors where they were. Each open re-reads the effective prompt, so an edit
+**The system prompt.** The writer runs under one of six instruction sets - FL2VA, Ref2VA and
+the one LTX set LTX 2.3 and 2.5 share, each with and without a picture - and the view shows
+them: pick the variant and *Instructions used*, and the box holds the text with its
+provenance under it (*Default, as ModelSwitchRefiner ships it* or *Override saved*).
+**Opening the view picks the pair the next press would use**: the set of whichever model the
+WanGP page is on - an H3 variant, or the LTX set for LTX 2.3 or 2.5 - and the picture half
+when the draft holds a picture that model reads - a First or Last Frame for FL2VA, a
+Reference for Ref2VA, a First Frame for LTX - which are the same two questions a press asks.
+A page on none of them leaves the selectors where they were. Each open re-reads the effective prompt, so an edit
 left unapplied is gone the next time the view opens, exactly as *Reload* would leave it.
 Edit it and **Apply override** to replace
 that set for every enhanced press from then on, on every page, after a restart too
@@ -426,6 +458,26 @@ server and there is no second copy of anything on disk.
 Nothing here names a path to the browser: every output is fetched by an opaque id, exactly
 as a library thumbnail is.
 
+**What made it, and Load.** Under the picture are its name, the model that made it (*LTX-2
+2.5 Distilled 22B*, *MiniMax H3 FL2VA 33B*, ...) and the prompt **as it was typed**, with the
+prompt an enhancement wrote from it - what WanGP was given - under it on hover and the entry
+marked *enhanced*. **Load**, beside them, puts the request that made the output back into the
+composer: the typed prompt, each picture still in the library in its slot, and *Use WanGP*
+for a slot that was inherited, whose picture has been deleted since, or whose picture was
+never in the folder (the gallery's frozen picture, another extension's upload) - each of those
+said in the status line. It queues nothing, and the view closes so the composer can be seen.
+
+Every entry keeps the **recipe** of the request that made it (`history.recipe_of_job`), taken
+from its job while the job is still in the queue - when its claim opens, or when the
+executor hands over its paths - so Load works for **any** video, whatever model made it and
+however long ago: one the server generated while nobody had the tab open (a long LTX 2.3 or
+2.5 run finishes, is swept from the queue two minutes later, and no page ever asked for it),
+one the gallery's popup asked for, one older than the last 200 Queue Send History records.
+An entry from before recipes were kept loads from its Queue Send History record, as Load
+always did, and one with neither offers a disabled Load that says why. Load reaches the
+server through the hidden box Queue Send History's own Load writes (`output:<id>` to
+`history_action`), because the slot cards it changes are still rendered by the framework.
+
 ## Queue Send History
 
 Every request **confirmed started or queued** from this tab is a record: when, on which
@@ -477,7 +529,7 @@ What the popup shows, top to bottom:
 * **Roles** — where the picture goes in the request: *First frame*, *Last frame*,
   *Reference*, several at once. Only the roles the page's current model reads are offered
   (from the page's live inputs, or the enhancer's mapping for the model when the page has
-  not said) - and never *Reference* for LTX 2.3 Distilled - and one is ticked by default. What was ticked is checked again at Generate,
+  not said) - and never *Reference* for LTX 2.3 or 2.5 Distilled - and one is ticked by default. What was ticked is checked again at Generate,
   so a request whose picture has nowhere left to go is refused
   (`INTERCEPT_NO_IMAGE_ROLE`) rather than sent without it.
 * **Inherit Clipboard inputs** — on by default. On, the composer's own cards fill every
@@ -489,8 +541,8 @@ What the popup shows, top to bottom:
 * **Cancel** and **Generate**. Escape cancels; Ctrl+Enter generates.
 
 **Blocked when the Clipboard is.** The popup asks the same readiness question as the composer
-(WanGP running, its bridge answering, the page on MiniMax H3 FL2VA, Ref2VA or LTX 2.3
-Distilled, defined and downloaded). Until it is ready the popup shows one quiet line with the
+(WanGP running, its bridge answering, the page on MiniMax H3 FL2VA, Ref2VA, LTX 2.3
+Distilled or LTX 2.5 Distilled, defined and downloaded). Until it is ready the popup shows one quiet line with the
 reason and **Check again**, and nothing to send with - no prompt, Enhance, roles, Inherit,
 History or Generate; Cancel still lets the frozen picture go, and Ctrl+Enter only asks again.
 A Generate refused for the same reason redraws the popup that way from the refusal itself.
@@ -506,7 +558,9 @@ the gallery (prompt, roles, inherit, enhance and a small preview), newest first 
 pinned ones on top. *Load* fills the popup from an entry, reconciling its roles against
 what the current model reads and naming the ones it dropped; *Pin* keeps an entry past
 the cap; *Delete* removes it. Unpinned entries are capped at 100 and the oldest leave
-first; pinned ones stay (up to 500).
+first; pinned ones stay (up to 500). A Generate's typed prompt also goes to the top of the
+composer's own **History** (the last ten prompts sent from the Clipboard, above), marked
+*from the gallery*, because the prompt is the composer's.
 
 **No Gradio event in the chain.** While the setting is WanGP the page takes the 🖌️ button
 over, the way the Clipboard tab's own sends work: the press is stopped before Forge's
@@ -781,8 +835,9 @@ it was ignored" case.
 | the queue outbox: every press as a job, with its request, its state, its enhancement and its place in WanGP | `…/clipboard-outbox.json` (schema 3; a finished job kept two minutes, a failure until it is dismissed, the list capped) |
 | the enhanced-prompts switch and the system prompt overrides | `…/clipboard-enhance.json` |
 | Queue Send History | `…/clipboard-history.json` |
+| History: the last ten prompts sent from here, as typed, with when, the model and whether it was enhanced | `…/clipboard-prompts.json` (ten; the same words sent again move up) |
 | the Send to WanGP popup's own history: prompt, roles, inherit, enhance, a small preview per recipe | `…/clipboard-intercept-history.json` (100 unpinned, pinned kept) |
-| View Outputs: which files WanGP made for which request, and where each one is | `…/clipboard-outputs.json` (paths only; the videos are never moved or copied) |
+| View Outputs: which files WanGP made for which request, where each one is, and that request's recipe for Load (the typed and the written prompt, library picture ids, the model) | `…/clipboard-outputs.json` (paths only; the videos are never moved or copied) |
 | the pictures | the storage folder you chose, and only there |
 | thumbnails | in memory, rebuilt as needed; never on disk |
 | images staged through the public API | `…/runtime/staging/<32 hex>.png`, swept after 30 minutes |

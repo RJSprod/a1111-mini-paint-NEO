@@ -482,13 +482,15 @@ composer asks WanGP to run the page exactly as it is, a card put back with its �
 nothing on the WanGP page, and a picture a MiniMax model cannot use is kept, badged *Not
 used by current model*, sent, and reported as ignored rather than refused.
 
-**Three models, and only when WanGP is ready for them.** The composer sends to **MiniMax H3
-FL2VA**, **MiniMax H3 Ref2VA** and **LTX 2.3 Distilled** (WanGP's `ltx2_22B` on its distilled
-pipeline, the GGUF builds included) - to LTX a first and a last frame and never a reference:
-no Reference card, no +Ref, and an inherited one is taken out of the request. Not LTX 2.3
-Dev, not 2.5, nothing else in WanGP. The WanGP section - the cards, the prompt, the
-enhancement button, Add to Queue and the toolbar's +First / +Last / +Ref - is simply not
-there until WanGP is running, its bridge answers, its page is on one of the three, and that
+**Four models, and only when WanGP is ready for them.** The composer sends to **MiniMax H3
+FL2VA**, **MiniMax H3 Ref2VA**, **LTX 2.3 Distilled** (WanGP's `ltx2_22B` on its distilled
+pipeline, the GGUF builds included) and **LTX 2.5 Distilled** (`ltx2_25_22B` on its distilled
+pipeline, the NVFP4 build included) - to either LTX a first and a last frame and never a
+reference: no Reference card, no +Ref, and an inherited one is taken out of the request. Not
+LTX 2.3 or 2.5 Dev, not the MSR or EditAnything workflows, nothing else in WanGP. The WanGP
+section - the cards, the prompt, History, the enhancement button, Add to Queue and the
+toolbar's +First / +Last / +Ref - is simply not there until WanGP is running, its bridge
+answers, its page is on one of the four, and that
 WanGP defines the model and already has every file it would fetch before generating (so a
 press never starts a download). One quiet line says which of those is missing, with **Check
 again** beside it. It is asked when the tab opens (which is when a model chosen in the WanGP
@@ -518,20 +520,32 @@ composer without queueing anything. Once WanGP has a job, the page that queued i
 asking the bridge where its task is and the card says so: *In WanGP's queue, 2 ahead of
 it*, *WanGP is generating it*, *Left WanGP's queue*.
 
+**History** (under the prompt). The last ten prompts sent to WanGP from here - from the
+composer or the gallery's Send to WanGP popup - **as you typed them**, never the prompt an
+enhancement wrote from them. It opens a dialog over the page: newest first, each with when,
+the model it was sent to and whether it was enhanced, the text clamped to four lines with
+*More* to read the rest, and the list scrolls. **Load** puts those words in the Prompt box -
+the pictures, the enhancement switch and the queue stay as they are, and nothing is queued.
+The same words sent again move to the top instead of taking a second place. A press that was
+refused is not in it; one that was stored is, whatever became of it. Escape, Close or a
+press outside the dialog closes it.
+
 **Enhanced prompts** (off by default). With the *SD-Neo-ModelSwitchRefiner* extension
 installed and its LLM Studio set up, the enhancement switch sends the typed prompt to one of
 its writers first, and WanGP gets the written prompt: the **MiniMax H3** writer, with the
 pictures the model reads, for whichever H3 model (FL2VA or Ref2VA) the WanGP page is on; or
-the **LTX 2.3** writer, which is shown the first frame itself (the language model's vision,
-not a caption) and nothing else, and turns whatever was typed - a line, a list, a shot plan -
-into one paragraph in the shape Lightricks' prompting guide asks for, without adding a
-style, a camera move or a mood nobody asked for. ModelSwitchRefiner keeps each LTX prompt it
-writes in Prompt Studio's history as a **[No settings]** entry. The job waits in the Queue as
+the **LTX** writer, for LTX 2.3 and 2.5 alike, which is shown the first frame itself (the
+language model's vision, not a caption) and nothing else, and turns whatever was typed - a
+line, a list, a shot plan - into one paragraph in the shape Lightricks' prompting guide asks
+for, without adding a style, a camera move or a mood nobody asked for. LTX 2.5 is written
+for under exactly the LTX 2.3 system prompt: one set of instructions, one override, for
+both. ModelSwitchRefiner keeps each LTX prompt it writes in Prompt Studio's history as a
+**[No settings]** entry, saying which of the two it was for. The job waits in the Queue as
 *Enhancing* with the writer's own progress, and goes to WanGP in press order once its prompt
 exists. One button under the prompt opens a view that fills the window and holds the switch
-and the six system prompts the writers run under (FL2VA, Ref2VA and LTX 2.3, each with and
-without a picture), opened on the pair the next press would use; it takes an override that
-is kept across sessions, and restores the default.
+and the six system prompts the writers run under (FL2VA, Ref2VA and the LTX set 2.3 and 2.5
+share, each with and without a picture), opened on the pair the next press would use; it
+takes an override that is kept across sessions, and restores the default.
 **Cancel everything** empties the whole line - the writer's requests and the pending jobs -
 in one press; jobs already being sent finish, and nothing in WanGP's own queue is touched.
 
@@ -545,10 +559,16 @@ and **full screen**, which keeps these controls - and which is the stage's own, 
 a page that is already full screen (the Forge Assistant's focus mode makes the whole page full
 screen) and comes off again leaving that one where it was. Loop, mute and speed are remembered. On a
 keyboard: Space or K plays, ← and → step a frame (with Shift, a second), L loops, M mutes,
-F is full screen, and Escape leaves full screen and then the view. **Load**, beside the
-prompt, puts the recipe that made the output back into the request - the prompt as it was
-typed and each picture still in the library, exactly what the Queue Send History's own Load
-restores - and queues nothing; an output whose request left no recipe says so. It is its own document,
+F is full screen, and Escape leaves full screen and then the view. Under the picture: its
+name, the model that made it (LTX 2.3 or 2.5, MiniMax H3), and the prompt as it was typed,
+with the one an enhancement wrote for WanGP under it on hover. **Load**, beside them, puts
+the recipe that made the output back into the request - the prompt as it was typed and each
+picture still in the library, *Use WanGP* for what was inherited, a deleted picture or one
+that was never in the folder - and queues nothing. Every output keeps that recipe itself,
+taken from its job while the job was still in the queue, so Load works for any video: one
+the server generated while nobody had the tab open (a long LTX run), one the gallery's popup
+asked for, one older than the Queue Send History's two hundred. An output from before
+recipes were kept loads from its Queue Send History record, and one with neither says so. It is its own document,
 not a view of the queue, so closing the WebUI does not empty it — last week's videos are
 still there next week. A job the server ran is tied to its files exactly, by the paths WanGP
 handed back; a job a browser page ran is matched to the files that appeared while it was
@@ -601,7 +621,7 @@ passed through to the Canvas with the reason when Clipboard cannot take it — o
 the result under an opaque token (never in the library) and opens a compact popup over
 the gallery: the composer's prompt and its *Enhanced prompts* switch, the image roles the
 WanGP page's model reads (first frame, last frame, reference, several at once - for LTX 2.3
-a first and a last frame, never a reference), *Inherit Clipboard inputs* for everything the
+and 2.5 a first and a last frame, never a reference), *Inherit Clipboard inputs* for everything the
 popup does not override, a dot saying whether WanGP is idle, generating or not running, and
 Generate. It is blocked by the same answer as the Clipboard's section: until WanGP is ready
 for its page's model, the popup holds the same quiet line and Check again where the prompt,
@@ -635,7 +655,7 @@ fields inherit, `start` defaults to `"auto"` (`"never"` stages only), the reques
 same server-owned queue as the tab's presses, ids are never paths, and the answer is
 `started`, `queued`, `refused` (with a code) or `unconfirmed`. `docs/clipboard/README.md`
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
-API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 or LTX 2.3 rewrite (the page's
+API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 or LTX 2.3 / 2.5 rewrite (the page's
 model travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
 and its place in WanGP. Bridge plugin 1.13.0 carries the queue, start and track operations
 (protocol 5) and the control plane server-owned execution runs on (protocol 6), answers the
@@ -871,12 +891,14 @@ minipaint_neo/
     clipboard/                   the Clipboard tab (see docs/clipboard/README.md)
         config.py                the folder, the intercept destination, the sort and the thumbnail size
         store.py                 the library: one folder, opaque ids, containment, import, refresh, rename, delete
-        history.py               the composer's draft and Queue Send History
+        history.py               the composer's draft, Queue Send History, and the recipe an output keeps for Load
+        prompts.py               History: the last ten prompts sent from here, as typed, and Load
         outbox.py                the queue outbox: every press a job the server owns, in press order; what each job is waiting for, said out loud
         executor.py              the coordinator that advances those jobs with nobody watching: cold WanGP, the enhancer, the card, the generation
         job_inputs.py            the pictures a queued job owns, pinned until it is done and no sweeper's to take
-        enhance.py               enhanced prompts: ModelSwitchRefiner's MiniMax H3 writer (mc_llm_api), the switch, the four system prompts and their overrides
-        outputs.py               what WanGP made for this tab's requests, kept where a restart can find it: View Outputs reads this, not the queue
+        targets.py               the four models the Clipboard sends to, what each is sent, and whether the one in use is ready
+        enhance.py               enhanced prompts: ModelSwitchRefiner's MiniMax H3 and LTX writers (mc_llm_api), the switch, the six system prompts and their overrides
+        outputs.py               what WanGP made for this tab's requests, and the recipe of each, kept where a restart can find it: View Outputs reads this, not the queue
         routes.py                a picture by its id, and bytes in
         intercept.py             Send to WanGP from the gallery: the frozen picture behind a token, the roles a model reads,
                                  the popup's request path through the outbox, and its pinned history
@@ -901,7 +923,7 @@ javascript/main.js               legacy bridge, parent-frame side, and the loade
 browser/minipaint_canvas.js      attaches the canvas; crop frame, touch gestures, tools, the rail's height, the layer list, the held mask, focus mode
 browser/minipaint_wangp.js       the WanGP iframe: handshake, receiver query, verified send, queue, confirm and track
 browser/minipaint_interop.js     window.minipaintInterop: the public queue API (v1, minipaint.wangp.queue/v1): enqueue (answers when the server has the job), sync (a bounded snapshot), cancelAll - no live connection
-browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid and its pager, the queue list and the history,
+browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid and its pager, the queue list and the history, History's dialog,
                                  the menu, paste and drop, Add to Queue, the page's model, and the one standing notice
                                  (browser/ is not auto-loaded: each tab fetches its own bundle from /minipaint-assets/js/, cached by content)
 browser/minipaint_intercept.js   the Send to WanGP popup: opened by the gallery button on a frozen picture, drawn from

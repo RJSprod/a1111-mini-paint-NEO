@@ -33,6 +33,17 @@ world instead of trusting a callback - the callback was never made, and a
 video the user is looking at exists whether or not this extension was
 running when it was written.
 
+WHAT IT REMEMBERS OF THE REQUEST. Its recipe (``history.recipe_of_job``):
+the prompt as it was typed, the prompt an enhancement wrote from it, the
+library pictures by id, and the model - taken from the job while the job is
+still in the queue, when the claim opens or when the executor hands over its
+paths. It is what View Outputs' Load puts back, so a video can be loaded
+whoever asked for it and however long ago: a job is swept two minutes after
+it finishes, and the Queue Send History record Load used to read is made
+only for the composer's own jobs, only when a page next asks, and only the
+newest two hundred are kept. An entry written before recipes were kept has
+none, and Load reads that history record for it, as before.
+
 WHAT CROSSES TO THE BROWSER. Ids, names, sizes and times, over this tab's
 own route, the way the picture library already works. A path never does,
 and neither does a name on the shared event stream - the stream is every
@@ -49,7 +60,7 @@ import time
 import typing
 
 from .. import scrub
-from . import config
+from . import config, history
 
 #: What counts as something WanGP made. Videos first, because that is what
 #: it makes; images because some models write a frame or a grid beside it,
@@ -247,6 +258,9 @@ def _normalize_entry(raw: typing.Any, root: typing.Optional[pathlib.Path] = None
         "floor": float(raw.get("floor") or 0.0),
         "exact": bool(raw.get("exact")),
         "model": str(raw.get("model") or "")[:120],
+        #: What the request was, for Load. None on an entry from before
+        #: recipes were kept. See the module docstring.
+        "recipe": history.normalize_recipe(raw.get("recipe")),
         "files": kept,
     }
 
@@ -292,13 +306,14 @@ def _file_record(path: pathlib.Path, at: float = 0.0, size: int = 0) -> dict:
 
 
 def remember(job_id: typing.Any, paths: typing.Sequence[typing.Any], request_id: str = "",
-             model: str = "") -> typing.Optional[dict]:
+             model: str = "", recipe: typing.Any = None) -> typing.Optional[dict]:
     """The exact half: WanGP said it wrote these, for this job.
 
     Called while the paths are fresh - the job they live on is swept from
     the queue minutes later - and it closes the entry outright, because
     there is nothing left to find out. A path already claimed by another
-    entry is not taken twice.
+    entry is not taken twice. ``recipe`` is the request's
+    (``history.recipe_of_job``), kept for Load; an entry that has one keeps it.
     """
     job_id = str(job_id or "")
     wanted = [str(one) for one in paths if isinstance(one, str) and one]
@@ -311,12 +326,14 @@ def remember(job_id: typing.Any, paths: typing.Sequence[typing.Any], request_id:
         if entry is None:
             entry = {"entry_id": _id(), "job_id": job_id, "request_id": str(request_id or "")[:64],
                      "opened_at": now, "closed_at": 0.0, "exact": True, "floor": 0.0,
-                     "model": str(model or "")[:120], "files": []}
+                     "model": str(model or "")[:120], "recipe": None, "files": []}
             entries.append(entry)
         if request_id:
             entry["request_id"] = str(request_id)[:64]
         if model:
             entry["model"] = str(model)[:120]
+        if entry.get("recipe") is None:
+            entry["recipe"] = history.normalize_recipe(recipe)
         taken = _claimed_paths(entries)
         # The paths already in the document were rooted as they were read;
         # these have just arrived, so they are rooted the same way before
@@ -401,9 +418,19 @@ def sync() -> None:
                 # session still belongs to the job that asked for it.
                 "opened_at": float(job.get("created") or now),
                 "closed_at": 0.0, "exact": False, "floor": _floor(where),
-                "model": str((job.get("model") or {}).get("label") or (job.get("model") or {}).get("type") or "")[:120], "files": [],
+                "model": str((job.get("model") or {}).get("label") or (job.get("model") or {}).get("type") or "")[:120],
+                "recipe": None, "files": [],
             })
             changed = True
+        for entry in entries:
+            # Every entry takes its request's recipe while the job is still
+            # here to take it from: a claim this sync has just opened, and an
+            # exact entry whose paths arrived without one.
+            if entry.get("recipe") is None and entry["job_id"] in jobs:
+                found = history.recipe_of_job(jobs[entry["job_id"]])
+                if found is not None:
+                    entry["recipe"] = found
+                    changed = True
         for entry in entries:
             if entry["closed_at"]:
                 continue
@@ -479,6 +506,8 @@ def files(refresh: bool = True) -> typing.List[dict]:
                     "job_id": entry["job_id"],
                     "request_id": entry["request_id"],
                     "exact": entry["exact"],
+                    "model": entry["model"],
+                    "recipe": dict(entry["recipe"]) if entry.get("recipe") else None,
                 })
             if len(kept) != len(entry["files"]):
                 entry["files"] = kept
@@ -486,6 +515,20 @@ def files(refresh: bool = True) -> typing.List[dict]:
             _save(entries)
     listed.sort(key=lambda item: (item["at"], item["id"]), reverse=True)
     return listed
+
+
+def entry_for_file(file_id: typing.Any) -> typing.Optional[dict]:
+    """The entry an output belongs to - its request, model and recipe - or
+    ``None``. Only facts about the request; the path stays with ``path_of``."""
+    wanted = str(file_id or "")
+    if not wanted:
+        return None
+    with _lock:
+        for entry in _load():
+            if any(one["file_id"] == wanted for one in entry["files"]):
+                return {"job_id": entry["job_id"], "request_id": entry["request_id"], "model": entry["model"],
+                        "recipe": dict(entry["recipe"]) if entry.get("recipe") else None}
+    return None
 
 
 def path_of(file_id: typing.Any) -> typing.Optional[pathlib.Path]:
@@ -523,6 +566,7 @@ __all__ = [
     "MEDIA_SUFFIXES",
     "SCHEMA",
     "VIDEO_SUFFIXES",
+    "entry_for_file",
     "files",
     "folder",
     "forget_all",

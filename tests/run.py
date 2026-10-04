@@ -75,8 +75,13 @@ SUITES = [
     "test_clipboard_enhance",
     # Which WanGP models the Clipboard sends to, and when it may: the bridge's
     # model check (1.13.0), the readiness that blocks the WanGP section, the
-    # press's own fresh gate, and the LTX 2.3 writer the enhancement reaches.
+    # press's own fresh gate, and the LTX writer the enhancement reaches, for
+    # LTX 2.3 and 2.5 alike.
     "test_clipboard_targets",
+    # The composer's History - the last ten prompts sent from here, as typed,
+    # and Load - and the recipe every output keeps, so View Outputs' Load
+    # works for any video, LTX 2.3 and 2.5 included.
+    "test_clipboard_prompts",
     # The server executor: press, walk away, come back to a generated file.
     # Ahead of the tab, because the tab is one of its screens.
     "test_clipboard_executor",

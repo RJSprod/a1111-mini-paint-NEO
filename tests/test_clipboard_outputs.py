@@ -295,10 +295,11 @@ def page_checks(r: Results, clock: _Clock, folder: pathlib.Path) -> None:
 
 
 def recipe_checks(r: Results, clock: _Clock, folder: pathlib.Path) -> None:
-    """Load from View Outputs: an output names the history record of the
-    request that made it, so the gallery can hand that record to the same
-    Load the Queue Send History uses. An output with no record has no recipe,
-    and says so by having none."""
+    """Load from View Outputs, for an output written before the ledger kept
+    recipes: it offers Load when the history record of the request that made
+    it is still there - the tab hands that record to the same Load the Queue
+    Send History uses - and an output with no record has no recipe, and says
+    so by having none. (``own_recipe_checks`` is the ledger's own recipe.)"""
     from minipaint_neo.clipboard import history
 
     kept = "a" * 32
@@ -317,8 +318,8 @@ def recipe_checks(r: Results, clock: _Clock, folder: pathlib.Path) -> None:
         "reference_mode": "inherit"})
     try:
         by_name = {item["name"]: item for item in routes.outputs_page()["items"]}
-        r.check("an output whose request is in the history names that record, for Load",
-                by_name["made.mp4"]["recipe"] == record["history_id"], str(by_name["made.mp4"]))
+        r.check("an output whose request is in the history offers Load, by its own id, which the tab resolves to that record",
+                by_name["made.mp4"]["recipe"] == by_name["made.mp4"]["id"], str(by_name["made.mp4"]))
         r.check("and carries its prompt beside it, as it did",
                 by_name["made.mp4"]["prompt"] == "a fox in the snow", str(by_name["made.mp4"]))
         r.check("an output whose request left no record names none, so the gallery can say so",

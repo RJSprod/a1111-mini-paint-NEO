@@ -23,12 +23,14 @@
  *
  * The WanGP section exists only while WanGP can take what it makes. The
  * readiness route (``targets.readiness`` on the server) says whether WanGP
- * is running, its bridge answering, and the page on one of the three models
+ * is running, its bridge answering, and the page on one of the four models
  * this sends to, defined and downloaded; this file writes the answer onto
- * the tab root as ``data-wangp-ready`` and ``data-wangp-target`` and the
- * stylesheet does the rest - no cards, no prompt, no enhancement, no Add to
- * Queue and no +First / +Last / +Ref while it is not, one quiet line with
- * Check again in their place, and no reference card for LTX 2.3 Distilled.
+ * the tab root as ``data-wangp-ready``, ``data-wangp-target`` and
+ * ``data-wangp-references`` and the stylesheet does the rest - no cards, no
+ * prompt, no enhancement, no Add to Queue and no +First / +Last / +Ref while
+ * it is not, one quiet line with Check again in their place, and no
+ * reference card for a model that is sent none (LTX 2.3 and 2.5 Distilled,
+ * by the server's own list of what each model is sent).
  * It is asked when the tab opens, when the page learns WanGP's model, after
  * a job ends, on Check again and in every refused press's answer; never on
  * a timer. The press is checked again on the server, fresh, whatever this
@@ -177,6 +179,10 @@ window.minipaintClipboard = (function () {
         //: one is in the stage, and the element playing it.
         outputs: { items: [], page: 0, pages: 1, chosen: "", stage: null, strip: null, player: null },
         outputsKey: null,
+        //: The History dialog: its nodes, the one read of its list in flight,
+        //: the Load in flight, how many entries it drew, and its Escape.
+        prompts: { dom: null, read: null, loading: "", entries: 0, drawn: 0 },
+        promptsKey: null,
         //: A flyout a toolbar button opened is the whole list: there is
         //: nothing behind it, so it shows no Back row and Escape closes it
         //: rather than stepping up a level that does not exist.
@@ -1835,7 +1841,7 @@ window.minipaintClipboard = (function () {
             // A panel of ours is pinned to the top as well. Measuring one of
             // those would push the next one that opened further down, and the
             // one after that further still.
-            if (node.closest && node.closest("." + EDITOR_OPEN_CLASS)) { continue; }
+            if (node.closest && (node.closest("." + EDITOR_OPEN_CLASS) || node.closest("." + PROMPTS_CLASS))) { continue; }
             let style;
             try { style = window.getComputedStyle(node); } catch (e) { continue; }
             if (!style || (style.position !== "fixed" && style.position !== "sticky")) { continue; }
@@ -1858,7 +1864,7 @@ window.minipaintClipboard = (function () {
     function watchHeaderInset() {
         if (S.headerWatch) { return; }
         S.headerWatch = function () {
-            if (outputsOpen() || editorOpen()) { applyHeaderInset(); }
+            if (outputsOpen() || editorOpen() || promptHistoryOpen()) { applyHeaderInset(); }
         };
         window.addEventListener("resize", S.headerWatch);
     }
@@ -2458,16 +2464,21 @@ window.minipaintClipboard = (function () {
     /**
      * Load: put the recipe that made this output back into the composer.
      *
-     * The same path the Queue Send History's own Load takes - the hidden box
-     * the server's `history_action` reads - so it restores exactly what that
-     * does: the prompt as it was typed, each picture that is still in the
-     * library, and "Use WanGP" for what was inherited or has since gone. It
-     * queues nothing. The view closes, because the composer is what it has
-     * just changed.
+     * The recipe is the output's own - the ledger keeps it from the job that
+     * made the file (``outputs``) - so a video can be loaded whoever asked
+     * for it and however long ago: one the server generated while nobody
+     * watched, one the gallery's popup asked for, an LTX 2.3 or 2.5 run that
+     * outlasted the queue's two minutes. It goes through the hidden box the
+     * server's `history_action` reads, as the Queue Send History's own Load
+     * does, because what it changes - the slot cards - is rendered there:
+     * the prompt as it was typed, never the enhanced one, each picture that
+     * is still in the library, and "Use WanGP" for what was inherited or has
+     * gone. It queues nothing. The view closes, because the composer is what
+     * it has just changed.
      *
-     * An output with no recipe - its request was made before history was
-     * kept, or its record has been deleted or aged out - says so rather than
-     * offering a button that would do nothing.
+     * An output with no recipe - made before recipes were kept, with no
+     * history record either - says so rather than offering a button that
+     * would do nothing.
      */
     function loadButton(item) {
         const button = el("button", "minipaint-clip-output-load", "Load");
@@ -2477,7 +2488,7 @@ window.minipaintClipboard = (function () {
             button.title = "No recipe was kept for this output, so there is nothing to load.";
             return button;
         }
-        button.title = "Put this output's prompt and pictures back in the request, to generate again. Nothing is queued.";
+        button.title = "Put this output's prompt, as it was typed, and its pictures back in the request, to generate again. Nothing is queued.";
         button.addEventListener("click", function (event) {
             event.stopPropagation();
             loadRecipe(item);
@@ -2487,7 +2498,7 @@ window.minipaintClipboard = (function () {
 
     function loadRecipe(item) {
         if (!item || !item.recipe) { return false; }
-        const sent = sendInput(BOXES.historyAction, "load:" + item.recipe + ":" + Date.now());
+        const sent = sendInput(BOXES.historyAction, "output:" + item.recipe + ":" + Date.now());
         note("outputs: load " + String(item.recipe).slice(0, 8) + (sent ? "" : " (the history box is missing)"));
         if (!sent) { return false; }
         closeOutputs();
@@ -2569,10 +2580,22 @@ window.minipaintClipboard = (function () {
         }
         const caption = el("div", "minipaint-clip-output-caption");
         caption.appendChild(el("span", "minipaint-clip-output-name", item.name));
-        if (item.prompt) {
-            const prompt = el("span", "minipaint-clip-output-prompt", item.prompt);
-            prompt.title = item.prompt;
+        if (item.model) { caption.appendChild(el("span", "minipaint-clip-output-model", item.model)); }
+        // The prompt as it was typed, which is what Load puts back; the one an
+        // enhancement wrote from it - what WanGP was given - is under it on
+        // hover, and marked.
+        const shown = item.prompt || item.written || "";
+        if (shown) {
+            const prompt = el("span", "minipaint-clip-output-prompt", shown);
+            prompt.title = item.written && item.prompt
+                ? "As typed: " + item.prompt + "\n\nWritten for WanGP: " + item.written
+                : shown;
             caption.appendChild(prompt);
+            if (item.written && item.prompt) {
+                const mark = el("span", "minipaint-clip-badge", "enhanced");
+                mark.title = "WanGP was given the prompt the writer made of these words.";
+                caption.appendChild(mark);
+            }
         }
         if (!item.exact) {
             const guess = el("span", "minipaint-clip-output-guess-note",
@@ -2712,6 +2735,298 @@ window.minipaintClipboard = (function () {
         if (panel) { panel.classList.remove(EDITOR_OPEN_CLASS); }
         if (S.outputsKey) { document.removeEventListener("keydown", S.outputsKey, true); S.outputsKey = null; }
         return true;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* History: the last ten prompts sent from here, as typed                */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Asked for: "the history for the last ten prompts submitted from
+     * clipboard to wangp. Not the enhanced, but the original raw input ... a
+     * new button in the right column 'History' ... a list that i can scroll,
+     * view, and choose to load."
+     *
+     * The list is the server's (``prompts``), read over this tab's own route
+     * when the dialog opens and never held open: a page has one connection to
+     * Forge under HTTP/2 and six under HTTP/1.1, and both reads here carry a
+     * deadline. Load writes the composer's draft over the same route and then
+     * puts the very text it answered with in the Prompt box - so it works with
+     * the framework's channel gone, and the box and the draft cannot disagree.
+     * It touches nothing else: the pictures, the enhancement switch and the
+     * queue stay as they are, and nothing is queued.
+     *
+     * A dialog, on the page's dialog layer, so nothing another extension
+     * floats over Forge covers it; and announced as one (``minipaint:overlay``),
+     * so the Forge Assistant's panel puts itself away while it is up, exactly
+     * as it does for the Send to WanGP popup.
+     */
+    const PROMPTS_ROUTE = "/minipaint-clipboard/prompts";
+    const PROMPTS_CLASS = "minipaint-clip-prompts";
+    const PROMPTS_BUTTON_ID = "minipaint_clipboard_prompt_history";
+    const PROMPTS_TITLE_ID = "minipaint_clipboard_prompts_title";
+    //: One ask of the route: a list of ten from a small document, or one write.
+    const PROMPTS_TIMEOUT_MS = 15000;
+    //: Said whenever this dialog takes the page and gives it back. See the
+    //: popup's own OVERLAY_EVENT in minipaint_intercept.js.
+    const OVERLAY_EVENT = "minipaint:overlay";
+    const PROMPTS_OVERLAY = "clipboard-history";
+
+    function promptsRoot() { return S.prompts.dom ? S.prompts.dom.root : null; }
+
+    function promptHistoryOpen() {
+        const element = promptsRoot();
+        return !!(element && !element.hidden);
+    }
+
+    function announceOverlay(open) {
+        try {
+            document.dispatchEvent(new CustomEvent(OVERLAY_EVENT, {
+                detail: { name: PROMPTS_OVERLAY, open: !!open, modal: true }
+            }));
+        } catch (e) { /* nothing here depends on being heard */ }
+    }
+
+    function buildPromptHistory() {
+        if (S.prompts.dom && S.prompts.dom.root.isConnected) { return S.prompts.dom; }
+        const host = root();
+        if (!host) { return null; }
+        // The layer: the window below the theme's header, transparent, so a
+        // press anywhere outside the dialog is a way out of it.
+        const layer = el("div", PROMPTS_CLASS);
+        layer.hidden = true;
+        const dialog = el("div", PROMPTS_CLASS + "-dialog");
+        dialog.setAttribute("role", "dialog");
+        dialog.setAttribute("aria-modal", "true");
+        dialog.setAttribute("aria-labelledby", PROMPTS_TITLE_ID);
+        const head = el("div", PROMPTS_CLASS + "-head");
+        const title = el("b", PROMPTS_CLASS + "-title", "Prompt history");
+        title.id = PROMPTS_TITLE_ID;
+        // A word, not a cross: the host's theme turns a span or a button
+        // holding one of its glyphs into an icon of its own.
+        const close = el("button", PROMPTS_CLASS + "-close", "Close");
+        close.type = "button";
+        close.title = "Close (Escape)";
+        head.appendChild(title);
+        head.appendChild(close);
+        dialog.appendChild(head);
+        dialog.appendChild(el("div", PROMPTS_CLASS + "-hint",
+            "The last ten prompts sent to WanGP from here, as you typed them. Load puts one in the Prompt box; nothing is queued."));
+        const message = el("div", PROMPTS_CLASS + "-message");
+        message.setAttribute("role", "status");
+        message.hidden = true;
+        dialog.appendChild(message);
+        const list = el("ol", PROMPTS_CLASS + "-list");
+        dialog.appendChild(list);
+        layer.appendChild(dialog);
+        layer.addEventListener("click", onPromptHistoryClick);
+        host.appendChild(layer);
+        S.prompts.dom = { root: layer, dialog: dialog, list: list, message: message, close: close };
+        return S.prompts.dom;
+    }
+
+    function promptsMessage(text, failure) {
+        const dom = S.prompts.dom;
+        if (!dom) { return; }
+        dom.message.textContent = text || "";
+        dom.message.hidden = !text;
+        dom.message.classList.toggle(PROMPTS_CLASS + "-failure", !!failure);
+    }
+
+    /** One ask of the route, bounded. ``body`` null is the list; else a POST. */
+    function askPrompts(body) {
+        if (!body && S.prompts.read) { return S.prompts.read; }
+        let controller = null;
+        let cutoff = 0;
+        try { controller = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { controller = null; }
+        if (controller) {
+            cutoff = setTimeout(function () { try { controller.abort(); } catch (e) { /* settled */ } }, PROMPTS_TIMEOUT_MS);
+        }
+        const options = { credentials: "same-origin", cache: "no-store" };
+        if (body) {
+            options.method = "POST";
+            options.headers = { "Content-Type": "application/json" };
+            options.body = JSON.stringify(body);
+        }
+        if (controller) { options.signal = controller.signal; }
+        const asked = fetch(PROMPTS_ROUTE, options).then(function (response) {
+            return response.json();
+        }).then(function (answer) {
+            serverSilent(false);
+            return answer && typeof answer === "object" ? answer : null;
+        }, function (error) {
+            note("prompt history: no answer (" + ((error && error.message) || error) + ")");
+            serverSilent(true, "the prompt history");
+            return null;
+        }).then(function (answer) {
+            if (cutoff) { clearTimeout(cutoff); }
+            if (!body && S.prompts.read === asked) { S.prompts.read = null; }
+            return answer;
+        });
+        if (!body) { S.prompts.read = asked; }
+        return asked;
+    }
+
+    function promptEntry(entry) {
+        const item = el("li", PROMPTS_CLASS + "-entry");
+        item.dataset.prompt = entry.id;
+        const meta = el("div", PROMPTS_CLASS + "-meta");
+        meta.appendChild(el("span", PROMPTS_CLASS + "-when", entry.when || ""));
+        if (entry.model) {
+            const model = el("span", PROMPTS_CLASS + "-model", entry.model);
+            model.title = entry.target_label ? entry.model + " (" + entry.target_label + ")" : entry.model;
+            meta.appendChild(model);
+        }
+        if (entry.enhanced) {
+            const enhanced = el("span", "minipaint-clip-badge", "enhanced");
+            enhanced.title = "This press was enhanced: WanGP was sent the prompt the writer made of these words. Load puts back the words.";
+            meta.appendChild(enhanced);
+        }
+        if (entry.origin) { meta.appendChild(el("span", "minipaint-clip-badge", entry.origin)); }
+        // One line of facts and the two buttons, then the words: ten entries
+        // should be mostly words.
+        const row = el("div", PROMPTS_CLASS + "-row");
+        row.appendChild(meta);
+        item.appendChild(row);
+        // The whole text, as it was typed - its line breaks too, because to
+        // WanGP each line can be a prompt of its own. Clamped until More.
+        const text = el("div", PROMPTS_CLASS + "-text", entry.prompt || "");
+        text.dataset.expanded = "0";
+        item.appendChild(text);
+        const actions = el("div", PROMPTS_CLASS + "-actions");
+        const more = el("button", PROMPTS_CLASS + "-more", "More");
+        more.type = "button";
+        more.dataset.promptMore = entry.id;
+        more.setAttribute("aria-expanded", "false");
+        more.hidden = true;
+        const load = el("button", PROMPTS_CLASS + "-load", "Load");
+        load.type = "button";
+        load.dataset.promptLoad = entry.id;
+        load.title = "Put this prompt in the Prompt box. The pictures stay as they are, and nothing is queued.";
+        actions.appendChild(more);
+        actions.appendChild(load);
+        row.appendChild(actions);
+        return item;
+    }
+
+    /** More is offered only where the clamp is hiding something. */
+    function offerMore(list) {
+        for (const item of Array.from(list.querySelectorAll("." + PROMPTS_CLASS + "-entry"))) {
+            const text = item.querySelector("." + PROMPTS_CLASS + "-text");
+            const more = item.querySelector("." + PROMPTS_CLASS + "-more");
+            if (!text || !more || text.dataset.expanded === "1") { continue; }
+            more.hidden = !(text.scrollHeight > text.clientHeight + 1);
+        }
+    }
+
+    function drawPromptHistory(answer) {
+        const dom = buildPromptHistory();
+        if (!dom) { return; }
+        const entries = answer && Array.isArray(answer.entries) ? answer.entries : [];
+        S.prompts.entries = entries.length;
+        dom.list.innerHTML = "";
+        dom.list.classList.toggle("minipaint-clip-empty", !entries.length);
+        if (!entries.length) {
+            dom.list.appendChild(el("li", PROMPTS_CLASS + "-empty", "No prompt has been sent to WanGP from here yet."));
+            return;
+        }
+        for (const entry of entries) { dom.list.appendChild(promptEntry(entry)); }
+        const settle = typeof requestAnimationFrame === "function" ? requestAnimationFrame : function (fn) { return setTimeout(fn, 0); };
+        settle(function () { offerMore(dom.list); });
+    }
+
+    function openPromptHistory() {
+        const dom = buildPromptHistory();
+        if (!dom) { return false; }
+        if (S.menu && !S.menu.hidden) { closeMenu(); }
+        const was = promptHistoryOpen();
+        applyHeaderInset();
+        watchHeaderInset();
+        dom.root.hidden = false;
+        if (!was) {
+            announceOverlay(true);
+            if (S.promptsKey) { document.removeEventListener("keydown", S.promptsKey, true); }
+            S.promptsKey = function (event) {
+                if (event.key !== "Escape" || !promptHistoryOpen()) { return; }
+                event.stopPropagation();
+                event.preventDefault();
+                closePromptHistory();
+            };
+            document.addEventListener("keydown", S.promptsKey, true);
+        }
+        promptsMessage("", false);
+        if (!dom.list.children.length) { dom.list.appendChild(el("li", PROMPTS_CLASS + "-empty", "Reading…")); }
+        try { dom.close.focus(); } catch (e) { /* focus is a courtesy */ }
+        S.prompts.drawn = (S.prompts.drawn || 0) + 1;
+        const asked = S.prompts.drawn;
+        return askPrompts(null).then(function (answer) {
+            if (asked !== S.prompts.drawn || !promptHistoryOpen()) { return answer; }
+            if (!answer || answer.ok !== true) {
+                drawPromptHistory({ entries: [] });
+                promptsMessage((answer && answer.message) || "Forge did not answer, so the history could not be read. Close and try again.", true);
+                return answer;
+            }
+            drawPromptHistory(answer);
+            note("prompt history: opened (" + (answer.entries || []).length + " of " + (answer.max || 10) + ")");
+            return answer;
+        });
+    }
+
+    function closePromptHistory() {
+        const element = promptsRoot();
+        if (!element || element.hidden) { return false; }
+        element.hidden = true;
+        if (S.promptsKey) { document.removeEventListener("keydown", S.promptsKey, true); S.promptsKey = null; }
+        announceOverlay(false);
+        const host = byId(PROMPTS_BUTTON_ID);
+        const button = host ? (host.tagName === "BUTTON" ? host : host.querySelector("button")) : null;
+        if (button && typeof button.focus === "function") {
+            try { button.focus(); } catch (e) { /* focus is a courtesy */ }
+        }
+        return true;
+    }
+
+    /** Load: the server puts the words in the draft, then this page puts the
+     *  same words in the box. Nothing else on the composer moves. */
+    function loadPrompt(entryId, button) {
+        if (!entryId || S.prompts.loading) { return Promise.resolve(null); }
+        S.prompts.loading = entryId;
+        if (button) { button.disabled = true; }
+        return askPrompts({ action: "load", id: entryId }).then(function (answer) {
+            S.prompts.loading = "";
+            if (answer && answer.ok === true && typeof answer.prompt === "string") {
+                const written = sendInput(PROMPT_ID, answer.prompt);
+                note("prompt history: " + String(entryId).slice(0, 8) + " loaded" + (written ? "" : " (the prompt box is missing)"));
+                closePromptHistory();
+                toast(answer.status || "Prompt loaded from History. Nothing was queued.");
+                return answer;
+            }
+            if (button) { button.disabled = false; }
+            if (answer && Array.isArray(answer.entries)) { drawPromptHistory(answer); }
+            promptsMessage((answer && answer.message) || "Forge did not answer; nothing was loaded.", true);
+            return answer;
+        });
+    }
+
+    function onPromptHistoryClick(event) {
+        const dom = S.prompts.dom;
+        const target = event.target;
+        if (!dom || !target) { return; }
+        if (target === dom.root) { closePromptHistory(); return; }
+        if (!target.closest) { return; }
+        if (target.closest("." + PROMPTS_CLASS + "-close")) { closePromptHistory(); return; }
+        const load = target.closest("[data-prompt-load]");
+        if (load) { loadPrompt(load.dataset.promptLoad, load); return; }
+        const more = target.closest("[data-prompt-more]");
+        if (more) {
+            const item = more.closest("." + PROMPTS_CLASS + "-entry");
+            const text = item ? item.querySelector("." + PROMPTS_CLASS + "-text") : null;
+            if (!text) { return; }
+            const open = text.dataset.expanded !== "1";
+            text.dataset.expanded = open ? "1" : "0";
+            more.textContent = open ? "Less" : "More";
+            more.setAttribute("aria-expanded", open ? "true" : "false");
+        }
     }
 
     /* ------------------------------------------------------------------ */
@@ -4089,6 +4404,12 @@ window.minipaintClipboard = (function () {
         if (element) {
             element.dataset.wangpReady = ready ? "1" : "0";
             element.dataset.wangpTarget = ready ? String(S.readiness.target || "") : "";
+            // Whether the model is sent a reference, from the fields the
+            // server says it is sent (``targets.FIELDS``) - so a model added
+            // there needs no rule here. Said only for a known target: a ready
+            // answer that names none keeps every card, as it always did.
+            const fields = ready && S.readiness.target && Array.isArray(S.readiness.fields) ? S.readiness.fields : null;
+            element.dataset.wangpReferences = fields ? (fields.indexOf("references") >= 0 ? "1" : "0") : "";
         }
         const host = byId(BLOCKED_ID);
         const box = host ? host.querySelector(".minipaint-clip-blocked") : null;
@@ -4096,8 +4417,10 @@ window.minipaintClipboard = (function () {
         if (box) { box.dataset.code = ready ? "" : String((S.readiness && S.readiness.code) || "checking"); }
         if (text) { text.textContent = ready ? "" : String((S.readiness && S.readiness.message) || READINESS_CHECKING); }
         // A blocked section has no enhancement button, so it has no editor
-        // open over the window either.
+        // open over the window either - and no prompt box for History to
+        // load into, so no History open over it.
         if (!ready && editorOpen()) { closePromptEditor(); }
+        if (!ready && promptHistoryOpen()) { closePromptHistory(); }
         const said = ready ? "ready for " + String(S.readiness.target || "?")
             : "blocked - " + String((S.readiness && S.readiness.code) || "no answer");
         if (said !== S.readinessSaid) {
@@ -4301,6 +4624,7 @@ window.minipaintClipboard = (function () {
                  offline: { server: S.offline.server, queue: S.offline.queue },
                  editorOpen: editorOpen(),
                  outputsOpen: outputsOpen(),
+                 promptHistory: { open: promptHistoryOpen(), entries: S.prompts.entries, loading: S.prompts.loading },
                  outputs: { page: S.outputs.page, pages: S.outputs.pages,
                             items: S.outputs.items.length, chosen: S.outputs.chosen,
                             drawn: S.outputs.drawn || 0,
@@ -4334,6 +4658,9 @@ window.minipaintClipboard = (function () {
         openToolbarMenu: openToolbarMenu,
         openOutputs: openOutputs,
         closeOutputs: closeOutputs,
+        openPromptHistory: openPromptHistory,
+        closePromptHistory: closePromptHistory,
+        loadPrompt: loadPrompt,
         askOutputs: askOutputs,
         loadRecipe: loadRecipe,
         fit: fitTab,

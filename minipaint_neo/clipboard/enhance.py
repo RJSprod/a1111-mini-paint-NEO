@@ -10,16 +10,27 @@ that prompt exists, and then goes to WanGP carrying it. The typed prompt is
 kept beside it, so the tab can show both and a retry can start again from
 what the user wrote.
 
-Two writers, three targets. MiniMax H3's writer, in its FL2VA and Ref2VA
-variants, for WanGP's two H3 models; and since 2026-10-03 the LTX 2.3
-writer (``mc_llm_api.submit_ltx``), for WanGP's LTX 2.3 Distilled models.
-The LTX writer is *shown* the first frame - the picture is in the request it
-writes in, as Lightricks' own enhancer does it - and reads nothing else: the
-last frame still goes to WanGP and is left out of the enhancement, and a
-reference is never sent to LTX 2.3 at all (``targets.FIELDS``). Its finished
-prompts land in LLM Studio's Prompt Studio history as *no settings* entries.
-Everything below says "variant" for all three, because to this module they
-are the same thing: which instructions, and which pictures.
+Two writers, four targets. MiniMax H3's writer, in its FL2VA and Ref2VA
+variants, for WanGP's two H3 models; and since 2026-10-03 the LTX writer
+(``mc_llm_api.submit_ltx``), for WanGP's LTX 2.3 Distilled models and, since
+2026-10-04, its LTX 2.5 Distilled ones. The LTX writer is *shown* the first
+frame - the picture is in the request it writes in, as Lightricks' own
+enhancer does it - and reads nothing else: the last frame still goes to WanGP
+and is left out of the enhancement, and a reference is never sent to LTX at
+all (``targets.FIELDS``). Its finished prompts land in LLM Studio's Prompt
+Studio history as *no settings* entries. Everything below says "variant" for
+all four, because to this module they are the same thing: which
+instructions, and which pictures.
+
+LTX 2.5 IS WRITTEN FOR UNDER LTX 2.3'S INSTRUCTIONS. The user asked for one
+system prompt for both, so there are three instruction sets and not four
+(``PROMPT_SETS``): ``ltx25`` runs under ``ltx23``'s pair - its default is
+the API's ``ltx23`` default and its override is ``ltx23``'s override, one
+document entry for both (``PROMPT_SET_OF``). The variant still travels to
+the writer as the model it writes for (``submit_ltx(model="ltx25")``) when
+the installed ModelSwitchRefiner takes one, so its progress line and Prompt
+Studio's entry say LTX 2.5; an older one writes the very same prompt and
+files it as LTX 2.3's.
 
 Three facts shape everything below:
 
@@ -32,12 +43,13 @@ Three facts shape everything below:
 
 * **The variant is WanGP's model, not a choice.** ``fl2va`` and ``ref2va``
   are the two H3 model definitions WanGP loads (``minimax_h3_fl2va`` and
-  ``minimax_h3_ref2va``), ``ltx23`` is WanGP's LTX 2.3 on its distilled
-  pipeline, and the prompt has to be written for the one the page is on.
-  The page reports its model with the press; a page on any other model is
-  refused rather than enhanced for a model it is not running. The system
-  prompt the writer uses is that variant's - one of the six the API
-  publishes (with and without a picture, for each variant) - unless an
+  ``minimax_h3_ref2va``), ``ltx23`` and ``ltx25`` are WanGP's LTX 2.3 and
+  LTX 2.5 on their distilled pipeline, and the prompt has to be written for
+  the one the page is on. The page reports its model with the press; a page
+  on any other model is refused rather than enhanced for a model it is not
+  running. The system prompt the writer uses is that variant's set - one of
+  the six the API publishes (with and without a picture, for MiniMax's two
+  variants and for LTX, whose one pair serves 2.3 and 2.5) - unless an
   override saved here replaces it.
 
 * **Pictures follow the model.** FL2VA writes about a first frame (a last
@@ -78,15 +90,25 @@ API_VERSION_SUPPORTED = 1
 ORIGIN = "minipaint-clipboard"
 CANCEL_REASON = "cancelled from the MiniPaint Clipboard tab"
 
-#: The two H3 variants and the LTX 2.3 writer, spelled the way the API spells them.
+#: The two H3 variants and the LTX writer's two models, spelled the way the API spells them.
 FL2VA = "fl2va"
 REF2VA = "ref2va"
 LTX23 = "ltx23"
+LTX25 = "ltx25"
 MINIMAX_VARIANTS = (FL2VA, REF2VA)
-VARIANTS = (FL2VA, REF2VA, LTX23)
+LTX_VARIANTS = (LTX23, LTX25)
+VARIANTS = (FL2VA, REF2VA, LTX23, LTX25)
 VARIANT_LABELS = {FL2VA: "FL2VA (first / last frame)", REF2VA: "Ref2VA (reference)",
-                  LTX23: "LTX 2.3 Distilled (first frame)"}
-#: The API kind the LTX 2.3 writer is published under (``capabilities()["kinds"]``).
+                  LTX23: "LTX 2.3 Distilled (first frame)", LTX25: "LTX 2.5 Distilled (first frame)"}
+#: The instruction sets: one per variant, except that LTX 2.5 runs under LTX
+#: 2.3's, by the user's choice - one default and one override for both. The
+#: enhancement view edits these three (six documents, with and without a
+#: picture), and an override is stored under the set's name.
+PROMPT_SETS = (FL2VA, REF2VA, LTX23)
+PROMPT_SET_OF = {LTX25: LTX23}
+PROMPT_SET_LABELS = {FL2VA: VARIANT_LABELS[FL2VA], REF2VA: VARIANT_LABELS[REF2VA],
+                     LTX23: "LTX 2.3 and 2.5 Distilled (first frame)"}
+#: The API kind the LTX writer is published under (``capabilities()["kinds"]``).
 LTX_KIND = "ltx"
 #: What names a MiniMax H3 model in WanGP's model types (``minimax_h3_fl2va``).
 MODEL_KEY = "minimax"
@@ -110,6 +132,7 @@ SLOTS_FOR: typing.Dict[str, typing.Dict[str, str]] = {
     # The first frame, shown to the writer, and nothing else: the last frame
     # is the video model's business and goes to WanGP untouched.
     LTX23: {protocol.QUEUE_FIELD_START: SLOT_FIRST},
+    LTX25: {protocol.QUEUE_FIELD_START: SLOT_FIRST},
 }
 SLOT_LABELS = {SLOT_FIRST: "the first frame", SLOT_LAST: "the last frame", SLOT_REFERENCE: "the reference"}
 
@@ -298,7 +321,7 @@ def capabilities() -> dict:
     found = {
         "found": False, "available": False, "api_version": 0, "enabled": False, "configured": False,
         "vision": False, "model": "", "variants": list(VARIANTS), "max_queued": 0, "reason": "",
-        "ltx": False,
+        "ltx": False, "ltx_models": [],
     }
     module = api()
     if module is None:
@@ -321,10 +344,16 @@ def capabilities() -> dict:
     found["model"] = pathlib.Path(str(raw.get("model") or "")).name[:80]
     variants = [item for item in (raw.get("variants") or []) if item in MINIMAX_VARIANTS] if isinstance(raw.get("variants"), (list, tuple)) else []
     kinds = raw.get("kinds") if isinstance(raw.get("kinds"), (list, tuple)) else []
-    # The LTX 2.3 writer is a kind of its own on the API, not a variant of
+    # The LTX writer is a kind of its own on the API, not a variant of
     # MiniMax's, and an older ModelSwitchRefiner simply does not list it.
     found["ltx"] = LTX_KIND in kinds and callable(getattr(module, "submit_ltx", None))
-    found["variants"] = (variants or list(MINIMAX_VARIANTS)) + ([LTX23] if found["ltx"] else [])
+    # Which LTX models the writer takes by name (``submit_ltx(model=)``). One
+    # from before LTX 2.5 names none and takes no ``model``: it is the LTX 2.3
+    # writer, and since LTX 2.5 runs under LTX 2.3's instructions it writes
+    # 2.5's prompts too - only filed as 2.3's.
+    named = raw.get("ltx_models") if isinstance(raw.get("ltx_models"), (list, tuple)) else []
+    found["ltx_models"] = ([item for item in LTX_VARIANTS if item in named] or [LTX23]) if found["ltx"] else []
+    found["variants"] = (variants or list(MINIMAX_VARIANTS)) + (list(LTX_VARIANTS) if found["ltx"] else [])
     capacity = raw.get("max_queued")
     found["max_queued"] = int(capacity) if isinstance(capacity, int) and not isinstance(capacity, bool) and capacity > 0 else 0
     found["available"] = found["enabled"] and found["configured"]
@@ -344,7 +373,8 @@ def capabilities() -> dict:
 
 def target_for_model(model: typing.Any) -> str:
     """Which writer a WanGP model is written for: an H3 variant, ``ltx23``
-    for LTX 2.3 Distilled, or "" for a model none of them writes for.
+    for LTX 2.3 Distilled, ``ltx25`` for LTX 2.5 Distilled, or "" for a model
+    none of them writes for.
 
     The Clipboard's own reading of the model (``targets.classify``), so the
     enhancement and the section's block agree on what the page is on.
@@ -422,11 +452,16 @@ def plan(request: typing.Mapping[str, typing.Any], model: typing.Any, target: st
 # --------------------------------------------------------- the settings --
 
 
+def prompt_set(variant: typing.Any) -> str:
+    """The instruction set a variant runs under: its own, or LTX 2.3's for LTX 2.5."""
+    return PROMPT_SET_OF.get(variant, variant) if isinstance(variant, str) else variant
+
+
 def _normalize_document(raw: typing.Any) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     overrides_raw = raw.get("overrides") if isinstance(raw.get("overrides"), dict) else {}
     overrides: typing.Dict[str, typing.Dict[str, str]] = {}
-    for variant in VARIANTS:
+    for variant in PROMPT_SETS:
         block = overrides_raw.get(variant) if isinstance(overrides_raw.get(variant), dict) else {}
         kept = {}
         for mode in MODES:
@@ -490,15 +525,20 @@ def set_enabled(flag: typing.Any) -> bool:
 
 
 def _check(variant: typing.Any, mode: typing.Any) -> typing.Tuple[str, str]:
+    """The instruction set and mode a variant and mode name. LTX 2.5's set is
+    LTX 2.3's, so reading, saving or forgetting an override for either is
+    the same document entry."""
     if variant not in VARIANTS:
         raise IntegrationError(errors.REQUEST_INVALID, f"unknown variant {str(variant)[:20]!r}")
     if mode not in MODES:
         raise IntegrationError(errors.REQUEST_INVALID, f"unknown mode {str(mode)[:20]!r}")
-    return variant, mode
+    return prompt_set(variant), mode
 
 
 def override(variant: typing.Any, mode: typing.Any) -> str:
-    """The saved override for one of the four instruction sets, or ""."""
+    """The saved override for one of the six instruction sets, or "".
+
+    For LTX 2.5 that is LTX 2.3's: the two models run under one set."""
     variant, mode = _check(variant, mode)
     return _document()["overrides"].get(variant, {}).get(mode, "")
 
@@ -534,13 +574,18 @@ def clear_override(variant: typing.Any, mode: typing.Any) -> bool:
 
 
 def overrides() -> typing.Dict[str, typing.Dict[str, bool]]:
-    """Which of the four sets are overridden, without their text."""
+    """Which of the six sets are overridden, without their text - by set, so
+    LTX 2.5 is answered under ``ltx23``."""
     saved = _document()["overrides"]
-    return {variant: {mode: mode in saved.get(variant, {}) for mode in MODES} for variant in VARIANTS}
+    return {variant: {mode: mode in saved.get(variant, {}) for mode in MODES} for variant in PROMPT_SETS}
 
 
 def default_prompt(variant: typing.Any, mode: typing.Any) -> str:
-    """The API's own instructions for one set, or "" when it cannot say."""
+    """The API's own instructions for one set, or "" when it cannot say.
+
+    Asked of the API by the set's name, so LTX 2.5's default is the API's
+    ``ltx23`` pair - which it is, on an installation that knows 2.5 and on
+    one that does not."""
     variant, mode = _check(variant, mode)
     module = api()
     if module is None:
@@ -568,8 +613,8 @@ def effective_prompt(variant: typing.Any, mode: typing.Any) -> typing.Tuple[str,
 
 def system_prompts() -> dict:
     """Every default with its structure guide, as the API publishes them -
-    MiniMax's two variants and LTX 2.3's, with and without a picture; empty
-    when it is not here."""
+    MiniMax's two variants and the LTX set LTX 2.3 and 2.5 share, with and
+    without a picture; empty when it is not here."""
     module = api()
     if module is None:
         return {}
@@ -578,12 +623,12 @@ def system_prompts() -> dict:
     except Exception:
         return {}
     out = {}
-    for variant in VARIANTS:
+    for variant in PROMPT_SETS:
         block = raw.get(variant) if isinstance(raw, dict) and isinstance(raw.get(variant), dict) else None
         if block is None:
             continue
         out[variant] = {
-            "label": str(block.get("label") or VARIANT_LABELS[variant])[:80],
+            "label": str(block.get("label") or PROMPT_SET_LABELS[variant])[:80],
             MODE_TEXT: str(block.get("text") or ""),
             MODE_IMAGE: str(block.get("image") or ""),
             "structure": str(block.get("structure") or ""),
@@ -619,14 +664,20 @@ def submit(prompt: str, planned: typing.Mapping[str, typing.Any]) -> dict:
     # switched LLM Studio off is told that, and is not told the model is
     # missing; a Forge with no model configured is told that, and is not
     # told to turn something on that already is.
-    code, why = preflight(planned)
+    ready = capabilities()
+    code, why = _preflight(planned, ready)
     if code:
         raise IntegrationError(code, why)
     variant = planned["variant"] if planned.get("variant") in VARIANTS else FL2VA
-    ltx = variant == LTX23
+    ltx = variant in LTX_VARIANTS
     keywords: typing.Dict[str, typing.Any] = {"origin": ORIGIN, "remember": True}
     if not ltx:
         keywords["variant"] = variant
+    elif variant != LTX23 and variant in ready.get("ltx_models", []):
+        # The model it is written for, only where the writer takes one: an
+        # older writer has no such keyword and writes the same prompt under
+        # the same instructions without it. LTX 2.3 is the writer's default.
+        keywords["model"] = variant
     pictures = []
     try:
         for slot in SLOTS:
@@ -737,7 +788,11 @@ def preflight(planned: typing.Mapping[str, typing.Any]) -> typing.Tuple[str, str
     A cold runtime is none of those and is not a MiniPaint state at all: it
     is stage text on a job that is already running.
     """
-    ready = capabilities()
+    return _preflight(planned, capabilities())
+
+
+def _preflight(planned: typing.Mapping[str, typing.Any], ready: typing.Mapping[str, typing.Any]) -> typing.Tuple[str, str]:
+    """``preflight`` over a capabilities answer the caller already has."""
     if not ready["found"]:
         return errors.ENHANCE_EXTENSION_MISSING, ready["reason"]
     if ready["api_version"] > API_VERSION_SUPPORTED:
@@ -746,7 +801,7 @@ def preflight(planned: typing.Mapping[str, typing.Any]) -> typing.Tuple[str, str
         return errors.ENHANCE_SWITCHED_OFF, errors.message(errors.ENHANCE_SWITCHED_OFF)
     if not ready["configured"]:
         return errors.ENHANCE_NOT_CONFIGURED, errors.message(errors.ENHANCE_NOT_CONFIGURED)
-    if planned.get("variant") == LTX23 and not ready.get("ltx"):
+    if planned.get("variant") in LTX_VARIANTS and not ready.get("ltx"):
         return errors.ENHANCE_LTX_UNSUPPORTED, errors.message(errors.ENHANCE_LTX_UNSUPPORTED)
     if not ready["vision"] and (planned.get("slots") or {}):
         # The owning extension's own check can also answer "unreadable"
@@ -943,12 +998,14 @@ def availability(model: typing.Any = None) -> dict:
         return {"state": "unknown", "text": llm + " WanGP's model is not known yet; open the WanGP tab.", "variant": "", "capabilities": ready}
     if not variant:
         return {"state": "model", "text": llm + f" WanGP is on {label}, which neither writer writes for; enhanced presses are refused until "
-                "MiniMax H3 FL2VA, Ref2VA or LTX 2.3 Distilled is loaded.",
+                "MiniMax H3 FL2VA, Ref2VA, LTX 2.3 Distilled or LTX 2.5 Distilled is loaded.",
                 "variant": "", "capabilities": ready}
-    if variant == LTX23 and not ready.get("ltx"):
-        return {"state": "blocked", "text": llm + f" WanGP is on {label}, but this ModelSwitchRefiner cannot write LTX 2.3 prompts yet; update it.",
+    if variant in LTX_VARIANTS and not ready.get("ltx"):
+        return {"state": "blocked", "text": llm + f" WanGP is on {label}, but this ModelSwitchRefiner cannot write LTX prompts yet; update it.",
                 "variant": variant, "capabilities": ready}
-    return {"state": "ready", "text": llm + f" WanGP is on {label}: prompts are written as {VARIANT_LABELS[variant]}.", "variant": variant, "capabilities": ready}
+    shared = " under the LTX 2.3 instructions" if prompt_set(variant) != variant else ""
+    return {"state": "ready", "text": llm + f" WanGP is on {label}: prompts are written as {VARIANT_LABELS[variant]}{shared}.",
+            "variant": variant, "capabilities": ready}
 
 
 def describe() -> dict:
@@ -959,6 +1016,9 @@ def describe() -> dict:
         "origin": ORIGIN,
         "variants": list(VARIANTS),
         "slots": {variant: dict(mapping) for variant, mapping in SLOTS_FOR.items()},
+        # The instruction set each variant runs under: LTX 2.5 runs under
+        # LTX 2.3's, and ``overrides`` is keyed by set.
+        "prompt_sets": {variant: prompt_set(variant) for variant in VARIANTS},
         "overrides": overrides(),
         "capabilities": ready,
     }
@@ -967,7 +1027,7 @@ def describe() -> dict:
 __all__ = [
     "API_MODULE", "API_VERSION_SUPPORTED", "CANCEL_REASON", "ENHANCE_NAME", "FL2VA", "LLM_CANCELLED", "LLM_DONE", "LLM_FAILED",
     "LLM_QUEUED", "LLM_RUNNING", "LLM_STATES", "LLM_TERMINAL", "MAX_SYSTEM_PROMPT_CHARS", "MODES", "MODE_IMAGE", "MODE_LABELS", "MODE_TEXT",
-    "LTX23", "LTX_KIND", "MINIMAX_VARIANTS",
+    "LTX23", "LTX25", "LTX_KIND", "LTX_VARIANTS", "MINIMAX_VARIANTS", "PROMPT_SETS", "PROMPT_SET_LABELS", "PROMPT_SET_OF", "prompt_set",
     "ORIGIN", "REF2VA", "REJECTIONS", "SLOTS", "SLOTS_FOR", "SLOT_FIRST", "SLOT_LABELS", "SLOT_LAST", "SLOT_REFERENCE", "VARIANTS",
     "VARIANT_LABELS", "api", "availability", "cancel", "cancel_all", "capabilities", "clear_override", "default_prompt", "describe",
     "effective_prompt", "enabled", "follow", "model_block", "override", "overrides", "plan", "preflight", "release_runtime",

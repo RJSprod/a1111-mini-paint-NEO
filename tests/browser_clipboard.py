@@ -3574,7 +3574,31 @@ def check_the_history_button_opens_the_last_prompts(r: Results, page) -> None:
                 "UTC" in state["meta"] and "LTX-2 2.5 Distilled 22B" in state["meta"] and "enhanced" in state["meta"], state["meta"])
         r.check("a long prompt is clamped with More beside it, and a short one has no More",
                 state["firstClamped"] is True and state["firstMore"] == "More" and state["secondMore"] is False, str(state))
-        r.check("and the list scrolls inside the dialog", state["scrolls"] is True, str(state))
+        # A list that scrolls: in a window shorter than the ten entries, the
+        # list itself takes a scroll and the dialog stays inside the window.
+        # Measured in a short window rather than the suite's own, because
+        # whether ten short prompts overflow 950 pixels is a question about
+        # the fonts the browser happens to have - and on the CI runner's they
+        # fit, so a check that waited for them not to never passed there.
+        tall = page.viewport_size or {"width": 1400, "height": 950}
+        page.set_viewport_size({"width": tall["width"], "height": 480})
+        page.wait_for_timeout(300)
+        short = page.evaluate("""() => {
+            const layer = document.querySelector('.minipaint-clip-prompts');
+            const list = layer.querySelector('.minipaint-clip-prompts-list');
+            const box = layer.querySelector('.minipaint-clip-prompts-dialog').getBoundingClientRect();
+            const page = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
+            list.scrollTop = 0;
+            list.scrollTop = list.scrollHeight;
+            const moved = list.scrollTop;
+            const after = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
+            list.scrollTop = 0;
+            return { overflows: list.scrollHeight > list.clientHeight + 1, moved: moved,
+                     inWindow: box.top >= 0 && box.bottom <= window.innerHeight + 1, pageMoved: after !== page }; }""")
+        page.set_viewport_size(tall)
+        page.wait_for_timeout(300)
+        r.check("and in a window too short for the list, the list scrolls inside the dialog and the dialog stays in the window",
+                short["overflows"] and short["moved"] > 0 and short["inWindow"] and not short["pageMoved"], str(short))
         r.check("the dialog says it has taken the page, so the Forge Assistant puts its panel away",
                 state["overlays"] == [{"name": "clipboard-history", "open": True, "modal": True}], str(state["overlays"]))
 

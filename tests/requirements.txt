@@ -37,4 +37,12 @@ pillow
 httpx
 # The browser suites drive a real page; tests/run.py skips them when this is
 # missing rather than failing, because the rest of the suite does not need it.
-playwright
+#
+# Pinned, because the browser suite records its View Outputs clips with the
+# ffmpeg Playwright downloads beside Chromium, and that build is Playwright's
+# own: 1.63.0 brings ffmpeg v1011, which reads piped JPEG frames and writes VP8
+# WebM; 1.64.0 brings v1013, which exits with status 8 on that same command,
+# so the player's checks never ran and CI went red on a change that touched
+# none of it. Move this pin only with tests/browser_clipboard.py's _real_clip
+# checked against the new ffmpeg.
+playwright==1.63.0

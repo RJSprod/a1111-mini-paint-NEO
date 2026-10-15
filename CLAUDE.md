@@ -278,7 +278,11 @@ screen to a real press, stacking included, so this is checked for real.
 writes VP8 WebM and nothing else, and it wants `-i pipe:0` - `-` is "Protocol
 not found". Playwright's Chromium has no H.264, so a WanGP-shaped MP4 does not
 play in the browser suites at all; `_real_clip` makes the WebM the player's
-checks watch.
+checks watch. And it is a different build with each Playwright release: 1.63.0's
+ffmpeg v1011 does what `_real_clip` asks, 1.64.0's v1013 exits with status 8
+on the same command, and an unpinned `playwright` turned CI red on a pull
+request that touched none of it. `tests/requirements.txt` pins 1.63.0; move
+it only with `_real_clip` checked against the new build.
 
 **A percentage height inside a Gradio container resolves to auto.** The WanGP
 frame was given `height: 100%` of a container the stylesheet had correctly

@@ -64,7 +64,7 @@ from ..canvas import host, imaging
 from ..canvas import ui as canvas_ui
 from ..wangp import errors, protocol
 from ..wangp.errors import IntegrationError
-from . import TAB_ID, TAB_LABEL, config, enhance, history, outbox, routes, store
+from . import TAB_ID, TAB_LABEL, archives, config, enhance, history, outbox, routes, store
 
 #: How many answered send requests a tab remembers. Enough to cover a
 #: page whose framework is several sends behind, small enough that the
@@ -641,6 +641,20 @@ def _hex(value: typing.Any) -> str:
     return value if protocol.valid_handoff_id(value) else ""
 
 
+def _picture(value: typing.Any) -> str:
+    """A library asset id or an archive picture's reference - the two
+    handles a selection can be - or ""."""
+    return value if (protocol.valid_handoff_id(value) or archives.is_ref(value)) else ""
+
+
+#: Destinations only the Clipboard offers, beside the ones it shares with
+#: the Canvas. PNG Info reads a picture's generation parameters, so it is
+#: sent the file's own bytes - which a picture in the Canvas no longer has.
+CLIPBOARD_DESTINATIONS = {"pnginfo": "PNG Info"}
+#: Destinations that are handed the file as it is on disk, never pixels.
+FILE_TARGETS = ("pnginfo",)
+
+
 def _nonce() -> str:
     return secrets.token_hex(4)
 
@@ -690,25 +704,28 @@ def send_plan(target: typing.Any, asset_id: typing.Any) -> dict:
     told so plainly instead of being handed a payload it cannot deliver.
     """
     name = str(target or "")
-    label = canvas_ui.DESTINATION_LABELS.get(name, name)
-    if name not in canvas_ui.DESTINATION_LABELS and name != "minipaint":
+    label = canvas_ui.DESTINATION_LABELS.get(name) or CLIPBOARD_DESTINATIONS.get(name, name)
+    if name not in canvas_ui.DESTINATION_LABELS and name not in CLIPBOARD_DESTINATIONS and name != "minipaint":
         return {"ok": False, "code": errors.REQUEST_INVALID,
                 "message": f"{label or 'That destination'} is not a destination."}
-    library = store.store()
-    found = library.get(asset_id) if _hex(asset_id) else None
-    if found is None:
+    handle = _picture(asset_id)
+    if not handle:
         return {"ok": False, "code": errors.CLIPBOARD_ASSET_UNKNOWN,
                 "message": "Select an image in the browser first."}
+    if name in FILE_TARGETS:
+        return _file_plan(name, label, handle)
     try:
-        image = library.open_image(found.asset_id)
+        filename, image = picture_of(handle)
     except IntegrationError as error:
-        return {"ok": False, "code": error.code, "message": errors.message(error.code)}
+        unknown = error.code in (errors.CLIPBOARD_ASSET_UNKNOWN, errors.CLIPBOARD_NOT_CONFIGURED)
+        return {"ok": False, "code": error.code,
+                "message": "Select an image in the browser first." if unknown and not archives.is_ref(handle) else errors.message(error.code)}
 
-    plan: dict = {"ok": True, "target": name, "filename": found.filename,
+    plan: dict = {"ok": True, "target": name, "filename": filename,
                   "label": label, "backend": name in canvas_ui.BACKEND_TARGETS}
     if name == "minipaint":
         plan["instruction"] = "minipaint"
-        plan["asset"] = found.asset_id
+        plan["asset"] = handle
         return plan
     if name in ("img2img", "inpaint"):
         # The browser finishes these by writing the host canvas's hidden
@@ -748,6 +765,58 @@ def send_plan(target: typing.Any, asset_id: typing.Any) -> dict:
     return plan
 
 
+def picture_of(handle: typing.Any) -> typing.Tuple[str, typing.Any]:
+    """``(file name, PIL image)`` for a library asset or an archive picture.
+
+    The one place a send turns a selection into pixels, so the storage
+    folder and an archive cannot come to mean different things by "send".
+    """
+    if archives.is_ref(handle):
+        return archives.filename_of(handle), archives.open_image(handle)
+    library = store.store()
+    found = library.get(handle) if _hex(handle) else None
+    if found is None:
+        raise IntegrationError(errors.CLIPBOARD_ASSET_UNKNOWN, "not in the library")
+    return found.filename, library.open_image(found.asset_id)
+
+
+def _file_plan(name: str, label: str, handle: str) -> dict:
+    """A destination handed the file as it is: PNG Info.
+
+    PNG Info reads the generation parameters Forge wrote into the file, so
+    what it is given has to be the file's own bytes - a decoded and
+    re-encoded picture has none. The browser puts those bytes in the
+    component the way a person dropping the file would (the same upload
+    path Extras is filled by), so nothing crosses the framework's queue;
+    and there is no server-side fallback, because the only thing a server
+    could hand a ``gr.Image`` is pixels.
+    """
+    import base64
+
+    try:
+        if archives.is_ref(handle):
+            data, mime, filename = archives.read_bytes(handle)
+        else:
+            library = store.store()
+            found = library.get(handle)
+            if found is None:
+                raise IntegrationError(errors.CLIPBOARD_ASSET_UNKNOWN, "not in the library")
+            data, mime = library.read_bytes(found.asset_id)
+            filename = found.filename
+    except IntegrationError as error:
+        unknown = error.code in (errors.CLIPBOARD_ASSET_UNKNOWN, errors.CLIPBOARD_NOT_CONFIGURED) and not archives.is_ref(handle)
+        return {"ok": False, "code": error.code,
+                "message": "Select an image in the browser first." if unknown else errors.message(error.code)}
+    tab = current()
+    targets = tab.targets if tab is not None else host.destinations()
+    elem = getattr(targets.get(name), "elem_id", "") or ""
+    if not elem:
+        return {"ok": False, "code": errors.REQUEST_INVALID, "message": f"There is no {label} on this page to send to."}
+    return {"ok": True, "target": name, "filename": filename, "label": label, "backend": False,
+            "instruction": name, "elem": elem, "adds": False,
+            "payload": f"data:{mime};base64," + base64.b64encode(data).decode("ascii")}
+
+
 # ----------------------------------------------------------------- the tab --
 
 
@@ -776,6 +845,8 @@ class ClipboardTab:
             for key in canvas_ui.DESTINATION_LABELS
             if key in self.targets and key != canvas_ui.CLIPBOARD_TARGET
         ]
+        # And the ones only the Clipboard sends to, where the host has them.
+        self.destinations += [(key, label) for key, label in CLIPBOARD_DESTINATIONS.items() if key in self.targets]
 
     # -- what the page shows ------------------------------------------------
 
@@ -814,7 +885,7 @@ class ClipboardTab:
 
     def _refresh_outputs(self, message: str, selected: str = "", notes: typing.Sequence[str] = ()) -> tuple:
         cards = self._cards()
-        return (_status(message, notes), _hex(selected), self._menu_state(), *cards, self._queue_button())
+        return (_status(message, notes), _picture(selected), self._menu_state(), *cards, self._queue_button())
 
     # -- WanGP's state, as the button shows it -----------------------------
 
@@ -1002,17 +1073,24 @@ class ClipboardTab:
             assets = self.library.refresh()
         except IntegrationError as error:
             return self._refresh_outputs(errors.message(error.code))
-        chosen = _hex(selected)
+        chosen = _picture(selected)
         last = self.library.last_import
         if last is not None and self._asset(last[0]) is not None:
             chosen = last[0]
             self.library.last_import = None
-        if chosen and self._asset(chosen) is None:
+        if chosen and not archives.is_ref(chosen) and self._asset(chosen) is None:
             chosen = ""
         cleared = self._clear_missing_slots()
         notes = [f"{', '.join(cleared)}: the image is no longer in the folder, so the slot is back to Use WanGP"] if cleared else []
         count = len(assets)
-        return self._refresh_outputs(f"{count} image{'s' if count != 1 else ''} in the folder.", chosen, notes)
+        message = f"{count} image{'s' if count != 1 else ''} in the folder."
+        viewing = archives.current_view()
+        if viewing:
+            # The grid is showing an archive, and its own listing says what
+            # is in it; this read was of the storage folder, for the cards.
+            message = (f"Showing the archive {archives.find(viewing)['name']} (read-only); "
+                       f"{count} image{'s' if count != 1 else ''} in the storage folder.")
+        return self._refresh_outputs(message, chosen, notes)
 
     def sort_request(self, value, selected):
         """A sort press: the mode, then a nonce so a repeat still counts.
@@ -1056,7 +1134,19 @@ class ClipboardTab:
     # -- the composer ---------------------------------------------------------
 
     def _assign(self, slot: str, asset_id: str) -> typing.Tuple[dict, str]:
-        asset = self._asset(asset_id)
+        copied = ""
+        if archives.is_ref(asset_id):
+            # A slot card holds a library asset, which is what lets History
+            # and Load bring a request back. An archive picture becomes one
+            # by being copied into the storage folder - byte for byte, once
+            # for the same bytes - and the archive is only read.
+            try:
+                asset = archives.adopt(asset_id)
+            except IntegrationError as error:
+                return history.load_draft(), errors.message(error.code)
+            copied = " (copied from the archive into the storage folder)"
+        else:
+            asset = self._asset(asset_id)
         if asset is None:
             return history.load_draft(), "Select an image in the browser first."
         draft = history.load_draft()
@@ -1066,10 +1156,10 @@ class ClipboardTab:
             draft[SLOT_KEYS[slot]] = asset.asset_id
         history.save_draft(draft)
         label = next(title for name, title, _field in SLOTS if name == slot)
-        return draft, f"{label}: {asset.filename}."
+        return draft, f"{label}: {asset.filename}{copied}."
 
     def assign(self, slot, selected):
-        draft, message = self._assign(slot, _hex(selected))
+        draft, message = self._assign(slot, _picture(selected))
         return (*self._cards(draft), _status(message))
 
     def slot_action(self, value):
@@ -1088,7 +1178,7 @@ class ClipboardTab:
             label = next(title for name, title, _field in SLOTS if name == slot)
             return (*self._cards(draft), _status(f"{label}: Use WanGP.", ["nothing on the WanGP page was changed"]))
         if action == "assign" and len(parts) >= 3:
-            draft, message = self._assign(slot, _hex(parts[2]))
+            draft, message = self._assign(slot, _picture(parts[2]))
             return (*self._cards(draft), _status(message))
         return (*self._cards(draft), gr.skip())
 
@@ -1507,7 +1597,7 @@ class ClipboardTab:
                 text = fresh
         parts = text.split(":")
         target = parts[0] if parts else ""
-        asset_id = _hex(parts[1]) if len(parts) > 1 else ""
+        asset_id = _picture(parts[1]) if len(parts) > 1 else ""
         # The browser stamps each request so it can recognise the answer to
         # its own; echoed back untouched.
         ack = parts[2][:32] if len(parts) > 2 else ""
@@ -1543,18 +1633,29 @@ class ClipboardTab:
         label = dict(self.destinations).get(target, target)
         if target not in dict(self.destinations):
             return ("", "", "", _status(f"{label or 'That destination'} is not available in this WebUI."), ack)
-        asset = self._asset(asset_id or selected)
-        if asset is None:
+        handle = asset_id or _picture(selected)
+        if not handle:
             return ("", "", "", _status("Select an image in the browser first."), ack)
+        if target in FILE_TARGETS:
+            # Placed by the page or not at all: the server has nothing it
+            # could put in PNG Info that would still carry the parameters.
+            name = archives.filename_of(handle) if archives.is_ref(handle) else getattr(self._asset(handle), "filename", "")
+            if not name:
+                return ("", "", "", _status("Select an image in the browser first."), ack)
+            if delivered:
+                return ("", "", "", _status(f"Sent {name} to {label}."), ack)
+            return ("", "", "", _status(f"{name} could not be placed in {label} from this page."), ack)
         try:
-            image = self.library.open_image(asset.asset_id)
+            filename, image = picture_of(handle)
         except IntegrationError as error:
+            if error.code in (errors.CLIPBOARD_ASSET_UNKNOWN, errors.CLIPBOARD_NOT_CONFIGURED) and not archives.is_ref(handle):
+                return ("", "", "", _status("Select an image in the browser first."), ack)
             return ("", "", "", _status(errors.message(error.code)), ack)
         if delivered:
-            return ("", "", "", _status(f"Sent {asset.filename} to {label}."), ack)
+            return ("", "", "", _status(f"Sent {filename} to {label}."), ack)
         nonce = _nonce()
         if target == "minipaint":
-            return ("", "", f"{asset.asset_id}:{nonce}", _status(f"Sent {asset.filename} to Mini Paint."), ack)
+            return ("", "", f"{handle}:{nonce}", _status(f"Sent {filename} to Mini Paint."), ack)
         payload = ""
         if target == "inpaint":
             instruction = f"inpaint:{image.width}x{image.height}"
@@ -1569,8 +1670,8 @@ class ClipboardTab:
             # this tab's oldest fault said in a new place: the only thing
             # that knows whether the picture arrived is the event that puts
             # it there, and it writes this same line when it is done.
-            return (instruction, payload, "", _status(f"Placing {asset.filename} in {label}…"), ack)
-        return (instruction, payload, "", _status(f"Sent {asset.filename} to {label}."), ack)
+            return (instruction, payload, "", _status(f"Placing {filename} in {label}…"), ack)
+        return (instruction, payload, "", _status(f"Sent {filename} to {label}."), ack)
 
     def send_backend(self, request, selected):
         """Write a destination the browser cannot write itself.
@@ -1617,12 +1718,14 @@ class ClipboardTab:
         # request whose asset field was present but not an id fell through to
         # nothing at all rather than to the selection, where ``send`` beside
         # it falls back correctly.
-        asset = self._asset((_hex(parts[1]) if len(parts) > 1 else "") or selected)
-        if asset is None:
+        handle = (_picture(parts[1]) if len(parts) > 1 else "") or _picture(selected)
+        if not handle:
             return (*skips, _status("Select an image in the browser first."))
         try:
-            image = self.library.open_image(asset.asset_id)
+            filename, image = picture_of(handle)
         except IntegrationError as error:
+            if error.code in (errors.CLIPBOARD_ASSET_UNKNOWN, errors.CLIPBOARD_NOT_CONFIGURED) and not archives.is_ref(handle):
+                return (*skips, _status("Select an image in the browser first."))
             return (*skips, _status(errors.message(error.code)))
         host.staged(image)
         outputs: typing.List[typing.Any] = []
@@ -1630,7 +1733,7 @@ class ClipboardTab:
             outputs.append(([image] if key in canvas_ui.STITCH_TARGETS else image) if key == target else gr.skip())
         label = dict(self.destinations).get(target, target)
         notes = ["it is now the only reference image there"] if target in canvas_ui.STITCH_TARGETS else []
-        return (*outputs, _status(f"Sent {asset.filename} to {label}.", notes))
+        return (*outputs, _status(f"Sent {filename} to {label}.", notes))
 
     # -- the folder and the file operations ---------------------------------------
 
@@ -1648,12 +1751,16 @@ class ClipboardTab:
         return gr.update(visible=True), gr.update(value=current.storage_root), ""
 
     def open_rename(self, selected):
+        if archives.is_ref(selected):
+            return gr.update(visible=False), gr.update(), _status(errors.message(errors.ARCHIVE_READ_ONLY))
         asset = self._asset(selected)
         if asset is None:
             return gr.update(visible=False), gr.update(), _status("Select an image in the browser first.")
         return gr.update(visible=True), gr.update(value=os.path.splitext(asset.filename)[0]), gr.skip()
 
     def rename(self, selected, name):
+        if archives.is_ref(selected):
+            return gr.update(visible=False), _status(errors.message(errors.ARCHIVE_READ_ONLY)), *self._cards()
         try:
             asset = self.library.rename(selected, name)
         except IntegrationError as error:
@@ -1662,12 +1769,16 @@ class ClipboardTab:
         return gr.update(visible=False), _status(f"Renamed to {asset.filename}."), *self._cards()
 
     def open_delete(self, selected):
+        if archives.is_ref(selected):
+            return gr.update(visible=False), _status(errors.message(errors.ARCHIVE_READ_ONLY))
         asset = self._asset(selected)
         if asset is None:
             return gr.update(visible=False), _status("Select an image in the browser first.")
         return gr.update(visible=True), gr.skip()
 
     def delete(self, selected):
+        if archives.is_ref(selected):
+            return (gr.update(visible=False), *self._refresh_outputs(errors.message(errors.ARCHIVE_READ_ONLY), selected))
         try:
             asset = self.library.delete(selected)
         except IntegrationError as error:
@@ -2127,10 +2238,10 @@ class ClipboardTab:
                                      receipt=p["receive_receipt"])
 
     def _picture_for_canvas(self, value):
-        asset_id = _hex(str(value or "").split(":", 1)[0])
-        if not asset_id:
+        handle = _picture(str(value or "").split(":", 1)[0])
+        if not handle:
             return None
-        return self.library.open_image(asset_id)
+        return picture_of(handle)[1]
 
 
 # ----------------------------------------------------------------- the tab --

@@ -348,7 +348,7 @@ def document_checks(r: Results, base: pathlib.Path) -> None:
     written = config.path_of(config.CONFIG_NAME).read_text(encoding="utf-8")
     r.check("the file holds exactly the declared keys",
             set(json.loads(written)) == {"schema_version", "storage_root", "root_id", "intercept", "intercept_target", "intercept_inherit",
-                                         "sort", "thumbnail", "outputs_folder"},
+                                         "sort", "thumbnail", "outputs_folder", "archives", "view"},
             str(sorted(json.loads(written))))
     # The intercept is a destination now, and the older switch is a view of
     # it in both directions: an old file reads as the destination it meant,

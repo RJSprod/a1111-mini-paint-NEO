@@ -212,6 +212,15 @@ def build_host(extension_tabs_fn, extra_head: str = "", hidden_tabs=(), gallery_
 
     with gr.Blocks(analytics_enabled=False) as pnginfo:
         gr.Textbox(label="PNG Info", elem_id="pnginfo_box")
+        # Forge's own shape: a PIL Image under this id whose change reads the
+        # generation parameters out of the file's text chunks - which only a
+        # file sent as its own bytes still has.
+        refs["pnginfo_image"] = gr.Image(label="Source", type="pil", elem_id="pnginfo_image", image_mode="RGBA", sources="upload")
+        refs["pnginfo_html"] = gr.HTML(elem_id="pnginfo_html")
+        refs["pnginfo_image"].change(
+            fn=lambda image: "" if image is None else str((getattr(image, "info", None) or {}).get("parameters", "(no parameters)")),
+            inputs=[refs["pnginfo_image"]], outputs=[refs["pnginfo_html"]],
+        )
 
     interfaces = [
         (txt2img, "txt2img", "txt2img"),

@@ -3184,7 +3184,9 @@ window.minipaintCanvas = (function () {
     //: still preferred: it is the host's, and it knows about sub-tabs.
     const HOST_PANELS = {
         txt2img: "tab_txt2img", img2img: "tab_img2img", inpaint: "tab_img2img",
-        extras: "tab_extras", stitch_txt2img: "tab_txt2img", stitch_img2img: "tab_img2img"
+        extras: "tab_extras", stitch_txt2img: "tab_txt2img", stitch_img2img: "tab_img2img",
+        // No helper of the host's opens it, so its panel is the only way in.
+        pnginfo: "tab_pnginfo"
     };
 
     /**
@@ -3217,9 +3219,9 @@ window.minipaintCanvas = (function () {
         // receive chain, which is how a picture handed in from another tab
         // says it arrived. See watchReceive.
         if (name === "canvas" || name === "clipboard") { receiveLanded(); }
-        if (name in helpers) {
+        if (name in helpers || name in HOST_PANELS) {
             const panel = HOST_PANELS[name];
-            if (typeof window[helpers[name]] === "function") {
+            if (helpers[name] && typeof window[helpers[name]] === "function") {
                 try { window[helpers[name]](); } catch (error) { /* the panel is tried next */ }
                 // The helper returns nothing, so what it did is read off the
                 // page rather than assumed. A host whose panel cannot be

@@ -80,7 +80,11 @@ def run() -> Results:
     r.check("the canvas was built", canvas is not None)
     if canvas is None:
         return r
-    r.check("every destination was found", set(canvas.targets) == {"img2img", "inpaint", "inpaint_mask", "extras", "stitch_txt2img", "stitch_txt2img_enable", "stitch_img2img", "stitch_img2img_enable"}, str(sorted(canvas.targets)))
+    r.check("every destination was found", set(canvas.targets) == {"img2img", "inpaint", "inpaint_mask", "extras", "stitch_txt2img", "stitch_txt2img_enable", "stitch_img2img", "stitch_img2img_enable", "pnginfo"}, str(sorted(canvas.targets)))
+    # PNG Info is found for the Clipboard, which sends it a file's own bytes;
+    # a Canvas picture has no generation parameters left to read, so the
+    # Canvas's own Send to menu does not offer it.
+    r.check("and PNG Info is not one of the Canvas's own destinations", "pnginfo" not in canvas.destinations, str(canvas.destinations))
     r.check("Extras and the ImageStitch galleries are written from the backend", canvas.image_targets == ["extras", "stitch_txt2img", "stitch_img2img"], str(canvas.image_targets))
     r.check("the inpaint mask layer was found", canvas.targets["inpaint_mask"] is refs["init_img_with_mask"].foreground)
     r.check("the ImageStitch galleries and their boxes are the host's", canvas.targets["stitch_txt2img"] is refs["txt2img_stitch_gallery"] and canvas.targets["stitch_img2img_enable"] is refs["img2img_stitch_enable"])

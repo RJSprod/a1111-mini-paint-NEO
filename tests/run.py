@@ -71,6 +71,10 @@ SUITES = [
     # page - what it asks, what it sends, what Cancel leaves.
     "test_intercept_browser",
     "test_clipboard_store",
+    # Archives: read-only folders the grid shows in place of the storage
+    # folder - listed whole without opening a picture, named by reference,
+    # thumbnailed once into a cache of their own, never written to.
+    "test_clipboard_archives",
     "test_clipboard_outbox",
     "test_clipboard_enhance",
     # Which WanGP models the Clipboard sends to, and when it may: the bridge's

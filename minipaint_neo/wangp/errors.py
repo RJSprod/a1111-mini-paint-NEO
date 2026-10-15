@@ -155,6 +155,21 @@ TARGET_CHECK_UNAVAILABLE = "TARGET_CHECK_UNAVAILABLE"
 #: The LTX writer (for LTX 2.3 and 2.5) is not in the installed ModelSwitchRefiner.
 ENHANCE_LTX_UNSUPPORTED = "ENHANCE_LTX_UNSUPPORTED"
 
+# -- the Clipboard's archives ------------------------------------------------
+#: Folders on the Forge host the Clipboard shows in place of its storage
+#: folder and never writes to. ``clipboard/archives.py`` decides.
+#: An archive id that is not in the list.
+ARCHIVE_UNKNOWN = "ARCHIVE_UNKNOWN"
+#: The archive's folder is not there, or cannot be listed.
+ARCHIVE_UNREADABLE = "ARCHIVE_UNREADABLE"
+#: The picture is no longer in the archive.
+ARCHIVE_FILE_UNKNOWN = "ARCHIVE_FILE_UNKNOWN"
+#: The reference names something that is not a plain picture file directly
+#: inside the archive: a separator, a link, a dot file, another kind of file.
+ARCHIVE_FILE_OUTSIDE = "ARCHIVE_FILE_OUTSIDE"
+#: Rename or Delete asked of an archive picture.
+ARCHIVE_READ_ONLY = "ARCHIVE_READ_ONLY"
+
 # -- everything else --------------------------------------------------------
 WANGP_RESTARTED = "WANGP_RESTARTED"
 INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -253,6 +268,11 @@ MESSAGES: dict[str, str] = {
     TARGET_NOT_DOWNLOADED: "The model the WanGP page is on is not downloaded yet. Generate with it once in the WanGP tab so WanGP fetches its files.",
     TARGET_CHECK_UNAVAILABLE: "WanGP's bridge cannot say whether its model is set up yet. Wait for WanGP to finish starting, or install the bridge again from the WanGP tab's setup.",
     ENHANCE_LTX_UNSUPPORTED: "The installed ModelSwitchRefiner cannot write LTX prompts yet; update it, or switch enhanced prompts off.",
+    ARCHIVE_UNKNOWN: "That archive is no longer in the list; open Menu → Archives to see the ones there are.",
+    ARCHIVE_UNREADABLE: "That archive's folder cannot be read on the Forge host right now.",
+    ARCHIVE_FILE_UNKNOWN: "That picture is no longer in the archive; press Refresh.",
+    ARCHIVE_FILE_OUTSIDE: "That is not a picture inside the archive, so it was not used.",
+    ARCHIVE_READ_ONLY: "Archives are read-only: an archive picture cannot be renamed or deleted here.",
 }
 
 #: Codes that mean "the setup on disk no longer describes reality". The tab

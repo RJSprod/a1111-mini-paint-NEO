@@ -146,6 +146,8 @@ Refresh, and every card and history entry that used it says so.
   a small panel opens with an ordinary paste box (Ctrl+V into it, or drop a file on it).
   Ctrl+V anywhere on the tab does the same.
 * **Upload image(s)** — the file chooser, several at once.
+* **Archives ›** — show the storage folder or one of the archives in the grid, and
+  **Manage archives…**, the screen that adds and removes them. See *Archives* below.
 * **Choose storage folder**, **Rename selected**, **Delete selected** — the file operations.
   A rename keeps the id and the extension and refuses a name with a separator, a leading
   dot, a reserved name or nothing before the extension; two files that want one name become
@@ -161,8 +163,13 @@ compact list under the button that was pressed, and pressing that button again c
 
 * **Sort** — the six orders above.
 * **Send selection to** — Mini Paint, img2img, Inpaint, Extras, ImageStitch: the same routes
-  the Canvas's own *Send to* takes, one picture at a time. Greyed with *Select an image
-  first* when nothing is chosen. Tap a thumbnail to select it; drop one on a
+  the Canvas's own *Send to* takes, one picture at a time - and **PNG Info**, which only the
+  Clipboard offers. PNG Info reads the generation parameters Forge wrote into a file, so it
+  is handed the file's **own bytes** (a PNG's text chunks, a JPEG's or WebP's EXIF comment)
+  over the same upload path Extras is filled by - never a decoded picture, which would
+  arrive with none. There is no server-side fallback for it: the only thing the server could
+  put in a `gr.Image` is pixels. Its tab opens once the picture has landed. Greyed with
+  *Select an image first* when nothing is chosen. Tap a thumbnail to select it; drop one on a
 card to assign it; drop a file from your desktop on a card to import it into the folder and
 assign it in one go. Only PNG, JPEG and WebP are library files — an animated file, a text
 file, or anything over the handoff ceilings (64 MiB, 16384 px on a side, 64 megapixels) is
@@ -173,6 +180,93 @@ Nothing in the grid names the folder: every thumbnail is fetched by its opaque 3
 id (`/minipaint-clipboard/image/<id>?thumb=1`), the file's name is shown as text, and the
 route refuses an id that is not in the index, a name that is not a plain filename, a
 symlink, and a file that has moved outside the folder (`CLIPBOARD_ASSET_OUTSIDE_ROOT`).
+
+## Archives
+
+An **archive** is a folder on the machine running Forge - usually thousands of pictures in
+one place - that the grid can show **in place of the storage folder**. Any number can be
+listed; one is shown at a time. **Menu → Archives › → Manage archives…** opens the screen
+that adds one (type the folder's path on the Forge host and press *Add*; a folder that does
+not exist, a file, and the storage folder itself are refused with their reason), shows one
+(*Show*) and takes one off the list (*Remove* - the folder and its files are not touched).
+*Archives ›* itself is the quick way between them: *Storage folder* and each archive, the
+one on screen ticked. Once there is an archive, a bar over the grid says which folder the
+grid is showing, that an archive is read-only and that new pictures go to the storage
+folder, and its button opens the same list. The choice is kept on the host
+(`clipboard.json`'s `view`), like the sort.
+
+**Read-only, and enforced by the server.** No route writes into an archive: nothing is
+created, renamed, deleted, touched or indexed there, and its thumbnails live in this
+extension's data folder (`clipboard-archive-thumbnails/`). Rename and Delete are off for an
+archive picture (the menu's two and the toolbar's Delete), and a server asked anyway says
+`ARCHIVE_READ_ONLY`. Paste, upload, a drop on a card and the gallery's 🖌️ still save to the
+**storage folder** while an archive is on screen - the toast says so.
+
+**Listed whole, opened only when looked at.** An archive is not paged: one answer from
+`/minipaint-clipboard/archive/list` carries every picture in it, sorted by the same six
+orders as the storage folder. It is read from the folder's **directory entries alone** - the
+name, the size, the time - so listing ten thousand photographs opens none of them (the
+storage folder's Refresh hashes every new file, which is what keeps a renamed file's id; done
+to an archive it would read the whole archive). What is listed: the PNG, JPEG and WebP files
+directly in the folder - not its subfolders, hidden files, links, empty files or anything over
+the handoff ceiling. A file that is not the picture its name says is listed, and its tile is
+marked once the server has found that out.
+
+**In view first.** Every picture gets a tile, laid out exactly as the storage folder's grid
+lays out its own, but a tile is an empty place until it is looked at - no address, no
+request - and only the rows near the view are in the page at all; the rest are a height the
+scroll bar knows about. The thumbnails of the tiles **in view** are asked for first, in
+reading order, then the screen past the view, a few at a time (three, which leaves the rest
+of the six connections a page has on HTTP/1.1 to everything else), over plain requests with
+a deadline each (twenty seconds; one more try, then the tile is marked). **When the view
+moves the order is decided again**: a request for a tile that has left the view is dropped,
+and while a tile in view is still waiting no request outside the view goes on, so what you
+are looking at always comes next. New requests wait for a scroll to settle (or start every
+fifth of a second during a long one), so a fling across the archive asks for nothing on its
+way - the pictures it passed over are never requested. The server finishes a thumbnail it
+started even when the page dropped the request, so the next look at that tile is a cache
+read.
+
+**Kept, three times.** A thumbnail is made once (320 px WebP, about 10-12 KiB for a
+photograph; a JPEG decoded at a fraction of its size; turned upright by its EXIF) and kept in
+the server's memory and on its disk under a **budget of its own** - 1 GiB, about eighty-five
+thousand thumbnails - least recently used out, so an archive never pushes the storage
+folder's thumbnails out of their 64 MiB. Two asks for one thumbnail at the same moment make
+it once. And its address carries the file's size and time (`?thumb=1&v=<mtime>-<size>`), so it
+is answered `immutable` for a year and the browser keeps it: a picture seen once is not asked
+of the server again until the file changes or the browser's cache is cleared. (A browser that
+clears its cache when it closes - LibreWolf does, as it ships - asks again after a restart,
+and the server answers from its disk without opening the original.) The page keeps the last
+eight hundred it drew besides, so scrolling back is instant.
+
+**A picture is named by reference, never by path.** `ar-<archive id>-<name in URL-safe
+base64>`: the archive's id says which folder and the name which file, and the server proves
+it is a regular file directly inside that archive before anything opens it - a separator, a
+dot file, a link, another kind of file, a file that has gone and an archive that has left the
+list are each refused with their own code (`ARCHIVE_*`). The same picture has the same
+reference after a restart, which is what lets the browser's cached thumbnail be used.
+
+**What an archive picture can do.** Everything a library picture can, except be changed:
+*Send selection to* any destination (PNG Info gets the file's own bytes, Mini Paint the
+picture through the Canvas's own receive), and the full-screen view. Put on a card with
++First, +Last or +Ref it is **copied into the storage folder**, byte for byte, and the card
+holds the copy - a card holds library pictures, which is what lets History and Load bring a
+request back. The same bytes are copied once: pressing +First again uses the copy already
+there. The status line says *copied from the archive into the storage folder*.
+
+## Full screen
+
+A tile large enough to hold it - from 120 px on the size slider - has a small button in its
+upper right corner (drawn, never a character a theme could swap). Pressing it selects the
+tile and opens its picture over everything: the browser's **own full screen** where it grants
+one, the window where it does not (some phone browsers). It is the one time the grid loads a
+whole picture, and only the one asked for; the tile's thumbnail stands in until it arrives.
+**A double tap** - or a double click, or Escape - closes it. It asks whether *it* is the full
+screen element before leaving full screen, so over the Forge Assistant's focus mode, which
+makes the whole document full screen, closing it leaves the page's full screen where it was.
+It says it has taken the page (`minipaint:overlay`, name `clipboard-viewer`), as the History
+and Archives dialogs do (`clipboard-history`, `clipboard-archives`). With a tile focused, `F`
+opens it too.
 
 ## The composer
 
@@ -829,7 +923,7 @@ it was ignored" case.
 
 | what | where |
 | --- | --- |
-| the folder, the intercept destination, the sort, the thumbnail size and the outputs folder | `<Forge data_path>/a1111-mini-paint-NEO/clipboard.json` |
+| the folder, the intercept destination, the sort, the thumbnail size, the outputs folder, the archives (id, path, name each) and which one is shown | `<Forge data_path>/a1111-mini-paint-NEO/clipboard.json` |
 | the index: id, filename, size, dimensions, digest, source per file | `…/clipboard-index.json` (rebuilt from the folder on Refresh) |
 | the composer's draft | `…/clipboard-draft.json` |
 | the queue outbox: every press as a job, with its request, its state, its enhancement and its place in WanGP | `…/clipboard-outbox.json` (schema 3; a finished job kept two minutes, a failure until it is dismissed, the list capped) |
@@ -838,8 +932,9 @@ it was ignored" case.
 | History: the last ten prompts sent from here, as typed, with when, the model and whether it was enhanced | `…/clipboard-prompts.json` (ten; the same words sent again move up) |
 | the Send to WanGP popup's own history: prompt, roles, inherit, enhance, a small preview per recipe | `…/clipboard-intercept-history.json` (100 unpinned, pinned kept) |
 | View Outputs: which files WanGP made for which request, where each one is, and that request's recipe for Load (the typed and the written prompt, library picture ids, the model) | `…/clipboard-outputs.json` (paths only; the videos are never moved or copied) |
-| the pictures | the storage folder you chose, and only there |
-| thumbnails | in memory, rebuilt as needed; never on disk |
+| the pictures | the storage folder you chose, and only there; an archive's stay in the archive, which is never written to |
+| thumbnails | in memory, and on disk in `…/clipboard-thumbnails/` (64 MiB, least recently used out) - never in the storage folder |
+| an archive's thumbnails | in memory, and on disk in `…/clipboard-archive-thumbnails/` (1 GiB, least recently used out) - never in the archive |
 | images staged through the public API | `…/runtime/staging/<32 hex>.png`, swept after 30 minutes |
 | a gallery picture frozen for the popup | the same staging folder and sweep; released by Cancel, or when a server-run job has adopted it |
 | images prepared for one queue request | `…/runtime/handoff/<32 hex>.png`, released when the request ends |
@@ -882,6 +977,11 @@ tab's own; the tab, the toast and the log say the same thing about the same fail
 | `CLIPBOARD_NOT_CONFIGURED` | no storage folder yet. Menu → Choose storage folder. |
 | `CLIPBOARD_ASSET_UNKNOWN` | that id is not in the index — the file left the folder. Refresh. |
 | `CLIPBOARD_ASSET_OUTSIDE_ROOT` | the indexed entry no longer resolves inside the folder (a symlink, a move). Not used. |
+| `ARCHIVE_UNKNOWN` | that archive is no longer in the list. Menu → Archives. |
+| `ARCHIVE_UNREADABLE` | the archive's folder is not there, or cannot be listed, on the Forge host right now. |
+| `ARCHIVE_FILE_UNKNOWN` | that picture is no longer in the archive. Refresh. |
+| `ARCHIVE_FILE_OUTSIDE` | the reference names something that is not a picture file directly inside the archive (a separator, a link, a dot file, another kind of file). Not used. |
+| `ARCHIVE_READ_ONLY` | Rename or Delete was asked of an archive picture. Archives are never written to. |
 | `INTERCEPT_IMAGE_EXPIRED` | the picture the popup froze is no longer there - cancelled, swept, or already taken by a server-run job. Press the gallery button again; nothing was queued. |
 | `INTERCEPT_NO_IMAGE_ROLE` | the WanGP page's current model reads no role the picture could fill, so the request was refused rather than sent without it. |
 | `REQUEST_INVALID` | the request is not one the API carries: a bad id, a wrong kind, a start mode that is not `auto` or `never`, an unreadable shape. |

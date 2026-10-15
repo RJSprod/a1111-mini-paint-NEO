@@ -12,7 +12,7 @@ because it was learned the hard way.
 ```
 pip install -r tests/requirements.txt
 python -m playwright install chromium
-python tests/run.py                    # 35 suites; every one must run
+python tests/run.py                    # 36 suites; every one must run
 ```
 
 Gradio is pinned to 4.40.0 because that is what the target Forge ships, and the

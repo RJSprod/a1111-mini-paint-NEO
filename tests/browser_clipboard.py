@@ -3728,6 +3728,23 @@ def _pnginfo_text(page):
     return page.evaluate("() => { const h = document.getElementById('pnginfo_html'); return h ? h.textContent : null; }")
 
 
+def _png_info_opened(page, timeout=15000):
+    """Wait for the send's last step: the PNG Info tab shown.
+
+    PNG Info's own text changes the moment the file lands, and the Clipboard
+    opens the tab only after it has proved the delivery - a moment later, and
+    longer in a slower browser. A check that went back to the Clipboard on the
+    text alone was pulled back to PNG Info by the switch that followed, and the
+    Clipboard's buttons were on a hidden tab (CI's headless shell, run 107).
+    """
+    try:
+        page.wait_for_function("""() => { const p = document.getElementById('tab_pnginfo');
+            return !!p && getComputedStyle(p).display !== 'none'; }""", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
 def _select_tile(page, name):
     """Select the tile showing this name, and wait for the server to hear it."""
     found = page.evaluate("""n => {
@@ -3770,9 +3787,7 @@ def check_a_picture_sends_to_png_info(r: Results, page, library) -> None:
         arrived = False
     r.check("PNG Info reads the picture's generation parameters - the file arrived as it is",
             arrived, repr(_pnginfo_text(page)))
-    shown = page.evaluate("""() => { const p = document.getElementById('tab_pnginfo');
-        return !!p && getComputedStyle(p).display !== 'none'; }""")
-    r.check("and the PNG Info tab is opened once it has", shown)
+    r.check("and the PNG Info tab is opened once it has", _png_info_opened(page))
     time.sleep(0.6)
     r.check("and the page says it went", (toast(page) or "").startswith("Sent "), toast(page))
     open_clipboard(page)
@@ -3970,6 +3985,8 @@ def check_an_archive_loads_what_is_in_view_first(r: Results, page) -> None:
         except Exception:
             arrived = False
         r.check("with its parameters, read straight from the archive's file", arrived, repr(_pnginfo_text(page)))
+        r.check("and the send ends on the PNG Info tab", _png_info_opened(page))
+        time.sleep(0.5)
         open_clipboard(page)
         storage = pathlib.Path(clip_config.load().storage_root)
         copies_before = len(list(storage.glob("img-0000*.png")))

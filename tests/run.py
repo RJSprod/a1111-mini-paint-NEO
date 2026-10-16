@@ -11,8 +11,9 @@ whose imports reach a changed module, and any suite that names a changed file
 - or, for the three browser suites, whose imports reach a module that names it,
 because those serve the page the bundles and the stylesheet make. A changed
 file of code that no suite reaches runs everything; a changed note runs
-nothing. It is for while working: it cannot see one suite's state reaching
-another, so CI runs every suite on every push, and so should a run before one.
+nothing. It cannot see one suite's state reaching another, so it is what a
+pull request's CI runs and every suite runs again on main after each merge
+(.github/workflows/tests.yml).
 ``MINIPAINT_BROWSER_ONLY=archive,scrubber`` narrows the Clipboard's browser
 suite to the checks whose names hold one of those words (see
 tests/browser_clipboard.py).
@@ -204,8 +205,10 @@ def _run_isolated(name: str) -> str:
 #: is read from the checkout; nothing is imported.
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
-#: Changing one of these changes how every suite runs.
-EVERYTHING = {"tests/run.py", "tests/requirements.txt"}
+#: Changing one of these changes how every suite runs - the workflow among
+#: them, since a pull request that changes how CI runs is checked by running
+#: everything under it.
+EVERYTHING = {"tests/run.py", "tests/requirements.txt", ".github/workflows/tests.yml"}
 #: A changed file with one of these suffixes is code: if no suite reaches it,
 #: everything runs rather than nothing.
 CODE = {".py", ".js", ".mjs", ".css", ".html", ".json"}
@@ -510,7 +513,14 @@ def main(argv: typing.Optional[typing.List[str]] = None) -> int:
     print(f"\n{round(time.monotonic() - started)} s.")
     if suites is not SUITES:
         print(f"{len(suites) - len(skipped)} of the {len(suites)} affected suites ran (of {len(SUITES)}); "
-              "CI runs them all.")
+              "every suite runs on main after a merge.")
+        # A skip is a broken environment here too: CI's pull request run is
+        # this one.
+        if skipped and os.environ.get("MINIPAINT_REQUIRE_ALL_SUITES"):
+            missing = [name for name in skipped if name not in BROWSER or _browser_expected()]
+            if missing:
+                print(f"FAILED: MINIPAINT_REQUIRE_ALL_SUITES is set and these did not run: {', '.join(missing)}")
+                ok = False
         return 0 if ok else 1
     if skipped:
         print(f"\n{len(skipped)} of {len(SUITES)} suites skipped: {', '.join(skipped)}")

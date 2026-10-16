@@ -334,8 +334,10 @@ window.minipaintClipboard = (function () {
         //: The Archives screen, and its Escape.
         archivesDom: null,
         archivesKey: null,
-        //: The full-screen view of one picture.
-        viewer: null
+        //: The full-screen view of one picture, and the folder it steps through.
+        viewer: null,
+        //: The last tap on a tile, for the double tap. See isDoubleTap.
+        lastTileTap: null
     };
 
     /* ------------------------------------------------------------------ */
@@ -1247,6 +1249,8 @@ window.minipaintClipboard = (function () {
         "float": "none",
         "transform": "none",
         "aspect-ratio": "auto",
+        //: A double tap is the tile's own (PNG Info), never the browser's zoom.
+        "touch-action": "manipulation",
         //: What the full-screen button in the corner is placed against. An
         //: archive's tile is placed absolutely instead, which does the same.
         "position": "relative"
@@ -1656,6 +1660,10 @@ window.minipaintClipboard = (function () {
     const SCRUB_INSET = 4;
     //: The handle's least height: a target, not a sliver.
     const SCRUB_MIN_HANDLE = 32;
+    //: Held still this long, the scrubber asks for the view's thumbnails as
+    //: though it had been let go. Asked for: "if i pause with out releasing
+    //: the scrubber, the thumbs in that view should start loading".
+    const SCRUB_PAUSE_MS = 300;
 
     //: The bar: a strip the width of a fingertip's edge over the grid's
     //: right-hand padding. Its top, height and right edge are measured
@@ -1927,7 +1935,9 @@ window.minipaintClipboard = (function () {
         // On the handle it is held where it was taken; anywhere else the
         // handle's middle comes to the pointer.
         const onHandle = y >= box.top && y <= box.top + box.size;
-        S.scrub = { pointer: event.pointerId, grab: onHandle ? y - box.top : box.size / 2, moved: false };
+        S.scrub = { pointer: event.pointerId, grab: onHandle ? y - box.top : box.size / 2, moved: false,
+                    paused: false, pauseTimer: 0 };
+        armScrubPause();
         try { bar.setPointerCapture(event.pointerId); } catch (e) { /* the moves still come to the bar */ }
         bar.classList.add("minipaint-clip-scrubbing");
         if (!onHandle) { scrubTo(bar, event.clientY); }
@@ -1949,8 +1959,24 @@ window.minipaintClipboard = (function () {
     function onScrubMove(event) {
         if (!S.scrub || event.pointerId !== S.scrub.pointer) { return; }
         event.preventDefault();
+        const before = gridElement() ? gridElement().scrollTop : 0;
         scrubTo(event.currentTarget, event.clientY);
+        // Moving again: nothing new is asked for until it rests or is let go.
+        if (gridElement() && gridElement().scrollTop !== before) { S.scrub.paused = false; armScrubPause(); }
         drawScrubber();
+    }
+
+    /** Rest on the scrubber and the view fills in, as at a release. */
+    function armScrubPause() {
+        const held = S.scrub;
+        if (!held) { return; }
+        if (held.pauseTimer) { clearTimeout(held.pauseTimer); }
+        held.pauseTimer = setTimeout(function () {
+            held.pauseTimer = 0;
+            if (S.scrub !== held) { return; }
+            held.paused = true;
+            if (archiveActive()) { renderArchive(); pumpThumbs(true); }
+        }, SCRUB_PAUSE_MS);
     }
 
     function onScrubEnd(event) {
@@ -1963,6 +1989,7 @@ window.minipaintClipboard = (function () {
         const bar = gridMount() ? gridMount().querySelector(".minipaint-clip-scrubber") : null;
         const held = S.scrub;
         S.scrub = null;
+        if (held && held.pauseTimer) { clearTimeout(held.pauseTimer); }
         if (bar) {
             bar.classList.remove("minipaint-clip-scrubbing");
             if (held) { try { bar.releasePointerCapture(held.pointer); } catch (e) { /* released already */ } }
@@ -4224,9 +4251,10 @@ window.minipaintClipboard = (function () {
         for (const entry of Array.from(S.archive.inflight)) {
             if (!keep.has(entry[0]) || (waiting && !visible.has(entry[0]))) { dropThumb(entry[0], entry[1]); }
         }
-        // Held on the scrubber: nothing new is asked for until it is let go,
-        // and then only for where it stopped (endScrub).
-        if (S.scrub) { return; }
+        // Held on the scrubber and moving: nothing new is asked for until it
+        // rests (armScrubPause) or is let go (endScrub), and then only for
+        // where it stopped.
+        if (S.scrub && !S.scrub.paused) { return; }
         const moment = Date.now();
         const settled = now || moment - S.archive.scrolledAt >= PUMP_SETTLE_MS || moment - S.archive.startedAt >= PUMP_EVERY_MS;
         if (!settled) {
@@ -4597,6 +4625,21 @@ window.minipaintClipboard = (function () {
     // anything full screen?" would end the assistant's when it closed. See
     // inFullscreen, which the Outputs player learnt this from.
 
+    //
+    // THE WHOLE FOLDER, ONE PICTURE AT A TIME. Asked for: "make full screen
+    // image view capable of browsing the folder in either random or date
+    // sorted order. Exiting the view should land that image in view in the
+    // gallery as if i scrolled to it." So the view steps through every
+    // picture in the folder the grid shows - the whole storage folder, not
+    // its page, or the whole archive - by the arrow keys, a swipe, or the
+    // arrows drawn at its sides. **Date** is newest to oldest by the file's
+    // time; **Random** shuffles the folder once, with the picture on screen
+    // first, so stepping back retraces the way. The choice is the browser
+    // tab's (sessionStorage), like the pictures per row. The next and the
+    // previous whole pictures are fetched while one is looked at, so a step
+    // is a swap. Leaving the view selects the picture it ended on and scrolls
+    // the grid to it, turning the storage folder's page if it has to.
+
     const VIEWER_CLASS = "minipaint-clip-viewer";
     const VIEWER_OVERLAY = "clipboard-viewer";
     //: Two taps this close in time and place are a double tap.
@@ -4604,8 +4647,35 @@ window.minipaintClipboard = (function () {
     const DOUBLE_TAP_PX = 32;
     //: How long the hint says how to leave.
     const VIEWER_HINT_MS = 2200;
+    //: A swipe: this far sideways, and more sideways than up or down.
+    const SWIPE_PX = 48;
+    //: The browser tab's choice of order.
+    const VIEWER_ORDER_KEY = "minipaint-clipboard:viewer-order";
+    const VIEWER_ORDERS = [["date", "Date"], ["random", "Random"]];
+    //: One read of the storage folder's whole order.
+    const VIEWER_ORDER_TIMEOUT_MS = 20000;
 
     function viewerOpen() { return !!(S.viewer && S.viewer.root && !S.viewer.root.hidden); }
+
+    /** An arrow, drawn: a chevron pointing left or right. */
+    function chevron(left) {
+        const ns = "http://www.w3.org/2000/svg";
+        const svg = document.createElementNS(ns, "svg");
+        svg.setAttribute("viewBox", "0 0 24 24");
+        svg.setAttribute("width", "28");
+        svg.setAttribute("height", "28");
+        svg.setAttribute("aria-hidden", "true");
+        svg.setAttribute("focusable", "false");
+        const path = document.createElementNS(ns, "path");
+        path.setAttribute("d", left ? "M15 5l-7 7 7 7" : "M9 5l7 7-7 7");
+        path.setAttribute("fill", "none");
+        path.setAttribute("stroke", "currentColor");
+        path.setAttribute("stroke-width", "2.4");
+        path.setAttribute("stroke-linecap", "round");
+        path.setAttribute("stroke-linejoin", "round");
+        svg.appendChild(path);
+        return svg;
+    }
 
     function buildViewer() {
         if (S.viewer && S.viewer.root.isConnected) { return S.viewer; }
@@ -4615,21 +4685,70 @@ window.minipaintClipboard = (function () {
         layer.hidden = true;
         layer.setAttribute("role", "dialog");
         layer.setAttribute("aria-modal", "true");
-        layer.setAttribute("aria-label", "Full screen picture. Double-tap to close.");
+        layer.setAttribute("aria-label", "Full screen picture. Arrows step through the folder; double-tap to close.");
         layer.tabIndex = -1;
         const picture = document.createElement("img");
         picture.className = VIEWER_CLASS + "-picture";
         picture.alt = "";
         picture.draggable = false;
         const hint = el("div", VIEWER_CLASS + "-hint", "Double-tap to close");
+        const previous = el("button", VIEWER_CLASS + "-nav " + VIEWER_CLASS + "-prev");
+        previous.type = "button";
+        previous.dataset.viewer = "prev";
+        previous.setAttribute("aria-label", "Previous picture");
+        previous.title = "Previous (←)";
+        previous.appendChild(chevron(true));
+        const next = el("button", VIEWER_CLASS + "-nav " + VIEWER_CLASS + "-next");
+        next.type = "button";
+        next.dataset.viewer = "next";
+        next.setAttribute("aria-label", "Next picture");
+        next.title = "Next (→)";
+        next.appendChild(chevron(false));
+        const bar = el("div", VIEWER_CLASS + "-bar");
+        const where = el("span", VIEWER_CLASS + "-where", "");
+        where.setAttribute("aria-live", "polite");
+        const orders = el("span", VIEWER_CLASS + "-orders");
+        orders.setAttribute("role", "radiogroup");
+        orders.setAttribute("aria-label", "Order");
+        for (const pair of VIEWER_ORDERS) {
+            const choice = el("button", VIEWER_CLASS + "-order", pair[1]);
+            choice.type = "button";
+            choice.dataset.viewer = "order";
+            choice.dataset.order = pair[0];
+            choice.setAttribute("role", "radio");
+            orders.appendChild(choice);
+        }
+        bar.appendChild(where);
+        bar.appendChild(orders);
         layer.appendChild(picture);
+        layer.appendChild(previous);
+        layer.appendChild(next);
+        layer.appendChild(bar);
         layer.appendChild(hint);
+        layer.addEventListener("pointerdown", onViewerDown);
         layer.addEventListener("pointerup", onViewerTap);
+        layer.addEventListener("click", onViewerClick);
         layer.addEventListener("dblclick", function (event) { event.preventDefault(); });
+        // The page's own menu is not this view's; a right click here does nothing.
+        layer.addEventListener("contextmenu", function (event) { event.preventDefault(); });
         host.appendChild(layer);
         S.viewer = { root: layer, picture: picture, hint: hint, lastTap: null, full: null, hintTimer: 0,
-                     fullscreen: false, key: null, change: null, url: "" };
+                     fullscreen: false, key: null, change: null, url: "",
+                     previous: previous, next: next, where: where, orders: orders, down: null,
+                     // The folder: its date order, the order in use, where
+                     // the view is in it, and what it shows.
+                     dated: null, list: null, at: -1, current: null, order: viewerOrder(),
+                     reading: null, ahead: [] };
         return S.viewer;
+    }
+
+    function viewerOrder() {
+        try {
+            const kept = window.sessionStorage.getItem(VIEWER_ORDER_KEY);
+            return kept === "random" ? "random" : "date";
+        } catch (e) {
+            return "date";
+        }
     }
 
     function viewerInFullscreen() {
@@ -4637,44 +4756,95 @@ window.minipaintClipboard = (function () {
         return !!(now && S.viewer && now === S.viewer.root);
     }
 
+    /** One picture of the folder: its id, its name and its version. */
+    function viewerItemOf(tile) {
+        return { id: tile.dataset.asset || "", name: tile.dataset.name || "", v: tile.dataset.v || "" };
+    }
+
+    function viewerFullUrl(item) {
+        return isArchiveRef(item.id) ? archiveFullUrl(item.id, item.v)
+            : "/minipaint-clipboard/image/" + encodeURIComponent(item.id) + (item.v ? "?v=" + encodeURIComponent(item.v) : "");
+    }
+
+    function viewerThumbUrl(item) {
+        return isArchiveRef(item.id) ? archiveThumbUrl(item.id, item.v) : imageUrl(item.id, item.v);
+    }
+
+    /** Newest first, by the time in a version (``<mtime_ns>-<size>``). */
+    function newestFirst(a, b) {
+        const x = String(a.v || "").split("-")[0];
+        const y = String(b.v || "").split("-")[0];
+        if (x.length !== y.length) { return y.length - x.length; }
+        return x < y ? 1 : x > y ? -1 : 0;
+    }
+
     /**
-     * Open a tile's picture over everything. Called inside the press, so
-     * the browser takes the full-screen request as the user's own.
+     * The folder the grid shows, newest first. An archive's listing is
+     * already on the page; the storage folder's is read once, whole, since
+     * the grid holds only its page.
      */
-    function openViewer(tile) {
-        if (!tile) { return false; }
-        const view = buildViewer();
-        if (!view) { return false; }
-        const id = tile.dataset.asset || "";
-        const version = tile.dataset.v || "";
-        const archive = isArchiveRef(id);
-        const shown = tile.querySelector("img");
-        const small = shown && shown.getAttribute("src") ? shown.getAttribute("src") : "";
-        const full = archive ? archiveFullUrl(id, version)
-            : "/minipaint-clipboard/image/" + encodeURIComponent(id) + (version ? "?v=" + encodeURIComponent(version) : "");
-        view.url = full;
-        view.picture.src = small || full;
-        view.root.dataset.loaded = small ? "0" : "1";
-        const was = viewerOpen();
-        view.root.hidden = false;
-        if (!was) {
-            announceOverlayAs(VIEWER_OVERLAY, true);
-            view.key = function (event) {
-                if (event.key !== "Escape" || !viewerOpen()) { return; }
-                event.stopPropagation();
-                event.preventDefault();
-                closeViewer();
-            };
-            document.addEventListener("keydown", view.key, true);
-            view.change = function () {
-                // Left by the browser's own way out (Escape, a gesture):
-                // the view goes with it. Only when it was this view's.
-                if (view.fullscreen && !viewerInFullscreen()) { view.fullscreen = false; closeViewer(); }
-            };
-            document.addEventListener("fullscreenchange", view.change);
-            document.addEventListener("webkitfullscreenchange", view.change);
+    function viewerFolder(source) {
+        if (isArchiveRef(source)) {
+            const items = S.archive.items.map(function (item) { return { id: archiveRef(item[0]), name: item[1], v: item[3] }; });
+            items.sort(newestFirst);
+            return Promise.resolve(items);
         }
-        // The full picture, then swapped in: the thumbnail is already there.
+        return askJson(LIBRARY_ROUTE + "?every=1&sort=newest", null, VIEWER_ORDER_TIMEOUT_MS, "the viewer's folder")
+            .then(function (answer) {
+                if (!answer || answer.ok !== true || !Array.isArray(answer.items)) { return null; }
+                return answer.items.map(function (item) { return { id: item[0], name: item[1], v: item[2] }; });
+            });
+    }
+
+    /** A shuffle of the folder with the picture on screen first. */
+    function shuffled(items, first) {
+        const rest = items.filter(function (item) { return item.id !== first; });
+        for (let i = rest.length - 1; i > 0; i -= 1) {
+            const j = Math.floor(Math.random() * (i + 1));
+            const swap = rest[i];
+            rest[i] = rest[j];
+            rest[j] = swap;
+        }
+        const head = items.find(function (item) { return item.id === first; });
+        return head ? [head].concat(rest) : rest;
+    }
+
+    /** Put the folder in the chosen order around the picture on screen. */
+    function arrangeViewer(view) {
+        if (!view.dated) { view.list = null; view.at = -1; drawViewerControls(view); return; }
+        const id = view.current ? view.current.id : "";
+        view.list = view.order === "random" ? shuffled(view.dated, id) : view.dated.slice();
+        view.at = view.list.findIndex(function (item) { return item.id === id; });
+        drawViewerControls(view);
+        preloadAround(view);
+    }
+
+    function drawViewerControls(view) {
+        const count = view.list ? view.list.length : 0;
+        const at = view.at;
+        view.previous.disabled = !(count && at > 0);
+        view.next.disabled = !(count && at >= 0 && at < count - 1);
+        const words = function (value) { try { return Number(value).toLocaleString(); } catch (e) { return String(value); } };
+        view.where.textContent = count && at >= 0 ? words(at + 1) + " of " + words(count)
+            : view.reading ? "Reading the folder…" : "";
+        for (const choice of Array.from(view.orders.children)) {
+            const on = choice.dataset.order === view.order;
+            choice.setAttribute("aria-checked", on ? "true" : "false");
+            choice.classList.toggle(VIEWER_CLASS + "-order-on", on);
+        }
+    }
+
+    /** Show one picture: the whole one if it is here, its thumbnail until it is. */
+    function showInViewer(view, item, small) {
+        view.current = item;
+        const full = viewerFullUrl(item);
+        view.url = full;
+        const ready = view.ahead.find(function (held) { return held.url === full && held.image.complete && held.image.naturalWidth; });
+        const stand = small || viewerThumbUrl(item);
+        view.picture.src = ready ? full : stand;
+        view.root.dataset.loaded = ready ? "1" : "0";
+        view.root.dataset.current = item.id;
+        if (ready) { view.full = null; return; }
         const loader = new Image();
         view.full = loader;
         loader.onload = function () {
@@ -4688,6 +4858,89 @@ window.minipaintClipboard = (function () {
             note("viewer: the full picture could not be read");
         };
         loader.src = full;
+    }
+
+    /** The whole pictures either side, fetched while this one is looked at. */
+    function preloadAround(view) {
+        if (!view.list || view.at < 0) { return; }
+        const wanted = [view.list[view.at + 1], view.list[view.at - 1]].filter(Boolean).map(viewerFullUrl);
+        view.ahead = view.ahead.filter(function (held) { return wanted.indexOf(held.url) !== -1; });
+        for (const url of wanted) {
+            if (view.ahead.some(function (held) { return held.url === url; })) { continue; }
+            const image = new Image();
+            image.src = url;
+            view.ahead.push({ url: url, image: image });
+        }
+    }
+
+    /** One step through the folder: +1 is the next picture, -1 the one before. */
+    function stepViewer(by) {
+        const view = S.viewer;
+        if (!viewerOpen() || !view.list || view.at < 0) { return false; }
+        const at = view.at + by;
+        if (at < 0 || at >= view.list.length) { return false; }
+        view.at = at;
+        showInViewer(view, view.list[at], "");
+        drawViewerControls(view);
+        preloadAround(view);
+        return true;
+    }
+
+    function setViewerOrder(order) {
+        const view = S.viewer;
+        const wanted = order === "random" ? "random" : "date";
+        if (!view) { return; }
+        try { window.sessionStorage.setItem(VIEWER_ORDER_KEY, wanted); } catch (e) { /* this view only, then */ }
+        // Random again reshuffles; Date again changes nothing.
+        if (wanted === view.order && wanted === "date") { drawViewerControls(view); return; }
+        view.order = wanted;
+        arrangeViewer(view);
+    }
+
+    /**
+     * Open a tile's picture over everything. Called inside the press, so
+     * the browser takes the full-screen request as the user's own.
+     */
+    function openViewer(tile) {
+        if (!tile) { return false; }
+        const view = buildViewer();
+        if (!view) { return false; }
+        const item = viewerItemOf(tile);
+        const archive = isArchiveRef(item.id);
+        const shown = tile.querySelector("img");
+        const small = shown && shown.getAttribute("src") ? shown.getAttribute("src") : "";
+        view.ahead = [];
+        view.order = viewerOrder();
+        showInViewer(view, item, small);
+        const was = viewerOpen();
+        view.root.hidden = false;
+        if (!was) {
+            announceOverlayAs(VIEWER_OVERLAY, true);
+            view.key = onViewerKey;
+            document.addEventListener("keydown", view.key, true);
+            view.change = function () {
+                // Left by the browser's own way out (Escape, a gesture):
+                // the view goes with it. Only when it was this view's.
+                if (view.fullscreen && !viewerInFullscreen()) { view.fullscreen = false; closeViewer(); }
+            };
+            document.addEventListener("fullscreenchange", view.change);
+            document.addEventListener("webkitfullscreenchange", view.change);
+        }
+        // The folder, read afresh on every open (what was added since is in
+        // it) while the first picture is already on screen.
+        view.dated = null;
+        view.list = null;
+        view.at = -1;
+        const reading = viewerFolder(archive ? item.id : "");
+        view.reading = reading;
+        reading.then(function (items) {
+            if (view.reading !== reading) { return; }
+            view.reading = null;
+            if (!items) { note("viewer: the folder could not be read; this picture only"); drawViewerControls(view); return; }
+            view.dated = items;
+            if (viewerOpen()) { arrangeViewer(view); }
+        });
+        drawViewerControls(view);
         const enter = view.root.requestFullscreen || view.root.webkitRequestFullscreen;
         if (enter && (document.fullscreenEnabled || document.webkitFullscreenEnabled)) {
             try {
@@ -4718,8 +4971,10 @@ window.minipaintClipboard = (function () {
             const leave = document.exitFullscreen || document.webkitExitFullscreen;
             if (leave) { try { leave.call(document); } catch (e) { /* it was leaving anyway */ } }
         }
+        const landed = view.current;
         view.fullscreen = false;
         view.full = null;
+        view.ahead = [];
         view.root.hidden = true;
         delete view.root.dataset.fill;
         view.picture.removeAttribute("src");
@@ -4731,13 +4986,100 @@ window.minipaintClipboard = (function () {
             view.change = null;
         }
         announceOverlayAs(VIEWER_OVERLAY, false);
+        if (landed && landed.id) { landOn(landed.id); }
         return true;
     }
 
-    /** Two taps (or clicks) in one place, close together: close. */
+    /**
+     * The grid, at the picture the view ended on: selected, and scrolled to
+     * as though you had scrolled there - in the middle of the grid where it
+     * can be. The storage folder turns to the page that holds it first.
+     */
+    function landOn(id) {
+        if (S.selected !== id) { select(id); }
+        if (isArchiveRef(id)) {
+            const key = id.slice(ARCHIVE_REF_PREFIX.length + 17);
+            const index = S.archive.index.get(key);
+            const grid = gridElement();
+            const layout = S.archive.layout;
+            if (index === undefined || !grid || !layout) { return Promise.resolve(false); }
+            const row = Math.floor(index / layout.columns);
+            const top = layout.padTop + row * (layout.cellHeight + layout.gap);
+            grid.scrollTop = Math.max(0, Math.round(top - (grid.clientHeight - layout.cellHeight) / 2));
+            S.archive.scrollTop = grid.scrollTop;
+            renderArchive();
+            pumpThumbs(true);
+            return Promise.resolve(true);
+        }
+        const centre = function () {
+            const tile = S.library.tiles.get(id);
+            const grid = gridElement();
+            if (!tile || !grid || !tile.isConnected) { return false; }
+            const box = tile.getBoundingClientRect();
+            const frame = grid.getBoundingClientRect();
+            grid.scrollTop = Math.max(0, Math.round(grid.scrollTop + (box.top - frame.top) - (grid.clientHeight - box.height) / 2));
+            return true;
+        };
+        if (S.library.tiles.has(id) && S.library.ids.indexOf(id) !== -1) { return Promise.resolve(centre()); }
+        // Another page: the server says which (it alone holds the whole
+        // order), and that page is drawn before the grid is moved.
+        return fetchLibrary({ quiet: true }).then(function (answer) {
+            const page = answer ? Number(answer.selected_page) : -1;
+            if (!answer || page < 0 || page === Number(answer.page)) { return answer; }
+            return fetchLibrary({ page: page, quiet: true });
+        }).then(function () {
+            return centre();
+        });
+    }
+
+    function onViewerKey(event) {
+        if (!viewerOpen()) { return; }
+        const key = event.key;
+        let handled = true;
+        if (key === "Escape") { closeViewer(); }
+        else if (key === "ArrowRight" || key === "ArrowDown" || key === "PageDown") { stepViewer(1); }
+        else if (key === "ArrowLeft" || key === "ArrowUp" || key === "PageUp") { stepViewer(-1); }
+        else { handled = false; }
+        if (handled) { event.stopPropagation(); event.preventDefault(); }
+    }
+
+    function onViewerClick(event) {
+        const control = event.target && event.target.closest ? event.target.closest("[data-viewer]") : null;
+        if (!control) { return; }
+        event.preventDefault();
+        event.stopPropagation();
+        const what = control.dataset.viewer;
+        if (what === "prev") { stepViewer(-1); }
+        else if (what === "next") { stepViewer(1); }
+        else if (what === "order") { setViewerOrder(control.dataset.order); }
+    }
+
+    function onViewerDown(event) {
+        const view = S.viewer;
+        if (!view) { return; }
+        view.down = { x: event.clientX, y: event.clientY, id: event.pointerId };
+    }
+
+    /**
+     * A swipe steps; two taps (or clicks) in one place, close together,
+     * close. A press on the view's own controls is theirs, never a tap.
+     */
     function onViewerTap(event) {
         const view = S.viewer;
         if (!view || (event.button !== undefined && event.button > 0)) { return; }
+        const down = view.down;
+        view.down = null;
+        if (event.target && event.target.closest && event.target.closest("[data-viewer]")) { view.lastTap = null; return; }
+        if (down && down.id === event.pointerId) {
+            const dx = event.clientX - down.x;
+            const dy = event.clientY - down.y;
+            if (Math.abs(dx) >= SWIPE_PX && Math.abs(dx) > Math.abs(dy) * 1.5) {
+                view.lastTap = null;
+                event.preventDefault();
+                stepViewer(dx < 0 ? 1 : -1);
+                return;
+            }
+        }
         const now = Date.now();
         const last = view.lastTap;
         if (last && now - last.at <= DOUBLE_TAP_MS
@@ -4748,6 +5090,16 @@ window.minipaintClipboard = (function () {
             return;
         }
         view.lastTap = { at: now, x: event.clientX, y: event.clientY };
+    }
+
+    /** What the view is showing, for the checks. */
+    function viewerState() {
+        const view = S.viewer;
+        if (!view) { return { open: false }; }
+        return { open: viewerOpen(), current: view.current ? view.current.id : "", at: view.at,
+                 count: view.list ? view.list.length : 0, order: view.order,
+                 list: view.list ? view.list.map(function (item) { return item.id; }) : [],
+                 ahead: view.ahead.map(function (held) { return held.url; }), loaded: view.root.dataset.loaded || "" };
     }
 
     /* ------------------------------------------------------------------ */
@@ -6229,6 +6581,14 @@ window.minipaintClipboard = (function () {
         }
         const item = target.closest(".minipaint-clip-item");
         if (item) {
+            // Two taps (or clicks) on one picture, close together: PNG Info.
+            // The first has already selected it, or taken a selection away,
+            // so the second leaves it selected whatever the first did.
+            if (isDoubleTap(item, event)) {
+                event.preventDefault();
+                sendToPngInfo(item);
+                return;
+            }
             select(item.dataset.asset === S.selected ? "" : item.dataset.asset);
             return;
         }
@@ -6267,6 +6627,54 @@ window.minipaintClipboard = (function () {
             const parts = String(outbox.dataset.outboxAction || "").split(":");
             jobAction(parts[0], parts[1] || "");
         }
+    }
+
+    /* -- a picture's own gestures ------------------------------------- */
+    //
+    // Asked for: "give pictures a double tap action that sends them to PNG
+    // info. This should be a permanent shortcut", and "make right click on a
+    // image open the full screen image view". Both on every tile, in the
+    // storage folder and in an archive; neither is a setting. A tile says
+    // `touch-action: manipulation` (TILE_GEOMETRY), so a phone's browser
+    // neither zooms on the double tap nor holds each tap back to wait for one.
+    // A long press on a phone is the browser's own context menu, so it opens
+    // the full-screen view too.
+
+    //: The last tap on a tile: which, when and where.
+    function isDoubleTap(item, event) {
+        const now = Date.now();
+        const last = S.lastTileTap;
+        const x = Number(event.clientX) || 0;
+        const y = Number(event.clientY) || 0;
+        const twice = !!last && last.asset === item.dataset.asset && now - last.at <= DOUBLE_TAP_MS
+            && Math.abs(x - last.x) <= DOUBLE_TAP_PX && Math.abs(y - last.y) <= DOUBLE_TAP_PX;
+        // A third tap starts a new pair rather than sending twice.
+        S.lastTileTap = twice ? null : { asset: item.dataset.asset, at: now, x: x, y: y };
+        return twice;
+    }
+
+    /** The picture, selected, to PNG Info - the one shortcut that is not a menu's. */
+    function sendToPngInfo(item) {
+        const asset = item.dataset.asset || "";
+        if (!asset) { return; }
+        if (S.selected !== asset) { select(asset); }
+        const offered = (menuState().destinations || []).some(function (pair) { return pair[0] === "pnginfo"; });
+        if (!offered) {
+            toast("This WebUI has no PNG Info tab to send to.", true);
+            return;
+        }
+        note("send pnginfo by a double tap");
+        sendTo("pnginfo");
+    }
+
+    /** A right click (a long press on a phone): the picture full screen. */
+    function onRootContextMenu(event) {
+        const target = event.target;
+        const item = target && target.closest ? target.closest(".minipaint-clip-item") : null;
+        if (!item || !root() || !root().contains(item)) { return; }
+        event.preventDefault();
+        if (item.dataset.asset !== S.selected) { select(item.dataset.asset); }
+        openViewer(item);
     }
 
     function onKeydown(event) {
@@ -6310,6 +6718,7 @@ window.minipaintClipboard = (function () {
         if (!element || S.attached) { return; }
         S.attached = true;
         element.addEventListener("click", onRootClick);
+        element.addEventListener("contextmenu", onRootContextMenu);
         element.addEventListener("keydown", onKeydown);
         bindDrop(element);
         buildMenu();
@@ -6417,7 +6826,7 @@ window.minipaintClipboard = (function () {
                  done: S.archive.stats.done, failed: S.archive.stats.failed,
                  order: S.archive.stats.order.slice(-200),
                  visible: archiveActive() ? wantedThumbs().visible : [],
-                 scrubbing: !!S.scrub };
+                 scrubbing: !!S.scrub, paused: !!(S.scrub && S.scrub.paused) };
     }
 
     /** The row as drawn: for the checks, and for a console. */
@@ -6455,6 +6864,9 @@ window.minipaintClipboard = (function () {
         select: select,
         setPerRow: setPerRow,
         rowState: rowState,
+        viewerState: viewerState,
+        stepViewer: stepViewer,
+        setViewerOrder: setViewerOrder,
         reportTiles: reportTiles,
         pasteFromClipboard: pasteFromClipboard,
         setIntercept: setIntercept,

@@ -29,9 +29,15 @@ so it takes `--only` (or `MINIPAINT_BROWSER_ONLY`): the words are matched
 against its checks' names (`check_the_row_is_filled_per_row`,
 `check_an_archive_loads_what_is_in_view_first`, ...), and the adapter's own
 attach always runs first. A check that leans on one before it may not hold
-alone. Neither replaces the whole run: `--affected` cannot see one suite's
-state reaching another, so CI runs every suite on every push, and a run
-before a push should too.
+alone.
+
+**What CI runs.** A pull request runs `--affected` against the branch it goes
+into, at the user's word ("the test for the changes are all that is needed,
+not the whole suite"), and every suite runs on `main` after each merge
+(`.github/workflows/tests.yml`). `--affected` cannot see one suite's state
+reaching another; the run on `main` is where that is caught, so a red `main`
+after a merge is a fix to make at once. A pull request that changes the
+workflow, `tests/run.py` or `tests/requirements.txt` runs everything.
 
 `tests/run.py` says at the end how many of its suites actually ran. A suite
 whose dependency is missing is skipped rather than failed, which is right for

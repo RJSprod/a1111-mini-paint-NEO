@@ -7,8 +7,15 @@
 # looked like it meant, which is how a Canvas that never attached shipped
 # behind a green suite.
 #
-# So: every suite, on every push, with the browser one included and skips
-# treated as failures.
+# So: every suite, with the browser ones included and skips treated as
+# failures - on main, after every merge. A pull request runs only the suites
+# its change can reach (`tests/run.py --affected` against the branch it goes
+# into), at the user's word: "those test are taking too long. i feel like the
+# test for the changes are all that is needed, not the whole suite", with the
+# whole suite checked after merge. What that trades away is the one thing
+# --affected cannot see - one suite's state reaching another - and the run on
+# main is where that is caught. A change to this file, tests/run.py or
+# tests/requirements.txt runs everything on its pull request too.
 name: tests
 
 # A branch with a pull request is covered by ``pull_request``; main is covered
@@ -45,6 +52,10 @@ jobs:
       MINIPAINT_REQUIRE_ALL_SUITES: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The whole history, so --affected can find where the pull request
+          # left the branch it goes into.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -60,7 +71,12 @@ jobs:
       - name: Install Chromium for the browser suite
         run: python -m playwright install --with-deps chromium
 
+      - name: Run the suites the pull request reaches
+        if: github.event_name == 'pull_request'
+        run: python tests/run.py --affected --base "origin/${{ github.base_ref }}"
+
       - name: Run every suite
+        if: github.event_name != 'pull_request'
         run: python tests/run.py
 
   # The editor's own suite needs a Forge Neo checkout for the real

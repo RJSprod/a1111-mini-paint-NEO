@@ -621,15 +621,30 @@ saved on the host.
 takes no room and moves nothing. Drag its handle, or press anywhere on it to jump there and
 drag on; while it is held a bubble beside it says which picture of how many is at the top of
 the view and the date, name or size the sort orders by. An archive asks for no thumbnails
-while it is held, only for where it is let go. It is drawn only when the grid holds more than
-it shows; the wheel, a finger on the grid and the keys scroll as they always did.
+while it is moving, only for where it rests - held still for about a third of a second - or
+is let go. It is drawn only when the grid holds more than
+it shows; the wheel, a finger on the grid and the keys scroll as they always did. Rest on it
+without letting go - about a third of a second - and the pictures in view start loading as
+though you had let go; move again and new loading waits until you rest or let go.
 
-**Full screen.** A tile large enough to hold it (120 px and larger) has a small
-button in its upper right corner that opens its picture over everything - the browser's own
-full screen where it grants it, the window where it does not. It is the one time the grid
-loads a whole picture, and only that one: the thumbnail stands in until it arrives. A double
-tap (or double click, or Escape) closes it, and it never ends the Forge Assistant's own full
-screen under it.
+**A picture's own gestures.** A **double tap** (or double click) on any picture sends it
+to **PNG Info**, selected, whether or not it was selected before - in the storage folder and
+in an archive alike, always. A **right click** (a long press on a phone) opens it **full
+screen**.
+
+**Full screen.** A right click, or the small button in the upper right corner of a tile large
+enough to hold it (120 px and larger), opens its picture over everything - the browser's own
+full screen where it grants it, the window where it does not. From there it **steps through
+the whole folder** the grid shows - every picture in the storage folder, not just its page,
+or the whole archive - with ← and →, a swipe, or the arrows at its sides. The bar at its top
+says where you are and switches the order: **Date**, newest to oldest, or **Random**, a
+shuffle with the picture on screen first, so stepping back retraces it; the choice is kept
+for the browser tab. Only whole pictures are loaded here: the one on screen and the one either
+side of it, fetched ahead so a step is a swap, with the thumbnail standing in until each
+arrives. A double tap (or double click, or Escape) closes it, and it never ends the Forge
+Assistant's own full screen under it. **Leaving it lands the grid on the picture it ended
+on**: selected, and scrolled into view as if you had scrolled there, the storage folder
+turning to the page that holds it.
 
 The tab **fills the window, and fits in it**. The thumbnail grid runs down to the bottom of
 it, and so does the request column, whose Prompt box takes whatever the column has left

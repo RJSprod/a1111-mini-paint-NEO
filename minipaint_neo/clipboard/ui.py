@@ -118,7 +118,16 @@ MENU_JS = f"() => {{ if ({_JS}) {_JS}.toggleMenu(); }}"
 #: because there is nothing behind a list that opened by itself.
 SORT_MENU_JS = f'() => {{ if ({_JS}) {_JS}.openToolbarMenu("sort"); }}'
 SEND_MENU_JS = f'() => {{ if ({_JS}) {_JS}.openToolbarMenu("send"); }}'
-THUMB_JS = f"(size) => {{ if ({_JS}) {_JS}.setThumbnailSize(size); }}"
+# The size slider counts pictures per row. The browser shares the row out
+# among them and keeps the count for this tab's session; nothing goes to
+# the host, so the slider has no backend function at all.
+THUMB_JS = f"(count) => {{ if ({_JS}) {_JS}.setPerRow(count); }}"
+#: The slider's own limits. The browser narrows them to the counts this
+#: width allows (tiles between config.THUMBNAIL_MIN and THUMBNAIL_MAX) and
+#: sets the session's count before anyone sees it.
+PER_ROW_MIN = 1
+PER_ROW_MAX = 40
+PER_ROW_DEFAULT = 6
 # Add to Queue: the press goes to this tab's own route carrying what only
 # the browser holds - the prompt as typed and the switch as it stands - and
 # the answer says whether the job is the server's to run or this page's.
@@ -1106,10 +1115,6 @@ class ClipboardTab:
             config.update(sort=mode)
         return self._menu_state()
 
-    def thumbnail_changed(self, size):
-        config.update(thumbnail=config.clamp_thumbnail(size))
-        return self._menu_state()
-
     def set_intercept(self, value):
         """The intercept destination, from the hidden box: ``<target>:<nonce>``.
 
@@ -1853,8 +1858,8 @@ class ClipboardTab:
                             elem_classes=["minipaint-clip-action", "minipaint-clip-icon", "minipaint-clip-icon-send"],
                         )
                         thumb = gr.Slider(
-                            config.THUMBNAIL_MIN, config.THUMBNAIL_MAX, value=current.thumbnail, step=8,
-                            label="Thumbnail size", show_label=False, container=False, elem_id=_id("thumb"), elem_classes=["minipaint-clip-thumb-size"], min_width=120,
+                            PER_ROW_MIN, PER_ROW_MAX, value=PER_ROW_DEFAULT, step=1,
+                            label="Pictures per row", show_label=False, container=False, elem_id=_id("thumb"), elem_classes=["minipaint-clip-thumb-size"], min_width=120,
                         )
                     grid = gr.HTML(GRID_MOUNT, elem_id=_id("grid"), elem_classes=["minipaint-clip-grid-host"])
                     status = gr.Markdown(
@@ -2107,7 +2112,6 @@ class ClipboardTab:
         p["prompt_history"].click(None, js=OPEN_PROMPT_HISTORY_JS)
         p["send_btn"].click(None, js=SEND_MENU_JS)
         p["thumb"].change(None, js=THUMB_JS, inputs=[p["thumb"]])
-        p["thumb"].release(self.thumbnail_changed, inputs=[p["thumb"]], outputs=[p["menu_state"]], **quiet)
         p["intercept_request"].input(self.set_intercept, inputs=[p["intercept_request"]], outputs=[p["menu_state"], p["status"]], **quiet)
         p["upload_btn"].upload(self.upload, inputs=[p["upload_btn"], selected], outputs=refresh_outputs, **quiet).then(None, js=LIBRARY_CHANGED_JS)
         p["paste_open"].click(lambda: gr.update(visible=True), inputs=[], outputs=[p["paste_panel"]], **quiet)

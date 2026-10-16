@@ -76,8 +76,13 @@ DEFAULT_SORT = "newest"
 ARCHIVE_LIMIT = 500
 _ARCHIVE_ID = re.compile(r"\A[0-9a-f]{16}\Z")
 
-#: Thumbnail size is presentation: a CSS variable the browser sizes the grid
-#: by, remembered here so a reload keeps it.
+#: The tile sizes the grid's per-row slider reaches: the browser offers the
+#: counts of pictures per row whose tiles come out between these two at the
+#: grid's width (browser/minipaint_clipboard.js holds equal copies, and a
+#: check says so). ``thumbnail`` itself is what a page from before the
+#: per-row slider remembered here; the slider now keeps its count for the
+#: browser tab's session instead, and nothing writes this any more but such
+#: a page.
 THUMBNAIL_MIN = 72
 THUMBNAIL_MAX = 320
 THUMBNAIL_DEFAULT = 144

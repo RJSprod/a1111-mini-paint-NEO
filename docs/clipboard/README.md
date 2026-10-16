@@ -158,8 +158,9 @@ Refresh, and every card and history entry that used it says so.
 Sending is not in this list: it is a button on the toolbar, and there is only the one.
 
 The toolbar has **+First**, **+Last**, **+Ref** (the selected picture into that card), two
-flyout buttons and a thumbnail-size slider (72–320 px, remembered). The flyouts each open a
-compact list under the button that was pressed, and pressing that button again closes it:
+flyout buttons and the **pictures-per-row** slider (see *The grid's size* below). The flyouts
+each open a compact list under the button that was pressed, and pressing that button again
+closes it:
 
 * **Sort** — the six orders above.
 * **Send selection to** — Mini Paint, img2img, Inpaint, Extras, ImageStitch: the same routes
@@ -181,6 +182,53 @@ id (`/minipaint-clipboard/image/<id>?thumb=1`), the file's name is shown as text
 route refuses an id that is not in the index, a name that is not a plain filename, a
 symlink, and a file that has moved outside the folder (`CLIPBOARD_ASSET_OUTSIDE_ROOT`).
 
+## The grid's size, and the scrubber
+
+**Pictures per row.** The slider counts pictures per row, not pixels. It used to name a tile
+size in steps of 8 px with columns of that size that never stretched, so nearly every size
+left a strip of empty grid at the right of every row; asked for: "slide based on number of
+images that can fit one row without empty space". Now the row is shared out: the grid has
+that many equal columns (`repeat(var(--minipaint-clip-cols), minmax(0, 1fr))`), and the
+script works the tile size out of the row - the width less the gaps, divided, less the tile's
+frame - and writes it as `--minipaint-clip-thumb`, from which the rows are measured. Every
+row is filled to the pixel at every count, and every tile is still exactly its cell. The
+picture keeps its aspect ratio inside its square (`object-fit: contain`): a wide picture has
+space above and below it, a tall one at its sides, and nothing is cropped or stretched; the
+browser suite measures that on a wide, a tall and a square picture.
+
+The slider offers the counts whose tiles come out between 72 and 320 px at the grid's width
+(`config.THUMBNAIL_MIN`/`MAX`; 320 is the side of the thumbnails the server makes, so a tile
+is never drawn larger than its picture), and the limits move with the width: the script
+writes them onto the slider's inputs, where Gradio's slider reads them for its filled track.
+**Per session**: a new browser tab starts at the count nearest 144 px and follows the width
+while it is on that default; a count you choose is that tab's (`sessionStorage`,
+`minipaint-clipboard:per-row`), kept through reloads and resizes (within what the width
+allows), and nothing about it reaches the host - the slider has no backend function. The
+host's old `thumbnail` setting stays in `clipboard.json` for pages loaded before this, which
+are the only thing that still writes it. An archive's grid shares its row the same way: its
+tiles are placed by the script, at the same columns and the same size.
+
+The grid draws **no scroll bar of its own** (`scrollbar-width: none`, and the WebKit
+pseudo-element): a bar that came and went with the content would change the width the row was
+shared out from, and the tiles would be sized for a width they no longer have.
+
+**The scrubber** is the grid's bar instead: a strip 14 px wide laid over the grid's right-hand
+padding (it overlaps nothing but the tiles' own frames), absolutely placed in the grid's
+mount, so it takes no room and moves nothing when it comes and goes. Its rail is a hairline;
+its handle is where the view is in the whole list - an archive's whole listing, or the
+storage folder's page - as tall as the share in view and never shorter than 32 px, and it
+widens under the pointer. Dragging the handle moves the grid with it; pressing anywhere else
+on the bar jumps the handle's middle to the pointer and drags on from there (pointer capture,
+`touch-action: none`, and a non-passive `touchmove` cancelled while it is held). While it is
+held a bubble beside the handle says which picture of how many is at the top of the view
+(`1,234 of 18,928`) and what the sort orders by: the date for *Newest*/*Oldest* (from the
+file's modification time, which every tile's version carries), the size for
+*Largest*/*Smallest*, the name otherwise. An archive asks for **no thumbnails while it is
+held**: the rows it passes are drawn as empty places, requests for tiles that left the view
+are dropped as always, and letting go asks for the screen it stopped on. It is drawn only
+while the grid holds more than it shows. The wheel, a finger on the grid, the keys and
+Page Up/Down scroll the grid as before, and the bar follows.
+
 ## Archives
 
 An **archive** is a folder on the machine running Forge - usually thousands of pictures in
@@ -189,11 +237,17 @@ listed; one is shown at a time. **Menu → Archives › → Manage archives…**
 that adds one (type the folder's path on the Forge host and press *Add*; a folder that does
 not exist, a file, and the storage folder itself are refused with their reason), shows one
 (*Show*) and takes one off the list (*Remove* - the folder and its files are not touched).
-*Archives ›* itself is the quick way between them: *Storage folder* and each archive, the
-one on screen ticked. Once there is an archive, a bar over the grid says which folder the
-grid is showing, that an archive is read-only and that new pictures go to the storage
-folder, and its button opens the same list. The choice is kept on the host
-(`clipboard.json`'s `view`), like the sort.
+*Archives ›* itself is the one way between them: *Storage folder* and each archive, the
+one on screen ticked. Once there is an archive, the **Menu button carries the name of the
+folder the grid shows** (*☰ Storage folder*, *☰ downloads*; cut short past 24 characters,
+because a theme's `min-width: fit-content` beats any max-width, with the whole name in its
+tooltip, and its border in the accent colour while an archive is shown), and the status line
+says how many pictures the archive holds, that it is read-only and that new pictures go to
+the storage folder. No row over the grid is spent on it: the first build had one (the
+folder's name as a button, and a note), and it was taken away at the user's word ("I don't
+like that the archive switcher button is now a new row, lets make switching between storage
+and folder a menu option"). The choice is kept on the host (`clipboard.json`'s `view`), like
+the sort.
 
 **Read-only, and enforced by the server.** No route writes into an archive: nothing is
 created, renamed, deleted, touched or indexed there, and its thumbnails live in this
@@ -256,7 +310,7 @@ there. The status line says *copied from the archive into the storage folder*.
 
 ## Full screen
 
-A tile large enough to hold it - from 120 px on the size slider - has a small button in its
+A tile large enough to hold it - 120 px and larger - has a small button in its
 upper right corner (drawn, never a character a theme could swap). Pressing it selects the
 tile and opens its picture over everything: the browser's **own full screen** where it grants
 one, the window where it does not (some phone browsers). It is the one time the grid loads a
@@ -923,7 +977,7 @@ it was ignored" case.
 
 | what | where |
 | --- | --- |
-| the folder, the intercept destination, the sort, the thumbnail size, the outputs folder, the archives (id, path, name each) and which one is shown | `<Forge data_path>/a1111-mini-paint-NEO/clipboard.json` |
+| the folder, the intercept destination, the sort, the outputs folder, the archives (id, path, name each) and which one is shown (and `thumbnail`, which only a page from before the per-row slider still writes) | `<Forge data_path>/a1111-mini-paint-NEO/clipboard.json` |
 | the index: id, filename, size, dimensions, digest, source per file | `…/clipboard-index.json` (rebuilt from the folder on Refresh) |
 | the composer's draft | `…/clipboard-draft.json` |
 | the queue outbox: every press as a job, with its request, its state, its enhancement and its place in WanGP | `…/clipboard-outbox.json` (schema 3; a finished job kept two minutes, a failure until it is dismissed, the list capped) |
@@ -1015,8 +1069,9 @@ and sizes only. Colours come from Gradio's theme variables — `--body-text-colo
 `--background-fill-primary`, `--block-background-fill`, `--border-color-primary`,
 `--color-accent`, `--error-text-color` and their kin — with neutral, translucent fallbacks
 for a theme that lacks one; `tests/test_clipboard_ui.py` refuses a white, a `#fff`, a
-black or a fixed background in that block, the queue list included. The thumbnail size is
-one CSS variable the browser sets from the slider. On a narrow tab the two columns stack.
+black or a fixed background in that block, the queue list included. The grid's size is two
+CSS variables the browser sets from the slider and the grid's width (`--minipaint-clip-cols`
+and `--minipaint-clip-thumb`). On a narrow tab the two columns stack.
 
 The grid's *geometry* has a second author. Every tile is a `<button>`, and a theme is free
 to say `!important` about every button on the page — the Lobe theme's

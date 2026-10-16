@@ -581,8 +581,38 @@ every thumbnail is fetched by an opaque id. Upload, paste (Ctrl+V, or the paste 
 the browser will not let the page read its clipboard), drop a file on a card, sort, resize
 the thumbnails, rename, delete, refresh (files dropped into the folder by hand appear),
 and *Send selected to* Mini Paint, img2img, Inpaint, Extras or ImageStitch by the same
-routes the Canvas takes. A Forge PNG keeps every byte, so its generation parameters
-survive.
+routes the Canvas takes - or to **PNG Info**, which only the Clipboard offers: it is handed
+the file's own bytes, the way a file dropped on it would be, so it reads the generation
+parameters Forge wrote. A Forge PNG keeps every byte, so its generation parameters survive.
+
+**Archives.** Menu → *Archives ›* → *Manage archives…* takes folders on the machine running
+Forge - as many as you like - and the grid can show any one of them **in place of the storage
+folder** (the flyout under *Archives ›*, or the bar that appears over the grid once there is
+one). An archive is **read-only**: nothing in this extension writes, renames, deletes or
+indexes anything in it, Rename and Delete are off for its pictures, and pasting, uploading,
+dropping or the gallery's 🖌️ still save to the storage folder while you look at one. It is
+**not paged**: the whole folder (its PNG, JPEG and WebP files, not its subfolders) is listed in
+one answer, from the folder's directory entries alone - no picture is opened to list it - and
+every picture gets a tile. A tile is an empty place costing nothing until it is in view; only
+the rows near the view are in the page at all. **What is in view loads first**, in reading
+order, a few thumbnails at a time over plain requests with a deadline each - nothing held
+open - and the order is decided again whenever you scroll: requests for tiles that have left
+the view are dropped while what you now see waits, so the pictures you scroll past are never
+asked for. A thumbnail is made on the server the first time anyone looks (a JPEG decoded at a
+fraction of its size, turned upright by its EXIF), kept in this extension's own data folder -
+never in the archive - under a budget of its own (1 GiB, about eighty-five thousand), and
+served with the file's size and time in its address so the browser keeps it as immutable: a
+picture seen once is not asked of the server again until the file changes or the browser's
+cache is cleared. An archive picture can be sent anywhere a library picture can; put on a
+card with +First, +Last or +Ref it is **copied** into the storage folder (byte for byte, once
+for the same bytes), because a card holds library pictures.
+
+**Full screen.** A tile large enough to hold it (from 120 px on the size slider) has a small
+button in its upper right corner that opens its picture over everything - the browser's own
+full screen where it grants it, the window where it does not. It is the one time the grid
+loads a whole picture, and only that one: the thumbnail stands in until it arrives. A double
+tap (or double click, or Escape) closes it, and it never ends the Forge Assistant's own full
+screen under it.
 
 The tab **fills the window, and fits in it**. The thumbnail grid runs down to the bottom of
 it, and so does the request column, whose Prompt box takes whatever the column has left
@@ -889,8 +919,10 @@ minipaint_neo/
     assets.py                    the browser bundles, fetched per tab from /minipaint-assets/js/ rather than parsed into every page
     interop.py                   the public queue API's server half: staging, preparing handoffs, the outbox routes, /minipaint-interop/*
     clipboard/                   the Clipboard tab (see docs/clipboard/README.md)
-        config.py                the folder, the intercept destination, the sort and the thumbnail size
+        config.py                the folder, the intercept destination, the sort, the thumbnail size, the archives and the view
         store.py                 the library: one folder, opaque ids, containment, import, refresh, rename, delete
+        archives.py              read-only folders shown in place of the library: listed whole from directory entries,
+                                 a picture by reference, thumbnails made once into a cache of their own, a copy for a card
         history.py               the composer's draft, Queue Send History, and the recipe an output keeps for Load
         prompts.py               History: the last ten prompts sent from here, as typed, and Load
         outbox.py                the queue outbox: every press a job the server owns, in press order; what each job is waiting for, said out loud
@@ -899,7 +931,7 @@ minipaint_neo/
         targets.py               the four models the Clipboard sends to, what each is sent, and whether the one in use is ready
         enhance.py               enhanced prompts: ModelSwitchRefiner's MiniMax H3 and LTX writers (mc_llm_api), the switch, the six system prompts and their overrides
         outputs.py               what WanGP made for this tab's requests, and the recipe of each, kept where a restart can find it: View Outputs reads this, not the queue
-        routes.py                a picture by its id, and bytes in
+        routes.py                a picture by its id, and bytes in; the archives, an archive's listing, and its pictures
         intercept.py             Send to WanGP from the gallery: the frozen picture behind a token, the roles a model reads,
                                  the popup's request path through the outbox, and its pinned history
         ui.py                    the tab: the browser, the composer, the enhancement panel, Add to Queue through the public API
@@ -924,7 +956,9 @@ browser/minipaint_canvas.js      attaches the canvas; crop frame, touch gestures
 browser/minipaint_wangp.js       the WanGP iframe: handshake, receiver query, verified send, queue, confirm and track
 browser/minipaint_interop.js     window.minipaintInterop: the public queue API (v1, minipaint.wangp.queue/v1): enqueue (answers when the server has the job), sync (a bounded snapshot), cancelAll - no live connection
 browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid and its pager, the queue list and the history, History's dialog,
-                                 the menu, paste and drop, Add to Queue, the page's model, and the one standing notice
+                                 the menu, paste and drop, Add to Queue, the page's model, and the one standing notice;
+                                 an archive's grid (tiles only near the view, thumbnails in view first), the Archives screen,
+                                 and the full-screen view of one picture
                                  (browser/ is not auto-loaded: each tab fetches its own bundle from /minipaint-assets/js/, cached by content)
 browser/minipaint_intercept.js   the Send to WanGP popup: opened by the gallery button on a frozen picture, drawn from
                                  /minipaint-clipboard/intercept, closed the moment the outbox has the job; fetched only when first needed

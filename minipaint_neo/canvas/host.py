@@ -8,7 +8,9 @@ Two things cross the tab boundary, both as ordinary Gradio events:
   own "Send to img2img" buttons find them, so a handoff is a Gradio output
   followed by the host's own tab-switch helper;
 * the reference gallery of the built-in ImageStitch script in txt2img and
-  img2img, and the box that enables it, remembered as the host builds them.
+  img2img, and the box that enables it, remembered as the host builds them;
+* the PNG Info tab's picture, which only the Clipboard sends to (the file as
+  it is, so its generation parameters are read).
 
 Nothing here runs JavaScript at startup, watches the document, or keeps a
 second copy of which tab is selected.
@@ -28,6 +30,8 @@ RECEIVE_TABS = ("txt2img", "img2img", "extras")
 GALLERY_IDS = {f"{tab}_gallery": tab for tab in RECEIVE_TABS}
 ANCHOR_IDS = {f"{tab}_send_to_extras": tab for tab in RECEIVE_TABS}
 EXTRAS_IMAGE_ID = "extras_image"
+#: The PNG Info tab's ``gr.Image`` (modules/ui.py builds it under this id).
+PNGINFO_IMAGE_ID = "pnginfo_image"
 TAB_LABEL = "Mini Paint"
 
 # The built-in ImageStitch script (extensions-builtin/sd_forge_image_stitch):
@@ -160,7 +164,7 @@ def on_after_component(component, **kwargs) -> None:
         _foregrounds[elem_id] = component
         return
 
-    if elem_id in GALLERY_IDS or elem_id == EXTRAS_IMAGE_ID:
+    if elem_id in GALLERY_IDS or elem_id == EXTRAS_IMAGE_ID or elem_id == PNGINFO_IMAGE_ID:
         _captured[elem_id] = component
         return
 
@@ -271,7 +275,8 @@ def _on_the_page(component: typing.Any) -> bool:
 
 def destinations() -> typing.Dict[str, typing.Any]:
     """Whatever this host has: img2img, inpaint (+ its mask layer), extras,
-    and ImageStitch's galleries (+ their enabling boxes) in txt2img and img2img.
+    ImageStitch's galleries (+ their enabling boxes) in txt2img and img2img,
+    and PNG Info's picture.
 
     Only what is actually on the page - see ``_on_the_page``.
     """
@@ -291,6 +296,10 @@ def destinations() -> typing.Dict[str, typing.Any]:
     extras = _init_img("extras") or _captured.get(EXTRAS_IMAGE_ID)
     if extras is not None:
         found["extras"] = extras
+
+    pnginfo = _captured.get(PNGINFO_IMAGE_ID)
+    if pnginfo is not None:
+        found["pnginfo"] = pnginfo
 
     for key in ("stitch_txt2img", "stitch_img2img"):
         gallery = _captured.get(key)

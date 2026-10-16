@@ -36,6 +36,13 @@
  * a timer. The press is checked again on the server, fresh, whatever this
  * page last drew.
  *
+ * The grid shows the storage folder, paged, or - from Menu → Archives - an
+ * archive in its place: a read-only folder on the Forge host listed whole,
+ * its tiles empty places until they are in view, its thumbnails asked for in
+ * view first and re-ordered whenever the view moves (see "Archives"). Any
+ * tile of either opens its picture full screen from the small button in its
+ * corner, the one time a whole picture is loaded.
+ *
  * Nothing polls. The one bounded watcher runs for a few seconds after the
  * Add to Queue click, in case the chained change never reaches this page,
  * and stops the moment the instruction is delivered either way; the pump
@@ -83,6 +90,9 @@ window.minipaintClipboard = (function () {
     //: equal. Why the script states them at all is above pin().
     const TILE_FRAME = 12;
     const TILE_CAPTION = 32;
+    //: The smallest tile that shows its full-screen button: below it the
+    //: button would cover too much of the picture it opens.
+    const EXPAND_MIN_THUMB = 120;
     const IMPORT_ROUTE = "/minipaint-clipboard/import";
     const SEND_ROUTE = "/minipaint-clipboard/send";
     const BOXES = {
@@ -265,7 +275,45 @@ window.minipaintClipboard = (function () {
             //: is still the current one. See stepPage and fetchLibrary.
             wanted: 0,
             ticket: 0
-        }
+        },
+        //: An archive shown in place of the storage folder. See "Archives".
+        archive: {
+            //: The archive's id, or "" while the storage folder is shown.
+            view: "",
+            mounted: false,
+            //: Every picture: [key, name, bytes, version], in the order asked.
+            items: [],
+            //: key -> position in items.
+            index: new Map(),
+            sort: "",
+            busy: false,
+            ticket: 0,
+            //: The worked-out grid (columns, cell, gap, rows, height).
+            layout: null,
+            //: position -> tile, for the rows the document holds.
+            rendered: new Map(),
+            //: key -> { url, state, tries }: the thumbnails this page has.
+            thumbs: new Map(),
+            //: key -> { controller, timer, ... }: the requests out now.
+            inflight: new Map(),
+            scrolledAt: 0,
+            //: The reader's place, kept for the grid's return from a hidden tab.
+            scrollTop: 0,
+            startedAt: 0,
+            pumpTimer: 0,
+            frame: 0,
+            watched: null,
+            observer: null,
+            //: What the loader did, for the journal and the checks: how many
+            //: thumbnails it asked for, dropped, got and gave up on, and the
+            //: order it asked for the last few hundred in.
+            stats: { started: 0, dropped: 0, done: 0, failed: 0, order: [] }
+        },
+        //: The Archives screen, and its Escape.
+        archivesDom: null,
+        archivesKey: null,
+        //: The full-screen view of one picture.
+        viewer: null
     };
 
     /* ------------------------------------------------------------------ */
@@ -653,7 +701,9 @@ window.minipaintClipboard = (function () {
         for (const id of NEEDS_SELECTION()) {
             const host = byId(id);
             const button = host ? (host.tagName === "BUTTON" ? host : host.querySelector("button")) : null;
-            if (button) { button.disabled = !S.selected; }
+            // An archive is read-only: its pictures can be sent and put on a
+            // card (as a copy in the storage folder), never deleted.
+            if (button) { button.disabled = !S.selected || (id === PRESS.deleteNow && isArchiveRef(S.selected)); }
         }
         if (!quiet) { sendInput(BOXES.selected, S.selected); }
     }
@@ -676,6 +726,26 @@ window.minipaintClipboard = (function () {
      * them - never merely because a render came back empty.
      */
     function afterRender() {
+        if (archiveActive()) {
+            // The grid is an archive's: its tiles are drawn only near the
+            // view, so "not on the grid" means nothing here. A selection is
+            // kept while the archive still lists it.
+            const confirmed = boxValue(BOXES.selected);
+            let keep = S.selected;
+            const listed = function (id) {
+                return isArchiveRef(id) && id.indexOf(ARCHIVE_REF_PREFIX + S.archive.view + "-") === 0
+                    && S.archive.index.has(id.slice(ARCHIVE_REF_PREFIX.length + 17));
+            };
+            if (keep && !listed(keep) && S.archive.items.length) { keep = ""; }
+            if (!keep && listed(confirmed)) { keep = confirmed; }
+            select(keep, true);
+            S.renderedAt = Date.now();
+            if (confirmed !== keep) { sendInput(BOXES.selected, keep); }
+            applyThumbnailSize(S.thumb);
+            refreshBadges();
+            scheduleFit();
+            return;
+        }
         const confirmed = boxValue(BOXES.selected);
         const listed = items();
         const onGrid = function (assetId) {
@@ -728,7 +798,15 @@ window.minipaintClipboard = (function () {
         // Marked important like the rest of the grid's geometry (see pin),
         // so the one variable every track and ceiling below is measured
         // from cannot be restated by a stylesheet either.
-        if (grid) { grid.style.setProperty("--minipaint-clip-thumb", value + "px", "important"); }
+        if (grid) {
+            const wanted = value + "px";
+            const moved = grid.style.getPropertyValue("--minipaint-clip-thumb") !== wanted;
+            grid.style.setProperty("--minipaint-clip-thumb", wanted, "important");
+            // The full-screen button, on tiles large enough to hold it.
+            const expand = value >= EXPAND_MIN_THUMB ? "1" : "0";
+            if (grid.dataset.expand !== expand) { grid.dataset.expand = expand; }
+            if (moved && archiveActive()) { onArchiveResize(); }
+        }
     }
 
     /**
@@ -905,7 +983,8 @@ window.minipaintClipboard = (function () {
         const bytes = Number(item.bytes || 0);
         const human = bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + " MB"
             : bytes >= 1024 ? Math.round(bytes / 1024) + " KB" : bytes + " B";
-        return item.w + " × " + item.h + " · " + human;
+        // An archive's listing has no dimensions: nothing is opened to list it.
+        return (item.w && item.h ? item.w + " × " + item.h + " · " : "") + human;
     }
 
     /**
@@ -1010,7 +1089,33 @@ window.minipaintClipboard = (function () {
         "overflow": "hidden",
         "float": "none",
         "transform": "none",
-        "aspect-ratio": "auto"
+        "aspect-ratio": "auto",
+        //: What the full-screen button in the corner is placed against. An
+        //: archive's tile is placed absolutely instead, which does the same.
+        "position": "relative"
+    };
+
+    //: The full-screen button: a small square in the tile's top right corner,
+    //: over the picture. Whether it is shown is the stylesheet's (keyed on
+    //: the grid's data-expand), so its display is the one thing not here.
+    const EXPAND_GEOMETRY = {
+        "position": "absolute",
+        "top": "6px",
+        "right": "6px",
+        "left": "auto",
+        "bottom": "auto",
+        "box-sizing": "border-box",
+        "width": "26px",
+        "height": "26px",
+        "min-width": "0",
+        "min-height": "0",
+        "margin": "0",
+        "padding": "4px",
+        "border-width": "1px",
+        "border-style": "solid",
+        "align-items": "center",
+        "justify-content": "center",
+        "z-index": "1"
     };
 
     //: The square takes the room the caption leaves. Its height is what the
@@ -1329,9 +1434,13 @@ window.minipaintClipboard = (function () {
                     if (!child.contains(gridElement())) { sizes.observe(child); }
                 }
             }
-            // The pager, which is inside the grid's host but never sized.
+            // The pager, which is inside the grid's host but never sized,
+            // and the archive bar over the grid, which is not sized either.
             const pager = pagerElement();
             if (pager) { sizes.observe(pager); }
+            const mount = gridMount();
+            const bar = mount ? mount.querySelector(".minipaint-clip-source") : null;
+            if (bar) { sizes.observe(bar); }
             // Every block of the composer but the Prompt's own.
             if (composer) {
                 for (const child of Array.from(composer.children)) {
@@ -1348,8 +1457,30 @@ window.minipaintClipboard = (function () {
         return mount ? mount.querySelector(".minipaint-clip-pager") : null;
     }
 
-    /** One tile. Built once per picture and then reused - see drawLibrary. */
-    function buildTile(item) {
+    /** The full-screen button's glyph: four corners, drawn, never a character. */
+    function expandGlyph() {
+        const ns = "http://www.w3.org/2000/svg";
+        const svg = document.createElementNS(ns, "svg");
+        svg.setAttribute("viewBox", "0 0 24 24");
+        svg.setAttribute("width", "16");
+        svg.setAttribute("height", "16");
+        svg.setAttribute("aria-hidden", "true");
+        svg.setAttribute("focusable", "false");
+        const path = document.createElementNS(ns, "path");
+        path.setAttribute("d", "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5");
+        path.setAttribute("fill", "none");
+        path.setAttribute("stroke", "currentColor");
+        path.setAttribute("stroke-width", "2.2");
+        path.setAttribute("stroke-linecap", "round");
+        path.setAttribute("stroke-linejoin", "round");
+        svg.appendChild(path);
+        return svg;
+    }
+
+    /** One tile. Built once per picture and then reused - see drawLibrary.
+     *  An archive's tile is built without a picture address: it is a place
+     *  until its thumbnail's turn comes (see pumpThumbs). */
+    function buildTile(item, placeholder) {
         const tile = document.createElement("button");
         tile.type = "button";
         tile.className = "minipaint-clip-item";
@@ -1376,14 +1507,24 @@ window.minipaintClipboard = (function () {
             tile.classList.add("minipaint-clip-item-missing");
             pin(picture, { "display": "none" });
         });
-        picture.src = imageUrl(item.id, item.v);
+        if (!placeholder) { picture.src = imageUrl(item.id, item.v); }
         thumb.appendChild(picture);
         const label = document.createElement("span");
         label.className = "minipaint-clip-name";
         label.textContent = item.name;
         pin(label, NAME_GEOMETRY);
+        // A span, not a button: a button inside the tile's own button is not
+        // a thing a page may have. A press on it is told apart in onRootClick.
+        const expand = document.createElement("span");
+        expand.className = "minipaint-clip-expand";
+        expand.setAttribute("role", "button");
+        expand.setAttribute("aria-label", "Full screen");
+        expand.title = "Full screen (double-tap to close)";
+        pin(expand, EXPAND_GEOMETRY);
+        expand.appendChild(expandGlyph());
         tile.appendChild(thumb);
         tile.appendChild(label);
+        tile.appendChild(expand);
         return tile;
     }
 
@@ -1433,6 +1574,9 @@ window.minipaintClipboard = (function () {
     function drawLibrary(answer) {
         const grid = gridElement();
         if (!grid) { return; }
+        // An archive is on screen: the storage folder's page is not drawn
+        // under it. Going back reads it again.
+        if (archiveActive()) { return; }
         const items = Array.isArray(answer.items) ? answer.items : [];
         const next = new Map();
         for (const item of items) {
@@ -1495,6 +1639,8 @@ window.minipaintClipboard = (function () {
         note.innerHTML = reason === "unconfigured"
             ? "<b>No storage folder yet.</b> Menu → <em>Choose storage folder</em> picks a folder on the machine "
               + "running Forge; Clipboard keeps its pictures there."
+            : reason === "archive-empty"
+            ? "No PNG, JPEG or WebP pictures in this archive's folder. Subfolders are not shown."
             : "No images yet. Upload or paste one from the menu, send one from Mini Paint, or point "
               + "<em>Intercept Options</em> at Clipboard and press 🖌️ under a result.";
         if (!existing) { grid.appendChild(note); }
@@ -1629,6 +1775,9 @@ window.minipaintClipboard = (function () {
      */
     function fetchLibrary(options) {
         const opts = options || {};
+        // The storage folder is not on screen; it is read again on the way
+        // back to it (leaveArchive).
+        if (archiveActive()) { return Promise.resolve(null); }
         const page = opts.page === undefined ? S.library.page : Number(opts.page);
         const sort = opts.sort === undefined ? S.library.sort : String(opts.sort || "");
         // The page size is one constant and the route takes it, so it stays
@@ -1714,8 +1863,14 @@ window.minipaintClipboard = (function () {
      * jobs did while this one was open. */
     function refreshAll() {
         pressHidden(PRESS.refresh);
-        fetchLibrary({ refresh: true });
+        refreshGrid();
         askQueue(null);
+    }
+
+    /** The grid read again: the storage folder, or the archive on screen. */
+    function refreshGrid() {
+        if (archiveActive()) { return fetchArchive({}); }
+        return fetchLibrary({ refresh: true });
     }
 
     /** The sort, over HTTP: remembered first, then drawn when it arrives. */
@@ -1724,6 +1879,8 @@ window.minipaintClipboard = (function () {
         if (!wanted || wanted === S.library.sort) { return Promise.resolve(false); }
         setBusy(true);
         return postSettings({ sort: wanted }).then(function (answer) {
+            S.library.sort = (answer && answer.sort) || wanted;
+            if (archiveActive()) { return fetchArchive({ sort: S.library.sort }); }
             // Page 0 of the new sort. Not the page you were on: a position
             // in one order means nothing in another.
             return fetchLibrary({ sort: (answer && answer.sort) || wanted, page: 0 });
@@ -2779,10 +2936,12 @@ window.minipaintClipboard = (function () {
         return !!(element && !element.hidden);
     }
 
-    function announceOverlay(open) {
+    function announceOverlay(open) { announceOverlayAs(PROMPTS_OVERLAY, open); }
+
+    function announceOverlayAs(name, open) {
         try {
             document.dispatchEvent(new CustomEvent(OVERLAY_EVENT, {
-                detail: { name: PROMPTS_OVERLAY, open: !!open, modal: true }
+                detail: { name: name, open: !!open, modal: true }
             }));
         } catch (e) { /* nothing here depends on being heard */ }
     }
@@ -3030,6 +3189,1061 @@ window.minipaintClipboard = (function () {
     }
 
     /* ------------------------------------------------------------------ */
+    /* Archives: other folders, shown in place of the storage folder        */
+    /* ------------------------------------------------------------------ */
+    //
+    // An archive is a folder on the Forge host - usually thousands of
+    // pictures in one place - that the grid can show instead of the storage
+    // folder, one at a time, and that nothing writes to (``archives.py``).
+    // It is not paged: the server answers every picture in one listing, read
+    // from the folder's directory entries alone, and the grid draws all of
+    // them - as tiles that are only places until they are looked at.
+    //
+    // WHAT A TILE COSTS. Nothing, until it is on screen: a tile's picture has
+    // no address until its turn comes, so ten thousand tiles are ten
+    // thousand empty boxes and no request. And only the rows near the view
+    // are in the document at all; the rest are a height the scroll bar
+    // knows about. A grid of a whole archive is a few hundred nodes.
+    //
+    // WHAT LOADS, AND IN WHAT ORDER. What is in view, in reading order, and
+    // then what is about to be. A thumbnail is asked for over plain HTTP - no
+    // stream, nothing held open - a few at a time, each with a deadline, and
+    // made on the server the first time anybody looks (``Thumbnails``). The
+    // order is decided again whenever the view moves: a request for a tile
+    // that has left the view is dropped while what is now in view waits, so
+    // what you are looking at is always what comes next - scroll a long way
+    // and the pictures you scrolled past are never asked for at all. The
+    // server finishes a thumbnail it started, so a dropped request costs it
+    // nothing it will not use: the next look at that tile is a cache read.
+    //
+    // WHAT IS KEPT. Each thumbnail's URL carries the file's size and time, so
+    // the server answers it as immutable and the browser keeps it; a picture
+    // seen once is not asked of the server again until the file changes or
+    // the browser's cache is cleared. The page keeps the last few hundred it
+    // drew as object URLs besides, so scrolling back is instant.
+
+    const ARCHIVES_ROUTE = "/minipaint-clipboard/archives";
+    const ARCHIVE_LIST_ROUTE = "/minipaint-clipboard/archive/list";
+    const ARCHIVE_IMAGE_ROUTE = "/minipaint-clipboard/archive/image/";
+    const ARCHIVE_REF_PREFIX = "ar-";
+    //: One listing of a folder of tens of thousands, on a slow disk.
+    const ARCHIVE_LIST_TIMEOUT_MS = 60000;
+    //: One thumbnail: a cache read in milliseconds, a large photograph's
+    //: first decode in a second or two. Past this the request is dropped and
+    //: tried once more later; a second miss marks the tile.
+    const THUMB_TIMEOUT_MS = 20000;
+    const THUMB_TRIES = 2;
+    //: How many thumbnails are asked for at once. Over HTTP/1.1 a page has six
+    //: connections to this origin; this leaves the rest to everything else.
+    const THUMB_CONCURRENCY = 3;
+    //: Drawn thumbnails kept as object URLs, for scrolling back.
+    const THUMB_KEEP = 800;
+    //: Rows in the document beyond the view, each way.
+    const ARCHIVE_OVERSCAN_ROWS = 2;
+    //: How far past the view is asked for once the view itself is done, in
+    //: screens.
+    const ARCHIVE_AHEAD_SCREENS = 1;
+    //: New requests wait for the view to settle this long after a scroll -
+    //: a fling across a thousand rows starts nothing for the rows it passes -
+    //: and are started at least this often during a long slow scroll.
+    const PUMP_SETTLE_MS = 80;
+    const PUMP_EVERY_MS = 200;
+    const ARCHIVES_TIMEOUT_MS = 20000;
+    const ARCHIVES_CLASS = "minipaint-clip-archives";
+    const ARCHIVES_TITLE_ID = "minipaint_clipboard_archives_title";
+    const ARCHIVES_OVERLAY = "clipboard-archives";
+
+    //: The archive's tile: absolutely placed in its row and column, which
+    //: the script works out; everything else is the library tile's.
+    const ARCHIVE_TRACK_GEOMETRY = {
+        "display": "block",
+        "position": "relative",
+        "box-sizing": "border-box",
+        "width": "100%",
+        "min-width": "0",
+        "max-width": "100%",
+        "margin": "0",
+        "padding": "0",
+        "border-width": "0",
+        "overflow": "visible"
+    };
+
+    function isArchiveRef(id) { return typeof id === "string" && id.indexOf(ARCHIVE_REF_PREFIX) === 0; }
+
+    function archiveActive() { return !!S.archive.view; }
+
+    function archiveThumbUrl(ref, version) {
+        return ARCHIVE_IMAGE_ROUTE + encodeURIComponent(ref) + "?thumb=1"
+            + (version ? "&v=" + encodeURIComponent(version) : "");
+    }
+
+    function archiveFullUrl(ref, version) {
+        return ARCHIVE_IMAGE_ROUTE + encodeURIComponent(ref) + (version ? "?v=" + encodeURIComponent(version) : "");
+    }
+
+    function archiveRef(key) { return ARCHIVE_REF_PREFIX + S.archive.view + "-" + key; }
+
+    /** One bounded JSON request: an answer, or null with the reason noted. */
+    function askJson(url, body, timeoutMs, what) {
+        let controller = null;
+        let cutoff = 0;
+        try { controller = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { controller = null; }
+        if (controller) {
+            cutoff = setTimeout(function () { try { controller.abort(); } catch (e) { /* settled */ } }, timeoutMs);
+        }
+        const options = { credentials: "same-origin", cache: "no-store" };
+        if (body) {
+            options.method = "POST";
+            options.headers = { "Content-Type": "application/json" };
+            options.body = JSON.stringify(body);
+        }
+        if (controller) { options.signal = controller.signal; }
+        return fetch(url, options).then(function (response) {
+            return response.json();
+        }).then(function (answer) {
+            serverSilent(false);
+            return answer && typeof answer === "object" ? answer : null;
+        }, function (error) {
+            note(what + ": no answer (" + ((error && error.message) || error) + ")");
+            serverSilent(true, what);
+            return null;
+        }).then(function (answer) {
+            if (cutoff) { clearTimeout(cutoff); }
+            return answer;
+        });
+    }
+
+    /** The archives and the view, as the menu's facts carry them. */
+    function archiveList() {
+        const state = menuState();
+        return Array.isArray(state.archives) ? state.archives : [];
+    }
+
+    function archiveName(id) {
+        const found = archiveList().find(function (pair) { return pair[0] === id; });
+        return found ? found[1] : "";
+    }
+
+    /* -- the bar over the grid ---------------------------------------- */
+
+    /**
+     * Which folder the grid is showing, and the way to change it.
+     *
+     * Shown only once there is an archive to choose: a Clipboard with none
+     * looks exactly as it always did. In an archive it says so, and says
+     * where new pictures go - the one thing about an archive that is easy to
+     * forget while you are looking at one.
+     */
+    function sourceBar() {
+        const mount = gridMount();
+        if (!mount) { return null; }
+        let bar = mount.querySelector(".minipaint-clip-source");
+        if (bar) { return bar; }
+        bar = document.createElement("div");
+        bar.className = "minipaint-clip-source";
+        bar.hidden = true;
+        const pick = document.createElement("button");
+        pick.type = "button";
+        pick.className = "minipaint-clip-source-pick";
+        pick.setAttribute("aria-haspopup", "menu");
+        pick.title = "Show the storage folder or one of the archives";
+        pick.addEventListener("click", function (event) {
+            event.preventDefault();
+            openToolbarMenu("archives");
+        });
+        const said = document.createElement("span");
+        said.className = "minipaint-clip-source-note";
+        bar.appendChild(pick);
+        bar.appendChild(said);
+        mount.insertBefore(bar, mount.firstChild);
+        if (S.fitRewatch) { S.fitRewatch(); }
+        return bar;
+    }
+
+    function drawSourceBar() {
+        const bar = sourceBar();
+        if (!bar) { return; }
+        const list = archiveList();
+        const shown = list.length > 0 || archiveActive();
+        if (bar.hidden !== !shown) { bar.hidden = !shown; scheduleFit(); }
+        if (!shown) { return; }
+        const pick = bar.querySelector(".minipaint-clip-source-pick");
+        const said = bar.querySelector(".minipaint-clip-source-note");
+        const name = archiveActive() ? (archiveName(S.archive.view) || "Archive") : "";
+        if (pick) { pick.textContent = (archiveActive() ? "Archive: " + name : "Storage folder") + " ▾"; }
+        if (said) {
+            said.textContent = archiveActive()
+                ? (S.archive.busy && !S.archive.items.length ? "Reading the folder…"
+                    : S.archive.items.length + " picture" + (S.archive.items.length === 1 ? "" : "s")
+                      + " · read-only · new pictures are saved to the storage folder")
+                : (list.length + " archive" + (list.length === 1 ? "" : "s") + " to choose from");
+        }
+        const root = byId(ROOT_ID);
+        if (root) { root.dataset.clipView = archiveActive() ? "archive" : "storage"; }
+    }
+
+    /* -- switching ----------------------------------------------------- */
+
+    /**
+     * Show an archive in place of the storage folder, or the storage folder
+     * again (""). Kept on the host like the sort, so a reload and a second
+     * browser open on the same view.
+     */
+    function setView(id) {
+        const wanted = String(id || "");
+        return askJson(ARCHIVES_ROUTE, { action: "view", id: wanted }, ARCHIVES_TIMEOUT_MS, "archives").then(function (answer) {
+            if (!answer || answer.ok !== true) {
+                setStatus((answer && answer.message) || "Forge did not answer; the grid is as it was.");
+                return false;
+            }
+            if (answer.menu) { S.menuOverride = answer.menu; }
+            applyView(String(answer.view || ""));
+            setStatus(answer.message || "");
+            note("view: " + (answer.view ? "an archive" : "the storage folder"));
+            return true;
+        });
+    }
+
+    /** Draw the view the server holds, from scratch when it changed. */
+    function applyView(id) {
+        const wanted = String(id || "");
+        if (wanted && archiveName(wanted) === "") {
+            // An archive that has left the list is the storage folder.
+            return applyView("");
+        }
+        if (wanted === S.archive.view && (wanted ? S.archive.mounted : !S.archive.mounted)) {
+            drawSourceBar();
+            return;
+        }
+        if (S.selected && (isArchiveRef(S.selected) || wanted)) { select("", false); }
+        if (wanted) {
+            enterArchive(wanted);
+        } else {
+            leaveArchive();
+        }
+        drawSourceBar();
+    }
+
+    function enterArchive(id) {
+        const grid = gridElement();
+        if (!grid) { return; }
+        stopThumbs();
+        S.archive.view = id;
+        S.archive.items = [];
+        S.archive.index = new Map();
+        S.archive.rendered = new Map();
+        // The storage folder's tiles leave the document but not the page's
+        // memory: going back reuses every one of them, decoded.
+        for (const tile of S.library.tiles.values()) {
+            if (tile.parentNode) { tile.parentNode.removeChild(tile); }
+        }
+        emptyNotice(grid, "");
+        const pager = pagerElement();
+        if (pager) { pager.hidden = true; }
+        pin(grid, { "display": "block" });
+        grid.classList.add("minipaint-clip-archive-grid");
+        grid.setAttribute("aria-label", "Archive images");
+        let track = grid.querySelector(".minipaint-clip-track");
+        if (!track) {
+            track = document.createElement("div");
+            track.className = "minipaint-clip-track";
+            pin(track, ARCHIVE_TRACK_GEOMETRY);
+            grid.appendChild(track);
+        }
+        track.innerHTML = "";
+        pin(track, { "height": "0px" });
+        grid.scrollTop = 0;
+        S.archive.scrollTop = 0;
+        S.archive.mounted = true;
+        watchArchive(grid);
+        fetchArchive({});
+    }
+
+    function leaveArchive() {
+        const grid = gridElement();
+        stopThumbs();
+        S.archive.view = "";
+        S.archive.items = [];
+        S.archive.index = new Map();
+        S.archive.rendered = new Map();
+        S.archive.mounted = false;
+        S.archive.ticket += 1;
+        if (!grid) { return; }
+        const track = grid.querySelector(".minipaint-clip-track");
+        if (track) { grid.removeChild(track); }
+        grid.classList.remove("minipaint-clip-archive-grid");
+        grid.setAttribute("aria-label", "Clipboard images");
+        pin(grid, { "display": GRID_GEOMETRY.display });
+        emptyNotice(grid, "");
+        fetchLibrary({ quiet: true, refresh: true });
+    }
+
+    /* -- the listing --------------------------------------------------- */
+
+    /** Ask for the whole archive and draw it. The newest ask wins. */
+    function fetchArchive(options) {
+        const opts = options || {};
+        if (!archiveActive()) { return Promise.resolve(null); }
+        const id = S.archive.view;
+        const sort = opts.sort || S.library.sort || menuState().sort || "";
+        const ticket = ++S.archive.ticket;
+        S.archive.busy = true;
+        setBusy(true);
+        drawSourceBar();
+        const url = ARCHIVE_LIST_ROUTE + "?id=" + encodeURIComponent(id) + (sort ? "&sort=" + encodeURIComponent(sort) : "");
+        return askJson(url, null, ARCHIVE_LIST_TIMEOUT_MS, "archive listing").then(function (answer) {
+            if (ticket !== S.archive.ticket || id !== S.archive.view) { return answer; }
+            S.archive.busy = false;
+            setBusy(false);
+            if (!answer || answer.ok !== true) {
+                setStatus((answer && answer.message) || "The archive could not be read. Press Refresh to try again.");
+                drawSourceBar();
+                return answer;
+            }
+            drawArchive(answer);
+            if (!opts.quiet) { setStatus(answer.status || ""); }
+            return answer;
+        });
+    }
+
+    function drawArchive(answer) {
+        const items = Array.isArray(answer.items) ? answer.items : [];
+        S.archive.items = items;
+        S.archive.sort = String(answer.sort || "");
+        const index = new Map();
+        for (let i = 0; i < items.length; i += 1) { index.set(items[i][0], i); }
+        S.archive.index = index;
+        // A tile drawn for an order that is no longer this one is a tile in
+        // the wrong place: every one is placed again.
+        const track = archiveTrack();
+        for (const tile of S.archive.rendered.values()) {
+            if (tile.parentNode) { tile.parentNode.removeChild(tile); }
+        }
+        S.archive.rendered = new Map();
+        if (track) { track.innerHTML = ""; }
+        const grid = gridElement();
+        if (grid) {
+            grid.dataset.count = String(items.length);
+            grid.classList.toggle("minipaint-clip-empty", !items.length);
+            emptyNotice(grid, items.length ? "" : "archive-empty");
+        }
+        if (S.selected && isArchiveRef(S.selected)) {
+            const key = S.selected.slice(ARCHIVE_REF_PREFIX.length + 17);
+            if (!index.has(key)) { select("", false); }
+        }
+        layoutArchive();
+        renderArchive();
+        drawSourceBar();
+        pumpThumbs(true);
+        S.renderedAt = Date.now();
+        applyThumbnailSize(S.thumb);
+        refreshBadges();
+        scheduleFit();
+    }
+
+    function archiveTrack() {
+        const grid = gridElement();
+        return grid ? grid.querySelector(".minipaint-clip-track") : null;
+    }
+
+    /* -- placing tiles ------------------------------------------------- */
+
+    /**
+     * The storage folder's grid, worked out rather than laid out: the same
+     * columns its `repeat(auto-fill, ...)` makes (the thumbnail plus the
+     * tile's frame, never stretched, at least one), the same row height and
+     * the same gap - so an archive looks exactly like the storage folder,
+     * and the place of tile ten thousand is a multiplication.
+     */
+    function layoutArchive() {
+        const grid = gridElement();
+        const track = archiveTrack();
+        if (!grid || !track) { return null; }
+        const style = getComputedStyle(grid);
+        const thumb = S.thumb || DEFAULT_THUMB;
+        const gap = parseFloat(style.rowGap) || parseFloat(style.columnGap) || 8;
+        const room = Math.max(1, track.clientWidth || (grid.clientWidth - parseFloat(style.paddingLeft || 0) - parseFloat(style.paddingRight || 0)));
+        const cellWidth = Math.min(thumb + TILE_FRAME, room);
+        const cellHeight = thumb + TILE_CAPTION;
+        const columns = Math.max(1, Math.floor((room + gap) / (cellWidth + gap)));
+        const rows = Math.ceil(S.archive.items.length / columns);
+        const height = rows ? rows * cellHeight + (rows - 1) * gap : 0;
+        const layout = { columns: columns, rows: rows, cellWidth: cellWidth, cellHeight: cellHeight, gap: gap,
+                         padTop: parseFloat(style.paddingTop || 0), height: height };
+        const before = S.archive.layout;
+        S.archive.layout = layout;
+        if (track.style.getPropertyValue("height") !== height + "px") { pin(track, { "height": height + "px" }); }
+        if (before && (before.columns !== columns || before.cellWidth !== cellWidth || before.cellHeight !== cellHeight)) {
+            for (const entry of S.archive.rendered) { placeTile(entry[1], entry[0]); }
+        }
+        return layout;
+    }
+
+    /** The rows in view, and the ones the document holds around them. */
+    function archiveRows() {
+        const grid = gridElement();
+        const layout = S.archive.layout;
+        if (!grid || !layout || !layout.rows) { return null; }
+        const step = layout.cellHeight + layout.gap;
+        const top = Math.max(0, grid.scrollTop - layout.padTop);
+        const bottom = top + Math.max(0, grid.clientHeight);
+        const first = Math.max(0, Math.floor(top / step));
+        const last = Math.min(layout.rows - 1, Math.max(first, Math.floor(Math.max(0, bottom - 1) / step)));
+        return { first: first, last: last, step: step, screenRows: Math.max(1, last - first + 1) };
+    }
+
+    function placeTile(tile, index) {
+        const layout = S.archive.layout;
+        if (!layout) { return; }
+        const row = Math.floor(index / layout.columns);
+        const column = index % layout.columns;
+        pin(tile, {
+            "position": "absolute",
+            "left": Math.round(column * (layout.cellWidth + layout.gap)) + "px",
+            "top": Math.round(row * (layout.cellHeight + layout.gap)) + "px",
+            "width": layout.cellWidth + "px",
+            "height": layout.cellHeight + "px"
+        });
+    }
+
+    function buildArchiveTile(index) {
+        const item = S.archive.items[index];
+        const ref = archiveRef(item[0]);
+        const tile = buildTile({ id: ref, name: item[1], v: item[3], bytes: item[2] }, true);
+        tile.dataset.key = item[0];
+        placeTile(tile, index);
+        const on = S.selected === ref;
+        tile.classList.toggle("minipaint-clip-selected", on);
+        tile.setAttribute("aria-selected", on ? "true" : "false");
+        paintThumb(tile, item[0]);
+        return tile;
+    }
+
+    /** Put the rows near the view in the document, and only those. */
+    function renderArchive() {
+        const track = archiveTrack();
+        const rows = archiveRows();
+        if (!track) { return; }
+        if (!rows) {
+            for (const tile of S.archive.rendered.values()) { if (tile.parentNode) { tile.parentNode.removeChild(tile); } }
+            S.archive.rendered = new Map();
+            return;
+        }
+        const columns = S.archive.layout.columns;
+        const from = Math.max(0, (rows.first - ARCHIVE_OVERSCAN_ROWS) * columns);
+        const to = Math.min(S.archive.items.length, (rows.last + 1 + ARCHIVE_OVERSCAN_ROWS) * columns);
+        for (const entry of Array.from(S.archive.rendered)) {
+            if (entry[0] < from || entry[0] >= to) {
+                if (entry[1].parentNode) { entry[1].parentNode.removeChild(entry[1]); }
+                S.archive.rendered.delete(entry[0]);
+            }
+        }
+        for (let index = from; index < to; index += 1) {
+            if (S.archive.rendered.has(index)) { continue; }
+            const tile = buildArchiveTile(index);
+            S.archive.rendered.set(index, tile);
+            track.appendChild(tile);
+        }
+    }
+
+    /* -- the thumbnails, in view first ---------------------------------- */
+
+    function paintThumb(tile, key) {
+        const held = S.archive.thumbs.get(key);
+        const picture = tile.querySelector("img");
+        if (!picture) { return; }
+        if (held && held.url) {
+            // Used again: the newest end of the keep list.
+            S.archive.thumbs.delete(key);
+            S.archive.thumbs.set(key, held);
+            pin(picture, { "display": PICTURE_GEOMETRY.display });
+            tile.classList.remove("minipaint-clip-item-missing");
+            if (picture.getAttribute("src") !== held.url) { picture.src = held.url; }
+        } else if (held && held.state === "failed") {
+            tile.classList.add("minipaint-clip-item-missing");
+            pin(picture, { "display": "none" });
+        }
+    }
+
+    function needsThumb(key) {
+        const held = S.archive.thumbs.get(key);
+        if (S.archive.inflight.has(key)) { return false; }
+        return !held || (!held.url && held.state !== "failed");
+    }
+
+    /**
+     * What to ask for, in order: the tiles in view in reading order, then
+     * the rows below the view, then the rows above it, nearest first.
+     */
+    function wantedThumbs() {
+        const rows = archiveRows();
+        const visible = [];
+        const ahead = [];
+        if (!rows || !tabVisible()) { return { visible: visible, ahead: ahead }; }
+        const columns = S.archive.layout.columns;
+        const count = S.archive.items.length;
+        const take = function (row, into) {
+            for (let index = row * columns; index < Math.min(count, (row + 1) * columns); index += 1) {
+                into.push(S.archive.items[index][0]);
+            }
+        };
+        for (let row = rows.first; row <= rows.last; row += 1) { take(row, visible); }
+        const reach = Math.ceil(rows.screenRows * ARCHIVE_AHEAD_SCREENS);
+        for (let step = 1; step <= reach; step += 1) {
+            if (rows.last + step < S.archive.layout.rows) { take(rows.last + step, ahead); }
+            if (rows.first - step >= 0) { take(rows.first - step, ahead); }
+        }
+        return { visible: visible, ahead: ahead };
+    }
+
+    /**
+     * Decide again what is asked for, and ask.
+     *
+     * Every request for a tile outside the view and what is just past it is
+     * dropped; so is every request for a tile outside the view while a tile
+     * IN it is still waiting - what you are looking at goes first, always.
+     * New requests start only once the view has settled (``PUMP_SETTLE_MS``)
+     * or every ``PUMP_EVERY_MS`` while it keeps moving, so a fling across the
+     * archive asks for nothing on its way.
+     */
+    function pumpThumbs(now) {
+        S.archive.pumpTimer = 0;
+        if (!archiveActive()) { return; }
+        const want = wantedThumbs();
+        const visible = new Set(want.visible);
+        const keep = new Set(want.visible.concat(want.ahead));
+        const waiting = want.visible.some(needsThumb);
+        for (const entry of Array.from(S.archive.inflight)) {
+            if (!keep.has(entry[0]) || (waiting && !visible.has(entry[0]))) { dropThumb(entry[0], entry[1]); }
+        }
+        const moment = Date.now();
+        const settled = now || moment - S.archive.scrolledAt >= PUMP_SETTLE_MS || moment - S.archive.startedAt >= PUMP_EVERY_MS;
+        if (!settled) {
+            const wait = Math.max(0, Math.min(PUMP_SETTLE_MS - (moment - S.archive.scrolledAt),
+                                              PUMP_EVERY_MS - (moment - S.archive.startedAt)));
+            schedulePump(wait + 1);
+            return;
+        }
+        const order = want.visible.concat(want.ahead).filter(needsThumb);
+        while (S.archive.inflight.size < THUMB_CONCURRENCY && order.length) {
+            startThumb(order.shift());
+        }
+    }
+
+    function schedulePump(delay) {
+        if (S.archive.pumpTimer) { return; }
+        S.archive.pumpTimer = setTimeout(function () { pumpThumbs(false); }, Math.max(0, delay || 0));
+    }
+
+    function startThumb(key) {
+        const index = S.archive.index.get(key);
+        if (index === undefined) { return; }
+        const item = S.archive.items[index];
+        const ref = archiveRef(key);
+        let controller = null;
+        try { controller = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { controller = null; }
+        const job = { controller: controller, timedOut: false, dropped: false, timer: 0, view: S.archive.view };
+        job.timer = setTimeout(function () {
+            job.timedOut = true;
+            if (controller) { try { controller.abort(); } catch (e) { /* settled */ } }
+        }, THUMB_TIMEOUT_MS);
+        S.archive.inflight.set(key, job);
+        S.archive.startedAt = Date.now();
+        S.archive.stats.started += 1;
+        S.archive.stats.order.push(key);
+        if (S.archive.stats.order.length > 400) { S.archive.stats.order.splice(0, 200); }
+        const options = { credentials: "same-origin" };
+        if (controller) { options.signal = controller.signal; }
+        fetch(archiveThumbUrl(ref, item[3]), options).then(function (response) {
+            if (!response.ok) {
+                const error = new Error("HTTP " + response.status);
+                error.status = response.status;
+                throw error;
+            }
+            return response.blob();
+        }).then(function (blob) {
+            if (job.view !== S.archive.view) { return; }
+            const url = URL.createObjectURL(blob);
+            S.archive.thumbs.set(key, { url: url, state: "done", tries: 0 });
+            S.archive.stats.done += 1;
+            keepThumbs();
+            const at = S.archive.index.get(key);
+            const tile = at === undefined ? null : S.archive.rendered.get(at);
+            if (tile) { paintThumb(tile, key); }
+        }).catch(function (error) {
+            if (job.view !== S.archive.view) { return; }
+            if (job.dropped) { return; }
+            const held = S.archive.thumbs.get(key) || { url: "", state: "idle", tries: 0 };
+            held.tries = (held.tries || 0) + 1;
+            const status = error && error.status;
+            // A picture the server says is not there, or not a picture, will
+            // not be one on the next try either. A deadline missed, or the
+            // server's own trouble, is tried once more.
+            const final = (status >= 400 && status < 500) || held.tries >= THUMB_TRIES;
+            held.state = final ? "failed" : "idle";
+            S.archive.thumbs.set(key, held);
+            if (final) {
+                S.archive.stats.failed += 1;
+                const at = S.archive.index.get(key);
+                const tile = at === undefined ? null : S.archive.rendered.get(at);
+                if (tile) { paintThumb(tile, key); }
+            }
+            if (job.timedOut) { note("archive: a thumbnail took longer than " + (THUMB_TIMEOUT_MS / 1000) + "s" + (final ? "; its tile is marked" : "; it will be asked for again")); }
+        }).then(function () {
+            clearTimeout(job.timer);
+            if (S.archive.inflight.get(key) === job) { S.archive.inflight.delete(key); }
+            // A request this page dropped is not a free slot to fill at once:
+            // it was dropped because the view moved, and the view's own pump
+            // decides what comes next - otherwise a fling would start and
+            // drop three requests a frame all the way down.
+            if (!job.dropped && job.view === S.archive.view) { pumpThumbs(true); }
+        });
+    }
+
+    /** A request for a tile that is no longer wanted first. */
+    function dropThumb(key, job) {
+        job.dropped = true;
+        clearTimeout(job.timer);
+        if (job.controller) { try { job.controller.abort(); } catch (e) { /* settled */ } }
+        S.archive.inflight.delete(key);
+        S.archive.stats.dropped += 1;
+    }
+
+    /** Only so many object URLs: the oldest not on screen go first. */
+    function keepThumbs() {
+        if (S.archive.thumbs.size <= THUMB_KEEP) { return; }
+        const shown = new Set();
+        for (const tile of S.archive.rendered.values()) { shown.add(tile.dataset.key); }
+        for (const entry of Array.from(S.archive.thumbs)) {
+            if (S.archive.thumbs.size <= THUMB_KEEP) { break; }
+            if (shown.has(entry[0]) || !entry[1].url) { continue; }
+            try { URL.revokeObjectURL(entry[1].url); } catch (e) { /* gone already */ }
+            S.archive.thumbs.delete(entry[0]);
+        }
+    }
+
+    /** Every request dropped and every object URL let go: a new view. */
+    function stopThumbs() {
+        for (const entry of Array.from(S.archive.inflight)) { dropThumb(entry[0], entry[1]); }
+        for (const held of S.archive.thumbs.values()) {
+            if (held.url) { try { URL.revokeObjectURL(held.url); } catch (e) { /* gone already */ } }
+        }
+        S.archive.thumbs = new Map();
+        if (S.archive.pumpTimer) { clearTimeout(S.archive.pumpTimer); S.archive.pumpTimer = 0; }
+    }
+
+    /** The grid moved: the rows are drawn at once, the asking re-decided. */
+    function onArchiveScroll() {
+        if (!archiveActive()) { return; }
+        S.archive.scrolledAt = Date.now();
+        // Where the reader is, kept while the grid is on screen: a hidden
+        // tab's grid has no layout, and coming back to it is coming back to
+        // the top - of five thousand pictures, after a send to PNG Info.
+        const grid = gridElement();
+        if (grid && grid.clientHeight > 0) { S.archive.scrollTop = grid.scrollTop; }
+        if (S.archive.frame) { return; }
+        S.archive.frame = window.requestAnimationFrame(function () {
+            S.archive.frame = 0;
+            renderArchive();
+            pumpThumbs(false);
+        });
+    }
+
+    function onArchiveResize() {
+        if (!archiveActive()) { return; }
+        const grid = gridElement();
+        // Hidden with its tab: nothing to measure, and a layout worked out
+        // from a width of nothing would be one column ten thousand rows high.
+        if (!grid || !grid.clientWidth || !grid.clientHeight) { return; }
+        layoutArchive();
+        if (S.archive.scrollTop && Math.abs(grid.scrollTop - S.archive.scrollTop) > 1) {
+            grid.scrollTop = S.archive.scrollTop;
+        }
+        renderArchive();
+        pumpThumbs(true);
+    }
+
+    function watchArchive(grid) {
+        if (S.archive.watched === grid) { return; }
+        S.archive.watched = grid;
+        grid.addEventListener("scroll", onArchiveScroll, { passive: true });
+        // The grid's size is the fit's to write; this only reads it, and
+        // writes nothing back onto the grid - the tiles inside it move.
+        if (typeof ResizeObserver === "function") {
+            if (S.archive.observer) { S.archive.observer.disconnect(); }
+            S.archive.observer = new ResizeObserver(function () { onArchiveResize(); });
+            S.archive.observer.observe(grid);
+        }
+    }
+
+    /* -- the Archives screen ------------------------------------------- */
+
+    function archivesRoot() { return S.archivesDom ? S.archivesDom.root : null; }
+
+    function archivesOpen() {
+        const element = archivesRoot();
+        return !!(element && !element.hidden);
+    }
+
+    function buildArchives() {
+        if (S.archivesDom && S.archivesDom.root.isConnected) { return S.archivesDom; }
+        const host = root();
+        if (!host) { return null; }
+        const layer = el("div", ARCHIVES_CLASS);
+        layer.hidden = true;
+        const dialog = el("div", ARCHIVES_CLASS + "-dialog");
+        dialog.setAttribute("role", "dialog");
+        dialog.setAttribute("aria-modal", "true");
+        dialog.setAttribute("aria-labelledby", ARCHIVES_TITLE_ID);
+        const head = el("div", ARCHIVES_CLASS + "-head");
+        const title = el("b", ARCHIVES_CLASS + "-title", "Archives");
+        title.id = ARCHIVES_TITLE_ID;
+        const close = el("button", ARCHIVES_CLASS + "-close", "Close");
+        close.type = "button";
+        close.title = "Close (Escape)";
+        head.appendChild(title);
+        head.appendChild(close);
+        dialog.appendChild(head);
+        dialog.appendChild(el("div", ARCHIVES_CLASS + "-hint",
+            "Folders on the machine running Forge that the Clipboard can show in place of its storage folder. "
+            + "Nothing in them is written to; new pictures still go to the storage folder."));
+        const form = el("form", ARCHIVES_CLASS + "-add");
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = ARCHIVES_CLASS + "-path";
+        input.placeholder = "/path/on/forge/host";
+        input.setAttribute("aria-label", "Folder on the Forge host");
+        input.autocomplete = "off";
+        input.spellcheck = false;
+        const add = el("button", ARCHIVES_CLASS + "-add-button", "Add");
+        add.type = "submit";
+        form.appendChild(input);
+        form.appendChild(add);
+        form.addEventListener("submit", function (event) {
+            event.preventDefault();
+            addArchive(input.value);
+        });
+        dialog.appendChild(form);
+        const message = el("div", ARCHIVES_CLASS + "-message");
+        message.setAttribute("role", "status");
+        message.hidden = true;
+        dialog.appendChild(message);
+        const list = el("ul", ARCHIVES_CLASS + "-list");
+        dialog.appendChild(list);
+        layer.appendChild(dialog);
+        layer.addEventListener("click", onArchivesClick);
+        host.appendChild(layer);
+        S.archivesDom = { root: layer, dialog: dialog, list: list, message: message, close: close, input: input, add: add };
+        return S.archivesDom;
+    }
+
+    function archivesMessage(text, failure) {
+        const dom = S.archivesDom;
+        if (!dom) { return; }
+        dom.message.textContent = text || "";
+        dom.message.hidden = !text;
+        dom.message.classList.toggle(ARCHIVES_CLASS + "-failure", !!failure);
+    }
+
+    function archiveEntry(archive, current) {
+        const item = el("li", ARCHIVES_CLASS + "-entry");
+        item.dataset.archive = archive.id;
+        const words = el("div", ARCHIVES_CLASS + "-words");
+        const name = el("b", ARCHIVES_CLASS + "-name", archive.name);
+        words.appendChild(name);
+        if (archive.id === current) { words.appendChild(el("span", "minipaint-clip-badge", "showing")); }
+        if (!archive.available) { words.appendChild(el("span", "minipaint-clip-badge", "cannot be read now")); }
+        words.appendChild(el("div", ARCHIVES_CLASS + "-where", archive.path));
+        item.appendChild(words);
+        const actions = el("div", ARCHIVES_CLASS + "-actions");
+        const show = el("button", ARCHIVES_CLASS + "-show", archive.id === current ? "Showing" : "Show");
+        show.type = "button";
+        show.dataset.archiveShow = archive.id;
+        show.disabled = archive.id === current;
+        const remove = el("button", ARCHIVES_CLASS + "-remove", "Remove");
+        remove.type = "button";
+        remove.dataset.archiveRemove = archive.id;
+        remove.title = "Take it off this list. The folder and its pictures are not touched.";
+        actions.appendChild(show);
+        actions.appendChild(remove);
+        item.appendChild(actions);
+        return item;
+    }
+
+    function drawArchives(answer) {
+        const dom = buildArchives();
+        if (!dom) { return; }
+        const list = answer && Array.isArray(answer.archives) ? answer.archives : [];
+        if (answer && answer.menu) { S.menuOverride = answer.menu; }
+        dom.list.innerHTML = "";
+        if (!list.length) {
+            dom.list.appendChild(el("li", ARCHIVES_CLASS + "-empty", "No archives yet. Type a folder above and press Add."));
+        }
+        for (const archive of list) { dom.list.appendChild(archiveEntry(archive, String(answer.view || ""))); }
+        drawSourceBar();
+    }
+
+    function openArchives() {
+        const dom = buildArchives();
+        if (!dom) { return Promise.resolve(null); }
+        if (S.menu && !S.menu.hidden) { closeMenu(); }
+        const was = archivesOpen();
+        applyHeaderInset();
+        watchHeaderInset();
+        dom.root.hidden = false;
+        if (!was) {
+            announceOverlayAs(ARCHIVES_OVERLAY, true);
+            if (S.archivesKey) { document.removeEventListener("keydown", S.archivesKey, true); }
+            S.archivesKey = function (event) {
+                if (event.key !== "Escape" || !archivesOpen()) { return; }
+                event.stopPropagation();
+                event.preventDefault();
+                closeArchives();
+            };
+            document.addEventListener("keydown", S.archivesKey, true);
+        }
+        archivesMessage("", false);
+        if (!dom.list.children.length) { dom.list.appendChild(el("li", ARCHIVES_CLASS + "-empty", "Reading…")); }
+        try { dom.input.focus(); } catch (e) { /* focus is a courtesy */ }
+        return askJson(ARCHIVES_ROUTE, null, ARCHIVES_TIMEOUT_MS, "archives").then(function (answer) {
+            if (!archivesOpen()) { return answer; }
+            if (!answer || answer.ok !== true) {
+                drawArchives({ archives: [] });
+                archivesMessage((answer && answer.message) || "Forge did not answer, so the archives could not be read. Close and try again.", true);
+                return answer;
+            }
+            drawArchives(answer);
+            return answer;
+        });
+    }
+
+    function closeArchives() {
+        const element = archivesRoot();
+        if (!element || element.hidden) { return false; }
+        element.hidden = true;
+        if (S.archivesKey) { document.removeEventListener("keydown", S.archivesKey, true); S.archivesKey = null; }
+        announceOverlayAs(ARCHIVES_OVERLAY, false);
+        return true;
+    }
+
+    function archiveAction(body, done) {
+        const dom = S.archivesDom;
+        if (dom) { dom.add.disabled = true; }
+        return askJson(ARCHIVES_ROUTE, body, ARCHIVES_TIMEOUT_MS, "archives").then(function (answer) {
+            if (dom) { dom.add.disabled = false; }
+            if (!answer) {
+                archivesMessage("Forge did not answer; nothing was changed.", true);
+                return null;
+            }
+            if (Array.isArray(answer.archives)) { drawArchives(answer); }
+            archivesMessage(answer.message || "", answer.ok !== true);
+            if (answer.ok === true && done) { done(answer); }
+            return answer;
+        });
+    }
+
+    function addArchive(path) {
+        const text = String(path || "").trim();
+        if (!text) { archivesMessage("Type a folder on the machine running Forge.", true); return Promise.resolve(null); }
+        return archiveAction({ action: "add", path: text }, function () {
+            if (S.archivesDom) { S.archivesDom.input.value = ""; }
+            note("archives: one added");
+        });
+    }
+
+    function onArchivesClick(event) {
+        const dom = S.archivesDom;
+        const target = event.target;
+        if (!dom || !target) { return; }
+        if (target === dom.root) { closeArchives(); return; }
+        if (!target.closest) { return; }
+        if (target.closest("." + ARCHIVES_CLASS + "-close")) { closeArchives(); return; }
+        const show = target.closest("[data-archive-show]");
+        if (show) {
+            closeArchives();
+            setView(show.dataset.archiveShow);
+            return;
+        }
+        const remove = target.closest("[data-archive-remove]");
+        if (remove) {
+            const id = remove.dataset.archiveRemove;
+            archiveAction({ action: "remove", id: id }, function (answer) {
+                applyView(String(answer.view || ""));
+                note("archives: one removed");
+            });
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Full screen, from a tile                                              */
+    /* ------------------------------------------------------------------ */
+    //
+    // The one place the grid ever loads a whole picture, and only the one
+    // that was asked for. The thumbnail the tile already has is shown at
+    // once and the full picture replaces it when it has arrived. Real full
+    // screen where the browser grants it; where it does not (some phone
+    // browsers), the view fills the window instead. A double tap - or a
+    // double click, or Escape - closes it.
+    //
+    // Its own full screen, never the page's: the Forge Assistant's focus
+    // mode makes the whole document full screen, and a view that asked "is
+    // anything full screen?" would end the assistant's when it closed. See
+    // inFullscreen, which the Outputs player learnt this from.
+
+    const VIEWER_CLASS = "minipaint-clip-viewer";
+    const VIEWER_OVERLAY = "clipboard-viewer";
+    //: Two taps this close in time and place are a double tap.
+    const DOUBLE_TAP_MS = 350;
+    const DOUBLE_TAP_PX = 32;
+    //: How long the hint says how to leave.
+    const VIEWER_HINT_MS = 2200;
+
+    function viewerOpen() { return !!(S.viewer && S.viewer.root && !S.viewer.root.hidden); }
+
+    function buildViewer() {
+        if (S.viewer && S.viewer.root.isConnected) { return S.viewer; }
+        const host = root();
+        if (!host) { return null; }
+        const layer = el("div", VIEWER_CLASS);
+        layer.hidden = true;
+        layer.setAttribute("role", "dialog");
+        layer.setAttribute("aria-modal", "true");
+        layer.setAttribute("aria-label", "Full screen picture. Double-tap to close.");
+        layer.tabIndex = -1;
+        const picture = document.createElement("img");
+        picture.className = VIEWER_CLASS + "-picture";
+        picture.alt = "";
+        picture.draggable = false;
+        const hint = el("div", VIEWER_CLASS + "-hint", "Double-tap to close");
+        layer.appendChild(picture);
+        layer.appendChild(hint);
+        layer.addEventListener("pointerup", onViewerTap);
+        layer.addEventListener("dblclick", function (event) { event.preventDefault(); });
+        host.appendChild(layer);
+        S.viewer = { root: layer, picture: picture, hint: hint, lastTap: null, full: null, hintTimer: 0,
+                     fullscreen: false, key: null, change: null, url: "" };
+        return S.viewer;
+    }
+
+    function viewerInFullscreen() {
+        const now = fullscreenNow();
+        return !!(now && S.viewer && now === S.viewer.root);
+    }
+
+    /**
+     * Open a tile's picture over everything. Called inside the press, so
+     * the browser takes the full-screen request as the user's own.
+     */
+    function openViewer(tile) {
+        if (!tile) { return false; }
+        const view = buildViewer();
+        if (!view) { return false; }
+        const id = tile.dataset.asset || "";
+        const version = tile.dataset.v || "";
+        const archive = isArchiveRef(id);
+        const shown = tile.querySelector("img");
+        const small = shown && shown.getAttribute("src") ? shown.getAttribute("src") : "";
+        const full = archive ? archiveFullUrl(id, version)
+            : "/minipaint-clipboard/image/" + encodeURIComponent(id) + (version ? "?v=" + encodeURIComponent(version) : "");
+        view.url = full;
+        view.picture.src = small || full;
+        view.root.dataset.loaded = small ? "0" : "1";
+        const was = viewerOpen();
+        view.root.hidden = false;
+        if (!was) {
+            announceOverlayAs(VIEWER_OVERLAY, true);
+            view.key = function (event) {
+                if (event.key !== "Escape" || !viewerOpen()) { return; }
+                event.stopPropagation();
+                event.preventDefault();
+                closeViewer();
+            };
+            document.addEventListener("keydown", view.key, true);
+            view.change = function () {
+                // Left by the browser's own way out (Escape, a gesture):
+                // the view goes with it. Only when it was this view's.
+                if (view.fullscreen && !viewerInFullscreen()) { view.fullscreen = false; closeViewer(); }
+            };
+            document.addEventListener("fullscreenchange", view.change);
+            document.addEventListener("webkitfullscreenchange", view.change);
+        }
+        // The full picture, then swapped in: the thumbnail is already there.
+        const loader = new Image();
+        view.full = loader;
+        loader.onload = function () {
+            if (view.full !== loader || !viewerOpen()) { return; }
+            view.picture.src = full;
+            view.root.dataset.loaded = "1";
+        };
+        loader.onerror = function () {
+            if (view.full !== loader) { return; }
+            view.root.dataset.loaded = "failed";
+            note("viewer: the full picture could not be read");
+        };
+        loader.src = full;
+        const enter = view.root.requestFullscreen || view.root.webkitRequestFullscreen;
+        if (enter && (document.fullscreenEnabled || document.webkitFullscreenEnabled)) {
+            try {
+                const asked = enter.call(view.root);
+                view.fullscreen = true;
+                if (asked && typeof asked.then === "function") {
+                    asked.then(null, function () { view.fullscreen = false; view.root.dataset.fill = "window"; });
+                }
+            } catch (e) {
+                view.fullscreen = false;
+                view.root.dataset.fill = "window";
+            }
+        } else {
+            view.root.dataset.fill = "window";
+        }
+        view.hint.hidden = false;
+        if (view.hintTimer) { clearTimeout(view.hintTimer); }
+        view.hintTimer = setTimeout(function () { view.hint.hidden = true; }, VIEWER_HINT_MS);
+        try { view.root.focus({ preventScroll: true }); } catch (e) { /* focus is a courtesy */ }
+        note("viewer: opened " + (archive ? "an archive picture" : "a library picture"));
+        return true;
+    }
+
+    function closeViewer() {
+        const view = S.viewer;
+        if (!view || view.root.hidden) { return false; }
+        if (viewerInFullscreen()) {
+            const leave = document.exitFullscreen || document.webkitExitFullscreen;
+            if (leave) { try { leave.call(document); } catch (e) { /* it was leaving anyway */ } }
+        }
+        view.fullscreen = false;
+        view.full = null;
+        view.root.hidden = true;
+        delete view.root.dataset.fill;
+        view.picture.removeAttribute("src");
+        if (view.hintTimer) { clearTimeout(view.hintTimer); view.hintTimer = 0; }
+        if (view.key) { document.removeEventListener("keydown", view.key, true); view.key = null; }
+        if (view.change) {
+            document.removeEventListener("fullscreenchange", view.change);
+            document.removeEventListener("webkitfullscreenchange", view.change);
+            view.change = null;
+        }
+        announceOverlayAs(VIEWER_OVERLAY, false);
+        return true;
+    }
+
+    /** Two taps (or clicks) in one place, close together: close. */
+    function onViewerTap(event) {
+        const view = S.viewer;
+        if (!view || (event.button !== undefined && event.button > 0)) { return; }
+        const now = Date.now();
+        const last = view.lastTap;
+        if (last && now - last.at <= DOUBLE_TAP_MS
+            && Math.abs(event.clientX - last.x) <= DOUBLE_TAP_PX && Math.abs(event.clientY - last.y) <= DOUBLE_TAP_PX) {
+            view.lastTap = null;
+            event.preventDefault();
+            closeViewer();
+            return;
+        }
+        view.lastTap = { at: now, x: event.clientX, y: event.clientY };
+    }
+
+    /* ------------------------------------------------------------------ */
     /* The menu                                                              */
     /* ------------------------------------------------------------------ */
 
@@ -3071,6 +4285,19 @@ window.minipaintClipboard = (function () {
             list.push({ menu: "close", label: "Cancel" });
             return list;
         }
+        if (section === "archives") {
+            // What the grid shows: the storage folder or one archive, ticked;
+            // and the screen that adds and removes archives.
+            const list = back.slice();
+            const current = archiveActive() ? S.archive.view : "";
+            list.push({ menu: "view", value: "", label: tick(!current) + "Storage folder" });
+            for (const pair of archiveList()) {
+                list.push({ menu: "view", value: pair[0], label: tick(current === pair[0]) + pair[1] });
+            }
+            if (!archiveList().length) { list.push({ menu: "status", label: "No archives yet" }); }
+            list.push({ menu: "archives", label: "Manage archives…" });
+            return list;
+        }
         if (section === "intercept") {
             // Where the gallery's 🖌️ button sends: three mutually exclusive
             // choices, the current one ticked. The labels come from the
@@ -3091,8 +4318,9 @@ window.minipaintClipboard = (function () {
             { menu: "paste", label: "Paste image" },
             { menu: "press", value: PRESS.upload, label: "Upload image(s)…" },
             { menu: "press", value: PRESS.folder, label: "Choose storage folder…" },
-            { menu: "press", value: PRESS.rename, label: "Rename selected…", disabled: !S.selected },
-            { menu: "press", value: PRESS.remove, label: "Delete selected…", disabled: !S.selected },
+            { menu: "section", value: "archives", label: "Archives ›" },
+            { menu: "press", value: PRESS.rename, label: "Rename selected…", disabled: !S.selected || isArchiveRef(S.selected) },
+            { menu: "press", value: PRESS.remove, label: "Delete selected…", disabled: !S.selected || isArchiveRef(S.selected) },
             { menu: "press", value: PRESS.history, label: "Queue Send History" }
         ];
     }
@@ -3124,7 +4352,7 @@ window.minipaintClipboard = (function () {
             case "press":
                 closeMenu();
                 pressHidden(value);
-                if (value === PRESS.refresh) { fetchLibrary({ refresh: true }); }
+                if (value === PRESS.refresh) { refreshGrid(); }
                 if (value === PRESS.history) { askQueue(null); }
                 return;
             case "intercept": closeMenu(); setIntercept(value); return;
@@ -3134,6 +4362,8 @@ window.minipaintClipboard = (function () {
             case "sort": closeMenu(); setSort(value); sendInput(BOXES.sortRequest, value + ":" + Date.now()); return;
             case "paste": closeMenu(); pasteFromClipboard(); return;
             case "send": closeMenu(); sendTo(value); return;
+            case "view": closeMenu(); setView(value); return;
+            case "archives": closeMenu(); openArchives(); return;
             default: return;
         }
     }
@@ -3199,7 +4429,9 @@ window.minipaintClipboard = (function () {
     function openToolbarMenu(section) {
         if (!S.menu) { buildMenu(); }
         if (!S.menu) { return; }
-        const anchor = byId(section === "send" ? SEND_BUTTON_ID : SORT_BUTTON_ID);
+        const bar = section === "archives" ? sourceBar() : null;
+        const anchor = bar ? bar.querySelector(".minipaint-clip-source-pick")
+            : byId(section === "send" ? SEND_BUTTON_ID : SORT_BUTTON_ID);
         const again = !S.menu.hidden && S.menuStandalone && S.menuSection === section;
         if (!S.menu.hidden) { closeMenu(); }
         if (again) { return; }
@@ -3451,7 +4683,9 @@ window.minipaintClipboard = (function () {
             // For the cards and the menu; the grid is read over HTTP.
             pressHidden(PRESS.refresh);
             libraryChanged();
-            toast(slot ? "Imported and placed in the slot." : "Imported into Clipboard.");
+            toast(slot ? "Imported and placed in the slot."
+                : archiveActive() ? "Saved to the storage folder. The archive on screen is not written to."
+                : "Imported into Clipboard.");
             return asset;
         } catch (error) {
             toast(String(error && error.message || error), true);
@@ -4477,6 +5711,17 @@ window.minipaintClipboard = (function () {
     function onRootClick(event) {
         const target = event.target;
         if (!target || !target.closest) { return; }
+        const expand = target.closest(".minipaint-clip-expand");
+        if (expand) {
+            const tile = expand.closest(".minipaint-clip-item");
+            event.preventDefault();
+            event.stopPropagation();
+            // Selected as well as shown, so a send after closing it sends
+            // the picture that was just looked at.
+            if (tile && tile.dataset.asset !== S.selected) { select(tile.dataset.asset); }
+            openViewer(tile);
+            return;
+        }
         const item = target.closest(".minipaint-clip-item");
         if (item) {
             select(item.dataset.asset === S.selected ? "" : item.dataset.asset);
@@ -4523,6 +5768,7 @@ window.minipaintClipboard = (function () {
         const item = event.target && event.target.closest ? event.target.closest(".minipaint-clip-item") : null;
         if (!item) { return; }
         if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(item.dataset.asset); }
+        if (event.key === "f" || event.key === "F") { event.preventDefault(); select(item.dataset.asset); openViewer(item); }
     }
 
     function watchTab() {
@@ -4542,6 +5788,9 @@ window.minipaintClipboard = (function () {
                     // back to the tab is exactly when the folder may have
                     // moved underneath it.
                     fetchLibrary({ quiet: true, refresh: true });
+                    // An archive is not re-listed for a look - an archive is
+                    // an archive - but its view was not measured while hidden.
+                    if (archiveActive()) { onArchiveResize(); }
                     refreshCapabilities(false);
                     // Whatever the throttle above decided: coming back to
                     // the tab is when a model changed in the WanGP tab shows.
@@ -4593,6 +5842,16 @@ window.minipaintClipboard = (function () {
         gridMount();
         watchFit();
         scheduleFit();
+        // The view this page was built with first - an archive, when one was
+        // on screen - and then the one the host holds now, over HTTP, since a
+        // page's built-in state is as old as the page.
+        drawSourceBar();
+        applyView(String(menuState().view || ""));
+        askJson(ARCHIVES_ROUTE, null, ARCHIVES_TIMEOUT_MS, "archives").then(function (answer) {
+            if (!answer || answer.ok !== true) { return; }
+            if (answer.menu) { S.menuOverride = Object.assign({}, S.menuOverride || {}, answer.menu); }
+            applyView(String(answer.view || ""));
+        });
         fetchLibrary({ quiet: true, refresh: true });
         // And the queue: what ran while this browser was closed, from the
         // route rather than from a framework render that a closed browser
@@ -4636,7 +5895,23 @@ window.minipaintClipboard = (function () {
                  library: { revision: S.library.revision, page: S.library.page, pages: S.library.pages,
                             total: S.library.total, shown: S.library.ids.length, busy: S.library.busy },
                  tileReport: S.tileReport,
+                 archive: archiveState(),
+                 archivesOpen: archivesOpen(),
+                 viewerOpen: viewerOpen(),
                  fitted: S.fitted || null };
+    }
+
+    /** What the archive loader is doing, for the journal and the checks. */
+    function archiveState() {
+        const rows = archiveActive() ? archiveRows() : null;
+        return { view: S.archive.view, total: S.archive.items.length, busy: S.archive.busy,
+                 rendered: S.archive.rendered.size, inflight: Array.from(S.archive.inflight.keys()),
+                 thumbs: S.archive.thumbs.size, columns: S.archive.layout ? S.archive.layout.columns : 0,
+                 rows: rows ? { first: rows.first, last: rows.last } : null,
+                 started: S.archive.stats.started, dropped: S.archive.stats.dropped,
+                 done: S.archive.stats.done, failed: S.archive.stats.failed,
+                 order: S.archive.stats.order.slice(-200),
+                 visible: archiveActive() ? wantedThumbs().visible : [] };
     }
 
     return {
@@ -4687,6 +5962,18 @@ window.minipaintClipboard = (function () {
         showOffline: connectionNotice,
         receiveOverHttp: receiveOverHttp,
         galleryPictureUrl: galleryPictureUrl,
+        setView: setView,
+        openArchives: openArchives,
+        closeArchives: closeArchives,
+        archiveState: archiveState,
+        openViewer: function (assetId) {
+            const grid = gridElement();
+            const tile = grid ? Array.from(grid.querySelectorAll(".minipaint-clip-item")).find(function (one) {
+                return one.dataset.asset === assetId;
+            }) : null;
+            return openViewer(tile || null);
+        },
+        closeViewer: closeViewer,
         debug: debug
     };
 })();

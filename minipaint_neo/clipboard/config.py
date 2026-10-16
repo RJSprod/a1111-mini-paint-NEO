@@ -7,7 +7,9 @@ directory of pictures:
 
 * ``clipboard.json``            the storage root, the intercept destination
                                 (where the gallery's 🖌️ button sends), the
-                                sort order and the thumbnail size;
+                                sort order, the thumbnail size, the archives
+                                (read-only folders the grid can show instead
+                                of the storage root) and which one is shown;
 * ``clipboard-index.json``      the asset index: opaque ids for the files of
                                 every root Clipboard has known;
 * ``clipboard-draft.json``      the composer: a prompt override and up to
@@ -33,6 +35,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import typing
 
 from .. import scrub
@@ -66,6 +69,12 @@ SORT_LABELS = {
     "smallest": "Smallest",
 }
 DEFAULT_SORT = "newest"
+
+#: How many archives the list may hold - read-only folders the grid can show
+#: in place of the storage folder (``archives``). "As many as you want",
+#: bounded only so a script cannot grow this document without limit.
+ARCHIVE_LIMIT = 500
+_ARCHIVE_ID = re.compile(r"\A[0-9a-f]{16}\Z")
 
 #: Thumbnail size is presentation: a CSS variable the browser sizes the grid
 #: by, remembered here so a reload keeps it.
@@ -210,6 +219,32 @@ def clamp_thumbnail(value: typing.Any) -> int:
     return max(THUMBNAIL_MIN, min(THUMBNAIL_MAX, number))
 
 
+def archives_of(value: typing.Any) -> typing.List[dict]:
+    """The archive records a document holds, kept only where each is whole.
+
+    A hand-edited list is read record by record: an entry without a 16-hex
+    id, a path or a name is dropped, a second entry for one id is dropped,
+    and the list stops at ``ARCHIVE_LIMIT``.
+    """
+    kept: typing.List[dict] = []
+    seen = set()
+    for record in value if isinstance(value, list) else []:
+        if not isinstance(record, dict):
+            continue
+        archive_id, path, name = record.get("id"), record.get("path"), record.get("name")
+        if not (isinstance(archive_id, str) and _ARCHIVE_ID.match(archive_id)):
+            continue
+        if not (isinstance(path, str) and path.strip() and isinstance(name, str) and name.strip()):
+            continue
+        if archive_id in seen:
+            continue
+        seen.add(archive_id)
+        kept.append({"id": archive_id, "path": path, "name": name})
+        if len(kept) >= ARCHIVE_LIMIT:
+            break
+    return kept
+
+
 @dataclasses.dataclass
 class Config:
     """The whole of what a restart may know about Clipboard."""
@@ -229,6 +264,13 @@ class Config:
     outputs_folder: str = ""
     #: The WanGP popup's last "Inherit Clipboard inputs" choice.
     intercept_inherit: bool = DEFAULT_INTERCEPT_INHERIT
+    #: The archives: ``{"id", "path", "name"}`` each, in the order added. A
+    #: path here is a folder on the Forge host, shown on the Archives screen
+    #: and never carried by a request - a request names an archive by id.
+    archives: typing.List[dict] = dataclasses.field(default_factory=list)
+    #: The archive the grid shows in place of the storage folder, by id, or
+    #: "" for the storage folder.
+    view: str = ""
 
     @property
     def intercept(self) -> bool:
@@ -254,6 +296,8 @@ class Config:
             "thumbnail": clamp_thumbnail(self.thumbnail),
             "outputs_folder": str(self.outputs_folder or ""),
             "intercept_inherit": self.intercept_inherit is not False,
+            "archives": archives_of(self.archives),
+            "view": self.view if _ARCHIVE_ID.match(str(self.view or "")) else "",
         }
 
     @classmethod
@@ -274,6 +318,8 @@ class Config:
             outputs_folder=str(data.get("outputs_folder") or "") if isinstance(data.get("outputs_folder"), str) else "",
             thumbnail=clamp_thumbnail(data.get("thumbnail", THUMBNAIL_DEFAULT)),
             intercept_inherit=data.get("intercept_inherit", DEFAULT_INTERCEPT_INHERIT) is not False,
+            archives=archives_of(data.get("archives")),
+            view=str(data.get("view") or "") if _ARCHIVE_ID.match(str(data.get("view") or "")) else "",
         )
 
     @property
@@ -307,6 +353,7 @@ def update(**changes: typing.Any) -> Config:
 
 
 __all__ = [
+    "ARCHIVE_LIMIT",
     "CONFIG_NAME",
     "Config",
     "DEFAULT_INTERCEPT",
@@ -328,6 +375,7 @@ __all__ = [
     "THUMBNAIL_DEFAULT",
     "THUMBNAIL_MAX",
     "THUMBNAIL_MIN",
+    "archives_of",
     "clamp_thumbnail",
     "config_dir",
     "load",

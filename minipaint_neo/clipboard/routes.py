@@ -19,7 +19,13 @@ exist because the browser's other way of reaching the server - writing a
 hidden box and hoping the framework noticed - is not reliable on every
 install.
 
-All three are gated by the same sign-in the WanGP proxy applies, where the
+``/minipaint-clipboard/archives``, ``/archive/list`` and
+``/archive/image/<ref>`` are the archives (``archives.py``): the list of
+read-only folders the grid can show in place of the storage folder, every
+picture in one of them in one answer, and one picture - or its thumbnail -
+by its reference, never by a path.
+
+All of them are gated by the same sign-in the WanGP proxy applies, where the
 host has one.
 """
 
@@ -32,7 +38,7 @@ import typing
 from .. import scrub
 from ..wangp import errors
 from ..wangp.errors import IntegrationError
-from . import config, history, outputs
+from . import archives, config, history, outputs
 from . import store as store_module
 
 ROUTE_PREFIX = "/minipaint-clipboard"
@@ -56,6 +62,14 @@ OUTPUT_FILE_ROUTE = ROUTE_PREFIX + "/output/{file_id}"
 #: the small copy of the picture it froze.
 INTERCEPT_ROUTE = ROUTE_PREFIX + "/intercept"
 INTERCEPT_IMAGE_ROUTE = ROUTE_PREFIX + "/intercept/image/{token}"
+#: The archives. GET lists them with the view; POST ``{action}`` adds one
+#: (``path``), removes one (``id``) or shows one (``id``, "" for the storage
+#: folder).
+ARCHIVES_ROUTE = ROUTE_PREFIX + "/archives"
+#: Every picture in one archive, in one answer: ``?id=<archive id>&sort=``.
+ARCHIVE_LIST_ROUTE = ROUTE_PREFIX + "/archive/list"
+#: One archive picture by its reference; ``?thumb=1`` for its thumbnail.
+ARCHIVE_IMAGE_ROUTE = ROUTE_PREFIX + "/archive/image/{ref}"
 
 #: How many pictures one page of the grid carries.
 #:
@@ -96,6 +110,16 @@ def image_url(asset_id: str, thumb: bool = True, version: typing.Any = "") -> st
     if version:
         query.append(f"v={version}")
     return f"{ROUTE_PREFIX}/image/{asset_id}" + (("?" + "&".join(query)) if query else "")
+
+
+def archive_image_url(ref: str, thumb: bool = True, version: typing.Any = "") -> str:
+    """An archive picture's URL, the library's shape: the reference, never a path."""
+    query = []
+    if thumb:
+        query.append("thumb=1")
+    if version:
+        query.append(f"v={version}")
+    return ARCHIVE_IMAGE_ROUTE.replace("{ref}", str(ref)) + (("?" + "&".join(query)) if query else "")
 
 
 #: What a picture is cached as when the URL carries its current identity.
@@ -310,6 +334,10 @@ def menu_facts(current: typing.Optional[config.Config] = None) -> dict:
         "sort": current.sort,
         "thumbnail": current.thumbnail,
         "sorts": [[mode, config.SORT_LABELS[mode]] for mode in config.SORT_MODES],
+        # The archives the grid can show instead of the storage folder, by id
+        # and name - never a path - and which one it shows ("" for none).
+        "archives": [[record["id"], record["name"]] for record in current.archives],
+        "view": current.view if any(record["id"] == current.view for record in current.archives) else "",
     }
 
 
@@ -994,6 +1022,111 @@ def forget_request() -> None:
     _last_request = None
 
 
+# ---------------------------------------------------------------- archives --
+
+
+def _archive_status(error: IntegrationError) -> int:
+    if error.code in (errors.ARCHIVE_UNKNOWN, errors.ARCHIVE_FILE_UNKNOWN, errors.ARCHIVE_UNREADABLE):
+        return 404
+    if error.code in (errors.HANDOFF_INVALID_IMAGE,):
+        return 415
+    return 403
+
+
+def archives_answer(extra: typing.Optional[dict] = None) -> dict:
+    """The archives, the view and the menu's facts, in one answer - after
+    whatever ``extra`` (an action's own answer) says about itself."""
+    answer = dict(extra or {})
+    answer.setdefault("ok", True)
+    answer.update({"archives": archives.all_archives(), "view": archives.current_view(), "menu": menu_facts()})
+    return answer
+
+
+def archives_action(body: typing.Mapping[str, typing.Any]) -> typing.Tuple[dict, int]:
+    """Add, remove or show an archive. Each answers with the whole list, so
+    the page draws what is true rather than what it asked for."""
+    action = str(body.get("action") or "")
+    if action == "add":
+        done = archives.add(body.get("path"))
+    elif action == "remove":
+        done = archives.remove(body.get("id"))
+    elif action == "view":
+        done = archives.set_view(body.get("id"))
+    else:
+        return {"ok": False, "code": errors.REQUEST_INVALID, "message": "That is not something the archives can do."}, 400
+    answer = archives_answer(done)
+    return answer, 200
+
+
+async def _archives(request: typing.Any) -> typing.Any:
+    """The archives: GET the list, POST an action. The filesystem work is
+    handed to a thread, because a folder on a network drive can take its time
+    and the event loop is every other request on this server."""
+    from starlette.concurrency import run_in_threadpool
+
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    if request.method == "GET":
+        return _json(await run_in_threadpool(archives_answer))
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        return _json({"ok": False, "code": errors.REQUEST_INVALID, "message": "An archive action needs a body."}, 400)
+    try:
+        answer, status = await run_in_threadpool(archives_action, body)
+    except Exception as error:
+        scrub.console(f"an archive action failed ({type(error).__name__}).", _LOG_PREFIX)
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    return _json(answer, status)
+
+
+def _archive_list(request: typing.Any) -> typing.Any:
+    """Every picture in an archive, in one answer. Not ``async``: it lists a
+    folder of thousands, and that is a thread's work, not the event loop's."""
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    params = request.query_params
+    try:
+        answer = archives.listing(params.get("id"), params.get("sort"))
+    except IntegrationError as error:
+        return _json({"ok": False, "code": error.code, "message": errors.message(error.code)}, _archive_status(error))
+    except Exception as error:
+        scrub.console(f"an archive could not be listed ({type(error).__name__}).", _LOG_PREFIX)
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    return _json(answer)
+
+
+def _archive_image(request: typing.Any) -> typing.Any:
+    """One archive picture, or its thumbnail, by its reference.
+
+    Not ``async``, for the library's reason: a thumbnail not made yet is a
+    decode and an encode. Cached by the browser for a year only when the URL
+    carries the file's current version - read from the file, never trusted
+    from the URL - and for the careful hour otherwise.
+    """
+    from starlette.responses import Response
+
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    ref = str(request.path_params.get("ref", "") or "")
+    thumb = str(request.query_params.get("thumb", "") or "") in ("1", "true", "yes")
+    wanted = str(request.query_params.get("v", "") or "")
+    try:
+        if thumb:
+            data, mime = archives.thumbnails().thumbnail(ref)
+        else:
+            data, mime, _name = archives.read_bytes(ref)
+    except IntegrationError as error:
+        return _json({"ok": False, "code": error.code, "message": errors.message(error.code)}, _archive_status(error))
+    except Exception:
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    fresh = bool(wanted) and wanted == archives.canonical_version(ref)
+    return Response(content=data, media_type=mime,
+                    headers={"Cache-Control": IMMUTABLE_CACHE if fresh else REVALIDATED_CACHE})
+
+
 def install(app: typing.Any) -> None:
     """Put the routes on Forge's FastAPI app. Called from ``on_app_started``."""
     if getattr(app, _INSTALLED_FLAG, False):
@@ -1015,6 +1148,9 @@ def install(app: typing.Any) -> None:
             Route(SEND_ROUTE, endpoint=_send, methods=["POST"]),
             Route(INTERCEPT_ROUTE, endpoint=_intercept, methods=["POST"]),
             Route(INTERCEPT_IMAGE_ROUTE, endpoint=_intercept_image, methods=["GET"]),
+            Route(ARCHIVES_ROUTE, endpoint=_archives, methods=["GET", "POST"]),
+            Route(ARCHIVE_LIST_ROUTE, endpoint=_archive_list, methods=["GET"]),
+            Route(ARCHIVE_IMAGE_ROUTE, endpoint=_archive_image, methods=["GET", "HEAD"]),
         ]
         app.router.routes[0:0] = routes
         setattr(app, _INSTALLED_FLAG, True)
@@ -1029,11 +1165,15 @@ def install(app: typing.Any) -> None:
         store_module.store().sweep_thumbnails()
     except Exception as error:  # pragma: no cover - a cache is never a reason to fail
         scrub.console(f"the thumbnail cache could not be swept ({type(error).__name__}); it will be swept after the next writes.", _LOG_PREFIX)
+    try:
+        archives.thumbnails().sweep()
+    except Exception as error:  # pragma: no cover - a cache is never a reason to fail
+        scrub.console(f"the archive thumbnail cache could not be swept ({type(error).__name__}); it will be swept after the next writes.", _LOG_PREFIX)
 
 
-__all__ = ["IMAGE_ROUTE", "IMMUTABLE_CACHE", "IMPORT_ROUTE", "INTERCEPT_ACTIONS", "INTERCEPT_IMAGE_ROUTE",
+__all__ = ["ARCHIVES_ROUTE", "ARCHIVE_IMAGE_ROUTE", "ARCHIVE_LIST_ROUTE", "IMAGE_ROUTE", "IMMUTABLE_CACHE", "IMPORT_ROUTE", "INTERCEPT_ACTIONS", "INTERCEPT_IMAGE_ROUTE",
            "INTERCEPT_ROUTE", "INTERCEPT_SENTENCES", "LIBRARY_ROUTE", "PAGE_SIZE",
            "PAGE_SIZE_MAX", "PAGE_SIZE_MIN", "REVALIDATED_CACHE", "ROUTE_PREFIX",
            "SEND_ROUTE", "SETTINGS_ROUTE", "QUEUE_ROUTE", "READINESS_ROUTE", "ENHANCE_SETTINGS_ROUTE", "PROMPTS_ROUTE", "REQUEST_MEMORY_SECONDS",
-           "apply_settings", "clamp_size", "forget_request", "image_url", "install", "intercept_action", "library_page",
+           "apply_settings", "archive_image_url", "archives_action", "archives_answer", "clamp_size", "forget_request", "image_url", "install", "intercept_action", "library_page",
            "menu_facts", "page_of", "prompts_action", "recent_request", "remember_request"]

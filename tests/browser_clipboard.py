@@ -3574,7 +3574,31 @@ def check_the_history_button_opens_the_last_prompts(r: Results, page) -> None:
                 "UTC" in state["meta"] and "LTX-2 2.5 Distilled 22B" in state["meta"] and "enhanced" in state["meta"], state["meta"])
         r.check("a long prompt is clamped with More beside it, and a short one has no More",
                 state["firstClamped"] is True and state["firstMore"] == "More" and state["secondMore"] is False, str(state))
-        r.check("and the list scrolls inside the dialog", state["scrolls"] is True, str(state))
+        # A list that scrolls: in a window shorter than the ten entries, the
+        # list itself takes a scroll and the dialog stays inside the window.
+        # Measured in a short window rather than the suite's own, because
+        # whether ten short prompts overflow 950 pixels is a question about
+        # the fonts the browser happens to have - and on the CI runner's they
+        # fit, so a check that waited for them not to never passed there.
+        tall = page.viewport_size or {"width": 1400, "height": 950}
+        page.set_viewport_size({"width": tall["width"], "height": 480})
+        page.wait_for_timeout(300)
+        short = page.evaluate("""() => {
+            const layer = document.querySelector('.minipaint-clip-prompts');
+            const list = layer.querySelector('.minipaint-clip-prompts-list');
+            const box = layer.querySelector('.minipaint-clip-prompts-dialog').getBoundingClientRect();
+            const page = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
+            list.scrollTop = 0;
+            list.scrollTop = list.scrollHeight;
+            const moved = list.scrollTop;
+            const after = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
+            list.scrollTop = 0;
+            return { overflows: list.scrollHeight > list.clientHeight + 1, moved: moved,
+                     inWindow: box.top >= 0 && box.bottom <= window.innerHeight + 1, pageMoved: after !== page }; }""")
+        page.set_viewport_size(tall)
+        page.wait_for_timeout(300)
+        r.check("and in a window too short for the list, the list scrolls inside the dialog and the dialog stays in the window",
+                short["overflows"] and short["moved"] > 0 and short["inWindow"] and not short["pageMoved"], str(short))
         r.check("the dialog says it has taken the page, so the Forge Assistant puts its panel away",
                 state["overlays"] == [{"name": "clipboard-history", "open": True, "modal": True}], str(state["overlays"]))
 
@@ -3685,6 +3709,419 @@ def check_the_section_is_blocked_until_wangp_is_ready(r: Results, page) -> None:
     r.check("a ready answer that names no model leaves the reference alone", state["references"] in ("", "1"), str(state))
 
 
+# --------------------------------------------------------------------------
+# PNG Info, archives and the full-screen view
+# --------------------------------------------------------------------------
+
+PARAMETERS_TEXT = "a lighthouse at dusk\nSteps: 20, Sampler: Euler a, CFG scale: 7, Seed: 98765"
+
+
+def _png_with_parameters(path, colour=(40, 120, 200), size=(96, 64)):
+    from PIL import Image, PngImagePlugin
+
+    info = PngImagePlugin.PngInfo()
+    info.add_text("parameters", PARAMETERS_TEXT)
+    Image.new("RGB", size, colour).save(path, format="PNG", pnginfo=info)
+
+
+def _pnginfo_text(page):
+    return page.evaluate("() => { const h = document.getElementById('pnginfo_html'); return h ? h.textContent : null; }")
+
+
+def _png_info_opened(page, timeout=15000):
+    """Wait for the send's last step: the PNG Info tab shown.
+
+    PNG Info's own text changes the moment the file lands, and the Clipboard
+    opens the tab only after it has proved the delivery - a moment later, and
+    longer in a slower browser. A check that went back to the Clipboard on the
+    text alone was pulled back to PNG Info by the switch that followed, and the
+    Clipboard's buttons were on a hidden tab (CI's headless shell, run 107).
+    """
+    try:
+        page.wait_for_function("""() => { const p = document.getElementById('tab_pnginfo');
+            return !!p && getComputedStyle(p).display !== 'none'; }""", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def _select_tile(page, name):
+    """Select the tile showing this name, and wait for the server to hear it."""
+    found = page.evaluate("""n => {
+        const tile = Array.from(document.querySelectorAll('#minipaint_clipboard_root .minipaint-clip-item'))
+            .find(t => t.dataset.name === n);
+        if (!tile) { return ''; }
+        if (!tile.classList.contains('minipaint-clip-selected')) { tile.click(); }
+        return tile.dataset.asset;
+    }""", name)
+    if not found:
+        return ""
+    for _ in range(40):
+        if box(page, "minipaint_clipboard_selected") == found:
+            break
+        time.sleep(0.1)
+    return found
+
+
+def check_a_picture_sends_to_png_info(r: Results, page, library) -> None:
+    """Asked for: "send to PNG info" from the Clipboard. PNG Info reads the
+    parameters Forge wrote into the file, so it is handed the file's own
+    bytes over the upload path - a re-encoded picture would arrive with none."""
+    open_clipboard(page)
+    _png_with_parameters(library / "with-parameters.png")
+    page.evaluate("() => window.minipaintClipboard.refreshAll()")
+    page.wait_for_function("""() => Array.from(document.querySelectorAll('.minipaint-clip-item'))
+        .some(t => t.dataset.name === 'with-parameters.png')""", timeout=15000)
+    r.check("PNG Info: the picture with parameters is selected", bool(_select_tile(page, "with-parameters.png")))
+    page.evaluate("() => window.minipaintClipboard.openToolbarMenu('send')")
+    time.sleep(0.4)
+    offered = page.evaluate("""() => Array.from(document.querySelectorAll('.minipaint-clip-menu .minipaint-clip-menu-item'))
+        .map(b => b.textContent.trim())""")
+    r.check("PNG Info is in Send selection to", "PNG Info" in offered, str(offered))
+    r.check("and pressing it sends", menu_click(page, "PNG Info") == "clicked")
+    try:
+        page.wait_for_function("""() => { const h = document.getElementById('pnginfo_html');
+            return !!h && h.textContent.indexOf('Seed: 98765') !== -1; }""", timeout=15000)
+        arrived = True
+    except Exception:
+        arrived = False
+    r.check("PNG Info reads the picture's generation parameters - the file arrived as it is",
+            arrived, repr(_pnginfo_text(page)))
+    r.check("and the PNG Info tab is opened once it has", _png_info_opened(page))
+    time.sleep(0.6)
+    r.check("and the page says it went", (toast(page) or "").startswith("Sent "), toast(page))
+    open_clipboard(page)
+    try:
+        (library / "with-parameters.png").unlink()
+    except OSError:
+        pass
+    page.evaluate("() => window.minipaintClipboard.refreshAll()")
+    time.sleep(1.0)
+
+
+ARCHIVE_COUNT = 480
+
+
+def _seed_archive(folder):
+    from PIL import Image
+
+    folder.mkdir(parents=True, exist_ok=True)
+    for stale in folder.glob("*"):
+        stale.unlink()
+    for index in range(ARCHIVE_COUNT):
+        shade = (index * 37) % 255
+        Image.new("RGB", (48, 36), (shade, 255 - shade, (index * 11) % 255)).save(folder / f"img-{index:04d}.png")
+    _png_with_parameters(folder / "img-0000.png")
+
+
+def _archive(page):
+    return page.evaluate("() => window.minipaintClipboard.archiveState()")
+
+
+def _snapshot(folder):
+    return {one.name: (one.stat().st_size, one.stat().st_mtime_ns) for one in sorted(folder.iterdir())}
+
+
+def check_an_archive_loads_what_is_in_view_first(r: Results, page) -> None:
+    """Asked for: archives "on the host", switched to in place of the storage
+    folder, "load the entire archive" with no pagination, "only load the place
+    holder ... until the user scrolls over it into view", "sequentially" make
+    and load the thumbnails of what is in view - and "if [I] start loading
+    then scroll, we need to requeue to load what i am seeing first".
+
+    The server is made slow on purpose - the first six thumbnails take 1.5 s
+    each, the rest a moment - so there are requests in flight for the top of
+    the archive when the grid is flung to the bottom, and still in flight
+    300 ms later; what the page has done by then is the measurement. A page
+    that only re-decided at the next answer would have done nothing yet.
+    """
+    from minipaint_neo.clipboard import archives, config as clip_config
+
+    base = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-archive-"))
+    folder = base / "Archive of 480"
+    _seed_archive(folder)
+    before = _snapshot(folder)
+    cache = archives.thumbnails()
+    real_make = cache._make
+    made = {"count": 0}
+
+    def slow_make(*args, **keywords):
+        made["count"] += 1
+        time.sleep(1.5 if made["count"] <= 6 else 0.05)
+        return real_make(*args, **keywords)
+
+    cache._make = slow_make
+    requests = []
+    listener = lambda request: requests.append(request.url) if "/minipaint-clipboard/archive/image/" in request.url else None
+    page.on("request", listener)
+    sort_before = clip_config.load().sort
+    try:
+        open_clipboard(page)
+        set_slider(page, 72)
+        # By name, so a tile's place in the archive is the number in its name.
+        page.evaluate("() => window.minipaintClipboard.setSort('name_asc')")
+        time.sleep(0.8)
+        # Added from the Archives screen, the way a person does it.
+        page.evaluate("() => window.minipaintClipboard.openArchives()")
+        page.wait_for_selector(".minipaint-clip-archives-path", state="visible", timeout=8000)
+        page.fill(".minipaint-clip-archives-path", str(folder))
+        page.click(".minipaint-clip-archives-add-button")
+        page.wait_for_function("""() => Array.from(document.querySelectorAll('.minipaint-clip-archives-entry'))
+            .some(e => e.textContent.indexOf('Archive of 480') !== -1)""", timeout=10000)
+        r.check("an archive is added from the Archives screen and listed there",
+                len(clip_config.load().archives) == 1 and clip_config.load().view == "", str(clip_config.load().archives))
+        page.click(".minipaint-clip-archives-show")
+        page.wait_for_function(f"() => window.minipaintClipboard.archiveState().total === {ARCHIVE_COUNT}", timeout=20000)
+        state = _archive(page)
+        r.check("Show puts the archive in place of the storage folder, every picture listed, no pages",
+                state["view"] == clip_config.load().view and state["total"] == ARCHIVE_COUNT
+                and page.evaluate("() => { const p = document.querySelector('.minipaint-clip-pager'); return !p || p.hidden; }"), str(state)[:200])
+        bar = page.evaluate("""() => { const b = document.querySelector('.minipaint-clip-source');
+            return b && !b.hidden ? b.textContent : ''; }""")
+        r.check("the bar over the grid says which archive, that it is read-only, and where new pictures go",
+                "Archive of 480" in bar and "read-only" in bar and "storage folder" in bar, bar)
+        page.wait_for_timeout(250)
+        state = _archive(page)
+        visible_top = list(state["visible"])
+        geometry = page.evaluate("""() => {
+            const grid = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
+            const tiles = Array.from(grid.querySelectorAll('.minipaint-clip-item'));
+            return { tiles: tiles.length, withSrc: tiles.filter(t => t.querySelector('img').getAttribute('src')).length,
+                     scroll: grid.scrollHeight, view: grid.clientHeight };
+        }""")
+        r.check("only the rows near the view are in the document, not every tile",
+                0 < geometry["tiles"] < ARCHIVE_COUNT / 2 and geometry["scroll"] > geometry["view"] * 3, str(geometry))
+        r.check("a tile is a place until its turn: none outside the view has a picture address",
+                geometry["withSrc"] <= len(visible_top), str(geometry))
+        r.check("the first thumbnails asked for are the ones in view, in reading order",
+                state["order"][:3] == visible_top[:3] and len(state["inflight"]) <= 3, str({"order": state["order"][:4], "visible": visible_top[:4]}))
+
+        # Flung to the bottom while the top is still loading.
+        started_before = state["started"]
+        dropped_before = state["dropped"]
+        in_flight = list(state["inflight"])
+        page.evaluate("""() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
+            g.scrollTop = g.scrollHeight; }""")
+        page.wait_for_timeout(300)
+        after = _archive(page)
+        visible_bottom = list(after["visible"])
+        r.check("the fling leaves the top of the archive out of view", not (set(visible_bottom) & set(visible_top)),
+                str(after["rows"]))
+        asked_after = after["order"][-(after["started"] - started_before):] if after["started"] > started_before else []
+        r.check("the requests still out for the top were dropped the moment the view moved - not at the next answer",
+                after["dropped"] > dropped_before and not (set(after["inflight"]) & set(in_flight)),
+                str({"dropped": after["dropped"] - dropped_before, "in_flight_before": len(in_flight), "made": made["count"]}))
+        r.check("and the next thumbnails asked for are ones now in view - what you are seeing goes first",
+                bool(asked_after) and all(key in set(visible_bottom) for key in asked_after[:3]),
+                str({"first": asked_after[:3], "visible": visible_bottom[:3]}))
+        page.wait_for_timeout(1500)
+        later = _archive(page)
+        # What was ever asked for: the top's view and the screen under it,
+        # and the bottom's view and the screen over it - nothing between.
+        import base64 as _b64
+        columns = later["columns"] or 1
+        reach = 2 * (len(visible_top) // columns + 1) * columns
+        asked = set(state["order"]) | set(later["order"])
+        positions = []
+        for key in asked:
+            name = _b64.urlsafe_b64decode(key + "=" * (-len(key) % 4)).decode("utf-8")
+            positions.append(int(name[4:8]))
+        passed = [at for at in positions if reach <= at < ARCHIVE_COUNT - reach]
+        r.check("and the pictures the fling passed over were never asked for at all",
+                positions and not passed, str({"passed": sorted(passed)[:5], "reach": reach}))
+        try:
+            page.wait_for_function("""() => {
+                const s = window.minipaintClipboard.archiveState();
+                const shown = Array.from(document.querySelectorAll('#minipaint_clipboard_root .minipaint-clip-item'))
+                    .filter(t => s.visible.indexOf(t.dataset.key) !== -1);
+                return shown.length > 0 && shown.every(t => (t.querySelector('img').getAttribute('src') || '').indexOf('blob:') === 0);
+            }""", timeout=30000)
+            filled = True
+        except Exception:
+            filled = False
+        r.check("every tile in view gets its thumbnail", filled, str(_archive(page))[:300])
+        r.check("over plain requests, a small fraction of the archive", 0 < len(requests) < ARCHIVE_COUNT / 3, str(len(requests)))
+        r.check("each carrying the file's version, so the browser may keep it",
+                all("v=" in url and "thumb=1" in url for url in requests), str(requests[:2]))
+        r.check("and no thumbnail ever made inside the archive: it is exactly as it was",
+                _snapshot(folder) == before)
+
+        # Somewhere in the middle, away and back: the place is kept.
+        page.evaluate("""() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
+            g.scrollTop = Math.round(g.scrollHeight / 2); }""")
+        page.wait_for_timeout(400)
+        middle_at = page.evaluate("() => document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid').scrollTop")
+        page.locator("#tabs > .tab-nav > button", has_text="PNG Info").first.click()
+        page.wait_for_timeout(500)
+        open_clipboard(page)
+        back_at = page.evaluate("() => document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid').scrollTop")
+        r.check("leaving the tab and coming back keeps the place in the archive",
+                middle_at > 1000 and abs(back_at - middle_at) <= 2, str({"left": middle_at, "back": back_at}))
+
+        # An archive picture, sent to PNG Info, and put on a slot card.
+        page.evaluate("""() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid'); g.scrollTop = 0; }""")
+        page.wait_for_timeout(600)
+        selected = _select_tile(page, "img-0000.png")
+        r.check("an archive picture can be selected", selected.startswith("ar-"), selected)
+        flags = page.evaluate("""() => {
+            const del = document.querySelector('#minipaint_clipboard_delete_now button, button#minipaint_clipboard_delete_now');
+            window.minipaintClipboard.toggleMenu();
+            const items = Array.from(document.querySelectorAll('.minipaint-clip-menu .minipaint-clip-menu-item'));
+            const find = t => items.find(b => b.textContent.indexOf(t) !== -1);
+            const out = { del: del ? del.disabled : null, rename: find('Rename') ? find('Rename').disabled : null,
+                          remove: find('Delete selected') ? find('Delete selected').disabled : null,
+                          archives: !!find('Archives') };
+            window.minipaintClipboard.closeMenu();
+            return out; }""")
+        r.check("it cannot be renamed or deleted: the toolbar's Delete and the menu's two are off",
+                flags == {"del": True, "rename": True, "remove": True, "archives": True}, str(flags))
+        page.evaluate("() => window.minipaintClipboard.openToolbarMenu('send')")
+        time.sleep(0.4)
+        r.check("an archive picture goes to PNG Info", menu_click(page, "PNG Info") == "clicked")
+        try:
+            page.wait_for_function("""() => { const h = document.getElementById('pnginfo_html');
+                return !!h && h.textContent.indexOf('Seed: 98765') !== -1; }""", timeout=15000)
+            arrived = True
+        except Exception:
+            arrived = False
+        r.check("with its parameters, read straight from the archive's file", arrived, repr(_pnginfo_text(page)))
+        r.check("and the send ends on the PNG Info tab", _png_info_opened(page))
+        time.sleep(0.5)
+        open_clipboard(page)
+        storage = pathlib.Path(clip_config.load().storage_root)
+        copies_before = len(list(storage.glob("img-0000*.png")))
+        page.locator("#minipaint_clipboard_to_first").click()
+        try:
+            page.wait_for_function("""() => { const s = document.getElementById('minipaint_clipboard_status');
+                return !!s && s.textContent.indexOf('copied from the archive') !== -1; }""", timeout=15000)
+            said = True
+        except Exception:
+            said = False
+        r.check("+First puts it on the card as a copy in the storage folder, and says so",
+                said and len(list(storage.glob("img-0000*.png"))) == copies_before + 1,
+                page.evaluate("() => document.getElementById('minipaint_clipboard_status').textContent"))
+        page.locator("#minipaint_clipboard_to_first").click()
+        time.sleep(1.5)
+        r.check("and a second press copies nothing more", len(list(storage.glob("img-0000*.png"))) == copies_before + 1)
+        r.check("the archive is still exactly as it was", _snapshot(folder) == before)
+
+        # Back to the storage folder from the bar's own flyout.
+        page.click(".minipaint-clip-source-pick")
+        time.sleep(0.4)
+        r.check("the bar's flyout offers the storage folder", menu_click(page, "Storage folder") == "clicked")
+        page.wait_for_function("() => window.minipaintClipboard.archiveState().view === ''", timeout=10000)
+        page.wait_for_function("() => document.querySelectorAll('#minipaint_clipboard_root .minipaint-clip-grid > .minipaint-clip-item').length > 0", timeout=10000)
+        back = page.evaluate("""() => ({ view: document.getElementById('minipaint_clipboard_root').dataset.clipView,
+            tiles: document.querySelectorAll('#minipaint_clipboard_root .minipaint-clip-grid > .minipaint-clip-item').length,
+            track: !!document.querySelector('.minipaint-clip-track'),
+            display: getComputedStyle(document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid')).display })""")
+        r.check("and the storage folder's grid is back as it was", back["view"] == "storage" and back["tiles"] > 0
+                and not back["track"] and back["display"] == "grid", str(back))
+    finally:
+        page.remove_listener("request", listener)
+        cache._make = real_make
+        try:
+            page.evaluate("() => window.minipaintClipboard.setView('')")
+        except Exception:
+            pass
+        for record in list(clip_config.load().archives):
+            archives.remove(record["id"])
+        set_slider(page, 144)
+        if sort_before != "name_asc":
+            page.evaluate(f"() => window.minipaintClipboard.setSort('{sort_before}')")
+            time.sleep(0.8)
+        shutil.rmtree(base, ignore_errors=True)
+        for copy in pathlib.Path(clip_config.load().storage_root or ".").glob("img-0000*.png"):
+            try:
+                copy.unlink()
+            except OSError:
+                pass
+
+
+def _viewer(page):
+    return page.evaluate("""() => {
+        const v = document.querySelector('#minipaint_clipboard_root .minipaint-clip-viewer');
+        const now = document.fullscreenElement;
+        return { open: !!v && !v.hidden, full: !now ? 'nothing' : now === document.documentElement ? 'page' : now === v ? 'viewer' : 'other',
+                 src: v ? (v.querySelector('img').getAttribute('src') || '') : '', loaded: v ? v.dataset.loaded : null };
+    }""")
+
+
+def check_a_tile_opens_full_screen(r: Results, page) -> None:
+    """Asked for: "a tiny button to the upper right of a large sized thumb,
+    that lets me expand to full screen and double tap to exit"."""
+    open_clipboard(page)
+    page.evaluate("() => window.minipaintClipboard.refreshAll()")
+    time.sleep(1.0)
+    set_slider(page, 96)
+    small = page.evaluate("""() => { const e = document.querySelector('#minipaint_clipboard_root .minipaint-clip-expand');
+        return e ? getComputedStyle(e).display : 'none-found'; }""")
+    r.check("a small tile has no full-screen button", small == "none", small)
+    set_slider(page, 200)
+    corner = page.evaluate("""() => {
+        const tile = document.querySelector('#minipaint_clipboard_root .minipaint-clip-item');
+        const e = tile.querySelector('.minipaint-clip-expand');
+        const t = tile.getBoundingClientRect(), b = e.getBoundingClientRect();
+        return { display: getComputedStyle(e).display, top: b.top - t.top, right: t.right - b.right, size: b.width,
+                 text: e.textContent, svg: !!e.querySelector('svg') }; }""")
+    r.check("a large tile has one, small, in its upper right corner, drawn rather than written",
+            corner["display"] == "flex" and 0 <= corner["top"] <= 12 and 0 <= corner["right"] <= 12
+            and corner["size"] <= 32 and corner["text"] == "" and corner["svg"], str(corner))
+    page.evaluate("""() => {
+        window.__fullRequests = [];
+        new PerformanceObserver(list => { for (const e of list.getEntries()) {
+            if (String(e.name).indexOf('/minipaint-clipboard/image/') !== -1 && String(e.name).indexOf('thumb=1') === -1) {
+                window.__fullRequests.push(e.name); } } }).observe({ type: 'resource', buffered: false });
+    }""")
+    first = page.locator("#minipaint_clipboard_root .minipaint-clip-item").first
+    name = first.get_attribute("data-name")
+    first.locator(".minipaint-clip-expand").click()
+    page.wait_for_timeout(700)
+    state = _viewer(page)
+    r.check("pressing it opens the picture over everything, in the browser's own full screen",
+            state["open"] and state["full"] == "viewer", str(state))
+    r.check("the whole picture is loaded for it - and only for it",
+            state["loaded"] == "1" and "thumb=1" not in state["src"]
+            and page.evaluate("() => window.__fullRequests.length") == 1, str(state))
+    r.check("and the tile it came from is the selection",
+            page.evaluate("() => window.minipaintClipboard.debug().selected") == first.get_attribute("data-asset"), name)
+    size = page.viewport_size or {"width": 1400, "height": 950}
+    page.mouse.dblclick(size["width"] / 2, size["height"] / 2)
+    page.wait_for_timeout(500)
+    state = _viewer(page)
+    r.check("a double tap closes it and gives the screen back", not state["open"] and state["full"] == "nothing", str(state))
+
+    # Over the page's own full screen - the Forge Assistant's focus mode.
+    page.evaluate("""() => {
+        const b = document.createElement('button');
+        b.id = 'page-full-screen';
+        b.textContent = 'page';
+        b.style.cssText = 'position:fixed;left:0;bottom:0;z-index:2147483647';
+        b.onclick = () => document.documentElement.requestFullscreen();
+        document.body.appendChild(b);
+    }""")
+    try:
+        page.click("#page-full-screen")
+        page.wait_for_timeout(400)
+        page.locator("#minipaint_clipboard_root .minipaint-clip-item").first.locator(".minipaint-clip-expand").click()
+        page.wait_for_timeout(500)
+        stacked = _viewer(page)["full"]
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(500)
+        state = _viewer(page)
+        r.check("over the page's own full screen it stacks, and leaving it leaves the page's where it was",
+                stacked == "viewer" and not state["open"] and state["full"] == "page", str({"stacked": stacked, **state}))
+    finally:
+        page.evaluate("""() => {
+            if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); }
+            const b = document.getElementById('page-full-screen');
+            if (b) { b.remove(); }
+        }""")
+        page.wait_for_timeout(300)
+        page.evaluate("() => window.minipaintClipboard.closeViewer()")
+        set_slider(page, 144)
+
+
 def run() -> Results:
     r = Results("browser clipboard")
     from playwright.sync_api import sync_playwright  # noqa: F401  (ImportError -> run.py skips)
@@ -3743,6 +4180,9 @@ def run() -> Results:
                 check_an_output_loads_its_recipe(r, page)
                 check_the_tab_fills_the_window(r, page)
                 check_a_thumbnail_is_fetched_once(r, page)
+                check_a_tile_opens_full_screen(r, page)
+                check_a_picture_sends_to_png_info(r, page, library)
+                check_an_archive_loads_what_is_in_view_first(r, page)
                 r.check("a picture can be selected", select_first(page),
                         repr(box(page, "minipaint_clipboard_selected")))
                 check_send(r, page, targets)

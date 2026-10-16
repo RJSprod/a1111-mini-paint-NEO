@@ -71,7 +71,8 @@ TEMP_PREFIX = ".minipaint-"
 
 #: Where a picture came from. Kept in the record for the browser's tooltip
 #: and for nothing else.
-SOURCES = ("upload", "paste", "forge_gallery", "minipaint", "external", "slot")
+#: ``archive`` is a picture copied in from an archive for a slot card.
+SOURCES = ("upload", "paste", "forge_gallery", "minipaint", "external", "slot", "archive")
 
 #: Ceilings for one library file, the handoff's own: what cannot be handed to
 #: WanGP has no business being a Clipboard asset either.

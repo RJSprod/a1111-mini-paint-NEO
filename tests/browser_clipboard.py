@@ -3766,11 +3766,11 @@ def check_the_section_is_blocked_until_wangp_is_ready(r: Results, page) -> None:
 PARAMETERS_TEXT = "a lighthouse at dusk\nSteps: 20, Sampler: Euler a, CFG scale: 7, Seed: 98765"
 
 
-def _png_with_parameters(path, colour=(40, 120, 200), size=(96, 64)):
+def _png_with_parameters(path, colour=(40, 120, 200), size=(96, 64), text=None):
     from PIL import Image, PngImagePlugin
 
     info = PngImagePlugin.PngInfo()
-    info.add_text("parameters", PARAMETERS_TEXT)
+    info.add_text("parameters", text or PARAMETERS_TEXT)
     Image.new("RGB", size, colour).save(path, format="PNG", pnginfo=info)
 
 
@@ -3841,10 +3841,36 @@ def check_a_picture_sends_to_png_info(r: Results, page, library) -> None:
     time.sleep(0.6)
     r.check("and the page says it went", (toast(page) or "").startswith("Sent "), toast(page))
     open_clipboard(page)
+
+    # The permanent shortcut: a double tap on a picture, nothing selected first.
+    # Asked for: "give pictures a double tap action that sends them to PNG info".
+    _png_with_parameters(library / "double-tap.png", colour=(200, 60, 40),
+                         text=PARAMETERS_TEXT.replace("Seed: 98765", "Seed: 24680"))
+    page.evaluate("() => window.minipaintClipboard.refreshAll()")
+    page.wait_for_function("""() => Array.from(document.querySelectorAll('.minipaint-clip-item'))
+        .some(t => t.dataset.name === 'double-tap.png')""", timeout=15000)
+    page.evaluate("() => window.minipaintClipboard.select('')")
+    tile = page.locator("#minipaint_clipboard_root .minipaint-clip-item[data-name='double-tap.png']")
+    r.check("a picture says the double tap is its own, not a zoom",
+            page.evaluate("() => getComputedStyle(document.querySelector(\"#minipaint_clipboard_root .minipaint-clip-item[data-name='double-tap.png']\")).touchAction")
+            == "manipulation")
+    tile.dblclick()
     try:
-        (library / "with-parameters.png").unlink()
-    except OSError:
-        pass
+        page.wait_for_function("""() => { const h = document.getElementById('pnginfo_html');
+            return !!h && h.textContent.indexOf('Seed: 24680') !== -1; }""", timeout=15000)
+        doubled = True
+    except Exception:
+        doubled = False
+    r.check("a double tap on a picture sends it to PNG Info, nothing selected beforehand", doubled, repr(_pnginfo_text(page)))
+    r.check("and opens PNG Info, as the menu's send does", _png_info_opened(page))
+    open_clipboard(page)
+    r.check("and leaves the picture selected", page.evaluate("() => window.minipaintClipboard.debug().selected")
+            == tile.get_attribute("data-asset"))
+    for name in ("with-parameters.png", "double-tap.png"):
+        try:
+            (library / name).unlink()
+        except OSError:
+            pass
     page.evaluate("() => window.minipaintClipboard.refreshAll()")
     time.sleep(1.0)
 
@@ -4015,6 +4041,7 @@ def check_an_archive_loads_what_is_in_view_first(r: Results, page) -> None:
                 _snapshot(folder) == before)
 
         check_the_scrubber_moves_through_the_archive(r, page)
+        check_the_viewer_lands_in_the_archive(r, page)
 
         # Somewhere in the middle, away and back: the place is kept.
         page.evaluate("""() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
@@ -4144,6 +4171,37 @@ SCRUB_JS = """() => {
 }"""
 
 
+def check_the_viewer_lands_in_the_archive(r: Results, page) -> None:
+    """The view steps through the whole archive, and leaving it lands the
+    grid on the picture it ended on - rows away from where it was opened."""
+    page.evaluate("() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid'); g.scrollTop = 0; }")
+    page.wait_for_timeout(500)
+    first = page.locator("#minipaint_clipboard_root .minipaint-clip-item[data-name='img-0000.png']")
+    first.click(button="right")
+    page.wait_for_function(f"() => window.minipaintClipboard.viewerState().count === {ARCHIVE_COUNT}", timeout=10000)
+    seen = page.evaluate(VIEWER_JS)
+    r.check("in an archive the view holds every picture in it",
+            seen["count"] == ARCHIVE_COUNT and seen["current"] == first.get_attribute("data-asset"), str(seen["count"]))
+    # Somewhere far from the top of a grid sorted by name.
+    page.click(".minipaint-clip-viewer-order[data-order='random']")
+    page.wait_for_timeout(200)
+    for _ in range(3):
+        page.keyboard.press("ArrowRight")
+    page.wait_for_timeout(200)
+    landing = page.evaluate(VIEWER_JS)["current"]
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(800)
+    state = _archive(page)
+    r.check("leaving it selects the picture it ended on and scrolls the archive to it",
+            page.evaluate("() => window.minipaintClipboard.debug().selected") == landing and _in_view(page, landing),
+            str({"landing": landing, "rows": state["rows"]}))
+    r.check("and the thumbnails there are asked for, as after a scroll",
+            any(key in landing for key in state["visible"]))
+    page.evaluate("() => sessionStorage.removeItem('minipaint-clipboard:viewer-order')")
+    page.evaluate("() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid'); g.scrollTop = 0; }")
+    page.wait_for_timeout(400)
+
+
 def check_the_scrubber_moves_through_the_archive(r: Results, page) -> None:
     """A thin bar over the grid's edge moves through thousands of pictures.
 
@@ -4191,7 +4249,6 @@ def check_the_scrubber_moves_through_the_archive(r: Results, page) -> None:
         y = handle["top"] + handle["height"] / 2 + (bottom - handle["top"] - handle["height"] / 2) * step / 10
         page.mouse.move(handle["left"] + handle["width"] / 2, y)
         page.wait_for_timeout(30)
-    page.wait_for_timeout(500)
     held = page.evaluate(SCRUB_JS)
     r.check("dragging the handle to the bottom takes the grid to the end of the archive",
             held["top"] >= held["max"] - 2, str({"top": held["top"], "max": held["max"]}))
@@ -4204,16 +4261,28 @@ def check_the_scrubber_moves_through_the_archive(r: Results, page) -> None:
     for step in range(1, 6):
         page.mouse.move(handle["left"] + handle["width"] / 2, bottom + (middle - bottom) * step / 5)
         page.wait_for_timeout(30)
-    page.wait_for_timeout(500)
     during = _archive(page)
-    r.check("and nothing new is asked for while it is held, down to the end and back to the middle",
-            during["scrubbing"] and during["started"] == before["started"],
+    r.check("and nothing new is asked for while it is moving, down to the end and back to the middle",
+            during["scrubbing"] and not during["paused"] and during["started"] == before["started"],
             str({"before": before["started"], "during": during["started"]}))
+    # Held still, not let go: the view fills in as though it had been.
+    # Asked for: "if i pause with out releasing the scrubber, the thumbs in
+    # that view should start loading as if i released the scrubber".
+    page.wait_for_timeout(700)
+    resting = _archive(page)
+    rested = resting["order"][-(resting["started"] - during["started"]):] if resting["started"] > during["started"] else []
+    r.check("held still without letting go, the thumbnails in view are asked for",
+            resting["scrubbing"] and resting["paused"] and rested
+            and all(key in set(resting["visible"]) for key in rested[:3]),
+            str({"asked": rested[:3], "visible": resting["visible"][:3], "paused": resting["paused"]}))
+    during = resting
     page.mouse.up()
     page.wait_for_timeout(600)
     after = _archive(page)
     let_go = page.evaluate(SCRUB_JS)
     asked = after["order"][-(after["started"] - during["started"]):] if after["started"] > during["started"] else []
+    # What was asked for since it came to rest: the screen it stopped on.
+    asked = rested + asked
     r.check("let go, the bubble is put away and the screen it stopped on is asked for",
             not let_go["bubble"] and not after["scrubbing"] and asked and all(key in set(after["visible"]) for key in asked[:3]),
             str({"asked": asked[:3], "visible": after["visible"][:3], "bubble": let_go["bubble"]}))
@@ -4379,6 +4448,150 @@ def check_the_row_is_filled_per_row(r: Results, page, browser) -> None:
     page.evaluate("() => sessionStorage.removeItem('minipaint-clipboard:per-row')")
 
 
+VIEWER_JS = "() => window.minipaintClipboard.viewerState()"
+
+
+def _in_view(page, asset):
+    """Whether the tile for this picture is inside the grid's visible box."""
+    return page.evaluate("""a => {
+        const grid = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
+        const tile = Array.from(grid.querySelectorAll('.minipaint-clip-item')).find(t => t.dataset.asset === a);
+        if (!tile) { return false; }
+        const g = grid.getBoundingClientRect(), t = tile.getBoundingClientRect();
+        return t.top >= g.top - 1 && t.bottom <= g.bottom + 1;
+    }""", asset)
+
+
+def check_the_viewer_browses_the_folder(r: Results, page, library) -> None:
+    """A right click opens the full-screen view, and it steps through the folder.
+
+    Asked for: "make right click on a image open the full screen image view",
+    and "make full screen image view capable of browser the folder in either
+    random or date sorted order. Exiting the view should land that image in
+    view in the gallery as if i scrolled to it." Thirteen pictures are added
+    with their times a second apart, newest last by name, so the date order
+    is known; the grid is paged ten at a time so landing has a page to turn.
+    """
+    from PIL import Image
+
+    made = []
+    future = time.time() + 1000
+    for number in range(13):
+        path = library / f"browse-{number:02d}.png"
+        Image.new("RGB", (60 + number, 40), (number * 15, 90, 160)).save(path)
+        os.utime(path, (future + number, future + number))
+        made.append(path)
+    open_clipboard(page)
+    show_page(page, {"size": 10, "page": 0, "sort": "name_asc", "refresh": True})
+    page.evaluate("() => { window.__menuShown = null; window.addEventListener('contextmenu', e => { window.__menuShown = !e.defaultPrevented; }); }")
+    try:
+        total = library_state(page)["total"]
+        tile = page.locator("#minipaint_clipboard_root .minipaint-clip-item[data-name='browse-06.png']")
+        opened = tile.get_attribute("data-asset")
+        tile.click(button="right")
+        page.wait_for_timeout(500)
+        state = _viewer(page)
+        r.check("a right click on a picture opens it full screen, and the browser's own menu does not open",
+                state["open"] and state["full"] == "viewer" and page.evaluate("() => window.__menuShown") is False,
+                str({**state, "menu": page.evaluate("() => window.__menuShown")}))
+        r.check("and it is the selection", page.evaluate("() => window.minipaintClipboard.debug().selected") == opened)
+        page.wait_for_function(f"() => window.minipaintClipboard.viewerState().count === {total}", timeout=10000)
+        seen = page.evaluate(VIEWER_JS)
+        pairs = page.evaluate("""() => fetch('/minipaint-clipboard/library?every=1&sort=newest', {credentials: 'same-origin'})
+            .then(r => r.json()).then(a => a.items.map(i => [i[0], i[1]]))""")
+        server = [pair[0] for pair in pairs]
+        called = dict(pairs)
+        names = [called.get(asset, asset) for asset in seen["list"]]
+        r.check("the view holds the whole folder, not the page, newest first by default",
+                seen["count"] == total > 10 and seen["order"] == "date" and seen["list"] == server
+                and names[:3] == ["browse-12.png", "browse-11.png", "browse-10.png"], str(names[:5]))
+        r.check("and opens at the picture pressed", seen["current"] == opened and seen["list"][seen["at"]] == opened,
+                str({"at": seen["at"], "current": seen["current"]}))
+        from urllib.parse import quote
+        either = [seen["list"][at] for at in (seen["at"] - 1, seen["at"] + 1) if 0 <= at < seen["count"]]
+        r.check("with the whole pictures either side already being fetched",
+                len(seen["ahead"]) == len(either) == 2
+                and all(any(quote(asset, safe="") in url and "thumb=1" not in url for url in seen["ahead"]) for asset in either),
+                str(seen["ahead"]))
+
+        def now():
+            state = page.evaluate(VIEWER_JS)
+            return state, called.get(state["current"], state["current"])
+
+        page.keyboard.press("ArrowRight")
+        page.wait_for_timeout(200)
+        state, name = now()
+        r.check("→ steps to the next picture by date", name == "browse-05.png" and state["at"] == seen["at"] + 1, name)
+        page.click(".minipaint-clip-viewer-next")
+        page.wait_for_timeout(200)
+        state, name = now()
+        r.check("so does the arrow drawn at its side", name == "browse-04.png", name)
+        page.keyboard.press("ArrowLeft")
+        page.wait_for_timeout(200)
+        state, name = now()
+        r.check("← steps back", name == "browse-05.png", name)
+        size = page.viewport_size or {"width": 1400, "height": 950}
+        page.mouse.move(size["width"] * 0.7, size["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(size["width"] * 0.45, size["height"] / 2, steps=6)
+        page.mouse.move(size["width"] * 0.3, size["height"] / 2, steps=6)
+        page.mouse.up()
+        page.wait_for_timeout(300)
+        state, name = now()
+        r.check("a swipe to the left steps forward, and the view stays open", name == "browse-04.png" and _viewer(page)["open"], name)
+        r.check("the picture on screen is the one stepped to",
+                page.evaluate("() => document.querySelector('.minipaint-clip-viewer').dataset.current") == state["current"]
+                and quote(state["current"], safe="") in (_viewer(page)["src"] or ""), _viewer(page)["src"])
+
+        page.click(".minipaint-clip-viewer-order[data-order='random']")
+        page.wait_for_timeout(200)
+        shuffled = page.evaluate(VIEWER_JS)
+        r.check("Random shuffles the same folder, with the picture on screen first",
+                shuffled["order"] == "random" and sorted(shuffled["list"]) == sorted(server)
+                and shuffled["list"][0] == state["current"] and shuffled["at"] == 0
+                and page.evaluate("() => sessionStorage.getItem('minipaint-clipboard:viewer-order')") == "random",
+                str(shuffled["list"][:3]))
+        page.keyboard.press("ArrowRight")
+        page.keyboard.press("ArrowRight")
+        page.keyboard.press("ArrowLeft")
+        page.keyboard.press("ArrowLeft")
+        page.wait_for_timeout(200)
+        back = page.evaluate(VIEWER_JS)
+        r.check("and stepping back retraces the shuffle",
+                back["current"] == state["current"] and back["list"] == shuffled["list"], str(back["at"]))
+        page.click(".minipaint-clip-viewer-order[data-order='date']")
+        page.wait_for_timeout(200)
+        dated = page.evaluate(VIEWER_JS)
+        r.check("Date puts it back in date order, where the picture on screen is",
+                dated["order"] == "date" and dated["list"] == server and dated["list"][dated["at"]] == state["current"], str(dated["at"]))
+
+        # Out to a picture on the other page: the grid turns to it.
+        shown = set(page.evaluate("() => Array.from(document.querySelectorAll('#minipaint_clipboard_root .minipaint-clip-item')).map(t => t.dataset.asset)"))
+        for _ in range(total):
+            if page.evaluate(VIEWER_JS)["current"] not in shown:
+                break
+            page.keyboard.press("ArrowRight")
+            page.wait_for_timeout(60)
+        landing = page.evaluate(VIEWER_JS)["current"]
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(1800)
+        r.check("leaving the view selects the picture it ended on",
+                not _viewer(page)["open"] and landing not in shown
+                and page.evaluate("() => window.minipaintClipboard.debug().selected") == landing, landing)
+        r.check("and the grid turns to the page that holds it, with it in view",
+                library_state(page)["page"] == 1 and _in_view(page, landing), str(library_state(page)))
+    finally:
+        page.evaluate("() => window.minipaintClipboard.closeViewer()")
+        page.evaluate("() => sessionStorage.removeItem('minipaint-clipboard:viewer-order')")
+        for path in made:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        show_page(page, {"size": 60, "page": 0, "sort": "newest", "refresh": True})
+        page.evaluate("() => window.minipaintClipboard.select('')")
+
+
 def check_a_tile_opens_full_screen(r: Results, page) -> None:
     """Asked for: "a tiny button to the upper right of a large sized thumb,
     that lets me expand to full screen and double tap to exit"."""
@@ -4412,9 +4625,19 @@ def check_a_tile_opens_full_screen(r: Results, page) -> None:
     state = _viewer(page)
     r.check("pressing it opens the picture over everything, in the browser's own full screen",
             state["open"] and state["full"] == "viewer", str(state))
-    r.check("the whole picture is loaded for it - and only for it",
+    # The view steps through the folder now, so the whole pictures either
+    # side are fetched too - and nothing else in the folder.
+    page.wait_for_function("() => window.minipaintClipboard.viewerState().count > 0", timeout=10000)
+    page.wait_for_timeout(300)
+    seen = page.evaluate("() => window.minipaintClipboard.viewerState()")
+    neighbours = {seen["list"][at] for at in (seen["at"] - 1, seen["at"], seen["at"] + 1) if 0 <= at < len(seen["list"])}
+    fetched = page.evaluate("() => window.__fullRequests")
+    from urllib.parse import unquote
+    named = {unquote(url.split("/minipaint-clipboard/image/")[1].split("?")[0]) for url in fetched}
+    r.check("the whole picture is loaded for it - and only for it and the two either side",
             state["loaded"] == "1" and "thumb=1" not in state["src"]
-            and page.evaluate("() => window.__fullRequests.length") == 1, str(state))
+            and first.get_attribute("data-asset") in named and named <= neighbours and len(fetched) <= 3,
+            str({"named": sorted(named), "neighbours": sorted(neighbours)}))
     r.check("and the tile it came from is the selection",
             page.evaluate("() => window.minipaintClipboard.debug().selected") == first.get_attribute("data-asset"), name)
     size = page.viewport_size or {"width": 1400, "height": 950}
@@ -4528,6 +4751,7 @@ def run() -> Results:
                     ("check_a_thumbnail_is_fetched_once", lambda: check_a_thumbnail_is_fetched_once(r, page)),
                     ("check_the_row_is_filled_per_row", lambda: check_the_row_is_filled_per_row(r, page, browser)),
                     ("check_a_tile_opens_full_screen", lambda: check_a_tile_opens_full_screen(r, page)),
+                    ("check_the_viewer_browses_the_folder", lambda: check_the_viewer_browses_the_folder(r, page, library)),
                     ("check_a_picture_sends_to_png_info", lambda: check_a_picture_sends_to_png_info(r, page, library)),
                     ("check_an_archive_loads_what_is_in_view_first", lambda: check_an_archive_loads_what_is_in_view_first(r, page)),
                     ("select_first", lambda: r.check("a picture can be selected", select_first(page),

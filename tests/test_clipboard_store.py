@@ -605,6 +605,18 @@ def index_checks(r: Results, base: pathlib.Path) -> None:
 
     r.check("an unknown sort falls back to the stored one rather than refusing",
             routes.library_page("sideways", 0, 10)["sort"] == config.load().sort)
+    # The full-screen view steps through the whole folder while the grid holds
+    # a page of it: one answer, every picture, ids and names and versions only.
+    order = routes.library_order("name_asc")
+    r.check("the whole folder's order is one answer, every picture in it, unpaged",
+            order["ok"] and order["total"] == len(whole) and [item[1] for item in order["items"]] == whole,
+            str(order["total"]))
+    r.check("each as its id, its name and the version its address carries - never a path",
+            all(len(item) == 3 and item[2] == store.version_of(next(a for a in store.store().assets() if a.asset_id == item[0]))
+                for item in order["items"]) and not any(os.sep in str(part) for item in order["items"] for part in item),
+            str(order["items"][:1]))
+    r.check("and in the order asked for", [item[1] for item in routes.library_order("name_desc")["items"]] == list(reversed(whole))
+            and routes.library_order("sideways")["sort"] == config.load().sort)
     r.check("a page past the end returns the last page that exists",
             routes.library_page("name_asc", 99, 10)["page"] == 2 and routes.library_page("name_asc", -5, 10)["page"] == 0)
     r.check("a size outside its bounds is clamped, not refused",

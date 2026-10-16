@@ -289,6 +289,24 @@ def library_page(sort: typing.Any = "", page: typing.Any = 0, size: typing.Any =
     }
 
 
+def library_order(sort: typing.Any = "") -> dict:
+    """Every picture in the storage folder, in one order, and nothing else:
+    ``[id, name, version]`` each.
+
+    For the full-screen view, which steps through the whole folder while the
+    grid holds one page of it. Ids and names only - never a path - and the
+    version that makes each picture's address one the browser may keep. Read
+    from the index as it stands; the grid's own reads refresh it.
+    """
+    library = store_module.store()
+    mode = str(sort or "")
+    if mode not in config.SORT_MODES:
+        mode = config.load().sort
+    assets = library.assets(mode) if library.configured() else []
+    return {"ok": True, "sort": mode, "total": len(assets),
+            "items": [[asset.asset_id, asset.filename, store_module.version_of(asset)] for asset in assets]}
+
+
 async def _library(request: typing.Any) -> typing.Any:
     """The picture index, as its own route.
 
@@ -302,8 +320,11 @@ async def _library(request: typing.Any) -> typing.Any:
         return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
     params = request.query_params
     try:
-        answer = library_page(params.get("sort"), params.get("page"), params.get("size"), params.get("selected"),
-                              str(params.get("refresh") or "") in ("1", "true", "yes"))
+        if str(params.get("every") or "") in ("1", "true", "yes"):
+            answer = library_order(params.get("sort"))
+        else:
+            answer = library_page(params.get("sort"), params.get("page"), params.get("size"), params.get("selected"),
+                                  str(params.get("refresh") or "") in ("1", "true", "yes"))
     except Exception as error:
         scrub.console(f"the library index could not be read ({type(error).__name__}).", _LOG_PREFIX)
         return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)

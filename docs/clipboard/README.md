@@ -224,8 +224,11 @@ held a bubble beside the handle says which picture of how many is at the top of 
 (`1,234 of 18,928`) and what the sort orders by: the date for *Newest*/*Oldest* (from the
 file's modification time, which every tile's version carries), the size for
 *Largest*/*Smallest*, the name otherwise. An archive asks for **no thumbnails while it is
-held**: the rows it passes are drawn as empty places, requests for tiles that left the view
-are dropped as always, and letting go asks for the screen it stopped on. It is drawn only
+moving**: the rows it passes are drawn as empty places, requests for tiles that left the view
+are dropped as always, and **resting** on it - held still for 300 ms without letting go
+(`SCRUB_PAUSE_MS`; asked for: "if i pause with out releasing the scrubber, the thumbs in that
+view should start loading as if i released the scrubber") - or letting go asks for the screen
+it stopped on. Moving again holds new requests back until the next rest. It is drawn only
 while the grid holds more than it shows. The wheel, a finger on the grid, the keys and
 Page Up/Down scroll the grid as before, and the bar follows.
 
@@ -308,14 +311,47 @@ holds the copy - a card holds library pictures, which is what lets History and L
 request back. The same bytes are copied once: pressing +First again uses the copy already
 there. The status line says *copied from the archive into the storage folder*.
 
+## A picture's gestures
+
+Two, on every tile, in the storage folder and in an archive, and neither is a setting:
+
+* **Double tap** (or double click) - **Send to PNG Info**. Asked for: "give pictures a double
+  tap action that sends them to PNG info. This should be a permanent shortcut". Two clicks on
+  one tile within 350 ms and 32 px; the first has already toggled the selection, so the second
+  selects the picture whatever the first did and sends it, the same send as the menu's (its
+  own bytes, the tab opened once they have landed). A third tap starts a new pair. Tiles say
+  `touch-action: manipulation` (pinned), so a phone's browser neither zooms on the double tap
+  nor holds every tap back to wait for one. A WebUI without a PNG Info tab says so.
+* **Right click** - **full screen**. Asked for: "make right click on a image open the full
+  screen image view". The browser's own menu is not shown for a picture. On a phone a long
+  press is the same event, so it opens full screen too.
+
 ## Full screen
 
-A tile large enough to hold it - 120 px and larger - has a small button in its
-upper right corner (drawn, never a character a theme could swap). Pressing it selects the
-tile and opens its picture over everything: the browser's **own full screen** where it grants
-one, the window where it does not (some phone browsers). It is the one time the grid loads a
-whole picture, and only the one asked for; the tile's thumbnail stands in until it arrives.
-**A double tap** - or a double click, or Escape - closes it. It asks whether *it* is the full
+A right click, or the small button in the upper right corner of a tile large enough to hold
+it - 120 px and larger (drawn, never a character a theme could swap) - selects the tile and
+opens its picture over everything: the browser's **own full screen** where it grants one, the
+window where it does not (some phone browsers). Only whole pictures are loaded here: the one on
+screen, and the one either side of it, ahead; the tile's thumbnail stands in until each
+arrives. **A double tap** - or a double click, or Escape - closes it.
+
+**It steps through the whole folder.** Asked for: "make full screen image view capable of
+browser the folder in either random or date sorted order. Exiting the view should land that
+image in view in the gallery as if i scrolled to it." The folder is the one the grid shows: an
+archive's listing is already on the page; the storage folder's whole order, which the grid
+holds only a page of, is read once per opening from the library route's `every=1` form
+(`routes.library_order`: `[id, name, version]` per picture, never a path). ←/↑/Page Up and
+→/↓/Page Down step, as do a swipe (48 px sideways, more sideways than up or down) and the two
+drawn arrows at its sides; the view takes every touch (`touch-action: none`), so a swipe is
+never the browser's Back and a double tap never a zoom. The bar at its top says *N of TOTAL*
+and holds the order: **Date** - newest to oldest by the file's time, the time every picture's
+version carries - or **Random**, the folder shuffled with the picture on screen first, so
+stepping back retraces the shuffle and pressing Random again reshuffles. The order is the
+browser tab's (`sessionStorage`, `minipaint-clipboard:viewer-order`), Date until changed.
+**Leaving it lands the grid** on the picture it ended on: selected, and scrolled so it sits in
+the middle of the grid where it can. In an archive that is the row the layout puts it on, and
+its thumbnails are asked for as after a scroll; in the storage folder the library route says
+which page holds it (`selected_page`) and the grid turns to that page first. It asks whether *it* is the full
 screen element before leaving full screen, so over the Forge Assistant's focus mode, which
 makes the whole document full screen, closing it leaves the page's full screen where it was.
 It says it has taken the page (`minipaint:overlay`, name `clipboard-viewer`), as the History

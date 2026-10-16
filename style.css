@@ -3454,7 +3454,9 @@
     padding: 0;
     background: var(--body-background-fill, var(--background-fill-primary, transparent));
     color: var(--body-text-color, inherit);
-    touch-action: manipulation;
+    /* Every touch is the view's: a swipe steps through the folder (never the
+       browser's Back), and a double tap closes it (never a zoom). */
+    touch-action: none;
     user-select: none;
     -webkit-user-select: none;
     outline: none;
@@ -3480,6 +3482,85 @@
     width: 100%;
     height: 100%;
     filter: blur(1px);
+}
+
+/* Stepping through the folder: an arrow at each side, and a bar at the
+   bottom with where the view is and the order it steps in. */
+#minipaint_clipboard_root .minipaint-clip-viewer-nav {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: 48px;
+    height: 72px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    border-radius: var(--radius-sm, 6px);
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.35));
+    color: var(--body-text-color, inherit);
+    opacity: 0.7;
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-viewer-nav:hover {
+    opacity: 1;
+}
+
+#minipaint_clipboard_root .minipaint-clip-viewer-nav:disabled {
+    opacity: 0.2;
+    cursor: default;
+}
+
+#minipaint_clipboard_root .minipaint-clip-viewer-prev {
+    left: 12px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-viewer-next {
+    right: 12px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-viewer-bar {
+    position: absolute;
+    left: 50%;
+    top: 12px;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 6px 4px 12px;
+    border-radius: 999px;
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.35));
+    color: var(--body-text-color, inherit);
+    font-size: 13px;
+    white-space: nowrap;
+    opacity: 0.85;
+}
+
+#minipaint_clipboard_root .minipaint-clip-viewer-orders {
+    display: inline-flex;
+    gap: 2px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-viewer-order {
+    min-width: 0;
+    margin: 0;
+    padding: 3px 10px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-viewer-order-on {
+    border-color: var(--color-accent, rgba(127, 127, 127, 0.6));
+    background: var(--background-fill-primary, transparent);
 }
 
 #minipaint_clipboard_root .minipaint-clip-viewer-hint {

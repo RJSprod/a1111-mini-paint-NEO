@@ -13,7 +13,15 @@ because it was learned the hard way.
 pip install -r tests/requirements.txt
 python -m playwright install chromium
 python tests/run.py                    # 36 suites; every one must run
+python tests/run.py --affected         # while working: only the suites a change reaches
 ```
+
+The whole run is about eight and a half minutes, more than half of it
+`browser_clipboard.py`; the user asked for only what changed to be tested
+while working. `--affected` (and `--list` for why) picks suites from the
+changed files, and `tests/browser_clipboard.py --only <words>` runs that
+suite's matching checks; `tests/README.md` says how both decide. Neither is a
+stand-in for the whole run: CI runs every suite on every push.
 
 Gradio is pinned to 4.40.0 because that is what the target Forge ships, and the
 event graph differs across majors. `tests/README.md` says why the whole Gradio

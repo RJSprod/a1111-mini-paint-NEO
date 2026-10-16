@@ -578,8 +578,8 @@ moved, copied or deleted.
 **The browser.** Menu → *Choose storage folder* first: Clipboard keeps its pictures in that
 folder on the machine running Forge and nowhere else, and never names it to the browser —
 every thumbnail is fetched by an opaque id. Upload, paste (Ctrl+V, or the paste panel when
-the browser will not let the page read its clipboard), drop a file on a card, sort, resize
-the thumbnails, rename, delete, refresh (files dropped into the folder by hand appear),
+the browser will not let the page read its clipboard), drop a file on a card, sort, choose
+how many pictures a row holds, rename, delete, refresh (files dropped into the folder by hand appear),
 and *Send selected to* Mini Paint, img2img, Inpaint, Extras or ImageStitch by the same
 routes the Canvas takes - or to **PNG Info**, which only the Clipboard offers: it is handed
 the file's own bytes, the way a file dropped on it would be, so it reads the generation
@@ -587,8 +587,9 @@ parameters Forge wrote. A Forge PNG keeps every byte, so its generation paramete
 
 **Archives.** Menu → *Archives ›* → *Manage archives…* takes folders on the machine running
 Forge - as many as you like - and the grid can show any one of them **in place of the storage
-folder** (the flyout under *Archives ›*, or the bar that appears over the grid once there is
-one). An archive is **read-only**: nothing in this extension writes, renames, deletes or
+folder**, chosen under Menu → *Archives ›*. Once there is an archive to choose, the Menu button
+carries the name of the folder the grid shows, and the status line says how many pictures it
+holds and where new ones go; no row over the grid is spent on it. An archive is **read-only**: nothing in this extension writes, renames, deletes or
 indexes anything in it, Rename and Delete are off for its pictures, and pasting, uploading,
 dropping or the gallery's 🖌️ still save to the storage folder while you look at one. It is
 **not paged**: the whole folder (its PNG, JPEG and WebP files, not its subfolders) is listed in
@@ -607,7 +608,23 @@ cache is cleared. An archive picture can be sent anywhere a library picture can;
 card with +First, +Last or +Ref it is **copied** into the storage folder (byte for byte, once
 for the same bytes), because a card holds library pictures.
 
-**Full screen.** A tile large enough to hold it (from 120 px on the size slider) has a small
+**Pictures per row.** The slider in the toolbar counts pictures per row rather than pixels:
+the row is shared out among that many tiles, so it is filled to its right-hand edge at every
+setting, and the tiles grow and shrink with the window. Each picture keeps its own shape
+inside its square tile - nothing is cut off or stretched. The slider offers the counts whose
+tiles come out between 72 and 320 px at the grid's width (320 is the size of the thumbnails
+the server makes), and a new browser tab starts at the count nearest 144 px. A count you
+choose is kept for that browser tab's session, through reloads, and nothing about it is
+saved on the host.
+
+**The scrubber.** A thin bar over the grid's right-hand edge, in place of its scroll bar: it
+takes no room and moves nothing. Drag its handle, or press anywhere on it to jump there and
+drag on; while it is held a bubble beside it says which picture of how many is at the top of
+the view and the date, name or size the sort orders by. An archive asks for no thumbnails
+while it is held, only for where it is let go. It is drawn only when the grid holds more than
+it shows; the wheel, a finger on the grid and the keys scroll as they always did.
+
+**Full screen.** A tile large enough to hold it (120 px and larger) has a small
 button in its upper right corner that opens its picture over everything - the browser's own
 full screen where it grants it, the window where it does not. It is the one time the grid
 loads a whole picture, and only that one: the thumbnail stands in until it arrives. A double
@@ -919,7 +936,7 @@ minipaint_neo/
     assets.py                    the browser bundles, fetched per tab from /minipaint-assets/js/ rather than parsed into every page
     interop.py                   the public queue API's server half: staging, preparing handoffs, the outbox routes, /minipaint-interop/*
     clipboard/                   the Clipboard tab (see docs/clipboard/README.md)
-        config.py                the folder, the intercept destination, the sort, the thumbnail size, the archives and the view
+        config.py                the folder, the intercept destination, the sort, the archives and the view
         store.py                 the library: one folder, opaque ids, containment, import, refresh, rename, delete
         archives.py              read-only folders shown in place of the library: listed whole from directory entries,
                                  a picture by reference, thumbnails made once into a cache of their own, a copy for a card

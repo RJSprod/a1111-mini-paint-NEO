@@ -4,8 +4,34 @@
 pip install -r tests/requirements.txt                 # no torch, under two minutes
 python -m playwright install chromium                 # for the browser suite in run.py
 python tests/run.py                                   # image maths, both frontends, the workflow, WanGP, the queue, Clipboard, Canvas startup
+python tests/run.py --affected                        # while working: only the suites a change reaches
+python tests/run.py --affected --list                 # which ones, and why, without running them
+python tests/browser_clipboard.py --only archive,row  # one browser suite's checks, by words in their names
 FORGE_ROOT=/path/to/forge-neo python tests/browser_smoke.py   # the real extension in a real browser
 ```
+
+**Only what changed, while working.** `--affected` compares the checkout -
+commits since the branch left `origin/main` (`--base <ref>` for another),
+staged and unstaged edits and new files - and runs the suites a changed file
+can reach: the suite itself; any suite whose imports reach a changed module
+(a suite's and a test helper's imports wherever they are written, an
+extension module's only at its top level, because the extension imports
+lazily where it needs a module only sometimes and following those reached
+every suite from every file); any suite that names the file (by its name, or
+with its folder when another file shares the name - `clipboard/ui.py`,
+`"clipboard" / "ui.py"`, `clipboard.ui`); any suite that lists the file's
+folder; and, for the three browser suites, any module they import that names
+it, because they run the page those modules serve (a bundle, the
+stylesheet). A changed file of code that nothing reaches runs everything; a
+changed note runs nothing; `tests/run.py` or `tests/requirements.txt` runs
+everything. The Clipboard's browser suite is most of the time of a whole run,
+so it takes `--only` (or `MINIPAINT_BROWSER_ONLY`): the words are matched
+against its checks' names (`check_the_row_is_filled_per_row`,
+`check_an_archive_loads_what_is_in_view_first`, ...), and the adapter's own
+attach always runs first. A check that leans on one before it may not hold
+alone. Neither replaces the whole run: `--affected` cannot see one suite's
+state reaching another, so CI runs every suite on every push, and a run
+before a push should too.
 
 `tests/run.py` says at the end how many of its suites actually ran. A suite
 whose dependency is missing is skipped rather than failed, which is right for

@@ -1,6 +1,21 @@
 """Run every check in this folder.
 
-    python tests/run.py
+    python tests/run.py                    # every suite
+    python tests/run.py --affected         # only the suites a change reaches
+    python tests/run.py --affected --list  # which ones, and why, without running
+
+``--affected`` compares the working tree (committed, staged, unstaged and new
+files) with where the branch left ``origin/main`` (``--base`` to name another)
+and runs the suites that can reach a changed file: the suite itself, any suite
+whose imports reach a changed module, and any suite that names a changed file
+- or, for the three browser suites, whose imports reach a module that names it,
+because those serve the page the bundles and the stylesheet make. A changed
+file of code that no suite reaches runs everything; a changed note runs
+nothing. It is for while working: it cannot see one suite's state reaching
+another, so CI runs every suite on every push, and so should a run before one.
+``MINIPAINT_BROWSER_ONLY=archive,scrubber`` narrows the Clipboard's browser
+suite to the checks whose names hold one of those words (see
+tests/browser_clipboard.py).
 
 Nothing here needs the WebUI running. The image maths needs only Pillow; the
 frontend suite needs Gradio, and says so rather than failing if it is not
@@ -13,6 +28,7 @@ from __future__ import annotations
 import os
 import pathlib
 import sys
+import typing
 
 os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
 
@@ -182,10 +198,276 @@ def _run_isolated(name: str) -> str:
     return "ok"
 
 
-def main() -> int:
+# ------------------------------------------------------------- --affected --
+
+#: What a changed file reaches, decided from the files themselves. Everything
+#: is read from the checkout; nothing is imported.
+HERE = pathlib.Path(__file__).resolve().parent
+ROOT = HERE.parent
+#: Changing one of these changes how every suite runs.
+EVERYTHING = {"tests/run.py", "tests/requirements.txt"}
+#: A changed file with one of these suffixes is code: if no suite reaches it,
+#: everything runs rather than nothing.
+CODE = {".py", ".js", ".mjs", ".css", ".html", ".json"}
+#: Folders that are not the extension's.
+SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".clipboard-library"}
+
+
+def _git(*args: str) -> typing.List[str]:
+    import subprocess
+
+    done = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True)
+    return [line for line in done.stdout.splitlines() if line.strip()]
+
+
+def changed_files(base: str) -> typing.Optional[typing.List[str]]:
+    """Every file that differs from where this branch left ``base``, or None
+    when git cannot say (then everything runs)."""
+    import subprocess
+
+    try:
+        fork = _git("merge-base", base, "HEAD")[0]
+        files = set(_git("diff", "--name-only", fork, "HEAD"))
+        files |= set(_git("diff", "--name-only", "HEAD"))
+        files |= set(_git("ls-files", "--others", "--exclude-standard"))
+    except (OSError, IndexError, subprocess.CalledProcessError):
+        return None
+    return sorted(files)
+
+
+def _python_files() -> typing.Dict[str, pathlib.Path]:
+    """Module name -> file, for every Python file an import here could reach:
+    the extension's (from the root), the suites and their helpers (from
+    tests/) and the WebUI stubs (from tests/stubs/)."""
+    found: typing.Dict[str, pathlib.Path] = {}
+    for base in (ROOT, HERE, HERE / "stubs"):
+        for path in base.rglob("*.py"):
+            relative = path.relative_to(base)
+            if any(part in SKIP_DIRS for part in relative.parts):
+                continue
+            parts = list(relative.with_suffix("").parts)
+            if parts[-1] == "__init__":
+                parts = parts[:-1]
+            if parts:
+                found.setdefault(".".join(parts), path)
+    return found
+
+
+def _imports_of(path: pathlib.Path, name: str, modules: typing.Dict[str, pathlib.Path]) -> typing.Set[str]:
+    """The modules this file imports, as names in ``modules``: every form of
+    import statement, relative ones resolved, and names handed to
+    ``__import__`` or ``import_module`` as text.
+
+    A suite's or a test helper's imports are all followed, wherever they are
+    written: a check that imports inside itself runs that import. An
+    extension module's are followed only where importing the module runs
+    them - at its top level, in a class body - and not inside a function.
+    The extension imports lazily where a module is needed only sometimes,
+    and following those made a picture-maths suite depend on the archives'
+    thumbnail cache (canvas.ui -> wangp -> handoff -> clipboard -> ui ->
+    archives, every link but the first inside a function): every change
+    reached every suite, which is no selection at all. What a lazy import
+    hides, the full run in CI catches.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError, ValueError):
+        return set()
+    package = name if path.name == "__init__.py" else name.rpartition(".")[0]
+    everywhere = path.resolve().is_relative_to(HERE)
+
+    def walk(node):
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if not everywhere and isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            yield from walk(child)
+
+    wanted: typing.Set[str] = set()
+    for node in walk(tree):
+        if isinstance(node, ast.Import):
+            wanted.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                anchor = package.split(".") if package else []
+                anchor = anchor[:len(anchor) - (node.level - 1)] if node.level > 1 else anchor
+                stem = ".".join(anchor + ([node.module] if node.module else []))
+            else:
+                stem = node.module or ""
+            if stem:
+                wanted.add(stem)
+            wanted.update(f"{stem}.{alias.name}" if stem else alias.name for alias in node.names)
+        elif isinstance(node, ast.Call):
+            callee = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            if callee in ("__import__", "import_module") and node.args and isinstance(node.args[0], ast.Constant) \
+                    and isinstance(node.args[0].value, str):
+                wanted.add(node.args[0].value)
+    reached: typing.Set[str] = set()
+    for item in wanted:
+        # Importing a.b.c runs a and a.b first.
+        parts = item.split(".")
+        for end in range(1, len(parts) + 1):
+            candidate = ".".join(parts[:end])
+            if candidate in modules:
+                reached.add(candidate)
+    return reached
+
+
+def _closures(modules: typing.Dict[str, pathlib.Path]) -> typing.Dict[str, typing.Set[str]]:
+    """Every suite's modules: what it imports, and what those import."""
+    graph = {name: _imports_of(path, name, modules) for name, path in modules.items()}
+    closures = {}
+    for suite in SUITES:
+        seen = {suite}
+        todo = [suite]
+        while todo:
+            for item in graph.get(todo.pop(), ()):
+                if item not in seen:
+                    seen.add(item)
+                    todo.append(item)
+        closures[suite] = seen
+    return closures
+
+
+def affected(files: typing.Iterable[str]) -> typing.Tuple[typing.Dict[str, str], typing.List[str]]:
+    """The suites the changed files reach, each with the first reason, and
+    the changed code files nothing reached."""
+    modules = _python_files()
+    by_path = {path.resolve(): name for name, path in modules.items()}
+    closures = _closures(modules)
+    texts: typing.Dict[str, str] = {}
+
+    def text(name: str) -> str:
+        if name not in texts:
+            try:
+                texts[name] = modules[name].read_text(encoding="utf-8", errors="replace")
+            except (KeyError, OSError):
+                texts[name] = ""
+        return texts[name]
+
+    chosen: typing.Dict[str, str] = {}
+    unreached: typing.List[str] = []
+    # File names more than one file of the checkout has: ui.py, config.py,
+    # routes.py, README.md. A suite naming one of those names some file.
+    counts: typing.Dict[str, int] = {}
+    for item in _all_files():
+        counts[item.name] = counts.get(item.name, 0) + 1
+    shared = {name for name, count in counts.items() if count > 1}
+
+    for changed in files:
+        path = (ROOT / changed).resolve()
+        reasons: typing.Dict[str, str] = {}
+        if changed in EVERYTHING:
+            reasons = {suite: f"{changed} changes how every suite runs" for suite in SUITES}
+        module = by_path.get(path)
+        if module in SUITES:
+            reasons.setdefault(module, "the suite itself changed")
+        if module:
+            for suite in SUITES:
+                if module in closures[suite] and suite != module:
+                    reasons.setdefault(suite, f"imports reach {changed}")
+        names = _names_of(changed, shared)
+        folders = list(pathlib.PurePosixPath(changed).parts[:-1])
+        for suite in SUITES:
+            if suite in reasons:
+                continue
+            own = text(suite)
+            named = next((name for name in names if name in own), "")
+            if named:
+                reasons[suite] = f"names {named}"
+                continue
+            # A suite that lists a folder reaches every file in it: every one
+            # of the folder's path parts quoted in it, and a listing call.
+            if folders and all(f'"{folder}"' in own for folder in folders) and ("iterdir(" in own or "glob(" in own):
+                reasons[suite] = f"lists the folder {changed.rsplit('/', 1)[0]}"
+                continue
+            # A test helper that names the file is the suite's own reach. A
+            # module of the extension that names it is the suite's reach only
+            # for a browser suite, which runs the page that module serves.
+            for item in sorted(closures[suite]):
+                if item == suite:
+                    continue
+                named = next((name for name in names if name in text(item)), "")
+                if named and (modules[item].resolve().is_relative_to(HERE) or suite in BROWSER):
+                    reasons[suite] = f"{item} names {named}"
+                    break
+        if not reasons and pathlib.PurePosixPath(changed).suffix in CODE:
+            unreached.append(changed)
+        for suite, why in reasons.items():
+            chosen.setdefault(suite, why)
+    return chosen, unreached
+
+
+def _all_files() -> typing.List[pathlib.Path]:
+    found = []
+    for path in ROOT.rglob("*"):
+        if path.is_file() and not any(part in SKIP_DIRS for part in path.relative_to(ROOT).parts):
+            found.append(path)
+    return found
+
+
+def _names_of(changed: str, shared: typing.Set[str]) -> typing.List[str]:
+    """How a suite would name this file: its file name when no other file
+    has it; otherwise with its folder, as a path (``clipboard/ui.py``) or as
+    a path built from parts (``"clipboard" / "ui.py"``), or as a dotted
+    module (``clipboard.ui``)."""
+    path = pathlib.PurePosixPath(changed)
+    if path.name not in shared:
+        return [path.name]
+    if len(path.parts) < 2:
+        # A shared name at the top of the checkout (README.md): only its own
+        # path names it.
+        return [f"ROOT / \"{path.name}\"", f'"{path.name}"'] if path.suffix in CODE else [f"ROOT / \"{path.name}\""]
+    folder = path.parts[-2]
+    names = [f"{folder}/{path.name}", f'"{folder}" / "{path.name}"']
+    if path.suffix == ".py":
+        names.append(f"{folder}.{path.stem}")
+    return names
+
+
+def _affected_plan(argv: typing.List[str]) -> typing.Optional[typing.List[str]]:
+    """The suites ``--affected`` runs, printed with why; None for all."""
+    base = "origin/main"
+    if "--base" in argv:
+        at = argv.index("--base")
+        if at + 1 < len(argv):
+            base = argv[at + 1]
+    files = changed_files(base)
+    if files is None:
+        print(f"--affected: git cannot compare with {base}; running every suite.")
+        return None
+    if not files:
+        print(f"--affected: nothing differs from {base}; nothing to run.")
+        return []
+    chosen, unreached = affected(files)
+    print(f"--affected: {len(files)} changed file(s) against {base}.")
+    if unreached:
+        print("   reached by no suite, so every suite runs: " + ", ".join(unreached))
+        return None
+    for suite in SUITES:
+        if suite in chosen:
+            print(f"   {suite}: {chosen[suite]}")
+    print(f"   {len(chosen)} of {len(SUITES)} suites.")
+    return [suite for suite in SUITES if suite in chosen]
+
+
+def main(argv: typing.Optional[typing.List[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    suites = SUITES
+    if "--affected" in argv:
+        plan = _affected_plan(argv)
+        if plan is not None:
+            suites = plan
+        if "--list" in argv:
+            return 0
+    import time
+
+    started = time.monotonic()
     ok = True
     skipped = []
-    for name in SUITES:
+    for name in suites:
         if name in BROWSER:
             outcome = _run_isolated(name)
             if outcome == "skipped":
@@ -225,6 +507,11 @@ def main() -> int:
     # A run that skipped most of itself and still said nothing is how a green
     # suite comes to mean very little. Say how much of it actually ran, and
     # let a caller that cares - CI - insist that all of it did.
+    print(f"\n{round(time.monotonic() - started)} s.")
+    if suites is not SUITES:
+        print(f"{len(suites) - len(skipped)} of the {len(suites)} affected suites ran (of {len(SUITES)}); "
+              "CI runs them all.")
+        return 0 if ok else 1
     if skipped:
         print(f"\n{len(skipped)} of {len(SUITES)} suites skipped: {', '.join(skipped)}")
         print("   install tests/requirements.txt to run them.")

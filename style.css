@@ -1502,6 +1502,17 @@
 #minipaint_clipboard_root .minipaint-clip-menu-button {
     min-width: 96px;
     font-weight: 600;
+    /* The folder's name, once there are archives: one line. The script cuts
+       it short as well, because a theme's `min-width: fit-content` beats
+       any max-width here. */
+    max-width: 240px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+#minipaint_clipboard_root[data-clip-view="archive"] .minipaint-clip-menu-button {
+    border-color: var(--color-accent, #ff7c00);
 }
 
 /* The toolbar's two icon buttons, beside the menu.
@@ -1634,9 +1645,13 @@
        but a box that was never the shape of the picture it holds.
 
        A fixed track is the same number the row uses, so the box is square
-       and a square picture fills it exactly. The cost is a ragged right-hand
-       edge, which is what every other thumbnail grid does. min() keeps a
-       single column from overflowing a panel narrower than one tile. */
+       and a square picture fills it exactly. The ragged right-hand edge that
+       left was then taken away the other way round: the slider counts
+       pictures per row, and the script works the tile size OUT of the row
+       (--minipaint-clip-thumb from --minipaint-clip-cols and the width), so
+       the columns share the row to the pixel and are still exactly the size
+       the rows are measured from. The line below is the fallback for a page
+       whose script has not run; the script pins the count's own. */
     grid-template-columns: repeat(auto-fill, min(calc(var(--minipaint-clip-thumb) + var(--minipaint-clip-frame)), 100%));
     justify-content: start;
     /* A row is the size the slider names, not the size of the tallest
@@ -1654,15 +1669,71 @@
     min-height: 160px;
     max-height: 70vh;
     overflow-y: auto;
+    /* The scrubber is the grid's bar, laid over its edge; a bar of the
+       browser's own would take width from the row as it came and went. */
+    scrollbar-width: none;
     border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
     border-radius: var(--block-radius, 8px);
     background: var(--block-background-fill, transparent);
 }
 
+#minipaint_clipboard_root .minipaint-clip-grid::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+}
+
+/* The scrubber: a thin bar over the grid's right-hand edge, on its padding,
+   so it takes no room and moves nothing. Its place and size are the
+   script's (pinned); its look is this file's. The rail is a hairline, the
+   handle a pill that widens under the pointer and while it is held, and the
+   bubble beside the handle says where the view is while it is held. */
+#minipaint_clipboard_root .minipaint-clip-scrubber {
+    display: block;
+}
+
+#minipaint_clipboard_root .minipaint-clip-scrubber[hidden] {
+    display: none !important;
+}
+
+#minipaint_clipboard_root .minipaint-clip-scrubber-rail {
+    border-radius: 1px;
+    background: var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    opacity: 0.7;
+}
+
+#minipaint_clipboard_root .minipaint-clip-scrubber-handle {
+    width: 6px;
+    border-radius: 3px;
+    background: var(--body-text-color-subdued, rgba(127, 127, 127, 0.8));
+    opacity: 0.75;
+    transition: width 0.12s ease, opacity 0.12s ease;
+}
+
+#minipaint_clipboard_root .minipaint-clip-scrubber:hover .minipaint-clip-scrubber-handle,
+#minipaint_clipboard_root .minipaint-clip-scrubbing .minipaint-clip-scrubber-handle {
+    width: 10px;
+    opacity: 1;
+    background: var(--color-accent, rgba(127, 127, 127, 0.9));
+}
+
+#minipaint_clipboard_root .minipaint-clip-scrubber-bubble {
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    border-radius: var(--radius-sm, 6px);
+    background: var(--background-fill-primary, rgba(127, 127, 127, 0.9));
+    color: var(--body-text-color, inherit);
+    box-shadow: var(--shadow-drop-lg, none);
+}
+
+#minipaint_clipboard_root .minipaint-clip-scrubber-bubble[hidden] {
+    display: none !important;
+}
+
 /* The browser draws the grid and the row under it, into the element the
    server used to fill. One wrapper so the two are laid out together and the
-   grid keeps its own scroll box. */
+   grid keeps its own scroll box; the scrubber is placed against it. */
 #minipaint_clipboard_root .minipaint-clip-mount {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: var(--minipaint-clip-gap, 8px);
@@ -3169,58 +3240,12 @@
 /* ---------------------------------------------------------------------------
    Archives: a read-only folder shown in place of the storage folder.
 
-   The bar over the grid says which folder the grid is showing and changes it
-   (it opens the same flyout as Menu → Archives). It is not drawn at all until
-   there is an archive to choose, so a Clipboard without one looks as it
-   always did. An archive's tiles are the storage folder's tiles, placed by
-   the script in rows it works out; a tile whose thumbnail has not been asked
-   for yet is its empty square and nothing else.
+   Menu → Archives › is the one switch, and the Menu button carries the name
+   of the folder the grid shows once there is an archive to choose; no row is
+   drawn over the grid for it. An archive's tiles are the storage folder's
+   tiles, placed by the script in rows it works out; a tile whose thumbnail
+   has not been asked for yet is its empty square and nothing else.
    --------------------------------------------------------------------------- */
-#minipaint_clipboard_root .minipaint-clip-source {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 4px var(--minipaint-clip-gap, 8px);
-    min-width: 0;
-    font-size: 12px;
-}
-
-#minipaint_clipboard_root .minipaint-clip-source[hidden] {
-    display: none !important;
-}
-
-#minipaint_clipboard_root .minipaint-clip-source-pick {
-    flex: 0 1 auto;
-    min-width: 0;
-    max-width: 100%;
-    min-height: var(--minipaint-clip-target, 32px);
-    padding: 0 10px;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
-    border-radius: var(--radius-sm, 6px);
-    background: var(--button-secondary-background-fill, transparent);
-    color: var(--button-secondary-text-color, inherit);
-    font: inherit;
-    font-weight: 600;
-    cursor: pointer;
-}
-
-#minipaint_clipboard_root .minipaint-clip-source-pick:hover {
-    background: var(--button-secondary-background-fill-hover, rgba(127, 127, 127, 0.25));
-}
-
-#minipaint_clipboard_root[data-clip-view="archive"] .minipaint-clip-source-pick {
-    border-color: var(--color-accent, #ff7c00);
-}
-
-#minipaint_clipboard_root .minipaint-clip-source-note {
-    flex: 1 1 200px;
-    min-width: 0;
-    color: var(--body-text-color-subdued, inherit);
-}
-
 /* The full-screen button in a tile's corner, over the picture. Its place and
    size are the script's (pinned); whether it shows is this file's, because
    it is only for tiles large enough to hold it. */

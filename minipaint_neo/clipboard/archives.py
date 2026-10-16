@@ -375,7 +375,10 @@ def listing(archive_id: typing.Any, sort: typing.Any = "") -> dict:
     ordered = ordered[:LISTING_LIMIT]
     items = [[key_of(name), display_name(name), size, f"{mtime}-{size}"] for name, size, mtime in ordered]
     total = len(items)
-    status = f"{total} picture{'s' if total != 1 else ''} in {record['name']} (read-only)."
+    # The status line is where the grid says which folder it shows (the bar
+    # that used to say so over the grid is gone), so it says all of it.
+    status = (f"{total} picture{'s' if total != 1 else ''} in the archive {record['name']} - read-only; "
+              "new pictures go to the storage folder.")
     if left_out:
         status += f" {left_out} more were left out; an archive lists at most {LISTING_LIMIT}."
     return {"ok": True, "archive": public(record), "sort": mode, "total": total, "skipped": skipped,

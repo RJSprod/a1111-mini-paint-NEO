@@ -367,8 +367,14 @@ def page_checks(r: Results, base: pathlib.Path):
             not targeting("grid", "change") and all(cid("grid") not in d["outputs"] for d in page["dependencies"]))
     r.check("every server render carries a nonce the browser can see land",
             any(".menuStateChanged" in (d.get("js") or "") for d in targeting("menu_state", "change")))
-    r.check("the thumbnail slider resizes in the browser as it moves and is saved when released",
-            any("setThumbnailSize" in (d.get("js") or "") for d in targeting("thumb", "change")) and any(d["backend_fn"] for d in targeting("thumb", "release")))
+    r.check("the size slider counts pictures per row, and the browser sizes the row as it moves",
+            any("setPerRow" in (d.get("js") or "") for d in targeting("thumb", "change")))
+    # Per session, by the user's word: the count is the browser tab's, and
+    # nothing about it reaches the host - no backend function on any of the
+    # slider's events.
+    r.check("and nothing about it is saved on the host",
+            not any(d["backend_fn"] for kind in ("change", "input", "release") for d in targeting("thumb", kind)),
+            str([(kind, len(targeting("thumb", kind))) for kind in ("change", "input", "release")]))
     r.check("the prompt is saved into the draft when the box loses focus", any(d["backend_fn"] for d in targeting("prompt", "blur")))
     for name in ("to_first", "to_last", "to_ref"):
         r.check(f"{name} assigns the selection from the backend", any(d["backend_fn"] and d["inputs"] == [cid("selected")] for d in targeting(name, "click")))
@@ -517,7 +523,7 @@ def browser_checks(r: Results, base: pathlib.Path, tab) -> dict:
     r.check("an unknown sort changes nothing", config.load().sort == "name_desc")
     r.check("and the index falls back to the stored sort rather than refusing an unknown one",
             _listed("sideways")["sort"] == "name_desc", _listed("sideways")["sort"])
-    r.check("the thumbnail size is saved, clamped", json.loads(tab.thumbnail_changed(200))["thumbnail"] == 200 and json.loads(tab.thumbnail_changed(5000))["thumbnail"] == config.THUMBNAIL_MAX)
+    r.check("the tab has no host-side save for the size any more", not hasattr(tab, "thumbnail_changed"))
 
     panel, textbox, status = tab.open_rename("")
     r.check("Rename with nothing selected says so", not _visible(panel) and "Select an image" in status)
@@ -1118,6 +1124,17 @@ def theming_checks(r: Results) -> None:
     r.check("the script's tile frame and caption are the stylesheet's own numbers",
             frame and caption and f"const TILE_FRAME = {frame.group(1)};" in script and f"const TILE_CAPTION = {caption.group(1)};" in script,
             f"css {frame and frame.group(1)}/{caption and caption.group(1)}")
+    # The per-row slider offers the counts whose tiles fall between the
+    # host's two sizes; the script's copies of them must not drift.
+    r.check("the script's smallest and largest tile are the config's own",
+            f"const THUMB_MIN = {config.THUMBNAIL_MIN};" in script and f"const THUMB_MAX = {config.THUMBNAIL_MAX};" in script
+            and f"const DEFAULT_THUMB = {config.THUMBNAIL_DEFAULT};" in script)
+    r.check("the grid's columns are the slider's count, sharing the row",
+            '"grid-template-columns": "repeat(var(--minipaint-clip-cols' in script and "minmax(0, 1fr)" in script)
+    r.check("and the grid draws no scroll bar of its own: the scrubber is its bar",
+            '"scrollbar-width": "none"' in script and "scrollbar-width: none" in block and "::-webkit-scrollbar" in block)
+    r.check("the archive bar over the grid is gone; the Menu button names the folder",
+            "minipaint-clip-source" not in script and "minipaint-clip-source" not in block and "function drawViewName" in script)
     r.check("and it pins the tile's box inline, with !important, against a theme's button rule",
             'setProperty(property, declarations[property], "important")' in script and '"min-width": "0"' in script
             and "pin(tile, TILE_GEOMETRY)" in script and "pin(grid, GRID_GEOMETRY)" in script and "pin(picture, PICTURE_GEOMETRY)" in script)

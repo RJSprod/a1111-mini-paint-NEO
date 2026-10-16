@@ -79,8 +79,20 @@ window.minipaintClipboard = (function () {
     //: chain that is.
     const EDITOR_GROW_CLASS = "minipaint-clip-grow";
     const TAB_PANEL_ID = "tab_minipaint_clipboard";
-    //: Matches the stylesheet's own default for --minipaint-clip-thumb.
+    //: Matches the stylesheet's own default for --minipaint-clip-thumb, and
+    //: is the size a session's first row is counted from: as many pictures
+    //: per row as come nearest to it. See applyPerRow.
     const DEFAULT_THUMB = 144;
+    //: The smallest and largest tile the per-row slider reaches, as the
+    //: host's config names them (THUMBNAIL_MIN and THUMBNAIL_MAX; a check in
+    //: test_clipboard_ui.py holds the copies equal): below the first a
+    //: picture is a smudge, above the second it is larger than the thumbnail
+    //: the server makes, 320 on its longer side.
+    const THUMB_MIN = 72;
+    const THUMB_MAX = 320;
+    //: Where this browser tab keeps its pictures-per-row between reloads. Per
+    //: session by the user's word: a new tab starts filled at the default.
+    const PER_ROW_KEY = "minipaint-clipboard:per-row";
     //: The tile's frame on one axis - 4px of padding and a 2px border, twice
     //: - and the strip under the square that carries the name. A column is
     //: the thumbnail plus the first, a row is the thumbnail plus the second.
@@ -176,10 +188,22 @@ window.minipaintClipboard = (function () {
         //: send. See watchSend.
         sendWatch: null,
         sendPoll: null,
-        //: The thumbnail size in pixels, remembered across refreshes: the
-        //: grid element is replaced wholesale and takes its inline style
-        //: with it, so without this every refresh snapped back to default.
+        //: The thumbnail size in pixels, worked out from the pictures per
+        //: row and the grid's width (applyPerRow) - fractional, so a row is
+        //: filled to the pixel.
         thumb: 0,
+        //: Pictures per row: what is drawn, what the slider asked for this
+        //: session (0 for the default), and the counts the width allows.
+        perRow: 0,
+        perRowWanted: 0,
+        perRowRange: null,
+        //: The grid whose size and scroll are watched (watchGrid), and its
+        //: observer.
+        gridWatched: null,
+        gridObserver: null,
+        //: The scrubber: the hold while it is pressed, and its next frame.
+        scrub: null,
+        scrubFrame: 0,
         menu: null,
         menuSection: null,
         //: The element the flyout is drawn under. The menu button when the
@@ -214,8 +238,6 @@ window.minipaintClipboard = (function () {
         //: the browser has six to this origin in total. See askQueue.
         queueRead: null,
         toastTimer: null,
-        //: The debounce on remembering the thumbnail size. See setThumbnailSize.
-        thumbSave: 0,
         //: The Escape listener that belongs to the full-window editor, held
         //: only while it is open.
         editorKey: null,
@@ -741,9 +763,10 @@ window.minipaintClipboard = (function () {
             select(keep, true);
             S.renderedAt = Date.now();
             if (confirmed !== keep) { sendInput(BOXES.selected, keep); }
-            applyThumbnailSize(S.thumb);
+            applyPerRow();
             refreshBadges();
             scheduleFit();
+            scheduleScrubber();
             return;
         }
         const confirmed = boxValue(BOXES.selected);
@@ -762,12 +785,13 @@ window.minipaintClipboard = (function () {
         select(keep, true);
         S.renderedAt = Date.now();
         if (confirmed !== keep) { sendInput(BOXES.selected, keep); }
-        applyThumbnailSize(S.thumb);
+        applyPerRow();
         refreshBadges();
         // Once the pictures have had a frame to lay out: measured before
         // that, every tile is "off-centre" because nothing has been drawn.
         setTimeout(reportTiles, 400);
         scheduleFit();
+        scheduleScrubber();
     }
 
     /** A Gradio round trip landed on this page, whatever it carried. */
@@ -776,8 +800,113 @@ window.minipaintClipboard = (function () {
         if (S.offline.queue) { connectionNotice(false); S.queueDown = false; }
     }
 
+    /* -- pictures per row --------------------------------------------- */
+    //
+    // THE SLIDER COUNTS PICTURES, NOT PIXELS. It used to name a tile size in
+    // steps of 8 px, and the columns were that size and never stretched, so
+    // almost every size left a strip of empty grid at the right-hand end of
+    // every row. Asked for: "slide based on number of images that can fit
+    // one row without empty space". So the slider's value is how many
+    // pictures a row holds, the columns are that many equal shares of the
+    // row, and the tile size is worked out from the row: the width less the
+    // gaps, shared out, less the tile's frame. Every row is filled to the
+    // pixel at every count, and the picture keeps its shape inside its square
+    // (object-fit: contain, PICTURE_GEOMETRY) - nothing is cut off and
+    // nothing is stretched.
+    //
+    // The counts the slider offers are the ones whose tiles come out between
+    // THUMB_MIN and THUMB_MAX at this width, and they move with the width. A
+    // new session starts at the count nearest DEFAULT_THUMB, and follows the
+    // width while it is still on that default; a count the slider chose is
+    // this browser tab's (sessionStorage) and is kept through a resize,
+    // within the counts the new width allows.
+    //
+    // The grid's own scroll bar is not drawn (the scrubber is the grid's
+    // bar), so the width a row has does not change with what it holds, and
+    // sizing the tiles can never take a scroll bar away and change the width
+    // it was sized from.
+
+    /** The width a row has, and the gap between its pictures. */
+    function rowRoom(grid) {
+        const style = getComputedStyle(grid);
+        const gap = parseFloat(style.columnGap) || parseFloat(style.rowGap) || 8;
+        const room = (grid.clientWidth || 0) - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0);
+        return { room: room, gap: gap };
+    }
+
+    /** The counts a row of this width may hold: tiles from THUMB_MAX down to THUMB_MIN. */
+    function perRowRange(room, gap) {
+        const fewest = Math.max(1, Math.ceil((room + gap) / (THUMB_MAX + TILE_FRAME + gap) - 1e-9));
+        const most = Math.max(fewest, Math.floor((room + gap) / (THUMB_MIN + TILE_FRAME + gap) + 1e-9));
+        return { min: fewest, max: most };
+    }
+
+    /** The picture's square when `count` tiles share the row exactly. */
+    function thumbFor(room, gap, count) {
+        return Math.max(1, (room - (count - 1) * gap) / count - TILE_FRAME);
+    }
+
+    function clampCount(count, range) {
+        return Math.min(range.max, Math.max(range.min, Math.round(Number(count) || 0)));
+    }
+
+    function sessionPerRow() {
+        try {
+            const kept = Number(window.sessionStorage.getItem(PER_ROW_KEY));
+            return kept >= 1 ? Math.round(kept) : 0;
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    function keepPerRow(count) {
+        try { window.sessionStorage.setItem(PER_ROW_KEY, String(count)); } catch (e) { /* this tab only, then */ }
+    }
+
+    function thumbSlider() {
+        const host = byId("minipaint_clipboard_thumb");
+        return {
+            range: host ? host.querySelector("input[type=range]") : null,
+            number: host ? host.querySelector("input[type=number]") : null
+        };
+    }
+
     /**
-     * Size the thumbnails, by writing the variable the grid actually reads.
+     * Show the count and the counts there are on the slider.
+     *
+     * The framework's slider keeps its value in its own state, which follows
+     * the range input's `input` event, and draws its filled track from the
+     * input's own min and max - so the limits are written on the inputs and
+     * a changed value is handed over as an input event. That event comes
+     * back as the slider's change, carrying the count that is already drawn,
+     * which setPerRow takes for the echo it is.
+     */
+    function syncSlider(count, range) {
+        const slider = thumbSlider();
+        for (const input of [slider.range, slider.number]) {
+            if (!input) { continue; }
+            if (input.min !== String(range.min)) { input.min = String(range.min); }
+            if (input.max !== String(range.max)) { input.max = String(range.max); }
+            if (input.step !== "1") { input.step = "1"; }
+            input.title = count + " picture" + (count === 1 ? "" : "s") + " per row";
+        }
+        const input = slider.range;
+        if (!input) { return; }
+        if (Number(input.value) !== count) {
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+            if (setter && setter.set) { setter.set.call(input, String(count)); } else { input.value = String(count); }
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        // The filled part of the track, as the framework draws it, for limits
+        // it did not set itself.
+        const span = range.max - range.min;
+        input.style.backgroundSize = (span > 0 ? ((count - range.min) / span) * 100 : 100) + "% 100%";
+        if (slider.number && Number(slider.number.value) !== count) { slider.number.value = String(count); }
+    }
+
+    /**
+     * Fill the row: the count asked for (or the session's, or the default),
+     * held to what this width allows, and the tile size it makes.
      *
      * On the grid itself, not on the Gradio block around it. Gradio renders
      * an HTML component's elem_classes onto both the outer block and the
@@ -785,45 +914,68 @@ window.minipaintClipboard = (function () {
      * inner match re-declared the variable - which meant a value written to
      * the outer element was shadowed before it ever reached the grid, and
      * the slider moved nothing. The grid is the element that reads the
-     * variable, so it is the element that gets written.
+     * variables, so it is the element that gets written.
      */
-    function applyThumbnailSize(size) {
+    function applyPerRow(wanted) {
+        if (wanted) { S.perRowWanted = Math.max(1, Math.round(Number(wanted) || 1)); }
+        if (!S.perRowWanted) { S.perRowWanted = sessionPerRow(); }
         const host = byId(GRID_ID);
         const grid = (host && host.querySelector(".minipaint-clip-grid"))
             || app().querySelector(".minipaint-clip-grid");
-        const slider = byId("minipaint_clipboard_thumb");
-        const input = slider ? slider.querySelector("input[type=range]") : null;
-        const value = Number(size) || (input ? Number(input.value) : 0) || DEFAULT_THUMB;
-        S.thumb = value;
-        // Marked important like the rest of the grid's geometry (see pin),
-        // so the one variable every track and ceiling below is measured
-        // from cannot be restated by a stylesheet either.
-        if (grid) {
-            const wanted = value + "px";
-            const moved = grid.style.getPropertyValue("--minipaint-clip-thumb") !== wanted;
-            grid.style.setProperty("--minipaint-clip-thumb", wanted, "important");
-            // The full-screen button, on tiles large enough to hold it.
-            const expand = value >= EXPAND_MIN_THUMB ? "1" : "0";
-            if (grid.dataset.expand !== expand) { grid.dataset.expand = expand; }
-            if (moved && archiveActive()) { onArchiveResize(); }
+        if (!grid) { return false; }
+        const measured = rowRoom(grid);
+        // Hidden with its tab, the grid has no width: it keeps the size it
+        // had, and the grid's resize observer sizes it again on its return.
+        if (!(measured.room > 0)) {
+            if (!S.thumb) { S.thumb = DEFAULT_THUMB; }
+            return false;
         }
+        const range = perRowRange(measured.room, measured.gap);
+        const count = S.perRowWanted
+            ? clampCount(S.perRowWanted, range)
+            : clampCount((measured.room + measured.gap) / (DEFAULT_THUMB + TILE_FRAME + measured.gap), range);
+        const thumb = thumbFor(measured.room, measured.gap, count);
+        S.thumb = thumb;
+        S.perRow = count;
+        S.perRowRange = range;
+        // Marked important like the rest of the grid's geometry (see pin),
+        // so the two variables every track and ceiling below is measured
+        // from cannot be restated by a stylesheet either.
+        const size = (Math.round(thumb * 100) / 100) + "px";
+        let moved = false;
+        if (grid.style.getPropertyValue("--minipaint-clip-thumb") !== size) {
+            grid.style.setProperty("--minipaint-clip-thumb", size, "important");
+            moved = true;
+        }
+        if (grid.style.getPropertyValue("--minipaint-clip-cols") !== String(count)) {
+            grid.style.setProperty("--minipaint-clip-cols", String(count), "important");
+            moved = true;
+        }
+        grid.dataset.perRow = String(count);
+        // The full-screen button, on tiles large enough to hold it.
+        const expand = thumb >= EXPAND_MIN_THUMB ? "1" : "0";
+        if (grid.dataset.expand !== expand) { grid.dataset.expand = expand; }
+        syncSlider(count, range);
+        if (moved && archiveActive()) { onArchiveResize(); }
+        if (moved) { scheduleScrubber(); }
+        return moved;
     }
 
     /**
-     * The slider moved: size the tiles now, remember it shortly.
-     *
-     * Sizing is drawing and happens on the frame the slider moved. Keeping
-     * it is a setting, and goes over this tab's own route - debounced,
-     * because a drag is a hundred values and one of them is the answer.
+     * The slider moved: that many pictures per row, now, and for the rest
+     * of this browser tab's session. Nothing is saved on the host.
      */
-    function setThumbnailSize(size) {
-        applyThumbnailSize(size);
-        if (S.thumbSave) { clearTimeout(S.thumbSave); }
-        const wanted = S.thumb;
-        S.thumbSave = setTimeout(function () {
-            S.thumbSave = 0;
-            postSettings({ thumbnail: wanted }).catch(function () { /* the size is still applied */ });
-        }, 400);
+    function setPerRow(count) {
+        const wanted = Math.round(Number(count) || 0);
+        if (!(wanted >= 1)) { return; }
+        // The slider's change for the count just drawn: the echo of
+        // syncSlider's own event, or a press that changed nothing.
+        if (wanted === S.perRow) { return; }
+        S.perRowWanted = wanted;
+        keepPerRow(wanted);
+        applyPerRow(wanted);
+        // Held to the width's counts: what is drawn is what is kept.
+        if (S.perRow && S.perRow !== wanted) { S.perRowWanted = S.perRow; keepPerRow(S.perRow); }
     }
 
     //: The three places the gallery's 🖌️ button can send, in the menu's
@@ -1011,9 +1163,9 @@ window.minipaintClipboard = (function () {
      * and selection borders, the missing-picture mark. Nothing here names a
      * colour; test_clipboard_ui.py holds that line.
      *
-     * The thumbnail size stays the one variable the slider writes onto the
-     * grid (applyThumbnailSize); every other length below is a number this
-     * file owns. reportTiles says so, with the values that won, if a tile is
+     * The thumbnail size and the pictures per row stay the two variables
+     * the slider writes onto the grid (applyPerRow); every other length
+     * below is a number this file owns. reportTiles says so, with the values that won, if a tile is
      * ever not the size of its cell again.
      */
     function pin(element, declarations) {
@@ -1024,8 +1176,10 @@ window.minipaintClipboard = (function () {
         }
     }
 
-    //: The mount: the grid over its pager, laid out together.
+    //: The mount: the grid over its pager, laid out together, and what the
+    //: scrubber is placed against.
     const MOUNT_GEOMETRY = {
+        "position": "relative",
         "display": "flex",
         "flex-direction": "column",
         "gap": "var(--minipaint-clip-gap, 8px)",
@@ -1035,14 +1189,16 @@ window.minipaintClipboard = (function () {
         "max-width": "100%"
     };
 
-    //: The grid: columns the size the slider names, never stretched to fill
-    //: the row (a stretched column is a box wider than the picture in it),
-    //: and rows of that size plus the caption, so every cell is identical
-    //: before any picture has loaded. min() keeps a single column from
-    //: overflowing a panel narrower than one tile.
+    //: The grid: as many equal columns as the slider counts, sharing the row
+    //: to the pixel, and rows of the tile size worked out from that share
+    //: plus the caption (applyPerRow) - so a column is exactly the tile, its
+    //: square exactly the picture's box, and every cell is identical before
+    //: any picture has loaded. No scroll bar of its own: the scrubber is the
+    //: grid's bar, and a bar that came and went would change the width the
+    //: row was shared out from.
     const GRID_GEOMETRY = {
         "display": "grid",
-        "grid-template-columns": "repeat(auto-fill, min(calc(var(--minipaint-clip-thumb) + " + TILE_FRAME + "px), 100%))",
+        "grid-template-columns": "repeat(var(--minipaint-clip-cols, 4), minmax(0, 1fr))",
         "grid-auto-rows": "calc(var(--minipaint-clip-thumb) + " + TILE_CAPTION + "px)",
         "grid-auto-flow": "row",
         "justify-content": "start",
@@ -1058,7 +1214,8 @@ window.minipaintClipboard = (function () {
         "min-width": "0",
         "max-width": "100%",
         "overflow-x": "hidden",
-        "overflow-y": "auto"
+        "overflow-y": "auto",
+        "scrollbar-width": "none"
     };
 
     //: The tile is the boundary: exactly its cell, one cell, and nothing it
@@ -1214,11 +1371,34 @@ window.minipaintClipboard = (function () {
         mount.appendChild(grid);
         mount.appendChild(pager);
         host.appendChild(mount);
-        // The size the slider holds, on the grid before its first tile: the
+        // The row the slider counts, on the grid before its first tile: the
         // tracks above are measured from it, and a page whose stylesheet
         // never arrived would otherwise have nothing to measure them from.
-        applyThumbnailSize(S.thumb);
+        applyPerRow();
+        watchGrid(grid);
         return mount;
+    }
+
+    /**
+     * The grid's own size, watched: a new width is a new share of the row,
+     * a new height a new view for the archive's rows and the scrubber.
+     *
+     * Only read here. Nothing this writes can change the grid's own box -
+     * its height is the fit's (fitTab) and its width the column's - so the
+     * observer cannot feed itself: the tiles inside move, the box does not.
+     */
+    function watchGrid(grid) {
+        if (S.gridWatched === grid) { return; }
+        S.gridWatched = grid;
+        grid.addEventListener("scroll", onGridScroll, { passive: true });
+        if (typeof ResizeObserver !== "function") { return; }
+        if (S.gridObserver) { S.gridObserver.disconnect(); }
+        S.gridObserver = new ResizeObserver(function () {
+            applyPerRow();
+            if (archiveActive()) { onArchiveResize(); }
+            drawScrubber();
+        });
+        S.gridObserver.observe(grid);
     }
 
     function gridElement() {
@@ -1434,13 +1614,9 @@ window.minipaintClipboard = (function () {
                     if (!child.contains(gridElement())) { sizes.observe(child); }
                 }
             }
-            // The pager, which is inside the grid's host but never sized,
-            // and the archive bar over the grid, which is not sized either.
+            // The pager, which is inside the grid's host but never sized.
             const pager = pagerElement();
             if (pager) { sizes.observe(pager); }
-            const mount = gridMount();
-            const bar = mount ? mount.querySelector(".minipaint-clip-source") : null;
-            if (bar) { sizes.observe(bar); }
             // Every block of the composer but the Prompt's own.
             if (composer) {
                 for (const child of Array.from(composer.children)) {
@@ -1450,6 +1626,350 @@ window.minipaintClipboard = (function () {
         };
         watchAll();
         S.fitRewatch = watchAll;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* The scrubber                                                          */
+    /* ------------------------------------------------------------------ */
+    //
+    // Asked for: "some sort of scrubber / scroll bar mechanism so I can
+    // scroll the images. I have thousands of images so scrolling one page at
+    // a time is horrible ... a compact solution that does not take up space
+    // or change the layout."
+    //
+    // A thin bar laid over the grid's right-hand edge, on the grid's own
+    // padding: it takes no room from the row and moves nothing when it comes
+    // and goes. Its handle is where the view is in the whole list, as tall as
+    // the share of it in view and never shorter than a fingertip. Drag the
+    // handle and the grid follows it; press anywhere else on the bar and the
+    // view jumps there and follows the pointer from then on. While it is
+    // held a bubble beside the handle says where you are - which picture of
+    // how many, and the date, name or size the sort orders by - and an
+    // archive asks for no thumbnails until it is let go, so a scrub across
+    // ten thousand pictures asks for the screen it stops on and nothing on
+    // the way there. The wheel, a finger on the grid and the keys scroll the
+    // grid as they always did; the bar follows them.
+    //
+    // It is shown only while the grid holds more than it shows.
+
+    //: How far the bar sits inside the grid's frame, top and bottom.
+    const SCRUB_INSET = 4;
+    //: The handle's least height: a target, not a sliver.
+    const SCRUB_MIN_HANDLE = 32;
+
+    //: The bar: a strip the width of a fingertip's edge over the grid's
+    //: right-hand padding. Its top, height and right edge are measured
+    //: (placeScrubber); this is everything else, pinned like the grid.
+    //: Its display is the stylesheet's, like the full-screen button's: an
+    //: inline !important display would beat the rule that hides it.
+    const SCRUBBER_GEOMETRY = {
+        "position": "absolute",
+        "box-sizing": "border-box",
+        "width": "14px",
+        "min-width": "0",
+        "max-width": "none",
+        "margin": "0",
+        "padding": "0",
+        "border-width": "0",
+        "overflow": "visible",
+        "z-index": "2",
+        "touch-action": "none",
+        "user-select": "none",
+        "-webkit-user-select": "none",
+        "cursor": "pointer"
+    };
+    const SCRUB_RAIL_GEOMETRY = {
+        "position": "absolute",
+        "top": "0",
+        "bottom": "0",
+        "right": "4px",
+        "width": "2px",
+        "margin": "0",
+        "padding": "0",
+        "pointer-events": "none"
+    };
+    const SCRUB_HANDLE_GEOMETRY = {
+        "position": "absolute",
+        "top": "0",
+        "right": "2px",
+        "box-sizing": "border-box",
+        "margin": "0",
+        "padding": "0",
+        "border-width": "0",
+        "pointer-events": "none"
+    };
+    const SCRUB_BUBBLE_GEOMETRY = {
+        "position": "absolute",
+        "right": "18px",
+        "top": "0",
+        "box-sizing": "border-box",
+        "margin": "0",
+        "padding": "4px 8px",
+        "max-width": "260px",
+        "white-space": "nowrap",
+        "overflow": "hidden",
+        "text-overflow": "ellipsis",
+        "font-size": "12px",
+        "line-height": "1.35",
+        "text-align": "right",
+        "pointer-events": "none"
+    };
+
+    function scrubberElement() {
+        const mount = gridMount();
+        if (!mount) { return null; }
+        let bar = mount.querySelector(".minipaint-clip-scrubber");
+        if (bar) { return bar; }
+        bar = document.createElement("div");
+        bar.className = "minipaint-clip-scrubber";
+        bar.hidden = true;
+        bar.setAttribute("role", "scrollbar");
+        bar.setAttribute("aria-orientation", "vertical");
+        bar.setAttribute("aria-label", "Scroll through the pictures");
+        bar.setAttribute("aria-valuemin", "0");
+        bar.setAttribute("aria-valuemax", "100");
+        bar.setAttribute("aria-valuenow", "0");
+        bar.title = "Drag, or press anywhere on it, to move through the pictures";
+        pin(bar, SCRUBBER_GEOMETRY);
+        const rail = document.createElement("span");
+        rail.className = "minipaint-clip-scrubber-rail";
+        pin(rail, SCRUB_RAIL_GEOMETRY);
+        const handle = document.createElement("span");
+        handle.className = "minipaint-clip-scrubber-handle";
+        pin(handle, SCRUB_HANDLE_GEOMETRY);
+        const bubble = document.createElement("span");
+        bubble.className = "minipaint-clip-scrubber-bubble";
+        bubble.hidden = true;
+        bubble.setAttribute("aria-live", "polite");
+        pin(bubble, SCRUB_BUBBLE_GEOMETRY);
+        bar.appendChild(rail);
+        bar.appendChild(handle);
+        bar.appendChild(bubble);
+        bar.addEventListener("pointerdown", onScrubDown);
+        bar.addEventListener("pointermove", onScrubMove);
+        bar.addEventListener("pointerup", onScrubEnd);
+        bar.addEventListener("pointercancel", onScrubEnd);
+        bar.addEventListener("lostpointercapture", onScrubEnd);
+        // The bar is the drag's: a page that pans under a finger the page
+        // has claimed (a Gecko trap the sibling extension met) is told so
+        // from a listener that can still say no.
+        bar.addEventListener("touchmove", function (event) { if (S.scrub && event.cancelable) { event.preventDefault(); } }, { passive: false });
+        mount.appendChild(bar);
+        return bar;
+    }
+
+    /** Where the grid's scroll stands: how far down, how far it can go. */
+    function scrollFacts(grid) {
+        const max = Math.max(0, grid.scrollHeight - grid.clientHeight);
+        return { top: grid.scrollTop, max: max, view: grid.clientHeight, whole: grid.scrollHeight };
+    }
+
+    /** Lay the bar over the grid's right-hand edge, inside its frame. */
+    function placeScrubber(bar, grid) {
+        const style = getComputedStyle(grid);
+        const borderTop = parseFloat(style.borderTopWidth) || 0;
+        const borderRight = parseFloat(style.borderRightWidth) || 0;
+        const mount = bar.parentNode;
+        const top = grid.offsetTop + borderTop + SCRUB_INSET;
+        const height = Math.max(0, grid.clientHeight - 2 * SCRUB_INSET);
+        const right = Math.max(0, (mount ? mount.clientWidth : 0) - (grid.offsetLeft + grid.offsetWidth) + borderRight);
+        const wanted = { "top": top + "px", "height": height + "px", "right": right + "px" };
+        for (const property in wanted) {
+            if (bar.style.getPropertyValue(property) !== wanted[property]) { bar.style.setProperty(property, wanted[property], "important"); }
+        }
+        return height;
+    }
+
+    /** The handle's height and place on a bar of `height`. */
+    function handleBox(height, facts) {
+        const size = Math.min(height, Math.max(SCRUB_MIN_HANDLE, facts.whole ? height * facts.view / facts.whole : height));
+        const travel = Math.max(0, height - size);
+        return { size: size, travel: travel, top: facts.max ? travel * Math.min(1, Math.max(0, facts.top / facts.max)) : 0 };
+    }
+
+    function drawScrubber() {
+        S.scrubFrame = 0;
+        const host = byId(GRID_ID);
+        const grid = host ? host.querySelector(".minipaint-clip-grid") : null;
+        if (!grid) { return; }
+        const bar = scrubberElement();
+        if (!bar) { return; }
+        const facts = scrollFacts(grid);
+        // More than the grid shows, by more than a rounding.
+        const shown = grid.clientHeight > 0 && facts.max > 2;
+        if (bar.hidden === shown) { bar.hidden = !shown; }
+        if (!shown) {
+            if (S.scrub) { endScrub(); }
+            return;
+        }
+        const height = placeScrubber(bar, grid);
+        const box = handleBox(height, facts);
+        const handle = bar.querySelector(".minipaint-clip-scrubber-handle");
+        if (handle) {
+            const top = Math.round(box.top) + "px";
+            const size = Math.round(box.size) + "px";
+            if (handle.style.getPropertyValue("top") !== top) { handle.style.setProperty("top", top, "important"); }
+            if (handle.style.getPropertyValue("height") !== size) { handle.style.setProperty("height", size, "important"); }
+        }
+        const now = String(facts.max ? Math.round(100 * facts.top / facts.max) : 0);
+        if (bar.getAttribute("aria-valuenow") !== now) { bar.setAttribute("aria-valuenow", now); }
+        if (S.scrub) { drawBubble(bar, box); }
+    }
+
+    function scheduleScrubber() {
+        if (S.scrubFrame) { return; }
+        S.scrubFrame = window.requestAnimationFrame(drawScrubber);
+    }
+
+    function onGridScroll() { scheduleScrubber(); }
+
+    /** The date a version names: ``<mtime_ns>-<size>``. */
+    function versionDate(version) {
+        const ns = String(version || "").split("-")[0];
+        if (!/^\d{7,}$/.test(ns)) { return ""; }
+        const when = new Date(Number(ns.slice(0, -6)));
+        if (isNaN(when.getTime())) { return ""; }
+        try {
+            return when.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+        } catch (e) {
+            return when.toDateString();
+        }
+    }
+
+    function bytesText(bytes) {
+        const value = Number(bytes || 0);
+        return value >= 1048576 ? (value / 1048576).toFixed(1) + " MB"
+            : value >= 1024 ? Math.round(value / 1024) + " KB" : value + " B";
+    }
+
+    /**
+     * Where the view is: the first picture in it, as a position in the
+     * whole list, and what the sort orders it by.
+     */
+    function scrubPlace() {
+        const grid = gridElement();
+        if (!grid) { return null; }
+        const style = getComputedStyle(grid);
+        const gap = parseFloat(style.rowGap) || 8;
+        const padTop = parseFloat(style.paddingTop) || 0;
+        const facts = scrollFacts(grid);
+        const perRow = Math.max(1, S.perRow || 1);
+        const rowHeight = (S.thumb || DEFAULT_THUMB) + TILE_CAPTION + gap;
+        // The last screen's first row is the end of the list, whatever row
+        // the arithmetic lands on: at the bottom, say the last picture.
+        const atEnd = facts.max > 0 && facts.top >= facts.max - 1;
+        let row = Math.max(0, Math.floor(Math.max(0, facts.top - padTop) / rowHeight + 0.5));
+        let sort = "";
+        let total = 0;
+        let offset = 0;
+        let pick = null;
+        if (archiveActive()) {
+            sort = S.archive.sort;
+            total = S.archive.items.length;
+            const at = atEnd ? total - 1 : Math.min(total - 1, row * perRow);
+            const item = S.archive.items[at];
+            if (!item) { return null; }
+            pick = { index: at, name: item[1], bytes: item[2], v: item[3] };
+        } else {
+            sort = S.library.sort;
+            const tiles = items();
+            total = S.library.total || tiles.length;
+            offset = S.library.page * S.library.size;
+            const at = atEnd ? tiles.length - 1 : Math.min(tiles.length - 1, row * perRow);
+            const tile = tiles[at];
+            if (!tile) { return null; }
+            pick = { index: offset + at, name: tile.dataset.name || "", bytes: tile.dataset.bytes, v: tile.dataset.v };
+        }
+        let detail = "";
+        if (sort === "newest" || sort === "oldest") { detail = versionDate(pick.v); }
+        else if (sort === "largest" || sort === "smallest") { detail = pick.bytes ? bytesText(pick.bytes) : ""; }
+        else { detail = pick.name; }
+        return { position: pick.index + 1, total: total, detail: detail };
+    }
+
+    function drawBubble(bar, box) {
+        const bubble = bar.querySelector(".minipaint-clip-scrubber-bubble");
+        if (!bubble) { return; }
+        const place = scrubPlace();
+        if (!place) { bubble.hidden = true; return; }
+        const count = function (value) { try { return Number(value).toLocaleString(); } catch (e) { return String(value); } };
+        const text = count(place.position) + " of " + count(place.total);
+        let first = bubble.firstChild;
+        if (!first) {
+            first = document.createElement("b");
+            bubble.appendChild(first);
+            bubble.appendChild(document.createElement("br"));
+            bubble.appendChild(document.createElement("span"));
+        }
+        if (first.textContent !== text) { first.textContent = text; }
+        const second = bubble.lastChild;
+        if (second.textContent !== place.detail) { second.textContent = place.detail; }
+        bubble.hidden = false;
+        // Level with the handle's middle, and kept on the bar.
+        const height = bubble.offsetHeight || 34;
+        const middle = box.top + box.size / 2 - height / 2;
+        const room = Math.max(0, (parseFloat(bar.style.getPropertyValue("height")) || 0) - height);
+        bubble.style.setProperty("top", Math.round(Math.min(room, Math.max(0, middle))) + "px", "important");
+    }
+
+    function onScrubDown(event) {
+        if (event.pointerType === "mouse" && event.button !== 0) { return; }
+        const grid = gridElement();
+        const bar = event.currentTarget;
+        if (!grid || !bar || bar.hidden) { return; }
+        event.preventDefault();
+        event.stopPropagation();
+        const facts = scrollFacts(grid);
+        const height = parseFloat(bar.style.getPropertyValue("height")) || grid.clientHeight;
+        const box = handleBox(height, facts);
+        const rect = bar.getBoundingClientRect();
+        const y = event.clientY - rect.top;
+        // On the handle it is held where it was taken; anywhere else the
+        // handle's middle comes to the pointer.
+        const onHandle = y >= box.top && y <= box.top + box.size;
+        S.scrub = { pointer: event.pointerId, grab: onHandle ? y - box.top : box.size / 2, moved: false };
+        try { bar.setPointerCapture(event.pointerId); } catch (e) { /* the moves still come to the bar */ }
+        bar.classList.add("minipaint-clip-scrubbing");
+        if (!onHandle) { scrubTo(bar, event.clientY); }
+        drawScrubber();
+    }
+
+    function scrubTo(bar, clientY) {
+        const grid = gridElement();
+        if (!grid || !S.scrub) { return; }
+        const facts = scrollFacts(grid);
+        const height = parseFloat(bar.style.getPropertyValue("height")) || grid.clientHeight;
+        const box = handleBox(height, facts);
+        const rect = bar.getBoundingClientRect();
+        const fraction = box.travel > 0 ? (clientY - rect.top - S.scrub.grab) / box.travel : 0;
+        const top = Math.round(Math.min(1, Math.max(0, fraction)) * facts.max);
+        if (Math.abs(grid.scrollTop - top) >= 1) { grid.scrollTop = top; S.scrub.moved = true; }
+    }
+
+    function onScrubMove(event) {
+        if (!S.scrub || event.pointerId !== S.scrub.pointer) { return; }
+        event.preventDefault();
+        scrubTo(event.currentTarget, event.clientY);
+        drawScrubber();
+    }
+
+    function onScrubEnd(event) {
+        if (!S.scrub || (event && event.pointerId !== undefined && event.pointerId !== S.scrub.pointer)) { return; }
+        endScrub();
+    }
+
+    /** Let go: the bubble put away, and the view's thumbnails asked for. */
+    function endScrub() {
+        const bar = gridMount() ? gridMount().querySelector(".minipaint-clip-scrubber") : null;
+        const held = S.scrub;
+        S.scrub = null;
+        if (bar) {
+            bar.classList.remove("minipaint-clip-scrubbing");
+            if (held) { try { bar.releasePointerCapture(held.pointer); } catch (e) { /* released already */ } }
+            const bubble = bar.querySelector(".minipaint-clip-scrubber-bubble");
+            if (bubble) { bubble.hidden = true; }
+        }
+        if (archiveActive()) { renderArchive(); pumpThumbs(true); }
     }
 
     function pagerElement() {
@@ -1489,6 +2009,7 @@ window.minipaintClipboard = (function () {
         tile.dataset.asset = item.id;
         tile.dataset.name = item.name;
         tile.dataset.v = item.v || "";
+        tile.dataset.bytes = String(item.bytes || 0);
         tile.title = item.name + " · " + sizeText(item);
         pin(tile, TILE_GEOMETRY);
         const thumb = document.createElement("span");
@@ -1545,6 +2066,7 @@ window.minipaintClipboard = (function () {
         }
         if (String(tile.dataset.v || "") !== String(item.v || "")) {
             tile.dataset.v = item.v || "";
+            tile.dataset.bytes = String(item.bytes || 0);
             tile.classList.remove("minipaint-clip-item-missing");
             const picture = tile.querySelector("img");
             if (picture) {
@@ -3324,62 +3846,43 @@ window.minipaintClipboard = (function () {
         return found ? found[1] : "";
     }
 
-    /* -- the bar over the grid ---------------------------------------- */
+    /* -- which folder the grid shows ------------------------------------ */
+
+    //: The Menu button's own word, while there is nothing else to say.
+    const MENU_LABEL = "☰ Menu";
+    //: A folder's name on the Menu button is cut to this many characters: a
+    //: theme can say `button { min-width: fit-content !important }`, which
+    //: no max-width beats, so the button is only as wide as what it says.
+    const MENU_NAME_CHARS = 24;
 
     /**
-     * Which folder the grid is showing, and the way to change it.
+     * Which folder the grid is showing, said where it is changed.
      *
-     * Shown only once there is an archive to choose: a Clipboard with none
-     * looks exactly as it always did. In an archive it says so, and says
-     * where new pictures go - the one thing about an archive that is easy to
-     * forget while you are looking at one.
+     * There used to be a row over the grid for this - the folder's name as a
+     * button, and a note - and it took a row from the pictures. Asked for:
+     * "lets make switching between storage and folder a menu option". So the
+     * switch is Menu → Archives › and nothing else, and the folder's name is
+     * on the Menu button once there is an archive to choose (the storage
+     * folder's, or the archive's, cut to MENU_NAME_CHARS); a Clipboard with
+     * no archives keeps its plain Menu. The status line says the rest when
+     * the view changes: how many pictures, that the archive is read-only,
+     * and where new pictures go.
      */
-    function sourceBar() {
-        const mount = gridMount();
-        if (!mount) { return null; }
-        let bar = mount.querySelector(".minipaint-clip-source");
-        if (bar) { return bar; }
-        bar = document.createElement("div");
-        bar.className = "minipaint-clip-source";
-        bar.hidden = true;
-        const pick = document.createElement("button");
-        pick.type = "button";
-        pick.className = "minipaint-clip-source-pick";
-        pick.setAttribute("aria-haspopup", "menu");
-        pick.title = "Show the storage folder or one of the archives";
-        pick.addEventListener("click", function (event) {
-            event.preventDefault();
-            openToolbarMenu("archives");
-        });
-        const said = document.createElement("span");
-        said.className = "minipaint-clip-source-note";
-        bar.appendChild(pick);
-        bar.appendChild(said);
-        mount.insertBefore(bar, mount.firstChild);
-        if (S.fitRewatch) { S.fitRewatch(); }
-        return bar;
-    }
-
-    function drawSourceBar() {
-        const bar = sourceBar();
-        if (!bar) { return; }
+    function drawViewName() {
         const list = archiveList();
-        const shown = list.length > 0 || archiveActive();
-        if (bar.hidden !== !shown) { bar.hidden = !shown; scheduleFit(); }
-        if (!shown) { return; }
-        const pick = bar.querySelector(".minipaint-clip-source-pick");
-        const said = bar.querySelector(".minipaint-clip-source-note");
-        const name = archiveActive() ? (archiveName(S.archive.view) || "Archive") : "";
-        if (pick) { pick.textContent = (archiveActive() ? "Archive: " + name : "Storage folder") + " ▾"; }
-        if (said) {
-            said.textContent = archiveActive()
-                ? (S.archive.busy && !S.archive.items.length ? "Reading the folder…"
-                    : S.archive.items.length + " picture" + (S.archive.items.length === 1 ? "" : "s")
-                      + " · read-only · new pictures are saved to the storage folder")
-                : (list.length + " archive" + (list.length === 1 ? "" : "s") + " to choose from");
+        const name = archiveActive() ? (archiveName(S.archive.view) || "Archive") : "Storage folder";
+        const button = byId(MENU_ID);
+        if (button) {
+            const shown = list.length > 0 || archiveActive();
+            const cut = name.length > MENU_NAME_CHARS ? name.slice(0, MENU_NAME_CHARS - 1) + "…" : name;
+            const label = shown ? "☰ " + cut : MENU_LABEL;
+            if (button.textContent !== label) { button.textContent = label; }
+            const title = shown ? "Menu · showing " + (archiveActive() ? "the archive " + name : "the storage folder") : "Menu";
+            if (button.title !== title) { button.title = title; }
         }
-        const root = byId(ROOT_ID);
-        if (root) { root.dataset.clipView = archiveActive() ? "archive" : "storage"; }
+        const element = byId(ROOT_ID);
+        const view = archiveActive() ? "archive" : "storage";
+        if (element && element.dataset.clipView !== view) { element.dataset.clipView = view; }
     }
 
     /* -- switching ----------------------------------------------------- */
@@ -3412,7 +3915,7 @@ window.minipaintClipboard = (function () {
             return applyView("");
         }
         if (wanted === S.archive.view && (wanted ? S.archive.mounted : !S.archive.mounted)) {
-            drawSourceBar();
+            drawViewName();
             return;
         }
         if (S.selected && (isArchiveRef(S.selected) || wanted)) { select("", false); }
@@ -3421,7 +3924,7 @@ window.minipaintClipboard = (function () {
         } else {
             leaveArchive();
         }
-        drawSourceBar();
+        drawViewName();
     }
 
     function enterArchive(id) {
@@ -3489,7 +3992,7 @@ window.minipaintClipboard = (function () {
         const ticket = ++S.archive.ticket;
         S.archive.busy = true;
         setBusy(true);
-        drawSourceBar();
+        drawViewName();
         const url = ARCHIVE_LIST_ROUTE + "?id=" + encodeURIComponent(id) + (sort ? "&sort=" + encodeURIComponent(sort) : "");
         return askJson(url, null, ARCHIVE_LIST_TIMEOUT_MS, "archive listing").then(function (answer) {
             if (ticket !== S.archive.ticket || id !== S.archive.view) { return answer; }
@@ -3497,7 +4000,7 @@ window.minipaintClipboard = (function () {
             setBusy(false);
             if (!answer || answer.ok !== true) {
                 setStatus((answer && answer.message) || "The archive could not be read. Press Refresh to try again.");
-                drawSourceBar();
+                drawViewName();
                 return answer;
             }
             drawArchive(answer);
@@ -3533,12 +4036,13 @@ window.minipaintClipboard = (function () {
         }
         layoutArchive();
         renderArchive();
-        drawSourceBar();
+        drawViewName();
         pumpThumbs(true);
         S.renderedAt = Date.now();
-        applyThumbnailSize(S.thumb);
+        applyPerRow();
         refreshBadges();
         scheduleFit();
+        scheduleScrubber();
     }
 
     function archiveTrack() {
@@ -3560,12 +4064,13 @@ window.minipaintClipboard = (function () {
         const track = archiveTrack();
         if (!grid || !track) { return null; }
         const style = getComputedStyle(grid);
-        const thumb = S.thumb || DEFAULT_THUMB;
         const gap = parseFloat(style.rowGap) || parseFloat(style.columnGap) || 8;
         const room = Math.max(1, track.clientWidth || (grid.clientWidth - parseFloat(style.paddingLeft || 0) - parseFloat(style.paddingRight || 0)));
-        const cellWidth = Math.min(thumb + TILE_FRAME, room);
+        // The storage folder's row, shared out the same way (applyPerRow).
+        const columns = Math.max(1, S.perRow || Math.floor((room + gap) / (DEFAULT_THUMB + TILE_FRAME + gap)) || 1);
+        const cellWidth = Math.max(1, (room - (columns - 1) * gap) / columns);
+        const thumb = cellWidth - TILE_FRAME;
         const cellHeight = thumb + TILE_CAPTION;
-        const columns = Math.max(1, Math.floor((room + gap) / (cellWidth + gap)));
         const rows = Math.ceil(S.archive.items.length / columns);
         const height = rows ? rows * cellHeight + (rows - 1) * gap : 0;
         const layout = { columns: columns, rows: rows, cellWidth: cellWidth, cellHeight: cellHeight, gap: gap,
@@ -3597,12 +4102,15 @@ window.minipaintClipboard = (function () {
         if (!layout) { return; }
         const row = Math.floor(index / layout.columns);
         const column = index % layout.columns;
+        // Fractions kept: the row is shared to the pixel, and a column
+        // rounded on its own would leave the row a pixel short or over.
+        const px = function (value) { return (Math.round(value * 100) / 100) + "px"; };
         pin(tile, {
             "position": "absolute",
-            "left": Math.round(column * (layout.cellWidth + layout.gap)) + "px",
-            "top": Math.round(row * (layout.cellHeight + layout.gap)) + "px",
-            "width": layout.cellWidth + "px",
-            "height": layout.cellHeight + "px"
+            "left": px(column * (layout.cellWidth + layout.gap)),
+            "top": px(row * (layout.cellHeight + layout.gap)),
+            "width": px(layout.cellWidth),
+            "height": px(layout.cellHeight)
         });
     }
 
@@ -3716,6 +4224,9 @@ window.minipaintClipboard = (function () {
         for (const entry of Array.from(S.archive.inflight)) {
             if (!keep.has(entry[0]) || (waiting && !visible.has(entry[0]))) { dropThumb(entry[0], entry[1]); }
         }
+        // Held on the scrubber: nothing new is asked for until it is let go,
+        // and then only for where it stopped (endScrub).
+        if (S.scrub) { return; }
         const moment = Date.now();
         const settled = now || moment - S.archive.scrolledAt >= PUMP_SETTLE_MS || moment - S.archive.startedAt >= PUMP_EVERY_MS;
         if (!settled) {
@@ -3867,13 +4378,9 @@ window.minipaintClipboard = (function () {
         if (S.archive.watched === grid) { return; }
         S.archive.watched = grid;
         grid.addEventListener("scroll", onArchiveScroll, { passive: true });
-        // The grid's size is the fit's to write; this only reads it, and
-        // writes nothing back onto the grid - the tiles inside it move.
-        if (typeof ResizeObserver === "function") {
-            if (S.archive.observer) { S.archive.observer.disconnect(); }
-            S.archive.observer = new ResizeObserver(function () { onArchiveResize(); });
-            S.archive.observer.observe(grid);
-        }
+        // Its size is watched with the grid's (watchGrid), which sizes the
+        // row first and then places the archive's tiles from it.
+        watchGrid(grid);
     }
 
     /* -- the Archives screen ------------------------------------------- */
@@ -3980,7 +4487,7 @@ window.minipaintClipboard = (function () {
             dom.list.appendChild(el("li", ARCHIVES_CLASS + "-empty", "No archives yet. Type a folder above and press Add."));
         }
         for (const archive of list) { dom.list.appendChild(archiveEntry(archive, String(answer.view || ""))); }
-        drawSourceBar();
+        drawViewName();
     }
 
     function openArchives() {
@@ -4429,9 +4936,7 @@ window.minipaintClipboard = (function () {
     function openToolbarMenu(section) {
         if (!S.menu) { buildMenu(); }
         if (!S.menu) { return; }
-        const bar = section === "archives" ? sourceBar() : null;
-        const anchor = bar ? bar.querySelector(".minipaint-clip-source-pick")
-            : byId(section === "send" ? SEND_BUTTON_ID : SORT_BUTTON_ID);
+        const anchor = byId(section === "send" ? SEND_BUTTON_ID : SORT_BUTTON_ID);
         const again = !S.menu.hidden && S.menuStandalone && S.menuSection === section;
         if (!S.menu.hidden) { closeMenu(); }
         if (again) { return; }
@@ -5845,7 +6350,7 @@ window.minipaintClipboard = (function () {
         // The view this page was built with first - an archive, when one was
         // on screen - and then the one the host holds now, over HTTP, since a
         // page's built-in state is as old as the page.
-        drawSourceBar();
+        drawViewName();
         applyView(String(menuState().view || ""));
         askJson(ARCHIVES_ROUTE, null, ARCHIVES_TIMEOUT_MS, "archives").then(function (answer) {
             if (!answer || answer.ok !== true) { return; }
@@ -5911,7 +6416,14 @@ window.minipaintClipboard = (function () {
                  started: S.archive.stats.started, dropped: S.archive.stats.dropped,
                  done: S.archive.stats.done, failed: S.archive.stats.failed,
                  order: S.archive.stats.order.slice(-200),
-                 visible: archiveActive() ? wantedThumbs().visible : [] };
+                 visible: archiveActive() ? wantedThumbs().visible : [],
+                 scrubbing: !!S.scrub };
+    }
+
+    /** The row as drawn: for the checks, and for a console. */
+    function rowState() {
+        return { perRow: S.perRow, wanted: S.perRowWanted, thumb: S.thumb,
+                 range: S.perRowRange ? { min: S.perRowRange.min, max: S.perRowRange.max } : null };
     }
 
     return {
@@ -5941,7 +6453,8 @@ window.minipaintClipboard = (function () {
         fit: fitTab,
         closeMenu: closeMenu,
         select: select,
-        setThumbnailSize: setThumbnailSize,
+        setPerRow: setPerRow,
+        rowState: rowState,
         reportTiles: reportTiles,
         pasteFromClipboard: pasteFromClipboard,
         setIntercept: setIntercept,

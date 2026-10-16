@@ -206,6 +206,11 @@ TILES_JS = """() => Array.from(document.querySelectorAll('.minipaint-clip-item')
             paintW: paint ? Math.round(paint.w) : 0,
             paintH: paint ? Math.round(paint.h) : 0,
             paintOffX: paint ? Math.round((paint.left + paint.w / 2) - ((inL + inR) / 2)) : 0,
+            // The picture's own shape, and how it is fitted: what "keeps its
+            // aspect ratio and is never cut off" is measured against.
+            natW: im ? im.naturalWidth : 0, natH: im ? im.naturalHeight : 0,
+            paintWf: paint ? paint.w : 0, paintHf: paint ? paint.h : 0,
+            fit: im ? getComputedStyle(im).objectFit : '',
             drawn: !!paint};
 })"""
 
@@ -341,6 +346,7 @@ def send_selected(page, label):
 
 
 def set_slider(page, value):
+    """Move the size slider to ``value`` pictures per row, as a hand would."""
     page.evaluate("""v => {
         const host = document.getElementById('minipaint_clipboard_thumb');
         const input = host.querySelector('input[type=range]');
@@ -350,6 +356,41 @@ def set_slider(page, value):
         input.dispatchEvent(new Event('change', {bubbles: true}));
     }""", value)
     time.sleep(1.0)
+
+
+#: The row as the page drew it: the count, the tile size it made, the counts
+#: the width allows, and the grid's own measures.
+ROW_JS = """() => {
+    const api = window.minipaintClipboard;
+    const row = api && api.rowState ? api.rowState() : {};
+    const grid = document.querySelector('.minipaint-clip-grid');
+    const cs = grid ? getComputedStyle(grid) : null;
+    const input = document.querySelector('#minipaint_clipboard_thumb input[type=range]');
+    return Object.assign({}, row, {
+        room: grid ? grid.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) : 0,
+        gap: cs ? parseFloat(cs.columnGap) : 0,
+        cols: cs ? cs.getPropertyValue('--minipaint-clip-cols').trim() : '',
+        thumbVar: cs ? parseFloat(cs.getPropertyValue('--minipaint-clip-thumb')) : 0,
+        sliderValue: input ? Number(input.value) : 0,
+        sliderMin: input ? Number(input.min) : 0,
+        sliderMax: input ? Number(input.max) : 0,
+        // The grid's own scroll bar, if one is drawn: what it takes from the
+        // row. Playwright starts headless Chromium with --hide-scrollbars, so
+        // that is 0 here whatever the page says, and what the page says is
+        // read as well.
+        bar: grid ? grid.offsetWidth - grid.clientWidth - parseFloat(cs.borderLeftWidth) - parseFloat(cs.borderRightWidth) : 0,
+        scrollbarWidth: cs ? cs.scrollbarWidth : '',
+    });
+}"""
+
+
+def set_tile_size(page, size):
+    """The count whose tiles come nearest ``size`` px, on the slider - for
+    checks that want a large or a small tile rather than a number per row."""
+    row = page.evaluate(ROW_JS)
+    rng = row.get("range") or {"min": 1, "max": 1}
+    count = round((row["room"] + row["gap"]) / (size + 12 + row["gap"])) if row["room"] > 0 else 1
+    set_slider(page, max(rng["min"], min(rng["max"], count)))
 
 
 # --------------------------------------------------------------------------
@@ -372,24 +413,27 @@ def check_grid(r: Results, page) -> None:
     check_a_hostile_page_cannot_move_a_picture(r, page)
     check_a_hostile_theme_cannot_resize_a_tile(r, page)
 
-    # The slider. It writes a CSS variable; the grid has to be the element
-    # that hears it, which is the whole of the bug this covers.
+    # The slider. It counts pictures per row and the page writes the size
+    # that makes as CSS variables; the grid has to be the element that hears
+    # them, which is the whole of the bug this covers.
     before = page.evaluate(TILES_JS)[0]["w"]
-    for size, direction in ((260, "larger"), (96, "smaller")):
-        set_slider(page, size)
+    start = page.evaluate(ROW_JS)
+    rng = start.get("range") or {"min": 1, "max": 1}
+    for count, direction in ((max(rng["min"], start["perRow"] - 2), "larger"),
+                             (min(rng["max"], start["perRow"] + 3), "smaller")):
+        set_slider(page, count)
         after = page.evaluate(TILES_JS)
         r.check(f"the size slider makes the tiles {direction}",
-                after and (after[0]["w"] > before if size > 144 else after[0]["w"] < before),
-                f"{before}px -> {after[0]['w'] if after else '?'}px at slider {size}")
-        r.check(f"and they are still uniform at {size}",
+                after and (after[0]["w"] > before if direction == "larger" else after[0]["w"] < before),
+                f"{before}px -> {after[0]['w'] if after else '?'}px at {count} per row (from {start['perRow']})")
+        r.check(f"and they are still uniform at {count} per row",
                 len({t['w'] for t in after}) == 1 and len({t['h'] for t in after}) == 1,
                 str(sorted({(t['w'], t['h']) for t in after})))
-        shown = page.evaluate("() => { const g = document.querySelector('.minipaint-clip-grid');"
-                              " return g ? getComputedStyle(g).getPropertyValue('--minipaint-clip-thumb').trim() : ''; }")
-        held = page.evaluate("() => { const i = document.querySelector('#minipaint_clipboard_thumb input[type=range]');"
-                             " return i ? i.value : ''; }")
-        r.check(f"the grid itself carries the size the slider holds (asked {size})",
-                shown == held + "px", f"grid {shown!r} vs slider {held!r}")
+        row = page.evaluate(ROW_JS)
+        r.check(f"the grid itself carries the count the slider holds (asked {count})",
+                row["cols"] == str(row["sliderValue"]) == str(count) and abs(row["thumbVar"] - row["thumb"]) < 0.05,
+                f"grid {row['cols']!r}/{row['thumbVar']} vs slider {row['sliderValue']!r}/{row['thumb']}")
+        size = count
         # The tile has to be the SHAPE of the picture it holds, not just a
         # uniform size. The columns used to be stretched to fill the row
         # while the rows came from the slider, so every box was wider than it
@@ -406,12 +450,14 @@ def check_grid(r: Results, page) -> None:
                 str(sorted((t["paintW"], t["paintH"]) for t in after)))
 
     # A refresh replaces the grid element; the size must not snap back.
-    set_slider(page, 220)
+    set_tile_size(page, 220)
+    wanted = page.evaluate(ROW_JS)["perRow"]
     page.evaluate("() => window.minipaintClipboard.pressHidden('minipaint_clipboard_refresh')")
     time.sleep(2.5)
     kept = page.evaluate(TILES_JS)
     r.check("and a refresh does not snap the tiles back to the default",
-            kept and kept[0]["w"] > 144, f"{kept[0]['w'] if kept else '?'}px after refresh")
+            kept and kept[0]["w"] > 170 and page.evaluate(ROW_JS)["perRow"] == wanted,
+            f"{kept[0]['w'] if kept else '?'}px after refresh")
 
     check_tiles_hold_without_the_thumb_box(r, page)
 
@@ -439,7 +485,7 @@ def check_tiles_hold_without_the_thumb_box(r: Results, page) -> None:
     on, this check would be asking nothing; what it asks is what the tile
     and the stylesheet do on their own, which is the layer under the pins.
     """
-    set_slider(page, 144)
+    set_tile_size(page, 144)
     time.sleep(0.6)
     kept = page.evaluate("""() => Array.from(document.querySelectorAll('.minipaint-clip-thumb, .minipaint-clip-thumb img'))
         .map(el => { const s = el.getAttribute('style') || ''; el.removeAttribute('style'); return s; })""")
@@ -538,8 +584,10 @@ def check_a_hostile_theme_cannot_resize_a_tile(r: Results, page) -> None:
             time.sleep(0.5)
             tiles = page.evaluate(TILES_JS)
             sizes = sorted({(t["w"], t["h"]) for t in tiles})
+            # A cell is the row shared out, so its width can be a fraction:
+            # a tile's rounded size is within a pixel of it.
             r.check(f"under {what}, every tile is still exactly its cell",
-                    tiles and sizes == [(round(expected["w"]), round(expected["h"]))],
+                    tiles and all(abs(w - expected["w"]) <= 1 and abs(h - expected["h"]) <= 1 for w, h in sizes),
                     f"{sizes} for {round(expected['w'])}x{round(expected['h'])}; "
                     f"min-width {sorted({t['minWidth'] for t in tiles})}, display {sorted({t['display'] for t in tiles})}")
             # Neighbours on a row are one column apart: a tile that had run
@@ -550,7 +598,8 @@ def check_a_hostile_theme_cannot_resize_a_tile(r: Results, page) -> None:
                 rows.setdefault(t["y"], []).append(t["x"])
             steps = sorted({b - a for xs in rows.values() for a, b in zip(sorted(xs), sorted(xs)[1:])})
             r.check("and each tile sits in its own column, a gap from the next",
-                    steps == [round(expected["w"] + expected["gap"])], f"column steps {steps} for {expected}")
+                    steps and all(abs(step - (expected["w"] + expected["gap"])) <= 1 for step in steps),
+                    f"column steps {steps} for {expected}")
             r.check("and every caption stays inside its tile",
                     not [t["name"] for t in tiles if t["nameSpillX"] > 1 or t["nameSpillY"] > 1],
                     str([(t["name"][:12], t["nameSpillX"], t["nameSpillY"]) for t in tiles if t["nameSpillX"] > 1 or t["nameSpillY"] > 1]))
@@ -1225,11 +1274,12 @@ def check_the_prompt_editor_fills_the_window(r: Results, page) -> None:
             }"""))
     page.keyboard.type("edited in the full window")
     time.sleep(0.4)
-    r.check("and it takes what is typed into it",
-            page.evaluate("""() => {
-                const box = document.querySelector('#minipaint_clipboard_system_prompt textarea');
-                return box ? String(box.value || '') : '';
-            }""") == "edited in the full window")
+    typed = page.evaluate("""() => {
+        const box = document.querySelector('#minipaint_clipboard_system_prompt textarea');
+        return {value: box ? String(box.value || '') : '', focus: document.activeElement ? (document.activeElement.id
+                || document.activeElement.className || document.activeElement.tagName) : ''};
+    }""")
+    r.check("and it takes what is typed into it", typed["value"] == "edited in the full window", str(typed))
 
     controls = page.evaluate("""() => {
         const panel = document.getElementById('minipaint_clipboard_enhance_panel');
@@ -3857,7 +3907,7 @@ def check_an_archive_loads_what_is_in_view_first(r: Results, page) -> None:
     sort_before = clip_config.load().sort
     try:
         open_clipboard(page)
-        set_slider(page, 72)
+        set_tile_size(page, 72)
         # By name, so a tile's place in the archive is the number in its name.
         page.evaluate("() => window.minipaintClipboard.setSort('name_asc')")
         time.sleep(0.8)
@@ -3870,16 +3920,34 @@ def check_an_archive_loads_what_is_in_view_first(r: Results, page) -> None:
             .some(e => e.textContent.indexOf('Archive of 480') !== -1)""", timeout=10000)
         r.check("an archive is added from the Archives screen and listed there",
                 len(clip_config.load().archives) == 1 and clip_config.load().view == "", str(clip_config.load().archives))
+        r.check("and with an archive to choose, the Menu button names the folder the grid shows",
+                page.evaluate(MENU_LABEL_JS) == "☰ Storage folder", repr(page.evaluate(MENU_LABEL_JS)))
         page.click(".minipaint-clip-archives-show")
         page.wait_for_function(f"() => window.minipaintClipboard.archiveState().total === {ARCHIVE_COUNT}", timeout=20000)
         state = _archive(page)
         r.check("Show puts the archive in place of the storage folder, every picture listed, no pages",
                 state["view"] == clip_config.load().view and state["total"] == ARCHIVE_COUNT
                 and page.evaluate("() => { const p = document.querySelector('.minipaint-clip-pager'); return !p || p.hidden; }"), str(state)[:200])
-        bar = page.evaluate("""() => { const b = document.querySelector('.minipaint-clip-source');
-            return b && !b.hidden ? b.textContent : ''; }""")
-        r.check("the bar over the grid says which archive, that it is read-only, and where new pictures go",
-                "Archive of 480" in bar and "read-only" in bar and "storage folder" in bar, bar)
+        # No row over the grid for it: the Menu button carries the name and
+        # the status line the rest. Asked for: "I don't like that the archive
+        # switcher button is now a new row, lets make switching between
+        # storage and folder a menu option".
+        layout = page.evaluate("""() => {
+            const mount = document.querySelector('#minipaint_clipboard_root .minipaint-clip-mount');
+            const grid = mount.querySelector('.minipaint-clip-grid');
+            return { rows: Array.from(mount.children).filter(c => getComputedStyle(c).position !== 'absolute'
+                         && !c.hidden && c.offsetHeight > 0).map(c => c.className),
+                     top: Math.round(grid.getBoundingClientRect().top - mount.getBoundingClientRect().top),
+                     bar: !!document.querySelector('.minipaint-clip-source') };
+        }""")
+        r.check("no row over the grid says which folder: the grid is the mount's first row",
+                layout["top"] == 0 and not layout["bar"] and layout["rows"][:1] == ["minipaint-clip-grid minipaint-clip-archive-grid"],
+                str(layout))
+        r.check("the Menu button names the archive instead",
+                page.evaluate(MENU_LABEL_JS) == "☰ Archive of 480", repr(page.evaluate(MENU_LABEL_JS)))
+        said = page.evaluate("() => document.getElementById('minipaint_clipboard_status').textContent")
+        r.check("and the status line says how many, that it is read-only, and where new pictures go",
+                "480" in said and "read-only" in said and "storage folder" in said, said)
         page.wait_for_timeout(250)
         state = _archive(page)
         visible_top = list(state["visible"])
@@ -3946,6 +4014,8 @@ def check_an_archive_loads_what_is_in_view_first(r: Results, page) -> None:
         r.check("and no thumbnail ever made inside the archive: it is exactly as it was",
                 _snapshot(folder) == before)
 
+        check_the_scrubber_moves_through_the_archive(r, page)
+
         # Somewhere in the middle, away and back: the place is kept.
         page.evaluate("""() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
             g.scrollTop = Math.round(g.scrollHeight / 2); }""")
@@ -4005,10 +4075,15 @@ def check_an_archive_loads_what_is_in_view_first(r: Results, page) -> None:
         r.check("and a second press copies nothing more", len(list(storage.glob("img-0000*.png"))) == copies_before + 1)
         r.check("the archive is still exactly as it was", _snapshot(folder) == before)
 
-        # Back to the storage folder from the bar's own flyout.
-        page.click(".minipaint-clip-source-pick")
-        time.sleep(0.4)
-        r.check("the bar's flyout offers the storage folder", menu_click(page, "Storage folder") == "clicked")
+        # Back to the storage folder from the menu, the one way there is.
+        page.click("#minipaint_clipboard_menu")
+        time.sleep(0.3)
+        r.check("Menu → Archives › opens the list of folders", menu_click(page, "Archives ›") == "clicked")
+        time.sleep(0.3)
+        offered = page.evaluate(MENU_ITEMS_JS)
+        r.check("which ticks the archive on screen and offers the storage folder",
+                "✓ Archive of 480" in offered and "Storage folder" in offered, str(offered))
+        r.check("and the storage folder is chosen from it", menu_click(page, "Storage folder") == "clicked")
         page.wait_for_function("() => window.minipaintClipboard.archiveState().view === ''", timeout=10000)
         page.wait_for_function("() => document.querySelectorAll('#minipaint_clipboard_root .minipaint-clip-grid > .minipaint-clip-item').length > 0", timeout=10000)
         back = page.evaluate("""() => ({ view: document.getElementById('minipaint_clipboard_root').dataset.clipView,
@@ -4017,6 +4092,12 @@ def check_an_archive_loads_what_is_in_view_first(r: Results, page) -> None:
             display: getComputedStyle(document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid')).display })""")
         r.check("and the storage folder's grid is back as it was", back["view"] == "storage" and back["tiles"] > 0
                 and not back["track"] and back["display"] == "grid", str(back))
+        r.check("with the Menu button saying so", page.evaluate(MENU_LABEL_JS) == "☰ Storage folder",
+                repr(page.evaluate(MENU_LABEL_JS)))
+        time.sleep(0.4)
+        scrub = page.evaluate(SCRUB_JS)
+        r.check("the scrubber is drawn only while the grid holds more than it shows",
+                scrub["hidden"] == (scrub["overflow"] <= 2), str(scrub))
     finally:
         page.remove_listener("request", listener)
         cache._make = real_make
@@ -4026,7 +4107,7 @@ def check_an_archive_loads_what_is_in_view_first(r: Results, page) -> None:
             pass
         for record in list(clip_config.load().archives):
             archives.remove(record["id"])
-        set_slider(page, 144)
+        set_tile_size(page, 144)
         if sort_before != "name_asc":
             page.evaluate(f"() => window.minipaintClipboard.setSort('{sort_before}')")
             time.sleep(0.8)
@@ -4038,6 +4119,128 @@ def check_an_archive_loads_what_is_in_view_first(r: Results, page) -> None:
                 pass
 
 
+MENU_LABEL_JS = "() => { const b = document.getElementById('minipaint_clipboard_menu'); return b ? b.textContent.trim() : ''; }"
+
+#: The scrubber, the grid it lies over and where the grid's scroll stands.
+SCRUB_JS = """() => {
+    const mount = document.querySelector('#minipaint_clipboard_root .minipaint-clip-mount');
+    const grid = mount.querySelector('.minipaint-clip-grid');
+    const bar = mount.querySelector('.minipaint-clip-scrubber');
+    const g = grid.getBoundingClientRect();
+    const cs = getComputedStyle(grid);
+    const rect = el => { if (!el) { return null; } const r = el.getBoundingClientRect();
+        return {left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height}; };
+    const handle = bar ? bar.querySelector('.minipaint-clip-scrubber-handle') : null;
+    const bubble = bar ? bar.querySelector('.minipaint-clip-scrubber-bubble') : null;
+    return {hidden: !bar || bar.hidden, bar: rect(bar), handle: rect(handle), grid: rect(g ? grid : null),
+            position: bar ? getComputedStyle(bar).position : '',
+            innerRight: g.left + parseFloat(cs.borderLeftWidth) + grid.clientWidth,
+            paddingRight: parseFloat(cs.paddingRight),
+            top: grid.scrollTop, max: grid.scrollHeight - grid.clientHeight, overflow: grid.scrollHeight - grid.clientHeight,
+            scrollbar: grid.offsetWidth - grid.clientWidth - parseFloat(cs.borderLeftWidth) - parseFloat(cs.borderRightWidth),
+            scrollbarWidth: cs.scrollbarWidth,
+            bubble: bubble && !bubble.hidden ? bubble.textContent : '',
+            scrubbing: !!(bar && bar.classList.contains('minipaint-clip-scrubbing'))};
+}"""
+
+
+def check_the_scrubber_moves_through_the_archive(r: Results, page) -> None:
+    """A thin bar over the grid's edge moves through thousands of pictures.
+
+    Asked for: "some sort of scrubber / scroll bar mechanism so I can scroll
+    the images. I have thousands of images so scrolling one page at a time is
+    horrible ... a compact solution that does not take up space or change
+    the layout." Dragged by a real mouse: the grid follows the handle, a
+    bubble says where the view is, and the archive asks for nothing while it
+    is held - only for where it is let go.
+    """
+    page.evaluate("() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid'); g.scrollTop = 0; }")
+    page.wait_for_timeout(1500)
+    scrub = page.evaluate(SCRUB_JS)
+    r.check("the scrubber is shown over an archive that holds more than the grid shows",
+            not scrub["hidden"] and scrub["overflow"] > 1000, str(scrub)[:300])
+    r.check("laid over the grid's right-hand edge, inside its frame, out of the layout",
+            scrub["bar"] and scrub["position"] == "absolute"
+            and scrub["bar"]["right"] <= scrub["innerRight"] + 0.5
+            and scrub["bar"]["left"] >= scrub["innerRight"] - 16
+            and scrub["bar"]["top"] >= scrub["grid"]["top"] and scrub["bar"]["bottom"] <= scrub["grid"]["bottom"],
+            str({k: scrub[k] for k in ("bar", "grid", "innerRight", "position")}))
+    r.check("and the grid draws no scroll bar of its own beside it",
+            abs(scrub["scrollbar"]) < 0.5 and scrub["scrollbarWidth"] == "none", str((scrub["scrollbar"], scrub["scrollbarWidth"])))
+    edge = page.evaluate("""() => {
+        const grid = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
+        const g = grid.getBoundingClientRect(); const cs = getComputedStyle(grid);
+        const end = g.left + parseFloat(cs.borderLeftWidth) + grid.clientWidth - parseFloat(cs.paddingRight);
+        const right = Math.max(...Array.from(grid.querySelectorAll('.minipaint-clip-item')).map(t => t.getBoundingClientRect().right));
+        return {end: end, right: right};
+    }""")
+    r.check("the archive's rows are filled to the grid's padding too", abs(edge["right"] - edge["end"]) <= 1, str(edge))
+    handle = scrub["handle"]
+    r.check("its handle is at the top, as tall as the share in view and never a sliver",
+            handle and handle["top"] - scrub["bar"]["top"] <= 1 and 32 <= handle["height"] < scrub["bar"]["height"] / 2,
+            str(handle))
+
+    page.mouse.move(handle["left"] + handle["width"] / 2, handle["top"] + handle["height"] / 2)
+    page.mouse.down()
+    page.wait_for_timeout(50)
+    # Counted from the press: a request that finished just before it may
+    # start the next one, and that is not the scrubber's.
+    before = _archive(page)
+    bottom = scrub["bar"]["bottom"] - 2
+    for step in range(1, 11):
+        y = handle["top"] + handle["height"] / 2 + (bottom - handle["top"] - handle["height"] / 2) * step / 10
+        page.mouse.move(handle["left"] + handle["width"] / 2, y)
+        page.wait_for_timeout(30)
+    page.wait_for_timeout(500)
+    held = page.evaluate(SCRUB_JS)
+    r.check("dragging the handle to the bottom takes the grid to the end of the archive",
+            held["top"] >= held["max"] - 2, str({"top": held["top"], "max": held["max"]}))
+    r.check("while it is held a bubble says where the view is: the picture of how many, and its name by this sort",
+            held["scrubbing"] and f"of {ARCHIVE_COUNT}" in held["bubble"] and f"{ARCHIVE_COUNT} of" in held["bubble"]
+            and "img-0479.png" in held["bubble"], repr(held["bubble"]))
+    # On, still held, to the middle: the bottom's thumbnails came with the
+    # fling above, so the middle is where nothing has been asked for yet.
+    middle = scrub["bar"]["top"] + scrub["bar"]["height"] * 0.55
+    for step in range(1, 6):
+        page.mouse.move(handle["left"] + handle["width"] / 2, bottom + (middle - bottom) * step / 5)
+        page.wait_for_timeout(30)
+    page.wait_for_timeout(500)
+    during = _archive(page)
+    r.check("and nothing new is asked for while it is held, down to the end and back to the middle",
+            during["scrubbing"] and during["started"] == before["started"],
+            str({"before": before["started"], "during": during["started"]}))
+    page.mouse.up()
+    page.wait_for_timeout(600)
+    after = _archive(page)
+    let_go = page.evaluate(SCRUB_JS)
+    asked = after["order"][-(after["started"] - during["started"]):] if after["started"] > during["started"] else []
+    r.check("let go, the bubble is put away and the screen it stopped on is asked for",
+            not let_go["bubble"] and not after["scrubbing"] and asked and all(key in set(after["visible"]) for key in asked[:3]),
+            str({"asked": asked[:3], "visible": after["visible"][:3], "bubble": let_go["bubble"]}))
+
+    # A press on the bar away from the handle jumps there: from the top, so
+    # the view was nowhere near the middle before the press.
+    page.evaluate("() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid'); g.scrollTop = 0; }")
+    page.wait_for_timeout(400)
+    bar = page.evaluate(SCRUB_JS)["bar"]
+    page.mouse.click(bar["left"] + bar["width"] / 2, bar["top"] + bar["height"] / 2)
+    page.wait_for_timeout(400)
+    jumped = page.evaluate(SCRUB_JS)
+    r.check("a press anywhere else on the bar jumps the view there",
+            0.35 * jumped["max"] <= jumped["top"] <= 0.65 * jumped["max"], str({"top": jumped["top"], "max": jumped["max"]}))
+    # The wheel still scrolls the grid, and the handle follows it.
+    grid = jumped["grid"]
+    page.mouse.move(grid["left"] + grid["width"] / 2, grid["top"] + grid["height"] / 2)
+    page.mouse.wheel(0, 900)
+    page.wait_for_timeout(500)
+    wheeled = page.evaluate(SCRUB_JS)
+    r.check("and the wheel still scrolls the grid, the handle following it",
+            wheeled["top"] > jumped["top"] + 300 and wheeled["handle"]["top"] > jumped["handle"]["top"],
+            str({"before": jumped["top"], "after": wheeled["top"]}))
+    page.evaluate("() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid'); g.scrollTop = 0; }")
+    page.wait_for_timeout(400)
+
+
 def _viewer(page):
     return page.evaluate("""() => {
         const v = document.querySelector('#minipaint_clipboard_root .minipaint-clip-viewer');
@@ -4047,17 +4250,146 @@ def _viewer(page):
     }""")
 
 
+def check_the_row_is_filled_per_row(r: Results, page, browser) -> None:
+    """The slider counts pictures per row, and every row is filled.
+
+    Asked for: "I want it to slide based on number of images that can fit
+    one row without empty space ... By default (per session)". The slider
+    used to name a size in steps of 8 px with columns that never stretched,
+    so almost every size left empty grid at the right-hand end of each row.
+    Now its value is how many pictures a row holds, and the tile size is
+    worked out from the row: so at every count the last tile of a row ends
+    where the grid's padding begins. And, confirmed with the user, every
+    picture keeps its shape and is never cut off - a wide one and a tall one
+    are each drawn whole inside their square, touching two of its sides.
+    """
+    row = page.evaluate(ROW_JS)
+    rng = row.get("range") or {}
+    r.check("the slider's limits are the counts this width allows, written on the slider itself",
+            rng and row["sliderMin"] == rng["min"] and row["sliderMax"] == rng["max"] and rng["min"] <= rng["max"],
+            str(row))
+    r.check("and they are the counts whose tiles fall between 72 and 320 px",
+            rng and (row["room"] - (rng["min"] - 1) * row["gap"]) / rng["min"] - 12 <= 320.5
+            and (rng["min"] == 1 or (row["room"] - (rng["min"] - 2) * row["gap"]) / (rng["min"] - 1) - 12 > 320)
+            and (row["room"] - (rng["max"] - 1) * row["gap"]) / rng["max"] - 12 >= 71.5
+            and (row["room"] - rng["max"] * row["gap"]) / (rng["max"] + 1) - 12 < 72, str(row))
+    r.check("the grid draws no scroll bar of its own to take width from the row",
+            abs(row["bar"]) < 0.5 and row["scrollbarWidth"] == "none", str((row["bar"], row["scrollbarWidth"])))
+    library_tiles = page.evaluate(TILES_JS)
+    shapes = sorted({("wide" if t["natW"] > t["natH"] * 1.2 else "tall" if t["natH"] > t["natW"] * 1.2 else "square")
+                     for t in library_tiles if t.get("natW")})
+    r.check("(the library holds a wide, a tall and a square picture to measure)",
+            {"wide", "tall", "square"} <= set(shapes), str(shapes))
+    counts = sorted({rng["min"], rng["max"], max(rng["min"], min(rng["max"], 3)), max(rng["min"], min(rng["max"], 5))})
+    for count in counts:
+        set_slider(page, count)
+        row = page.evaluate(ROW_JS)
+        tiles = page.evaluate(TILES_JS)
+        edges = page.evaluate("""() => {
+            const grid = document.querySelector('.minipaint-clip-grid');
+            const g = grid.getBoundingClientRect(); const cs = getComputedStyle(grid);
+            const inside = g.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft);
+            const end = g.left + parseFloat(cs.borderLeftWidth) + grid.clientWidth - parseFloat(cs.paddingRight);
+            const tiles = Array.from(grid.querySelectorAll('.minipaint-clip-item')).map(t => t.getBoundingClientRect());
+            const top = tiles.length ? Math.min(...tiles.map(t => t.top)) : 0;
+            const first = tiles.filter(t => Math.abs(t.top - top) < 1);
+            return {inside: inside, end: end, inRow: first.length,
+                    left: first.length ? Math.min(...first.map(t => t.left)) : 0,
+                    right: first.length ? Math.max(...first.map(t => t.right)) : 0};
+        }""")
+        full = len(tiles) >= count
+        r.check(f"at {count} per row the slider, the row and the grid's columns agree",
+                row["perRow"] == count and row["sliderValue"] == count and row["cols"] == str(count)
+                and (not full or edges["inRow"] == count), f"{row} {edges}")
+        r.check(f"and the tile size is the row shared out: (width - gaps) / {count} - frame",
+                abs(row["thumb"] - ((row["room"] - (count - 1) * row["gap"]) / count - 12)) < 0.05
+                and abs(row["thumbVar"] - row["thumb"]) < 0.05, str(row))
+        if full:
+            r.check(f"so a full row at {count} runs from edge to edge, no empty space at its end",
+                    abs(edges["left"] - edges["inside"]) <= 1 and abs(edges["right"] - edges["end"]) <= 1, str(edges))
+        r.check(f"and every tile at {count} is the same size",
+                len({t["w"] for t in tiles}) == 1 and len({t["h"] for t in tiles}) == 1,
+                str(sorted({(t["w"], t["h"]) for t in tiles})))
+        page.wait_for_function(
+            "() => { const i = document.querySelectorAll('.minipaint-clip-item img');"
+            " return i.length && Array.from(i).every(x => x.complete); }", timeout=20000)
+        tiles = page.evaluate(TILES_JS)
+        whole = []
+        for t in tiles:
+            if not t.get("natW") or not t.get("paintW"):
+                continue
+            ratio = t["natW"] / t["natH"]
+            drawn = t["paintWf"] / t["paintHf"]
+            # Whole: inside its box on both axes. Kept: the drawn shape is the
+            # picture's own. Fitted: it touches the box on one axis, so it is
+            # as large as it can be without either.
+            inside = t["paintW"] <= t["thumbW"] + 1 and t["paintH"] <= t["thumbH"] + 1
+            touches = abs(t["paintW"] - t["thumbW"]) <= 1.5 or abs(t["paintH"] - t["thumbH"]) <= 1.5
+            whole.append((t["name"][:14], round(ratio, 3), round(drawn, 3), inside, touches, t["fit"]))
+        bad = [w for w in whole if abs(w[1] - w[2]) > 0.02 or not w[3] or not w[4] or w[5] != "contain"]
+        r.check(f"at {count} per row every picture keeps its shape and is drawn whole, nothing cut off",
+                whole and not bad, str(bad or whole[:3]))
+
+    # Per session: the browser tab keeps the count through a reload; a new
+    # tab starts filled at the default; nothing is told to the host.
+    settings_posts = []
+    page.on("request", lambda req: settings_posts.append(req.post_data or "")
+            if "/minipaint-clipboard/settings" in req.url and req.method == "POST" else None)
+    chosen = max(rng["min"], min(rng["max"], 4))
+    if chosen == page.evaluate(ROW_JS)["perRow"]:
+        chosen = rng["min"] if chosen != rng["min"] else rng["max"]
+    set_slider(page, chosen)
+    time.sleep(0.6)
+    r.check("a count chosen on the slider is not saved on the host",
+            not [body for body in settings_posts if "thumbnail" in body], str(settings_posts[:2]))
+    kept = page.evaluate("() => sessionStorage.getItem('minipaint-clipboard:per-row')")
+    r.check("it is this browser tab's, for its session", kept == str(chosen), repr(kept))
+    page.reload(wait_until="load")
+    page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
+    time.sleep(2)
+    open_clipboard(page)
+    time.sleep(1.0)
+    after = page.evaluate(ROW_JS)
+    r.check("and a reload of the tab keeps it", after["perRow"] == chosen and after["sliderValue"] == chosen, str(after))
+    other = browser.new_page(viewport={"width": 1400, "height": 950})
+    try:
+        other.goto(f"http://127.0.0.1:{PORT}/", wait_until="load")
+        other.wait_for_selector("#tabs .tab-nav button", timeout=30000)
+        time.sleep(2)
+        open_clipboard(other)
+        time.sleep(1.0)
+        fresh = other.evaluate(ROW_JS)
+        nearest = min(range(fresh["range"]["min"], fresh["range"]["max"] + 1),
+                      key=lambda n: abs((fresh["room"] - (n - 1) * fresh["gap"]) / n - 12 - 144))
+        r.check("a new browser tab starts at the count whose tiles come nearest 144 px",
+                fresh["perRow"] == nearest and fresh["wanted"] in (0, None), f"{fresh} nearest {nearest}")
+    finally:
+        other.close()
+    # A narrower window: the count is kept while the width allows it, and the
+    # row is still filled.
+    page.set_viewport_size({"width": 1000, "height": 950})
+    time.sleep(1.0)
+    narrow = page.evaluate(ROW_JS)
+    r.check("a narrower window keeps the chosen count while it still fits, and shares the row again",
+            narrow["perRow"] == max(narrow["range"]["min"], min(narrow["range"]["max"], chosen))
+            and abs(narrow["thumb"] - ((narrow["room"] - (narrow["perRow"] - 1) * narrow["gap"]) / narrow["perRow"] - 12)) < 0.05,
+            str(narrow))
+    page.set_viewport_size({"width": 1400, "height": 950})
+    time.sleep(1.0)
+    page.evaluate("() => sessionStorage.removeItem('minipaint-clipboard:per-row')")
+
+
 def check_a_tile_opens_full_screen(r: Results, page) -> None:
     """Asked for: "a tiny button to the upper right of a large sized thumb,
     that lets me expand to full screen and double tap to exit"."""
     open_clipboard(page)
     page.evaluate("() => window.minipaintClipboard.refreshAll()")
     time.sleep(1.0)
-    set_slider(page, 96)
+    set_tile_size(page, 96)
     small = page.evaluate("""() => { const e = document.querySelector('#minipaint_clipboard_root .minipaint-clip-expand');
         return e ? getComputedStyle(e).display : 'none-found'; }""")
     r.check("a small tile has no full-screen button", small == "none", small)
-    set_slider(page, 200)
+    set_tile_size(page, 200)
     corner = page.evaluate("""() => {
         const tile = document.querySelector('#minipaint_clipboard_root .minipaint-clip-item');
         const e = tile.querySelector('.minipaint-clip-expand');
@@ -4119,7 +4451,20 @@ def check_a_tile_opens_full_screen(r: Results, page) -> None:
         }""")
         page.wait_for_timeout(300)
         page.evaluate("() => window.minipaintClipboard.closeViewer()")
-        set_slider(page, 144)
+        set_tile_size(page, 144)
+
+
+def only_words() -> list:
+    """The checks to run alone, while working: ``--only archive,scrubber`` or
+    ``MINIPAINT_BROWSER_ONLY=archive,scrubber``, each word matched against
+    the checks' names. The adapter's own attach always runs. A check that
+    leans on one before it (a picture it added, a size it set) may not hold
+    alone; the whole suite is the judge, and CI runs it whole."""
+    text = os.environ.get("MINIPAINT_BROWSER_ONLY", "")
+    if "--only" in sys.argv:
+        at = sys.argv.index("--only")
+        text = sys.argv[at + 1] if at + 1 < len(sys.argv) else ""
+    return [word.strip() for word in text.split(",") if word.strip()]
 
 
 def run() -> Results:
@@ -4163,54 +4508,66 @@ def run() -> Results:
                 open_clipboard(page)
                 r.check("the clipboard adapter attached",
                         page.evaluate("() => !!(window.minipaintClipboard && window.minipaintClipboard.debug)"))
-                check_grid(r, page)
-                check_paging(r, page, library)
-                check_patching(r, page, library)
-                check_sorting_is_separate_from_drawing(r, page)
-                check_the_failure_modes_have_answers(r, page, library)
-                check_the_section_is_blocked_until_wangp_is_ready(r, page)
-                check_the_queue_section_is_the_browsers(r, page)
-                check_queue_reads_are_one_at_a_time(r, page)
-                check_the_prompt_editor_fills_the_window(r, page)
-                check_the_history_button_opens_the_last_prompts(r, page)
-                check_the_toolbar_flyouts_are_the_one_door(r, page)
-                check_view_outputs_is_a_gallery(r, page)
-                check_the_player_is_the_pages(r, page)
-                check_the_players_full_screen_is_its_own(r, page)
-                check_an_output_loads_its_recipe(r, page)
-                check_the_tab_fills_the_window(r, page)
-                check_a_thumbnail_is_fetched_once(r, page)
-                check_a_tile_opens_full_screen(r, page)
-                check_a_picture_sends_to_png_info(r, page, library)
-                check_an_archive_loads_what_is_in_view_first(r, page)
-                r.check("a picture can be selected", select_first(page),
-                        repr(box(page, "minipaint_clipboard_selected")))
-                check_send(r, page, targets)
-                # Tab switching first: the checks below cut Gradio's queue
-                # with page routing, and a reload while a route handler is
-                # in flight is a good way to hang a browser for no reason
-                # that has anything to do with what is being tested.
-                check_tab_switching_survives_reordering(r, page)
-                check_recovers_after_the_interruption(r, page, targets)
-                check_send_survives_a_dead_queue(r, page, targets)
-                check_a_component_destination_fills_without_the_queue(r, page, targets)
-                check_a_render_cannot_take_the_selection(r, page)
-                check_a_send_reaches_a_framework_owned_input(r, page, targets)
-                check_a_send_survives_a_box_the_host_never_hears(r, page, targets)
-                check_the_page_can_say_why_a_send_was_silent(r, page)
-                check_the_notice_takes_itself_down(r, page)
-                check_a_picture_handed_in_arrives_without_the_queue(r, page, library)
-                # Before the Send-to contract, because its Delete is a
-                # framework event and the checks below cut that channel.
-                check_the_toolbar_pastes_and_deletes(r, page)
-                # Last: the first of these reloads the page to prove no
-                # destination was opened beforehand.
-                check_a_destination_is_never_pre_opened(r, page, targets)
-                check_navigation_is_never_what_makes_a_send_work(r, page, targets)
-                check_a_failed_send_leaves_you_in_clipboard(r, page, targets)
-                check_delivery_and_navigation_are_separate_facts(r, page, targets)
-                check_mini_paint_keeps_the_same_contract(r, page)
-                check_the_whole_tab_works_with_the_channel_cut(r, page, targets)
+                steps = [
+                    ("check_grid", lambda: check_grid(r, page)),
+                    ("check_paging", lambda: check_paging(r, page, library)),
+                    ("check_patching", lambda: check_patching(r, page, library)),
+                    ("check_sorting_is_separate_from_drawing", lambda: check_sorting_is_separate_from_drawing(r, page)),
+                    ("check_the_failure_modes_have_answers", lambda: check_the_failure_modes_have_answers(r, page, library)),
+                    ("check_the_section_is_blocked_until_wangp_is_ready", lambda: check_the_section_is_blocked_until_wangp_is_ready(r, page)),
+                    ("check_the_queue_section_is_the_browsers", lambda: check_the_queue_section_is_the_browsers(r, page)),
+                    ("check_queue_reads_are_one_at_a_time", lambda: check_queue_reads_are_one_at_a_time(r, page)),
+                    ("check_the_prompt_editor_fills_the_window", lambda: check_the_prompt_editor_fills_the_window(r, page)),
+                    ("check_the_history_button_opens_the_last_prompts", lambda: check_the_history_button_opens_the_last_prompts(r, page)),
+                    ("check_the_toolbar_flyouts_are_the_one_door", lambda: check_the_toolbar_flyouts_are_the_one_door(r, page)),
+                    ("check_view_outputs_is_a_gallery", lambda: check_view_outputs_is_a_gallery(r, page)),
+                    ("check_the_player_is_the_pages", lambda: check_the_player_is_the_pages(r, page)),
+                    ("check_the_players_full_screen_is_its_own", lambda: check_the_players_full_screen_is_its_own(r, page)),
+                    ("check_an_output_loads_its_recipe", lambda: check_an_output_loads_its_recipe(r, page)),
+                    ("check_the_tab_fills_the_window", lambda: check_the_tab_fills_the_window(r, page)),
+                    ("check_a_thumbnail_is_fetched_once", lambda: check_a_thumbnail_is_fetched_once(r, page)),
+                    ("check_the_row_is_filled_per_row", lambda: check_the_row_is_filled_per_row(r, page, browser)),
+                    ("check_a_tile_opens_full_screen", lambda: check_a_tile_opens_full_screen(r, page)),
+                    ("check_a_picture_sends_to_png_info", lambda: check_a_picture_sends_to_png_info(r, page, library)),
+                    ("check_an_archive_loads_what_is_in_view_first", lambda: check_an_archive_loads_what_is_in_view_first(r, page)),
+                    ("select_first", lambda: r.check("a picture can be selected", select_first(page),
+                                                     repr(box(page, "minipaint_clipboard_selected")))),
+                    ("check_send", lambda: check_send(r, page, targets)),
+                    # Tab switching first: the checks below cut Gradio's queue
+                    # with page routing, and a reload while a route handler is
+                    # in flight is a good way to hang a browser for no reason
+                    # that has anything to do with what is being tested.
+                    ("check_tab_switching_survives_reordering", lambda: check_tab_switching_survives_reordering(r, page)),
+                    ("check_recovers_after_the_interruption", lambda: check_recovers_after_the_interruption(r, page, targets)),
+                    ("check_send_survives_a_dead_queue", lambda: check_send_survives_a_dead_queue(r, page, targets)),
+                    ("check_a_component_destination_fills_without_the_queue", lambda: check_a_component_destination_fills_without_the_queue(r, page, targets)),
+                    ("check_a_render_cannot_take_the_selection", lambda: check_a_render_cannot_take_the_selection(r, page)),
+                    ("check_a_send_reaches_a_framework_owned_input", lambda: check_a_send_reaches_a_framework_owned_input(r, page, targets)),
+                    ("check_a_send_survives_a_box_the_host_never_hears", lambda: check_a_send_survives_a_box_the_host_never_hears(r, page, targets)),
+                    ("check_the_page_can_say_why_a_send_was_silent", lambda: check_the_page_can_say_why_a_send_was_silent(r, page)),
+                    ("check_the_notice_takes_itself_down", lambda: check_the_notice_takes_itself_down(r, page)),
+                    ("check_a_picture_handed_in_arrives_without_the_queue", lambda: check_a_picture_handed_in_arrives_without_the_queue(r, page, library)),
+                    # Before the Send-to contract, because its Delete is a
+                    # framework event and the checks below cut that channel.
+                    ("check_the_toolbar_pastes_and_deletes", lambda: check_the_toolbar_pastes_and_deletes(r, page)),
+                    # Last: the first of these reloads the page to prove no
+                    # destination was opened beforehand.
+                    ("check_a_destination_is_never_pre_opened", lambda: check_a_destination_is_never_pre_opened(r, page, targets)),
+                    ("check_navigation_is_never_what_makes_a_send_work", lambda: check_navigation_is_never_what_makes_a_send_work(r, page, targets)),
+                    ("check_a_failed_send_leaves_you_in_clipboard", lambda: check_a_failed_send_leaves_you_in_clipboard(r, page, targets)),
+                    ("check_delivery_and_navigation_are_separate_facts", lambda: check_delivery_and_navigation_are_separate_facts(r, page, targets)),
+                    ("check_mini_paint_keeps_the_same_contract", lambda: check_mini_paint_keeps_the_same_contract(r, page)),
+                    ("check_the_whole_tab_works_with_the_channel_cut", lambda: check_the_whole_tab_works_with_the_channel_cut(r, page, targets)),
+                ]
+                words = only_words()
+                chosen = [name for name, _ in steps if not words or any(word in name for word in words)]
+                if words:
+                    print(f"browser clipboard: --only {','.join(words)}: {len(chosen)} of {len(steps)} checks: "
+                          + ", ".join(chosen))
+                    r.check("--only names at least one check", chosen, ",".join(words))
+                for name, step in steps:
+                    if name in chosen:
+                        step()
             finally:
                 browser.close()
     finally:

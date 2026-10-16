@@ -219,6 +219,9 @@ def listing_checks(r: Results, archive: pathlib.Path) -> str:
             first[1] == "a-photo.jpg" and first[2] == info.st_size and first[3] == f"{info.st_mtime_ns}-{info.st_size}", str(first))
     r.check("and says where it is from and how many", answer["archive"]["id"] == archive_id and answer["total"] == 5
             and "read-only" in answer["status"], str(answer["status"]))
+    # The status line is where the grid says which folder it shows - there is
+    # no row over the grid for it - so it says where new pictures go as well.
+    r.check("and that new pictures go to the storage folder", "storage folder" in answer["status"], str(answer["status"]))
     orders = {mode: [item[1] for item in archives.listing(archive_id, mode)["items"]] for mode in config.SORT_MODES}
     r.check("newest first is by modification time", orders["newest"][0] == "ünïcode name: odd.png" and orders["oldest"][0] == "b-meta.png", str(orders))
     r.check("name Z-A is the reverse of A-Z", orders["name_desc"] == list(reversed(orders["name_asc"])))

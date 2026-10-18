@@ -3462,6 +3462,37 @@ def check_tab_switching_survives_reordering(r: Results, page) -> None:
     page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
     time.sleep(2)
 
+    # A tab whose button is not laid out is still a tab: ModelSwitchRefiner's
+    # Model Chain theme folds the tabs its bar has no room for into a menu and
+    # hides their buttons with `display: none` (every tab but the selected
+    # one, on a phone), and presses them from that menu. The switch used to
+    # refuse a button with no offsetParent, so a picture sent to PNG Info from
+    # a phone landed and the Clipboard said it "could not open that tab".
+    page.evaluate("""() => {
+        const button = document.querySelector('#tabs > .tab-nav button[aria-controls="tab_pnginfo"]');
+        button.style.setProperty('display', 'none', 'important');
+    }""")
+    r.check("the PNG Info button really is out of the layout",
+            page.evaluate("() => document.querySelector('#tabs > .tab-nav button[aria-controls=\"tab_pnginfo\"]').offsetParent === null"))
+    page.evaluate("() => window.minipaintCanvas.switchTo('pnginfo')")
+    time.sleep(1.2)
+    r.check("a tab whose button a theme has folded away still opens when a picture is sent to it",
+            visible_panel() == "tab_pnginfo", visible_panel())
+    # A disabled button is the one that cannot be pressed.
+    page.evaluate("() => window.minipaintCanvas.switchTo('clipboard')")
+    time.sleep(1.2)
+    page.evaluate("""() => {
+        document.querySelector('#tabs > .tab-nav button[aria-controls="tab_pnginfo"]').disabled = true;
+    }""")
+    said = page.evaluate("() => window.minipaintCanvas.switchTo('pnginfo')")
+    time.sleep(1.2)
+    r.check("a disabled button is still refused, and the switch says so",
+            visible_panel() == "tab_minipaint_clipboard" and said and said.get("ok") is False,
+            f"{visible_panel()} {said}")
+    page.reload(wait_until="load")
+    page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
+    time.sleep(2)
+
 
 def check_the_toolbar_pastes_and_deletes(r: Results, page) -> None:
     """The two verbs this tab is actually used for, one press each.

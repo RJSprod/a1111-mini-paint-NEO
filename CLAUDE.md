@@ -538,6 +538,14 @@ padding - and `tests/browser_intercept.py` carries a copy of the assistant's
 rule for that reason (`FOCUS_STAND_IN_CSS`): a change to the rule there has
 to be made here too, or the measurement stops measuring the real thing.
 
+`RJSprod/SD-Neo-ModelSwitchRefiner` also draws the Model Chain theme, whose
+header folds the tabs its bar has no room for into a menu and hides their
+buttons with `display: none` (every tab but the selected one, on a phone).
+The Canvas bundle's `showTab` presses such a button like any other; it used
+to refuse a button with no `offsetParent`, and a picture sent to PNG Info
+from a phone landed with the Clipboard saying it "could not open that tab"
+(2026-10-18). Only a `disabled` button is refused.
+
 `RJSprod/SD-Neo-ModelSwitchRefiner` runs a local LLM. Its logs showed
 `llama-server` taking every CPU core for nine minutes with its model on the
 CPU, and its GPU placement pointing at the card WanGP owns. That starves WanGP

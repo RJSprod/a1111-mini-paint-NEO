@@ -3280,9 +3280,14 @@ window.minipaintCanvas = (function () {
             if (index >= 0 && panels.length === buttons.length) { button = buttons[index]; }
         }
         if (!button) { return false; }
-        // A hidden tab has a button that cannot be pressed; treat it as absent
-        // rather than clicking something the user cannot see the result of.
-        if (button.disabled || button.offsetParent === null) { return false; }
+        // A disabled button cannot be pressed. A button that is merely not
+        // laid out can: a theme that folds the tabs its bar has no room for
+        // into a menu (ModelSwitchRefiner's Model Chain theme, on a phone)
+        // hides their buttons with `display: none` and presses them from the
+        // menu the same way, and the panel opens. Refusing those was the
+        // "could not open that tab" the user met on a phone sending a picture
+        // to PNG Info, with the picture landed and the tab a press away.
+        if (button.disabled) { return false; }
         if (!button.classList.contains("selected")) { button.click(); }
         return true;
     }

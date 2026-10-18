@@ -843,7 +843,11 @@ They are not any more:
   a picture proved to have landed in a tab that would not open says
   *"Sent x.png to img2img, but could not open that tab."* and is **never sent
   again**, because sending it twice is one picture too many in a gallery that
-  appends. Mini Paint keeps the same contract although its delivery is still
+  appends. A tab whose button a theme has folded away -- ModelSwitchRefiner's
+  Model Chain theme hides the tabs its bar has no room for with `display:
+  none` and presses them from a menu -- is still a tab: the switch presses
+  its button and the panel opens; only a `disabled` button is refused
+  (2026-10-18, from a phone sending to PNG Info). Mini Paint keeps the same contract although its delivery is still
   a Gradio event: it does not have to be visited first, a receive that landed
   shows it, and one that did not leaves you here.
 

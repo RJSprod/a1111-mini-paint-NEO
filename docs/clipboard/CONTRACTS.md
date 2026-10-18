@@ -968,7 +968,9 @@ LIBRARY event makes the page re-ask rather than apply a delta),
 now, remembers shortly, over `/settings`), `pasteFromClipboard`,
 drop-on-card import, the menu, `sendTo` (delivers first, says
 `Sent <name> to <destination>, but could not open that tab.` when the picture
-landed and the tab would not open, and never resends in that case;
+landed and the tab would not open, and never resends in that case; a tab whose
+button is in the document but not laid out -- a theme's overflow menu -- is
+opened by pressing that button, and only a `disabled` one would not open;
 `whySilent` puts the three facts that separate "the event never fired", "it
 failed" and "the answer never came back" in the log), `reportTiles` (says when
 a thumbnail is *drawn* off-centre, measured through `object-fit` rather than

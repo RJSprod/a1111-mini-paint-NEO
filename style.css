@@ -998,9 +998,10 @@
 /*
    SD-Neo-ModelSwitchRefiner's assistant has a focus mode that hands one
    workspace the whole window. It marks the workspace's tab panel
-   `forge-assistant-focus-root` - fixed, inset 0, eight pixels of padding, a
-   scroller of its own - and takes every ancestor's other children out of
-   the layout. For this tab the workspace IS the WanGP page, so under that
+   `forge-assistant-focus-root` - fixed, inset 0 (or from under the tab bar
+   it keeps along the top, by default since 2026-10-22), eight pixels of
+   padding, a scroller of its own - and takes every ancestor's other
+   children out of the layout. For this tab the workspace IS the WanGP page, so under that
    class the frame is the window and nothing else shows: the panel's padding
    and border go, the Integration management accordion is not displayed, and
    the frame's measured height is the panel's own - the sizer reads the same

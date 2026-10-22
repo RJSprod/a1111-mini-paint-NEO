@@ -565,19 +565,25 @@ def check_the_wangp_panel_is_parked_not_hidden(r: Results, page) -> None:
 
 #: What SD-Neo-ModelSwitchRefiner's focus mode does to the page, as its own
 #: stylesheet does it (its style.css, "Focus mode"): the workspace's tab
-#: panel fixed over the whole window with eight pixels of padding and a
-#: scroller of its own, its ancestors marked, and every other child of
-#: theirs out of the layout. A stand-in, like the Forge gallery helper the
-#: Clipboard suite carries: this page has no assistant, and the rule the
-#: WanGP tab writes against is that extension's, so it has to be on the page
-#: for the tab's rule to have anything to beat - the padding in particular,
-#: which that rule states with !important.
+#: panel fixed over the window with eight pixels of padding and a scroller of
+#: its own, its ancestors marked, and every other child of theirs out of the
+#: layout - all but the workspace's own tab bar, which since 2026-10-22 it
+#: keeps along the window's top by default, the panel starting under it at
+#: the bar's bottom edge, which that extension measures and writes on the
+#: body (`--forge-assistant-focus-top`). A stand-in, like the Forge gallery
+#: helper the Clipboard suite carries: this page has no assistant, and the
+#: rule the WanGP tab writes against is that extension's, so it has to be on
+#: the page for the tab's rule to have anything to beat - the padding in
+#: particular, which that rule states with !important.
 FOCUS_STAND_IN_CSS = """
-.forge-assistant-focus-root { position: fixed !important; inset: 0 !important; z-index: 1100 !important;
+.forge-assistant-focus-root { position: fixed !important; inset: 0 !important;
+  top: var(--forge-assistant-focus-top, 0px) !important; z-index: 1100 !important;
   width: auto !important; height: auto !important; max-width: none !important; max-height: none !important;
   margin: 0 !important; padding: 8px !important; box-sizing: border-box !important; overflow: auto !important;
   display: block !important; overscroll-behavior: contain !important; }
-body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistant-focus-path):not(.forge-assistant-focus-root) { display: none !important; }
+body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistant-focus-path):not(.forge-assistant-focus-root):not(.forge-assistant-focus-bar):not(.forge-assistant-focus-keep) { display: none !important; }
+body.forge-assistant-focused .forge-assistant-focus-bar { position: fixed !important; top: 0 !important; right: 8px !important;
+  bottom: auto !important; left: 8px !important; z-index: 1102 !important; margin: 0 !important; box-sizing: border-box !important; }
 """
 
 #: The WanGP tab painted on its iframe view - this machine has no WanGP, so
@@ -585,7 +591,7 @@ body.forge-assistant-focused .forge-assistant-focus-path > *:not(.forge-assistan
 #: assistant enters it: ancestors marked, the class on the panel, the class
 #: on the body. The frame points at a blank document; what is measured is
 #: the box the page gives it.
-FOCUS_ENTER_JS = """([css, markup]) => {
+FOCUS_ENTER_JS = """([css, markup, keepBar]) => {
     const style = document.createElement("style");
     style.id = "mp-focus-stand-in"; style.textContent = css;
     document.head.appendChild(style);
@@ -604,8 +610,18 @@ FOCUS_ENTER_JS = """([css, markup]) => {
         if (walk === document.body) { break; }
         walk = walk.parentElement;
     }
+    // The tab bar kept, as that extension keeps it by default: marked, said on
+    // the body, and its bottom edge written for the panel to start at.
+    const nav = document.querySelector("#tabs > .tab-nav");
+    if (keepBar) {
+        nav.classList.add("forge-assistant-focus-bar");
+        document.body.setAttribute("data-forge-assistant-focus-bar", "shown");
+    }
     panel.classList.add("forge-assistant-focus-root");
     document.body.classList.add("forge-assistant-focused");
+    if (keepBar) {
+        document.body.style.setProperty("--forge-assistant-focus-top", Math.round(nav.getBoundingClientRect().bottom) + "px");
+    }
     return true;
 }"""
 FOCUS_MEASURE_JS = """() => {
@@ -621,11 +637,15 @@ FOCUS_MEASURE_JS = """() => {
              overflowY: panel.scrollHeight - panel.clientHeight, overflowX: panel.scrollWidth - panel.clientWidth,
              manage: manage ? getComputedStyle(manage).display : "missing",
              tabs: getComputedStyle(document.querySelector("#tabs > .tab-nav")).display,
+             bar: Math.round(document.querySelector("#tabs > .tab-nav").getBoundingClientRect().bottom),
              wrote: column.style.getPropertyValue("--minipaint-wangp-frame") };
 }"""
 FOCUS_LEAVE_JS = """() => {
     document.getElementById("tab_wangp").classList.remove("forge-assistant-focus-root");
     document.body.classList.remove("forge-assistant-focused");
+    document.querySelector("#tabs > .tab-nav").classList.remove("forge-assistant-focus-bar");
+    document.body.removeAttribute("data-forge-assistant-focus-bar");
+    document.body.style.removeProperty("--forge-assistant-focus-top");
     document.querySelectorAll(".forge-assistant-focus-path").forEach((node) => node.classList.remove("forge-assistant-focus-path"));
     return true;
 }"""
@@ -662,7 +682,7 @@ def check_focus_mode_makes_the_frame_the_window(r: Results, page) -> None:
     page.locator("#tabs > .tab-nav > button", has_text="WanGP").first.click()
     time.sleep(0.8)
     markup = re.sub(r'src="[^"]*"', 'src="about:blank"', wangp_ui.iframe_html())
-    page.evaluate(FOCUS_ENTER_JS, [FOCUS_STAND_IN_CSS, markup])
+    page.evaluate(FOCUS_ENTER_JS, [FOCUS_STAND_IN_CSS, markup, False])
     time.sleep(1.2)
     full = page.evaluate(FOCUS_MEASURE_JS)
     r.check("under the assistant's focus mode the WanGP frame is the whole window",
@@ -681,6 +701,22 @@ def check_focus_mode_makes_the_frame_the_window(r: Results, page) -> None:
     r.check("and when the class comes off the accordion is back, the tab bar too, and the frame leaves them room",
             back["manage"] != "none" and back["tabs"] != "none" and back["position"] != "fixed"
             and 480 <= back["height"] < back["viewport"][1] - 20 and back["top"] > 0, str(back))
+
+    # With the tab bar kept along the top - that extension's default since
+    # 2026-10-22 - the panel starts under the bar and the frame is the rest of
+    # the window: the sizer measures from the column's top to the panel's
+    # bottom, so it follows wherever the panel starts.
+    page.evaluate(FOCUS_ENTER_JS, [FOCUS_STAND_IN_CSS, markup, True])
+    time.sleep(1.2)
+    kept = page.evaluate(FOCUS_MEASURE_JS)
+    r.check("under focus with the tab bar kept the frame starts at the bar's bottom edge and fills the window under it",
+            kept["tabs"] != "none" and 0 < kept["bar"] < 120 and kept["top"] == kept["bar"] and kept["left"] == 0
+            and kept["width"] == kept["viewport"][0] and kept["height"] == kept["viewport"][1] - kept["bar"], str(kept))
+    r.check("with nothing to scroll to, and the frame's height written by the sizer for the box under the bar",
+            kept["overflowY"] <= 0 and kept["overflowX"] <= 0 and kept["manage"] == "none"
+            and kept["wrote"] == f"{kept['viewport'][1] - kept['bar']}px", str(kept))
+    page.evaluate(FOCUS_LEAVE_JS)
+    time.sleep(0.8)
     page.evaluate(FOCUS_RESTORE_JS)
     open_txt2img(page)
     time.sleep(0.5)

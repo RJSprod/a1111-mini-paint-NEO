@@ -345,8 +345,13 @@ frame the whole window (the panel's padding and border off, `#wangp_manage_root`
 displayed, the browser's recovery notice laid over the frame) and `fitFrame()` gives the
 frame the panel's whole height - nothing under it and the accordion not measured, the
 panel's bottom rather than the window's. Nothing is moved in the DOM and nothing is
-repainted; leaving focus is the class coming off. Its side of the contract is that
-extension's `docs/22-forge-assistant.md`.
+repainted; leaving focus is the class coming off. Since 2026-10-22 that extension keeps the
+workspace's own tab bar along the window's top by default, and the panel starts at the
+bar's bottom edge (`--forge-assistant-focus-top` on the body) rather than at the window's
+top: the frame is then the window under the bar, because `fitFrame()` measures from the
+column's top to the panel's bottom wherever the panel starts. `tests/browser_intercept.py`
+carries that extension's rule (`FOCUS_STAND_IN_CSS`) and measures both. Its side of the
+contract is that extension's `docs/22-forge-assistant.md` (§3.24, §3.37).
 
 **The compact page** (bridge 1.11.0): `layout()` sends `LAYOUT_STATE` `{compact}` -
 `compact` true while `focusedPanel()` finds that class on the tab's panel - at READY

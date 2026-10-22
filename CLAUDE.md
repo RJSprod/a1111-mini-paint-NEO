@@ -537,6 +537,12 @@ breaks the other silently - the tab would simply keep its accordion and its
 padding - and `tests/browser_intercept.py` carries a copy of the assistant's
 rule for that reason (`FOCUS_STAND_IN_CSS`): a change to the rule there has
 to be made here too, or the measurement stops measuring the real thing.
+Since 2026-10-22 the assistant keeps the workspace's own tab bar along the
+window's top under focus by default, and the panel starts at the bar's
+bottom edge (`--forge-assistant-focus-top` on the body) instead of the
+window's top; `fitFrame()` measures from the column's top to the panel's
+bottom, so the frame fills what is left with nothing changed here, and the
+stand-in carries the new rule and measures the frame under the kept bar.
 
 `RJSprod/SD-Neo-ModelSwitchRefiner` runs a local LLM. Its logs showed
 `llama-server` taking every CPU core for nine minutes with its model on the

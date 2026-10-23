@@ -88,6 +88,48 @@ LEAKS = (
     (r"Lora 'loras\minimax_h3\Rosalind! face v2.safetensors' was loaded", "Rosalind"),
     (r"Loaded image: inputs\rosalind@home #1.png", "rosalind"),
     (r"Video file saved to Path: outputs\Rosalind! a photo.mp4", "Rosalind"),
+    # Wan2GP names an output after its prompt, and lets almost everything in
+    # a prompt into the name: it takes out only control characters and the
+    # nine a filesystem refuses. The first two are lines from a real log of
+    # 2026-10-23, the prompt's first words kept and its subject renamed. The
+    # rules stopped at the comma, started again after it and redacted only the
+    # tail, so the time, the seed and every word before the last comma were
+    # printed.
+    (r"Video file saved to Path: outputs\2026-10-23-15h57m02s_seed173622884_POV low angle, Rosalind at dusk.mp4",
+     "POV low angle"),
+    (r"Video file saved to Path: outputs\2026-10-23-15h57m02s_seed173622884_POV low angle, Rosalind at dusk.mp4",
+     "seed173622884"),
+    (r"Video file saved to Path: outputs\2026-10-23-12h51m08s_seed471071410_OV low angle, Rosalind.mp4",
+     "12h51m08s"),
+    # ...and every other character that ended a name the same way.
+    (r"Image file saved to Path: outputs\2026-10-23-15h57m02s_seed1_Rosalind; close-up.png", "Rosalind"),
+    ("Image file saved to Path: outputs\\2026-10-23-15h57m02s_seed1_Rosalind\u2019s face, smiling.png", "Rosalind"),
+    ("Audio file saved to Path: outputs\\2026-10-23-15h57m02s_seed1_Rosalind \u2014 humming\u2026 softly.wav",
+     "Rosalind"),
+    (r"Video file saved to Path: outputs\2026-10-23-15h57m02s_seed1_Rosalind  at night.mp4", "Rosalind"),
+    ("Video file saved to Path: outputs\\2026-10-23-15h57m02s_seed1_Rosalind \U0001F305 sunset.mp4", "Rosalind"),
+    # A full stop inside a prompt is not the end of the name, and the word
+    # after it is not the file's type: this printed "*.rosalind walks".
+    (r"Video file saved to Path: outputs\2026-10-23-15h57m02s_seed1_Mr.Rosalind walks, slowly.mp4", "osalind"),
+    (r"Video file saved to Path: outputs\2026-10-23-15h57m02s_seed1_Mr.Rosalind walks, slowly.mp4", "walks"),
+    # A type the scrubber did not know was no filename to any rule at all.
+    (r"3D asset saved to Path: outputs\2026-10-23-15h57m02s_seed1_Rosalind statue.glb", "Rosalind"),
+    # Inside a known install, the start of a name cut short of its extension
+    # was kept as if it were a folder: "<wangp>/outputs/2026-..._POV low angle".
+    (f"Side file saved to Path: {WANGP_ROOT}/outputs/2026-10-23-15h57m02s_seed1_POV low angle, Rosalind_lyrics.lrc",
+     "POV low angle"),
+    (f"copied {WANGP_ROOT}/outputs/2026-10-23-15h57m02s_seed1_POV low angle, Rosalind.xyz to the gallery",
+     "Rosalind"),
+    # The same names with no "Path:" in front: in a path, alone, in an
+    # exception, and in the twelve-and-thirty-five-character form of
+    # Wan2GP's "Saving File" status.
+    (r"wrote outputs\2026-10-23-15h57m02s_seed1_POV low angle, Rosalind.mp4 in 3s", "POV low angle"),
+    (r"Video file added to gallery from Path: outputs\Rosalind, at dusk.mp4", "Rosalind"),
+    (r"Lora 'loras\ltx2\Rosalind, face v2.safetensors' was loaded", "Rosalind"),
+    ("remux 2026-10-23-15h57m02s_seed1_Rosalind, at dusk.mp4 done", "Rosalind"),
+    ("FileNotFoundError: [Errno 2] No such file or directory: "
+     "'C:\\\\Users\\\\x\\\\Wan2GP\\\\outputs\\\\2026-10-23-15h57m02s_seed1_POV low angle, Rosalind.mp4'", "low angle"),
+    ("Saving File 2026-10-23-1...w angle, Rosalind at dusk.mp4", "angle"),
 )
 
 #: What a failure is actually diagnosed from. None of it identifies anybody,
@@ -113,6 +155,18 @@ KEPT = (
     ("The user loaded lora 'loras/x/y.safetensors' just now", "The user loaded lora"),
     (r"Lora 'loras\minimax_h3\Rosalind! face v2.safetensors' was loaded", "was loaded"),
     ("Skipped Steps:1/4", "Skipped Steps:1/4"),
+    # The other side of reading a name to its extension: what the line says
+    # around the name, and the type the name had, both survive.
+    (r"Video file saved to Path: outputs\2026-10-23-15h57m02s_seed1_POV low angle, Rosalind.mp4",
+     "Video file saved to Path:"),
+    (r"Video file saved to Path: outputs\2026-10-23-15h57m02s_seed1_POV low angle, Rosalind.mp4", "*.mp4"),
+    (r"3D asset saved to Path: outputs\2026-10-23-15h57m02s_seed1_Rosalind statue.glb", "*.glb"),
+    (r"wrote outputs\2026-10-23-15h57m02s_seed1_POV low angle, Rosalind.mp4 in 3s", " in 3s"),
+    ("remux 2026-10-23-15h57m02s_seed1_Rosalind, at dusk.mp4 done", " done"),
+    (r"Lora 'loras\ltx2\Rosalind, face v2.safetensors' was loaded", "was loaded"),
+    (f"copied {WANGP_ROOT}/outputs/2026-10-23-15h57m02s_seed1_POV, Rosalind.xyz to the gallery", "to the gallery"),
+    ("NVFP4: kernels available (comfy-kitchen, lightx2v); selection follows weight packing and compatibility.",
+     "selection follows weight packing and compatibility."),
 )
 
 
@@ -140,6 +194,27 @@ def scrubber_checks(r: Results) -> None:
     r.check("an unknown one keeps no directory at all",
             unlabelled == "Saving video to <path>/*.mp4", unlabelled)
     scrub.register_root("wangp", WANGP_ROOT)
+
+    # What a saved output's line comes out as, exactly: the sentence, a path
+    # and the type - none of the name, however its prompt was punctuated.
+    saved = scrub.line(r"Video file saved to Path: outputs\2026-10-23-15h57m02s_seed173622884_POV low angle, "
+                       r"Rosalind at dusk.mp4")
+    r.check("a saved output is a path and a type", saved == "Video file saved to Path: <path>/*.mp4", saved)
+    side = scrub.line(f"Side file saved to Path: {WANGP_ROOT}/outputs/2026-10-23-15h57m02s_seed1_POV low angle, "
+                      "Rosalind_lyrics.lrc")
+    r.check("one in a known install keeps its folder and nothing of its name",
+            side == "Side file saved to Path: <wangp>/outputs/*.lrc", side)
+    quoted = scrub.line("Image file saved to Path: 'outputs/2026-10-23-15h57m02s_seed1_Rosalind, at dusk.png'.")
+    r.check("a quoted one keeps its quotes and the full stop after them",
+            quoted == "Image file saved to Path: '<path>/*.png'.", quoted)
+    alone = scrub.line("Saving File 2026-10-23-1...w angle, Rosalind at dusk.mp4")
+    r.check("Wan2GP's own name, standing alone, is a file of that type", alone == "Saving File <file>.mp4", alone)
+    # A colour code is still in the line when the rules run, and the value of
+    # "Path:" ends at it rather than being missed: nothing but that rule knows
+    # where a name with no folder and no stamp begins.
+    coloured = scrub.line("Video file added to gallery from Path: Rosalind, at dusk.mp4\x1b[0m")
+    r.check("a value of Path: ends at a colour code instead of being skipped",
+            "Rosalind" not in coloured and "<path>/*.mp4" in coloured, coloured)
 
     # Registering the same label twice must not leave the old root matching:
     # a setup repointed at another install would otherwise keep labelling
@@ -197,6 +272,9 @@ def child_output_checks(r: Results) -> None:
         b"Loading model...\n",
         f"Prompt: a photo of {PERSON} at the beach\n".encode("utf-8"),
         f"Saving video to {WANGP_ROOT}/outputs/a_photo_of_{PERSON}.mp4\n".encode("utf-8"),
+        # The shape of Wan2GP's own save line, prompt punctuation and all.
+        f"Video file saved to Path: outputs\\2026-10-23-15h57m02s_seed173622884_POV low angle, {PERSON}.mp4\n"
+        .encode("utf-8"),
         b"ModuleNotFoundError: No module named 'torch'\n",
     ]
 
@@ -221,6 +299,8 @@ def child_output_checks(r: Results) -> None:
     for name, written in (("console", echoed), ("tab console", recorded), ("crash tail", crash_tail)):
         r.check(f"the {name} loses the prompt", PERSON not in written, written)
         r.check(f"the {name} loses the output filename", "a_photo_of" not in written, written)
+        r.check(f"the {name} loses Wan2GP's own output name, to its last comma",
+                "low angle" not in written and "seed173622884" not in written, written)
         r.check(f"the {name} still says what went wrong", "No module named 'torch'" in written, written)
         r.check(f"the {name} still says what it was doing", "Loading model" in written, written)
 

@@ -911,7 +911,9 @@ first. What it takes out:
 * **paths**, down to `<path>/*.mp4` — or `<wangp>/outputs/*.mp4` where the directory is one
   the integration knows, since the tree a file sits in is structure and the folders above it
   are your account name;
-* **filenames** with a content extension, with or without a directory in front;
+* **filenames** with a content extension, with or without a directory in front, taken whole
+  however the prompt in them was punctuated: WanGP keeps commas, full stops, dashes and emoji
+  in an output's name, and everything after its `… saved to Path:` is read as one path;
 * **URLs, e-mail addresses and non-loopback IP addresses**;
 * **credentials** — `key=value` secrets, vendor-prefixed tokens, and any opaque run long
   enough to be an id or a digest.

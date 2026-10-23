@@ -23,9 +23,14 @@ handles. So the shapes are what get taken out:
   a prompt is not something a regular expression gets to guess at;
 * **paths**, rooted or relative, down to a placeholder plus a type. A path is
   the single richest leak in a generation log: the directories carry the
-  account name and the last component carries the prompt that produced it;
+  account name and the last component carries the prompt that produced it -
+  punctuation and all, so that component runs to its extension whatever is in
+  it, and everything after WanGP's ``Path:`` is one path to the end of the
+  line;
 * **bare filenames** with a content extension, for the same reason, since
-  WanGP frequently prints one with no directory in front of it;
+  WanGP frequently prints one with no directory in front of it - and its own
+  output names wherever they stand, from the time stamp each one starts with
+  to its type;
 * **URLs, e-mail addresses and non-loopback IP addresses**;
 * **credential shapes** - the ``key=value`` forms, the vendor-prefixed tokens,
   and any long opaque run that could be an id or a digest.
@@ -122,11 +127,17 @@ KEEP_NAMES = frozenset(
 #: Suffixes that mean "somebody's content": an output, a model, an archive. A
 #: bare one of these with no directory in front is still redacted, because
 #: WanGP prints output filenames that way and the filename *is* the prompt.
+#: Every type WanGP writes an output as has to be here - ``.aac`` for a muxed
+#: soundtrack, ``.glb`` and ``.ply`` for a 3D asset - or that output's name
+#: is not a filename to any rule below and is printed whole.
 CONTENT_SUFFIXES = frozenset(
     {
         ".avi", ".bmp", ".flac", ".gif", ".jpeg", ".jpg", ".m4a", ".m4v", ".mkv", ".mov",
         ".mp3", ".mp4", ".mpo", ".ogg", ".opus", ".png", ".psd", ".svg", ".tif", ".tiff",
         ".wav", ".webm", ".webp", ".avif",
+        ".aac", ".aif", ".aiff", ".exr", ".heic", ".jxl", ".mid", ".midi", ".mpeg", ".mpg",
+        ".fbx", ".glb", ".obj", ".ply", ".splat", ".stl", ".usdz",
+        ".lrc", ".srt", ".vtt",
         ".bin", ".ckpt", ".gguf", ".npy", ".npz", ".onnx", ".pkl", ".pt", ".pth", ".safetensors",
         ".7z", ".gz", ".rar", ".tar", ".zip",
         ".csv", ".json", ".log", ".md", ".txt", ".yaml", ".yml",
@@ -154,10 +165,11 @@ SENTENCE_WORDS = frozenset(
 
 # -- the rules, in the order they are applied -------------------------------
 
-#: Nothing may start a match immediately after one of these, which is what
-#: stops a placeholder written by an earlier rule from being eaten by a later
-#: one - or by a second pass over the same line.
-_GUARD = r"(?<![\w<>*])"
+#: Nothing may start a match immediately after one of these, or after the
+#: ``*.`` in front of the type a placeholder keeps, which is what stops a
+#: placeholder written by an earlier rule from being eaten by a later one - or
+#: by a second pass over the same line.
+_GUARD = r"(?<![\w<>*])(?<!\*\.)"
 
 #: ``key=value`` credentials. The value goes; the key stays, because "there was
 #: an authorization header" is worth knowing and its contents never are.
@@ -229,19 +241,17 @@ _IPV4 = re.compile(_GUARD + r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 #: "wrote /tmp/x and stopped" is a path followed by two words.
 _INSIDE = r"""(?: [^\s'"<>|*?;,)\]}] | [ ](?=[^\s'"<>|*?;,)\]}]*[\\/]) )*"""
 
-_ROOTED = re.compile(
-    _GUARD
-    + r"""(?:
-            [A-Za-z]:[\\/]
-          | \\\\[^\s\\/]+[\\/]?
-          | ~[\\/]
-          | \.{1,2}[\\/]
-          | /(?=[^\s/])
-        )
-    """
-    + _INSIDE,
-    re.VERBOSE,
-)
+#: Where a rooted path starts. Shared by the two rules that read one, so they
+#: cannot come to disagree about what a root is.
+_ROOT = r"""(?:
+        [A-Za-z]:[\\/]
+      | \\\\[^\s\\/]+[\\/]?
+      | ~[\\/]
+      | \.{1,2}[\\/]
+      | /(?=[^\s/])
+    )"""
+
+_ROOTED = re.compile(_GUARD + _ROOT + _INSIDE, re.VERBOSE)
 
 #: The characters a *name* is made of, shared by the two rules below so they
 #: cannot drift apart again - they already had, and the narrower one was the
@@ -280,18 +290,63 @@ _REL_INSIDE = (
 #: called "Ray Personal" or "!favourites" ended the match and was printed:
 #: "loras\Ray <path>/*.safetensors". The file was protected and the person
 #: was not.
-_RELATIVE = (
-    r"[" + _PATH_EDGE + r"]" + _REL_INSIDE + r"*"
-    + r"(?:[\\/]" + _REL_INSIDE + r"*)+"
-    + r"\.[A-Za-z0-9]{1,12}\b"
+_RELATIVE_HEAD = r"[" + _PATH_EDGE + r"]" + _REL_INSIDE + r"*"
+_RELATIVE_REST = r"(?:[\\/]" + _REL_INSIDE + r"*)+" + r"\.[A-Za-z0-9]{1,12}\b"
+
+#: A NAME RUNS TO ITS EXTENSION, WHATEVER IS IN BETWEEN.
+#:
+#: Wan2GP names an output after the prompt that made it -
+#: ``2026-10-23-15h57m02s_seed173622884_POV low angle, ....mp4`` - and takes
+#: out of the prompt only control characters and the nine characters a
+#: filesystem refuses (``sanitize_file_name``, in its ``shared/utils/utils.py``).
+#: A comma, a full stop, a curly apostrophe, a dash, an emoji and two spaces in
+#: a row all reach the filename, and each of them ended the rules above, which
+#: then started again after it and redacted only the tail. The line in the log
+#: was ``outputs\<the time, the seed and the prompt up to its last comma>,
+#: <file>.mp4``.
+#:
+#: So after the last separator of a path the name may hold anything Wan2GP
+#: lets through, and it ends at the first *content* extension that is not
+#: followed by more name. Any extension would not do: a full stop inside a
+#: prompt ("Mr.Smith walks") would end the name there and print the word after
+#: it as the file's type.
+_NAME_TAIL = r"""[^\\/*:|?<>"\x00-\x1f]"""
+_CONTENT_ALTERNATION = "|".join(
+    re.escape(suffix[1:]) for suffix in sorted(CONTENT_SUFFIXES, key=len, reverse=True)
+)
+_CONTENT_END = r"\.(?i:" + _CONTENT_ALTERNATION + r")(?![\w-])(?!\.\w)"
+#: A name that begins with Wan2GP's stamp - the time an output was saved - is
+#: an output's name whatever its type, so it ends at the last extension in
+#: reach rather than at the first content one: a type Wan2GP starts writing
+#: after this list was made is still the end of a prompt.
+_STAMP_AHEAD = r"(?=\d{4}-\d{2}-\d{2}-\d)"
+_ANY_END = r"\.[A-Za-z0-9]{1,12}(?![\w-])"
+#: 255 is the longest name a filesystem holds, and it bounds how far a name
+#: with no extension in sight is read before the rule gives up.
+_TAIL_NAME = (
+    r"(?:" + _NAME_TAIL + r"{1,255}?" + _CONTENT_END
+    + r"|" + _STAMP_AHEAD + _NAME_TAIL + r"{1,255}" + _ANY_END + r")"
 )
 
-#: Both shapes in one expression, substituted in one pass. That is not tidying:
-#: ``re.sub`` never looks at what it has just written, so a single pass is what
-#: stops the relative rule from reading "<extension>/logs/..." as a fresh
-#: relative path and flattening the label the rooted rule just worked out.
+#: One directory of a rooted path and its separator: ``_INSIDE`` without the
+#: separators, so that the last one is where the name begins.
+_DIR = r"""(?: [^\s'"<>|*?;,)\]}\\/] | [ ](?=[^\s'"<>|*?;,)\]}]*[\\/]) )*[\\/]"""
+
+_ROOTED_NAMED = _GUARD + _ROOT + r"(?:" + _DIR + r")*" + _TAIL_NAME
+_RELATIVE_NAMED_REST = r"(?:[\\/]" + _REL_INSIDE + r"*)*" + r"[\\/]" + _TAIL_NAME
+
+#: Every shape in one expression, substituted in one pass. That is not
+#: tidying: ``re.sub`` never looks at what it has just written, so a single
+#: pass is what stops the relative rule from reading "<extension>/logs/..." as
+#: a fresh relative path and flattening the label the rooted rule just worked
+#: out. A path that ends in a content name is tried before one that does not,
+#: so the longer reading wins wherever there is one. The two relative readings
+#: share their first directory, which is read once: its look-ahead past each
+#: space is most of what this expression costs on a line of words.
 _PATH = re.compile(
-    "(?:" + _ROOTED.pattern + "|" + _GUARD + r"(?<![\\/])" + _RELATIVE + ")", re.VERBOSE
+    "(?:" + _ROOTED_NAMED + "|" + _ROOTED.pattern + "|" + _GUARD + r"(?<![\\/])"
+    + _RELATIVE_HEAD + "(?:" + _RELATIVE_NAMED_REST + "|" + _RELATIVE_REST + "))",
+    re.VERBOSE,
 )
 
 #: A filename on its own, spaces and all. Only the last word is required to
@@ -322,14 +377,33 @@ _PATH = re.compile(
 #: end in a content extension, and ``_replace_bare`` hands back every
 #: leading word that is sentence rather than name.
 _BARE_WORD = r"[" + _NAME_CHARS + r"]+"
-_CONTENT_ALTERNATION = "|".join(
-    re.escape(suffix[1:]) for suffix in sorted(CONTENT_SUFFIXES, key=len, reverse=True)
-)
 _BARE = re.compile(
     _GUARD + r"\b" + _BARE_WORD + r"(?:[ ]" + _BARE_WORD + r")*?"
     + r"(\.(?:" + _CONTENT_ALTERNATION + r"))\b",
     re.IGNORECASE,
 )
+
+#: Wan2GP's own name for an output, standing on its own: the time it was
+#: saved (``%Y-%m-%d-%Hh%Mm%Ss``), the seed, then the prompt. A bare name has
+#: no separator to say where it begins, and the rule above guesses at that
+#: from its words - a guess a comma defeats. This name says so itself: from
+#: the stamp to the extension is the name, whatever lies between. Only the
+#: stamp's first twelve characters are asked for, because those are all that
+#: Wan2GP's "Saving File" status keeps of it, with the name's last thirty-five:
+#: ``2026-10-23-1...low angle, a cat.mp4``.
+_STAMPED = re.compile(
+    _GUARD + r"\b\d{4}-\d{2}-\d{2}-\d(?:" + _NAME_TAIL + r"{0,255}?" + _CONTENT_END
+    + r"|" + _NAME_TAIL + r"{0,255}" + _ANY_END + r")"
+)
+
+#: Every message Wan2GP prints for a file it has just written ends the same
+#: way - ``Video file saved to Path: ...``, ``Side file saved to Path: ...``,
+#: ``Postprocessed audio saved to Path: ...`` - and what follows ``Path:`` is
+#: one path, to the end of the line, whatever its name is made of and
+#: whatever its extension: a side file may have any suffix at all. "The end
+#: of the line" stops short of a control character, because the colour codes
+#: Wan2GP prints are still in the line when this runs.
+_SAVED_PATH = re.compile(r"""(?i)\b(path[ \t]*:)[ \t]*(?!["']?<)(\S[^\x00-\x1f]*)""")
 
 #: The backend port, in the two forms it gets written. Not a secret the way a
 #: token is, but the browser is not supposed to learn it and a pasted log is
@@ -528,10 +602,23 @@ def _label_for(normalised: str) -> typing.Tuple[str, str]:
 
 _TRAILING = ".,;:!?)]}'\"`"
 
+#: What a file's type looks like. Whatever else follows the last full stop of
+#: a name - "Smith walks" in "Mr.Smith walks" - is more of the name, and
+#: printing it as ``*.smith walks`` prints the name.
+_EXTENSION = re.compile(r"\.[a-z0-9]{1,12}")
+
+#: An extension-less last component that is structure inside a known install
+#: is one word, the way "bin", "python" and "ckpts" are, and never carries
+#: Wan2GP's output stamp: the start of an output's name cut short of its
+#: extension is the start of its prompt.
+_STRUCTURE = re.compile(r"[\w.-]+")
+_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}-\d|_seed\d")
+
 
 def _suffix_of(name: str) -> str:
     dot = name.rfind(".")
-    return name[dot:].lower() if dot > 0 else ""
+    suffix = name[dot:].lower() if dot > 0 else ""
+    return suffix if _EXTENSION.fullmatch(suffix) else ""
 
 
 def _keep_name(name: str) -> bool:
@@ -557,13 +644,18 @@ def _shorten(raw: str) -> str:
     name = segments[0] if segments else ""
     if name and _keep_name(name):
         tail = name
-    elif name and not _suffix_of(name) and label:
+    elif (name and not _suffix_of(name) and label
+          and _STRUCTURE.fullmatch(name) and not _STAMP.search(name)):
         # Inside a known install an extension-less last component is structure
         # - "bin", "python", "ckpts" - and dropping it turns a useful line into
         # a shrug. Outside one it could be anything, so it still goes.
         tail = name
     elif name:
         suffix = _suffix_of(name)
+        if suffix not in CONTENT_SUFFIXES and _STAMP.search(name):
+            # An output's name read to the last full stop in reach: what
+            # follows that may be a word of its prompt rather than a type.
+            suffix = ""
         tail = f"*{suffix}" if suffix else ""
     else:
         tail = ""
@@ -606,6 +698,29 @@ def _replace_bare(match: "re.Match[str]") -> str:
     return f"{prefix} {FILE}{suffix}" if prefix else f"{FILE}{suffix}"
 
 
+def _replace_stamped(match: "re.Match[str]") -> str:
+    suffix = _suffix_of(match.group(0))
+    return f"{FILE}{suffix if suffix in CONTENT_SUFFIXES else ''}"
+
+
+def _replace_saved_path(match: "re.Match[str]") -> str:
+    """The value after ``Path:``, read as one path to the end of the line.
+
+    A quote around it stays around the placeholder, and the punctuation a
+    sentence puts after a path stays after it, as ``_replace_path`` does.
+    """
+    key, value = match.group(1), match.group(2).rstrip()
+    quote = value[0] if value[0] in "'\"" else ""
+    inner = value[len(quote):]
+    closing = quote if quote and inner.endswith(quote) else ""
+    inner = inner[: len(inner) - len(closing)]
+    trailing = ""
+    while inner and inner[-1] in _TRAILING:
+        trailing = inner[-1] + trailing
+        inner = inner[:-1]
+    return f"{key} {quote}{_shorten(inner) if inner else ''}{trailing}{closing}"
+
+
 def _replace_address(match: "re.Match[str]") -> str:
     address = match.group(0)
     return address if address in _PUBLIC_ADDRESSES else ADDRESS
@@ -631,7 +746,9 @@ def line(text: typing.Any, limit: int = 0) -> str:
         cleaned = _NAME_KEY.sub(lambda m: f"{m.group(1)}: {FILE}", cleaned)
         cleaned = _EMAIL.sub(EMAIL, cleaned)
         cleaned = _URL.sub(URL, cleaned)
+        cleaned = _SAVED_PATH.sub(_replace_saved_path, cleaned)
         cleaned = _PATH.sub(_replace_path, cleaned)
+        cleaned = _STAMPED.sub(_replace_stamped, cleaned)
         cleaned = _BARE.sub(_replace_bare, cleaned)
         cleaned = _IPV4.sub(_replace_address, cleaned)
         cleaned = _OPAQUE.sub(HIDDEN, cleaned)

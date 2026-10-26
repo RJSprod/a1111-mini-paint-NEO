@@ -74,10 +74,18 @@ FORM_CHANGED = "WANGP_FORM_CHANGED"
 #: while the Forge Assistant's focus mode has given the WanGP tab the whole
 #: window, and the page then hides what sits above its generator form: the
 #: title, the main tab strip, the model row and the model's description.
-#: Presentation, like THEME_STATE: never a reason a picture cannot be handed
-#: over, never answered, and sent only to a bridge whose READY said
-#: ``layout_compact`` - an older one drops a type it does not know.
+#: ``studio`` (bridge 1.15.0) is true under the assistant's super focus, and
+#: the compact page is then cut down to WanGP's prompt, its Generate and its
+#: progress beside its gallery. Presentation, like THEME_STATE: never a reason
+#: a picture cannot be handed over, and sent only to a bridge whose READY said
+#: ``layout_compact`` (``studio`` only to one that said ``layout_studio``) - an
+#: older one drops a type it does not know, or a key.
 LAYOUT_STATE = "WANGP_LAYOUT_STATE"
+#: What the page shows after a LAYOUT_STATE (bridge 1.15.0), once, under the
+#: request's id: the layout it settled on, how many parts it took out, and
+#: what it did not find when that is less than was asked. Nothing waits for
+#: it; the parent writes it down.
+LAYOUT_RESULT = "WANGP_LAYOUT_RESULT"
 #: The page's prompt, read or written from outside it (bridge 1.14.0), for the
 #: Forge Assistant's prompt box on the WanGP tab. A request with no ``prompt``
 #: reads the box WanGP shows - the wizard's while its wizard is on - and one
@@ -93,7 +101,7 @@ TO_BRIDGE = frozenset({HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEM
                        PING, LAYOUT_STATE, PROMPT_REQUEST})
 #: What the iframe may send out to the parent page.
 TO_PARENT = frozenset({READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED,
-                       PONG, FORM_CHANGED, PROMPT_RESULT})
+                       PONG, FORM_CHANGED, PROMPT_RESULT, LAYOUT_RESULT})
 
 #: Stable logical receiver ids. The bridge maps these onto whatever the
 #: installed WanGP calls them; MiniPaint only ever sees these.
@@ -421,10 +429,38 @@ def normalize_layout(payload: typing.Any) -> dict:
 
     Compact only when the parent said so with a real ``true``: anything else -
     no payload, a string, a number - is WanGP's page whole, which is what it
-    was before there was a layout to ask for.
+    was before there was a layout to ask for. A studio likewise, and a studio
+    is compact as well: it is the compact page with less in it.
     """
     source = payload if isinstance(payload, dict) else {}
-    return {"compact": source.get("compact") is True}
+    studio = source.get("studio") is True
+    return {"compact": studio or source.get("compact") is True, "studio": studio}
+
+
+#: What a LAYOUT_RESULT may say the page shows, and what it may say it did not
+#: find: no generator form (the page stays whole), no prompt box (it stays
+#: compact), no Generate bar or no progress (a studio without it), or a
+#: failure that put the page back whole.
+LAYOUTS = ("whole", "compact", "studio")
+LAYOUT_MISSING = ("", "form", "prompt", "actions", "progress", "error")
+#: More parts than any page has; a count past it is not a count.
+MAX_LAYOUT_PARTS = 4096
+
+
+def normalize_layout_result(payload: typing.Any) -> dict:
+    """A LAYOUT_RESULT payload as the parent reads it.
+
+    An unknown layout is ``whole`` - the page the parent cannot vouch for - an
+    unknown ``missing`` is nothing said, and the count is a whole number of
+    parts or 0.
+    """
+    source = payload if isinstance(payload, dict) else {}
+    shown = source.get("layout") if source.get("layout") in LAYOUTS else "whole"
+    missing = source.get("missing") if source.get("missing") in LAYOUT_MISSING else ""
+    hidden = source.get("hidden")
+    if isinstance(hidden, bool) or not isinstance(hidden, int) or not 0 <= hidden <= MAX_LAYOUT_PARTS:
+        hidden = 0
+    return {"layout": shown, "hidden": hidden if shown != "whole" else 0, "missing": missing}
 
 
 def normalize_prompt_edit(payload: typing.Any) -> typing.Tuple[dict, str]:

@@ -753,7 +753,7 @@ def bridge_checks(r: Results) -> None:
     status, body = surface.dispatch(protocol.CONTROL_MODEL, {"model_type": "no spaces allowed"})
     r.check("and refuses a model type that does not normalise", status == 400)
     info = json.loads((BRIDGE_DIR / "plugin_info.json").read_text(encoding="utf-8"))
-    r.check("the bridge is 1.14.0 and lists the model check", info["version"] == "1.14.0" and "model_check" in info["capabilities"])
+    r.check("the bridge is 1.15.0 and lists the model check", info["version"] == "1.15.0" and "model_check" in info["capabilities"])
 
 
 # ------------------------------------------------------------- the screens --

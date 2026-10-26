@@ -1613,6 +1613,14 @@ function selectTab(on) {
 // puts on and takes off, heard by the same attribute observer.
 function focusMode(on) {
   if (on) { panel.classList.add("forge-assistant-focus-root"); } else { panel.classList.remove("forge-assistant-focus-root"); }
+  classChanged();
+}
+// Its super focus (bridge 1.15.0): a second class beside the first.
+function studioMode(on) {
+  if (on) { panel.classList.add("forge-assistant-wangp-studio"); } else { panel.classList.remove("forge-assistant-wangp-studio"); }
+  classChanged();
+}
+function classChanged() {
   for (const o of mutationObservers) {
     if (o.target === panel && (!o.options || !o.options.attributeFilter || o.options.attributeFilter.indexOf("class") !== -1)) {
       o.fn([{ type: "attributes", attributeName: "class", target: panel }]);
@@ -1628,12 +1636,17 @@ const B = {
     : MODE === "noping" ? { queue: true, start: true, track: true, form_watch: true }
     : MODE === "layoutLegacy" ? { queue: true, start: true, track: true, ping: true, form_watch: true, session: true }
     : MODE === "promptLegacy" ? { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true }
+    : MODE === "studio" ? { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true, prompt_edit: true,
+                            layout_studio: true }
     : { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true, prompt_edit: true },
   hellos: [], presses: 0, looks: 0, pings: 0, busyMs: 0, channel: "", navigations: 0, reloadMs: 500,
   // Every THEME_STATE the parent sent, in order.
   themes: [],
-  // And every LAYOUT_STATE (bridge 1.11.0).
+  // And every LAYOUT_STATE (bridge 1.11.0); and, for a bridge that offers
+  // the studio (1.15.0), what its page answers to one: a function of the
+  // payload giving LAYOUT_RESULT's payload, or null for no answer at all.
   layouts: [],
+  layoutAnswer: null,
   // The page's prompt box, every PROMPT_REQUEST's payload, and the code the
   // bridge refuses one with when a scenario says so (bridge 1.14.0).
   prompt: "the page's own prompt", wizard: false, promptAsks: [], promptRefusal: "",
@@ -1673,7 +1686,12 @@ function toBridge(message) {
   }
   if (message.channel_id !== B.channel) { return; }
   if (message.type === "WANGP_THEME_STATE") { B.themes.push(message.payload || {}); return; }
-  if (message.type === "WANGP_LAYOUT_STATE") { B.layouts.push(message.payload || {}); return; }
+  if (message.type === "WANGP_LAYOUT_STATE") {
+    B.layouts.push(message.payload || {});
+    const answer = B.layoutAnswer ? B.layoutAnswer(message.payload || {}) : null;
+    if (answer) { reply("WANGP_LAYOUT_RESULT", message.request_id, answer); }
+    return;
+  }
   if (message.type === "WANGP_PROMPT_REQUEST") {
     const asked = message.payload || {};
     B.promptAsks.push(asked);
@@ -1936,6 +1954,58 @@ const scenarios = {
     await advance(1000);
     focusMode(true); await advance(50); focusMode(false); await advance(50); focusMode(true); await advance(50);
     return { sent: B.layouts.length, said: linesWith("layout:"), state: api.state().layout };
+  },
+  // The studio (bridge 1.15.0): super focus is the second class on the
+  // focused panel, and the page answers what it settled on.
+  studio: async function () {
+    B.layoutAnswer = function (p) { return { layout: p.studio ? "studio" : (p.compact ? "compact" : "whole"), hidden: p.compact ? 23 : 0, missing: "" }; };
+    api.attach(null);
+    await advance(1000);
+    const atReady = B.layouts.slice();
+    focusMode(true); await advance(50);
+    const onFocus = B.layouts.slice(atReady.length);
+    let mark = B.layouts.length;
+    studioMode(true); await advance(50);
+    const onStudio = B.layouts.slice(mark);
+    const studioState = api.state().layout;
+    mark = B.layouts.length;
+    studioMode(true); await advance(50); selectTab(false); await advance(50); selectTab(true); await advance(50);
+    const repeated = B.layouts.length - mark;
+    // A studio class without focus is not a studio: the panel is not given
+    // the window.
+    mark = B.layouts.length;
+    focusMode(false); await advance(50);
+    const onLeave = B.layouts.slice(mark);
+    studioMode(false); await advance(50);
+    const afterClass = B.layouts.length - mark - onLeave.length;
+    // A page that cannot find its prompt answers compact, and the journal
+    // says why; one without WanGP's Generate bar answers a studio without it.
+    B.layoutAnswer = function (p) { return p.studio ? { layout: "compact", hidden: 7, missing: "prompt" } : { layout: p.compact ? "compact" : "whole", hidden: 0, missing: "" }; };
+    focusMode(true); studioMode(true); await advance(50);
+    const refusedState = api.state().layout;
+    studioMode(false); await advance(50);
+    B.layoutAnswer = function (p) { return p.studio ? { layout: "studio", hidden: 19, missing: "actions" } : { layout: p.compact ? "compact" : "whole", hidden: 3, missing: "" }; };
+    studioMode(true); await advance(50);
+    const withoutState = api.state().layout;
+    // An answer to a request that is not the last one is nobody's.
+    B.layoutAnswer = null;
+    studioMode(false); await advance(50);
+    const before = JSON.stringify(api.state().layout);
+    fire("message", { origin: ORIGIN, source: inner, data: { protocol: 5, type: "WANGP_LAYOUT_RESULT", channel_id: B.channel,
+                                                             request_id: "0123456789abcdef0123456789abcdef", payload: { layout: "studio", hidden: 1, missing: "" } } });
+    await advance(10);
+    const stale = JSON.stringify(api.state().layout) === before;
+    return { atReady, onFocus, onStudio, studioState, repeated, onLeave, afterClass, refusedState, withoutState, stale,
+             said: linesWith("layout:") };
+  },
+  // Super focus on a bridge older than 1.15.0: told compact, the journal
+  // says once why, and the payload is the one it always read.
+  studioOld: async function () {
+    api.attach(null);
+    await advance(1000);
+    focusMode(true); studioMode(true); await advance(50);
+    focusMode(false); await advance(50); focusMode(true); await advance(50);
+    return { layouts: B.layouts.slice(), said: linesWith("older than 1.15.0"), state: api.state().layout };
   },
   // The page's prompt, read and written for the assistant's box (bridge 1.14.0).
   prompt: async function () {
@@ -2568,18 +2638,44 @@ def layout_checks(r: Results) -> None:
     Gradio 5.29 draws it (browser_intercept.check_focus_compacts_the_wangp_page).
     """
     r.check("a layout is compact only for a real true; anything else is WanGP's page whole",
-            protocol.normalize_layout({"compact": True}) == {"compact": True}
-            and all(protocol.normalize_layout(v) == {"compact": False}
+            protocol.normalize_layout({"compact": True}) == {"compact": True, "studio": False}
+            and all(protocol.normalize_layout(v) == {"compact": False, "studio": False}
                     for v in (None, {}, {"compact": "true"}, {"compact": 1}, {"compact": False}, [True], "compact")))
+    r.check("a studio only for a real true, and a studio is compact as well (bridge 1.15.0)",
+            protocol.normalize_layout({"studio": True}) == {"compact": True, "studio": True}
+            and protocol.normalize_layout({"compact": False, "studio": True}) == {"compact": True, "studio": True}
+            and all(protocol.normalize_layout({"compact": True, "studio": v}) == {"compact": True, "studio": False}
+                    for v in ("true", 1, None, False, [True])))
     r.check("the parent may send it, the WanGP page never does",
             protocol.LAYOUT_STATE in protocol.TO_BRIDGE and protocol.LAYOUT_STATE not in protocol.TO_PARENT)
+    r.check("the WanGP page answers what it shows, and only the WanGP page does (bridge 1.15.0)",
+            protocol.LAYOUT_RESULT in protocol.TO_PARENT and protocol.LAYOUT_RESULT not in protocol.TO_BRIDGE)
+    norm = protocol.normalize_layout_result
+    r.check("an answer is a known layout, a count and a known word for what was not found; anything else is whole and nothing",
+            norm({"layout": "studio", "hidden": 23, "missing": "actions"}) == {"layout": "studio", "hidden": 23, "missing": "actions"}
+            and norm({"layout": "compact", "hidden": 7, "missing": "prompt"}) == {"layout": "compact", "hidden": 7, "missing": "prompt"}
+            and norm({"layout": "grid", "hidden": 9}) == {"layout": "whole", "hidden": 0, "missing": ""}
+            and norm({"layout": "whole", "hidden": 9, "missing": "form"}) == {"layout": "whole", "hidden": 0, "missing": "form"}
+            and all(norm({"layout": "compact", "hidden": v})["hidden"] == 0 for v in (-1, True, 2.5, "3", protocol.MAX_LAYOUT_PARTS + 1))
+            and norm({"layout": "studio", "missing": "/etc/passwd"})["missing"] == ""
+            and norm(None) == {"layout": "whole", "hidden": 0, "missing": ""})
+    bundle = BROWSER_COPY.read_text(encoding="utf-8")
+    r.check("the tab's copy of the answer's vocabulary is protocol.py's",
+            ('const LAYOUTS = ' + json.dumps(list(protocol.LAYOUTS)) + ';') in bundle
+            and ('const LAYOUT_MISSING = ' + json.dumps(list(protocol.LAYOUT_MISSING)) + ';') in bundle
+            and f"const MAX_LAYOUT_PARTS = {protocol.MAX_LAYOUT_PARTS};" in bundle)
     config = bridge_js_config()
     r.check("the script finds WanGP's page from the id WanGP gives its gallery tabs for bridges",
             config.get("chromeAnchorId") == "wangp-gallery-tabs" and config.get("types", {}).get("layoutState") == protocol.LAYOUT_STATE
             and config.get("layoutAttribute") == "data-minipaint-layout" and config.get("chromeAttribute") == "data-minipaint-chrome",
             str({k: config.get(k) for k in ("chromeAnchorId", "layoutAttribute", "chromeAttribute")}))
+    r.check("and the studio's prompt boxes by the ids wgp.py gives them, its progress and Generate bar by WanGP's classes",
+            config.get("studioPromptIds") == ["wangp-prompt-advanced", "wangp-prompt-wizard"]
+            and config.get("studioProgressClass") == "wangp-progress-container" and config.get("studioActionsClass") == "wangp-settings-actions"
+            and config.get("types", {}).get("layoutResult") == protocol.LAYOUT_RESULT and config.get("studioAttribute") == "data-minipaint-studio",
+            str({k: config.get(k) for k in ("studioPromptIds", "studioProgressClass", "studioActionsClass", "studioAttribute")}))
 
-    answers = _run_live(("layout", "layoutLegacy"))
+    answers = _run_live(("layout", "layoutLegacy", "studio", "studioOld"))
     if answers is None:
         r.check("node is available for the layout checks (skipped)", True)
         return
@@ -2606,6 +2702,37 @@ def layout_checks(r: Results) -> None:
             and "older than 1.11.0" in (legacy.get("said") or [""])[0]
             and (legacy.get("state") or {}).get("offered") is False, str(legacy))
 
+    # The studio (bridge 1.15.0): super focus's class beside focus's.
+    studio = answers.get("studio") or {}
+    r.check("the studio scenario ran", "error" not in studio and not studio.get("thrown") and "onStudio" in studio, str(studio)[:300])
+    r.check("a bridge that offers the studio is told whole with the studio's key, and compact under focus",
+            studio.get("atReady") == [{"compact": False, "studio": False}] and studio.get("onFocus") == [{"compact": True, "studio": False}],
+            str(studio.get("atReady")) + str(studio.get("onFocus")))
+    r.check("super focus on the focused panel tells it a studio, and state() says what it answered",
+            studio.get("onStudio") == [{"compact": True, "studio": True}]
+            and {k: (studio.get("studioState") or {}).get(k) for k in ("studio", "asked", "shown", "missing", "compact")}
+            == {"studio": True, "asked": "studio", "shown": "studio", "missing": "", "compact": True},
+            str(studio.get("onStudio")) + str(studio.get("studioState")))
+    r.check("the same classes again, or the tab away and back, tell it nothing new", studio.get("repeated") == 0, str(studio.get("repeated")))
+    r.check("focus ending with the studio's class still on tells it whole, and the class going after says nothing",
+            studio.get("onLeave") == [{"compact": False, "studio": False}] and studio.get("afterClass") == 0,
+            str(studio.get("onLeave")) + str(studio.get("afterClass")))
+    r.check("a page that answers compact to a studio is written down, and the journal says it found no prompt box",
+            {k: (studio.get("refusedState") or {}).get(k) for k in ("asked", "shown", "missing")} == {"asked": "studio", "shown": "compact", "missing": "prompt"}
+            and any("could not show the studio layout (no prompt box in the form); it shows compact" in line for line in studio.get("said") or []),
+            str(studio.get("refusedState")) + str(studio.get("said")))
+    r.check("and a studio without WanGP's Generate bar says so",
+            (studio.get("withoutState") or {}).get("missing") == "actions"
+            and any(line.endswith("layout: studio without WanGP's Generate bar") for line in studio.get("said") or []),
+            str(studio.get("withoutState")))
+    r.check("an answer to a request that is not the last one changes nothing", studio.get("stale") is True)
+    old = answers.get("studioOld") or {}
+    r.check("super focus on a bridge older than 1.15.0 tells it compact in the words it always read, and the journal says why once",
+            old.get("layouts") == [{"compact": False}, {"compact": True}, {"compact": False}, {"compact": True}]
+            and len(old.get("said") or []) == 1 and "reinstalled from the WanGP tab" in (old.get("said") or [""])[0]
+            and (old.get("state") or {}).get("studio") is False and (old.get("state") or {}).get("asked") == "compact",
+            str(old)[:400])
+
     # The decision a check has to see: the class is watched, not only the style.
     import tempfile
     source = BROWSER_COPY.read_text(encoding="utf-8")
@@ -2619,6 +2746,30 @@ def layout_checks(r: Results) -> None:
             mutated = (_run_live(("layout",), source=path) or {}).get("layout") or {}
     r.check("mutation: a panel watched for its style alone never hears focus start",
             anchored and mutated.get("onFocus") == [], "anchor gone" if not anchored else str(mutated.get("onFocus")))
+
+    # And the studio's: the second class read, the answer only the last
+    # request's, the old bridge's words kept.
+    for name, old, new, broken in (
+        ("a panel whose studio class is not read is never told a studio",
+         'return studioPanel() ? "studio" : "compact";', 'return "compact";',
+         lambda m: m.get("onStudio") == []),
+        ("an answer to any request is taken for the last one's",
+         "if (!requestId || requestId !== S.layoutRequest) { return; }", "",
+         lambda m: m.get("stale") is False),
+        ("a bridge older than the studio is sent the studio's key",
+         "const payload = S.layoutStudio ? { compact: asked !== \"whole\", studio: asked === \"studio\" } : { compact: asked !== \"whole\" };",
+         "const payload = { compact: asked !== \"whole\", studio: asked === \"studio\" };",
+         lambda m: (m.get("layouts") or [{}])[0] != {"compact": False}),
+    ):
+        anchored = source.count(old) == 1
+        mutated = {}
+        if anchored:
+            with tempfile.TemporaryDirectory(prefix="minipaint-wangp-studio-") as scratch:
+                path = pathlib.Path(scratch) / "minipaint_wangp.js"
+                path.write_text(source.replace(old, new), encoding="utf-8")
+                mode = "studioOld" if "older" in name else "studio"
+                mutated = (_run_live((mode,), source=path) or {}).get(mode) or {}
+        r.check(f"mutation: {name}", anchored and broken(mutated), "anchor gone" if not anchored else str(mutated)[:200])
 
 
 def prompt_checks(r: Results) -> None:

@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.14.0"
+BRIDGE_VERSION = "1.15.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -2327,6 +2327,13 @@ class Compatibility:
                 # sits above its generator form. Presentation too, so it is
                 # offered whatever the form made of this build.
                 "layout_compact": True,
+                # Bridge 1.15.0: LAYOUT_STATE's studio. Under the parent's super
+                # focus the compact page is cut down to WanGP's prompt, its
+                # Generate and its progress beside its gallery, and LAYOUT_RESULT
+                # says what the page settled on. Presentation as well: offered
+                # whatever the form made of this build, and a page whose form
+                # it cannot find says so in its answer.
+                "layout_studio": True,
                 # Bridge 1.14.0: PROMPT_REQUEST. The page's prompt read and
                 # written from outside it, for the Forge Assistant's prompt box
                 # on the WanGP tab. It needs the prompt box itself - the

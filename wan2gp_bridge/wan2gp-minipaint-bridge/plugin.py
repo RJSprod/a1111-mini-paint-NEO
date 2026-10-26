@@ -81,13 +81,17 @@ THEME_FILE = "theme.css"
 #: The operations the hidden trigger understands. A request naming anything
 #: else is answered with a refusal rather than ignored, so that a parent stuck
 #: on an older protocol gets a code instead of a timeout.
-OPERATIONS = ("hello", "receivers", "receive", "queue", "confirm", "track", "flush")
+OPERATIONS = ("hello", "receivers", "receive", "queue", "confirm", "track", "flush", "prompt")
 
 #: What the answer to a queue operation is keyed by in the request box: the
 #: queue payload sits under its own key so its ``request_id`` - the public
 #: one, which is also WanGP's client id - cannot be confused with the
 #: correlation id every box request carries.
 QUEUE_KEY = "queue"
+
+#: Bridge 1.14.0: a prompt read or write sits under its own key for the same
+#: reason - ``protocol.normalize_prompt_edit`` reads it and nothing else.
+PROMPT_KEY = "edit"
 
 
 def _theme_css(folder: typing.Optional[pathlib.Path] = None) -> str:
@@ -739,6 +743,43 @@ class MiniPaintBridge:
             "generation_running": self.compat.generation_running(),
         }, {}
 
+    def prompt(
+        self,
+        raw: typing.Any,
+        live: typing.Mapping[str, typing.Any],
+    ) -> typing.Tuple[dict, typing.Dict[str, typing.Any]]:
+        """Bridge 1.14.0: the box WanGP shows its prompt in, read or written.
+
+        For the Forge Assistant's prompt box on the WanGP tab. The box is the
+        one generation reads - the wizard's while WanGP's prompt wizard is
+        on, the plain prompt otherwise, which is the choice a queue request
+        makes - and the live value is this event's input, so a read is what
+        the page shows now. A write is the page's own value from then on:
+        not an overlay, so no record is kept and nothing puts it back, as if
+        it had been typed there. A queue request's overlay still pending
+        meanwhile puts back only a box that still holds its own text
+        (``admission.restore_plan``), so it leaves a written prompt alone.
+
+        Answers with what the box holds afterwards. A prompt longer than the
+        ceiling is not read out (``PROMPT_TOO_LONG``) - the parent could not
+        write it back - and the page keeps it.
+        """
+        edit, code = protocol.normalize_prompt_edit(raw)
+        if code:
+            raise compatibility.BridgeError(code, "the prompt edit did not normalise")
+        wizard_on = str(live.get(compatibility.WIZARD_ACTIVE) or "").strip().lower() == "on"
+        target = compatibility.WIZARD_PROMPT if wizard_on else compatibility.PROMPT
+        if self.compat.component(target) is None:
+            raise compatibility.BridgeError(compatibility.BRIDGE_COMPONENT_INCOMPATIBLE, f"this WanGP handed over no {target} box")
+        if edit["write"]:
+            text = edit["prompt"]
+            return {"prompt": text, "wizard": wizard_on, "written": True}, {target: text}
+        current = live.get(target)
+        text = current if isinstance(current, str) else ""
+        if len(text) > protocol.PROMPT_MAX_CHARS:
+            raise compatibility.BridgeError(compatibility.PROMPT_TOO_LONG, f"the page's prompt is {len(text)} characters")
+        return {"prompt": text, "wizard": wizard_on, "written": False}, {}
+
     def _settle(
         self,
         record: "admission.PendingAdmission",
@@ -831,6 +872,10 @@ class MiniPaintBridge:
                 ack["ok"] = True
             elif operation == "flush":
                 answer, result = self.flush(request, self.live_values(values))
+                ack.update(answer)
+                ack["ok"] = True
+            elif operation == "prompt":
+                answer, result = self.prompt(request.get(PROMPT_KEY), self.live_values(values))
                 ack.update(answer)
                 ack["ok"] = True
             else:
@@ -1258,6 +1303,11 @@ def _summary(operation: typing.Any, ack: typing.Mapping[str, typing.Any], second
     filename, never a path.
     """
     took = f"{seconds * 1000:.0f} ms"
+    if operation == "prompt":
+        # How much, never what: the prompt is the user's text.
+        box = "the wizard's box" if ack.get("wizard") else "the prompt box"
+        done = "written" if ack.get("written") else "read"
+        return f"prompt: {done}, {len(str(ack.get('prompt') or ''))} character(s) in {box}, in {took}"
     if operation == "receive":
         line = f"receive: {ack.get('receiver_id')} {ack.get('operation')} {ack.get('verification')} in {took}"
         return line + (f", switched {ack['switched']}" if ack.get("switched") else "")

@@ -627,6 +627,109 @@ def restore_checks(r: Results, root: str) -> None:
     r.check("a page cannot see another page's owner", ledger.owner("s") is None and ledger.owner("t") is other)
 
 
+# ------------------------------------------------------- the prompt (1.14.0) --
+
+
+def _edit(bridge, live, edit, correlation="p1"):
+    """One prompt read or write, as the page's script submits it."""
+    request = {"op": "prompt", "request_id": correlation, "channel_id": "c" * 32, "edit": edit}
+    values = [live.get(key) for key in bridge.state_keys]
+    return bridge.handle(json.dumps(request), values, "session-hash-of-this-page")
+
+
+def prompt_edit_checks(r: Results, root: str) -> None:
+    """Bridge 1.14.0: the box WanGP shows its prompt in, read and written for
+    the Forge Assistant's prompt box on the WanGP tab. The box generation
+    reads, wizard on or off; a write is the page's own value, kept by nothing
+    and put back by nothing; and nothing of the text reaches WanGP's console."""
+    plugin, compatibility, _admission, _ui = _modules()
+    session = plugin.bridge_session_for("session-hash-of-this-page", "i")
+    K = compatibility
+    fresh = _page(K)
+
+    bridge, _ = _bridge({"video": VIDEO_MODEL}, root)
+    hello, _ = _call(bridge, fresh, "hello")
+    r.check("a build that hands over the prompt box offers the prompt edit in its handshake",
+            hello.get("capabilities", {}).get("prompt_edit") is True, str(hello.get("capabilities")))
+    r.check("and the operation is one the trigger understands", "prompt" in plugin.OPERATIONS)
+
+    ack, writes = _edit(bridge, fresh, {})
+    r.check("a read answers with what the plain prompt box holds while the wizard is off",
+            ack.get("ok") is True and ack.get("prompt") == "the page's own prompt" and ack.get("wizard") is False
+            and ack.get("written") is False, str({k: ack.get(k) for k in ("ok", "code", "prompt", "wizard", "written")}))
+    r.check("and writes nothing", writes == {}, str(writes))
+    outputs = bridge.outputs(ack, writes)
+    tail = dict(zip(bridge.queue_keys, outputs[1 + len(bridge.receiver_keys) + len(bridge.switch_keys):]))
+    r.check("so the prompt output is no change",
+            isinstance(tail.get(K.PROMPT), dict) and "value" not in tail[K.PROMPT], repr(tail.get(K.PROMPT)))
+    r.check("the answer is correlated like every other",
+            ack.get("op") == "prompt" and ack.get("request_id") == "p1" and ack.get("channel_id") == "c" * 32, str(ack.get("op")))
+
+    wizard = _page(K, **{K.WIZARD_ACTIVE: "on", K.WIZARD_PROMPT: "the wizard's text"})
+    ack, _ = _edit(bridge, wizard, {})
+    r.check("with the wizard on, a read answers with the wizard's box",
+            ack.get("prompt") == "the wizard's text" and ack.get("wizard") is True, str(ack.get("prompt")))
+
+    ack, writes = _edit(bridge, fresh, {"prompt": "  a cat on a mat\r\nsecond line\n"})
+    r.check("a write goes into the plain prompt box, as typed - spaces, line breaks and the trailing newline kept",
+            _raw(writes.get(K.PROMPT)) == "  a cat on a mat\nsecond line\n" and K.WIZARD_PROMPT not in writes, repr(writes))
+    r.check("and answers with what the box holds now",
+            ack.get("ok") is True and ack.get("written") is True and ack.get("prompt") == "  a cat on a mat\nsecond line\n", str(ack.get("prompt")))
+    outputs = bridge.outputs(ack, writes)
+    tail = dict(zip(bridge.queue_keys, outputs[1 + len(bridge.receiver_keys) + len(bridge.switch_keys):]))
+    r.check("the prompt output carries the text, and every other output is no change",
+            tail.get(K.PROMPT) == "  a cat on a mat\nsecond line\n"
+            and all(isinstance(value, dict) and "value" not in value for key, value in tail.items() if key != K.PROMPT), repr(tail))
+    ack, writes = _edit(bridge, wizard, {"prompt": "a dog"})
+    r.check("with the wizard on, a write goes into the wizard's box and nowhere else",
+            _raw(writes.get(K.WIZARD_PROMPT)) == "a dog" and K.PROMPT not in writes, str(sorted(writes)))
+    ack, writes = _edit(bridge, fresh, {"prompt": ""})
+    r.check("an empty box is a prompt cleared", ack.get("ok") is True and _raw(writes.get(K.PROMPT)) == "", repr(writes))
+
+    ack, writes = _edit(bridge, fresh, {"prompt": "x" * (protocol.PROMPT_MAX_CHARS + 1)})
+    r.check("a write over the ceiling is PROMPT_TOO_LONG and writes nothing",
+            ack.get("ok") is False and ack.get("code") == "PROMPT_TOO_LONG" and not writes, str(ack.get("code")))
+    ack, writes = _edit(bridge, fresh, {"prompt": 7})
+    r.check("a prompt that is not text is REQUEST_INVALID", ack.get("ok") is False and ack.get("code") == "REQUEST_INVALID" and not writes)
+    long_page = _page(K, **{K.PROMPT: "y" * (protocol.PROMPT_MAX_CHARS + 1)})
+    ack, _ = _edit(bridge, long_page, {})
+    r.check("a page whose prompt is over the ceiling is not read out - it could not be written back",
+            ack.get("ok") is False and ack.get("code") == "PROMPT_TOO_LONG" and "prompt" not in ack, str(ack.get("code")))
+
+    # A write is not an overlay: no record, so the next queue request is not busy.
+    bridge, _ = _bridge({"video": VIDEO_MODEL}, root)
+    _edit(bridge, fresh, {"prompt": "from the assistant"})
+    r.check("a write keeps no admission record", bridge.ledger.owner(session) is None)
+    ack, _ = _call(bridge, _page(K, **{K.PROMPT: "from the assistant"}), "queue", {"request_id": ID_A, "bridge_session": session})
+    r.check("so a queue request right after it is admitted, not QUEUE_BUSY", ack.get("ok") is True, str(ack.get("code")))
+
+    # A write over a pending overlay: the overlay's restore leaves it alone.
+    bridge, _ = _bridge({"video": VIDEO_MODEL}, root)
+    ack, writes = _call(bridge, fresh, "queue", {"request_id": ID_B, "bridge_session": session, "prompt": "the overlay"})
+    after = _apply(fresh, writes)
+    _ack, written = _edit(bridge, after, {"prompt": "typed in the assistant's box"})
+    after = _apply(after, written)
+    status, restore = _call(bridge, _queued(after, ID_B), "confirm", {"request_id": ID_B, "bridge_session": session})
+    r.check("a prompt written while a queue request's overlay is pending is not put back by its restore",
+            K.PROMPT not in restore and K.PROMPT in status.get("restore_skipped", []), str(sorted(restore)) + str(status.get("restore_skipped")))
+
+    # A build that did not hand over the prompt box.
+    names = tuple(name for name in FORM_NAMES if name != "prompt")
+    bridge, _ = _bridge({"video": VIDEO_MODEL}, root, names=names)
+    hello, _ = _call(bridge, fresh, "hello")
+    r.check("a build without the prompt box does not offer the prompt edit",
+            hello.get("capabilities", {}).get("prompt_edit") is False, str(hello.get("capabilities")))
+    ack, writes = _edit(bridge, fresh, {"prompt": "a cat"})
+    r.check("and refuses one with BRIDGE_COMPONENT_INCOMPATIBLE, writing nothing",
+            ack.get("ok") is False and ack.get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE" and not writes, str(ack.get("code")))
+
+    # WanGP's console: how much, never what.
+    secret = "a very particular prompt"
+    line = plugin._summary("prompt", {"prompt": secret, "wizard": False, "written": True}, 0.012)
+    r.check("the console line says a prompt was written and how long it is, never the text",
+            secret not in line and line.startswith("prompt: written") and str(len(secret)) in line, line)
+
+
 def run() -> Results:
     r = Results("wangp queue")
     try:
@@ -640,6 +743,7 @@ def run() -> Results:
         confirm_checks(r, root)
         track_checks(r, root)
         restore_checks(r, root)
+        prompt_edit_checks(r, root)
     return r
 
 

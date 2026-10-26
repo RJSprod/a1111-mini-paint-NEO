@@ -273,6 +273,28 @@ inheritance off, which is not what is on screen. Its name and its answer's
 there or here breaks the button silently, and `tests/test_wangp_protocol.py`
 holds that it overrides nothing.
 
+`prompt()` and `setPrompt(text)` (bridge 1.14.0) are the prompt WanGP's page
+shows, read and written for the same panel's prompt box on the WanGP tab (that
+extension's `docs/22-forge-assistant.md` §3.38): one `PROMPT_REQUEST`, `{}` to
+read, `{prompt}` to write, answered by `PROMPT_RESULT`. Both resolve - never
+reject - with `{ok, prompt, wizard, written}` (`prompt` is what the box holds
+afterwards, `wizard` whether it was the prompt wizard's box) or a failure's
+`{ok: false, code, message}`. A page with no bridge session answers
+`IFRAME_NOT_READY`, and a bridge whose READY did not say
+`capabilities.prompt_edit` - one older than 1.14.0, or a build that handed over
+no prompt box - is never asked: `BRIDGE_COMPONENT_INCOMPATIBLE`, whose sentence
+says to reinstall the bridge. A text that is not a string is `REQUEST_INVALID`
+and one over `PROMPT_MAX_CHARS` is `PROMPT_TOO_LONG`, both without asking. A
+write is the page's own value from then on, as if typed - not a queue request's
+overlay, so nothing puts it back - and is a change to the form: WanGP's record
+is no longer current and is saved a second later, as after a touch. It is not a
+touch: `state().prompt` is `{offered, touched}`, `touched` counting the WanGP
+page's own `FORM_CHANGED` notices alone, so a box that reads again when the page
+was touched by hand is never sent back to read its own writes. The names
+`prompt`, `setPrompt`, the answer's `ok`, `prompt`, `code` and `message`, and
+`state().prompt` are read by that extension; renaming any of them breaks its box
+silently.
+
 Protocol 6 adds `flushForm({timeoutMs, settleMs, callTimeoutMs})`: ask WanGP to
 commit this page's live settings form so a job composed later — on the server,
 with this page shut — runs at what was on screen. It writes one hidden trigger
@@ -718,6 +740,42 @@ The one window: WanGP's edit clearing the flag between two re-assertions (at mos
 let its worker - which looks every half second - take the next task. The hold then says
 `holding` again until that task ends, and the lease reports it; WanGP's plugin API has no
 hook before a task that could close it.
+
+## Bridge 1.14.0: the prompt
+
+One more page operation, additive (`PROTOCOL` stays 5) and advertised in READY as
+`capabilities.prompt_edit`, true when the build handed over WanGP's `prompt` box. The
+parent sends `PROMPT_REQUEST` with `{}` (a read) or `{prompt}` (a write);
+`protocol.normalize_prompt_edit` is the rule on both sides: a missing or null `prompt` is
+a read, a string is a write with its line endings made `\n` and `clean_prompt`'s control
+characters removed and **nothing else touched** - not stripped, and an empty string is a
+prompt cleared, because this is somebody typing in a box - anything else
+`REQUEST_INVALID`, over `PROMPT_MAX_CHARS` `PROMPT_TOO_LONG`, never cut. The page script
+refuses those two on the spot (nothing clicked) and otherwise submits `{op: "prompt",
+edit}` through the request box and the trigger like every operation; the plugin's
+`prompt` reads the box generation reads - `wizard_prompt` while `wizard_prompt_activated_var`
+is `on`, `prompt` otherwise, the choice a queue request makes - from the event's own
+inputs, and a write is that box's output value. The answer, `PROMPT_RESULT`, carries
+`prompt` (what the box holds afterwards), `wizard` and `written`. A write keeps no
+admission record, so a queue request right after it is not `QUEUE_BUSY`, and a queue
+overlay still pending meanwhile puts back only a box that still holds its own text, so a
+written prompt is left alone. A page prompt over the ceiling is not read out
+(`PROMPT_TOO_LONG`): it could not be written back. WanGP's console line says `prompt:
+read` or `written`, how many characters and which box, never the text.
+
+**It holds nothing open.** Forge's page sends a message into the frame and gets one back;
+`prompt()` and `setPrompt()` make no request, open no stream and set no repeating timer
+of their own, and each `ask` has its deadline (`PROMPT_TIMEOUT_MS`, 10 s on screen). In
+the WanGP page each read or write is one Gradio event like every other bridge operation:
+on Gradio 5.29 (WanGP's pin) a `POST /gradio_api/queue/join` and its
+`/gradio_api/queue/data` result stream, which Gradio closes as soon as the event has
+answered - about 60 ms on a 5.29 page carrying the real bridge controls, event, page
+script and plugin handler, driven in Chromium on 2026-10-26 (four reads and writes, the
+real prompt box written, an empty box clearing it). At rest the only thing open on that
+page was Gradio's own `/gradio_api/heartbeat/<session>`, there from the page's load
+before any prompt operation: WanGP's, as it always was (the session guard's subject),
+and not this operation's. `prompt_checks` holds the parent's half: no stream, no
+request but the journal's own plain POST, nothing pending.
 
 ## Bridge 1.13.0: `model`
 

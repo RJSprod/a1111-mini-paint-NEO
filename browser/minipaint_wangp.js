@@ -76,8 +76,13 @@ window.minipaintWanGP = (function () {
     // Bridge 1.11.0: how much of WanGP's own page to show. Compact while the
     // assistant's focus mode gives this tab the whole window. See layout().
     const LAYOUT_STATE = "WANGP_LAYOUT_STATE";
+    // Bridge 1.14.0: the page's prompt, read or written from outside it, for
+    // the assistant panel's prompt box on this tab. See prompt().
+    const PROMPT_REQUEST = "WANGP_PROMPT_REQUEST";
+    const PROMPT_RESULT = "WANGP_PROMPT_RESULT";
 
-    const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH, PING, LAYOUT_STATE];
+    const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH, PING, LAYOUT_STATE,
+                       PROMPT_REQUEST];
 
     //: THEME_STATE's vocabulary, as protocol.py spells it. `mode` is which of
     //: the bridge's built-in palettes is in force; `skin` is where the colours
@@ -140,7 +145,8 @@ window.minipaintWanGP = (function () {
     //: What was read, per sheet address: {state: pending|read|failed, faces:
     //: [{family, face}], why, at}. Page-lifetime, like the sheets themselves.
     const FONT_SHEETS = new Map();
-    const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED, PONG, FORM_CHANGED];
+    const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED, PONG, FORM_CHANGED,
+                       PROMPT_RESULT];
 
     // The flush outcomes, as protocol.py names them.
     const FLUSH_REQUESTED = "requested";
@@ -202,6 +208,9 @@ window.minipaintWanGP = (function () {
     const QUEUE_REQUEST_TIMEOUT_MS = 30000;
     const QUEUE_CONFIRM_TIMEOUT_MS = 10000;
     const QUEUE_TRACK_TIMEOUT_MS = 10000;
+    // A prompt read or write is one Gradio round trip on the WanGP page, like
+    // a confirmation: no file, no task, nothing to wait out but the queue.
+    const PROMPT_TIMEOUT_MS = 10000;
     const QUEUE_CONFIRM_DELAYS_MS = [0, 100, 300, 700, 1500, 3000];
     const PROMPT_MAX_CHARS = 12000;
     const MAX_QUEUE_REFERENCES = 16;
@@ -442,7 +451,10 @@ window.minipaintWanGP = (function () {
         formWatch: false,
         // Bridge 1.8.0: whether the bridge reports the page's Gradio session
         // with every answer, and guards it. See noteSession.
-        session: false
+        session: false,
+        // Bridge 1.14.0: whether it reads and writes the page's prompt for
+        // the assistant panel. See prompt().
+        promptEdit: false
     };
 
     //: The proactive flush's own state, declared here rather than beside the
@@ -473,7 +485,12 @@ window.minipaintWanGP = (function () {
         //: The quiet second after the last notice. See onFormChanged.
         changeTimer: 0,
         //: How many saves the form's changes have made, for a bug report.
-        saves: 0
+        saves: 0,
+        //: The WanGP page's own change notices alone - a person's hand on its
+        //: form - without the prompt writes this page made. What the assistant
+        //: panel's prompt box reads to know the page's prompt may have moved
+        //: under it. See prompt().
+        touched: 0
     };
 
     //: The tab's panel: whether Forge has the WanGP tab selected, and how
@@ -1449,7 +1466,10 @@ window.minipaintWanGP = (function () {
         // The two that arrive by the dozen write nothing on arrival. What
         // they lead to - a miss, a save that carried something - does.
         if (message.type === PONG) { onPong(message.requestId, message.payload); return; }
-        if (message.type === FORM_CHANGED) { onFormChanged(message.payload); return; }
+        if (message.type === FORM_CHANGED) { P.touched += 1; onFormChanged(message.payload); return; }
+        // A prompt box writes as it is typed in: what each write leads to - a
+        // refusal, the save after it - is what the journal says.
+        if (message.type === PROMPT_RESULT) { onPromptResult(message.requestId, message.payload); return; }
         say("received " + message.type + " from the iframe");
         if (message.type === READY) { onReady(message.payload); return; }
         if (message.type === RUNTIME_STATE) { onRuntimeState(message.payload); return; }
@@ -1528,6 +1548,7 @@ window.minipaintWanGP = (function () {
         S.formWatch = declared && !!(payload.capabilities && payload.capabilities.form_watch === true);
         S.session = declared && !!(payload.capabilities && payload.capabilities.session === true);
         S.layout = declared && !!(payload.capabilities && payload.capabilities.layout_compact === true);
+        S.promptEdit = declared && !!(payload.capabilities && payload.capabilities.prompt_edit === true);
         noteSession(payload.session, "ready");
         // A session this page has saved nothing from yet: whatever WanGP has
         // recorded may be from before, so no send may take it as current.
@@ -1817,6 +1838,23 @@ window.minipaintWanGP = (function () {
             ok: true,
             flush: text(payload.flush, 40),
             fingerprint: text(payload.fingerprint, 128)
+        });
+    }
+
+    /** The bridge's answer to a prompt read or write (bridge 1.14.0). */
+    function onPromptResult(requestId, payload) {
+        const entry = S.pending.get(requestId);
+        if (!entry || entry.type !== PROMPT_RESULT) { return; }
+        noteSession(payload.session, "prompt");
+        if (payload.ok === false) {
+            settle(requestId, failure(code(payload.code) || INTERNAL_ERROR, text(payload.detail, 200)));
+            return;
+        }
+        settle(requestId, {
+            ok: true,
+            prompt: text(payload.prompt, PROMPT_MAX_CHARS),
+            wizard: payload.wizard === true,
+            written: payload.written === true
         });
     }
 
@@ -3062,6 +3100,50 @@ window.minipaintWanGP = (function () {
         return queueAndConfirm({ start: START_MODES[0] });
     }
 
+    /**
+     * The prompt WanGP's page shows, read (`prompt()`) or written
+     * (`setPrompt(text)`), for the sibling extension's assistant panel, whose
+     * prompt box on the WanGP tab these are (bridge 1.14.0). The box is the
+     * one generation reads - the wizard's while WanGP's prompt wizard is on -
+     * and a write is the page's own value from then on, as if it had been
+     * typed there: not a queue request's overlay, so nothing puts it back.
+     * Both resolve - never reject - with `{ok, prompt, wizard, written}`,
+     * `prompt` being what the box holds afterwards, or a failure's
+     * `{ok: false, code, message}`. A bridge that did not offer `prompt_edit`
+     * (one older than 1.14.0) is never asked: BRIDGE_COMPONENT_INCOMPATIBLE,
+     * whose sentence says to reinstall it.
+     *
+     * A write is a change to the form, so it is counted as one: WanGP's
+     * record is saved a second later and no send takes the old record as
+     * current (onFormChanged). It is not a touch - `state().prompt.touched`
+     * counts the WanGP page's own notices only, so a box that re-reads when
+     * the page was touched is not sent back to read its own writes.
+     */
+    function prompt() {
+        return askPrompt(null);
+    }
+
+    function setPrompt(value) {
+        if (typeof value !== "string") { return Promise.resolve(failure(REQUEST_INVALID, "the prompt is not text")); }
+        if (value.length > PROMPT_MAX_CHARS) { return Promise.resolve(failure(PROMPT_TOO_LONG, "over " + PROMPT_MAX_CHARS + " characters")); }
+        return askPrompt(value);
+    }
+
+    function askPrompt(value) {
+        if (!ensure() || !S.ready || !S.bridgeSession) {
+            rearm();
+            return Promise.resolve(failure(IFRAME_NOT_READY, "no bridge session in this page"));
+        }
+        if (!S.promptEdit) {
+            return Promise.resolve(failure(BRIDGE_COMPONENT_INCOMPATIBLE, "this bridge does not read or write the prompt (older than 1.14.0)"));
+        }
+        const writing = value !== null;
+        return ask(PROMPT_REQUEST, writing ? { prompt: value } : {}, PROMPT_TIMEOUT_MS, PROMPT_RESULT).then(function (answer) {
+            if (answer && answer.ok && answer.written) { onFormChanged({ touches: 1 }); }
+            return answer;
+        });
+    }
+
     /** One bounded admission check for a request this page asked for. */
     function confirmQueue(requestId) {
         if (!HEX32.test(String(requestId || ""))) { return Promise.resolve(failure(REQUEST_INVALID, "not a request id")); }
@@ -3880,6 +3962,10 @@ window.minipaintWanGP = (function () {
             },
             // What the WanGP page was last told to show. See layout().
             layout: { offered: S.layout, compact: S.layoutSent },
+            // Bridge 1.14.0: whether the page's prompt can be read and
+            // written from here, and how many times the WanGP page said its
+            // form was touched by hand. See prompt().
+            prompt: { offered: S.promptEdit, touched: P.touched },
             tab: {
                 found: !!T.panel,
                 selected: T.selected,
@@ -4698,6 +4784,10 @@ window.minipaintWanGP = (function () {
         // pressed from outside it. A contract with the sibling extension's
         // assistant panel; see docs/wangp/CONTRACTS.md.
         generate: generate,
+        // The page's prompt, read and written for the same panel's prompt
+        // box on this tab (bridge 1.14.0); the same contract.
+        prompt: prompt,
+        setPrompt: setPrompt,
         trackQueue: trackQueue,
         flushForm: flushForm,
         // Save WanGP's form just before a send; see saveForSend. What the

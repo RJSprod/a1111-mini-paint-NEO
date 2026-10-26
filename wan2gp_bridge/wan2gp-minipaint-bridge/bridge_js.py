@@ -134,6 +134,8 @@ def configuration(theme_css: str = "") -> dict:
             "ping": protocol.PING,
             "pong": protocol.PONG,
             "formChanged": protocol.FORM_CHANGED,
+            "promptRequest": protocol.PROMPT_REQUEST,
+            "promptResult": protocol.PROMPT_RESULT,
         },
         "inbound": sorted(protocol.TO_BRIDGE),
         "receiverIds": list(protocol.RECEIVER_IDS),
@@ -610,6 +612,7 @@ __MINIPAINT_FRAME_WRAPPER__
     if (operation === "confirm") { return CONFIG.types.queueStatus; }
     if (operation === "track") { return CONFIG.types.queueTracked; }
     if (operation === "flush") { return CONFIG.types.formFlushed; }
+    if (operation === "prompt") { return CONFIG.types.promptResult; }
     return "";
   }
 
@@ -884,6 +887,26 @@ __MINIPAINT_FRAME_WRAPPER__
         op: "flush", request_id: message.request_id, channel_id: channelId,
         probe: !!(message.payload && message.payload.probe)
       });
+      return;
+    }
+
+    if (message.type === CONFIG.types.promptRequest) {
+      // Bridge 1.14.0: the page's prompt, read (no prompt) or written. The
+      // plugin checks it again; here a write the page cannot carry is
+      // refused at once rather than after a round trip.
+      var edit = {};
+      var text = message.payload.prompt;
+      if (text !== undefined && text !== null) {
+        var wrong = typeof text !== "string" ? ["REQUEST_INVALID", "the prompt is not text"]
+          : (text.length > CONFIG.promptMaxChars ? ["PROMPT_TOO_LONG", "the prompt is over " + CONFIG.promptMaxChars + " characters"] : null);
+        if (wrong) {
+          log("prompt: refused before the click - " + wrong[0]);
+          post(CONFIG.types.promptResult, message.request_id, { ok: false, code: wrong[0], detail: wrong[1] });
+          return;
+        }
+        edit.prompt = text;
+      }
+      submit({ op: "prompt", request_id: message.request_id, channel_id: channelId, edit: edit });
       return;
     }
 

@@ -602,6 +602,22 @@ system prompt by the user's choice: the enhancement view edits
 `system_prompts()["ltx23"]` beside MiniMax's two, for both models, and an
 override is kept once under `ltx23` (`enhance.PROMPT_SET_OF`).
 
+An eighth is shared since 2026-10-26: **`minipaintWanGP.prompt()` and
+`setPrompt(text)`** (bridge 1.14.0, `PROMPT_REQUEST`). The assistant panel shows a
+prompt box on the WanGP tab that reads WanGP's prompt and writes what is typed into
+it - the box generation reads, the wizard's while WanGP's prompt wizard is on - as
+the page's own value, not as a queue overlay, so ▶ afterwards generates with it. A
+write counts as a change to the form (the record is saved a second later) but not as
+a touch: `state().prompt.touched` counts the WanGP page's own notices, which is what
+the box reads again on. Renaming either function, the answer's keys or
+`state().prompt` breaks that box with nothing said; `docs/wangp/CONTRACTS.md` has
+them and `tests/test_wangp_protocol.py` (`prompt_checks`) holds them. It holds
+nothing open, at the user's word ("No live connections!"): a message into the
+frame and one back, no request or stream of this page's, and in the WanGP page one
+Gradio event whose result stream Gradio closes on the answer (checked on a Gradio
+5.29 page carrying the real bridge, `CONTRACTS.md`). A box that polled, or a
+stream opened for it, would be the trap above again.
+
 The Clipboard's own presses - the tab's Add to Queue and the gallery popup's
 Generate - are gated since 2026-10-03 by `clipboard/targets.py`: WanGP running,
 the bridge answering the model check (bridge 1.13.0, `control.model`), the page
@@ -642,9 +658,13 @@ and reload is a `heartbeat:` line in the page journal. Saving as the form
 changes and the heartbeat need bridge 1.7.0 installed in WanGP, the session guard
 bridge 1.8.0, the theme hijack - the page's colours on the WanGP page, over
 WanGP's own themes - bridge 1.9.0, the page's typeface bridge 1.10.1, the
-compact WanGP page under focus bridge 1.11.0, and the card lease's hold bridge
-1.12.0. The compact page has been checked against Gradio 5.29's own markup of
-WanGP 13.14's structure (`tests/wangp_page_gradio_5_29.html`), never against the
+compact WanGP page under focus bridge 1.11.0, the card lease's hold bridge
+1.12.0, and the assistant's prompt box on the WanGP tab bridge 1.14.0. The
+prompt box has been checked against a fake of the bridge's event and a stand-in
+of WanGP's page, never against the user's own WanGP: if a typed prompt does not
+reach WanGP's box, the WanGP console's `prompt: written` line (or its absence)
+is the first thing to look at. The compact page has been checked against
+Gradio 5.29's own markup of WanGP 13.14's structure (`tests/wangp_page_gradio_5_29.html`), never against the
 user's own WanGP: if the header is still there under focus, the WanGP page's
 console line `compact layout: no #wangp-gallery-tabs` and
 `<html data-minipaint-layout>` are the first things to look at. The hold has been

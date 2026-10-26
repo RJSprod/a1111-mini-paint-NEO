@@ -415,7 +415,11 @@ is simply never held. Bridge 1.13.0 adds the read-only `model` check
 (`capabilities.model`): whether one model is defined in this WanGP and has every file WanGP
 would fetch before generating with it, found by WanGP's own download path without
 downloading anything. The Clipboard tab blocks its WanGP section on it
-(`docs/clipboard/README.md`, *Which WanGP models it sends to*). An extension newer than its
+(`docs/clipboard/README.md`, *Which WanGP models it sends to*). Bridge 1.14.0 reads and
+writes the page's prompt (`capabilities.prompt_edit`): SD-Neo-ModelSwitchRefiner's
+assistant panel shows a prompt box on the WanGP tab that edits the prompt WanGP shows, the
+wizard's box while WanGP's prompt wizard is on, as if it had been typed there; an older
+bridge leaves that box saying the bridge needs reinstalling. An extension newer than its
 bridge says `BRIDGE_VERSION_MISMATCH` until the bridge is installed again from setup step 4
 and WanGP restarted.
 

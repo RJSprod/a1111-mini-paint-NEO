@@ -728,7 +728,9 @@ between two tasks when SD-Neo-ModelSwitchRefiner borrows its card (the card leas
 running finishes, the next waits, and Clipboard jobs wait with it until the card is given
 back - `docs/wangp/README.md`, *Sharing the machine*), and answers whether a model is set up
 (defined, and its files on disk) without downloading anything - the check the Clipboard's
-WanGP section is blocked on - so WanGP's bridge must be updated and WanGP restarted; a
+WanGP section is blocked on - and, from 1.14.0, reads and writes the page's prompt for
+SD-Neo-ModelSwitchRefiner's assistant panel, whose prompt box on the WanGP tab edits the
+prompt WanGP shows - so WanGP's bridge must be updated and WanGP restarted; a
 build lacking one of the six queue components keeps the image send and refuses the queue
 with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking the generate trigger queues but never
 starts.

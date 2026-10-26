@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.13.0"
+BRIDGE_VERSION = "1.14.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -2327,6 +2327,12 @@ class Compatibility:
                 # sits above its generator form. Presentation too, so it is
                 # offered whatever the form made of this build.
                 "layout_compact": True,
+                # Bridge 1.14.0: PROMPT_REQUEST. The page's prompt read and
+                # written from outside it, for the Forge Assistant's prompt box
+                # on the WanGP tab. It needs the prompt box itself - the
+                # wizard's is read only while the wizard is on - so a build
+                # that did not hand it over says no.
+                "prompt_edit": bool(ready and self.resolution.component(PROMPT) is not None),
             },
             # Live, and process-wide: true while any page's generation runs,
             # false when none does, None when this build cannot say.

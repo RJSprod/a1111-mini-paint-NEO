@@ -1627,12 +1627,16 @@ const B = {
   capabilities: MODE === "legacy" ? { queue: true, start: true, track: true }
     : MODE === "noping" ? { queue: true, start: true, track: true, form_watch: true }
     : MODE === "layoutLegacy" ? { queue: true, start: true, track: true, ping: true, form_watch: true, session: true }
-    : { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true },
+    : MODE === "promptLegacy" ? { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true }
+    : { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true, prompt_edit: true },
   hellos: [], presses: 0, looks: 0, pings: 0, busyMs: 0, channel: "", navigations: 0, reloadMs: 500,
   // Every THEME_STATE the parent sent, in order.
   themes: [],
   // And every LAYOUT_STATE (bridge 1.11.0).
   layouts: [],
+  // The page's prompt box, every PROMPT_REQUEST's payload, and the code the
+  // bridge refuses one with when a scenario says so (bridge 1.14.0).
+  prompt: "the page's own prompt", wizard: false, promptAsks: [], promptRefusal: "",
   // The bridge's word on the page's Gradio session, carried on every answer
   // from 1.8.0 on; null until a scenario sets it.
   session: null,
@@ -1670,6 +1674,15 @@ function toBridge(message) {
   if (message.channel_id !== B.channel) { return; }
   if (message.type === "WANGP_THEME_STATE") { B.themes.push(message.payload || {}); return; }
   if (message.type === "WANGP_LAYOUT_STATE") { B.layouts.push(message.payload || {}); return; }
+  if (message.type === "WANGP_PROMPT_REQUEST") {
+    const asked = message.payload || {};
+    B.promptAsks.push(asked);
+    if (B.promptRefusal) { reply("WANGP_PROMPT_RESULT", message.request_id, { ok: false, code: B.promptRefusal, detail: "no prompt box" }); return; }
+    const writing = typeof asked.prompt === "string";
+    if (writing) { B.prompt = asked.prompt; }
+    reply("WANGP_PROMPT_RESULT", message.request_id, { ok: true, prompt: B.prompt, wizard: B.wizard, written: writing });
+    return;
+  }
   if (message.type === "WANGP_PING") {
     B.pings += 1;
     if (B.answerPing) { reply("WANGP_PONG", message.request_id, { busy_ms: B.busyMs, op: "queue", waiting: 0 }); }
@@ -1859,6 +1872,9 @@ function settleSend(promise) { const box = { answer: null, at: 0 }; promise.then
 // is a whole multiple of five seconds from there.
 async function bootOnScreen() { api.attach(null); await advance(100); const first = now; screen(true); await advance(1); return first; }
 async function until(at) { await advance(Math.max(0, at - now)); }
+// What a call that waits on the bridge answers, once the clock has let the
+// reply arrive.
+async function answerOf(promise) { const box = settleSend(promise); await advance(50); return box.answer; }
 
 async function themeScenario() {
   api.attach(null);
@@ -1915,6 +1931,39 @@ const scenarios = {
     await advance(1000);
     focusMode(true); await advance(50); focusMode(false); await advance(50); focusMode(true); await advance(50);
     return { sent: B.layouts.length, said: linesWith("layout:"), state: api.state().layout };
+  },
+  // The page's prompt, read and written for the assistant's box (bridge 1.14.0).
+  prompt: async function () {
+    api.inheritSettings(true);
+    const early = await answerOf(api.prompt());
+    await bootOnScreen();
+    await advance(1000);
+    const offered = api.state().prompt;
+    const read = await answerOf(api.prompt());
+    const pressesBefore = B.presses;
+    const touchedBefore = api.state().prompt.touched;
+    const written = await answerOf(api.setPrompt("a cat on a mat\n"));
+    const afterWrite = { current: api.state().settings.current, touched: api.state().prompt.touched, page: B.prompt };
+    await advance(1500);
+    const saved = { presses: B.presses - pressesBefore, current: api.state().settings.current };
+    changed(); await advance(10);
+    const touchedByHand = api.state().prompt.touched - touchedBefore;
+    const cleared = await answerOf(api.setPrompt(""));
+    const asksBefore = B.promptAsks.length;
+    const notText = await answerOf(api.setPrompt(7));
+    const tooLong = await answerOf(api.setPrompt("x".repeat(12001)));
+    const askedForThose = B.promptAsks.length - asksBefore;
+    B.promptRefusal = "BRIDGE_COMPONENT_INCOMPATIBLE";
+    const refused = await answerOf(api.prompt());
+    return { early, offered, read, written, afterWrite, saved, touchedByHand, cleared, page: B.prompt, notText, tooLong,
+             askedForThose, refused, asks: B.promptAsks, carried: lines.filter((line) => line.indexOf("a cat") !== -1).length };
+  },
+  promptLegacy: async function () {
+    await bootOnScreen();
+    await advance(1000);
+    const read = await answerOf(api.prompt());
+    const write = await answerOf(api.setPrompt("a dog"));
+    return { offered: api.state().prompt, read, write, asks: B.promptAsks.length };
   },
   themeHost: themeScenario, themeBridge: themeScenario, themeOff: themeScenario,
   themeGradient: themeScenario, themeLight: themeScenario, themeUnknownLook: themeScenario,
@@ -2561,6 +2610,75 @@ def layout_checks(r: Results) -> None:
             anchored and mutated.get("onFocus") == [], "anchor gone" if not anchored else str(mutated.get("onFocus")))
 
 
+def prompt_checks(r: Results) -> None:
+    """The page's prompt, read and written from outside it (bridge 1.14.0).
+
+    For the Forge Assistant's prompt box on the WanGP tab
+    (SD-Neo-ModelSwitchRefiner's docs/22, section 3.38): the vocabulary, the
+    normaliser both sides apply, and the tab's half on the virtual clock -
+    ``prompt()`` and ``setPrompt()`` answer from the bridge, a write is a
+    change to the form (saved a second later) and not a touch, a refusal
+    keeps its code, and a bridge older than 1.14.0 is never asked. The
+    plugin's half is in tests/test_wangp_queue.py, the WanGP document's in
+    bridge_liveness_checks.
+    """
+    r.check("the parent may ask, and only the WanGP page answers",
+            protocol.PROMPT_REQUEST in protocol.TO_BRIDGE and protocol.PROMPT_REQUEST not in protocol.TO_PARENT
+            and protocol.PROMPT_RESULT in protocol.TO_PARENT and protocol.PROMPT_RESULT not in protocol.TO_BRIDGE)
+    r.check("no prompt, or a null one, is a read",
+            all(protocol.normalize_prompt_edit(v) == ({"write": False}, "") for v in (None, {}, {"prompt": None}, [], "text")))
+    r.check("a write keeps the text as it was typed - its trailing newline, its spaces",
+            protocol.normalize_prompt_edit({"prompt": "  a cat\n"}) == ({"write": True, "prompt": "  a cat\n"}, ""))
+    r.check("and an empty box is a prompt cleared, not a read",
+            protocol.normalize_prompt_edit({"prompt": ""}) == ({"write": True, "prompt": ""}, ""))
+    r.check("line endings become newlines and control characters go, as for a queue request's prompt",
+            protocol.normalize_prompt_edit({"prompt": "one\r\ntwo\rthree\x00\x1b\tfour"}) == ({"write": True, "prompt": "one\ntwo\nthree\tfour"}, ""))
+    r.check("a prompt at the ceiling is taken, one over is PROMPT_TOO_LONG, and nothing is cut",
+            protocol.normalize_prompt_edit({"prompt": "x" * protocol.PROMPT_MAX_CHARS})[1] == ""
+            and protocol.normalize_prompt_edit({"prompt": "x" * (protocol.PROMPT_MAX_CHARS + 1)}) == ({}, "PROMPT_TOO_LONG"))
+    r.check("a prompt that is not text is REQUEST_INVALID",
+            all(protocol.normalize_prompt_edit({"prompt": v}) == ({}, "REQUEST_INVALID") for v in (7, ["a"], {"a": 1}, True)))
+
+    answers = _run_live(("prompt", "promptLegacy"))
+    if answers is None:
+        r.check("node is available for the prompt checks (skipped)", True)
+        return
+    live = answers.get("prompt") or {}
+    r.check("the prompt scenario ran", "error" not in live and not live.get("thrown") and "read" in live, str(live)[:300])
+    r.check("before the WanGP page has answered, nothing is asked: IFRAME_NOT_READY",
+            (live.get("early") or {}).get("code") == "IFRAME_NOT_READY", str(live.get("early")))
+    r.check("a 1.14.0 bridge's READY offers it, and state() says so",
+            (live.get("offered") or {}).get("offered") is True, str(live.get("offered")))
+    r.check("a read answers with what the page's box holds, asking nothing to be written",
+            live.get("read") == {"ok": True, "prompt": "the page's own prompt", "wizard": False, "written": False}
+            and (live.get("asks") or [None])[0] == {}, str(live.get("read")) + str((live.get("asks") or [None])[:1]))
+    r.check("a write carries the text whole and answers with what the box holds now",
+            live.get("written") == {"ok": True, "prompt": "a cat on a mat\n", "wizard": False, "written": True}
+            and (live.get("afterWrite") or {}).get("page") == "a cat on a mat\n", str(live.get("written")))
+    r.check("a write is a change to the form: WanGP's record is no longer current",
+            (live.get("afterWrite") or {}).get("current") is False, str(live.get("afterWrite")))
+    r.check("and is saved a second later, as a touch would be",
+            (live.get("saved") or {}).get("presses") == 1, str(live.get("saved")))
+    r.check("but is not a touch: only the WanGP page's own notices count there",
+            (live.get("afterWrite") or {}).get("touched") == 0 and live.get("touchedByHand") == 1,
+            str(live.get("afterWrite")) + " " + str(live.get("touchedByHand")))
+    r.check("an empty box is written, and the page's prompt is cleared",
+            (live.get("cleared") or {}).get("written") is True and live.get("page") == "", str(live.get("cleared")))
+    r.check("a prompt that is not text, or one over the ceiling, is refused here without asking",
+            (live.get("notText") or {}).get("code") == "REQUEST_INVALID" and (live.get("tooLong") or {}).get("code") == "PROMPT_TOO_LONG"
+            and live.get("askedForThose") == 0, str(live.get("notText")) + str(live.get("tooLong")))
+    r.check("a refusal from the bridge keeps its code and says it in words",
+            (live.get("refused") or {}).get("ok") is False and (live.get("refused") or {}).get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE"
+            and "reinstalled" in (live.get("refused") or {}).get("message", ""), str(live.get("refused")))
+    r.check("and the journal never carries the prompt", live.get("carried") == 0, str(live.get("carried")))
+    legacy = answers.get("promptLegacy") or {}
+    r.check("a bridge older than 1.14.0 is never asked, and the answer says to reinstall it",
+            "error" not in legacy and legacy.get("asks") == 0 and (legacy.get("offered") or {}).get("offered") is False
+            and (legacy.get("read") or {}).get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE"
+            and (legacy.get("write") or {}).get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE"
+            and "reinstalled" in (legacy.get("read") or {}).get("message", ""), str(legacy)[:400])
+
+
 def bridge_js_config() -> dict:
     """The configuration the bridge's document script is built with."""
     import sys
@@ -2946,7 +3064,41 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const channel = "c".repeat(32);
 const count = (type) => posted.filter((p) => p.type === type).length;
 
+// Bridge 1.14.0: a prompt read or written for the parent's prompt box. A
+// request the page can carry goes through the request box and the trigger,
+// under its own key; one it cannot is refused on the spot, nothing clicked.
+async function prompt() {
+  send("WANGP_BRIDGE_HELLO", { watch_form: true }, channel, "hello1");
+  await wait(20);
+  window.__minipaintBridge.deliver(JSON.stringify({ op: "hello", request_id: "hello1", channel_id: channel, ok: true, ready: true }));
+  await wait(10);
+  const asked = (payload, request) => { const before = clicks; send("WANGP_PROMPT_REQUEST", payload, channel, request); return before; };
+  const sentBox = () => { try { return JSON.parse(box.value); } catch (e) { return null; } };
+  const answer = (id) => posted.filter((p) => p.type === "WANGP_PROMPT_RESULT" && p.request === id)[0] || null;
+  const deliver = (fields) => window.__minipaintBridge.deliver(JSON.stringify(Object.assign({ channel_id: channel }, fields)));
+  let before = asked({}, "read1");
+  await wait(30);
+  const read = { clicked: clicks - before, box: sentBox() };
+  deliver({ op: "prompt", request_id: "read1", ok: true, prompt: "the page's own", wizard: false, written: false });
+  await wait(10);
+  read.answer = answer("read1");
+  before = asked({ prompt: "a cat\n" }, "write1");
+  await wait(30);
+  const write = { clicked: clicks - before, box: sentBox() };
+  deliver({ op: "prompt", request_id: "write1", ok: true, prompt: "a cat\n", wizard: false, written: true });
+  await wait(10);
+  write.answer = answer("write1");
+  before = asked({ prompt: 7 }, "bad1");
+  const notText = { clicked: clicks - before, answer: answer("bad1") };
+  before = asked({ prompt: "x".repeat(12001) }, "long1");
+  const tooLong = { clicked: clicks - before, answer: answer("long1") };
+  await wait(30);
+  console.log(JSON.stringify({ read, write, notText, tooLong, stranger: posted.filter((p) => p.type === "WANGP_PROMPT_RESULT").every((p) => p.channel === channel) }));
+  process.exit(0);
+}
+
 async function main() {
+  if (MODE === "prompt") { return prompt(); }
   send("WANGP_BRIDGE_HELLO", MODE === "unasked" ? {} : { watch_form: true }, channel, "hello1");
   await wait(20);
   const clicksAfterHello = clicks;
@@ -3335,7 +3487,7 @@ def bridge_liveness_checks(r: Results) -> None:
         root = pathlib.Path(scratch)
         (root / "bridge.js").write_text(bridge_js.document_script(""), encoding="utf-8")
         (root / "harness.js").write_text(_BRIDGE_LIVE_HARNESS, encoding="utf-8")
-        for mode in ("watch", "unasked"):
+        for mode in ("watch", "unasked", "prompt"):
             try:
                 run = subprocess.run([node, str(root / "harness.js"), str(root / "bridge.js"), mode],
                                      capture_output=True, text=True, timeout=30, check=False)
@@ -3381,6 +3533,30 @@ def bridge_liveness_checks(r: Results) -> None:
     r.check("a parent whose hello did not ask is told of no touch at all",
             "error" not in unasked and unasked.get("first") == 0 and unasked.get("afterDrag") == 0, repr(unasked))
     r.check("but is still answered when it pings", unasked.get("pongNow") == 1, repr(unasked))
+
+    # Bridge 1.14.0: the prompt, read and written for the assistant's box.
+    edited = results.get("prompt", {})
+    r.check("the script knows PROMPT_REQUEST and PROMPT_RESULT from protocol.py, and takes the request in",
+            config["types"].get("promptRequest") == protocol.PROMPT_REQUEST and config["types"].get("promptResult") == protocol.PROMPT_RESULT
+            and protocol.PROMPT_REQUEST in config["inbound"], repr(config["types"]))
+    read = edited.get("read") or {}
+    r.check("a read goes to the plugin through the request box and the trigger, under its own key, asking nothing written",
+            "error" not in edited and read.get("clicked") == 1
+            and (read.get("box") or {}).get("op") == "prompt" and (read.get("box") or {}).get("edit") == {}, repr(edited)[:400])
+    r.check("and the plugin's answer goes back to the parent as a PROMPT_RESULT on the request that asked",
+            ((read.get("answer") or {}).get("payload") or {}).get("prompt") == "the page's own"
+            and (read.get("answer") or {}).get("origin") == "http://forge.test", repr(read.get("answer")))
+    write = edited.get("write") or {}
+    r.check("a write carries the text as it was typed, trailing newline and all",
+            write.get("clicked") == 1 and (write.get("box") or {}).get("edit") == {"prompt": "a cat\n"}
+            and ((write.get("answer") or {}).get("payload") or {}).get("written") is True, repr(write)[:400])
+    r.check("a prompt that is not text is refused on the spot, nothing clicked",
+            (edited.get("notText") or {}).get("clicked") == 0
+            and (((edited.get("notText") or {}).get("answer") or {}).get("payload") or {}).get("code") == "REQUEST_INVALID", repr(edited.get("notText")))
+    r.check("and one over the ceiling is PROMPT_TOO_LONG, nothing clicked",
+            (edited.get("tooLong") or {}).get("clicked") == 0
+            and (((edited.get("tooLong") or {}).get("answer") or {}).get("payload") or {}).get("code") == "PROMPT_TOO_LONG", repr(edited.get("tooLong")))
+    r.check("every prompt answer goes to the channel that asked", edited.get("stranger") is True, repr(edited)[:200])
 
 
 def page_head_checks(r: Results) -> None:
@@ -5677,6 +5853,7 @@ def run() -> Results:
     theme_send_checks(r)
     theme_checks(r)
     layout_checks(r)
+    prompt_checks(r)
     heartbeat_checks(r)
     panel_checks(r)
     session_checks(r)

@@ -69,13 +69,22 @@ FORM_CHANGED = "WANGP_FORM_CHANGED"
 #: over, never answered, and sent only to a bridge whose READY said
 #: ``layout_compact`` - an older one drops a type it does not know.
 LAYOUT_STATE = "WANGP_LAYOUT_STATE"
+#: The page's prompt, read or written from outside it (bridge 1.14.0), for the
+#: Forge Assistant's prompt box on the WanGP tab. A request with no ``prompt``
+#: reads the box WanGP shows - the wizard's while its wizard is on - and one
+#: with a ``prompt`` writes it there, as the page's own value and not as a
+#: queue request's overlay: nothing puts it back. Answered with what the box
+#: holds afterwards. Sent only to a bridge whose READY said ``prompt_edit``;
+#: an older one drops a type it does not know.
+PROMPT_REQUEST = "WANGP_PROMPT_REQUEST"
+PROMPT_RESULT = "WANGP_PROMPT_RESULT"
 
 #: What the parent page may send into the iframe.
 TO_BRIDGE = frozenset({HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH,
-                       PING, LAYOUT_STATE})
+                       PING, LAYOUT_STATE, PROMPT_REQUEST})
 #: What the iframe may send out to the parent page.
 TO_PARENT = frozenset({READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED,
-                       PONG, FORM_CHANGED})
+                       PONG, FORM_CHANGED, PROMPT_RESULT})
 
 #: Stable logical receiver ids. The bridge maps these onto whatever the
 #: installed WanGP calls them; MiniPaint only ever sees these.
@@ -407,6 +416,34 @@ def normalize_layout(payload: typing.Any) -> dict:
     """
     source = payload if isinstance(payload, dict) else {}
     return {"compact": source.get("compact") is True}
+
+
+def normalize_prompt_edit(payload: typing.Any) -> typing.Tuple[dict, str]:
+    """A PROMPT_REQUEST payload as the bridge takes it: ``(edit, code)``.
+
+    No ``prompt`` (or a null one) is a read, ``{"write": False}``. A string is
+    a write of that text, ``{"write": True, "prompt": text}``, with line
+    endings made ``\n`` and the control characters ``clean_prompt`` removes
+    removed - and nothing else touched. Unlike a queue request's prompt it is
+    not stripped and may be empty: this is somebody typing in a box, a
+    trailing newline is the line they are about to write and an empty box is
+    a prompt they cleared. Anything else is ``REQUEST_INVALID``, a text over
+    PROMPT_MAX_CHARS is ``PROMPT_TOO_LONG``; neither is cut to fit.
+    """
+    source = payload if isinstance(payload, dict) else {}
+    value = source.get("prompt")
+    if value is None:
+        return {"write": False}, ""
+    if not isinstance(value, str):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    text = value.replace("\r\n", "\n").replace("\r", "\n")
+    text = "".join(
+        character for character in text
+        if character in "\n\t" or unicodedata.category(character) != "Cc"
+    )
+    if len(text) > PROMPT_MAX_CHARS:
+        return {}, QUEUE_CODE_PROMPT_TOO_LONG
+    return {"write": True, "prompt": text}, ""
 
 
 def canonical_json(value: typing.Any) -> str:

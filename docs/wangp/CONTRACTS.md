@@ -763,6 +763,20 @@ written prompt is left alone. A page prompt over the ceiling is not read out
 (`PROMPT_TOO_LONG`): it could not be written back. WanGP's console line says `prompt:
 read` or `written`, how many characters and which box, never the text.
 
+**It holds nothing open.** Forge's page sends a message into the frame and gets one back;
+`prompt()` and `setPrompt()` make no request, open no stream and set no repeating timer
+of their own, and each `ask` has its deadline (`PROMPT_TIMEOUT_MS`, 10 s on screen). In
+the WanGP page each read or write is one Gradio event like every other bridge operation:
+on Gradio 5.29 (WanGP's pin) a `POST /gradio_api/queue/join` and its
+`/gradio_api/queue/data` result stream, which Gradio closes as soon as the event has
+answered - about 60 ms on a 5.29 page carrying the real bridge controls, event, page
+script and plugin handler, driven in Chromium on 2026-10-26 (four reads and writes, the
+real prompt box written, an empty box clearing it). At rest the only thing open on that
+page was Gradio's own `/gradio_api/heartbeat/<session>`, there from the page's load
+before any prompt operation: WanGP's, as it always was (the session guard's subject),
+and not this operation's. `prompt_checks` holds the parent's half: no stream, no
+request but the journal's own plain POST, nothing pending.
+
 ## Bridge 1.13.0: `model`
 
 One more read-only operation on the control plane, additive (`CONTROL_VERSION` stays 1) and

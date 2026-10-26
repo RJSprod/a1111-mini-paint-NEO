@@ -1774,6 +1774,10 @@ const win = {
              getPropertyValue: function (name) { return PAGE_VARS[name] || ""; } };
   },
   requestAnimationFrame: (f) => vSet(f, 16), innerHeight: 900,
+  // A stream of any kind the bundle opens, counted: the prompt scenario holds
+  // that reading and writing WanGP's prompt opens none.
+  EventSource: class { constructor(url) { OPENED.push(["eventsource", String(url)]); } close() {} },
+  WebSocket: class { constructor(url) { OPENED.push(["websocket", String(url)]); } close() {} },
   crypto: { getRandomValues: (b) => { for (let i = 0; i < b.length; i++) { b[i] = Math.floor(Math.random() * 256); } return b; } }
 };
 // The Forge page's theme variables, for the theme scenarios: a dark page
@@ -1840,6 +1844,7 @@ if (MODE === "pull" || MODE === "pulloff") {
 }
 global.window = win; global.document = doc;
 global.MutationObserver = win.MutationObserver;
+const OPENED = [];
 // Every request the bundle makes, by address; the three foreign sheets are
 // answered as their hosts would, everything else as before.
 const FETCHES = [];
@@ -1938,6 +1943,8 @@ const scenarios = {
     const early = await answerOf(api.prompt());
     await bootOnScreen();
     await advance(1000);
+    const fetchesBefore = FETCHES.length;
+    const openedBefore = OPENED.length;
     const offered = api.state().prompt;
     const read = await answerOf(api.prompt());
     const pressesBefore = B.presses;
@@ -1955,8 +1962,12 @@ const scenarios = {
     const askedForThose = B.promptAsks.length - asksBefore;
     B.promptRefusal = "BRIDGE_COMPONENT_INCOMPATIBLE";
     const refused = await answerOf(api.prompt());
+    // Nothing but the journal's own plain POST went on the wire meanwhile:
+    // every read and write was a message to the frame, and nothing was opened.
+    const fetched = FETCHES.slice(fetchesBefore).filter((url) => url !== "/minipaint-wangp/client-log");
     return { early, offered, read, written, afterWrite, saved, touchedByHand, cleared, page: B.prompt, notText, tooLong,
-             askedForThose, refused, asks: B.promptAsks, carried: lines.filter((line) => line.indexOf("a cat") !== -1).length };
+             askedForThose, refused, asks: B.promptAsks, carried: lines.filter((line) => line.indexOf("a cat") !== -1).length,
+             fetched, opened: OPENED.slice(openedBefore), pending: api.state().pending };
   },
   promptLegacy: async function () {
     await bootOnScreen();
@@ -2671,6 +2682,10 @@ def prompt_checks(r: Results) -> None:
             (live.get("refused") or {}).get("ok") is False and (live.get("refused") or {}).get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE"
             and "reinstalled" in (live.get("refused") or {}).get("message", ""), str(live.get("refused")))
     r.check("and the journal never carries the prompt", live.get("carried") == 0, str(live.get("carried")))
+    r.check("no live connection: reading and writing the prompt opens no stream, makes no request of its own"
+            " and leaves nothing waiting",
+            live.get("opened") == [] and live.get("fetched") == [] and live.get("pending") == 0,
+            str({k: live.get(k) for k in ("opened", "fetched", "pending")}))
     legacy = answers.get("promptLegacy") or {}
     r.check("a bridge older than 1.14.0 is never asked, and the answer says to reinstall it",
             "error" not in legacy and legacy.get("asks") == 0 and (legacy.get("offered") or {}).get("offered") is False

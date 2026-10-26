@@ -611,7 +611,12 @@ write counts as a change to the form (the record is saved a second later) but no
 a touch: `state().prompt.touched` counts the WanGP page's own notices, which is what
 the box reads again on. Renaming either function, the answer's keys or
 `state().prompt` breaks that box with nothing said; `docs/wangp/CONTRACTS.md` has
-them and `tests/test_wangp_protocol.py` (`prompt_checks`) holds them.
+them and `tests/test_wangp_protocol.py` (`prompt_checks`) holds them. It holds
+nothing open, at the user's word ("No live connections!"): a message into the
+frame and one back, no request or stream of this page's, and in the WanGP page one
+Gradio event whose result stream Gradio closes on the answer (checked on a Gradio
+5.29 page carrying the real bridge, `CONTRACTS.md`). A box that polled, or a
+stream opened for it, would be the trap above again.
 
 The Clipboard's own presses - the tab's Add to Queue and the gallery popup's
 Generate - are gated since 2026-10-03 by `clipboard/targets.py`: WanGP running,

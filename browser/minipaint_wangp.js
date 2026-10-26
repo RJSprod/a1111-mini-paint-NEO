@@ -74,8 +74,11 @@ window.minipaintWanGP = (function () {
     const PONG = "WANGP_PONG";
     const FORM_CHANGED = "WANGP_FORM_CHANGED";
     // Bridge 1.11.0: how much of WanGP's own page to show. Compact while the
-    // assistant's focus mode gives this tab the whole window. See layout().
+    // assistant's focus mode gives this tab the whole window, a studio (bridge
+    // 1.15.0) under its super focus; the page says what it settled on in a
+    // LAYOUT_RESULT. See layout().
     const LAYOUT_STATE = "WANGP_LAYOUT_STATE";
+    const LAYOUT_RESULT = "WANGP_LAYOUT_RESULT";
     // Bridge 1.14.0: the page's prompt, read or written from outside it, for
     // the assistant panel's prompt box on this tab. See prompt().
     const PROMPT_REQUEST = "WANGP_PROMPT_REQUEST";
@@ -146,7 +149,11 @@ window.minipaintWanGP = (function () {
     //: [{family, face}], why, at}. Page-lifetime, like the sheets themselves.
     const FONT_SHEETS = new Map();
     const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED, PONG, FORM_CHANGED,
-                       PROMPT_RESULT];
+                       PROMPT_RESULT, LAYOUT_RESULT];
+    //: LAYOUT_RESULT's vocabulary, as protocol.py spells it.
+    const LAYOUTS = ["whole", "compact", "studio"];
+    const LAYOUT_MISSING = ["", "form", "prompt", "actions", "progress", "error"];
+    const MAX_LAYOUT_PARTS = 4096;
 
     // The flush outcomes, as protocol.py names them.
     const FLUSH_REQUESTED = "requested";
@@ -303,6 +310,11 @@ window.minipaintWanGP = (function () {
     //: sizer below reads it to leave nothing under the frame. The name is the
     //: contract with that extension (docs/wangp/CONTRACTS.md).
     const FOCUS_ROOT_CLASS = "forge-assistant-focus-root";
+    //: The class the same assistant adds beside it under its super focus: the
+    //: WanGP page is then a studio - its prompt, its Generate and its progress
+    //: beside its gallery, and nothing else (bridge 1.15.0). The same
+    //: contract.
+    const STUDIO_CLASS = "forge-assistant-wangp-studio";
     //: The panel's width in its place, kept across a park so the WanGP
     //: page's layout never changes with the tab. See keepPanelWidth.
     const PARKED_WIDTH_PROPERTY = "--minipaint-wangp-parked-width";
@@ -428,11 +440,19 @@ window.minipaintWanGP = (function () {
         lastCode: "",
         theme: "",
         // Whether the bridge hides WanGP's title, tab strip and model row on
-        // request (its READY said `layout_compact`), what it was last told,
-        // and what the journal last said about it. See layout().
+        // request (its READY said `layout_compact`), whether it lays the page
+        // out as a studio (`layout_studio`, bridge 1.15.0), what it was last
+        // told ("whole", "compact" or "studio") and under which request, what
+        // it answered it shows and did not find, and what the journal last
+        // said about it. See layout().
         layout: false,
+        layoutStudio: false,
         layoutSent: null,
+        layoutRequest: "",
+        layoutShown: null,
+        layoutMissing: "",
         layoutSaid: "",
+        studioRefusedSaid: false,
         // Whether the bridge in this page can take a queue request at all: the
         // handshake says, and a build that lacks a queue-critical component
         // says no while still taking an image send.
@@ -1470,6 +1490,8 @@ window.minipaintWanGP = (function () {
         // A prompt box writes as it is typed in: what each write leads to - a
         // refusal, the save after it - is what the journal says.
         if (message.type === PROMPT_RESULT) { onPromptResult(message.requestId, message.payload); return; }
+        // Presentation: what the page settled on is a line of its own.
+        if (message.type === LAYOUT_RESULT) { onLayoutResult(message.requestId, message.payload); return; }
         say("received " + message.type + " from the iframe");
         if (message.type === READY) { onReady(message.payload); return; }
         if (message.type === RUNTIME_STATE) { onRuntimeState(message.payload); return; }
@@ -1548,6 +1570,7 @@ window.minipaintWanGP = (function () {
         S.formWatch = declared && !!(payload.capabilities && payload.capabilities.form_watch === true);
         S.session = declared && !!(payload.capabilities && payload.capabilities.session === true);
         S.layout = declared && !!(payload.capabilities && payload.capabilities.layout_compact === true);
+        S.layoutStudio = S.layout && !!(payload.capabilities && payload.capabilities.layout_studio === true);
         S.promptEdit = declared && !!(payload.capabilities && payload.capabilities.prompt_edit === true);
         noteSession(payload.session, "ready");
         // A session this page has saved nothing from yet: whatever WanGP has
@@ -3442,6 +3465,10 @@ window.minipaintWanGP = (function () {
         if (H.stuck) { hideStuckBar("the WanGP view was taken away"); }
         S.bridgeSession = "";
         S.bridgeVersion = "";
+        S.layoutStudio = false;
+        S.layoutRequest = "";
+        S.layoutShown = null;
+        S.layoutMissing = "";
         S.receivers = [];
         S.revision = "";
         S.query = null;
@@ -3960,8 +3987,16 @@ window.minipaintWanGP = (function () {
                 } : null,
                 refused: S.themeFont && S.themeFont.refused ? S.themeFont.refused : ""
             },
-            // What the WanGP page was last told to show. See layout().
-            layout: { offered: S.layout, compact: S.layoutSent },
+            // What the WanGP page was last told to show, and what it said it
+            // shows. See layout().
+            layout: {
+                offered: S.layout,
+                compact: S.layoutSent === null ? null : S.layoutSent !== "whole",
+                studio: S.layoutStudio,
+                asked: S.layoutSent,
+                shown: S.layoutShown,
+                missing: S.layoutMissing
+            },
             // Bridge 1.14.0: whether the page's prompt can be read and
             // written from here, and how many times the WanGP page said its
             // form was touched by hand. See prompt().
@@ -4445,41 +4480,116 @@ window.minipaintWanGP = (function () {
      * How much of WanGP's own page to show, sent to the bridge as
      * LAYOUT_STATE: compact while the assistant's focus mode has given this
      * tab the whole window (the class that extension puts on the panel, read
-     * by focusedPanel), whole otherwise. Compact is the WanGP page without its
-     * title, its tab strip, its model row and the model's description - under
-     * focus somebody is creating, not choosing a model - and the bridge puts
-     * them all back when told whole.
+     * by focusedPanel), a studio while its super focus is on as well (the
+     * second class, read by studioPanel), whole otherwise. Compact is the
+     * WanGP page without its title, its tab strip, its model row and the
+     * model's description - under focus somebody is creating, not choosing a
+     * model - and a studio is the compact page cut down to WanGP's prompt, its
+     * Generate and its progress beside its gallery. The bridge puts it all
+     * back when told whole.
      *
-     * Presentation, like theme(): never a reason a picture cannot be sent,
-     * never answered. Sent when the page becomes ready - a new page is whole
-     * until told - and whenever focus starts or ends; the same answer twice
-     * is not sent twice. A bridge older than 1.11.0 never said
-     * `layout_compact` and is not sent it: the journal says once, the first
-     * time focus would have asked, that the page keeps its header.
+     * Presentation, like theme(): never a reason a picture cannot be sent.
+     * Sent when the page becomes ready - a new page is whole until told - and
+     * whenever focus or super focus starts or ends; the same answer twice is
+     * not sent twice. A bridge older than 1.11.0 never said `layout_compact`
+     * and is not sent it, and one older than 1.15.0 never said
+     * `layout_studio` and is told compact, never `studio`: the journal says
+     * once, the first time either would have been asked, that the page keeps
+     * its header or shows its form. The page answers (1.15.0) with what it
+     * settled on; see onLayoutResult.
      */
+    function wantedLayout() {
+        if (!focusedPanel()) { return "whole"; }
+        return studioPanel() ? "studio" : "compact";
+    }
+
     function layout() {
-        const compact = !!focusedPanel();
+        const wanted = wantedLayout();
         if (!S.ready) { return false; }
         if (!S.layout) {
-            if (compact && !S.layoutSaid) {
+            if (wanted !== "whole" && !S.layoutSaid) {
                 S.layoutSaid = "layout: this WanGP bridge (" + (S.bridgeVersion || "unknown")
                     + ") is older than 1.11.0; the WanGP page keeps its header under focus";
                 say(S.layoutSaid);
             }
             return false;
         }
-        if (S.layoutSent === compact) { return false; }
-        const sent = post(LAYOUT_STATE, hex32(), { compact: compact });
+        let asked = wanted;
+        if (wanted === "studio" && !S.layoutStudio) {
+            asked = "compact";
+            if (!S.studioRefusedSaid) {
+                S.studioRefusedSaid = true;
+                say("layout: this WanGP bridge (" + (S.bridgeVersion || "unknown")
+                    + ") is older than 1.15.0; super focus shows WanGP's page compact until the bridge is reinstalled from the WanGP tab");
+            }
+        }
+        if (S.layoutSent === asked) { return false; }
+        // A studio is sent only to a bridge that offered one, so an older
+        // bridge hears exactly what it always heard.
+        const payload = S.layoutStudio ? { compact: asked !== "whole", studio: asked === "studio" } : { compact: asked !== "whole" };
+        const request = hex32();
+        const sent = post(LAYOUT_STATE, request, payload);
         if (!sent) { return false; }
-        S.layoutSent = compact;
-        const summary = compact
-            ? "layout: compact under focus - WanGP's title, tab strip, model row and description hidden"
-            : "layout: whole - WanGP's title, tab strip, model row and description shown";
+        S.layoutSent = asked;
+        S.layoutRequest = request;
+        S.layoutShown = null;
+        S.layoutMissing = "";
+        const summary = asked === "studio"
+            ? "layout: studio under super focus - WanGP's prompt, Generate and progress beside its gallery"
+            : asked === "compact"
+                ? "layout: compact under focus - WanGP's title, tab strip, model row and description hidden"
+                : "layout: whole - WanGP's title, tab strip, model row and description shown";
         if (summary !== S.layoutSaid) {
             S.layoutSaid = summary;
             say(summary);
         }
         return true;
+    }
+
+    /** The tab's panel while the assistant's super focus is on (the panel
+     * focused, and marked a studio as well), else null. */
+    function studioPanel() {
+        const panel = focusedPanel();
+        try {
+            return panel && panel.classList.contains(STUDIO_CLASS) ? panel : null;
+        } catch (e) { return null; }
+    }
+
+    /** A LAYOUT_RESULT as protocol.normalize_layout_result reads it. */
+    function normaliseLayoutResult(payload) {
+        const source = payload && typeof payload === "object" ? payload : {};
+        const shown = LAYOUTS.indexOf(source.layout) !== -1 ? source.layout : "whole";
+        const missing = LAYOUT_MISSING.indexOf(source.missing) !== -1 ? source.missing : "";
+        let hidden = source.hidden;
+        if (typeof hidden !== "number" || !Number.isInteger(hidden) || hidden < 0 || hidden > MAX_LAYOUT_PARTS) { hidden = 0; }
+        return { layout: shown, hidden: shown === "whole" ? 0 : hidden, missing: missing };
+    }
+
+    /**
+     * What the WanGP page says it shows after the last LAYOUT_STATE (bridge
+     * 1.15.0). Kept for state().layout, and a line in the journal only when
+     * it is less than was asked: no form (the page stayed whole), no prompt
+     * box (a studio asked for, the page compact), or a studio without
+     * WanGP's Generate bar or its progress. An answer to an earlier request
+     * is not this one's.
+     */
+    function onLayoutResult(requestId, payload) {
+        if (!requestId || requestId !== S.layoutRequest) { return; }
+        const answer = normaliseLayoutResult(payload);
+        S.layoutRequest = "";
+        S.layoutShown = answer.layout;
+        S.layoutMissing = answer.missing;
+        const asked = S.layoutSent;
+        const why = {
+            form: "no generator form on the page", prompt: "no prompt box in the form",
+            actions: "WanGP's Generate bar", progress: "WanGP's progress", error: "a failure in the page"
+        }[answer.missing] || "";
+        if (answer.layout !== asked) {
+            say("layout: the WanGP page could not show the " + asked + " layout (" + (why || "no reason given")
+                + "); it shows " + answer.layout);
+        } else if (answer.layout === "studio" && answer.missing) {
+            say("layout: studio without " + why);
+        }
     }
 
     /** The WanGP top-level tab, through the Canvas's one tab switcher. There

@@ -31,7 +31,9 @@ Gradio applies it the way it applies a human upload. The theme is injected
 here too, in its own try/catch, because a stylesheet that fails to apply must
 not take image handoff with it; and so is the compact layout (bridge 1.11.0),
 which hides WanGP's own header while the parent's focus mode gives the tab the
-window - presentation again, touching no value and no event.
+window, and the studio (bridge 1.15.0), which shows WanGP's prompt, Generate
+and progress beside its gallery and nothing else - presentation again,
+touching no value and no event.
 
 The script is generated from Python so that the protocol constants have one
 definition rather than two: they are interpolated as JSON from ``protocol``.
@@ -103,6 +105,33 @@ LAYOUT_ATTRIBUTE = "data-minipaint-layout"
 #: On every element the compact layout took out, naming which part it is.
 CHROME_ATTRIBUTE = "data-minipaint-chrome"
 
+#: The studio layout (bridge 1.15.0): the compact page cut down to what the
+#: Forge Assistant's super focus asks for - WanGP's prompt, its Generate and
+#: its progress in one column, its gallery in the other, a divider between
+#: them that the person drags. Found from the same anchor, and inside the
+#: generator form by what WanGP itself names: the two prompt boxes by the ids
+#: wgp.py gives them (``PROMPT_ADVANCED_ELEM_ID``, ``PROMPT_WIZARD_ELEM_ID``),
+#: the progress and the action bar by the classes it gives them. Everything
+#: between the two prompt boxes stays with them - the wizard's variables.
+STUDIO_PROMPT_IDS = ("wangp-prompt-advanced", "wangp-prompt-wizard")
+STUDIO_PROGRESS_CLASS = "wangp-progress-container"
+STUDIO_ACTIONS_CLASS = "wangp-settings-actions"
+#: On every element the studio kept and arranged, naming which part it is.
+STUDIO_ATTRIBUTE = "data-minipaint-studio"
+#: The prompt column's share of the row, as a fraction: where it starts, and
+#: how far the divider may take it. A dragged share is this browser's, kept
+#: under STUDIO_SPLIT_KEY (the WanGP page is on Forge's origin, so it is the
+#: same storage the Forge page has) - a convenience, never state.
+STUDIO_SPLIT = 0.4
+STUDIO_SPLIT_MIN = 0.2
+STUDIO_SPLIT_MAX = 0.75
+STUDIO_SPLIT_KEY = "minipaint-wangp:studio-split"
+#: Narrower than this, the two columns stack: the prompt's, then the gallery.
+STUDIO_STACK_BELOW_PX = 720
+#: The smallest the gallery is drawn, and what it leaves under itself.
+STUDIO_GALLERY_MIN_PX = 240
+STUDIO_GALLERY_MARGIN_PX = 12
+
 #: What ``.then(js=...)`` runs with the acknowledgement textbox's value. It
 #: names one method on one object and swallows its own failures, so a bridge
 #: that is not present cannot turn into a console error on every event.
@@ -123,6 +152,7 @@ def configuration(theme_css: str = "") -> dict:
             "focusReceiver": protocol.FOCUS_RECEIVER,
             "themeState": protocol.THEME_STATE,
             "layoutState": protocol.LAYOUT_STATE,
+            "layoutResult": protocol.LAYOUT_RESULT,
             "queueRequest": protocol.QUEUE_REQUEST,
             "queueResult": protocol.QUEUE_RESULT,
             "queueConfirm": protocol.QUEUE_CONFIRM,
@@ -168,6 +198,18 @@ def configuration(theme_css: str = "") -> dict:
         "chromeAnchorId": CHROME_ANCHOR_ID,
         "layoutAttribute": LAYOUT_ATTRIBUTE,
         "chromeAttribute": CHROME_ATTRIBUTE,
+        # The studio layout (bridge 1.15.0). See STUDIO_PROMPT_IDS.
+        "studioPromptIds": list(STUDIO_PROMPT_IDS),
+        "studioProgressClass": STUDIO_PROGRESS_CLASS,
+        "studioActionsClass": STUDIO_ACTIONS_CLASS,
+        "studioAttribute": STUDIO_ATTRIBUTE,
+        "studioSplit": STUDIO_SPLIT,
+        "studioSplitMin": STUDIO_SPLIT_MIN,
+        "studioSplitMax": STUDIO_SPLIT_MAX,
+        "studioSplitKey": STUDIO_SPLIT_KEY,
+        "studioStackBelowPx": STUDIO_STACK_BELOW_PX,
+        "studioGalleryMinPx": STUDIO_GALLERY_MIN_PX,
+        "studioGalleryMarginPx": STUDIO_GALLERY_MARGIN_PX,
         # THEME_STATE's vocabulary, so the script applies a theme exactly as
         # protocol.normalize_theme would: the modes, the skins, the palette's
         # slots and the one shape a colour may have.
@@ -343,13 +385,22 @@ _SCRIPT = r"""
   var changeSent = 0;
   var changeTouches = 0;
   var changeSeq = 0;
-  // The compact layout: what the parent last asked for, the elements taken out
-  // with the inline display each had before, and the bounded retry for a page
-  // that has not rendered its form yet. See layout.
-  var layoutWanted = false;
+  // The compact layout: what the parent last asked for ("whole", "compact" or
+  // "studio"), the elements taken out with the inline display each had
+  // before, and the bounded retry for a page that has not rendered its form
+  // yet. See layout. The request the answer goes back under, and what was
+  // last answered, so a retry that changes nothing says nothing.
+  var layoutWanted = "whole";
   var layoutHidden = [];
   var layoutAttempts = 0;
   var layoutTimer = 0;
+  var layoutRequest = "";
+  // The studio (bridge 1.15.0): every inline declaration it wrote, with what
+  // was there before, in the order written; the elements it marked; its own
+  // divider; and what it listens to while arranged. See arrangeStudio.
+  var studio = null;
+  var studioHeld = [];
+  var studioMarked = [];
 
   function log(message) {
     try { if (typeof console !== "undefined" && console.debug) { console.debug("[minipaint bridge] " + message); } }
@@ -429,10 +480,15 @@ __MINIPAINT_FRAME_WRAPPER__
     catch (error) { return []; }
   }
 
+  // An element the layout took out of the page (CHROME_ATTRIBUTE) is not a
+  // reason a set is not the live one: the studio hides the column WanGP put
+  // the bridge's controls in, and that is still the form on screen.
   function surroundingsDisplayed(column) {
     var node = column.parentElement;
     while (node && node !== document.body) {
-      try { if (window.getComputedStyle(node).display === "none") { return false; } }
+      try {
+        if (!node.hasAttribute(CONFIG.chromeAttribute) && window.getComputedStyle(node).display === "none") { return false; }
+      }
       catch (error) { return true; }
       node = node.parentElement;
     }
@@ -921,7 +977,7 @@ __MINIPAINT_FRAME_WRAPPER__
     }
 
     if (message.type === CONFIG.types.layoutState) {
-      layout(message.payload);
+      layout(message.payload, message.request_id);
       return;
     }
   }
@@ -954,6 +1010,8 @@ __MINIPAINT_FRAME_WRAPPER__
     var target = event.target;
     try {
       if (target && target.closest && target.closest("." + CONFIG.columnClass)) { return; }
+      // The studio's divider is the bridge's own, and moves no value.
+      if (target && target.closest && target.closest("[" + CONFIG.studioAttribute + "='divider']")) { return; }
     } catch (error) {}
     changeTouches += 1;
     if (changeTimer) { return; }
@@ -1161,6 +1219,7 @@ __MINIPAINT_FRAME_WRAPPER__
       try {
         held.element.style.removeProperty("display");
         if (held.display) { held.element.style.setProperty("display", held.display, held.priority); }
+        if (held.bare && !held.element.style.length) { held.element.removeAttribute("style"); }
         held.element.removeAttribute(CONFIG.chromeAttribute);
       } catch (error) {}
     }
@@ -1173,47 +1232,465 @@ __MINIPAINT_FRAME_WRAPPER__
       var element = parts[i][0];
       try {
         layoutHidden.push({ element: element, display: element.style.getPropertyValue("display"),
-                            priority: element.style.getPropertyPriority("display") });
+                            priority: element.style.getPropertyPriority("display"), bare: !element.hasAttribute("style") });
         element.style.setProperty("display", "none", "important");
         element.setAttribute(CONFIG.chromeAttribute, parts[i][1]);
       } catch (error) {}
     }
   }
 
+  function retryLayout() {
+    if (layoutAttempts >= CONFIG.triggerAttempts) { return false; }
+    layoutAttempts += 1;
+    layoutTimer = window.setTimeout(applyLayout, CONFIG.triggerRetryMs);
+    return true;
+  }
+
+  // What the page shows now: "whole", "compact" or "studio"; how many parts it
+  // took out; and, when it could not do all it was asked, the first thing it
+  // did not find - "form" (no generator form: the page stays whole), "prompt"
+  // (no prompt box: the page stays compact), "actions" or "progress" (a
+  // studio without WanGP's Generate bar or its progress). `pending` while a
+  // bounded look for a form not drawn yet is still to come.
+  function layoutAnswer(shown, missing, pending) {
+    return {
+      compact: layoutWanted !== "whole",
+      studio: shown === "studio",
+      layout: shown,
+      hidden: shown === "whole" ? 0 : layoutHidden.length,
+      missing: missing || "",
+      pending: !!pending
+    };
+  }
+
+  // Settled: answered once, to the request that asked (bridge 1.15.0's
+  // LAYOUT_RESULT), and never again for a retry or a re-fit of the same one.
+  function layoutSettled(shown, missing) {
+    var answer = layoutAnswer(shown, missing, false);
+    if (layoutRequest) {
+      post(CONFIG.types.layoutResult, layoutRequest, { layout: answer.layout, hidden: answer.hidden, missing: answer.missing });
+      layoutRequest = "";
+    }
+    return answer;
+  }
+
   function applyLayout() {
     layoutTimer = 0;
     var root = document.documentElement;
-    if (!layoutWanted) {
+    if (layoutWanted === "whole") {
+      clearStudio();
       showChrome();
       try { root.removeAttribute(CONFIG.layoutAttribute); } catch (error) {}
-      return 0;
+      return layoutSettled("whole", "");
     }
     var parts = chromeParts();
     if (!parts) {
       // The form not drawn yet: a few more looks, as for the trigger, and
       // then WanGP's page stays whole - never a half-compact page.
-      if (layoutAttempts < CONFIG.triggerAttempts) {
-        layoutAttempts += 1;
-        layoutTimer = window.setTimeout(applyLayout, CONFIG.triggerRetryMs);
-      } else {
-        log("compact layout: no #" + CONFIG.chromeAnchorId + " on this page; it stays whole");
-      }
-      return 0;
+      if (retryLayout()) { return layoutAnswer("whole", "", true); }
+      log("compact layout: no #" + CONFIG.chromeAnchorId + " on this page; it stays whole");
+      return layoutSettled("whole", "form");
     }
-    hideChrome(parts);
-    try { root.setAttribute(CONFIG.layoutAttribute, "compact"); } catch (error) {}
-    return parts.length;
+    var found = layoutWanted === "studio" ? studioParts() : null;
+    var arranged = !!(found && typeof found === "object");
+    clearStudio();
+    hideChrome(arranged ? parts.concat(found.hide) : parts);
+    if (arranged) { arrangeStudio(found); }
+    try { root.setAttribute(CONFIG.layoutAttribute, arranged ? "studio" : "compact"); } catch (error) {}
+    if (layoutWanted === "studio" && !arranged) {
+      // The form is drawn and its prompt is not, yet - or this WanGP names it
+      // differently. Compact meanwhile, the same bounded looks, and then
+      // compact it stays, with the reason said.
+      if (retryLayout()) { return layoutAnswer("compact", found, true); }
+      log("studio layout: no " + found + " in the generator form; the page stays compact");
+      return layoutSettled("compact", found);
+    }
+    if (arranged && found.missing) {
+      log("studio layout: arranged without WanGP's " + (found.missing === "actions" ? "Generate bar" : "progress"));
+    }
+    return layoutSettled(arranged ? "studio" : "compact", arranged ? found.missing : "");
   }
 
-  // A LAYOUT_STATE payload as protocol.normalize_layout reads it: compact
-  // only for a real true. Presentation, and never answered.
-  function layout(payload) {
-    layoutWanted = !!(payload && typeof payload === "object" && payload.compact === true);
+  // A LAYOUT_STATE payload as protocol.normalize_layout reads it: a studio
+  // only for a real true, which is compact as well; compact only for a real
+  // true. Presentation; answered, since 1.15.0, with LAYOUT_RESULT.
+  function layout(payload, requestId) {
+    var source = payload && typeof payload === "object" ? payload : {};
+    layoutWanted = source.studio === true ? "studio" : (source.compact === true ? "compact" : "whole");
+    layoutRequest = isToken(requestId) ? requestId : "";
     layoutAttempts = 0;
     if (layoutTimer) { window.clearTimeout(layoutTimer); layoutTimer = 0; }
-    var hidden = 0;
-    try { hidden = applyLayout(); } catch (error) { hidden = 0; }
-    return { compact: layoutWanted, hidden: hidden };
+    try {
+      return applyLayout();
+    } catch (error) {
+      // Never a half-arranged page: whatever went wrong, WanGP's page whole.
+      log("layout: " + (error && error.message ? error.message : "failed") + "; the page is put back whole");
+      try { clearStudio(); showChrome(); document.documentElement.removeAttribute(CONFIG.layoutAttribute); } catch (again) {}
+      return layoutSettled("whole", "error");
+    }
+  }
+
+  // -- the studio layout (bridge 1.15.0) -----------------------------------------
+  //
+  // The Forge Assistant's super focus: WanGP's page as its prompt, its
+  // Generate and its progress in one column and its gallery - the video
+  // playing and the strip under it - in the other, a divider between the two
+  // that the person drags, and nothing else. On top of the compact layout.
+  //
+  // Nothing moves. The generator form's row becomes a grid and its two
+  // columns `display: contents`, so the blocks kept are placed in the grid
+  // where they already are in the document; every other block of the form,
+  // what WanGP has around it and Gradio's footer are taken out the compact
+  // layout's way (an inline `display: none !important`, marked "settings",
+  // "details", "around" or "footer"); and every declaration written on a kept
+  // element is written inline with !important and recorded with what was
+  // there before, so leaving puts each one back as it was. The divider is the
+  // one element of the bridge's own, and goes with the studio.
+
+  function holderOf(parent, className) {
+    var found = null;
+    try { found = parent.querySelector("." + className); } catch (error) { found = null; }
+    return found ? childHolding(parent, found) : null;
+  }
+
+  function hasClass(element, name) {
+    return !!(element && element.classList && element.classList.contains(name));
+  }
+
+  // The generator form's row - the nearest row around the gallery tabs whose
+  // child holding them has a column before it: WanGP's settings column, then
+  // its actions column - and what the studio keeps of it. A string when it
+  // cannot be found: what is missing.
+  function studioParts() {
+    var anchor = document.getElementById(CONFIG.chromeAnchorId);
+    if (!anchor) { return "form"; }
+    var row = null, settings = null, actions = null;
+    for (var node = anchor; node && node.parentElement && node !== document.body; node = node.parentElement) {
+      var parent = node.parentElement;
+      if (!hasClass(parent, "row")) { continue; }
+      var before = node.previousElementSibling;
+      while (before && !hasClass(before, "column")) { before = before.previousElementSibling; }
+      if (before) { row = parent; settings = before; actions = node; break; }
+    }
+    if (!row) { return "form"; }
+
+    var kids = Array.prototype.slice.call(settings.children);
+    var first = -1, last = -1;
+    for (var i = 0; i < CONFIG.studioPromptIds.length; i += 1) {
+      var box = null;
+      try { box = settings.querySelector("#" + CONFIG.studioPromptIds[i]); } catch (error) { box = null; }
+      var at = box ? kids.indexOf(childHolding(settings, box)) : -1;
+      if (at === -1) { continue; }
+      if (first === -1 || at < first) { first = at; }
+      if (at > last) { last = at; }
+    }
+    if (first === -1) { return "prompt"; }
+
+    var prompts = kids.slice(first, last + 1);
+    var gallery = childHolding(actions, anchor);
+    var generate = holderOf(actions, CONFIG.studioActionsClass);
+    var progress = holderOf(actions, CONFIG.studioProgressClass);
+    var kept = prompts.concat([gallery, generate, progress]);
+    var hide = [];
+    var push = function (element, part) {
+      for (var j = 0; j < hide.length; j += 1) { if (hide[j][0] === element) { return; } }
+      hide.push([element, part]);
+    };
+    kids.forEach(function (kid) { if (prompts.indexOf(kid) === -1) { push(kid, "settings"); } });
+    Array.prototype.slice.call(actions.children).forEach(function (kid) {
+      if (kept.indexOf(kid) === -1) { push(kid, "details"); }
+    });
+    // Around the form, up to the tab's own column: whatever WanGP puts beside
+    // the form or after it there. What sits before it in that column is the
+    // compact layout's already.
+    var tabpanel = anchor.parentElement && typeof anchor.parentElement.closest === "function"
+      ? anchor.parentElement.closest("[role='tabpanel'], .tabitem") : null;
+    var column = tabpanel ? childHolding(tabpanel, anchor) : null;
+    for (var up = row; column && up && up !== column && up.parentElement; up = up.parentElement) {
+      var seen = false;
+      var siblings = Array.prototype.slice.call(up.parentElement.children);
+      for (var k = 0; k < siblings.length; k += 1) {
+        if (siblings[k] === up) { seen = true; continue; }
+        if (up.parentElement === column && !seen) { continue; }
+        if (siblings[k] !== settings && siblings[k] !== actions) { push(siblings[k], "around"); }
+      }
+    }
+    var footers = [];
+    try { footers = Array.prototype.slice.call(document.querySelectorAll(".gradio-container footer")); } catch (error) { footers = []; }
+    footers.forEach(function (footer) { if (!footer.contains(row)) { push(footer, "footer"); } });
+
+    var media = null;
+    try { media = anchor.querySelector("#gallery"); } catch (error) { media = null; }
+    return {
+      row: row, settings: settings, actions: actions, prompts: prompts, gallery: gallery,
+      generate: generate, progress: progress, media: media, hide: hide,
+      missing: !generate ? "actions" : (!progress ? "progress" : "")
+    };
+  }
+
+  function holdStyle(element, name, value) {
+    if (!element || !element.style) { return; }
+    studioHeld.push({ element: element, name: name, value: element.style.getPropertyValue(name),
+                      priority: element.style.getPropertyPriority(name), bare: !element.hasAttribute("style") });
+    element.style.setProperty(name, value, "important");
+  }
+
+  // A declaration the studio already holds, written again: no new record,
+  // and nothing written when it is what is there.
+  function restyle(element, name, value) {
+    if (!element || !element.style) { return; }
+    if (element.style.getPropertyValue(name) === value && element.style.getPropertyPriority(name) === "important") { return; }
+    element.style.setProperty(name, value, "important");
+  }
+
+  function markStudio(element, part) {
+    try { element.setAttribute(CONFIG.studioAttribute, part); studioMarked.push(element); } catch (error) {}
+  }
+
+  function storedSplit() {
+    var value = NaN;
+    try { value = parseFloat(window.localStorage.getItem(CONFIG.studioSplitKey)); } catch (error) { value = NaN; }
+    return isFinite(value) ? value : CONFIG.studioSplit;
+  }
+
+  function saveSplit() {
+    if (!studio) { return; }
+    try { window.localStorage.setItem(CONFIG.studioSplitKey, String(Math.round(studio.split * 1000) / 1000)); } catch (error) {}
+  }
+
+  function rowWidth() {
+    var width = 0;
+    try { width = studio.row.getBoundingClientRect().width; } catch (error) { width = 0; }
+    return width || window.innerWidth || 0;
+  }
+
+  // The share the prompt column may have at this width: inside the bounds,
+  // and never so much that either column is narrower than it can be used at.
+  function clampSplit(value, width) {
+    var low = Math.max(CONFIG.studioSplitMin, width ? 280 / width : 0);
+    var high = Math.min(CONFIG.studioSplitMax, width ? 1 - 320 / width : 1);
+    if (!isFinite(value)) { value = CONFIG.studioSplit; }
+    if (high < low) { return CONFIG.studioSplit; }
+    return Math.min(high, Math.max(low, value));
+  }
+
+  function studioStyleSheet() {
+    if (document.getElementById("minipaint-bridge-studio")) { return; }
+    var divider = "[" + CONFIG.studioAttribute + "='divider']";
+    var tag = document.createElement("style");
+    tag.id = "minipaint-bridge-studio";
+    tag.textContent = divider + "::before { content: ''; position: absolute; top: 0; bottom: 0; left: 5px; width: 2px;"
+      + " border-radius: 1px; background: var(--border-color-primary, rgba(127, 127, 127, 0.4)); }\n"
+      + divider + ":hover::before, " + divider + ":focus-visible::before, " + divider + "[data-dragging]::before"
+      + " { background: var(--color-accent, #2563eb); }\n"
+      + divider + ":focus { outline: none; }\n";
+    (document.head || document.documentElement).appendChild(tag);
+  }
+
+  function arrangeStudio(found) {
+    var left = found.prompts.slice();
+    if (found.generate) { left.push(found.generate); }
+    if (found.progress) { left.push(found.progress); }
+    studio = { row: found.row, left: left, gallery: found.gallery, media: found.media, divider: null,
+               split: storedSplit(), stacked: null, frame: 0, drag: null };
+
+    markStudio(found.row, "row");
+    markStudio(found.settings, "settings-column");
+    markStudio(found.actions, "actions-column");
+    holdStyle(found.settings, "display", "contents");
+    holdStyle(found.actions, "display", "contents");
+    holdStyle(found.row, "display", "grid");
+    // The whole width of the tab, whatever the row it sits in makes of it.
+    holdStyle(found.row, "width", "100%");
+    holdStyle(found.row, "grid-template-columns", "minmax(0, 1fr)");
+    holdStyle(found.row, "grid-template-rows", "repeat(" + left.length + ", auto) minmax(0, 1fr)");
+    holdStyle(found.row, "align-items", "start");
+    holdStyle(found.row, "gap", "0px");
+    for (var i = 0; i < left.length; i += 1) {
+      var part = i < found.prompts.length ? "prompt" : (left[i] === found.generate ? "actions" : "progress");
+      markStudio(left[i], part);
+      holdStyle(left[i], "grid-column", "1");
+      holdStyle(left[i], "grid-row", String(i + 1));
+      holdStyle(left[i], "min-width", "0px");
+      holdStyle(left[i], "margin-bottom", "var(--layout-gap, 12px)");
+    }
+    // WanGP floats its action bar over the bottom of the window until its
+    // place comes into view, and dresses it as floating whenever it is above
+    // the place its script measures - which, the columns being contents
+    // here, is wherever the gallery ends. Its place is under the prompt.
+    if (found.generate) {
+      holdStyle(found.generate, "position", "static");
+      holdStyle(found.generate, "background", "transparent");
+      holdStyle(found.generate, "border-color", "transparent");
+      holdStyle(found.generate, "box-shadow", "none");
+      holdStyle(found.generate, "backdrop-filter", "none");
+    }
+    markStudio(found.gallery, "gallery");
+    holdStyle(found.gallery, "grid-column", "3");
+    holdStyle(found.gallery, "grid-row", "1 / -1");
+    holdStyle(found.gallery, "min-width", "0px");
+    if (found.media) {
+      markStudio(found.media, "media");
+      holdStyle(found.media, "height", found.media.style.getPropertyValue("height") || "auto");
+    }
+
+    studioStyleSheet();
+    var divider = document.createElement("div");
+    divider.setAttribute(CONFIG.studioAttribute, "divider");
+    divider.setAttribute("role", "separator");
+    divider.setAttribute("aria-orientation", "vertical");
+    divider.setAttribute("aria-label", "Prompt and gallery widths");
+    divider.setAttribute("aria-valuemin", String(Math.round(CONFIG.studioSplitMin * 100)));
+    divider.setAttribute("aria-valuemax", String(Math.round(CONFIG.studioSplitMax * 100)));
+    divider.tabIndex = 0;
+    divider.title = "Drag to share the width between the prompt and the gallery; double-click to reset";
+    var look = { "grid-column": "2", "grid-row": "1 / -1", "align-self": "stretch", "position": "relative",
+                 "width": "12px", "min-height": "48px", "cursor": "col-resize", "touch-action": "none", "user-select": "none" };
+    Object.keys(look).forEach(function (name) { divider.style.setProperty(name, look[name], "important"); });
+    divider.addEventListener("pointerdown", startStudioDrag);
+    divider.addEventListener("pointermove", moveStudioDrag);
+    divider.addEventListener("pointerup", endStudioDrag);
+    divider.addEventListener("pointercancel", endStudioDrag);
+    divider.addEventListener("lostpointercapture", endStudioDrag);
+    divider.addEventListener("keydown", studioKey);
+    divider.addEventListener("dblclick", resetSplit);
+    found.row.appendChild(divider);
+    studio.divider = divider;
+    window.addEventListener("resize", scheduleStudio, false);
+    fitStudio();
+  }
+
+  // The columns for this width - two with the divider, or stacked - and the
+  // gallery as tall as the window leaves it. Written only where it changed.
+  function fitStudio() {
+    if (!studio) { return; }
+    studio.frame = 0;
+    var width = rowWidth();
+    var stacked = width < CONFIG.studioStackBelowPx;
+    studio.stacked = stacked;
+    studio.split = clampSplit(studio.split, width);
+    var share = Math.round(studio.split * 1000) / 1000;
+    restyle(studio.row, "grid-template-columns", stacked ? "minmax(0, 1fr)"
+      : "minmax(0, " + share + "fr) 12px minmax(0, " + (Math.round((1 - share) * 1000) / 1000) + "fr)");
+    restyle(studio.gallery, "grid-column", stacked ? "1" : "3");
+    restyle(studio.gallery, "grid-row", stacked ? String(studio.left.length + 1) : "1 / -1");
+    if (studio.divider) {
+      restyle(studio.divider, "display", stacked ? "none" : "block");
+      studio.divider.setAttribute("aria-valuenow", String(Math.round(share * 100)));
+    }
+    if (studio.media) {
+      // As tall as the window leaves it once the page is at its top: what is
+      // above the gallery, what its own tab holds under it, and what the page
+      // keeps under the form all come off.
+      var view = window.innerHeight || document.documentElement.clientHeight || 0;
+      var height = Math.round(view * 0.6);
+      if (!stacked) {
+        try {
+          var media = studio.media.getBoundingClientRect();
+          var under = studio.gallery.getBoundingClientRect().bottom - media.bottom;
+          height = Math.round(view - (media.top + (window.pageYOffset || 0)) - Math.max(0, under)
+            - trailing(studio.row) - CONFIG.studioGalleryMarginPx);
+        } catch (error) {
+          height = Math.round(view * 0.6);
+        }
+      }
+      restyle(studio.media, "height", Math.max(CONFIG.studioGalleryMinPx, height) + "px");
+    }
+  }
+
+  // What the page keeps under an element whose following siblings are all
+  // out of the layout: every ancestor's bottom padding, border and margin.
+  function trailing(element) {
+    var total = 0;
+    for (var node = element; node && node !== document.documentElement; node = node.parentElement) {
+      try {
+        var look = window.getComputedStyle(node);
+        total += (parseFloat(look.paddingBottom) || 0) + (parseFloat(look.borderBottomWidth) || 0) + (parseFloat(look.marginBottom) || 0);
+      } catch (error) {}
+    }
+    return total;
+  }
+
+  function scheduleStudio() {
+    if (!studio || studio.frame) { return; }
+    studio.frame = window.requestAnimationFrame(fitStudio);
+  }
+
+  function setSplit(value, save) {
+    if (!studio) { return; }
+    studio.split = clampSplit(value, rowWidth());
+    fitStudio();
+    if (save) { saveSplit(); }
+  }
+
+  function startStudioDrag(event) {
+    if (!studio || studio.stacked) { return; }
+    if (event.pointerType === "mouse" && event.button !== 0) { return; }
+    event.preventDefault();
+    studio.drag = { pointer: event.pointerId };
+    try { studio.divider.setPointerCapture(event.pointerId); } catch (error) {}
+    studio.divider.setAttribute("data-dragging", "true");
+  }
+
+  function moveStudioDrag(event) {
+    if (!studio || !studio.drag || event.pointerId !== studio.drag.pointer) { return; }
+    var box = null;
+    try { box = studio.row.getBoundingClientRect(); } catch (error) { box = null; }
+    if (!box || box.width <= 12) { return; }
+    setSplit((event.clientX - box.left - 6) / (box.width - 12), false);
+  }
+
+  function endStudioDrag(event) {
+    if (!studio || !studio.drag) { return; }
+    if (event && event.pointerId !== undefined && event.pointerId !== studio.drag.pointer) { return; }
+    var pointer = studio.drag.pointer;
+    studio.drag = null;
+    try { if (studio.divider.hasPointerCapture(pointer)) { studio.divider.releasePointerCapture(pointer); } } catch (error) {}
+    studio.divider.removeAttribute("data-dragging");
+    saveSplit();
+  }
+
+  function studioKey(event) {
+    if (!studio) { return; }
+    var step = event.shiftKey ? 0.1 : 0.02;
+    var key = event.key;
+    var next = key === "ArrowLeft" ? studio.split - step : key === "ArrowRight" ? studio.split + step
+      : key === "Home" ? CONFIG.studioSplitMin : key === "End" ? CONFIG.studioSplitMax : null;
+    if (next === null) { return; }
+    event.preventDefault();
+    setSplit(next, true);
+  }
+
+  function resetSplit(event) {
+    if (event) { event.preventDefault(); }
+    setSplit(CONFIG.studioSplit, true);
+  }
+
+  // Everything the studio wrote, put back in the reverse of the order it was
+  // written, and its divider gone. The compact layout's own parts are
+  // showChrome's.
+  function clearStudio() {
+    var current = studio;
+    studio = null;
+    if (current) {
+      if (current.frame) { try { window.cancelAnimationFrame(current.frame); } catch (error) {} }
+      window.removeEventListener("resize", scheduleStudio, false);
+      if (current.divider && current.divider.parentNode) { current.divider.parentNode.removeChild(current.divider); }
+    }
+    for (var i = studioHeld.length - 1; i >= 0; i -= 1) {
+      var held = studioHeld[i];
+      try {
+        held.element.style.removeProperty(held.name);
+        if (held.value) { held.element.style.setProperty(held.name, held.value, held.priority); }
+        // An element that had no style attribute is left with none.
+        if (held.bare && !held.element.style.length) { held.element.removeAttribute("style"); }
+      } catch (error) {}
+    }
+    studioHeld = [];
+    for (var j = 0; j < studioMarked.length; j += 1) {
+      try { studioMarked[j].removeAttribute(CONFIG.studioAttribute); } catch (error) {}
+    }
+    studioMarked = [];
   }
 
   window.__minipaintBridge = { deliver: deliver, theme: theme, layout: layout };

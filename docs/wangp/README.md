@@ -419,7 +419,10 @@ downloading anything. The Clipboard tab blocks its WanGP section on it
 writes the page's prompt (`capabilities.prompt_edit`): SD-Neo-ModelSwitchRefiner's
 assistant panel shows a prompt box on the WanGP tab that edits the prompt WanGP shows, the
 wizard's box while WanGP's prompt wizard is on, as if it had been typed there; an older
-bridge leaves that box saying the bridge needs reinstalling. An extension newer than its
+bridge leaves that box saying the bridge needs reinstalling. Bridge 1.15.0 lays the page out
+as a studio under that assistant's super focus (`capabilities.layout_studio`; see *Super
+focus: the studio*, below) and answers every `LAYOUT_STATE` with what it shows; an older
+bridge shows the compact page there. An extension newer than its
 bridge says `BRIDGE_VERSION_MISMATCH` until the bridge is installed again from setup step 4
 and WanGP restarted.
 
@@ -493,8 +496,8 @@ window. On the WanGP tab the workspace *is* the WanGP page, so under focus the t
 frame and nothing else: the panel's padding and border go, *Integration management* is not
 displayed, and the frame is given the panel's whole height - nothing under it. Nothing is
 reloaded or repainted and the iframe is not moved (a moved iframe reloads its document);
-three presses on the assistant's header or launcher turn focus on and off, and leaving it
-puts the accordion back. The contract is the one class that extension writes on the tab's
+two presses on the assistant's header or launcher turn focus on, and leaving it puts the
+accordion back. The contract is the one class that extension writes on the tab's
 panel, `forge-assistant-focus-root`; `style.css` and `browser/minipaint_wangp.js` read it,
 and `tests/browser_intercept.py` measures the result in a real browser against a copy of
 that extension's own rule.
@@ -508,13 +511,41 @@ hidden control keeps its value and its events, since nothing is removed from the
 Leaving focus shows them again. With the strip hidden the WanGP tab you were on is the one
 you stay on; to change model or open another WanGP tab, leave focus. The journal says
 `layout: compact under focus - ...` and `layout: whole - ...` on each change;
-`minipaintWanGP.state().layout` is `{offered, compact}`. In the WanGP page, `<html>` has
+`minipaintWanGP.state().layout` is `{offered, compact, studio, asked, shown, missing}`. In the WanGP page, `<html>` has
 `data-minipaint-layout="compact"` while compact, and each element taken out carries
 `data-minipaint-chrome` (`title`, `tabs` or `model`). With a bridge older than 1.11.0 the
 journal says once that the page keeps its header under focus. The parts are found from the
 one id WanGP gives its gallery tabs for bridges, `#wangp-gallery-tabs`, and never from a
 label; a WanGP that drops that id keeps its page whole under focus, and the page's console
 says `compact layout: no #wangp-gallery-tabs on this page; it stays whole`.
+
+## Super focus: the studio
+
+Two more presses on the assistant's header or launcher, from focus on the WanGP tab, are
+its **Super Focused** mode: the WanGP page becomes a studio - WanGP's prompt, its Generate
+(its live controls while it generates) and its progress in one column, its gallery - the
+video playing with its controls, the strip of results under it - in the other, and
+nothing else. WanGP's settings, its model row, its galleries' details and its queue are
+put away; the assistant's panel and Forge's tab bar go too. A divider between the two
+columns can be dragged, moved with the arrow keys, or put back with a double click, and
+the share is remembered in this browser. Under 720 pixels of page the columns stack. Two
+more presses, Escape or a switch of tab end it, and the WanGP page is whole again with
+every setting where it was; what was typed and generated meanwhile stays (bridge 1.15.0).
+
+Nothing in WanGP's page moves and nothing is reloaded: its form's row is laid out as a
+grid with the blocks kept where they already are in the document, and every other block
+taken out the compact way; leaving puts back every declaration it wrote. The journal says
+`layout: studio under super focus - ...`, and when the page could not do it all, what it
+did not find - `layout: the WanGP page could not show the studio layout (no prompt box in
+the form); it shows compact`, or `layout: studio without WanGP's Generate bar`. In the
+WanGP page `<html>` has `data-minipaint-layout="studio"` and each kept part carries
+`data-minipaint-studio`; the page's console says `studio layout: ...` when it could not
+find the prompt box. The prompt boxes are found by the ids WanGP gives them
+(`wangp-prompt-advanced`, `wangp-prompt-wizard`), the action bar and the progress by
+WanGP's classes (`wangp-settings-actions`, `wangp-progress-container`); a WanGP set up
+without its floating action bar has no such class, and the studio is shown without
+Generate (the assistant's ▶ still presses it). With a bridge older than 1.15.0 the journal
+says once that super focus shows the page compact until the bridge is reinstalled.
 
 ## When the WanGP view stops answering
 

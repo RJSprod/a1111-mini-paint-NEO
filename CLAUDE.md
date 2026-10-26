@@ -618,6 +618,30 @@ Gradio event whose result stream Gradio closes on the answer (checked on a Gradi
 5.29 page carrying the real bridge, `CONTRACTS.md`). A box that polled, or a
 stream opened for it, would be the trap above again.
 
+A ninth is shared since 2026-10-26: **a second class, `forge-assistant-wangp-studio`,**
+beside `forge-assistant-focus-root` on the WanGP tab's panel - the assistant's Super
+Focused mode (its docs/22 §3.39; two presses on its launcher cycle Normal, Focused and,
+on this tab, Super Focused). The tab's panel observer already hears class changes, and
+`layout()` sends `LAYOUT_STATE {compact, studio}` to a bridge that says
+`layout_studio` (bridge 1.15.0): `bridge_js.py` lays WanGP's page out as a studio - the
+prompt boxes by wgp.py's ids, WanGP's action bar and progress by its classes, beside the
+gallery tabs, the form's row made a grid with its columns `display: contents` so nothing
+moves, every declaration inline `!important` and put back exactly, a divider of its own -
+and answers with `LAYOUT_RESULT {layout, hidden, missing}`. Renaming the class on either
+side leaves super focus showing the compact page with nothing said; `docs/wangp/CONTRACTS.md`
+(*Bridge 1.15.0: the studio*) has it, `layout_checks` in `tests/test_wangp_protocol.py` and
+`check_super_focus_makes_the_wangp_page_a_studio` in `tests/browser_intercept.py` hold it.
+The studio hides the image prompt column WanGP put the bridge's controls in, so
+`surroundingsDisplayed` reads an element the layout took out (`data-minipaint-chrome`) as
+displayed: a live set behind the layout is still the live set. And a captured Gradio page
+for a browser check must hold no picture in a gallery: a gallery holding pictures draws a
+button inside a button, the HTML parser closes the outer one early when the file is read
+back, and the tree it builds is not Gradio's (`tests/wangp_studio_gradio_5_29.html` says
+so); such a page also needs Gradio's own row, column and tab rules and its border-box
+sizing to lay out as Gradio's does (`STUDIO_GRADIO_CSS`), and a blob address rather than
+`srcdoc` for any check that messages it, because an about:srcdoc document's
+`location.origin` is "null" and the bridge checks every message against its own origin.
+
 The Clipboard's own presses - the tab's Add to Queue and the gallery popup's
 Generate - are gated since 2026-10-03 by `clipboard/targets.py`: WanGP running,
 the bridge answering the model check (bridge 1.13.0, `control.model`), the page
@@ -659,11 +683,17 @@ changes and the heartbeat need bridge 1.7.0 installed in WanGP, the session guar
 bridge 1.8.0, the theme hijack - the page's colours on the WanGP page, over
 WanGP's own themes - bridge 1.9.0, the page's typeface bridge 1.10.1, the
 compact WanGP page under focus bridge 1.11.0, the card lease's hold bridge
-1.12.0, and the assistant's prompt box on the WanGP tab bridge 1.14.0. The
+1.12.0, the assistant's prompt box on the WanGP tab bridge 1.14.0, and the assistant's
+Super Focused studio bridge 1.15.0. The
 prompt box has been checked against a fake of the bridge's event and a stand-in
 of WanGP's page, never against the user's own WanGP: if a typed prompt does not
 reach WanGP's box, the WanGP console's `prompt: written` line (or its absence)
-is the first thing to look at. The compact page has been checked against
+is the first thing to look at. The studio has been checked against Gradio 5.29's own
+markup of WanGP's Media Generator form (`tests/wangp_studio_gradio_5_29.html`) and watched
+once on a live 5.29 page with WanGP's own stylesheet and page script through a fake
+generation, never against the user's own WanGP: if super focus shows the whole form or the
+compact page, the journal's `layout:` line (it says what the page did not find) and the
+WanGP page's `<html data-minipaint-layout>` are the first things to look at. The compact page has been checked against
 Gradio 5.29's own markup of WanGP 13.14's structure (`tests/wangp_page_gradio_5_29.html`), never against the
 user's own WanGP: if the header is still there under focus, the WanGP page's
 console line `compact layout: no #wangp-gallery-tabs` and

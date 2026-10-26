@@ -381,8 +381,10 @@ contract is that extension's `docs/22-forge-assistant.md` (§3.24, §3.37).
 attribute observer hears the class change (`attributeFilter: ["style", "class"]`); the
 same answer is never sent twice. Only to a bridge whose READY said
 `capabilities.layout_compact`; otherwise the journal says once, when focus would have
-asked, that the page keeps its header. Presentation like `THEME_STATE`: never answered,
-never a reason a send fails. `state().layout` is `{offered, compact}`.
+asked, that the page keeps its header. Presentation like `THEME_STATE`: never a reason a
+send fails. `state().layout` is `{offered, compact, studio, asked, shown, missing}`
+(`studio` whether the bridge offers the studio, `asked` the last layout sent, `shown` and
+`missing` what the page answered; see *Bridge 1.15.0: the studio*).
 
 The heartbeat: while the WanGP tab is on screen and the page is visible, a
 bridge whose READY said `capabilities.ping` is sent `PING` every 5 s and
@@ -441,7 +443,7 @@ tabs (the title), and every block of the panel's column before the one holding t
 the inline display each had and removes both marks. A part holding the bridge's own column
 is never taken. No anchor yet: up to `TRIGGER_ATTEMPTS` looks `TRIGGER_RETRY_MS` apart,
 then the page stays whole. `window.__minipaintBridge.layout(payload)` returns
-`{compact, hidden}`. Measured on Gradio 5.29's own markup of WanGP's structure
+`{compact, studio, layout, hidden, missing, pending}`. Measured on Gradio 5.29's own markup of WanGP's structure
 (`tests/wangp_page_gradio_5_29.html`) by `tests/browser_intercept.py`. The handshake says
 `capabilities.theme_palette`; a parent that never hears it sends `mode` alone, and
 the script's first paint is the bridge's own dark until the parent speaks.
@@ -776,6 +778,78 @@ page was Gradio's own `/gradio_api/heartbeat/<session>`, there from the page's l
 before any prompt operation: WanGP's, as it always was (the session guard's subject),
 and not this operation's. `prompt_checks` holds the parent's half: no stream, no
 request but the journal's own plain POST, nothing pending.
+
+## Bridge 1.15.0: the studio
+
+SD-Neo-ModelSwitchRefiner's assistant has three modes since 2026-10-26 (its
+`docs/22-forge-assistant.md`, §3.39), two presses moving to the next: Normal, Focused and,
+on this tab, **Super Focused** - the focus root (`forge-assistant-focus-root`) with one
+more class, **`forge-assistant-wangp-studio`**. That class is the contract; renaming it on
+either side leaves super focus showing the compact page with nothing said.
+
+The tab (`browser/minipaint_wangp.js`): `wantedLayout()` is `"studio"` while
+`studioPanel()` finds both classes on the panel, `"compact"` while only focus's,
+`"whole"` otherwise, heard by the same attribute observer. To a bridge whose READY said
+`capabilities.layout_studio`, `layout()` sends `LAYOUT_STATE` `{compact, studio}`; to one
+that did not (older than 1.15.0) it sends `{compact}` exactly as before - compact for a
+studio asked - and the journal says once that super focus shows the page compact until the
+bridge is reinstalled. Each request has its id, and the page's answer to the last one is
+written into `state().layout` (`shown`, `missing`); an answer to an earlier request is
+nobody's. The journal says when the answer is less than was asked.
+
+The vocabulary (`protocol.py`, both copies): `normalize_layout` gives `{compact, studio}`,
+`studio` only for a real `true` and a studio compact as well. **`LAYOUT_RESULT`**
+(page to parent, once per request, under its id) carries `{layout, hidden, missing}`:
+`layout` one of `LAYOUTS` (`whole`, `compact`, `studio`; anything else reads as `whole`),
+`hidden` the parts taken out (0 for whole), `missing` one of `LAYOUT_MISSING` - `form` (no
+generator form: the page stays whole), `prompt` (no prompt box: the page stays compact),
+`actions` or `progress` (a studio without WanGP's Generate bar or its progress), `error`
+(a failure put the page back whole) - or nothing. `normalize_layout_result` is the
+parent's reading; nothing waits on the answer.
+
+The page (`bridge_js.py`): from the compact layout's anchor, the generator form's row is
+the nearest `.row` around `#wangp-gallery-tabs` whose child holding them has a `.column`
+before it - WanGP's settings column, then its actions column. Kept, by what WanGP itself
+names: the run of the settings column's blocks from the one holding
+`#wangp-prompt-advanced` to the one holding `#wangp-prompt-wizard` (`STUDIO_PROMPT_IDS`,
+wgp.py's `PROMPT_ADVANCED_ELEM_ID` and `PROMPT_WIZARD_ELEM_ID`; the wizard's variables are
+between them), and in the actions column the block of class `wangp-settings-actions`
+(WanGP's action bar: Generate, its live controls while it generates, Add to Queue), the
+block of class `wangp-progress-container` (its progress) and the gallery tabs. Nothing
+moves: the row is made a grid (`display: grid`, the whole width, `grid-template-columns`
+`<share>fr 12px <1-share>fr`) and both columns `display: contents`, so the kept blocks are
+the grid's items where they already are in the document - the prompt's, then the action
+bar, then the progress, one to a row in the first column; the gallery tabs in the third,
+`1 / -1`, against a last `minmax(0, 1fr)` row that takes what the gallery adds. The
+action bar is `position: static` and loses its floating look (WanGP's script floats it
+otherwise). `#gallery` under the anchor is given the height the window leaves it once the
+page is at its top - what is above it, what its tab holds under it and every ancestor's
+bottom padding, border and margin come off - at least `STUDIO_GALLERY_MIN_PX`. Every other
+block of the two columns, every sibling around the form up to the tab's own column (those
+before it in that column are the compact layout's already) and Gradio's footer are taken
+out the compact layout's way, marked `settings`, `details`, `around` and `footer`. Every
+declaration on a kept element is inline `!important`, recorded with the value and priority
+it replaced and whether the element had a style attribute at all, and put back in reverse
+order; the kept elements are marked `data-minipaint-studio` (`row`, `settings-column`,
+`actions-column`, `prompt`, `actions`, `progress`, `gallery`, `media`); `<html>` says
+`data-minipaint-layout="studio"`. A part the layout took out is not a reason a set of the
+bridge's controls is not the live one (`surroundingsDisplayed` skips an element marked
+`data-minipaint-chrome`): the studio hides the image prompt column WanGP placed them in.
+
+The divider is the one element of the bridge's own (`data-minipaint-studio="divider"`,
+`role="separator"`, its look in `<style id="minipaint-bridge-studio">`): dragged with any
+pointer (captured), moved 2% with the arrow keys and 10% with Shift, to its bounds with
+Home and End, back to `STUDIO_SPLIT` with a double click; the share is held between
+`STUDIO_SPLIT_MIN` and `STUDIO_SPLIT_MAX` and so that neither column is narrower than
+280 / 320 px, and kept in `localStorage["minipaint-wangp:studio-split"]` - the WanGP page
+is on Forge's origin - as a convenience. A press on it is not a touch of WanGP's form.
+Under `STUDIO_STACK_BELOW_PX` (720) the columns stack, the gallery under the progress, at
+60% of the window, with no divider; a window resize fits it again (one animation frame).
+No prompt box yet: compact meanwhile, the same bounded looks, then compact with
+`missing: "prompt"`. Measured on Gradio 5.29's own markup of WanGP's Media Generator page,
+form and all (`tests/wangp_studio_gradio_5_29.html`), by
+`check_super_focus_makes_the_wangp_page_a_studio`; watched once on a live 5.29 page with
+WanGP's own stylesheet and page script through a generation.
 
 ## Bridge 1.13.0: `model`
 

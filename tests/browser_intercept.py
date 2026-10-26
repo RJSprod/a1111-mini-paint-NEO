@@ -1081,7 +1081,8 @@ def check_focus_compacts_the_wangp_page(r: Results, page) -> None:
              'element.style.setProperty("display", "none", "important");', 'element.style.setProperty("display", "none");',
              lambda c, w: c.get("strip") is True),
             ("without putting it all back on whole the page stays compact after focus",
-             "    if (!layoutWanted) {\n      showChrome();", "    if (!layoutWanted) {\n",
+             '    if (layoutWanted === "whole") {\n      clearStudio();\n      showChrome();',
+             '    if (layoutWanted === "whole") {\n      clearStudio();\n',
              lambda c, w: w.get("strip") is False),
         ):
             anchored = old in script
@@ -1090,6 +1091,322 @@ def check_focus_compacts_the_wangp_page(r: Results, page) -> None:
                     "anchor gone from the script" if not anchored else str(mutated)[:200] + str(mutated_whole)[:200])
     finally:
         page.evaluate("""() => { const f = document.getElementById("mp-wangp-compact-frame"); if (f) { f.remove(); } }""")
+
+
+#: The studio's frame: the captured page, the bridge's script, a hostile
+#: stylesheet, visible so a pointer can reach the divider. Laid over the test
+#: page for the check and taken away after it. From a blob address rather
+#: than srcdoc: a blob's document has this page's origin as its own, which
+#: the bridge reads and checks every message against, and an about:srcdoc
+#: document's location says "null".
+STUDIO_FRAME_JS = """([markup, script, css, width]) => new Promise((resolve) => {
+    const old = document.getElementById("mp-wangp-studio-frame");
+    if (old) { old.remove(); }
+    const frame = document.createElement("iframe");
+    frame.id = "mp-wangp-studio-frame";
+    frame.style.cssText = "position:fixed;left:0;top:0;width:" + width + "px;height:800px;border:0;z-index:2147483000;background:#fff";
+    frame.src = URL.createObjectURL(new Blob(["<!doctype html><html><head><style>" + css + "</style></head><body>" + markup + "</body></html>"],
+                                             { type: "text/html" }));
+    frame.addEventListener("load", () => {
+        const tag = frame.contentDocument.createElement("script");
+        tag.textContent = script;
+        frame.contentDocument.head.appendChild(tag);
+        try { frame.contentWindow.localStorage.removeItem("minipaint-wangp:studio-split"); } catch (error) {}
+        resolve(!!frame.contentWindow.__minipaintBridge);
+    });
+    document.body.appendChild(frame);
+})"""
+STUDIO_APPLY_JS = """(payload) => document.getElementById("mp-wangp-studio-frame").contentWindow.__minipaintBridge.layout(payload)"""
+#: Where everything is, what shows, and every inline declaration on the page,
+#: so that "put back as it was" is checked declaration by declaration.
+STUDIO_MEASURE_JS = """() => {
+    const frame = document.getElementById("mp-wangp-studio-frame");
+    const doc = frame.contentDocument;
+    const form = doc.querySelector("#wangp-gallery-tabs").closest(".row");
+    const q = (s) => form.querySelector(s) || doc.querySelector(s);
+    const shown = (el) => !!el && el.getClientRects().length > 0;
+    const box = (el) => { if (!shown(el)) { return null; } const r = el.getBoundingClientRect(); return { l: Math.round(r.left), t: Math.round(r.top), r: Math.round(r.right), b: Math.round(r.bottom), w: Math.round(r.width), h: Math.round(r.height) }; };
+    const declarations = {};
+    [...doc.querySelectorAll("body *")].forEach((e, i) => {
+        if (!e.hasAttribute("style")) { return; }
+        const o = {};
+        for (let k = 0; k < e.style.length; k += 1) { const n = e.style[k]; o[n] = e.style.getPropertyValue(n) + "|" + e.style.getPropertyPriority(n); }
+        declarations[i + ":" + e.tagName] = o;
+    });
+    const divider = doc.querySelector("[data-minipaint-studio='divider']");
+    return {
+        prompt: box(q("#wangp-prompt-advanced")), generate: box(q("#generate")), progress: box(q(".wangp-progress-container")),
+        tabs: box(q("#wangp-gallery-tabs")), gallery: box(q("#wangp-gallery-tabs #gallery")), divider: box(divider),
+        dividerNow: divider ? divider.getAttribute("aria-valuenow") : null,
+        lset: shown(q("#lset")), image: shown(q("#minipaint_bridge_1") && q("#minipaint_bridge_1").parentElement),
+        frames: shown(q("#frames")), enhance: [...form.querySelectorAll("button")].some((b) => /Enhance/.test(b.textContent) && shown(b)),
+        mediaInfo: [...form.querySelectorAll("button, span")].some((b) => /Media Info/.test(b.textContent) && shown(b)),
+        queue: [...form.querySelectorAll("button, span")].some((b) => /Queue Management/.test(b.textContent) && shown(b)),
+        title: shown(doc.querySelector("h1")), family: shown(doc.querySelector("#family_list")),
+        studioMarks: [...doc.querySelectorAll("[data-minipaint-studio]")].map((e) => e.getAttribute("data-minipaint-studio")),
+        chromeMarks: [...doc.querySelectorAll("[data-minipaint-chrome]")].map((e) => e.getAttribute("data-minipaint-chrome")),
+        attr: doc.documentElement.getAttribute("data-minipaint-layout"),
+        declarations, split: frame.contentWindow.localStorage.getItem("minipaint-wangp:studio-split"),
+        viewport: frame.contentWindow.innerHeight
+    };
+}"""
+#: Gradio 5.29's own rules for its rows, columns, tabs and tab panels, as its
+#: page carries them (read off a running 5.29 page; the svelte scopes
+#: dropped), and its border-box sizing: without them a captured page lays its blocks out as plain
+#: divs, and a tab panel's inline `display: flex` makes a row of what Gradio
+#: stacks. Then a theme that says !important about rows, about WanGP's
+#: floating action bar and about the gallery's height: what the bridge's
+#: inline !important has to beat.
+STUDIO_GRADIO_CSS = (":root { --layout-gap: 16px; --size-full: 100%; --block-padding: 0px; }"
+                     " *, ::before, ::after { box-sizing: border-box; }"
+                     " .column { display: flex; position: relative; flex-direction: column; }"
+                     " .column > *, .column > .form > * { width: var(--size-full); }"
+                     " .gap { gap: var(--layout-gap); }"
+                     " .tabitem { display: flex; flex-direction: column; position: relative; padding: var(--block-padding); width: 100%; box-sizing: border-box; }"
+                     " .tabs { position: relative; display: flex; flex-direction: column; gap: var(--layout-gap); }"
+                     " .row { display: flex; flex-wrap: wrap; gap: var(--layout-gap); width: var(--size-full); position: relative; }"
+                     " .row > *, .row > .form > * { flex: 1 1 0%; flex-wrap: wrap; min-width: min(160px, 100%); }"
+                     " .unequal-height { align-items: flex-start; }"
+                     " .hide, .hidden { display: none; }")
+STUDIO_HOSTILE_CSS = (STUDIO_GRADIO_CSS + " " + COMPACT_HOSTILE_CSS + " .row { display: flex !important; }"
+                      " .wangp-settings-actions { position: sticky !important; bottom: 0; }"
+                      " #gallery { height: 450px !important; }")
+#: The parent's half of the conversation: a hello to bind the channel (the
+#: Gradio round trip behind it never answers on a static page, and needs
+#: not), then LAYOUT_STATE, and every LAYOUT_RESULT the page posts back.
+STUDIO_TALK_JS = """async ([payloads, first]) => {
+    const frame = document.getElementById("mp-wangp-studio-frame");
+    if (first) { frame.contentWindow.__minipaintBridge.layout(first); }
+    const heard = [];
+    const listen = (event) => { if (event.source === frame.contentWindow && event.data && event.data.type === "WANGP_LAYOUT_RESULT") { heard.push(event.data); } };
+    window.addEventListener("message", listen);
+    const channel = "c".repeat(32);
+    const send = (type, id, payload) => frame.contentWindow.postMessage({ protocol: 5, type, channel_id: channel, request_id: id, payload }, location.origin);
+    send("WANGP_BRIDGE_HELLO", "h".repeat(32), {});
+    await new Promise((done) => setTimeout(done, 100));
+    const requests = payloads.map((payload, n) => String(n).repeat(32).slice(0, 32));
+    for (let n = 0; n < payloads.length; n += 1) {
+        send("WANGP_LAYOUT_STATE", requests[n], payloads[n]);
+        await new Promise((done) => setTimeout(done, 150));
+    }
+    await new Promise((done) => setTimeout(done, 900));
+    window.removeEventListener("message", listen);
+    const doc = frame.contentDocument;
+    return { requests, heard: heard.map((m) => [m.request_id, m.payload]),
+             written: [...doc.querySelectorAll(".minipaint-bridge-column")].map((c) => [c.id, (c.querySelector(".minipaint-bridge-request textarea") || {}).value || ""]) };
+}"""
+
+
+#: The hidden Edit tab, and the actions column its form keeps hidden, shown.
+SHOW_EDIT_FORM_JS = """() => { const doc = document.getElementById("mp-wangp-studio-frame").contentDocument;
+    const edit = doc.querySelector("#minipaint_bridge_2").closest(".tabitem");
+    edit.style.display = "flex"; edit.classList.remove("hide", "hidden"); }"""
+
+
+def check_super_focus_makes_the_wangp_page_a_studio(r: Results, page) -> None:
+    """Under super focus the WanGP page is its prompt beside its gallery (bridge 1.15.0).
+
+    The bridge's own script runs on WanGP's Media Generator page as Gradio
+    5.29 really draws it, form and all (tests/wangp_studio_gradio_5_29.html),
+    under a theme that says !important about rows, about WanGP's floating
+    action bar and about the gallery's height, and is told a studio: the
+    prompt, Generate and the progress stack in one column, the gallery takes
+    the other and the window's height, a divider between them moves the
+    share and remembers it, everything else of the form and around it is out
+    of the layout, a narrow page stacks, the page answers what it shows - and
+    told whole, every inline declaration on the page is what it was. Measured
+    in a browser because what is asked is where real boxes went.
+
+    Six decisions are reverted to prove the checks can see them.
+    """
+    import sys as _sys
+
+    folder = str(ROOT / "wan2gp_bridge" / "wan2gp-minipaint-bridge")
+    _sys.path.insert(0, folder)
+    try:
+        import bridge_js
+    finally:
+        if folder in _sys.path:
+            _sys.path.remove(folder)
+    markup = (ROOT / "tests" / "wangp_studio_gradio_5_29.html").read_text(encoding="utf-8")
+    config = bridge_js.configuration("")
+    # Two looks for a form that is not there rather than twenty: the same
+    # decision, a check that does not wait five seconds for it.
+    config["triggerAttempts"] = 2
+    script = bridge_js.document_script("", config)
+
+    def studio(source, width=1200):
+        ready = page.evaluate(STUDIO_FRAME_JS, [markup, source, STUDIO_HOSTILE_CSS, width])
+        before = page.evaluate(STUDIO_MEASURE_JS)
+        told = page.evaluate(STUDIO_APPLY_JS, {"compact": True, "studio": True})
+        page.wait_for_timeout(100)
+        return ready, before, told, page.evaluate(STUDIO_MEASURE_JS)
+
+    def studio_shape(m):
+        # The prompt over Generate over the progress, the gallery's tabs to
+        # the right of all three.
+        p_, g_, pr_, tabs = (m.get(k) or {} for k in ("prompt", "generate", "progress", "tabs"))
+        return (p_.get("b", 9e9) <= g_.get("t", -1) and g_.get("b", 9e9) <= pr_.get("t", -1)
+                and tabs.get("l", -1) >= max(p_.get("r", 9e9), g_.get("r", 9e9), pr_.get("r", 9e9)))
+
+    def whole():
+        told = page.evaluate(STUDIO_APPLY_JS, {"compact": False})
+        page.wait_for_timeout(100)
+        return told, page.evaluate(STUDIO_MEASURE_JS)
+
+    try:
+        ready, before, told, s = studio(script)
+        r.check("WanGP's Media Generator page as Gradio 5.29 draws it runs the bridge's own script", ready is True, str(ready))
+        r.check("whole, the form shows its settings beside its gallery and its details",
+                before.get("lset") and before.get("image") and before.get("frames") and before.get("enhance")
+                and before.get("mediaInfo") and before.get("queue") and before.get("title") and before.get("attr") is None,
+                str({k: before.get(k) for k in ("lset", "image", "frames", "enhance", "mediaInfo", "queue", "title")}))
+        r.check("told a studio, the page says so and says what it took out",
+                told.get("layout") == "studio" and told.get("studio") is True and told.get("missing") == ""
+                and told.get("hidden") == len(s.get("chromeMarks") or []) and s.get("attr") == "studio", str(told))
+        r.check("and everything but the prompt, Generate, the progress and the gallery is gone - the header's parts with it",
+                not any(s.get(k) for k in ("lset", "image", "frames", "enhance", "mediaInfo", "queue", "title", "family"))
+                and all(s.get(k) for k in ("prompt", "generate", "progress", "tabs", "gallery")),
+                str({k: s.get(k) for k in ("lset", "image", "frames", "enhance", "mediaInfo", "queue", "title", "family", "prompt")}))
+        p_, g_, pr_, gal, tabs = (s.get(k) or {} for k in ("prompt", "generate", "progress", "gallery", "tabs"))
+        r.check("the prompt, then Generate, then the progress, in one column",
+                p_.get("b", 9e9) <= g_.get("t", -1) and g_.get("b", 9e9) <= pr_.get("t", -1)
+                and abs(p_.get("l", 0) - g_.get("l", 99)) < 24 and abs(g_.get("l", 0) - pr_.get("l", 99)) < 24, str((p_, g_, pr_)))
+        r.check("the gallery in the other, beside them from the top, the divider between",
+                max(p_.get("r", 0), g_.get("r", 0), pr_.get("r", 0)) <= (s.get("divider") or {}).get("l", -1)
+                and (s.get("divider") or {}).get("r", 9e9) <= tabs.get("l", -1) and abs(tabs.get("t", 0) - p_.get("t", 999)) < 80,
+                str((p_, s.get("divider"), tabs)))
+        r.check("the prompt's column at the starting share of the width",
+                abs((tabs.get("l", 0) - p_.get("l", 0)) / 1200 - bridge_js.STUDIO_SPLIT) < 0.08 and s.get("dividerNow") == "40",
+                f"{tabs.get('l')} {s.get('dividerNow')}")
+        r.check("the gallery as tall as the window leaves it, over a theme's own !important height",
+                gal.get("h", 0) > 600 and s.get("viewport", 0) - gal.get("b", 0) < 80, str(gal) + " " + str(s.get("viewport")))
+        kinds = sorted(set(s.get("studioMarks") or []))
+        r.check("each part named for what it is, and the divider the bridge's own",
+                kinds == ["actions", "actions-column", "divider", "gallery", "media", "progress", "prompt", "row", "settings-column"]
+                and sorted(set(s.get("chromeMarks") or [])) == ["details", "footer", "model", "settings", "tabs", "title"],
+                str(kinds) + str(sorted(set(s.get("chromeMarks") or []))))
+
+        # The divider: dragged, by the keys, and remembered.
+        d = s.get("divider") or {}
+        page.mouse.move(d.get("l", 0) + 6, d.get("t", 0) + 120)
+        page.mouse.down()
+        page.mouse.move(780, d.get("t", 0) + 140, steps=6)
+        page.mouse.up()
+        dragged = page.evaluate(STUDIO_MEASURE_JS)
+        r.check("dragged, the divider gives the prompt's column more of the width and the browser keeps the share",
+                (dragged.get("prompt") or {}).get("w", 0) > p_.get("w", 9e9) + 150
+                and abs(float(dragged.get("split") or 0) - (780 - 6) / 1188) < 0.03, str(dragged.get("prompt")) + str(dragged.get("split")))
+        page.evaluate("""() => { const d = document.getElementById("mp-wangp-studio-frame").contentDocument.querySelector("[data-minipaint-studio='divider']");
+                               d.focus(); d.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true })); }""")
+        keyed = page.evaluate(STUDIO_MEASURE_JS)
+        r.check("and a key moves it a step", int(keyed.get("dividerNow") or 0) == int(dragged.get("dividerNow") or 0) - 2,
+                f"{dragged.get('dividerNow')} -> {keyed.get('dividerNow')}")
+
+        # Narrow: stacked, the gallery under the progress, no divider.
+        page.evaluate("""() => { document.getElementById("mp-wangp-studio-frame").style.width = "600px"; }""")
+        page.wait_for_timeout(300)
+        narrow = page.evaluate(STUDIO_MEASURE_JS)
+        r.check("on a narrow page the columns stack: the prompt's, then the gallery, and no divider",
+                (narrow.get("tabs") or {}).get("t", 0) >= (narrow.get("progress") or {}).get("b", 9e9) - 1 and narrow.get("divider") is None,
+                str(narrow.get("tabs")) + str(narrow.get("progress")))
+        page.evaluate("""() => { document.getElementById("mp-wangp-studio-frame").style.width = "1200px"; }""")
+        page.wait_for_timeout(300)
+
+        told_whole, w = whole()
+        changed = {k: (before.get("declarations", {}).get(k), w.get("declarations", {}).get(k))
+                   for k in set(before.get("declarations") or {}) | set(w.get("declarations") or {})
+                   if (before.get("declarations") or {}).get(k) != (w.get("declarations") or {}).get(k)}
+        r.check("told whole, every inline declaration on the page is what it was, and nothing is left marked",
+                not changed and w.get("studioMarks") == [] and w.get("chromeMarks") == []
+                and w.get("attr") is None and told_whole.get("layout") == "whole", str(told_whole) + str(changed)[:400])
+        r.check("and every part is back where it was",
+                {k: w.get(k) for k in ("prompt", "generate", "progress", "tabs", "gallery", "lset", "image", "frames", "title")}
+                == {k: before.get(k) for k in ("prompt", "generate", "progress", "tabs", "gallery", "lset", "image", "frames", "title")},
+                str({k: (before.get(k), w.get(k)) for k in ("prompt", "gallery") if before.get(k) != w.get(k)}))
+        r.check("and the dragged share outlives the studio, for the next one", abs(float(w.get("split") or 0) - float(keyed.get("split") or -1)) < 1e-6,
+                str(w.get("split")))
+
+        # The page answers what it settled on, once per request, to the
+        # parent that asked.
+        page.evaluate(STUDIO_FRAME_JS, [markup, script, STUDIO_HOSTILE_CSS, 1200])
+        talk = page.evaluate(STUDIO_TALK_JS, [[{"compact": True, "studio": True}, {"compact": True}, {"compact": False}], None])
+        reqs = talk.get("requests") or []
+        r.check("the page answers each request once, under its id, with what it shows",
+                [entry[0] for entry in talk.get("heard") or []] == reqs
+                and [entry[1].get("layout") for entry in talk.get("heard") or []] == ["studio", "compact", "whole"]
+                and (talk.get("heard") or [[None, {}]])[0][1].get("missing") == "" and (talk.get("heard") or [[None, {}]] * 3)[2][1].get("hidden") == 0,
+                str(talk.get("heard")))
+        # The studio takes out the column WanGP placed the bridge's controls
+        # in. With the Edit tab's form on screen as well (as while a queued
+        # task is edited), the controls a request writes are still the
+        # generator form's.
+        page.evaluate(STUDIO_FRAME_JS, [markup, script, STUDIO_HOSTILE_CSS, 1200])
+        page.evaluate(SHOW_EDIT_FORM_JS)
+        talk = page.evaluate(STUDIO_TALK_JS, [[], {"compact": True, "studio": True}])
+        written = dict(talk.get("written") or [])
+        r.check("a part the layout took out is no reason the generator form's controls are not the live ones",
+                "hello" in written.get("minipaint_bridge_1", "") and not written.get("minipaint_bridge_2"), str(talk.get("written"))[:300])
+
+        # No prompt box: a studio asked for is compact, and says why.
+        page.evaluate(STUDIO_FRAME_JS, [markup, script, STUDIO_HOSTILE_CSS, 1200])
+        page.evaluate("""() => { const doc = document.getElementById("mp-wangp-studio-frame").contentDocument;
+                               ["wangp-prompt-advanced", "wangp-prompt-wizard"].forEach((id) => doc.querySelectorAll("#" + id).forEach((e) => { e.id = id + "-renamed"; })); }""")
+        nopro = page.evaluate(STUDIO_TALK_JS, [[{"compact": True, "studio": True}], None])
+        last = ((nopro.get("heard") or [[None, {}]])[-1])[1]
+        r.check("with no prompt box in the form the page stays compact, and its answer says, once, that it found none",
+                len(nopro.get("heard") or []) == 1 and last.get("layout") == "compact" and last.get("missing") == "prompt" and last.get("hidden", 0) > 0
+                and page.evaluate("""() => document.getElementById("mp-wangp-studio-frame").contentDocument.documentElement.getAttribute("data-minipaint-layout")""") == "compact",
+                str(nopro.get("heard")))
+
+        # Every decision here has a mutation that must break its check.
+        for name, old, new, broken in (
+            ("without the columns as contents the prompt and the gallery are not side by side",
+             'holdStyle(found.settings, "display", "contents");\n    holdStyle(found.actions, "display", "contents");', "",
+             lambda m: not studio_shape(m)),
+            ("without the inline !important a theme's own keeps the row a row",
+             '    element.style.setProperty(name, value, "important");\n  }\n', '    element.style.setProperty(name, value);\n  }\n',
+             lambda m: not studio_shape(m)),
+            ("without the gallery fitted it keeps its 450 px",
+             'restyle(studio.media, "height", Math.max(CONFIG.studioGalleryMinPx, height) + "px");', "",
+             lambda m: (m.get("gallery") or {}).get("h", 0) < 470),
+            ("without the WanGP action bar held in its place it stays sticky under a theme that says so",
+             'holdStyle(found.generate, "position", "static");', "",
+             lambda m: False),
+        ):
+            anchored = old in script
+            if not anchored:
+                r.check(f"mutation: {name}", False, "anchor gone from the script")
+                continue
+            _ready, _before, _told, mutated = studio(script.replace(old, new))
+            if name.startswith("without the WanGP action bar"):
+                sticky = page.evaluate("""() => getComputedStyle(document.getElementById("mp-wangp-studio-frame").contentDocument
+                                           .querySelector(".wangp-settings-actions")).position""")
+                r.check(f"mutation: {name}", sticky == "sticky", sticky)
+                continue
+            r.check(f"mutation: {name}", broken(mutated), str({k: mutated.get(k) for k in ("prompt", "tabs", "gallery")})[:240])
+        # Leaving: without the studio's declarations put back, whole is not
+        # what it was.
+        old = 'held.element.style.removeProperty(held.name);\n        if (held.value) { held.element.style.setProperty(held.name, held.value, held.priority); }'
+        anchored = old in script
+        if anchored:
+            _ready, before_m, _told, _s = studio(script.replace(old, ""))
+            _told_w, whole_m = whole()
+        r.check("mutation: without the studio's declarations put back, whole is not what it was",
+                anchored and whole_m.get("declarations") != before_m.get("declarations"), "anchor gone" if not anchored else "")
+        # And the live set: without a taken-out part counted as displayed,
+        # the Edit form's controls are written.
+        old = "if (!node.hasAttribute(CONFIG.chromeAttribute) && window.getComputedStyle(node).display === \"none\") { return false; }"
+        anchored = old in script
+        if anchored:
+            page.evaluate(STUDIO_FRAME_JS, [markup, script.replace(old, 'if (window.getComputedStyle(node).display === "none") { return false; }'),
+                                            STUDIO_HOSTILE_CSS, 1200])
+            page.evaluate(SHOW_EDIT_FORM_JS)
+            mutated_talk = page.evaluate(STUDIO_TALK_JS, [[], {"compact": True, "studio": True}])
+        r.check("mutation: without a taken-out part counted as displayed, the Edit form's controls are the ones written",
+                anchored and not dict(mutated_talk.get("written") or []).get("minipaint_bridge_1"), "anchor gone" if not anchored else str(mutated_talk.get("written"))[:200])
+    finally:
+        page.evaluate("""() => { const f = document.getElementById("mp-wangp-studio-frame"); if (f) { f.remove(); } }""")
 
 
 def check_the_direct_route_when_the_queue_is_dead(r: Results, page) -> None:
@@ -1162,6 +1479,7 @@ def run() -> Results:
                 check_the_page_palette_is_sampled(r, page)
                 check_the_page_typeface_reaches_wangp(r, page)
                 check_focus_compacts_the_wangp_page(r, page)
+                check_super_focus_makes_the_wangp_page_a_studio(r, page)
                 check_the_direct_route_when_the_queue_is_dead(r, page)
             finally:
                 browser.close()

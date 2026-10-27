@@ -782,9 +782,12 @@ request but the journal's own plain POST, nothing pending.
 ## Bridge 1.15.0: the studio
 
 SD-Neo-ModelSwitchRefiner's assistant has three modes since 2026-10-26 (its
-`docs/22-forge-assistant.md`, §3.39), two presses moving to the next: Normal, Focused and,
-on this tab, **Super Focused** - the focus root (`forge-assistant-focus-root`) with one
-more class, **`forge-assistant-wangp-studio`**. That class is the contract; renaming it on
+`docs/22-forge-assistant.md`, §3.39 and §3.40): Normal, Focused (three presses) and, on
+this tab, **Super Focused** (four) - the focus root (`forge-assistant-focus-root`) with one
+more class, **`forge-assistant-wangp-studio`**. A switch to another tab in super focus takes
+both classes off this panel, as focus moving away always has, and a switch back while focus
+lasts puts both on again: the tab hears whole, then compact and studio, and needs nothing
+of its own for it. That class is the contract; renaming it on
 either side leaves super focus showing the compact page with nothing said.
 
 The tab (`browser/minipaint_wangp.js`): `wantedLayout()` is `"studio"` while

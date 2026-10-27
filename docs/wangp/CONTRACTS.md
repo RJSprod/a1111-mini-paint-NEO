@@ -816,13 +816,25 @@ wgp.py's `PROMPT_ADVANCED_ELEM_ID` and `PROMPT_WIZARD_ELEM_ID`; the wizard's var
 between them), and in the actions column the block of class `wangp-settings-actions`
 (WanGP's action bar: Generate, its live controls while it generates, Add to Queue), the
 block of class `wangp-progress-container` (its progress) and the gallery tabs. Nothing
-moves: the row is made a grid (`display: grid`, the whole width, `grid-template-columns`
-`<share>fr 12px <1-share>fr`) and both columns `display: contents`, so the kept blocks are
-the grid's items where they already are in the document - the prompt's, then the action
-bar, then the progress, one to a row in the first column; the gallery tabs in the third,
-`1 / -1`, against a last `minmax(0, 1fr)` row that takes what the gallery adds. The
-action bar is `position: static` and loses its floating look (WanGP's script floats it
-otherwise). `#gallery` under the anchor is given the height the window leaves it once the
+moves. Since 1.15.1 (1.15.0 put the action bar and the progress under the prompt, in its
+column, and the gallery alone in the other) the row is made a grid (`display: grid`, the
+whole width, `grid-template-columns` `<share>fr 12px <1-share>fr`); the settings column is
+the first column, across every row (`grid-row: 1 / -1`), a flex column with everything in
+it but the prompt's blocks taken out and those at their own height; the actions column is
+`display: contents`, so its kept blocks are the grid's items in the third column - the
+action bar, then the progress, then the gallery tabs, one to a row, the gallery's against a
+last `minmax(0, 1fr)` row. The prompt's box is as tall as its column: the studio writes a
+height on the row as `--minipaint-studio-prompt-height` (`STUDIO_PROMPT_HEIGHT_PROPERTY`) -
+the room left under the prompt's last block, measured against where the gallery ends - and
+a rule of its stylesheet gives every prompt box in the settings column that height,
+`!important`, with no `max-height` or resize and `overflow-y: auto`: a stylesheet rule,
+because Gradio writes the box's height inline as it is typed in, and that is not the
+studio's to overwrite. The box is never less than `STUDIO_PROMPT_MIN_PX`. The studio is
+fitted again on a window resize and when anything it does not size changes size - the
+action bar (WanGP's live controls in Generate's place), the progress, the prompt's blocks
+(the wizard's box shown for the plain one) - through one `ResizeObserver`, one animation
+frame later, writing only what changed. The action bar is `position: static` and loses
+its floating look (WanGP's script floats it otherwise). `#gallery` under the anchor is given the height the window leaves it once the
 page is at its top - what is above it, what its tab holds under it and every ancestor's
 bottom padding, border and margin come off - at least `STUDIO_GALLERY_MIN_PX`. Every other
 block of the two columns, every sibling around the form up to the tab's own column (those
@@ -840,16 +852,23 @@ The divider is the one element of the bridge's own (`data-minipaint-studio="divi
 `role="separator"`, its look in `<style id="minipaint-bridge-studio">`): dragged with any
 pointer (captured), moved 2% with the arrow keys and 10% with Shift, to its bounds with
 Home and End, back to `STUDIO_SPLIT` with a double click; the share is held between
-`STUDIO_SPLIT_MIN` and `STUDIO_SPLIT_MAX` and so that neither column is narrower than
-280 / 320 px, and kept in `localStorage["minipaint-wangp:studio-split"]` - the WanGP page
+`STUDIO_SPLIT_MIN` and `STUDIO_SPLIT_MAX` and so that neither column is narrower than its
+minimum (`STUDIO_PROMPT_MIN_WIDTH_PX` 200, `STUDIO_GALLERY_MIN_WIDTH_PX` 280), and kept in `localStorage["minipaint-wangp:studio-split"]` - the WanGP page
 is on Forge's origin - as a convenience. A press on it is not a touch of WanGP's form.
-Under `STUDIO_STACK_BELOW_PX` (720) the columns stack, the gallery under the progress, at
-60% of the window, with no divider; a window resize fits it again (one animation frame).
+Under `STUDIO_STACK_BELOW_PX` (520 since 1.15.1, a phone's page: a Fold 7's inner screen
+at 120% is about 690 px and keeps two columns; 1.15.0 stacked under 720) the columns stack -
+the prompt, its box `STUDIO_PROMPT_STACKED_SHARE` (30%) of the window, then the action bar,
+the progress and the gallery at 60% of the window - with no divider. A studio starts at the
+page's top (stacked, at the prompt), and leaving it scrolls the page back to where it was,
+read before anything was taken out and put back once everything is shown again.
 No prompt box yet: compact meanwhile, the same bounded looks, then compact with
 `missing: "prompt"`. Measured on Gradio 5.29's own markup of WanGP's Media Generator page,
 form and all (`tests/wangp_studio_gradio_5_29.html`), by
-`check_super_focus_makes_the_wangp_page_a_studio`; watched once on a live 5.29 page with
-WanGP's own stylesheet and page script through a generation.
+`check_super_focus_makes_the_wangp_page_a_studio` - the shape, the box ending where the
+gallery does, typed past its height under Gradio's inline height and a theme's cap, the
+action bar grown, two columns at 700 px and stacked at 480, the scroll - with thirteen
+mutations; watched on a live 5.29 page with WanGP's own stylesheet and page script through
+a generation, 1.15.0 once and 1.15.1 at 1400, 680 and 400 px.
 
 ## Bridge 1.13.0: `model`
 

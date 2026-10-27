@@ -1104,8 +1104,8 @@ def session_checks(r: Results) -> None:
     bridge.resolve()
     bridge.state_keys = (compatibility.SESSION_STATE,) + tuple(k for k in bridge.state_keys if k != compatibility.SESSION_STATE)
     handshake = bridge.compat.handshake(bridge_session="s", environ=environ)
-    r.check("the handshake offers the session capability, and the bridge is 1.15.0",
-            compatibility.BRIDGE_VERSION == "1.15.0"
+    r.check("the handshake offers the session capability, and the bridge is 1.15.1",
+            compatibility.BRIDGE_VERSION == "1.15.1"
             and handshake["capabilities"].get("session") is True)
     r.check("and, from 1.11.0, says the page may be made compact under focus (LAYOUT_STATE)",
             handshake["capabilities"].get("layout_compact") is True, str(handshake["capabilities"]))
@@ -1116,7 +1116,7 @@ def session_checks(r: Results) -> None:
             and handshake["capabilities"].get("theme_font") is True, str(handshake["capabilities"]))
     info = json.loads((BRIDGE_DIR / "plugin_info.json").read_text(encoding="utf-8"))
     r.check("and plugin_info.json says the same version twice, and lists the palette, the typeface, the compact layout, the studio, the hold, the model check and the prompt edit among its capabilities",
-            info.get("version") == "1.15.0" and info.get("bridge_version") == "1.15.0"
+            info.get("version") == "1.15.1" and info.get("bridge_version") == "1.15.1"
             and "prompt_edit" in (info.get("capabilities") or []) and "layout_studio" in (info.get("capabilities") or [])
             and "theme_palette" in (info.get("capabilities") or []) and "theme_font" in (info.get("capabilities") or [])
             and "layout_compact" in (info.get("capabilities") or []) and "hold" in (info.get("capabilities") or [])

@@ -311,9 +311,9 @@ window.minipaintWanGP = (function () {
     //: contract with that extension (docs/wangp/CONTRACTS.md).
     const FOCUS_ROOT_CLASS = "forge-assistant-focus-root";
     //: The class the same assistant adds beside it under its super focus: the
-    //: WanGP page is then a studio - its prompt, its Generate and its progress
-    //: beside its gallery, and nothing else (bridge 1.15.0). The same
-    //: contract.
+    //: WanGP page is then a studio - its prompt in one column, its Generate,
+    //: its progress and its gallery in the other, and nothing else (bridge
+    //: 1.15.0, laid out again in 1.15.1). The same contract.
     const STUDIO_CLASS = "forge-assistant-wangp-studio";
     //: The panel's width in its place, kept across a park so the WanGP
     //: page's layout never changes with the tab. See keepPanelWidth.
@@ -4484,9 +4484,10 @@ window.minipaintWanGP = (function () {
      * second class, read by studioPanel), whole otherwise. Compact is the
      * WanGP page without its title, its tab strip, its model row and the
      * model's description - under focus somebody is creating, not choosing a
-     * model - and a studio is the compact page cut down to WanGP's prompt, its
-     * Generate and its progress beside its gallery. The bridge puts it all
-     * back when told whole.
+     * model - and a studio is the compact page cut down to WanGP's prompt in
+     * one column and its Generate, its progress and its gallery in the other
+     * (bridge 1.15.1; 1.15.0 put Generate and the progress under the prompt).
+     * The bridge puts it all back when told whole.
      *
      * Presentation, like theme(): never a reason a picture cannot be sent.
      * Sent when the page becomes ready - a new page is whole until told - and
@@ -4535,7 +4536,7 @@ window.minipaintWanGP = (function () {
         S.layoutShown = null;
         S.layoutMissing = "";
         const summary = asked === "studio"
-            ? "layout: studio under super focus - WanGP's prompt, Generate and progress beside its gallery"
+            ? "layout: studio under super focus - WanGP's prompt beside its Generate, progress and gallery"
             : asked === "compact"
                 ? "layout: compact under focus - WanGP's title, tab strip, model row and description hidden"
                 : "layout: whole - WanGP's title, tab strip, model row and description shown";

@@ -422,7 +422,9 @@ wizard's box while WanGP's prompt wizard is on, as if it had been typed there; a
 bridge leaves that box saying the bridge needs reinstalling. Bridge 1.15.0 lays the page out
 as a studio under that assistant's super focus (`capabilities.layout_studio`; see *Super
 focus: the studio*, below) and answers every `LAYOUT_STATE` with what it shows; an older
-bridge shows the compact page there. An extension newer than its
+bridge shows the compact page there. Bridge 1.15.1 lays the studio out again: the prompt
+alone in one column, Generate, the progress and the gallery in the other, stacked only on
+a phone. An extension newer than its
 bridge says `BRIDGE_VERSION_MISMATCH` until the bridge is installed again from setup step 4
 and WanGP restarted.
 
@@ -522,15 +524,21 @@ says `compact layout: no #wangp-gallery-tabs on this page; it stays whole`.
 ## Super focus: the studio
 
 Two more presses on the assistant's header or launcher, from focus on the WanGP tab, are
-its **Super Focused** mode: the WanGP page becomes a studio - WanGP's prompt, its Generate
-(its live controls while it generates) and its progress in one column, its gallery - the
-video playing with its controls, the strip of results under it - in the other, and
-nothing else. WanGP's settings, its model row, its galleries' details and its queue are
-put away; the assistant's panel and Forge's tab bar go too. A divider between the two
-columns can be dragged, moved with the arrow keys, or put back with a double click, and
-the share is remembered in this browser. Under 720 pixels of page the columns stack. Two
-more presses, Escape or a switch of tab end it, and the WanGP page is whole again with
-every setting where it was; what was typed and generated meanwhile stays (bridge 1.15.0).
+its **Super Focused** mode: the WanGP page becomes a studio - WanGP's prompt alone in one
+column, its box the column's whole height and scrolling inside itself when the text is
+longer; in the other its Generate (its live controls while it generates), its progress
+and, under them, its gallery - the video playing with its controls, the strip of results
+under it - and nothing else. WanGP's settings, its model row, its galleries' details and
+its queue are put away; the assistant's panel and Forge's tab bar go too. A divider between
+the two columns can be dragged, moved with the arrow keys, or put back with a double click,
+which makes the prompt's box wider or narrower, and the share is remembered in this
+browser. Only a phone's page, under 520 pixels, stacks the columns - the prompt, then
+Generate, the progress and the gallery - and opens at the prompt; a folded-out phone at
+120% keeps two. While WanGP generates, its live controls take Generate's place and the
+gallery gives up the room they need. Two more presses, Escape or a switch of tab end it,
+and the WanGP page is whole again with every setting where it was and scrolled where it
+was; what was typed and generated meanwhile stays (bridge 1.15.1; 1.15.0 put Generate and
+the progress under the prompt and stacked under 720 pixels).
 
 Nothing in WanGP's page moves and nothing is reloaded: its form's row is laid out as a
 grid with the blocks kept where they already are in the document, and every other block

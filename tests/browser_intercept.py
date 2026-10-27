@@ -1081,8 +1081,8 @@ def check_focus_compacts_the_wangp_page(r: Results, page) -> None:
              'element.style.setProperty("display", "none", "important");', 'element.style.setProperty("display", "none");',
              lambda c, w: c.get("strip") is True),
             ("without putting it all back on whole the page stays compact after focus",
-             '    if (layoutWanted === "whole") {\n      clearStudio();\n      showChrome();',
-             '    if (layoutWanted === "whole") {\n      clearStudio();\n',
+             '    if (layoutWanted === "whole") {\n      var whole = clearStudio();\n      showChrome();',
+             '    if (layoutWanted === "whole") {\n      var whole = clearStudio();\n',
              lambda c, w: w.get("strip") is False),
         ):
             anchored = old in script
@@ -1134,8 +1134,12 @@ STUDIO_MEASURE_JS = """() => {
         declarations[i + ":" + e.tagName] = o;
     });
     const divider = doc.querySelector("[data-minipaint-studio='divider']");
+    const area = q("#wangp-prompt-advanced textarea");
     return {
         prompt: box(q("#wangp-prompt-advanced")), generate: box(q("#generate")), progress: box(q(".wangp-progress-container")),
+        box: box(area), boxScroll: area ? [area.scrollHeight, area.clientHeight] : null,
+        column: box(doc.querySelector("[data-minipaint-studio='settings-column']")),
+        scrollY: Math.round(frame.contentWindow.scrollY), pageHeight: doc.documentElement.scrollHeight,
         tabs: box(q("#wangp-gallery-tabs")), gallery: box(q("#wangp-gallery-tabs #gallery")), divider: box(divider),
         dividerNow: divider ? divider.getAttribute("aria-valuenow") : null,
         lset: shown(q("#lset")), image: shown(q("#minipaint_bridge_1") && q("#minipaint_bridge_1").parentElement),
@@ -1150,9 +1154,9 @@ STUDIO_MEASURE_JS = """() => {
         viewport: frame.contentWindow.innerHeight
     };
 }"""
-#: Gradio 5.29's own rules for its rows, columns, tabs and tab panels, as its
-#: page carries them (read off a running 5.29 page; the svelte scopes
-#: dropped), and its border-box sizing: without them a captured page lays its blocks out as plain
+#: Gradio 5.29's own rules for its rows, columns, tabs, tab panels and text
+#: boxes, as its page carries them (read off a running 5.29 page; the svelte
+#: scopes dropped), and its border-box sizing: without them a captured page lays its blocks out as plain
 #: divs, and a tab panel's inline `display: flex` makes a row of what Gradio
 #: stacks. Then a theme that says !important about rows, about WanGP's
 #: floating action bar and about the gallery's height: what the bridge's
@@ -1167,10 +1171,24 @@ STUDIO_GRADIO_CSS = (":root { --layout-gap: 16px; --size-full: 100%; --block-pad
                      " .row { display: flex; flex-wrap: wrap; gap: var(--layout-gap); width: var(--size-full); position: relative; }"
                      " .row > *, .row > .form > * { flex: 1 1 0%; flex-wrap: wrap; min-width: min(160px, 100%); }"
                      " .unequal-height { align-items: flex-start; }"
-                     " .hide, .hidden { display: none; }")
+                     " .hide, .hidden { display: none; }"
+                     " textarea { display: block; position: relative; width: 100%; }")
 STUDIO_HOSTILE_CSS = (STUDIO_GRADIO_CSS + " " + COMPACT_HOSTILE_CSS + " .row { display: flex !important; }"
                       " .wangp-settings-actions { position: sticky !important; bottom: 0; }"
-                      " #gallery { height: 450px !important; }")
+                      " #gallery { height: 450px !important; }"
+                      " textarea { max-height: 160px !important; overflow-y: hidden !important; }")
+#: What Gradio's textbox does as it is typed in: the text, and a height
+#: written inline on the box to fit all of it (its autosize).
+STUDIO_TYPE_JS = """(lines) => { const doc = document.getElementById("mp-wangp-studio-frame").contentDocument;
+    const area = doc.querySelector("#wangp-gallery-tabs").closest(".row").querySelector("#wangp-prompt-advanced textarea");
+    area.value = Array.from({ length: lines }, (_, n) => "line " + n + " of a prompt too long for its box").join(String.fromCharCode(10));
+    area.style.height = (lines * 24) + "px"; }"""
+#: WanGP's action bar growing, as its live controls take Generate's place.
+STUDIO_GROW_ACTIONS_JS = """(px) => { const doc = document.getElementById("mp-wangp-studio-frame").contentDocument;
+    const more = doc.createElement("div"); more.style.height = px + "px";
+    doc.querySelector(".wangp-settings-actions").appendChild(more); }"""
+#: The frame's own scroll, set; answers where it is.
+STUDIO_SCROLL_JS = """(y) => { const w = document.getElementById("mp-wangp-studio-frame").contentWindow; w.scrollTo(0, y); return Math.round(w.scrollY); }"""
 #: The parent's half of the conversation: a hello to bind the channel (the
 #: Gradio round trip behind it never answers on a static page, and needs
 #: not), then LAYOUT_STATE, and every LAYOUT_RESULT the page posts back.
@@ -1204,20 +1222,25 @@ SHOW_EDIT_FORM_JS = """() => { const doc = document.getElementById("mp-wangp-stu
 
 
 def check_super_focus_makes_the_wangp_page_a_studio(r: Results, page) -> None:
-    """Under super focus the WanGP page is its prompt beside its gallery (bridge 1.15.0).
+    """Under super focus the WanGP page is its prompt beside its gallery (bridge 1.15.1).
 
     The bridge's own script runs on WanGP's Media Generator page as Gradio
     5.29 really draws it, form and all (tests/wangp_studio_gradio_5_29.html),
     under a theme that says !important about rows, about WanGP's floating
-    action bar and about the gallery's height, and is told a studio: the
-    prompt, Generate and the progress stack in one column, the gallery takes
-    the other and the window's height, a divider between them moves the
-    share and remembers it, everything else of the form and around it is out
-    of the layout, a narrow page stacks, the page answers what it shows - and
-    told whole, every inline declaration on the page is what it was. Measured
-    in a browser because what is asked is where real boxes went.
+    action bar, about the gallery's height and about text boxes, and is told
+    a studio: the prompt alone in one column, its box as tall as the column
+    and scrolling inside itself whatever Gradio writes on it as it is typed
+    in; Generate, the progress and the gallery in the other, the gallery
+    taking what the window leaves and giving back what the action bar grows
+    by; a divider between them that moves the share and remembers it;
+    everything else of the form and around it out of the layout; two columns
+    at a folded-out phone's width zoomed in, stacked only at a phone's, where
+    the studio starts at its top and leaving gives the page its scroll back;
+    the page answers what it shows - and told whole, every inline declaration
+    on the page is what it was. Measured in a browser because what is asked
+    is where real boxes went.
 
-    Six decisions are reverted to prove the checks can see them.
+    Thirteen decisions are reverted to prove the checks can see them.
     """
     import sys as _sys
 
@@ -1234,6 +1257,8 @@ def check_super_focus_makes_the_wangp_page_a_studio(r: Results, page) -> None:
     # decision, a check that does not wait five seconds for it.
     config["triggerAttempts"] = 2
     script = bridge_js.document_script("", config)
+    # A folded-out phone at 120%, and a phone.
+    fold, phone = 700, 480
 
     def studio(source, width=1200):
         ready = page.evaluate(STUDIO_FRAME_JS, [markup, source, STUDIO_HOSTILE_CSS, width])
@@ -1243,16 +1268,46 @@ def check_super_focus_makes_the_wangp_page_a_studio(r: Results, page) -> None:
         return ready, before, told, page.evaluate(STUDIO_MEASURE_JS)
 
     def studio_shape(m):
-        # The prompt over Generate over the progress, the gallery's tabs to
-        # the right of all three.
-        p_, g_, pr_, tabs = (m.get(k) or {} for k in ("prompt", "generate", "progress", "tabs"))
-        return (p_.get("b", 9e9) <= g_.get("t", -1) and g_.get("b", 9e9) <= pr_.get("t", -1)
-                and tabs.get("l", -1) >= max(p_.get("r", 9e9), g_.get("r", 9e9), pr_.get("r", 9e9)))
+        # Generate over the progress over the gallery's tabs, all three to
+        # the right of the prompt's box.
+        b_, g_, pr_, tabs = (m.get(k) or {} for k in ("box", "generate", "progress", "tabs"))
+        return (g_.get("b", 9e9) <= pr_.get("t", -1) and pr_.get("b", 9e9) <= tabs.get("t", -1) + 1
+                and min(g_.get("l", -1), pr_.get("l", -1), tabs.get("l", -1)) >= b_.get("r", 9e9))
+
+    def fitted(m):
+        # The prompt's box ends where the gallery's tabs do, in the window.
+        b_, tabs = m.get("box") or {}, m.get("tabs") or {}
+        return abs(b_.get("b", 0) - tabs.get("b", 9e9)) <= 24 and tabs.get("b", 9e9) <= m.get("viewport", 0)
+
+    def stacked(m):
+        # The prompt's column, then Generate, the progress and the gallery,
+        # and no divider.
+        c_, g_, pr_, tabs = (m.get(k) or {} for k in ("column", "generate", "progress", "tabs"))
+        return (c_.get("b", 9e9) <= g_.get("t", -1) + 1 and g_.get("b", 9e9) <= pr_.get("t", -1)
+                and pr_.get("b", 9e9) <= tabs.get("t", -1) + 1 and m.get("divider") is None)
+
+    def width(px):
+        page.evaluate("""(px) => { document.getElementById("mp-wangp-studio-frame").style.width = px + "px"; }""", px)
+        page.wait_for_timeout(300)
+        return page.evaluate(STUDIO_MEASURE_JS)
 
     def whole():
         told = page.evaluate(STUDIO_APPLY_JS, {"compact": False})
         page.wait_for_timeout(100)
         return told, page.evaluate(STUDIO_MEASURE_JS)
+
+    def scrolled(source):
+        # On a phone, scrolled down: where the studio starts, and where
+        # leaving it puts the page. A phone's window, taller than it is
+        # wide and short enough that the studio's page scrolls too.
+        page.evaluate(STUDIO_FRAME_JS, [markup, source, STUDIO_HOSTILE_CSS, phone])
+        page.evaluate("""() => { document.getElementById("mp-wangp-studio-frame").style.height = "640px"; }""")
+        page.wait_for_timeout(50)
+        at = page.evaluate(STUDIO_SCROLL_JS, 400)
+        page.evaluate(STUDIO_APPLY_JS, {"compact": True, "studio": True})
+        page.wait_for_timeout(100)
+        top = page.evaluate(STUDIO_MEASURE_JS).get("scrollY")
+        return at, top, whole()[1].get("scrollY")
 
     try:
         ready, before, told, s = studio(script)
@@ -1266,21 +1321,22 @@ def check_super_focus_makes_the_wangp_page_a_studio(r: Results, page) -> None:
                 and told.get("hidden") == len(s.get("chromeMarks") or []) and s.get("attr") == "studio", str(told))
         r.check("and everything but the prompt, Generate, the progress and the gallery is gone - the header's parts with it",
                 not any(s.get(k) for k in ("lset", "image", "frames", "enhance", "mediaInfo", "queue", "title", "family"))
-                and all(s.get(k) for k in ("prompt", "generate", "progress", "tabs", "gallery")),
+                and all(s.get(k) for k in ("prompt", "box", "generate", "progress", "tabs", "gallery")),
                 str({k: s.get(k) for k in ("lset", "image", "frames", "enhance", "mediaInfo", "queue", "title", "family", "prompt")}))
-        p_, g_, pr_, gal, tabs = (s.get(k) or {} for k in ("prompt", "generate", "progress", "gallery", "tabs"))
-        r.check("the prompt, then Generate, then the progress, in one column",
-                p_.get("b", 9e9) <= g_.get("t", -1) and g_.get("b", 9e9) <= pr_.get("t", -1)
-                and abs(p_.get("l", 0) - g_.get("l", 99)) < 24 and abs(g_.get("l", 0) - pr_.get("l", 99)) < 24, str((p_, g_, pr_)))
-        r.check("the gallery in the other, beside them from the top, the divider between",
-                max(p_.get("r", 0), g_.get("r", 0), pr_.get("r", 0)) <= (s.get("divider") or {}).get("l", -1)
-                and (s.get("divider") or {}).get("r", 9e9) <= tabs.get("l", -1) and abs(tabs.get("t", 0) - p_.get("t", 999)) < 80,
-                str((p_, s.get("divider"), tabs)))
+        b_, p_, g_, pr_, gal, tabs, col, div = (s.get(k) or {} for k in ("box", "prompt", "generate", "progress", "gallery", "tabs",
+                                                                          "column", "divider"))
+        r.check("the prompt alone in the left column; Generate, then the progress, then the gallery in the right, from its top",
+                studio_shape(s) and abs(g_.get("t", 0) - col.get("t", 999)) < 24, str((col, b_, g_, pr_, tabs)))
+        r.check("the divider between the two columns",
+                b_.get("r", 9e9) <= div.get("l", -1) and div.get("r", 9e9) <= min(g_.get("l", -1), pr_.get("l", -1), tabs.get("l", -1)),
+                str((b_, div, g_)))
+        r.check("the prompt's box as tall as its column: it ends where the gallery does, in the window",
+                fitted(s) and b_.get("h", 0) > 500, str((b_, tabs, s.get("viewport"))))
         r.check("the prompt's column at the starting share of the width",
                 abs((tabs.get("l", 0) - p_.get("l", 0)) / 1200 - bridge_js.STUDIO_SPLIT) < 0.08 and s.get("dividerNow") == "40",
                 f"{tabs.get('l')} {s.get('dividerNow')}")
-        r.check("the gallery as tall as the window leaves it, over a theme's own !important height",
-                gal.get("h", 0) > 600 and s.get("viewport", 0) - gal.get("b", 0) < 80, str(gal) + " " + str(s.get("viewport")))
+        r.check("the gallery as tall as the window leaves it under Generate and the progress, over a theme's own !important height",
+                gal.get("h", 0) > 480 and s.get("viewport", 0) - gal.get("b", 0) < 80, str(gal) + " " + str(s.get("viewport")))
         kinds = sorted(set(s.get("studioMarks") or []))
         r.check("each part named for what it is, and the divider the bridge's own",
                 kinds == ["actions", "actions-column", "divider", "gallery", "media", "progress", "prompt", "row", "settings-column"]
@@ -1288,30 +1344,32 @@ def check_super_focus_makes_the_wangp_page_a_studio(r: Results, page) -> None:
                 str(kinds) + str(sorted(set(s.get("chromeMarks") or []))))
 
         # The divider: dragged, by the keys, and remembered.
-        d = s.get("divider") or {}
-        page.mouse.move(d.get("l", 0) + 6, d.get("t", 0) + 120)
+        page.mouse.move(div.get("l", 0) + 6, div.get("t", 0) + 120)
         page.mouse.down()
-        page.mouse.move(780, d.get("t", 0) + 140, steps=6)
+        page.mouse.move(780, div.get("t", 0) + 140, steps=6)
         page.mouse.up()
         dragged = page.evaluate(STUDIO_MEASURE_JS)
-        r.check("dragged, the divider gives the prompt's column more of the width and the browser keeps the share",
-                (dragged.get("prompt") or {}).get("w", 0) > p_.get("w", 9e9) + 150
-                and abs(float(dragged.get("split") or 0) - (780 - 6) / 1188) < 0.03, str(dragged.get("prompt")) + str(dragged.get("split")))
+        r.check("dragged, the divider gives the prompt's box more of the width and the browser keeps the share",
+                (dragged.get("box") or {}).get("w", 0) > b_.get("w", 9e9) + 150 and fitted(dragged)
+                and abs(float(dragged.get("split") or 0) - (780 - 6) / 1188) < 0.03, str(dragged.get("box")) + str(dragged.get("split")))
         page.evaluate("""() => { const d = document.getElementById("mp-wangp-studio-frame").contentDocument.querySelector("[data-minipaint-studio='divider']");
                                d.focus(); d.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true })); }""")
         keyed = page.evaluate(STUDIO_MEASURE_JS)
         r.check("and a key moves it a step", int(keyed.get("dividerNow") or 0) == int(dragged.get("dividerNow") or 0) - 2,
                 f"{dragged.get('dividerNow')} -> {keyed.get('dividerNow')}")
 
-        # Narrow: stacked, the gallery under the progress, no divider.
-        page.evaluate("""() => { document.getElementById("mp-wangp-studio-frame").style.width = "600px"; }""")
-        page.wait_for_timeout(300)
-        narrow = page.evaluate(STUDIO_MEASURE_JS)
-        r.check("on a narrow page the columns stack: the prompt's, then the gallery, and no divider",
-                (narrow.get("tabs") or {}).get("t", 0) >= (narrow.get("progress") or {}).get("b", 9e9) - 1 and narrow.get("divider") is None,
-                str(narrow.get("tabs")) + str(narrow.get("progress")))
-        page.evaluate("""() => { document.getElementById("mp-wangp-studio-frame").style.width = "1200px"; }""")
-        page.wait_for_timeout(300)
+        # A folded-out phone zoomed in keeps two columns; a phone stacks.
+        folded = width(fold)
+        r.check(f"{fold} px wide - a folded-out phone at 120% - it is still two columns, the divider between them",
+                studio_shape(folded) and fitted(folded) and folded.get("divider") is not None,
+                str({k: folded.get(k) for k in ("box", "generate", "tabs", "divider")}))
+        narrow = width(phone)
+        r.check(f"{phone} px wide - a phone - the columns stack: the prompt, then Generate, the progress and the gallery, and no divider",
+                stacked(narrow), str({k: narrow.get(k) for k in ("column", "generate", "progress", "tabs", "divider")}))
+        r.check("and the stacked prompt's box is its share of the window",
+                abs((narrow.get("box") or {}).get("h", 0) - round(narrow.get("viewport", 0) * bridge_js.STUDIO_PROMPT_STACKED_SHARE)) <= 2,
+                str(narrow.get("box")))
+        width(1200)
 
         told_whole, w = whole()
         changed = {k: (before.get("declarations", {}).get(k), w.get("declarations", {}).get(k))
@@ -1321,11 +1379,34 @@ def check_super_focus_makes_the_wangp_page_a_studio(r: Results, page) -> None:
                 not changed and w.get("studioMarks") == [] and w.get("chromeMarks") == []
                 and w.get("attr") is None and told_whole.get("layout") == "whole", str(told_whole) + str(changed)[:400])
         r.check("and every part is back where it was",
-                {k: w.get(k) for k in ("prompt", "generate", "progress", "tabs", "gallery", "lset", "image", "frames", "title")}
-                == {k: before.get(k) for k in ("prompt", "generate", "progress", "tabs", "gallery", "lset", "image", "frames", "title")},
-                str({k: (before.get(k), w.get(k)) for k in ("prompt", "gallery") if before.get(k) != w.get(k)}))
+                {k: w.get(k) for k in ("prompt", "box", "generate", "progress", "tabs", "gallery", "lset", "image", "frames", "title")}
+                == {k: before.get(k) for k in ("prompt", "box", "generate", "progress", "tabs", "gallery", "lset", "image", "frames", "title")},
+                str({k: (before.get(k), w.get(k)) for k in ("prompt", "box", "gallery") if before.get(k) != w.get(k)}))
         r.check("and the dragged share outlives the studio, for the next one", abs(float(w.get("split") or 0) - float(keyed.get("split") or -1)) < 1e-6,
                 str(w.get("split")))
+
+        # Typed in past its height: Gradio writes the box's height inline to
+        # fit the text, and a theme caps text boxes.
+        _ready, _before, _told, fresh = studio(script)
+        page.evaluate(STUDIO_TYPE_JS, 200)
+        page.wait_for_timeout(150)
+        typed = page.evaluate(STUDIO_MEASURE_JS)
+        scroll = typed.get("boxScroll") or [0, 0]
+        r.check("typed in past its height, the box keeps its size whatever Gradio writes on it, and scrolls inside itself",
+                abs((typed.get("box") or {}).get("h", 0) - (fresh.get("box") or {}).get("h", -99)) <= 1 and scroll[0] > scroll[1] + 1000
+                and typed.get("pageHeight", 9e9) <= typed.get("viewport", 0) + 1,
+                str((typed.get("box"), scroll, typed.get("pageHeight"))))
+        # The live controls take Generate's place, taller than it.
+        page.evaluate(STUDIO_GROW_ACTIONS_JS, 60)
+        page.wait_for_timeout(150)
+        grown = page.evaluate(STUDIO_MEASURE_JS)
+        r.check("when WanGP's action bar grows, the gallery gives the room back and the two columns still end together in the window",
+                (grown.get("gallery") or {}).get("h", 9e9) <= (fresh.get("gallery") or {}).get("h", 0) - 50 and fitted(grown),
+                str((grown.get("gallery"), grown.get("box"), grown.get("tabs"))))
+
+        at, top, back = scrolled(script)
+        r.check("on a phone the studio starts at its top, and leaving it puts the page back where it was",
+                at == 400 and top == 0 and back == 400, f"{at} -> {top} -> {back}")
 
         # The page answers what it settled on, once per request, to the
         # parent that asked.
@@ -1360,9 +1441,15 @@ def check_super_focus_makes_the_wangp_page_a_studio(r: Results, page) -> None:
                 str(nopro.get("heard")))
 
         # Every decision here has a mutation that must break its check.
+        def mutant(name, old):
+            if old not in script:
+                r.check(f"mutation: {name}", False, "anchor gone from the script")
+                return False
+            return True
+
         for name, old, new, broken in (
-            ("without the columns as contents the prompt and the gallery are not side by side",
-             'holdStyle(found.settings, "display", "contents");\n    holdStyle(found.actions, "display", "contents");', "",
+            ("without the actions column as contents Generate and the progress are not over the gallery",
+             'holdStyle(found.actions, "display", "contents");', "",
              lambda m: not studio_shape(m)),
             ("without the inline !important a theme's own keeps the row a row",
              '    element.style.setProperty(name, value, "important");\n  }\n', '    element.style.setProperty(name, value);\n  }\n',
@@ -1370,21 +1457,46 @@ def check_super_focus_makes_the_wangp_page_a_studio(r: Results, page) -> None:
             ("without the gallery fitted it keeps its 450 px",
              'restyle(studio.media, "height", Math.max(CONFIG.studioGalleryMinPx, height) + "px");', "",
              lambda m: (m.get("gallery") or {}).get("h", 0) < 470),
-            ("without the WanGP action bar held in its place it stays sticky under a theme that says so",
-             'holdStyle(found.generate, "position", "static");', "",
-             lambda m: False),
+            ("without the prompt fitted its box is not as tall as its column",
+             "    fitPrompt(stacked, view);\n", "",
+             lambda m: not fitted(m)),
+            ("without the prompt's column across every row the right column does not start at its top",
+             'restyle(studio.settings, "grid-row", stacked ? "1" : "1 / -1");', 'restyle(studio.settings, "grid-row", "1");',
+             lambda m: not (studio_shape(m) and fitted(m))),
         ):
-            anchored = old in script
-            if not anchored:
-                r.check(f"mutation: {name}", False, "anchor gone from the script")
-                continue
-            _ready, _before, _told, mutated = studio(script.replace(old, new))
-            if name.startswith("without the WanGP action bar"):
-                sticky = page.evaluate("""() => getComputedStyle(document.getElementById("mp-wangp-studio-frame").contentDocument
-                                           .querySelector(".wangp-settings-actions")).position""")
-                r.check(f"mutation: {name}", sticky == "sticky", sticky)
-                continue
-            r.check(f"mutation: {name}", broken(mutated), str({k: mutated.get(k) for k in ("prompt", "tabs", "gallery")})[:240])
+            if mutant(name, old):
+                _ready, _before, _told, mutated = studio(script.replace(old, new))
+                r.check(f"mutation: {name}", broken(mutated), str({k: mutated.get(k) for k in ("box", "tabs", "gallery")})[:240])
+        name, old = "without the WanGP action bar held in its place it stays sticky under a theme that says so", 'holdStyle(found.generate, "position", "static");'
+        if mutant(name, old):
+            studio(script.replace(old, ""))
+            sticky = page.evaluate("""() => getComputedStyle(document.getElementById("mp-wangp-studio-frame").contentDocument
+                                       .querySelector(".wangp-settings-actions")).position""")
+            r.check(f"mutation: {name}", sticky == "sticky", sticky)
+        name = "without the studio's own rule for the prompt's box, typing makes it what Gradio and the theme say"
+        old = '" { height: var(" + CONFIG.studioPromptHeightProperty + ", auto) !important;"'
+        if mutant(name, old):
+            studio(script.replace(old, '" {"'))
+            page.evaluate(STUDIO_TYPE_JS, 200)
+            page.wait_for_timeout(150)
+            r.check(f"mutation: {name}", not fitted(page.evaluate(STUDIO_MEASURE_JS)), "")
+        name, old = "without the parts above the gallery watched, the live controls push the gallery out of the window", "studio.watch.observe(part);"
+        if mutant(name, old):
+            studio(script.replace(old, ""))
+            page.evaluate(STUDIO_GROW_ACTIONS_JS, 60)
+            page.wait_for_timeout(150)
+            r.check(f"mutation: {name}", not fitted(page.evaluate(STUDIO_MEASURE_JS)), "")
+        # The width a page stacks below, back at 1.15.0's.
+        _ready, _before, _told, _s = studio(bridge_js.document_script("", dict(config, studioStackBelowPx=720)), fold)
+        r.check(f"mutation: stacking below 720 px stacks a folded-out phone at {fold} px", stacked(_s), str(_s.get("divider")))
+        name, old = "without the studio starting at its top, a phone shows the middle of the prompt or less", "if (window.pageYOffset) { try { window.scrollTo(0, 0); } catch (error) {} }"
+        if mutant(name, old):
+            at, top, back = scrolled(script.replace(old, ""))
+            r.check(f"mutation: {name}", top != 0, f"{at} -> {top} -> {back}")
+        name, old = "without the scroll put back, leaving the studio leaves the page at its top", "scrollBack(whole);"
+        if mutant(name, old):
+            at, top, back = scrolled(script.replace(old, ""))
+            r.check(f"mutation: {name}", back != 400, f"{at} -> {top} -> {back}")
         # Leaving: without the studio's declarations put back, whole is not
         # what it was.
         old = 'held.element.style.removeProperty(held.name);\n        if (held.value) { held.element.style.setProperty(held.name, held.value, held.priority); }'

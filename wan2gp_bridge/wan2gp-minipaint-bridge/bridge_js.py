@@ -31,9 +31,10 @@ Gradio applies it the way it applies a human upload. The theme is injected
 here too, in its own try/catch, because a stylesheet that fails to apply must
 not take image handoff with it; and so is the compact layout (bridge 1.11.0),
 which hides WanGP's own header while the parent's focus mode gives the tab the
-window, and the studio (bridge 1.15.0), which shows WanGP's prompt, Generate
-and progress beside its gallery and nothing else - presentation again,
-touching no value and no event.
+window, and the studio (bridge 1.15.0, laid out again in 1.15.1), which shows
+WanGP's prompt alone in one column and its Generate, progress and gallery in
+the other, and nothing else - presentation again, touching no value and no
+event.
 
 The script is generated from Python so that the protocol constants have one
 definition rather than two: they are interpolated as JSON from ``protocol``.
@@ -105,14 +106,15 @@ LAYOUT_ATTRIBUTE = "data-minipaint-layout"
 #: On every element the compact layout took out, naming which part it is.
 CHROME_ATTRIBUTE = "data-minipaint-chrome"
 
-#: The studio layout (bridge 1.15.0): the compact page cut down to what the
-#: Forge Assistant's super focus asks for - WanGP's prompt, its Generate and
-#: its progress in one column, its gallery in the other, a divider between
-#: them that the person drags. Found from the same anchor, and inside the
-#: generator form by what WanGP itself names: the two prompt boxes by the ids
-#: wgp.py gives them (``PROMPT_ADVANCED_ELEM_ID``, ``PROMPT_WIZARD_ELEM_ID``),
-#: the progress and the action bar by the classes it gives them. Everything
-#: between the two prompt boxes stays with them - the wizard's variables.
+#: The studio layout (bridge 1.15.0, laid out again in 1.15.1): the compact
+#: page cut down to what the Forge Assistant's super focus asks for - WanGP's
+#: prompt alone in one column, its box as tall as the column, and its Generate,
+#: its progress and its gallery in the other, a divider between them that the
+#: person drags. Found from the same anchor, and inside the generator form by
+#: what WanGP itself names: the two prompt boxes by the ids wgp.py gives them
+#: (``PROMPT_ADVANCED_ELEM_ID``, ``PROMPT_WIZARD_ELEM_ID``), the progress and
+#: the action bar by the classes it gives them. Everything between the two
+#: prompt boxes stays with them - the wizard's variables.
 STUDIO_PROMPT_IDS = ("wangp-prompt-advanced", "wangp-prompt-wizard")
 STUDIO_PROGRESS_CLASS = "wangp-progress-container"
 STUDIO_ACTIONS_CLASS = "wangp-settings-actions"
@@ -126,8 +128,21 @@ STUDIO_SPLIT = 0.4
 STUDIO_SPLIT_MIN = 0.2
 STUDIO_SPLIT_MAX = 0.75
 STUDIO_SPLIT_KEY = "minipaint-wangp:studio-split"
-#: Narrower than this, the two columns stack: the prompt's, then the gallery.
-STUDIO_STACK_BELOW_PX = 720
+#: Narrower than this - a phone's page, not a tablet's or a folded-out
+#: phone's at a larger zoom - the two columns stack: the prompt, then
+#: Generate, the progress and the gallery. Wider, each column keeps at least
+#: its own minimum, the prompt's and the gallery's.
+STUDIO_STACK_BELOW_PX = 520
+STUDIO_PROMPT_MIN_WIDTH_PX = 200
+STUDIO_GALLERY_MIN_WIDTH_PX = 280
+#: The prompt box is never drawn shorter than this; stacked, it is this share
+#: of the window's height.
+STUDIO_PROMPT_MIN_PX = 96
+STUDIO_PROMPT_STACKED_SHARE = 0.3
+#: The custom property on the form's row that the studio's stylesheet sets the
+#: prompt box's height from: a rule, so that Gradio's own sizing of the box as
+#: it is typed in (an inline height, not important) cannot undo it.
+STUDIO_PROMPT_HEIGHT_PROPERTY = "--minipaint-studio-prompt-height"
 #: The smallest the gallery is drawn, and what it leaves under itself.
 STUDIO_GALLERY_MIN_PX = 240
 STUDIO_GALLERY_MARGIN_PX = 12
@@ -208,6 +223,11 @@ def configuration(theme_css: str = "") -> dict:
         "studioSplitMax": STUDIO_SPLIT_MAX,
         "studioSplitKey": STUDIO_SPLIT_KEY,
         "studioStackBelowPx": STUDIO_STACK_BELOW_PX,
+        "studioPromptMinWidthPx": STUDIO_PROMPT_MIN_WIDTH_PX,
+        "studioGalleryMinWidthPx": STUDIO_GALLERY_MIN_WIDTH_PX,
+        "studioPromptMinPx": STUDIO_PROMPT_MIN_PX,
+        "studioPromptStackedShare": STUDIO_PROMPT_STACKED_SHARE,
+        "studioPromptHeightProperty": STUDIO_PROMPT_HEIGHT_PROPERTY,
         "studioGalleryMinPx": STUDIO_GALLERY_MIN_PX,
         "studioGalleryMarginPx": STUDIO_GALLERY_MARGIN_PX,
         # THEME_STATE's vocabulary, so the script applies a theme exactly as
@@ -1278,9 +1298,10 @@ __MINIPAINT_FRAME_WRAPPER__
     layoutTimer = 0;
     var root = document.documentElement;
     if (layoutWanted === "whole") {
-      clearStudio();
+      var whole = clearStudio();
       showChrome();
       try { root.removeAttribute(CONFIG.layoutAttribute); } catch (error) {}
+      scrollBack(whole);
       return layoutSettled("whole", "");
     }
     var parts = chromeParts();
@@ -1293,10 +1314,13 @@ __MINIPAINT_FRAME_WRAPPER__
     }
     var found = layoutWanted === "studio" ? studioParts() : null;
     var arranged = !!(found && typeof found === "object");
-    clearStudio();
+    // Where the page was, read before anything is taken out of it.
+    var at = window.pageYOffset || 0;
+    var back = clearStudio();
     hideChrome(arranged ? parts.concat(found.hide) : parts);
-    if (arranged) { arrangeStudio(found); }
+    if (arranged) { arrangeStudio(found, back === null ? at : back); }
     try { root.setAttribute(CONFIG.layoutAttribute, arranged ? "studio" : "compact"); } catch (error) {}
+    if (!arranged) { scrollBack(back); }
     if (layoutWanted === "studio" && !arranged) {
       // The form is drawn and its prompt is not, yet - or this WanGP names it
       // differently. Compact meanwhile, the same bounded looks, and then
@@ -1330,22 +1354,28 @@ __MINIPAINT_FRAME_WRAPPER__
     }
   }
 
-  // -- the studio layout (bridge 1.15.0) -----------------------------------------
+  // -- the studio layout (bridge 1.15.0, laid out again in 1.15.1) ---------------
   //
-  // The Forge Assistant's super focus: WanGP's page as its prompt, its
-  // Generate and its progress in one column and its gallery - the video
-  // playing and the strip under it - in the other, a divider between the two
-  // that the person drags, and nothing else. On top of the compact layout.
+  // The Forge Assistant's super focus: WanGP's page as its prompt alone in one
+  // column - the box as tall as the column, scrolling inside itself - and its
+  // Generate, its progress and its gallery (the video playing and the strip
+  // under it) in the other, a divider between the two that the person drags,
+  // and nothing else. On top of the compact layout.
   //
-  // Nothing moves. The generator form's row becomes a grid and its two
-  // columns `display: contents`, so the blocks kept are placed in the grid
-  // where they already are in the document; every other block of the form,
-  // what WanGP has around it and Gradio's footer are taken out the compact
-  // layout's way (an inline `display: none !important`, marked "settings",
-  // "details", "around" or "footer"); and every declaration written on a kept
-  // element is written inline with !important and recorded with what was
-  // there before, so leaving puts each one back as it was. The divider is the
-  // one element of the bridge's own, and goes with the studio.
+  // Nothing moves. The generator form's row becomes a grid. Its settings
+  // column is the left column, spanning every row, with everything in it but
+  // the prompt taken out; its actions column is `display: contents`, so the
+  // three blocks kept from it are placed in the grid's right column where they
+  // already are in the document, the gallery on the last row, which takes
+  // what the window has left. Every other block of the form, what WanGP has
+  // around it and Gradio's footer are taken out the compact layout's way (an
+  // inline `display: none !important`, marked "settings", "details", "around"
+  // or "footer"); every declaration written on a kept element is written
+  // inline with !important and recorded with what was there before, so
+  // leaving puts each one back as it was. The prompt box's height is the one
+  // thing set from a stylesheet - from a custom property on the row - because
+  // Gradio writes the box's height inline as it is typed in. The divider is
+  // the one element of the bridge's own, and goes with the studio.
 
   function holderOf(parent, className) {
     var found = null;
@@ -1467,8 +1497,8 @@ __MINIPAINT_FRAME_WRAPPER__
   // The share the prompt column may have at this width: inside the bounds,
   // and never so much that either column is narrower than it can be used at.
   function clampSplit(value, width) {
-    var low = Math.max(CONFIG.studioSplitMin, width ? 280 / width : 0);
-    var high = Math.min(CONFIG.studioSplitMax, width ? 1 - 320 / width : 1);
+    var low = Math.max(CONFIG.studioSplitMin, width ? CONFIG.studioPromptMinWidthPx / width : 0);
+    var high = Math.min(CONFIG.studioSplitMax, width ? 1 - CONFIG.studioGalleryMinWidthPx / width : 1);
     if (!isFinite(value)) { value = CONFIG.studioSplit; }
     if (high < low) { return CONFIG.studioSplit; }
     return Math.min(high, Math.max(low, value));
@@ -1483,41 +1513,64 @@ __MINIPAINT_FRAME_WRAPPER__
       + " border-radius: 1px; background: var(--border-color-primary, rgba(127, 127, 127, 0.4)); }\n"
       + divider + ":hover::before, " + divider + ":focus-visible::before, " + divider + "[data-dragging]::before"
       + " { background: var(--color-accent, #2563eb); }\n"
-      + divider + ":focus { outline: none; }\n";
+      + divider + ":focus { outline: none; }\n"
+      // The prompt box, as tall as the studio says, whatever Gradio writes on
+      // it as it is typed in, scrolling inside itself; its height is the
+      // divider's business no more than its width is the person's.
+      + CONFIG.studioPromptIds.map(function (id) {
+        return "html[" + CONFIG.layoutAttribute + "='studio'] [" + CONFIG.studioAttribute + "='settings-column'] #" + id + " textarea";
+      }).join(",\n") + " { height: var(" + CONFIG.studioPromptHeightProperty + ", auto) !important;"
+      + " max-height: none !important; min-height: 0 !important; resize: none !important; overflow-y: auto !important; }\n";
     (document.head || document.documentElement).appendChild(tag);
   }
 
-  function arrangeStudio(found) {
-    var left = found.prompts.slice();
-    if (found.generate) { left.push(found.generate); }
-    if (found.progress) { left.push(found.progress); }
-    studio = { row: found.row, left: left, gallery: found.gallery, media: found.media, divider: null,
-               split: storedSplit(), stacked: null, frame: 0, drag: null };
+  function arrangeStudio(found, back) {
+    var right = [];
+    if (found.generate) { right.push(found.generate); }
+    if (found.progress) { right.push(found.progress); }
+    right.push(found.gallery);
+    studio = { row: found.row, settings: found.settings, prompts: found.prompts, right: right, gallery: found.gallery,
+               media: found.media, divider: null, split: storedSplit(), stacked: null, frame: 0, drag: null, watch: null,
+               scrolled: back || 0 };
 
     markStudio(found.row, "row");
     markStudio(found.settings, "settings-column");
     markStudio(found.actions, "actions-column");
-    holdStyle(found.settings, "display", "contents");
-    holdStyle(found.actions, "display", "contents");
     holdStyle(found.row, "display", "grid");
     // The whole width of the tab, whatever the row it sits in makes of it.
     holdStyle(found.row, "width", "100%");
     holdStyle(found.row, "grid-template-columns", "minmax(0, 1fr)");
-    holdStyle(found.row, "grid-template-rows", "repeat(" + left.length + ", auto) minmax(0, 1fr)");
+    holdStyle(found.row, "grid-template-rows", "none");
     holdStyle(found.row, "align-items", "start");
     holdStyle(found.row, "gap", "0px");
-    for (var i = 0; i < left.length; i += 1) {
-      var part = i < found.prompts.length ? "prompt" : (left[i] === found.generate ? "actions" : "progress");
-      markStudio(left[i], part);
-      holdStyle(left[i], "grid-column", "1");
-      holdStyle(left[i], "grid-row", String(i + 1));
-      holdStyle(left[i], "min-width", "0px");
-      holdStyle(left[i], "margin-bottom", "var(--layout-gap, 12px)");
+    holdStyle(found.row, CONFIG.studioPromptHeightProperty, "auto");
+    // The left column is WanGP's own settings column, its prompt the one
+    // thing left in it, as tall as the row: a flex column of its blocks, at
+    // their own heights - a prompt column grows by its inline flex-grow, which
+    // would put the free room inside the block rather than in the box.
+    holdStyle(found.settings, "display", "flex");
+    holdStyle(found.settings, "flex-direction", "column");
+    holdStyle(found.settings, "grid-column", "1");
+    holdStyle(found.settings, "grid-row", "1 / -1");
+    holdStyle(found.settings, "align-self", "stretch");
+    holdStyle(found.settings, "min-width", "0px");
+    for (var p = 0; p < found.prompts.length; p += 1) {
+      markStudio(found.prompts[p], "prompt");
+      holdStyle(found.prompts[p], "flex-grow", "0");
+    }
+    // The right column: Generate, the progress, the gallery, from the top.
+    holdStyle(found.actions, "display", "contents");
+    for (var i = 0; i < right.length; i += 1) {
+      markStudio(right[i], right[i] === found.generate ? "actions" : (right[i] === found.progress ? "progress" : "gallery"));
+      holdStyle(right[i], "grid-column", "3");
+      holdStyle(right[i], "grid-row", String(i + 1));
+      holdStyle(right[i], "min-width", "0px");
+      if (right[i] !== found.gallery) { holdStyle(right[i], "margin-bottom", "var(--layout-gap, 12px)"); }
     }
     // WanGP floats its action bar over the bottom of the window until its
     // place comes into view, and dresses it as floating whenever it is above
     // the place its script measures - which, the columns being contents
-    // here, is wherever the gallery ends. Its place is under the prompt.
+    // here, is wherever the gallery ends. Its place is over the gallery.
     if (found.generate) {
       holdStyle(found.generate, "position", "static");
       holdStyle(found.generate, "background", "transparent");
@@ -1525,10 +1578,6 @@ __MINIPAINT_FRAME_WRAPPER__
       holdStyle(found.generate, "box-shadow", "none");
       holdStyle(found.generate, "backdrop-filter", "none");
     }
-    markStudio(found.gallery, "gallery");
-    holdStyle(found.gallery, "grid-column", "3");
-    holdStyle(found.gallery, "grid-row", "1 / -1");
-    holdStyle(found.gallery, "min-width", "0px");
     if (found.media) {
       markStudio(found.media, "media");
       holdStyle(found.media, "height", found.media.style.getPropertyValue("height") || "auto");
@@ -1557,11 +1606,30 @@ __MINIPAINT_FRAME_WRAPPER__
     found.row.appendChild(divider);
     studio.divider = divider;
     window.addEventListener("resize", scheduleStudio, false);
+    // Fitted again when what stands above the gallery changes height - the
+    // live controls in Generate's place, the progress drawing its bar - and
+    // when WanGP shows its wizard's box for the plain one. Only sizes the
+    // studio never writes are watched; what it writes it compares first.
+    if (typeof ResizeObserver === "function") {
+      try {
+        studio.watch = new ResizeObserver(scheduleStudio);
+        right.concat(found.prompts).forEach(function (part) { if (part !== found.gallery) { studio.watch.observe(part); } });
+      } catch (error) { studio.watch = null; }
+    }
     fitStudio();
+    // The studio starts at its top - stacked, the prompt - wherever the
+    // page had been scrolled to; leaving puts that place back (scrollBack),
+    // once what the studio took out is shown again.
+    if (window.pageYOffset) { try { window.scrollTo(0, 0); } catch (error) {} }
   }
 
-  // The columns for this width - two with the divider, or stacked - and the
-  // gallery as tall as the window leaves it. Written only where it changed.
+  function scrollBack(offset) {
+    if (typeof offset === "number" && offset > 0) { try { window.scrollTo(0, offset); } catch (error) {} }
+  }
+
+  // The columns for this width - two with the divider, or stacked - the
+  // gallery as tall as the window leaves it, and the prompt box as tall as
+  // its column. Written only where it changed.
   function fitStudio() {
     if (!studio) { return; }
     studio.frame = 0;
@@ -1570,19 +1638,28 @@ __MINIPAINT_FRAME_WRAPPER__
     studio.stacked = stacked;
     studio.split = clampSplit(studio.split, width);
     var share = Math.round(studio.split * 1000) / 1000;
+    var count = studio.right.length;
     restyle(studio.row, "grid-template-columns", stacked ? "minmax(0, 1fr)"
       : "minmax(0, " + share + "fr) 12px minmax(0, " + (Math.round((1 - share) * 1000) / 1000) + "fr)");
-    restyle(studio.gallery, "grid-column", stacked ? "1" : "3");
-    restyle(studio.gallery, "grid-row", stacked ? String(studio.left.length + 1) : "1 / -1");
+    // Two columns: the right column's rows, the gallery's taking the rest,
+    // the prompt's column across them all. Stacked: the prompt, then the rest.
+    restyle(studio.row, "grid-template-rows", stacked ? "repeat(" + (count + 1) + ", auto)"
+      : (count > 1 ? "repeat(" + (count - 1) + ", auto) " : "") + "minmax(0, 1fr)");
+    restyle(studio.settings, "grid-column", "1");
+    restyle(studio.settings, "grid-row", stacked ? "1" : "1 / -1");
+    for (var i = 0; i < count; i += 1) {
+      restyle(studio.right[i], "grid-column", stacked ? "1" : "3");
+      restyle(studio.right[i], "grid-row", String(stacked ? i + 2 : i + 1));
+    }
     if (studio.divider) {
       restyle(studio.divider, "display", stacked ? "none" : "block");
       studio.divider.setAttribute("aria-valuenow", String(Math.round(share * 100)));
     }
+    var view = window.innerHeight || document.documentElement.clientHeight || 0;
     if (studio.media) {
       // As tall as the window leaves it once the page is at its top: what is
       // above the gallery, what its own tab holds under it, and what the page
       // keeps under the form all come off.
-      var view = window.innerHeight || document.documentElement.clientHeight || 0;
       var height = Math.round(view * 0.6);
       if (!stacked) {
         try {
@@ -1596,6 +1673,45 @@ __MINIPAINT_FRAME_WRAPPER__
       }
       restyle(studio.media, "height", Math.max(CONFIG.studioGalleryMinPx, height) + "px");
     }
+    fitPrompt(stacked, view);
+  }
+
+  // The prompt box WanGP shows - the plain one, or the wizard's while its
+  // wizard is on - and the kept block of the column that holds it.
+  function shownPrompt() {
+    for (var i = CONFIG.studioPromptIds.length - 1; i >= 0; i -= 1) {
+      var host = null;
+      try { host = studio.settings.querySelector("#" + CONFIG.studioPromptIds[i]); } catch (error) { host = null; }
+      var box = host ? host.querySelector("textarea") : null;
+      if (box && box.getClientRects().length) { return box; }
+    }
+    return null;
+  }
+
+  // Two columns: the box grows by the room the column has left under its
+  // last block, so it ends where the gallery's column ends; stacked, a share
+  // of the window. Measured off the box's own height, so a second fit that
+  // finds no room left writes nothing.
+  function fitPrompt(stacked, view) {
+    var box = shownPrompt();
+    if (!box) { return; }
+    var height = Math.round(view * CONFIG.studioPromptStackedShare);
+    if (!stacked) {
+      try {
+        var last = null;
+        for (var i = 0; i < studio.prompts.length; i += 1) {
+          if (studio.prompts[i].getClientRects().length) { last = studio.prompts[i]; }
+        }
+        var column = window.getComputedStyle(studio.settings);
+        var end = studio.gallery.getBoundingClientRect().bottom
+          - (parseFloat(column.paddingBottom) || 0) - (parseFloat(column.borderBottomWidth) || 0);
+        var room = end - last.getBoundingClientRect().bottom - (parseFloat(window.getComputedStyle(last).marginBottom) || 0);
+        height = Math.floor((parseFloat(window.getComputedStyle(box).height) || 0) + room);
+      } catch (error) {
+        height = Math.round(view * CONFIG.studioPromptStackedShare);
+      }
+    }
+    restyle(studio.row, CONFIG.studioPromptHeightProperty, Math.max(CONFIG.studioPromptMinPx, height) + "px");
   }
 
   // What the page keeps under an element whose following siblings are all
@@ -1669,11 +1785,14 @@ __MINIPAINT_FRAME_WRAPPER__
   // Everything the studio wrote, put back in the reverse of the order it was
   // written, and its divider gone. The compact layout's own parts are
   // showChrome's.
+  // Ends the studio, if there is one, and answers where the page had been
+  // scrolled to when it began (null without one), for scrollBack.
   function clearStudio() {
     var current = studio;
     studio = null;
     if (current) {
       if (current.frame) { try { window.cancelAnimationFrame(current.frame); } catch (error) {} }
+      if (current.watch) { try { current.watch.disconnect(); } catch (error) {} }
       window.removeEventListener("resize", scheduleStudio, false);
       if (current.divider && current.divider.parentNode) { current.divider.parentNode.removeChild(current.divider); }
     }
@@ -1691,6 +1810,7 @@ __MINIPAINT_FRAME_WRAPPER__
       try { studioMarked[j].removeAttribute(CONFIG.studioAttribute); } catch (error) {}
     }
     studioMarked = [];
+    return current ? current.scrolled : null;
   }
 
   window.__minipaintBridge = { deliver: deliver, theme: theme, layout: layout };

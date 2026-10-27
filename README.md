@@ -719,7 +719,7 @@ same server-owned queue as the tab's presses, ids are never paths, and the answe
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
 API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 or LTX 2.3 / 2.5 rewrite (the page's
 model travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
-and its place in WanGP. Bridge plugin 1.15.0 carries the queue, start and track operations
+and its place in WanGP. Bridge plugin 1.15.1 carries the queue, start and track operations
 (protocol 5) and the control plane server-owned execution runs on (protocol 6), answers the
 WanGP tab's heartbeat and says when its form is touched, guards the page's Gradio session
 (below), dresses the WanGP page in the colours this page sends (above), refuses
@@ -730,8 +730,9 @@ back - `docs/wangp/README.md`, *Sharing the machine*), and answers whether a mod
 (defined, and its files on disk) without downloading anything - the check the Clipboard's
 WanGP section is blocked on - and, from 1.14.0, reads and writes the page's prompt for
 SD-Neo-ModelSwitchRefiner's assistant panel, whose prompt box on the WanGP tab edits the
-prompt WanGP shows, and from 1.15.0 lays the WanGP page out as a studio (its prompt,
-Generate and progress beside its gallery) under that assistant's Super Focused mode - so
+prompt WanGP shows, and from 1.15.0 lays the WanGP page out as a studio under that
+assistant's Super Focused mode (since 1.15.1 its prompt alone beside its Generate, progress
+and gallery, stacked only on a phone) - so
 WanGP's bridge must be updated and WanGP restarted; a
 build lacking one of the six queue components keeps the image send and refuses the queue
 with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking the generate trigger queues but never

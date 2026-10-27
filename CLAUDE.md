@@ -623,11 +623,17 @@ beside `forge-assistant-focus-root` on the WanGP tab's panel - the assistant's S
 Focused mode (its docs/22 §3.39; two presses on its launcher cycle Normal, Focused and,
 on this tab, Super Focused). The tab's panel observer already hears class changes, and
 `layout()` sends `LAYOUT_STATE {compact, studio}` to a bridge that says
-`layout_studio` (bridge 1.15.0): `bridge_js.py` lays WanGP's page out as a studio - the
-prompt boxes by wgp.py's ids, WanGP's action bar and progress by its classes, beside the
-gallery tabs, the form's row made a grid with its columns `display: contents` so nothing
-moves, every declaration inline `!important` and put back exactly, a divider of its own -
-and answers with `LAYOUT_RESULT {layout, hidden, missing}`. Renaming the class on either
+`layout_studio` (bridge 1.15.0): `bridge_js.py` lays WanGP's page out as a studio - since
+1.15.1 the prompt boxes (by wgp.py's ids) alone in the form's settings column, across every
+row, and WanGP's action bar, its progress (by its classes) and the gallery tabs in the
+other, the form's row made a grid with its actions column `display: contents` so nothing
+moves, every declaration inline `!important` and put back exactly, a divider of its own,
+the columns stacked only under 520 px (a Fold 7 at 120% is about 690) - and answers with
+`LAYOUT_RESULT {layout, hidden, missing}`. The prompt's box is as tall as its column by a
+rule in the studio's stylesheet keyed on a custom property the studio writes on the row,
+never by an inline height: Gradio's textbox writes its own height inline on every input
+(its autosize), so an inline height of the studio's would be overwritten at the first key
+and one recorded to put back would put back a stale one. Renaming the class on either
 side leaves super focus showing the compact page with nothing said; `docs/wangp/CONTRACTS.md`
 (*Bridge 1.15.0: the studio*) has it, `layout_checks` in `tests/test_wangp_protocol.py` and
 `check_super_focus_makes_the_wangp_page_a_studio` in `tests/browser_intercept.py` hold it.
@@ -637,8 +643,10 @@ displayed: a live set behind the layout is still the live set. And a captured Gr
 for a browser check must hold no picture in a gallery: a gallery holding pictures draws a
 button inside a button, the HTML parser closes the outer one early when the file is read
 back, and the tree it builds is not Gradio's (`tests/wangp_studio_gradio_5_29.html` says
-so); such a page also needs Gradio's own row, column and tab rules and its border-box
-sizing to lay out as Gradio's does (`STUDIO_GRADIO_CSS`), and a blob address rather than
+so); such a page also needs Gradio's own row, column, tab and text-box rules and its
+border-box sizing to lay out as Gradio's does (`STUDIO_GRADIO_CSS`; without the text box's
+`width: 100%` a textarea is its default 20 columns wide and no drag of the divider widens
+it), and a blob address rather than
 `srcdoc` for any check that messages it, because an about:srcdoc document's
 `location.origin` is "null" and the bridge checks every message against its own origin.
 
@@ -684,14 +692,15 @@ bridge 1.8.0, the theme hijack - the page's colours on the WanGP page, over
 WanGP's own themes - bridge 1.9.0, the page's typeface bridge 1.10.1, the
 compact WanGP page under focus bridge 1.11.0, the card lease's hold bridge
 1.12.0, the assistant's prompt box on the WanGP tab bridge 1.14.0, and the assistant's
-Super Focused studio bridge 1.15.0. The
+Super Focused studio bridge 1.15.0 (its second layout, the prompt alone beside Generate,
+the progress and the gallery, 1.15.1). The
 prompt box has been checked against a fake of the bridge's event and a stand-in
 of WanGP's page, never against the user's own WanGP: if a typed prompt does not
 reach WanGP's box, the WanGP console's `prompt: written` line (or its absence)
 is the first thing to look at. The studio has been checked against Gradio 5.29's own
 markup of WanGP's Media Generator form (`tests/wangp_studio_gradio_5_29.html`) and watched
-once on a live 5.29 page with WanGP's own stylesheet and page script through a fake
-generation, never against the user's own WanGP: if super focus shows the whole form or the
+on a live 5.29 page with WanGP's own stylesheet and page script through a fake generation
+(1.15.1 at 1400, 680 and 400 px), never against the user's own WanGP: if super focus shows the whole form or the
 compact page, the journal's `layout:` line (it says what the page did not find) and the
 WanGP page's `<html data-minipaint-layout>` are the first things to look at. The compact page has been checked against
 Gradio 5.29's own markup of WanGP 13.14's structure (`tests/wangp_page_gradio_5_29.html`), never against the

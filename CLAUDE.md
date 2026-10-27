@@ -620,8 +620,10 @@ stream opened for it, would be the trap above again.
 
 A ninth is shared since 2026-10-26: **a second class, `forge-assistant-wangp-studio`,**
 beside `forge-assistant-focus-root` on the WanGP tab's panel - the assistant's Super
-Focused mode (its docs/22 §3.39; two presses on its launcher cycle Normal, Focused and,
-on this tab, Super Focused). The tab's panel observer already hears class changes, and
+Focused mode (its docs/22 §3.39 and §3.40; three presses on its launcher toggle focus and
+four, on this tab, Super Focused, which a switch to another tab puts away - both classes
+off this panel - until focus comes back to this tab). The tab's panel observer already
+hears class changes, and
 `layout()` sends `LAYOUT_STATE {compact, studio}` to a bridge that says
 `layout_studio` (bridge 1.15.0): `bridge_js.py` lays WanGP's page out as a studio - since
 1.15.1 the prompt boxes (by wgp.py's ids) alone in the form's settings column, across every

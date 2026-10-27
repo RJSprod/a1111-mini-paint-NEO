@@ -498,7 +498,7 @@ window. On the WanGP tab the workspace *is* the WanGP page, so under focus the t
 frame and nothing else: the panel's padding and border go, *Integration management* is not
 displayed, and the frame is given the panel's whole height - nothing under it. Nothing is
 reloaded or repainted and the iframe is not moved (a moved iframe reloads its document);
-two presses on the assistant's header or launcher turn focus on, and leaving it puts the
+three presses on the assistant's header or launcher turn focus on, and leaving it puts the
 accordion back. The contract is the one class that extension writes on the tab's
 panel, `forge-assistant-focus-root`; `style.css` and `browser/minipaint_wangp.js` read it,
 and `tests/browser_intercept.py` measures the result in a real browser against a copy of
@@ -523,8 +523,8 @@ says `compact layout: no #wangp-gallery-tabs on this page; it stays whole`.
 
 ## Super focus: the studio
 
-Two more presses on the assistant's header or launcher, from focus on the WanGP tab, are
-its **Super Focused** mode: the WanGP page becomes a studio - WanGP's prompt alone in one
+Four presses on the assistant's header or launcher, on the WanGP tab, are its **Super
+Focused** mode: the WanGP page becomes a studio - WanGP's prompt alone in one
 column, its box the column's whole height and scrolling inside itself when the text is
 longer; in the other its Generate (its live controls while it generates), its progress
 and, under them, its gallery - the video playing with its controls, the strip of results
@@ -535,10 +535,14 @@ which makes the prompt's box wider or narrower, and the share is remembered in t
 browser. Only a phone's page, under 520 pixels, stacks the columns - the prompt, then
 Generate, the progress and the gallery - and opens at the prompt; a folded-out phone at
 120% keeps two. While WanGP generates, its live controls take Generate's place and the
-gallery gives up the room they need. Two more presses, Escape or a switch of tab end it,
-and the WanGP page is whole again with every setting where it was and scrolled where it
-was; what was typed and generated meanwhile stays (bridge 1.15.1; 1.15.0 put Generate and
-the progress under the prompt and stacked under 720 pixels).
+gallery gives up the room they need. It is focus on this tab: a switch to another tab
+keeps focus there and puts the studio away - the WanGP page whole again, with every setting
+where it was and scrolled where it was - and coming back to this tab while focus lasts lays
+it out as the studio again. Four more presses go back to the compact page; three presses,
+Escape or the browser leaving full screen end focus and the studio with it. What was typed
+and generated meanwhile stays (bridge 1.15.1; 1.15.0 put Generate and the progress under
+the prompt and stacked under 720 pixels; the assistant's presses since its docs/22
+§3.40).
 
 Nothing in WanGP's page moves and nothing is reloaded: its form's row is laid out as a
 grid with the blocks kept where they already are in the document, and every other block

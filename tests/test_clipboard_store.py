@@ -499,7 +499,7 @@ def http_door_checks(r: Results, base: pathlib.Path) -> None:
     routes.install(app)
     client = TestClient(app)
 
-    listed = client.get(routes.LIBRARY_ROUTE, params={"sort": "name_asc", "page": 0, "size": 10})
+    listed = client.get(routes.LIBRARY_ROUTE, params={"sort": "name_asc"})
     body = listed.json()
     r.check("the index route answers over plain HTTP", listed.status_code == 200 and body.get("ok") is True, str(body)[:120])
     r.check("and is cached by nobody: it is the truth, asked for again on every change",
@@ -625,81 +625,77 @@ def http_door_checks(r: Results, base: pathlib.Path) -> None:
 
 
 def index_checks(r: Results, base: pathlib.Path) -> None:
-    """The route contract: sorted over the whole library, then sliced.
+    """The route contract: the whole folder, sorted, in one answer.
 
     The grid has been reported broken three times with every check passing,
     so what the grid is built from is checked directly rather than through
-    the page that draws it.
+    the page that draws it. It is not paged any more, at the user's word
+    ("i prefer the way archive loads, which is not pages"): the listing is
+    every picture, the way an archive's is, and the browser draws what is in
+    view of it.
     """
     library = store.store()
     root = library.root()
     for stale in root.glob("*"):
         stale.unlink()
     library.refresh()
-    # Enough to page. Named so that name_asc is a known order.
-    for number in range(25):
-        (root / f"p{number:02d}.png").write_bytes(_png(size=(4 + number % 3, 4)))
+    # More than the sixty a page used to hold. Named so that name_asc is a
+    # known order.
+    for number in range(75):
+        (root / f"p{number:02d}.png").write_bytes(_png(size=(4 + number % 3, 4 + number // 3)))
     library.refresh()
 
     whole = [asset.filename for asset in library.assets("name_asc")]
-    r.check("the library has the pictures the pages are cut from", len(whole) == 25, str(len(whole)))
+    r.check("the library has the pictures the listing is made of", len(whole) == 75, str(len(whole)))
 
-    first = routes.library_page("name_asc", 0, 10)
-    second = routes.library_page("name_asc", 1, 10)
-    last = routes.library_page("name_asc", 2, 10)
-    r.check("a page is exactly `size` pictures, and the last one is what is left",
-            len(first["items"]) == 10 and len(second["items"]) == 10 and len(last["items"]) == 5, str(len(last["items"])))
-    r.check("and the totals describe the whole library, not the page",
-            first["total"] == 25 and first["pages"] == 3 and first["page"] == 0 and last["page"] == 2, json.dumps({k: first[k] for k in ("total", "pages", "page")}))
-    r.check("SORTING IS OVER THE WHOLE LIBRARY AND THEN SLICED, not within a page",
-            [item["name"] for item in first["items"]] == whole[:10]
-            and [item["name"] for item in second["items"]] == whole[10:20], str([i["name"] for i in second["items"]])[:90])
-    r.check("the other direction is the same list reversed, page for page",
-            [item["name"] for item in routes.library_page("name_desc", 0, 10)["items"]] == list(reversed(whole))[:10])
-
+    listing = routes.library_listing("name_asc")
+    r.check("ONE ANSWER HOLDS EVERY PICTURE IN THE FOLDER, past the sixty a page held, and says how many",
+            listing["ok"] is True and len(listing["items"]) == listing["total"] == 75 and listing["left_out"] == 0,
+            json.dumps({k: listing[k] for k in ("total", "left_out")}))
+    r.check("and nothing about pages is in it: no page, no page count, no size, no selected page",
+            not {"page", "pages", "size", "selected_page"} & set(listing), str(sorted(listing)))
+    r.check("SORTED OVER THE WHOLE LIBRARY, in the store's own order",
+            [item[1] for item in listing["items"]] == whole, str([item[1] for item in listing["items"]][:4]))
+    r.check("the other direction is the same list reversed",
+            [item[1] for item in routes.library_listing("name_desc")["items"]] == list(reversed(whole)))
+    newest = routes.library_listing("newest")
+    r.check("and by date it is the store's newest first, the order the full-screen view's Date reads",
+            [item[0] for item in newest["items"]] == [asset.asset_id for asset in library.assets("newest")])
     r.check("an unknown sort falls back to the stored one rather than refusing",
-            routes.library_page("sideways", 0, 10)["sort"] == config.load().sort)
-    # The full-screen view steps through the whole folder while the grid holds
-    # a page of it: one answer, every picture, ids and names and versions only.
-    order = routes.library_order("name_asc")
-    r.check("the whole folder's order is one answer, every picture in it, unpaged",
-            order["ok"] and order["total"] == len(whole) and [item[1] for item in order["items"]] == whole,
-            str(order["total"]))
-    r.check("each as its id, its name and the version its address carries - never a path",
-            all(len(item) == 3 and item[2] == store.version_of(next(a for a in store.store().assets() if a.asset_id == item[0]))
-                for item in order["items"]) and not any(os.sep in str(part) for item in order["items"] for part in item),
-            str(order["items"][:1]))
-    r.check("and in the order asked for", [item[1] for item in routes.library_order("name_desc")["items"]] == list(reversed(whole))
-            and routes.library_order("sideways")["sort"] == config.load().sort)
-    r.check("a page past the end returns the last page that exists",
-            routes.library_page("name_asc", 99, 10)["page"] == 2 and routes.library_page("name_asc", -5, 10)["page"] == 0)
-    r.check("a size outside its bounds is clamped, not refused",
-            routes.library_page("name_asc", 0, 0)["size"] == routes.PAGE_SIZE_MIN
-            and routes.library_page("name_asc", 0, 9999)["size"] == routes.PAGE_SIZE_MAX
-            and routes.library_page("name_asc", 0, "nonsense")["size"] == routes.PAGE_SIZE)
-    r.check("and the default page holds sixty pictures",
-            routes.PAGE_SIZE == 60 and routes.library_page()["size"] == 60)
+            routes.library_listing("sideways")["sort"] == config.load().sort)
 
-    item = first["items"][0]
-    asset = next(a for a in library.assets() if a.asset_id == item["id"])
-    r.check("an item is the id, the name, the shape, the bytes and the version - and no path",
-            set(item) == {"id", "name", "w", "h", "bytes", "v"} and item["name"] == asset.filename
-            and item["v"] == f"{asset.mtime_ns}-{asset.size_bytes}" and str(base) not in json.dumps(first))
+    item = listing["items"][0]
+    asset = next(a for a in library.assets() if a.asset_id == item[0])
+    r.check("a picture is [id, name, bytes, version, width, height] - an archive's first four in its four places - and no path",
+            len(item) == 6 and item[1] == asset.filename and item[2] == asset.size_bytes
+            and item[3] == f"{asset.mtime_ns}-{asset.size_bytes}" and item[4] == asset.width and item[5] == asset.height
+            and str(base) not in json.dumps(listing) and not any(os.sep in str(part) for row in listing["items"] for part in row),
+            str(item))
     r.check("and the version is the one the thumbnail cache is keyed by",
-            store.version_of(asset) == item["v"] and library.canonical_version(asset.asset_id) == item["v"])
+            store.version_of(asset) == item[3] and library.canonical_version(asset.asset_id) == item[3])
+    r.check("every id is the opaque one the picture route takes",
+            all(len(row[0]) == 32 and int(row[0], 16) >= 0 for row in listing["items"]))
 
-    where = routes.library_page("name_asc", 0, 10, selected=whole and first["items"][0]["id"])
-    r.check("the answer says which page holds the selection", where["selected_page"] == 0)
-    twelfth = [a for a in library.assets("name_asc")][11]
-    r.check("including when it is not this page", routes.library_page("name_asc", 0, 10, selected=twelfth.asset_id)["selected_page"] == 1)
-    r.check("and says so plainly when the selection is not in the library at all",
-            routes.library_page("name_asc", 0, 10, selected=GOOD)["selected_page"] == -1)
+    # Past an archive's limit the listing says how many it left out rather
+    # than answering with a document nobody can draw.
+    from minipaint_neo.clipboard import archives
+
+    limit = archives.LISTING_LIMIT
+    archives.LISTING_LIMIT = 50
+    try:
+        capped = routes.library_listing("name_asc")
+    finally:
+        archives.LISTING_LIMIT = limit
+    r.check("a folder past the listing's limit is listed up to it, and the answer says how many it left out",
+            len(capped["items"]) == capped["total"] == 50 and capped["left_out"] == 25
+            and [item[1] for item in capped["items"]] == whole[:50] and "25 more were left out" in capped["status"],
+            str({k: capped[k] for k in ("total", "left_out", "status")}))
 
     # -- the revision: it moves when the library does, and at no other time
     was = library.revision()
     r.check("the revision is <epoch>:<n>, namespaced by the process", was.count(":") == 1 and was.split(":")[1].isdigit())
     r.check("reading the library again does not move it",
-            routes.library_page()["revision"] == was and library.assets() and library.revision() == was)
+            routes.library_listing()["revision"] == was and library.assets() and library.revision() == was)
     library.refresh()
     r.check("nor does a refresh that found no difference", library.revision() == was)
     (root / "p25.png").write_bytes(_png())
@@ -719,10 +715,10 @@ def index_checks(r: Results, base: pathlib.Path) -> None:
     for stale in root.glob("*"):
         stale.unlink()
     library.refresh()
-    empty = routes.library_page()
+    empty = routes.library_listing()
     r.check("an empty library is answered with a total of zero and a reason",
             empty["ok"] is True and empty["total"] == 0 and empty["reason"] == "empty" and empty["configured"] is True, json.dumps(empty)[:120])
-    r.check("and a page number is still valid on it", empty["page"] == 0 and empty["pages"] == 1)
+    r.check("and with an empty list, not a missing one", empty["items"] == [], str(empty.get("items")))
 
 
 def thumbnail_cache_checks(r: Results, base: pathlib.Path) -> None:

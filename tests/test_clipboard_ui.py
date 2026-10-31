@@ -123,18 +123,23 @@ def _flat(view) -> str:
     return json.dumps(view)
 
 
-def _listed(sort: str = "", page: int = 0, size: int = 500, selected: str = "") -> dict:
+def _listed(sort: str = "") -> dict:
     """What the browser's grid would draw: the index route's own answer.
 
     The grid is not markup the server renders any more, so what these checks
-    read is the thing that replaced it. ``routes.library_page`` is what the
-    route hands out, and the route is a thin signed-in wrapper over it.
+    read is the thing that replaced it. ``routes.library_listing`` is what the
+    route hands out - the whole folder, a picture an array - and the route is
+    a thin signed-in wrapper over it; each picture is read back here by name
+    (``id``, ``name``, ``v``, ...) so a check says what it means.
     """
-    return routes.library_page(sort, page, size, selected)
+    answer = dict(routes.library_listing(sort))
+    answer["items"] = [{"id": row[0], "name": row[1], "bytes": row[2], "v": row[3], "w": row[4], "h": row[5]}
+                       for row in answer["items"]]
+    return answer
 
 
-def _ids(sort: str = "", page: int = 0, size: int = 500) -> list:
-    return [item["id"] for item in _listed(sort, page, size)["items"]]
+def _ids(sort: str = "") -> list:
+    return [item["id"] for item in _listed(sort)["items"]]
 
 
 def build_page():
@@ -1295,8 +1300,8 @@ def theming_checks(r: Results) -> None:
         # Gradio's typography and radius tokens, used by the enhancement panel
         # and the job cards' lines; a theme sets all three.
         "--font-mono", "--radius-sm", "--text-sm",
-        # The pager's go-to-page box is a text input, and a theme fills one
-        # the same way Gradio fills its own.
+        # The text inputs the tab draws itself (the Archives screen's path
+        # box among them), filled the way Gradio fills its own.
         "--input-background-fill",
         # The player's Play button is the theme's primary button, fill and
         # text as the pair a theme promises are legible together.
@@ -1336,8 +1341,11 @@ def theming_checks(r: Results) -> None:
     r.check("the script's smallest and largest tile are the config's own",
             f"const THUMB_MIN = {config.THUMBNAIL_MIN};" in script and f"const THUMB_MAX = {config.THUMBNAIL_MAX};" in script
             and f"const DEFAULT_THUMB = {config.THUMBNAIL_DEFAULT};" in script)
+    # The tiles are placed by the script (layoutGrid), in both folders: as
+    # many columns as the slider counts, the row shared out between them.
     r.check("the grid's columns are the slider's count, sharing the row",
-            '"grid-template-columns": "repeat(var(--minipaint-clip-cols' in script and "minmax(0, 1fr)" in script)
+            "const columns = Math.max(1, S.perRow" in script and "(room - (columns - 1) * gap) / columns" in script
+            and "function placeTile(tile, index)" in script)
     r.check("and the grid draws no scroll bar of its own: the scrubber is its bar",
             '"scrollbar-width": "none"' in script and "scrollbar-width: none" in block and "::-webkit-scrollbar" in block)
     r.check("the archive bar over the grid is gone; the Menu button names the folder",

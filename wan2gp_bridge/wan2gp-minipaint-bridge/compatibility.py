@@ -430,6 +430,36 @@ SERVICE_HOLDERS: typing.Tuple[str, ...] = ("__main__", "wgp", SERVICE_MODULE)
 #: not a re-implementation of the chain around it.
 INLINE_QUEUE_KEY = "inline_queue"
 LOAD_QUEUE_COMMAND = "load_queue_trigger"
+#: WanGP's own discipline for that slot, since Wan2GP 9905f0d (2026-10-26),
+#: and what bridge 1.17.0 follows. The slot holds ONE submission until the
+#: queue loader takes it, so WanGP's own API sessions hold this lock while
+#: they wait for the slot to be empty and fill it - ``_INLINE_QUEUE_LOCK`` in
+#: ``shared.api_webui``, looked up in ``sys.modules`` and never imported - and
+#: then admit the entry through the service's ``load_inline_queue``: "Admit
+#: API submissions into the live queue without a browser request or waiting
+#: for running work". ``LOAD_QUEUE_COMMAND`` is the older way in, and on a
+#: run the command itself started it waits for that whole run before the
+#: loader looks at the slot (``_run_generation_command`` holds the service's
+#: generation lock across ``worker.join()``), so a second submission sat in
+#: the slot unloaded and a third one overwrote it. The command stays as the
+#: way in for a WanGP from before the admitter, which never has the slot
+#: overwritten either: a slot still full is refused as busy, before anything
+#: is recorded, and Forge tries again.
+INLINE_QUEUE_LOCK_MODULE = "shared.api_webui"
+INLINE_QUEUE_LOCK_NAME = "_INLINE_QUEUE_LOCK"
+#: How long WanGP's own API waits for the slot (its
+#: ``_INLINE_QUEUE_SLOT_TIMEOUT_SECONDS``), used only where the admitter
+#: empties the slot at once - behind the old command a full slot can stay
+#: full for a whole generation, and nothing should wait on that here.
+INLINE_SLOT_TIMEOUT_SECONDS = 10.0
+INLINE_SLOT_POLL_SECONDS = 0.05
+#: The service's two entry points: admit what is in the slot, and start a
+#: worker if none is running and the queue holds something.
+SERVICE_ADMIT = "load_inline_queue"
+SERVICE_START = "start_generation"
+#: The lock the bridge's own submissions share when WanGP's is not loaded,
+#: so two of them at least never write the slot over each other.
+_OWN_INLINE_QUEUE_LOCK = threading.Lock()
 #: Plugin state, which travels BESIDE a task's params and never inside them.
 #: Wan2GP's queue entries are ``{id, params, plugin_data, ...}``; its unpacker
 #: reads this key off the manifest entry, and its worker passes what it finds
@@ -1500,6 +1530,28 @@ class Compatibility:
             return None
         return found if isinstance(found, dict) else None
 
+    def inline_queue_lock(self) -> typing.Any:
+        """The lock WanGP's own submissions hold while they use the inline
+        slot (see ``INLINE_QUEUE_LOCK_NAME``), or the bridge's own when this
+        WanGP has none loaded. Anything without ``acquire`` and ``release`` is
+        not a lock to hold, whatever it is called."""
+        import sys
+
+        module = sys.modules.get(INLINE_QUEUE_LOCK_MODULE)
+        found = getattr(module, INLINE_QUEUE_LOCK_NAME, None) if module is not None else None
+        if found is not None and callable(getattr(found, "acquire", None)) and callable(getattr(found, "release", None)):
+            return found
+        return _OWN_INLINE_QUEUE_LOCK
+
+    def service_entry(self, service: typing.Any, name: str) -> typing.Optional[typing.Callable[[], typing.Any]]:
+        """``SERVICE_ADMIT`` or ``SERVICE_START`` on this service, when it has
+        it as something callable, else None - a WanGP from before 2026-10-26
+        has no admitter, and the caller then takes the command's way in."""
+        if service is None or name not in (SERVICE_ADMIT, SERVICE_START):
+            return None
+        found = getattr(service, name, None)
+        return found if callable(found) else None
+
     def service_generation_running(self, service: typing.Any) -> typing.Optional[bool]:
         """Whether the one worker exists, from the thread handle rather than a flag.
 
@@ -2071,9 +2123,21 @@ class Compatibility:
     def current_model_type(self, service: typing.Any = None) -> str:
         """The model this child is on, with no page to ask.
 
-        Read off the shared state where there is one, then off the injected
-        global. Empty is a real answer - a child nobody has chosen a model in
-        - and the caller composes for the model the job named instead.
+        Read off the shared state where there is one, then off WanGP's own
+        record of the last model chosen, then off the injected global. Empty
+        is a real answer - a child nobody has chosen a model in - and the
+        caller composes for the model the job named instead.
+
+        WHERE WANGP ACTUALLY KEEPS IT. ``server_config["last_model_type"]``,
+        written by WanGP every time a page switches model (``change_model``)
+        and read back at start to choose the model it opens on - the one
+        process-wide record of it there is. The shared generation record has
+        never carried a model (the two keys below are read for a build that
+        might), and the ``model_type`` global was only ever a loop variable
+        of wgp.py's that a default install never bound and that 2026-10-25
+        removed: until bridge 1.17.0 this answered "" on every real WanGP.
+        A page's own model is ``page_model``'s answer, and is preferred
+        wherever there is a page to ask.
         """
         gen = self.shared_gen(service)
         if isinstance(gen, dict):
@@ -2081,6 +2145,11 @@ class Compatibility:
                 found = gen.get(key)
                 if isinstance(found, str) and found:
                     return found
+        config = self.host.read_global("server_config")
+        if isinstance(config, dict):
+            found = config.get("last_model_type")
+            if isinstance(found, str) and found:
+                return found
         found = self.host.read_global("model_type")
         return found if isinstance(found, str) else ""
 

@@ -685,7 +685,21 @@ class MiniPaintBridge:
         """
         service = self.compat.service()
         trigger = self.compat.resolution.component(compatibility.SAVE_FORM_TRIGGER)
-        model_type = self.compat.current_model_type(service)
+        # THE PAGE'S MODEL, BECAUSE THAT IS WHAT WANGP SAVES UNDER.
+        #
+        # ``save_inputs`` records the form under ``get_state_model_type(state)``
+        # - this page's own model, the edited task's while its Edit form is the
+        # one in use - and the count and the fingerprint are read per model, so
+        # the save is only seen to land when it is looked for under that key.
+        # Until bridge 1.17.0 the key came from ``current_model_type``, which
+        # reads a ``gen["model_type"]`` WanGP has never written and a module
+        # global it stopped binding on 2026-10-25: on a real WanGP it was
+        # always empty, every flush answered "unavailable" and wrote nothing,
+        # and every send ran at the last form WanGP had saved by itself - the
+        # "last run settings" this whole operation exists to prevent. The
+        # tests that passed planted the key themselves. The process-wide
+        # answer stays as the fallback for a page that cannot say.
+        model_type = self.compat.page_model(live)[0] or self.compat.current_model_type(service)
         before = self.compat.recorded_fingerprint(service, model_type)
         answer = {"flush": protocol.FLUSH_UNAVAILABLE, "fingerprint": before, "model_type": model_type,
                   "commits": self.compat.commit_count(service, model_type)}

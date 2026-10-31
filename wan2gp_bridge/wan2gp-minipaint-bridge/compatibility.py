@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.16.0"
+BRIDGE_VERSION = "1.17.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -165,6 +165,18 @@ GALLERY_TAB = "gallery_tab"
 #: snapshot a server-side compose reads. Writing it is therefore how a page
 #: hands its live settings to a job that will run with no page at all.
 SAVE_FORM_TRIGGER = "save_form_trigger"
+#: Bridge 1.17.0, a file's settings loaded into the page: what WanGP's own
+#: "Load Settings From Media File" writes once ``load_settings_from_file`` has
+#: put the settings in the page's state - ``refresh_form_trigger`` to fill the
+#: form again for the same model, ``model_choice_target`` to switch to the
+#: file's model, whose switch fills the form - and the main tabs, so the form
+#: they land in is the one on screen.
+REFRESH_FORM_TRIGGER = "refresh_form_trigger"
+MODEL_CHOICE_TARGET = "model_choice_target"
+MAIN_TABS = "main_tabs"
+#: The main tab the generator form is in. WanGP has called it ``media_gen``
+#: since before 13.14; v19 maps an older plugin's ``video_gen`` onto it.
+MEDIA_TAB_ID = "media_gen"
 
 # VERIFY ON A REAL INSTALL (section 49.1): every elem_id below was taken from
 # WanGP's documented media-input naming and from the receiver example in
@@ -312,6 +324,16 @@ COMPONENTS: typing.Tuple[ComponentSpec, ...] = (
     # own post-processing buttons write ``generate_trigger`` to start a run.
     ComponentSpec(key=SAVE_FORM_TRIGGER, candidates=("save_form_trigger",), kind="text", mandatory=False,
                   known_for="Wan2GP: hidden gr.Text; its change commits the live form process-wide"),
+    # Bridge 1.17.0. Read against Wan2GP v19 (ee20770): ``settings_file.upload``
+    # runs validate_wizard_prompt -> save_inputs -> load_settings_from_file,
+    # whose outputs are exactly these two (and the file box). Both are hidden
+    # locals of generate_media_tab; ``main_tabs`` is its parameter.
+    ComponentSpec(key=REFRESH_FORM_TRIGGER, candidates=("refresh_form_trigger",), kind="text", mandatory=False,
+                  known_for="Wan2GP: hidden gr.Text; its change fills the form again from the page's state"),
+    ComponentSpec(key=MODEL_CHOICE_TARGET, candidates=("model_choice_target",), kind="text", mandatory=False,
+                  known_for="Wan2GP: hidden gr.Text; 'model|time' switches the page to that model"),
+    ComponentSpec(key=MAIN_TABS, candidates=("main_tabs",), kind="tabs", mandatory=False,
+                  known_for="Wan2GP: the main gr.Tabs (generate_media_tab's parameter); selected='media_gen' shows the form"),
 )
 
 COMPONENTS_BY_KEY = {spec.key: spec for spec in COMPONENTS}
@@ -381,6 +403,9 @@ GLOBALS: typing.Tuple[str, ...] = (
     # the pictures opened as images - so a job is checked exactly as WanGP
     # would check it when it queued it, with nothing queued.
     "validate_task", "_extract_model_type", "_task_has_path_attachments", "_load_task_attachments",
+    # Bridge 1.17.0: WanGP's own loader of a file's settings - a video's, a
+    # picture's - into a page's state, which its Load Settings box calls.
+    "load_settings_from_file",
 )
 
 #: The exact Wan2GP revision the protocol-6 control plane was proven against.
@@ -1184,8 +1209,15 @@ class Compatibility:
         ordering to keep in step.
         """
         keys = (PROMPT, WIZARD_PROMPT, CLIENT_ID, ADD_TO_QUEUE_TRIGGER, GENERATE_TRIGGER,
-                SAVE_FORM_TRIGGER)
+                SAVE_FORM_TRIGGER, REFRESH_FORM_TRIGGER, MODEL_CHOICE_TARGET, MAIN_TABS)
         return [(key, self.resolution.component(key)) for key in keys if self.resolution.component(key) is not None]
+
+    def settings_loadable(self) -> bool:
+        """Whether this build can load a file's settings into a page: WanGP's
+        loader handed over, and both triggers its answer is written to."""
+        return (callable(self.host.read_global("load_settings_from_file"))
+                and self.resolution.component(REFRESH_FORM_TRIGGER) is not None
+                and self.resolution.component(MODEL_CHOICE_TARGET) is not None)
 
     def queue_missing(self) -> typing.List[str]:
         """The queue-critical components this build did not hand over."""
@@ -2502,6 +2534,11 @@ class Compatibility:
                 # wizard's is read only while the wizard is on - so a build
                 # that did not hand it over says no.
                 "prompt_edit": bool(ready and self.resolution.component(PROMPT) is not None),
+                # Bridge 1.17.0: SETTINGS_REQUEST. A file's settings loaded into
+                # the page through WanGP's own loader, for View Outputs' Send
+                # to WanGP. It needs the loader and both of the triggers the
+                # loader's answer is written to.
+                "settings_load": bool(ready and self.settings_loadable()),
             },
             # Live, and process-wide: true while any page's generation runs,
             # false when none does, None when this build cannot say.

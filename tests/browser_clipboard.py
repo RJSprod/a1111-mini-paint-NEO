@@ -1846,6 +1846,7 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
 PLAYER_REQUEST = "ab" * 16
 LOAD_REQUEST = "cd" * 16
 NO_RECIPE_REQUEST = "ef" * 16
+SETTINGS_REQUEST = "aa" * 16
 
 
 def _open_outputs_fresh(page):
@@ -2156,6 +2157,148 @@ def check_the_players_full_screen_is_its_own(r: Results, page) -> None:
         page.wait_for_timeout(300)
         page.evaluate("() => window.minipaintClipboard.closeOutputs()")
         outputs.reset_for_tests()
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def check_an_output_sends_its_settings_to_wangp(r: Results, page) -> None:
+    """Asked for: "the ability to send a video from this view to wan2gp to
+    load its settings! Using this option should be a new send button in the
+    playback controls bar. Sending should open wan2gp tab to the newly loaded
+    settings!"
+
+    The button is in the player's bar for a video WanGP keeps its settings in
+    (MP4, MKV, MOV) and not for one it keeps none in. A press asks the server
+    for a note naming the file - a real one, in the handoff root - and hands
+    its id to the WanGP tab's ``loadSettings``, stood in for here because
+    there is no WanGP; only once WanGP says it loaded them does the view close
+    and the WanGP tab open. A refusal, or a file WanGP read nothing from,
+    leaves the view open and says why, and a second press while one is going
+    is the same press.
+    """
+    import json as _json
+
+    from minipaint_neo.clipboard import config as clip_config
+    from minipaint_neo.wangp import handoff, protocol as wangp_protocol
+
+    folder = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-settings-"))
+    send = ".minipaint-clip-player [data-control='settings']"
+    try:
+        made = _seed_outputs(folder, 2, kind="mp4", request_id=SETTINGS_REQUEST, job_id="b" * 16)
+        for name in ("plain.webm", "plain.m4v"):
+            (folder / name).write_bytes(b"not really a video" * 8)
+        clip_config.update(outputs_folder=str(folder))
+        page.evaluate("""() => {
+            window.__settingsSaved = window.minipaintWanGP;
+            window.__settingsCalls = [];
+            window.__switches = 0;
+            window.__settingsAnswer = { ok: true, loaded: true, model_type: 'ltx2_22B_distilled', switched: true, message: '' };
+            window.minipaintWanGP = Object.assign({}, window.__settingsSaved || {}, {
+                loadSettings: function (id) {
+                    window.__settingsCalls.push(id);
+                    const a = window.__settingsAnswer;
+                    return typeof a === 'function' ? a() : Promise.resolve(a);
+                },
+                switchToWanGP: function () { window.__switches += 1; return true; }
+            });
+        }""")
+
+        def toast():
+            return page.evaluate("() => { const t = document.querySelector('.minipaint-clip-toast'); return t && !t.hidden ? t.textContent : ''; }")
+
+        def button():
+            return page.evaluate("""s => { const b = document.querySelector(s);
+                return b ? { hidden: b.hidden, label: b.getAttribute('aria-label') || '', disabled: b.disabled,
+                             busy: b.getAttribute('aria-busy') === 'true',
+                             beforeFull: !!b.nextElementSibling && b.nextElementSibling.dataset.control === 'full' } : null; }""", send)
+
+        for name in ("plain.webm", "plain.m4v"):
+            _open_outputs_on(page, name)
+            page.wait_for_selector(".minipaint-clip-player", state="attached", timeout=8000)
+            shown = button()
+            r.check(f"a {name.rsplit('.', 1)[1].upper()}, which WanGP keeps no settings in, has no Send to WanGP in its bar",
+                    shown is not None and shown["hidden"] is True, str(shown))
+
+        _open_outputs_on(page, "clip000.mp4")
+        page.wait_for_selector(send, state="attached", timeout=8000)
+        shown = button()
+        r.check("an MP4 in the stage has a Send to WanGP button in the player's bar, beside full screen",
+                shown is not None and shown["hidden"] is False and "Send to WanGP" in shown["label"] and shown["beforeFull"], str(shown))
+
+        page.click(send)
+        page.wait_for_function("() => window.__switches >= 1", timeout=15000)
+        page.wait_for_timeout(300)
+        calls = page.evaluate("() => window.__settingsCalls.slice()")
+        r.check("a press hands the WanGP tab the id of a note and nothing else",
+                len(calls) == 1 and wangp_protocol.valid_handoff_id(calls[0]), str(calls))
+        note = handoff.handoff_root() / (str(calls[0] if calls else "") + wangp_protocol.HANDOFF_REFERENCE_SUFFIX)
+        named = _json.loads(note.read_text(encoding="utf-8")).get("path") if note.is_file() else None
+        r.check("a note the server wrote, naming the video in the stage",
+                named is not None and pathlib.Path(named).resolve() == pathlib.Path(made[0]).resolve(), str(named))
+        r.check("once WanGP says it loaded them, the view closes and the WanGP tab is opened",
+                page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is False
+                and page.evaluate("() => window.__switches") == 1)
+        r.check("and the toast says WanGP is switching to the video's model",
+                "Loaded its settings in WanGP, which is switching to ltx2_22B_distilled" in toast(), toast())
+
+        refusals = (
+            ("a refusal", {"ok": False, "code": "HANDOFF_NOT_FOUND", "message": "The prepared image was gone before WanGP read it."},
+             "no longer where WanGP can read it"),
+            ("a file WanGP read nothing from", {"ok": True, "loaded": False, "model_type": "", "switched": False,
+                                                 "message": "WanGP found no settings it could load in that file"},
+             "WanGP found no settings it could load"),
+            ("an older bridge", {"ok": False, "code": "BRIDGE_COMPONENT_INCOMPATIBLE",
+                                 "message": "This WanGP bridge needs to be reinstalled or updated."}, "reinstalled"),
+        )
+        for label, answer, said in refusals:
+            page.evaluate("a => { window.__settingsAnswer = a; }", answer)
+            before = page.evaluate("() => window.__settingsCalls.length")
+            _open_outputs_on(page, "clip000.mp4")
+            page.wait_for_selector(send, state="attached", timeout=8000)
+            page.click(send)
+            page.wait_for_function("""([s, n]) => window.__settingsCalls.length > n
+                && !document.querySelector(s).disabled""", arg=[send, before], timeout=15000)
+            r.check(f"{label} leaves the view open, the WanGP tab where it was, and says why",
+                    page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is True
+                    and page.evaluate("() => window.__switches") == 1 and said in toast(), toast())
+
+        page.evaluate("""() => {
+            window.__settingsAnswer = () => new Promise((resolve) => {
+                window.__release = () => resolve({ ok: true, loaded: true, model_type: 't2v', switched: false, message: '' });
+            });
+        }""")
+        before = page.evaluate("() => window.__settingsCalls.length")
+        page.evaluate("s => { const b = document.querySelector(s); b.click(); b.click(); }", send)
+        page.wait_for_function("n => window.__settingsCalls.length > n && typeof window.__release === 'function'", arg=before, timeout=15000)
+        page.evaluate("s => document.querySelector(s).click()", send)
+        waiting = button()
+        r.check("while a send is going the button says so, and two more presses are the same press",
+                waiting is not None and waiting["disabled"] and waiting["busy"]
+                and page.evaluate("() => window.__settingsCalls.length") == before + 1, str(waiting))
+        # Another video in the stage meanwhile, with a bar - and a button - of its own.
+        page.evaluate("""() => {
+            const tile = [...document.querySelectorAll('.minipaint-clip-output-tile')]
+                .find((t) => (t.title || '').indexOf('clip001.mp4') === 0);
+            if (tile) { tile.click(); }
+        }""")
+        page.wait_for_function("s => { const b = document.querySelector(s); return !!b && !b.disabled && !b.hidden; }",
+                               arg=send, timeout=8000)
+        page.click(send)
+        page.wait_for_timeout(400)
+        r.check("and so is a press on another video's button while it is going",
+                page.evaluate("() => window.__settingsCalls.length") == before + 1,
+                str(page.evaluate("() => window.__settingsCalls.length")))
+        page.evaluate("() => window.__release()")
+        page.wait_for_function("() => window.__switches >= 2", timeout=15000)
+        page.wait_for_timeout(300)
+        r.check("and its answer is the one that opens WanGP, once, saying nothing is switching",
+                page.evaluate("() => window.__settingsCalls.length") == before + 1 and page.evaluate("() => window.__switches") == 2
+                and "Loaded its settings in WanGP." in toast() and "switching" not in toast(), toast())
+    finally:
+        page.evaluate("""() => {
+            window.minipaintWanGP = window.__settingsSaved;
+            for (const k of ['__settingsSaved', '__settingsCalls', '__switches', '__settingsAnswer', '__release']) { delete window[k]; }
+            if (window.minipaintClipboard.debug().outputsOpen) { window.minipaintClipboard.closeOutputs(); }
+        }""")
         shutil.rmtree(folder, ignore_errors=True)
 
 
@@ -5136,6 +5279,7 @@ def run() -> Results:
                     ("check_the_player_is_the_pages", lambda: check_the_player_is_the_pages(r, page)),
                     ("check_the_players_full_screen_is_its_own", lambda: check_the_players_full_screen_is_its_own(r, page)),
                     ("check_an_output_loads_its_recipe", lambda: check_an_output_loads_its_recipe(r, page)),
+                    ("check_an_output_sends_its_settings_to_wangp", lambda: check_an_output_sends_its_settings_to_wangp(r, page)),
                     ("check_the_tab_fills_the_window", lambda: check_the_tab_fills_the_window(r, page)),
                     ("check_a_thumbnail_is_fetched_once", lambda: check_a_thumbnail_is_fetched_once(r, page)),
                     ("check_the_row_is_filled_per_row", lambda: check_the_row_is_filled_per_row(r, page, browser)),

@@ -28,6 +28,7 @@ from harness import Results, setup_path
 setup_path()
 
 import json  # noqa: E402
+import os  # noqa: E402
 import pathlib  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
@@ -730,6 +731,258 @@ def prompt_edit_checks(r: Results, root: str) -> None:
             secret not in line and line.startswith("prompt: written") and str(len(secret)) in line, line)
 
 
+# ----------------------------------------------------- the settings (1.17.0) --
+
+#: The generator form's names, with the three a settings load writes.
+SETTINGS_NAMES = FORM_NAMES + ("refresh_form_trigger", "model_choice_target", "main_tabs")
+#: What ``time.time()`` says in WanGP's answers below.
+LOADED_AT = "1761900000.25"
+
+
+class _Loader:
+    """WanGP's ``load_settings_from_file(state, file_path)`` as v19 has it
+    (wgp.py at ee20770): the settings a file carries put in the page's state;
+    for the page's own model a new ``refresh_form_trigger`` value, for
+    another a ``model_choice_target`` of ``model|time`` with the switch's
+    ``ignore_save_form`` set; a file it reads nothing from changes nothing and
+    answers two no-changes. ``fail`` is a loader that raises."""
+
+    def __init__(self, carried):
+        self.carried = carried
+        self.read = []
+        self.fail = False
+
+    def __call__(self, state, file_path):
+        self.read.append(str(file_path))
+        if self.fail:
+            raise ValueError(f"cannot parse {file_path}")
+        configs = self.carried.get(pathlib.Path(str(file_path)).name)
+        if configs is None:
+            return {"__type__": "update"}, {"__type__": "update"}, None
+        state.setdefault("settings", {})[configs["model_type"]] = dict(configs)
+        if configs["model_type"] == state["model_type"]:
+            return LOADED_AT, {"__type__": "update"}, None
+        state["ignore_save_form"] = True
+        return {"__type__": "update"}, configs["model_type"] + "|" + LOADED_AT, None
+
+
+def _load(bridge, live, settings, correlation="s1"):
+    """One settings load, as the page's script submits it."""
+    request = {"op": "settings", "request_id": correlation, "channel_id": "c" * 32, "settings": settings}
+    values = [live.get(key) for key in bridge.state_keys]
+    return bridge.handle(json.dumps(request), values, "session-hash-of-this-page")
+
+
+def _note(root, handoff_id, body):
+    """A reference note in the handoff root: Forge's shape when ``body`` is a path."""
+    note = pathlib.Path(root) / (handoff_id + protocol.HANDOFF_REFERENCE_SUFFIX)
+    text = body if isinstance(body, str) and not body.startswith("/") and not body[1:3] == ":\\" else None
+    if text is None:
+        text = json.dumps({"path": str(body), "written": "2026-10-31T12:00:00Z"})
+    note.write_text(text, encoding="utf-8")
+    return note
+
+
+def _unchanged(value):
+    """``gr.update()`` with nothing in it - or None where Gradio is absent."""
+    return value is None or (isinstance(value, dict) and set(value) <= {"__type__"})
+
+
+def settings_load_checks(r: Results, root: str) -> None:
+    """Bridge 1.17.0: a file's settings loaded into the page, for View
+    Outputs' Send to WanGP - read by WanGP's own loader from the file a
+    reference note in the handoff root names, never from anything the
+    browser says, and answered where WanGP's own Load Settings box writes
+    its answer: the refresh trigger for the page's own model, the model
+    switch for another, and the main tabs put on the generator's form."""
+    plugin, compatibility, _admission, _ui = _modules()
+    K = compatibility
+    ref = lambda n: f"{n:032x}"  # noqa: E731 - ids no other check uses
+    with tempfile.TemporaryDirectory(prefix="minipaint-wangp-outputs-") as folder:
+        outputs = pathlib.Path(folder)
+        for name in ("same.mp4", "other.mkv", "blank.mov", "clip.webm", "picture.png"):
+            (outputs / name).write_bytes(b"\x00" * 16)
+        loader = _Loader({"same.mp4": {"model_type": "video", "prompt": "p"},
+                          "other.mkv": {"model_type": "ltx2_22B_distilled", "prompt": "q"},
+                          "picture.png": {"model_type": "video", "prompt": "r"}})
+        bridge, wgp = _bridge({"video": VIDEO_MODEL}, root, names=SETTINGS_NAMES)
+        wgp.load_settings_from_file = loader
+        fresh = _page(K)
+        hello, _ = _call(bridge, fresh, "hello")
+        r.check("a build that hands over WanGP's loader and both of its triggers offers the settings load",
+                hello.get("capabilities", {}).get("settings_load") is True, str(hello.get("capabilities")))
+        r.check("the operation is one the trigger understands, and the loader one of the globals asked for",
+                "settings" in plugin.OPERATIONS and "load_settings_from_file" in wgp.asked_globals, str(wgp.asked_globals))
+
+        _note(root, ref(1), outputs / "same.mp4")
+        ack, writes = _load(bridge, fresh, {"handoff_id": ref(1)})
+        r.check("a file of the page's own model is read by WanGP's loader, from the path its note names",
+                ack.get("ok") is True and ack.get("loaded") is True and loader.read[-1:] == [str(outputs / "same.mp4")],
+                str({k: ack.get(k) for k in ("ok", "code", "loaded")}) + str(loader.read[-1:]))
+        r.check("and fills the form again through refresh_form_trigger, switching nothing",
+                writes.get(K.REFRESH_FORM_TRIGGER) == LOADED_AT and K.MODEL_CHOICE_TARGET not in writes
+                and ack.get("switched") is False and ack.get("model_type") == "video", str(sorted(writes)) + str(ack.get("model_type")))
+        r.check("with the generator's form put on screen in WanGP's main tabs",
+                writes.get(K.MAIN_TABS) == {"selected": compatibility.MEDIA_TAB_ID} and compatibility.MEDIA_TAB_ID == "media_gen",
+                repr(writes.get(K.MAIN_TABS)))
+        r.check("the answer is correlated like every other",
+                ack.get("op") == "settings" and ack.get("request_id") == "s1" and ack.get("channel_id") == "c" * 32, str(ack.get("op")))
+        placed = bridge.outputs(ack, writes)
+        tail = dict(zip(bridge.queue_keys, placed[1 + len(bridge.receiver_keys) + len(bridge.switch_keys):]))
+        r.check("the event's outputs carry the trigger's value and the tab's selection, and leave every other output alone",
+                tail.get(K.REFRESH_FORM_TRIGGER) == LOADED_AT
+                and isinstance(tail.get(K.MAIN_TABS), dict) and tail[K.MAIN_TABS].get("selected") == "media_gen"
+                and all(_unchanged(value) for key, value in tail.items() if key not in (K.REFRESH_FORM_TRIGGER, K.MAIN_TABS))
+                and all(_unchanged(value) for value in placed[1:1 + len(bridge.receiver_keys) + len(bridge.switch_keys)]), repr(tail))
+
+        other_page = _page(K)
+        _note(root, ref(2), outputs / "other.mkv")
+        ack, writes = _load(bridge, other_page, {"handoff_id": ref(2)})
+        r.check("a file of another model switches the page to it through model_choice_target, as WanGP's box does",
+                ack.get("loaded") is True and ack.get("switched") is True and ack.get("model_type") == "ltx2_22B_distilled"
+                and writes.get(K.MODEL_CHOICE_TARGET) == "ltx2_22B_distilled|" + LOADED_AT and K.REFRESH_FORM_TRIGGER not in writes
+                and writes.get(K.MAIN_TABS) == {"selected": "media_gen"}, str(ack) + str(sorted(writes)))
+        r.check("and the switch's one-shot is WanGP's own loader's doing, in this page's state",
+                other_page[K.SESSION_STATE].get("ignore_save_form") is True
+                and "ltx2_22B_distilled" in other_page[K.SESSION_STATE].get("settings", {}))
+
+        _note(root, ref(3), outputs / "picture.png")
+        ack, writes = _load(bridge, _page(K), {"handoff_id": ref(3)})
+        r.check("a picture WanGP made is loaded the same way", ack.get("loaded") is True and writes.get(K.REFRESH_FORM_TRIGGER) == LOADED_AT,
+                str(ack))
+
+        _note(root, ref(4), outputs / "blank.mov")
+        reads = len(loader.read)
+        ack, writes = _load(bridge, _page(K), {"handoff_id": ref(4)})
+        r.check("a file WanGP reads nothing from answers ok and not loaded, and writes nothing - not even the tabs",
+                ack.get("ok") is True and ack.get("loaded") is False and ack.get("switched") is False and writes == {}
+                and "no settings" in ack.get("message", "") and len(loader.read) == reads + 1, str(ack) + str(writes))
+
+        editing = _page(K, **{K.SESSION_STATE: {"model_type": "video", "gen": {"queue": []}, "active_form": "edit"}})
+        ack, writes = _load(bridge, editing, {"handoff_id": ref(1)})
+        r.check("on the Edit form - a queued task being edited - the tabs are left where they are",
+                ack.get("loaded") is True and K.MAIN_TABS not in writes and K.REFRESH_FORM_TRIGGER in writes, str(sorted(writes)))
+
+        ack, writes = _load(bridge, _page(K), {"handoff_id": ref(1), "path": str(outputs / "other.mkv"), "model_type": "t2v"})
+        r.check("a path or a model beside the id is not read: the note's file is the one loaded",
+                ack.get("loaded") is True and loader.read[-1] == str(outputs / "same.mp4") and ack.get("switched") is False, str(loader.read[-1:]))
+
+        # Everything the browser or a stranger could put in its place.
+        (outputs / "folder.mp4").mkdir()
+        elsewhere = outputs / "elsewhere"
+        elsewhere.mkdir()
+        cases = [
+            ("a path in place of the id", {"handoff_id": str(outputs / "same.mp4")}, None, "REQUEST_INVALID"),
+            ("an id in upper case", {"handoff_id": ID_B.upper()}, None, "REQUEST_INVALID"),
+            ("no id at all", {}, None, "REQUEST_INVALID"),
+            ("an id no note was written for", {"handoff_id": ref(40)}, None, "HANDOFF_NOT_FOUND"),
+            ("a picture's handoff, which is no note", {"handoff_id": ID_A}, None, "HANDOFF_NOT_FOUND"),
+            ("a note naming a relative path", {"handoff_id": ref(5)}, json.dumps({"path": "same.mp4"}), "HANDOFF_INVALID_ID"),
+            ("a note naming a WebM, which WanGP keeps no settings in", {"handoff_id": ref(6)}, outputs / "clip.webm", "HANDOFF_INVALID_ID"),
+            ("a note naming a file that has gone", {"handoff_id": ref(7)}, outputs / "gone.mp4", "HANDOFF_NOT_FOUND"),
+            ("a note naming a folder", {"handoff_id": ref(8)}, outputs / "folder.mp4", "HANDOFF_INVALID_ID"),
+            ("a note that is not JSON", {"handoff_id": ref(9)}, "not json at all", "HANDOFF_INVALID_ID"),
+            ("a note naming nothing", {"handoff_id": ref(10)}, json.dumps({"written": "now"}), "HANDOFF_INVALID_ID"),
+            ("a note with a NUL in its path", {"handoff_id": ref(11)}, json.dumps({"path": str(outputs / "same.mp4") + "\x00.mp4"}), "HANDOFF_INVALID_ID"),
+            # Good JSON, padded past the limit: the read alone, cut at the limit,
+            # would still parse it, so only the size check refuses it.
+            ("a note larger than any Forge writes", {"handoff_id": ref(12)},
+             json.dumps({"path": str(outputs / "same.mp4")}) + " " * protocol.MAX_REFERENCE_BYTES, "HANDOFF_INVALID_ID"),
+        ]
+        for label, settings, body, expected in cases:
+            if body is not None:
+                _note(root, settings["handoff_id"], body)
+            reads = len(loader.read)
+            ack, writes = _load(bridge, _page(K), settings)
+            r.check(f"{label} is {expected}, and WanGP's loader is never called",
+                    ack.get("ok") is False and ack.get("code") == expected and not writes and len(loader.read) == reads,
+                    str({k: ack.get(k) for k in ("ok", "code")}) + str(writes))
+
+        if _can_symlink(outputs):
+            os.symlink(str(outputs / "same.mp4"), str(outputs / "link.mp4"))
+            _note(root, ref(13), outputs / "link.mp4")
+            os.symlink(str(_note(elsewhere, ref(14), outputs / "same.mp4")), str(pathlib.Path(root) / (ref(14) + protocol.HANDOFF_REFERENCE_SUFFIX)))
+            # A link to one of our own notes, inside the root: it resolves
+            # where a note should, so only the note's own file type refuses it.
+            os.symlink(str(pathlib.Path(root) / (ref(1) + protocol.HANDOFF_REFERENCE_SUFFIX)),
+                       str(pathlib.Path(root) / (ref(16) + protocol.HANDOFF_REFERENCE_SUFFIX)))
+            for label, handoff_id in (("a note naming a link, even to an output", ref(13)),
+                                      ("a note that is a link out of the root", ref(14)),
+                                      ("a note that is a link to another note in the root", ref(16))):
+                reads = len(loader.read)
+                ack, writes = _load(bridge, _page(K), {"handoff_id": handoff_id})
+                r.check(f"{label} is HANDOFF_INVALID_ID, and WanGP's loader is never called",
+                        ack.get("code") == "HANDOFF_INVALID_ID" and not writes and len(loader.read) == reads, str(ack.get("code")))
+
+        loader.fail = True
+        ack, writes = _load(bridge, _page(K), {"handoff_id": ref(1)})
+        r.check("a loader that raises is INTERNAL_ERROR, writing nothing",
+                ack.get("ok") is False and ack.get("code") == "INTERNAL_ERROR" and not writes, str(ack.get("code")))
+        loader.fail = False
+
+        stateless = _page(K, **{K.SESSION_STATE: None})
+        ack, writes = _load(bridge, stateless, {"handoff_id": ref(1)})
+        r.check("a page whose state was not handed over is refused, not loaded into a stranger's",
+                ack.get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE" and not writes, str(ack.get("code")))
+
+        # Builds that cannot: no loader handed over, or no trigger to write its answer to.
+        for label, names, hand_over in (("WanGP's loader", SETTINGS_NAMES, False),
+                                        ("refresh_form_trigger", tuple(n for n in SETTINGS_NAMES if n != "refresh_form_trigger"), True),
+                                        ("model_choice_target", tuple(n for n in SETTINGS_NAMES if n != "model_choice_target"), True)):
+            bare, bare_wgp = _bridge({"video": VIDEO_MODEL}, root, names=names)
+            if hand_over:
+                bare_wgp.load_settings_from_file = loader
+            hello, _ = _call(bare, fresh, "hello")
+            reads = len(loader.read)
+            ack, writes = _load(bare, _page(K), {"handoff_id": ref(1)})
+            r.check(f"a build without {label} does not offer the load, and refuses one with BRIDGE_COMPONENT_INCOMPATIBLE",
+                    hello.get("capabilities", {}).get("settings_load") is False and ack.get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE"
+                    and not writes and len(loader.read) == reads, str(hello.get("capabilities", {}).get("settings_load")) + str(ack.get("code")))
+        tabless, tabless_wgp = _bridge({"video": VIDEO_MODEL}, root, names=tuple(n for n in SETTINGS_NAMES if n != "main_tabs"))
+        tabless_wgp.load_settings_from_file = loader
+        ack, writes = _load(tabless, _page(K), {"handoff_id": ref(1)})
+        r.check("a build without the main tabs still loads, and writes no tab",
+                ack.get("loaded") is True and K.MAIN_TABS not in writes and K.REFRESH_FORM_TRIGGER in writes, str(sorted(writes)))
+
+        # WanGP's console: the model, never the file.
+        line = plugin._summary("settings", {"loaded": True, "model_type": "ltx2_22B_distilled", "switched": True}, 0.012)
+        nothing = plugin._summary("settings", {"loaded": False}, 0.012)
+        r.check("the console line names the model and whether WanGP is switching, and nothing of the file",
+                line.startswith("settings: loaded for ltx2_22B_distilled") and "switching" in line
+                and nothing.startswith("settings: nothing") and ".mp4" not in line + nothing, line + " | " + nothing)
+        printed = []
+        answers = []
+        original = plugin._note
+        plugin._note = printed.append
+        try:
+            # A note naming a file inside a file: an OSError that is not "not
+            # found", whose own text is the whole path.
+            (outputs / "a very private name.mp4").write_bytes(b"\x00" * 16)
+            _note(root, ref(15), outputs / "a very private name.mp4" / "inside.mp4")
+            answers.append(_load(bridge, _page(K), {"handoff_id": ref(15)})[0])
+            answers.append(_load(bridge, _page(K), {"handoff_id": ref(1)})[0])
+            answers.append(_load(bridge, _page(K), {"handoff_id": ref(7)})[0])
+        finally:
+            plugin._note = original
+        r.check("a file that cannot be looked at is HANDOFF_NOT_FOUND",
+                answers[0].get("code") == "HANDOFF_NOT_FOUND", str(answers[0].get("code")))
+        r.check("and neither a refusal nor a load puts the file's name or its folder in WanGP's console",
+                len(printed) == 3 and not any("private" in line or folder in line or "same.mp4" in line or "gone.mp4" in line
+                                              for line in printed), str(printed))
+        r.check("nor in the answer the page gets: it holds the model, never the file",
+                not any(folder in json.dumps(ack) or ".mp4" in json.dumps(ack) for ack in answers), str(answers)[:300])
+
+
+def _can_symlink(base) -> bool:
+    probe = pathlib.Path(base) / "probe-link"
+    try:
+        os.symlink(str(base), str(probe))
+    except (OSError, NotImplementedError):
+        return False
+    probe.unlink()
+    return True
+
+
 def run() -> Results:
     r = Results("wangp queue")
     try:
@@ -744,6 +997,7 @@ def run() -> Results:
         track_checks(r, root)
         restore_checks(r, root)
         prompt_edit_checks(r, root)
+        settings_load_checks(r, root)
     return r
 
 

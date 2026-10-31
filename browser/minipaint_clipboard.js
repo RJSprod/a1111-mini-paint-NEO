@@ -213,7 +213,7 @@ window.minipaintClipboard = (function () {
         menuAnchor: null,
         //: The gallery's own working set: what this page of it holds, which
         //: one is in the stage, and the element playing it.
-        outputs: { items: [], page: 0, pages: 1, chosen: "", stage: null, strip: null, player: null },
+        outputs: { items: [], page: 0, pages: 1, chosen: "", stage: null, strip: null, player: null, sending: false },
         outputsKey: null,
         //: The History dialog: its nodes, the one read of its list in flight,
         //: the Load in flight, how many entries it drew, and its Escape.
@@ -2816,6 +2816,9 @@ window.minipaintClipboard = (function () {
 
     const OUTPUTS_PANEL_ID = "minipaint_clipboard_outputs_panel";
     const OUTPUTS_ROUTE = "/minipaint-clipboard/outputs";
+    //: One output's own address, by its opaque id; ``/settings`` after it is
+    //: the note Send to WanGP asks for (routes.OUTPUT_SETTINGS_ROUTE).
+    const OUTPUTS_FILE_PREFIX = "/minipaint-clipboard/output/";
 
     function outputsPanel() { return byId(OUTPUTS_PANEL_ID); }
 
@@ -2906,6 +2909,8 @@ window.minipaintClipboard = (function () {
         sound: "M3 9v6h4l5 5V4L7 9zM16.5 12A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4zM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6z",
         muted: "M3 9v6h4l5 5V4L7 9zM16 9.4l1.4-1.4L19.5 10l2.1-2.1L23 9.4 20.9 11.5 23 13.6l-1.4 1.4-2.1-2.1-2.1 2.1L16 13.6l2.1-2.1z",
         full: "M5 5h5v2H7v3H5zM14 5h5v5h-2V7h-3zM5 14h2v3h3v2H5zM17 14h2v5h-5v-2h3z",
+        // Sliders: a video's settings, sent to WanGP to be loaded there.
+        settings: "M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z",
         exit: "M8 5h2v5H5V8h3zM14 5h2v3h3v2h-5zM5 14h5v5H8v-3H5zM14 14h5v2h-3v3h-2z"
     };
 
@@ -3114,7 +3119,7 @@ window.minipaintClipboard = (function () {
     }
 
     /** The control bar for one video. */
-    function buildPlayer(video) {
+    function buildPlayer(video, item) {
         const prefs = playerPrefs();
         video.loop = prefs.loop;
         video.muted = prefs.muted;
@@ -3197,9 +3202,17 @@ window.minipaintClipboard = (function () {
         const canFullscreen = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled
                                  || video.webkitEnterFullscreen);
         full.hidden = !canFullscreen;
-        for (const button of [restart, back, play, forward, loop, sound, speed, full]) { row.appendChild(button); }
+        // Send to WanGP: this video's settings loaded in WanGP, which then
+        // shows them. Only where WanGP's loader reads a video's settings; a
+        // .webm or an .m4v carries none it can load, and offers no button.
+        const send = playerButton("settings", "Send to WanGP: load this video's settings there", function (button) {
+            sendSettings(item, button);
+        });
+        send.classList.add("minipaint-clip-player-send");
+        send.hidden = !settingsReadable(item);
+        for (const button of [restart, back, play, forward, loop, sound, speed, send, full]) { row.appendChild(button); }
         root.appendChild(row);
-        Object.assign(controls, { play: play, loop: loop, sound: sound, speed: speed, full: full });
+        Object.assign(controls, { play: play, loop: loop, sound: sound, speed: speed, full: full, send: send });
 
         video.addEventListener("play", function () { drawPlay(controls); startClock(controls); });
         video.addEventListener("pause", function () { drawPlay(controls); stopClockFor(video); drawTime(controls); });
@@ -3386,6 +3399,95 @@ window.minipaintClipboard = (function () {
         return button;
     }
 
+    //: The videos WanGP's settings loader reads (its get_settings_from_file):
+    //: the containers it writes its settings into. A picture has no player.
+    const SETTINGS_VIDEO_SUFFIXES = [".mp4", ".mkv", ".mov"];
+    //: How long the server may take to write the note that names the video.
+    const OUTPUT_SETTINGS_TIMEOUT_MS = 15000;
+    //: What a refused load says, by its code, where the WanGP tab's own
+    //: sentence is about a picture's send (HANDOFF_NOT_FOUND) or is not
+    //: what to do next (IFRAME_NOT_READY). Anything else says the tab's.
+    const SETTINGS_REFUSALS = {
+        IFRAME_NOT_READY: "WanGP's page is not open in this browser yet. Open the WanGP tab once, then send again.",
+        HANDOFF_NOT_FOUND: "the video is no longer where WanGP can read it. Refresh View Outputs and try again.",
+        HANDOFF_INVALID_ID: "WanGP would not read that file."
+    };
+
+    function settingsReadable(item) {
+        const name = String((item && item.name) || "").toLowerCase();
+        return SETTINGS_VIDEO_SUFFIXES.some(function (suffix) { return name.endsWith(suffix); });
+    }
+
+    /**
+     * Send to WanGP: one video's settings loaded in WanGP, and the WanGP tab
+     * opened on them.
+     *
+     * Asked for: "the ability to send a video from this view to wan2gp to
+     * load its settings ... a new send button in the playback controls bar.
+     * Sending should open wan2gp tab to the newly loaded settings!" Two
+     * steps, each bounded. The server writes a note naming the file and
+     * answers with the note's id - this page holds the output's id and
+     * nothing else, so no path is ever in it - and the WanGP tab hands that
+     * id to its page, whose bridge loads the file through WanGP's own loader,
+     * the way WanGP's Load Settings box does: the model, the prompt, every
+     * setting, and a video's source pictures (``minipaintWanGP.loadSettings``,
+     * which saves the form on WanGP's screen first, as WanGP's box does).
+     * Only once WanGP has said it loaded them does the view close and the
+     * WanGP tab open; a refusal stays here and says why. A second press while
+     * one is going is the same press.
+     */
+    function sendSettings(item, button) {
+        if (!item || S.outputs.sending) { return Promise.resolve(false); }
+        const wangp = window.minipaintWanGP;
+        if (!wangp || typeof wangp.loadSettings !== "function") {
+            toast("The WanGP tab is not on this page, so there is nowhere to send the settings.", true);
+            return Promise.resolve(false);
+        }
+        S.outputs.sending = true;
+        if (button) { button.disabled = true; button.setAttribute("aria-busy", "true"); }
+        const controller = typeof AbortController === "function" ? new AbortController() : null;
+        const limit = setTimeout(function () { if (controller) { controller.abort(); } }, OUTPUT_SETTINGS_TIMEOUT_MS);
+        note("outputs: settings of " + String(item.id).slice(0, 8) + " to WanGP");
+        return fetch(OUTPUTS_FILE_PREFIX + encodeURIComponent(item.id) + "/settings", {
+            method: "POST", credentials: "same-origin", cache: "no-store",
+            signal: controller ? controller.signal : undefined
+        }).then(function (response) {
+            return response.json().catch(function () { return { ok: false, message: "HTTP " + response.status }; });
+        }).then(function (answer) {
+            clearTimeout(limit);
+            if (!answer || answer.ok !== true || typeof answer.handoff_id !== "string") {
+                throw new Error((answer && answer.message) || "the server would not name that video");
+            }
+            return wangp.loadSettings(answer.handoff_id);
+        }).then(function (result) {
+            if (!result || result.ok !== true) {
+                const why = (result && SETTINGS_REFUSALS[result.code]) || (result && result.message) || "WanGP did not answer.";
+                toast("Its settings were not sent: " + why, true);
+                note("outputs: settings not loaded (" + ((result && result.code) || "no answer") + ")");
+                return false;
+            }
+            if (!result.loaded) {
+                toast(result.message || "WanGP found no settings it could load in that video.", true);
+                return false;
+            }
+            closeOutputs();
+            if (typeof wangp.switchToWanGP === "function") { wangp.switchToWanGP(); }
+            toast("Loaded its settings in WanGP" + (result.switched
+                ? ", which is switching to " + (result.model_type || "its model") + "." : "."));
+            return true;
+        }).catch(function (error) {
+            clearTimeout(limit);
+            const aborted = error && error.name === "AbortError";
+            toast("Its settings were not sent: " + (aborted ? "the server did not answer in time."
+                : ((error && error.message) || "something went wrong.")), true);
+            note("outputs: settings send failed (" + (aborted ? "timed out" : ((error && error.message) || error)) + ")");
+            return false;
+        }).finally(function () {
+            S.outputs.sending = false;
+            if (button) { button.disabled = false; button.removeAttribute("aria-busy"); }
+        });
+    }
+
     function loadRecipe(item) {
         if (!item || !item.recipe) { return false; }
         const sent = sendInput(BOXES.historyAction, "output:" + item.recipe + ":" + Date.now());
@@ -3444,7 +3546,7 @@ window.minipaintClipboard = (function () {
             media.playsInline = true;
             media.preload = "auto";
             S.outputs.player = media;
-            controls = buildPlayer(media);
+            controls = buildPlayer(media, item);
             S.outputs.controls = controls;
             // A press on the picture is play and pause, the way every video
             // on a phone works. Only on the picture: the bar has its own.
@@ -7106,7 +7208,8 @@ window.minipaintClipboard = (function () {
                  outputs: { page: S.outputs.page, pages: S.outputs.pages,
                             items: S.outputs.items.length, chosen: S.outputs.chosen,
                             drawn: S.outputs.drawn || 0,
-                            player: !!S.outputs.controls, clock: !!S.outputs.clock },
+                            player: !!S.outputs.controls, clock: !!S.outputs.clock,
+                            sending: !!S.outputs.sending },
                  intercept: interceptTarget() === "clipboard",
                  interceptTarget: interceptTarget(),
                  auto: autoRoles(),

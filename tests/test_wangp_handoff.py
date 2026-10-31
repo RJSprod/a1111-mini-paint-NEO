@@ -18,9 +18,12 @@ from harness import Results, setup_path
 setup_path()
 
 import hashlib  # noqa: E402
+import importlib  # noqa: E402
+import json  # noqa: E402
 import os  # noqa: E402
 import pathlib  # noqa: E402
 import struct  # noqa: E402
+import sys  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
 
@@ -507,6 +510,77 @@ def check_sweep(r: Results, base: pathlib.Path) -> None:
             and handoff._sweepable_id("../" + ID_A + ".png") is None)
 
 
+def _bridge_handoff():
+    """The bridge's own handoff module, loaded off its folder the way WanGP loads it."""
+    folder = str(pathlib.Path(__file__).resolve().parents[1] / "wan2gp_bridge" / "wan2gp-minipaint-bridge")
+    added = folder not in sys.path
+    if added:
+        sys.path.insert(0, folder)
+    try:
+        return importlib.import_module("handoff")
+    finally:
+        if added and folder in sys.path:
+            sys.path.remove(folder)
+
+
+def check_reference(r: Results, base: pathlib.Path) -> None:
+    """A note naming one output, for View Outputs' Send to WanGP (bridge 1.17.0).
+
+    A video is hundreds of megabytes, so it is named rather than copied: a
+    small note under an id of the picture's grammar, written whole, read back
+    by the bridge's own resolver to the same file, removed by ``discard`` and
+    swept by age like a picture - and nothing in it but the path and a time.
+    """
+    forget_everything()
+    root = handoff.handoff_root()
+    video = base / "outputs" / "a clip of mine.mp4"
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"\x00" * 64)
+    before = entries(root)
+
+    handoff_id = handoff.write_reference(video)
+    note = root / (handoff_id + protocol.HANDOFF_REFERENCE_SUFFIX)
+    r.check("a reference is a fresh id of the handoff grammar", protocol.valid_handoff_id(handoff_id), handoff_id)
+    r.check("written as one note under that id, and nothing else - no picture, no part file",
+            entries(root) - before == {note.name}, str(sorted(entries(root) - before)))
+    body = json.loads(note.read_text(encoding="utf-8"))
+    r.check("the note names the file and when it was written, and holds nothing more",
+            set(body) == {"path", "written"} and body["path"] == str(video), str(body))
+    r.check("and is within the bridge's limit", note.stat().st_size <= protocol.MAX_REFERENCE_BYTES)
+    r.check("a second reference to the same file is a second note", handoff.write_reference(video) != handoff_id)
+    r.check("the file itself is only named, never copied or moved", video.is_file() and video.read_bytes() == b"\x00" * 64)
+
+    bridge = _bridge_handoff()
+    resolved = bridge.resolve_reference(handoff_id, {"MINIPAINT_WANGP_HANDOFF_ROOT": str(root)})
+    r.check("the bridge's own resolver reads the note back to the same file", resolved == video, str(resolved))
+
+    written = entries(root)
+    for label, value in (("a relative path", "outputs/a clip of mine.mp4"), ("an empty path", ""), ("nothing", None)):
+        r.check(f"a reference to {label} is HANDOFF_INVALID_ID",
+                code_of(failure(handoff.write_reference, value)) == errors.HANDOFF_INVALID_ID)
+    long_path = pathlib.Path(str(base.anchor) + "a" * (protocol.MAX_REFERENCE_BYTES + 1) + ".mp4")
+    r.check("a path too long for the bridge to read is HANDOFF_TOO_LARGE",
+            code_of(failure(handoff.write_reference, long_path)) == errors.HANDOFF_TOO_LARGE)
+    r.check("and a refused reference leaves nothing behind", entries(root) == written, str(sorted(entries(root) - written)))
+
+    handoff.discard(handoff_id)
+    r.check("discard removes the note", not note.exists())
+    r.check("and never the file it named", video.is_file())
+
+    r.check("the sweeper knows a note as one of its own shapes",
+            handoff._sweepable_id(ID_A + protocol.HANDOFF_REFERENCE_SUFFIX) == ID_A
+            and handoff._sweepable_id(ID_A + ".json") is None and handoff._sweepable_id(ID_A + ".ref.txt") is None)
+    stale = root / (ID_B + protocol.HANDOFF_REFERENCE_SUFFIX)
+    stale.write_text(json.dumps({"path": str(video), "written": "2020-01-01T00:00:00Z"}), encoding="utf-8")
+    backdate(stale, 100000)
+    fresh_id = handoff.write_reference(video)
+    fresh = root / (fresh_id + protocol.HANDOFF_REFERENCE_SUFFIX)
+    handoff.sweep(max_age_seconds=3600)
+    r.check("a stale note is swept at the next start, and a fresh one kept", not stale.exists() and fresh.is_file())
+    r.check("and sweeping a note never touches the file it named", video.is_file())
+    handoff.discard(fresh_id)
+
+
 def run() -> Results:
     r = Results("wangp handoff")
 
@@ -521,6 +595,7 @@ def run() -> Results:
             check_validate(r, base)
             check_discard(r, base)
             check_sweep(r, base)
+            check_reference(r, base)
         finally:
             # Module state: the manifests and the path helpers both outlive
             # this function, and the directory they point at is about to go.

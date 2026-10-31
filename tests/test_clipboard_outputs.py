@@ -487,6 +487,87 @@ def route_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
             "FileResponse(path" in source and "data = handle.read()" not in source, source[:200])
 
 
+def settings_route_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
+    """Send to WanGP's first half: a note naming one output, for the bridge.
+
+    Asked for: "the ability to send a video from this view to wan2gp to load
+    its settings ... a new send button in the playback controls bar". The
+    browser holds an output's id and nothing else; the server answers with the
+    id of a note in the handoff root naming the file, which the WanGP page's
+    bridge reads through WanGP's own loader. A video WanGP keeps no settings
+    in is refused here, and no answer names a folder or a file.
+    """
+    import inspect
+
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from minipaint_neo.wangp import handoff, protocol as wangp_protocol
+
+    outputs.reset_for_tests()
+    config.update(outputs_folder=str(folder))
+    clock.now += 10
+    requested = _wrote(folder, "requested here.mp4", clock.now + 1)
+    outputs.remember("6" * 16, [str(requested)], request_id="r6")
+    from_wangp = _wrote(folder, "made in wangp.mkv", clock.now + 2)
+    _wrote(folder, "a clip.webm", clock.now + 3)
+    _wrote(folder, "another.m4v", clock.now + 4)
+    listed = {item["name"]: item for item in outputs.gallery(refresh=False)}
+    app = FastAPI()
+    routes.install(app)
+    client = TestClient(app)
+
+    def route(output_id):
+        return f"/minipaint-clipboard/output/{output_id}/settings"
+
+    def named(answer):
+        try:
+            return pathlib.Path(json.loads((handoff.handoff_root() / (answer.json()["handoff_id"] + wangp_protocol.HANDOFF_REFERENCE_SUFFIX))
+                                           .read_text(encoding="utf-8"))["path"])
+        except Exception as error:  # the check below says what was wrong
+            return error
+
+    first = client.post(route(listed["requested here.mp4"]["id"]))
+    if first.status_code == 401:
+        r.check("the settings route is behind the sign-in gate (signed-out run)", True)
+        return
+    answers = [first]
+    r.check("a video this tab asked for answers with a note's id",
+            first.status_code == 200 and first.json().get("ok") is True and wangp_protocol.valid_handoff_id(first.json().get("handoff_id")),
+            first.text[:200])
+    r.check("and the note names that very file", named(first) == requested.resolve() or named(first) == requested, str(named(first)))
+    second = client.post(route(listed["made in wangp.mkv"]["id"]))
+    answers.append(second)
+    r.check("so does a video only WanGP's folder knows, an MKV among them",
+            second.status_code == 200 and (named(second) == from_wangp.resolve() or named(second) == from_wangp), second.text[:200])
+    again = client.post(route(listed["requested here.mp4"]["id"]))
+    answers.append(again)
+    r.check("each press is a note of its own", again.status_code == 200 and again.json().get("handoff_id") != first.json().get("handoff_id"))
+
+    before = {child.name for child in handoff.handoff_root().iterdir()}
+    for name in ("a clip.webm", "another.m4v"):
+        refused = client.post(route(listed[name]["id"]))
+        answers.append(refused)
+        r.check(f"{name.rsplit('.', 1)[1].upper()}, which WanGP keeps no settings in, is refused 409 OUTPUT_NO_SETTINGS",
+                refused.status_code == 409 and refused.json().get("code") == "OUTPUT_NO_SETTINGS", refused.text[:200])
+    unknown = client.post(route("deadbeefdeadbeef"))
+    never = client.post(route(outputs.FOLDER_ID_PREFIX + "0" * 16))
+    answers.extend([unknown, never])
+    r.check("an id that is not an output's is a 404, wherever it claims to be from",
+            unknown.status_code == 404 and never.status_code == 404 and unknown.json().get("code") == "CLIPBOARD_ASSET_UNKNOWN")
+    looked = client.get(route(listed["requested here.mp4"]["id"]))
+    r.check("a note is written by a POST alone", looked.status_code == 405, str(looked.status_code))
+    r.check("and none of the refusals left a note behind",
+            {child.name for child in handoff.handoff_root().iterdir()} == before)
+    r.check("no answer names a folder or a file",
+            not any(str(folder) in answer.text or "requested" in answer.text or "wangp.mkv" in answer.text for answer in answers))
+    r.check("writing the note is not a coroutine, so it is off the event loop",
+            not inspect.iscoroutinefunction(routes._output_settings))
+    (folder / "made in wangp.mkv").unlink()
+    gone = client.post(route(listed["made in wangp.mkv"]["id"]))
+    r.check("a video deleted since is a 404", gone.status_code == 404, str(gone.status_code))
+
+
 def run() -> Results:
     r = Results("clipboard outputs")
     with tempfile.TemporaryDirectory(prefix="minipaint-outputs-") as scratch:
@@ -504,7 +585,7 @@ def run() -> Results:
         try:
             folder_checks(r, base)
             folders = {}
-            for name in ("exact", "window", "restart", "page", "route", "recipe", "folder"):
+            for name in ("exact", "window", "restart", "page", "route", "recipe", "folder", "settings"):
                 folders[name] = base / name
                 folders[name].mkdir()
             exact_checks(r, clock, folders["exact"])
@@ -516,6 +597,7 @@ def run() -> Results:
             recipe_checks(r, clock, folders["recipe"])
             range_checks(r)
             route_checks(r, folders["route"], clock)
+            settings_route_checks(r, folders["settings"], clock)
         finally:
             outputs.use_clock(None)
             outbox.use_clock(None)

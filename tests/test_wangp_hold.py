@@ -833,7 +833,7 @@ def hello_checks(r: Results) -> None:
                                                 "waiter", "vram_free", "vram_total"))
                     and body["hold"] == protocol.HOLD_NONE and body["worker"] is False and body["task_running"] is False,
                     str({key: body.get(key) for key in ("hold", "worker", "task_running", "waiter")}))
-            r.check("and the bridge is 1.16.0", body["bridge_version"] == "1.16.0" == compatibility.BRIDGE_VERSION,
+            r.check("and the bridge is 1.17.0", body["bridge_version"] == "1.17.0" == compatibility.BRIDGE_VERSION,
                     str(body.get("bridge_version")))
 
             status, body = call(protocol.CONTROL_HOLD, {"lease": LEASE, "ttl_s": 45, "label": "Speech engine"})

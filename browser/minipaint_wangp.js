@@ -83,9 +83,13 @@ window.minipaintWanGP = (function () {
     // the assistant panel's prompt box on this tab. See prompt().
     const PROMPT_REQUEST = "WANGP_PROMPT_REQUEST";
     const PROMPT_RESULT = "WANGP_PROMPT_RESULT";
+    // Bridge 1.17.0: a file's settings loaded into the page, for the
+    // Clipboard's View Outputs. See loadSettings().
+    const SETTINGS_REQUEST = "WANGP_SETTINGS_REQUEST";
+    const SETTINGS_RESULT = "WANGP_SETTINGS_RESULT";
 
     const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH, PING, LAYOUT_STATE,
-                       PROMPT_REQUEST];
+                       PROMPT_REQUEST, SETTINGS_REQUEST];
 
     //: THEME_STATE's vocabulary, as protocol.py spells it. `mode` is which of
     //: the bridge's built-in palettes is in force; `skin` is where the colours
@@ -149,7 +153,7 @@ window.minipaintWanGP = (function () {
     //: [{family, face}], why, at}. Page-lifetime, like the sheets themselves.
     const FONT_SHEETS = new Map();
     const TO_PARENT = [READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED, PONG, FORM_CHANGED,
-                       PROMPT_RESULT, LAYOUT_RESULT];
+                       PROMPT_RESULT, LAYOUT_RESULT, SETTINGS_RESULT];
     //: LAYOUT_RESULT's vocabulary, as protocol.py spells it.
     const LAYOUTS = ["whole", "compact", "studio"];
     const LAYOUT_MISSING = ["", "form", "prompt", "actions", "progress", "error"];
@@ -218,6 +222,10 @@ window.minipaintWanGP = (function () {
     // A prompt read or write is one Gradio round trip on the WanGP page, like
     // a confirmation: no file, no task, nothing to wait out but the queue.
     const PROMPT_TIMEOUT_MS = 10000;
+    //: How long a settings load may take to be answered. WanGP reads the file's
+    //: settings and, for a video, the source pictures it embeds - a read of a
+    //: few megabytes of metadata at most - before it answers.
+    const SETTINGS_TIMEOUT_MS = 20000;
     const QUEUE_CONFIRM_DELAYS_MS = [0, 100, 300, 700, 1500, 3000];
     const PROMPT_MAX_CHARS = 12000;
     const MAX_QUEUE_REFERENCES = 16;
@@ -1494,6 +1502,7 @@ window.minipaintWanGP = (function () {
         // A prompt box writes as it is typed in: what each write leads to - a
         // refusal, the save after it - is what the journal says.
         if (message.type === PROMPT_RESULT) { onPromptResult(message.requestId, message.payload); return; }
+        if (message.type === SETTINGS_RESULT) { onSettingsResult(message.requestId, message.payload); return; }
         // Presentation: what the page settled on is a line of its own.
         if (message.type === LAYOUT_RESULT) { onLayoutResult(message.requestId, message.payload); return; }
         say("received " + message.type + " from the iframe");
@@ -1576,6 +1585,7 @@ window.minipaintWanGP = (function () {
         S.layout = declared && !!(payload.capabilities && payload.capabilities.layout_compact === true);
         S.layoutStudio = S.layout && !!(payload.capabilities && payload.capabilities.layout_studio === true);
         S.promptEdit = declared && !!(payload.capabilities && payload.capabilities.prompt_edit === true);
+        S.settingsLoad = declared && !!(payload.capabilities && payload.capabilities.settings_load === true);
         noteSession(payload.session, "ready");
         // A session this page has saved nothing from yet: whatever WanGP has
         // recorded may be from before, so no send may take it as current -
@@ -1888,6 +1898,25 @@ window.minipaintWanGP = (function () {
             prompt: text(payload.prompt, PROMPT_MAX_CHARS),
             wizard: payload.wizard === true,
             written: payload.written === true
+        });
+    }
+
+    /** The bridge's answer to a settings load (bridge 1.17.0). */
+    function onSettingsResult(requestId, payload) {
+        const entry = S.pending.get(requestId);
+        if (!entry || entry.type !== SETTINGS_RESULT) { return; }
+        noteSession(payload.session, "settings");
+        if (payload.ok === false) {
+            settle(requestId, failure(code(payload.code) || INTERNAL_ERROR, text(payload.detail, 200)));
+            return;
+        }
+        const loaded = payload.loaded === true;
+        settle(requestId, {
+            ok: true,
+            loaded: loaded,
+            model_type: MODEL_TYPE_RE.test(String(payload.model_type || "")) ? String(payload.model_type) : "",
+            switched: loaded && payload.switched === true,
+            message: text(payload.message, 200)
         });
     }
 
@@ -3234,6 +3263,46 @@ window.minipaintWanGP = (function () {
             if (answer && answer.ok && answer.written) { onFormChanged({ touches: 1 }); }
             return answer;
         });
+    }
+
+    /**
+     * A file's settings loaded into WanGP's page (bridge 1.17.0), for the
+     * Clipboard's View Outputs: the settings a video or picture WanGP wrote
+     * carries - its model, its prompt, every setting, and for a video the
+     * source pictures it embeds - put on the page by WanGP's own loader, the
+     * way its Load Settings box does. ``handoffId`` names a reference handoff
+     * the server wrote for that output; no path ever reaches this page.
+     *
+     * WanGP's own box saves the form first, so the settings on its screen are
+     * kept for the model they belong to, and so does this: one bounded save,
+     * the same one a send makes, and then the load whatever it answered - a
+     * page whose save could not be confirmed still gets what was asked for.
+     * Resolves - never rejects - with `{ok, loaded, model_type, switched,
+     * message}` (`switched` when WanGP is changing model to show them), or a
+     * failure's `{ok: false, code, message}`. A bridge that did not offer
+     * `settings_load` (older than 1.17.0) is never asked:
+     * BRIDGE_COMPONENT_INCOMPATIBLE, whose sentence says to reinstall it.
+     * Switching Forge to this tab is the caller's, through switchToWanGP().
+     */
+    async function loadSettings(handoffId) {
+        const reference = String(handoffId || "");
+        if (!HEX32.test(reference)) { return failure(REQUEST_INVALID, "not a handoff id"); }
+        if (!ensure() || !S.ready || !S.bridgeSession) {
+            rearm();
+            return failure(IFRAME_NOT_READY, "no bridge session in this page");
+        }
+        if (!S.settingsLoad) {
+            return failure(BRIDGE_COMPONENT_INCOMPATIBLE, "this bridge does not load settings (older than 1.17.0)");
+        }
+        try {
+            await flushForm({ reason: "before loading settings", timeoutMs: SEND_POLL_BUDGET_MS, callTimeoutMs: SEND_SAVE_BUDGET_MS });
+        } catch (e) { /* the load goes ahead; a page that could not save still gets what was asked for */ }
+        const answer = await ask(SETTINGS_REQUEST, { handoff_id: reference }, SETTINGS_TIMEOUT_MS, SETTINGS_RESULT);
+        if (answer && answer.ok) {
+            say("settings: " + (answer.loaded ? "loaded for " + (answer.model_type || "the page's model")
+                + (answer.switched ? " (WanGP is switching to it)" : "") : "nothing WanGP could load in that file"));
+        }
+        return answer;
     }
 
     /** One bounded admission check for a request this page asked for. */
@@ -4969,6 +5038,7 @@ window.minipaintWanGP = (function () {
         // box on this tab (bridge 1.14.0); the same contract.
         prompt: prompt,
         setPrompt: setPrompt,
+        loadSettings: loadSettings,
         trackQueue: trackQueue,
         flushForm: flushForm,
         // Save WanGP's form just before a send; see saveForSend. What the

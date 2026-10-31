@@ -58,6 +58,8 @@ ENHANCE_SETTINGS_ROUTE = ROUTE_PREFIX + "/enhance-settings"
 PROMPTS_ROUTE = ROUTE_PREFIX + "/prompts"
 OUTPUTS_ROUTE = ROUTE_PREFIX + "/outputs"
 OUTPUT_FILE_ROUTE = ROUTE_PREFIX + "/output/{file_id}"
+#: A reference handoff for one output, for View Outputs' Send to WanGP.
+OUTPUT_SETTINGS_ROUTE = OUTPUT_FILE_ROUTE + "/settings"
 #: The gallery's Send to WanGP popup: everything it asks, over one POST, and
 #: the small copy of the picture it froze.
 INTERCEPT_ROUTE = ROUTE_PREFIX + "/intercept"
@@ -760,6 +762,36 @@ def _output_file(request: typing.Any) -> typing.Any:
                     }))
 
 
+def _output_settings(request: typing.Any) -> typing.Any:
+    """A reference handoff for one output, for View Outputs' Send to WanGP.
+
+    The browser holds an output's opaque id and nothing else; the bridge inside
+    WanGP reads the file's settings through WanGP's own loader. Between the
+    two goes a note in the handoff root naming the file (``handoff
+    .write_reference``), and the browser is given its id - 32 hex characters
+    that name nothing - to hand the WanGP page. Only a file WanGP's loader
+    reads settings from is offered: an MP4, MKV or MOV video, or a picture.
+
+    Not ``async``: it writes a file, and the note is written whole or not at
+    all, which is a write the event loop should not wait on.
+    """
+    from ..wangp import handoff, protocol as wangp_protocol
+
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    path = outputs.path_of(request.path_params.get("file_id", ""))
+    if path is None:
+        return _json({"ok": False, "code": errors.CLIPBOARD_ASSET_UNKNOWN, "message": "That output is no longer there."}, 404)
+    if not path.name.lower().endswith(wangp_protocol.SETTINGS_FILE_SUFFIXES):
+        return _json({"ok": False, "code": errors.OUTPUT_NO_SETTINGS, "message": errors.message(errors.OUTPUT_NO_SETTINGS)}, 409)
+    try:
+        handoff_id = handoff.write_reference(path)
+    except Exception as error:
+        scrub.console(f"a settings reference could not be written ({type(error).__name__}).", _LOG_PREFIX)
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    return _json({"ok": True, "handoff_id": handoff_id})
+
+
 async def _enhance_settings(request: typing.Any) -> typing.Any:
     """The prompt-enhancement settings, over HTTP: describe, toggle, edit.
 
@@ -1234,6 +1266,7 @@ def install(app: typing.Any) -> None:
             Route(PROMPTS_ROUTE, endpoint=_prompts, methods=["GET", "POST"]),
             Route(OUTPUTS_ROUTE, endpoint=_outputs, methods=["GET"]),
             Route(OUTPUT_FILE_ROUTE, endpoint=_output_file, methods=["GET", "HEAD"]),
+            Route(OUTPUT_SETTINGS_ROUTE, endpoint=_output_settings, methods=["POST"]),
             Route(IMPORT_ROUTE, endpoint=_import, methods=["POST"]),
             Route(SEND_ROUTE, endpoint=_send, methods=["POST"]),
             Route(INTERCEPT_ROUTE, endpoint=_intercept, methods=["POST"]),

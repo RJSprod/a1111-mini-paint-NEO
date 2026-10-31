@@ -6,8 +6,8 @@ job the browser ran is tied to them by the window it was running in and
 says so; a file is never claimed by two requests; a claim left open by a
 Forge that was shut down mid-generation is finished on the next sync, which
 is what makes the gallery still full after a restart; a file the user has
-deleted stops being listed; the page is the same size and shape as the
-picture grid's; and the byte route answers ranges, because a <video> that
+deleted stops being listed; a page holds sixty, the size the picture
+grid's pages were; and the byte route answers ranges, because a <video> that
 cannot ask for the middle of a file cannot be scrubbed.
 """
 
@@ -280,7 +280,7 @@ def page_checks(r: Results, clock: _Clock, folder: pathlib.Path) -> None:
     outputs.remember("3" * 16, [str(path) for path in made], request_id="r3")
 
     page = routes.outputs_page()
-    r.check("a page is 60, the same as the picture grid's, so there is one pager to learn",
+    r.check("a page is 60 (routes.PAGE_SIZE), the size the picture grid's pages were, so the strip turns as it always did",
             page["size"] == routes.PAGE_SIZE == 60 and len(page["items"]) == 60, str(len(page["items"])))
     r.check("and it counts the whole ledger, not the page", page["total"] == 65 and page["pages"] == 2)
     r.check("newest first", page["items"][0]["name"] == "v064.mp4", page["items"][0]["name"])

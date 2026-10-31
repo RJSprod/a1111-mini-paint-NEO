@@ -1057,7 +1057,7 @@ Sort and Send flyouts: the same list the menu's own sections draw, anchored
 under the button that asked and standing alone, so no Back row and a second
 press closes it), `openOutputs` / `closeOutputs` / `askOutputs(page)` (the
 gallery: the stage, the filmstrip, tap-to-hide the controls, and a pager at
-the grid's own 60 - `closeOutputs` clears the player's `src`, because a
+60 (`routes.PAGE_SIZE`) - `closeOutputs` clears the player's `src`, because a
 `<video>` left with a source keeps downloading the largest file this
 extension touches), `openPromptEditor` / `closePromptEditor`
 (the full-window system-prompt view: the class, the Escape key, the focus, and

@@ -568,7 +568,7 @@ in one press; jobs already being sent finish, and nothing in WanGP's own queue i
 **View Outputs** (under the queue). Every video in WanGP's output folder - its subfolders
 included, the ones this tab asked for and the ones made in WanGP itself, each once, newest
 first - over the whole window, below the tab bar and never under it: the output in a stage
-with its own controls under it, a filmstrip of everything else, paged at 60. A video only the
+with its own controls under it, a filmstrip of everything else, sixty to a page. A video only the
 folder knows has no request behind it, so it has no recipe to Load (below) and is never
 marked as a match; it is listed by an id that names nothing, and the folder is read from its
 directory entries and a stat of each, nothing opened, so a file deleted meanwhile is gone at the
@@ -616,16 +616,26 @@ routes the Canvas takes - or to **PNG Info**, which only the Clipboard offers: i
 the file's own bytes, the way a file dropped on it would be, so it reads the generation
 parameters Forge wrote. A Forge PNG keeps every byte, so its generation parameters survive.
 
+**The whole folder, in view first.** The storage folder is **not paged**: it is listed whole,
+in one answer, and drawn the way an archive is (below) - every picture gets a tile, but only
+the rows near the view are in the page, the thumbnails **in view load first**, a few at a time
+with a deadline each, a fling across the folder asks for nothing on its way, and a thumbnail
+seen once is kept by the server, by the browser and by the page. Page Up and Page Down move
+the grid a screen, Home and End take it to the top and the end; a selection far from the view
+is still the selection, marked by a short line across the scrubber that brings it back when
+pressed; a rename changes a caption where it stands; and a new sort starts at the top. Past a
+hundred thousand pictures the listing stops and says how many it left out.
+
 **Archives.** Menu → *Archives ›* → *Manage archives…* takes folders on the machine running
 Forge - as many as you like - and the grid can show any one of them **in place of the storage
 folder**, chosen under Menu → *Archives ›*. Once there is an archive to choose, the Menu button
 carries the name of the folder the grid shows, and the status line says how many pictures it
 holds and where new ones go; no row over the grid is spent on it. An archive is **read-only**: nothing in this extension writes, renames, deletes or
 indexes anything in it, Rename and Delete are off for its pictures, and pasting, uploading,
-dropping or the gallery's 🖌️ still save to the storage folder while you look at one. It is
-**not paged**: the whole folder (its PNG, JPEG and WebP files, not its subfolders) is listed in
-one answer, from the folder's directory entries alone - no picture is opened to list it - and
-every picture gets a tile. A tile is an empty place costing nothing until it is in view; only
+dropping or the gallery's 🖌️ still save to the storage folder while you look at one. Like
+the storage folder it is **not paged**: the whole folder (its PNG, JPEG and WebP files, not its
+subfolders) is listed in one answer, from the folder's directory entries alone - no picture is
+opened to list it - and every picture gets a tile. A tile is an empty place costing nothing until it is in view; only
 the rows near the view are in the page at all. **What is in view loads first**, in reading
 order, a few thumbnails at a time over plain requests with a deadline each - nothing held
 open - and the order is decided again whenever you scroll: requests for tiles that have left
@@ -651,9 +661,10 @@ saved on the host.
 **The scrubber.** A thin bar over the grid's right-hand edge, in place of its scroll bar: it
 takes no room and moves nothing. Drag its handle, or press anywhere on it to jump there and
 drag on; while it is held a bubble beside it says which picture of how many is at the top of
-the view and the date, name or size the sort orders by. An archive asks for no thumbnails
+the view and the date, name or size the sort orders by. The grid asks for no thumbnails
 while it is moving, only for where it rests - held still for about a third of a second - or
-is let go. It is drawn only when the grid holds more than
+is let go. A selected picture out of view is a short line across it; a press there brings
+the picture back. It is drawn only when the grid holds more than
 it shows; the wheel, a finger on the grid and the keys scroll as they always did. Rest on it
 without letting go - about a third of a second - and the pictures in view start loading as
 though you had let go; move again and new loading waits until you rest or let go.
@@ -1079,7 +1090,7 @@ javascript/main.js               legacy bridge, parent-frame side, and the loade
 browser/minipaint_canvas.js      attaches the canvas; crop frame, touch gestures, tools, the rail's height, the layer list, the held mask, focus mode
 browser/minipaint_wangp.js       the WanGP iframe: handshake, receiver query, verified send, queue, confirm and track
 browser/minipaint_interop.js     window.minipaintInterop: the public queue API (v1, minipaint.wangp.queue/v1): enqueue (answers when the server has the job), sync (a bounded snapshot), cancelAll - no live connection
-browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid and its pager, the queue list and the history, History's dialog,
+browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid drawn in view, the queue list and the history, History's dialog,
                                  the menu, paste and drop, Add to Queue, the page's model, and the one standing notice;
                                  an archive's grid (tiles only near the view, thumbnails in view first), the Archives screen,
                                  and the full-screen view of one picture

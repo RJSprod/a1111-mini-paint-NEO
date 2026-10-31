@@ -711,7 +711,8 @@ Under the queue, one button opens a gallery of **every video in WanGP's output f
 ones this tab asked for and the ones made in WanGP itself, each once, newest first - over the
 whole window and below the tab bar, never under it: a large playback area with the filmstrip
 of everything else under it. Tap a tile to play it; tap the picture itself to hide the video controls and tap again
-to bring them back. It pages at 60, the same as the picture grid, and **Close** or Escape
+to bring them back. It pages at 60 - the storage folder's grid used to, and is listed whole
+now - and **Close** or Escape
 puts it away. Scrubbing works - the file is served with byte ranges, so the player can ask
 for the middle of a video rather than only playing it from the start.
 

@@ -1653,39 +1653,17 @@
 }
 
 #minipaint_clipboard_root .minipaint-clip-grid {
-    display: grid;
-    /* Columns are the size the slider names, and are NOT stretched to fill
-       the row.
-
-       `minmax(thumb, 1fr)` was tidier at the right-hand edge and it made
-       every tile wider than the picture in it. The row height comes from the
-       slider, so the picture is held to that height, while 1fr hands the
-       column whatever is left over from dividing the grid up - at 260px the
-       box came out 369 wide and 264 tall, and a square picture sat in it
-       with 105px of dead space around it. That is what "the tile's border
-       extends well beyond the thumbnail" is: not a centring fault at all,
-       but a box that was never the shape of the picture it holds.
-
-       A fixed track is the same number the row uses, so the box is square
-       and a square picture fills it exactly. The ragged right-hand edge that
-       left was then taken away the other way round: the slider counts
-       pictures per row, and the script works the tile size OUT of the row
-       (--minipaint-clip-thumb from --minipaint-clip-cols and the width), so
-       the columns share the row to the pixel and are still exactly the size
-       the rows are measured from. The line below is the fallback for a page
-       whose script has not run; the script pins the count's own. */
-    grid-template-columns: repeat(auto-fill, min(calc(var(--minipaint-clip-thumb) + var(--minipaint-clip-frame)), 100%));
-    justify-content: start;
-    /* A row is the size the slider names, not the size of the tallest
-       picture in it. Tile height used to be whatever the tile's content
-       came to, which is only uniform while the thumb box is holding its
-       picture to a square - and a tile that trusts one rule to do that has
-       nothing left when the rule does not land. A row measured from the
-       same variable as the columns cannot grow to fit a picture at all, so
-       every tile is identical before any picture has loaded. */
-    grid-auto-rows: calc(var(--minipaint-clip-thumb) + var(--minipaint-clip-caption));
-    align-items: stretch;
-    justify-items: stretch;
+    /* A scroll box over one track as tall as the whole listing - the
+       storage folder's or an archive's - in which the script places the
+       tiles that are near the view, at as many equal columns as the slider
+       counts, sharing the row to the pixel (layoutGrid). So the columns are
+       never a strip short of the row's end, a column is exactly the tile and
+       its square exactly the picture's box: the box is square and a square
+       picture fills it, which is what "the tile's border extends well beyond
+       the thumbnail" once was not. The script pins the box's display, gap
+       and padding; these are the readable copy, and what the layout reads
+       back. */
+    display: block;
     gap: var(--minipaint-clip-gap);
     padding: var(--minipaint-clip-gap);
     min-height: 160px;
@@ -1751,82 +1729,32 @@
     display: none !important;
 }
 
-/* The browser draws the grid and the row under it, into the element the
-   server used to fill. One wrapper so the two are laid out together and the
-   grid keeps its own scroll box; the scrubber is placed against it. */
+/* The selection's mark: a line across the bar where the selected picture
+   is in the whole list, shown while it is out of view, and a press on it
+   brings the picture back - what the pager's "selection on page N" was. The
+   line is the box's middle; its padding is left unpainted, so the box a
+   finger finds is taller than the line it sees. */
+#minipaint_clipboard_root .minipaint-clip-scrubber-mark {
+    display: block;
+    border-radius: 2px;
+    background: var(--color-accent, rgba(127, 127, 127, 0.9));
+    background-clip: content-box;
+}
+
+#minipaint_clipboard_root .minipaint-clip-scrubber-mark[hidden] {
+    display: none !important;
+}
+
+/* The browser draws the grid into the element the server used to fill. One
+   wrapper, so the grid keeps its own scroll box and the scrubber has
+   something to be placed against. There is no row under the grid any more:
+   the storage folder is not paged, so it has no Back, page and Next. */
 #minipaint_clipboard_root .minipaint-clip-mount {
     position: relative;
     display: flex;
     flex-direction: column;
     gap: var(--minipaint-clip-gap, 8px);
     min-width: 0;
-}
-
-/* One row, and it does not change width as you move through it: the ends
-   are disabled rather than hidden, and the count sits at the far end where
-   it is read rather than scanned. */
-#minipaint_clipboard_root .minipaint-clip-pager {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--minipaint-clip-gap, 8px);
-    font-size: var(--text-sm, 0.85em);
-    color: var(--body-text-color, inherit);
-}
-
-#minipaint_clipboard_root .minipaint-clip-pager[hidden] {
-    display: none;
-}
-
-#minipaint_clipboard_root .minipaint-clip-pager button {
-    min-height: var(--minipaint-clip-target, 32px);
-    padding: 0 10px;
-    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
-    border-radius: var(--radius-sm, 6px);
-    background: var(--button-secondary-background-fill, transparent);
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
-}
-
-#minipaint_clipboard_root .minipaint-clip-pager button:disabled {
-    opacity: 0.45;
-    cursor: default;
-}
-
-#minipaint_clipboard_root .minipaint-clip-pager-label {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-}
-
-#minipaint_clipboard_root .minipaint-clip-pager-number {
-    width: 4.5em;
-    min-height: var(--minipaint-clip-target, 32px);
-    padding: 0 6px;
-    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
-    border-radius: var(--radius-sm, 6px);
-    background: var(--input-background-fill, transparent);
-    color: inherit;
-    font: inherit;
-    text-align: center;
-}
-
-/* The whole library's count, at the far end of the row. */
-#minipaint_clipboard_root .minipaint-clip-pager-count {
-    margin-left: auto;
-    color: var(--body-text-color-subdued, inherit);
-}
-
-/* Where the selection is, when you have paged away from it. Quiet: being
-   told is useful, being moved is not. */
-#minipaint_clipboard_root .minipaint-clip-pager-mark {
-    font-size: inherit;
-    opacity: 0.85;
-}
-
-#minipaint_clipboard_root .minipaint-clip-pager-mark[hidden] {
-    display: none;
 }
 
 /* A sort that has been asked for and not yet arrived. The tiles are the
@@ -1858,7 +1786,6 @@
 
 /* The empty and unconfigured states, drawn where the tiles would be. */
 #minipaint_clipboard_root .minipaint-clip-nothing {
-    grid-column: 1 / -1;
     margin: 0;
     padding: 12px;
     color: var(--body-text-color-subdued, inherit);

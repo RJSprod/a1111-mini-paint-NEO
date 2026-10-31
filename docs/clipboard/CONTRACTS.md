@@ -700,19 +700,25 @@ ones answer bytes and a revalidated cache header instead). They exist because ev
 one of this tab's events was a request with a response and none was ever a
 push: what made them fragile was the transport, not the interaction.
 
-    GET  /minipaint-clipboard/library?sort&page&size&selected&refresh
-      -> {ok, revision: "<epoch>:<n>", configured, sort, total, page, pages, size,
-          selected_page, reason: ""|"empty"|"unconfigured", status,
-          items: [{id, name, w, h, bytes, v}]}
+    GET  /minipaint-clipboard/library?sort&refresh
+      -> {ok, revision: "<epoch>:<n>", configured, sort, total, left_out,
+          reason: ""|"empty"|"unconfigured", status,
+          items: [[id, name, bytes, v, w, h], ...]}
 
-`routes.library_page(sort, page, size, selected, refresh)` is the whole of it;
-the route is a signed-in wrapper. **Sorting is applied over the whole library
-and then sliced** — `store.assets(sort)` already returns the complete ordered
-list, so this is a slice of work the store does correctly rather than a second
-ordering to keep in step. Bad input is answered, never refused: an unknown
-sort falls back to the stored one, a page past the end returns the last page
-that exists, a size outside `PAGE_SIZE_MIN..PAGE_SIZE_MAX` is clamped.
-`PAGE_SIZE = 60`. `refresh=1` re-reads the folder first.
+`routes.library_listing(sort, refresh)` is the whole of it; the route is a
+signed-in wrapper, and not `async`, because `refresh=1` reads the folder again
+first and hashes what it has not seen. **The whole storage folder in one
+answer, not a page of it**, at the user's word ("i prefer the way archive
+loads, which is not pages") - the archive listing's shape, its
+`[key, name, bytes, version]` in the same first four places, so the browser
+draws both with one renderer. The order is `store.assets(sort)`'s, the
+complete ordered list the store already keeps, not a second ordering to keep
+in step. An unknown sort falls back to the stored one. Past
+`archives.LISTING_LIMIT` (100 000) the listing stops and `left_out` and the
+status say how many it left out. The paged form (`page`, `size`, `selected`,
+`selected_page`) and the full-screen view's `every=1` form are gone: the
+browser finds a selection and steps through the folder in the listing it
+holds, and nothing outside the tab's own bundle asked for either.
 
 `revision` is the **library's own** generation (`Store.revision()`), not
 `events.revision()`: job, enhancement, runtime and WanGP events move that one
@@ -898,11 +904,11 @@ class Store:
 # import_bytes / import_image / rename / delete / set_root / a refresh that found a difference all call moved()
 
 # routes.py
-LIBRARY_ROUTE; SETTINGS_ROUTE; QUEUE_ROUTE; READINESS_ROUTE; ENHANCE_SETTINGS_ROUTE; OUTPUTS_ROUTE; OUTPUT_FILE_ROUTE; PAGE_SIZE = 60; PAGE_SIZE_MIN = 10; PAGE_SIZE_MAX = 250
+LIBRARY_ROUTE; SETTINGS_ROUTE; QUEUE_ROUTE; READINESS_ROUTE; ENHANCE_SETTINGS_ROUTE; OUTPUTS_ROUTE; OUTPUT_FILE_ROUTE; PAGE_SIZE = 60; PAGE_SIZE_MIN = 10; PAGE_SIZE_MAX = 250   # the page sizes are View Outputs' now
 # READINESS_ROUTE = /minipaint-clipboard/readiness: POST {model, fresh} -> {ok: true, readiness: targets.readiness(...)} - a blocked answer is an answer.
 # The queue route's add and auto, the readiness route and every intercept action run on the thread pool: each may ask the WanGP bridge, over a socket.
 IMMUTABLE_CACHE; REVALIDATED_CACHE; RANGE_CHUNK = 4 MiB
-def library_page(sort, page, size, selected="", refresh=False) -> dict; def apply_settings(changes) -> dict
+def library_listing(sort="", refresh=False) -> dict; def apply_settings(changes) -> dict    # the whole storage folder, [id, name, bytes, v, w, h] each
 AUTO_NONE_SENTENCE; def auto_sentence(roles) -> "Auto now sends the picture as First Frame and Reference."
 def outputs_page(page=0, size=PAGE_SIZE) -> dict                                      # the gallery; syncs the ledger first; prompt, written and model from each
                                                                                       # entry's recipe, else joined on from its Queue Send History record
@@ -1019,10 +1025,15 @@ why an unapplied edit does not survive a close and re-open.
 The tab's browser side, `browser/minipaint_clipboard.js`
 (`window.minipaintClipboard`): `attach` (mounts the grid, fetches the library
 and the queue, listens for `minipaint:outbox`, pumps once so a reloaded page
-resumes its jobs), `library(options)` / `goToPage` / `setSort` (the grid, its
-pager and the sort, over the index route; only the newest answer draws, and a
-LIBRARY event makes the page re-ask rather than apply a delta),
-`libraryState()`, `addToQueue(prompt, switch)`, `cancelAll`, `refreshQueue`,
+resumes its jobs), `library(options)` / `setSort` (the grid's listing - the
+storage folder whole over the index route, or the archive on screen over its
+own - and the sort; only the newest answer draws, nothing moves until it
+does, and a change makes the page re-ask rather than apply a delta; the tiles
+are placed by the script, only the rows near the view are in the document,
+and the thumbnails are asked for in view first, three at a time, each with a
+deadline, dropped when the view moves on), `libraryState()` and `gridState()`
+(the listing, and what its loader is doing), `addToQueue(prompt, switch)`,
+`cancelAll`, `refreshQueue`,
 `queue(instruction)` (→ `minipaintInterop.wangp.pump()`), `pump`, `pageId`,
 `modelJson`, `afterRender`, `toggleMenu`, `select`, `setThumbnailSize` (sizes
 now, remembers shortly, over `/settings`), `pasteFromClipboard`,

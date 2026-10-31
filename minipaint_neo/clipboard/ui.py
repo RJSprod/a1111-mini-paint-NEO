@@ -297,10 +297,10 @@ def _size_text(asset: store.Asset) -> str:
 #: IT WAS 571 BYTES A TILE - 279 KiB at five hundred pictures, 558 at a
 #: thousand - carried by a Gradio event, on a transport that dies when the
 #: tab is backgrounded, when a session is forgotten and when Forge restarts.
-#: The same index as JSON is 73 KiB, one page of it is 9 KiB, and it travels
-#: over the plain HTTP that has kept working through every failure this tab
-#: has had. See ``routes.library_page`` for what the browser asks for and
-#: ``browser/minipaint_clipboard.js`` for what it draws.
+#: The same index as JSON arrays is a few dozen bytes a picture, and it
+#: travels over the plain HTTP that has kept working through every failure
+#: this tab has had. See ``routes.library_listing`` for what the browser asks
+#: for and ``browser/minipaint_clipboard.js`` for what it draws.
 #:
 #: What is left here is the element the browser draws into, and the value it
 #: is built with is empty on purpose: a page that renders a grid the browser

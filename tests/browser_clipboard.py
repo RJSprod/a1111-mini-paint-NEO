@@ -4002,6 +4002,73 @@ def check_a_press_says_when_the_settings_in_view_were_not_used(r: Results, page)
         page.evaluate("() => window.minipaintClipboard.select('')")
 
 
+def check_wangp_settings_is_a_choice_in_the_menu(r: Results, page) -> None:
+    """Menu → WanGP Settings: where every WanGP job's settings come from.
+
+    Asked for once it had gone - "I didn't know this was a setting. I couldn't
+    find it. So I actually want to bring the setting back so I can have the
+    old style" - and put where the presses that use it are, beside Auto
+    Options: what the WanGP tab shows (the default), or WanGP's saved settings
+    for the model, or its defaults. A choice is saved over the tab's route,
+    said where the press was, and the page told at once with one snapshot, so
+    the WanGP tab stops (or starts) saving its form without a reload.
+    """
+    from minipaint_neo.clipboard import config as clip_config
+    from minipaint_neo.clipboard import outbox as clip_outbox
+
+    open_clipboard(page)
+    radios = """() => Array.from(document.querySelectorAll('.minipaint-clip-menu [role=menuitemradio]'))
+        .map(b => [b.textContent.replace('\u2713', '').trim(), b.getAttribute('aria-checked')])"""
+    synced = []
+
+    def heard(request):
+        if "/minipaint-interop/sync" in request.url:
+            synced.append(request.url)
+
+    clip_outbox.use_inherit(None)
+    page.on("request", heard)
+    try:
+        page.evaluate("() => window.minipaintClipboard.toggleMenu()")
+        listed = page.evaluate("""() => Array.from(document.querySelectorAll('.minipaint-clip-menu .minipaint-clip-menu-item'))
+            .map(b => b.textContent.trim())""")
+        r.check("the menu has WanGP Settings, right after Auto Options",
+                "WanGP Settings ›" in listed and listed.index("WanGP Settings ›") == listed.index("Auto Options ›") + 1, str(listed))
+        r.check("which opens", menu_click(page, "WanGP Settings") == "clicked")
+        r.check("on two choices, what the WanGP tab shows ticked until changed",
+                page.evaluate(radios) == [["What the WanGP tab shows", "true"], ["WanGP's saved settings, or the defaults", "false"]],
+                str(page.evaluate(radios)))
+        before = len(synced)
+        r.check("choosing WanGP's saved settings is one press", menu_click(page, "WanGP's saved settings") == "clicked")
+        page.wait_for_function("() => window.minipaintClipboard.wangpSettings() === 'saved'", timeout=8000)
+        for _ in range(40):
+            if len(synced) > before:
+                break
+            page.wait_for_timeout(100)
+        r.check("which the host keeps, and every later press reads",
+                clip_config.load().wangp_settings == clip_config.WANGP_SETTINGS_SAVED and clip_outbox.inherit_settings() is False,
+                str(clip_config.load().wangp_settings))
+        said = toast(page)
+        r.check("and says what it means, where the press was, closing the menu",
+                said.startswith("WanGP jobs now take WanGP’s saved settings for the model, or its defaults")
+                and page.evaluate("() => window.minipaintClipboard.debug().menuOpen") is False, said)
+        r.check("and the page is told at once - one snapshot - so the WanGP tab stops saving its form",
+                len(synced) == before + 1, str(synced[before:]))
+        page.evaluate("() => window.minipaintClipboard.toggleMenu()")
+        menu_click(page, "WanGP Settings")
+        r.check("opened again, the tick has moved",
+                page.evaluate(radios) == [["What the WanGP tab shows", "false"], ["WanGP's saved settings, or the defaults", "true"]],
+                str(page.evaluate(radios)))
+        menu_click(page, "What the WanGP tab shows")
+        page.wait_for_function("() => window.minipaintClipboard.wangpSettings() === 'in_view'", timeout=8000)
+        r.check("and choosing what the WanGP tab shows puts every later press back on it",
+                clip_config.load().wangp_settings == clip_config.WANGP_SETTINGS_IN_VIEW and clip_outbox.inherit_settings() is True
+                and toast(page).startswith("WanGP jobs now take what the WanGP tab shows"), toast(page))
+    finally:
+        page.remove_listener("request", heard)
+        clip_config.update(wangp_settings=clip_config.WANGP_SETTINGS_IN_VIEW)
+        page.evaluate("() => window.minipaintClipboard.closeMenu()")
+
+
 # --------------------------------------------------------------------------
 # PNG Info, archives and the full-screen view
 # --------------------------------------------------------------------------
@@ -4988,6 +5055,8 @@ def run() -> Results:
                     ("check_auto_sends_the_selected_picture", lambda: check_auto_sends_the_selected_picture(r, page)),
                     ("check_a_press_says_when_the_settings_in_view_were_not_used",
                      lambda: check_a_press_says_when_the_settings_in_view_were_not_used(r, page)),
+                    ("check_wangp_settings_is_a_choice_in_the_menu",
+                     lambda: check_wangp_settings_is_a_choice_in_the_menu(r, page)),
                     ("check_the_toolbar_flyouts_are_the_one_door", lambda: check_the_toolbar_flyouts_are_the_one_door(r, page)),
                     ("check_view_outputs_is_a_gallery", lambda: check_view_outputs_is_a_gallery(r, page)),
                     ("check_the_player_is_the_pages", lambda: check_the_player_is_the_pages(r, page)),

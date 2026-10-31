@@ -381,7 +381,11 @@ whole two seconds and was then reported `unchanged` - and so was a save WanGP
 never made, which marked the record current and let every later send skip its
 save while the record still held the last run's settings. That, with the
 inheritance setting off by default, is what "the video ... is not the settings
-that are visible in wan2gp, but the last run settings" was (2026-10-31). The
+that are visible in wan2gp, but the last run settings" was (2026-10-31). (The
+choice itself came back the same day, where the presses are - the Clipboard's
+Menu -> WanGP Settings, `clipboard.json`'s `wangp_settings`, what the WanGP tab
+shows by default - because the Forge setting it had been, under *Settings ->
+miniPaint / Canvas*, was never found.) The
 bridge now counts every `record_model_form` call (`commits` on every
 `FORM_FLUSHED`), the page trusts only a count that moved (`savedOutcome`), and
 from such a bridge every send saves, because a WanGP page that changes its own

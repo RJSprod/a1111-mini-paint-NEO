@@ -289,7 +289,7 @@ def settings_source_checks(r: Results) -> None:
         ("factory, inheriting", server(wire.BASE_FACTORY, wire.FLUSH_COMMITTED), outbox.SETTINGS_DEFAULTS,
          "the model's defaults (nothing saved yet)"),
         ("factory, by choice", server(wire.BASE_FACTORY, "", inherit=False), outbox.SETTINGS_OFF,
-         "the model's defaults (the request asked not to take the WanGP page's settings)"),
+         "WanGP's saved settings for the model, or its defaults (chosen in place of what the WanGP tab shows)"),
         ("a job not composed yet", server(None, wire.FLUSH_COMMITTED), "", ""),
         ("a page-run job WanGP took", {"executor": outbox.EXECUTOR_BROWSER, "state": outbox.QUEUED}, outbox.SETTINGS_LIVE,
          "the WanGP page itself, as it was when this browser queued the job"),
@@ -320,7 +320,7 @@ def settings_source_checks(r: Results) -> None:
             and notes["suppressed"] == "WanGP was loading a model's settings, so its form was not saved at send"
             and notes["none"] == "WanGP's form was not asked to save at send", repr(notes))
     r.check("and says plainly when the page's settings are not taken at all, or are the page's own",
-            notes["off"] == "WanGP's settings are not taken from its page (the request asked for the model's defaults)"
+            notes["off"] == "WanGP's settings are not taken from its page (WanGP's saved settings for the model, or its defaults, as chosen)"
             and notes["page"] == "WanGP's settings are its page's own when this browser queues it", repr(notes))
     r.check("a job a page runs itself drives the live form whatever the setting says, and its line says so",
             notes["page off"] == notes["page"], repr(notes))
@@ -341,7 +341,6 @@ def settings_source_checks(r: Results) -> None:
         outbox.SETTINGS_LOADING: server(wire.BASE_RECORDED, wire.FLUSH_SUPPRESSED),
         outbox.SETTINGS_LAST_SAVED: server(wire.BASE_RECORDED, ""),
         outbox.SETTINGS_DEFAULTS: server(wire.BASE_FACTORY, wire.FLUSH_COMMITTED),
-        outbox.SETTINGS_OFF: server(wire.BASE_FACTORY, "", inherit=False),
         outbox.SETTINGS_SESSION: server(wire.BASE_SESSION, wire.FLUSH_COMMITTED),
     }
     for key, job in said.items():
@@ -350,9 +349,17 @@ def settings_source_checks(r: Results) -> None:
                 view == {"source": key, "sentence": outbox.SETTINGS_TEXT[key], "in_view": False,
                          "warning": "Not the settings on WanGP's screen: this job runs at " + outbox.SETTINGS_TEXT[key]}
                 and outbox.settings_warning(job) == view["warning"], repr(view))
-    r.check("every source is either the settings on screen or a fallback the press names - none is left unsaid",
-            set(said) | set(outbox.SETTINGS_IN_VIEW) == set(outbox.SETTINGS_KEYS)
-            and not set(said) & set(outbox.SETTINGS_IN_VIEW), repr(outbox.SETTINGS_IN_VIEW))
+    # WanGP's saved settings chosen in the menu's WanGP Settings (or by a
+    # caller's ``inherit: false``): what the job runs at is what was asked
+    # for, so the press says nothing - and does not claim it is in view.
+    chosen = outbox.settings_view(server(wire.BASE_FACTORY, "", inherit=False))
+    r.check("a job built from WanGP's saved settings by choice is not in view, and the press warns of nothing",
+            chosen == {"source": outbox.SETTINGS_OFF, "sentence": outbox.SETTINGS_TEXT[outbox.SETTINGS_OFF],
+                       "in_view": False, "warning": ""}
+            and outbox.settings_warning(server(wire.BASE_RECORDED, wire.FLUSH_UNAVAILABLE, inherit=False)) == "", repr(chosen))
+    r.check("every source is either the settings on screen, the saved settings by choice, or a fallback the press names",
+            set(said) | set(outbox.SETTINGS_IN_VIEW) | {outbox.SETTINGS_OFF} == set(outbox.SETTINGS_KEYS)
+            and not set(said) & (set(outbox.SETTINGS_IN_VIEW) | {outbox.SETTINGS_OFF}), repr(outbox.SETTINGS_IN_VIEW))
     undecided = outbox.settings_view(server(None, wire.FLUSH_COMMITTED))
     r.check("a server job not composed at its press says its turn reads them",
             undecided == {"source": "", "sentence": "", "in_view": False, "warning": outbox.SETTINGS_AT_TURN}

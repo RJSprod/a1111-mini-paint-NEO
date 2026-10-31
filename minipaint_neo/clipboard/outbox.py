@@ -192,7 +192,7 @@ SETTINGS_TEXT = {
     SETTINGS_LOADING: "WanGP's last saved settings (WanGP was loading a model's settings at send)",
     SETTINGS_LAST_SAVED: "WanGP's last saved settings",
     SETTINGS_DEFAULTS: "the model's defaults (nothing saved yet)",
-    SETTINGS_OFF: "the model's defaults (the request asked not to take the WanGP page's settings)",
+    SETTINGS_OFF: "WanGP's saved settings for the model, or its defaults (chosen in place of what the WanGP tab shows)",
     SETTINGS_SESSION: "the WanGP page's own session",
     SETTINGS_LIVE: "the WanGP page itself, as it was when this browser queued the job",
 }
@@ -345,18 +345,24 @@ def unattended_enabled() -> bool:
 
 
 def inherit_settings() -> bool:
-    """Whether a new job is built from the WanGP page's settings: yes.
+    """Whether a new job is built from the WanGP page's settings.
 
-    There was a setting for this until 2026-10-31, off by default, and with
-    it off a job took the model's saved settings file - which only WanGP's own
-    Save Settings button writes - in place of what the WanGP tab showed.
-    Asked for: "I want all of my send to wan2gp to use the settings that are
-    in view!" So every job is built from them; a public-API caller can still
-    ask for the model's defaults with ``inherit: false``. Frozen onto the job
-    at the press either way, so the record says which it was.
+    The Clipboard menu's WanGP Settings decides (``config.wangp_settings``):
+    what the WanGP tab shows - the default since 2026-10-31, at the user's
+    word: "I want all of my send to wan2gp to use the settings that are in
+    view!" - or WanGP's saved settings for the model, or its defaults, the
+    way jobs were built before, chosen again at the user's word ("so I can
+    have the old style"). A public-API caller can still ask for the second
+    with ``inherit: false``. Read on every press and frozen onto the job, so
+    the record says which it was and a later change does not reach back.
     """
     seam = _seams.get("inherit")
-    return True if seam is None else bool(seam)
+    if seam is not None:
+        return bool(seam)
+    try:
+        return config.load().wangp_settings != config.WANGP_SETTINGS_SAVED
+    except Exception:  # noqa: BLE001 - an unreadable choice is the default one
+        return True
 
 
 def use_inherit(flag: typing.Optional[bool]) -> None:
@@ -839,6 +845,11 @@ def settings_warning(job: typing.Mapping[str, typing.Any]) -> str:
     """
     if not isinstance(job, typing.Mapping) or job.get("executor", EXECUTOR_BROWSER) != EXECUTOR_SERVER:
         return ""
+    if not job.get("inherit_settings"):
+        # WanGP's saved settings were chosen (the menu's WanGP Settings, or a
+        # caller's ``inherit: false``): what the job runs at is what was
+        # asked for, and a warning on every press would only be noise.
+        return ""
     source = settings_source(job)
     if source in SETTINGS_IN_VIEW:
         return ""
@@ -850,10 +861,16 @@ def settings_warning(job: typing.Mapping[str, typing.Any]) -> str:
 def settings_view(job: typing.Mapping[str, typing.Any]) -> dict:
     """A press's answer about its job's WanGP settings: where they came from
     (a ``SETTINGS_*`` key, "" while undecided), that in words, whether they
-    are the settings on WanGP's screen, and the warning to say when not."""
-    source = settings_source(job) if isinstance(job, typing.Mapping) else ""
+    are the settings on WanGP's screen, and the warning to say when they are
+    not and nobody chose that. A job a page runs drives the live form, so it
+    is in view whatever its source says yet; one built from WanGP's saved
+    settings by choice is not in view, and says nothing about it."""
+    mapping = isinstance(job, typing.Mapping)
+    source = settings_source(job) if mapping else ""
     warning = settings_warning(job)
-    return {"source": source, "sentence": SETTINGS_TEXT.get(source, ""), "in_view": not warning, "warning": warning}
+    page_run = mapping and job.get("executor", EXECUTOR_BROWSER) != EXECUTOR_SERVER
+    return {"source": source, "sentence": SETTINGS_TEXT.get(source, ""),
+            "in_view": bool(page_run or source in SETTINGS_IN_VIEW), "warning": warning}
 
 
 #: What a press says when WanGP's own check would not take its job
@@ -875,7 +892,7 @@ def flush_note(job: typing.Mapping[str, typing.Any]) -> str:
     if job.get("executor", EXECUTOR_BROWSER) != EXECUTOR_SERVER:
         return "WanGP's settings are its page's own when this browser queues it"
     if not job.get("inherit_settings"):
-        return "WanGP's settings are not taken from its page (the request asked for the model's defaults)"
+        return "WanGP's settings are not taken from its page (WanGP's saved settings for the model, or its defaults, as chosen)"
     return FLUSH_NOTES.get(job.get("settings_flush") or "", "WanGP's form was not asked to save at send")
 
 

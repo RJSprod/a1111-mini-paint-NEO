@@ -765,13 +765,24 @@ because of your own work; and on Windows a Forge crash loses a generation that w
 which is reported as "could not be proved" rather than retried. `docs/wangp/SERVER_EXECUTION.md`
 is the whole of it, including what is still an inference waiting for a real install.
 
-**Settings come from the WanGP page.** Every job takes its prompt and pictures from where you
-sent it and everything else — LoRAs and their weights, steps, guidance, resolution — from what
-the WanGP tab shows when you press. There is no setting for it any more: *WanGP queue: build
-queued jobs from the WanGP page's settings* was off by default, and a job built with it off ran
-at the model's defaults or at the last run's settings, whatever the WanGP tab showed. WanGP
-builds a job from the settings it last *saved* for the model, so the page keeps that save
-current without anything held open, and a press reads it at the press:
+**Settings come from the WanGP page - or, if you choose, from WanGP's saved settings.** Every
+job takes its prompt and pictures from where you sent it. Everything else - LoRAs and their
+weights, steps, guidance, resolution - comes from where **☰ Menu → WanGP Settings ›** in the
+Clipboard tab says, for the Clipboard's presses and the gallery's Send to WanGP alike:
+
+- **What the WanGP tab shows** (the default): the settings on the WanGP tab when you press.
+- **WanGP's saved settings, or the defaults**: the way jobs were built before 2026-10-31 -
+  WanGP's saved settings for the model (what its own Save Settings button writes, and what it
+  loads when you switch to that model), or the model's defaults when none are saved. Nothing on
+  the WanGP tab is read, the page stops saving its form, and no press warns that the settings
+  are not the ones on screen, because that is what was chosen.
+
+The choice is read on every press, so a job already queued keeps what it was pressed with. It
+used to be a Forge setting, *WanGP queue: build queued jobs from the WanGP page's settings*, off
+by default and easy to miss under *Settings → miniPaint / Canvas*; that page now says where the
+choice is. With what the WanGP tab shows, WanGP builds a job from the settings it last *saved*
+for the model, so the page keeps that save current without anything held open, and a press
+reads it at the press:
 
 - **As you change them.** About a second after you stop changing something in the WanGP
   form, the page saves it: one short request, never two at once, each with a time limit, and
@@ -793,8 +804,8 @@ current without anything held open, and a press reads it at the press:
   happened on returning from the background, and the listener for that was only installed by
   the check itself.)
 
-**A job WanGP would not generate is refused at the press.** The press also asks WanGP's own
-check of the job - the one WanGP's queue makes before it takes a task, made on a copy with nothing
+**A job WanGP would not generate is refused at the press,** whichever WanGP Settings says. The
+press also asks WanGP's own check of the job - the one WanGP's queue makes before it takes a task, made on a copy with nothing
 queued (bridge 1.16.0): the job's model, its pictures, its prompt and the settings on screen. If
 WanGP would not generate it - no start image for a model that needs one, an empty prompt where one
 is required, a resolution or a frame count the model refuses - Add to Queue, Auto and the popup's

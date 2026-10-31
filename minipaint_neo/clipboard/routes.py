@@ -339,6 +339,14 @@ INTERCEPT_SENTENCES = {
 }
 #: What the status line says when Auto Options were asked to leave no role.
 AUTO_NONE_SENTENCE = "Auto needs at least one role, so it is as it was."
+#: What the status line says when WanGP Settings is changed: where every WanGP
+#: job's settings come from from now on, for the Clipboard and the gallery's
+#: Send to WanGP alike.
+WANGP_SETTINGS_SENTENCES = {
+    config.WANGP_SETTINGS_IN_VIEW: "WanGP jobs now take what the WanGP tab shows, saved as you press.",
+    config.WANGP_SETTINGS_SAVED: "WanGP jobs now take WanGP’s saved settings for the model, or its defaults - "
+                                 "not what the WanGP tab shows.",
+}
 
 
 def auto_sentence(roles: typing.Sequence[str]) -> str:
@@ -370,11 +378,15 @@ def menu_facts(current: typing.Optional[config.Config] = None) -> dict:
         # Options section offers, in its order.
         "auto_roles": list(current.auto_roles),
         "autos": [[role, config.AUTO_ROLE_LABELS[role]] for role in config.AUTO_ROLES],
+        # Where WanGP jobs' settings come from, and the two choices the
+        # menu's WanGP Settings section offers, in its order.
+        "wangp_settings": current.wangp_settings,
+        "wangp_settings_choices": [[mode, config.WANGP_SETTINGS_LABELS[mode]] for mode in config.WANGP_SETTINGS],
     }
 
 
 def apply_settings(changes: typing.Mapping[str, typing.Any]) -> dict:
-    """What the menu remembers: the sort, the tile size, the intercept, Auto's roles.
+    """What the menu remembers: the sort, the tile size, the intercept, Auto's roles, WanGP Settings.
 
     Every one of them is request-and-response - press a thing, get an answer
     - so none of them needs anything held open, and each answers with its own
@@ -423,6 +435,13 @@ def apply_settings(changes: typing.Mapping[str, typing.Any]) -> dict:
             said.append(auto_sentence(wanted["auto_roles"]))
         else:
             said.append(AUTO_NONE_SENTENCE)
+    if "wangp_settings" in changes:
+        # One of two, or nothing changes: a word that is not one is no reason
+        # to move every later job to the other source.
+        mode = changes.get("wangp_settings")
+        if mode in config.WANGP_SETTINGS:
+            wanted["wangp_settings"] = mode
+            said.append(WANGP_SETTINGS_SENTENCES[mode])
     current = config.update(**wanted) if wanted else config.load()
     return {
         "ok": True,
@@ -432,6 +451,7 @@ def apply_settings(changes: typing.Mapping[str, typing.Any]) -> dict:
         "intercept": current.intercept,
         "intercept_target": current.intercept_target,
         "auto_roles": list(current.auto_roles),
+        "wangp_settings": current.wangp_settings,
         # What the browser's menu draws itself from. Answered here so a menu
         # that changed a setting is correct without a Gradio render.
         "menu": menu_facts(current),
@@ -1235,7 +1255,7 @@ def install(app: typing.Any) -> None:
         scrub.console(f"the archive thumbnail cache could not be swept ({type(error).__name__}); it will be swept after the next writes.", _LOG_PREFIX)
 
 
-__all__ = ["ARCHIVES_ROUTE", "ARCHIVE_IMAGE_ROUTE", "ARCHIVE_LIST_ROUTE", "AUTO_NONE_SENTENCE", "IMAGE_ROUTE", "IMMUTABLE_CACHE", "IMPORT_ROUTE", "INTERCEPT_ACTIONS", "INTERCEPT_IMAGE_ROUTE",
+__all__ = ["ARCHIVES_ROUTE", "ARCHIVE_IMAGE_ROUTE", "ARCHIVE_LIST_ROUTE", "AUTO_NONE_SENTENCE", "WANGP_SETTINGS_SENTENCES", "IMAGE_ROUTE", "IMMUTABLE_CACHE", "IMPORT_ROUTE", "INTERCEPT_ACTIONS", "INTERCEPT_IMAGE_ROUTE",
            "INTERCEPT_ROUTE", "INTERCEPT_SENTENCES", "LIBRARY_ROUTE", "PAGE_SIZE",
            "PAGE_SIZE_MAX", "PAGE_SIZE_MIN", "REVALIDATED_CACHE", "ROUTE_PREFIX",
            "SEND_ROUTE", "SETTINGS_ROUTE", "QUEUE_ROUTE", "READINESS_ROUTE", "ENHANCE_SETTINGS_ROUTE", "PROMPTS_ROUTE", "REQUEST_MEMORY_SECONDS",

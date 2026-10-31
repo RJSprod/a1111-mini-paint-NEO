@@ -185,26 +185,38 @@ job that falls all the way through still runs at the user's saved defaults
 for that model, which is also why a genuinely cold child (Forge just started,
 the WanGP tab never opened, nothing recorded) is far less bad than it sounds.
 
-### Inheriting: always (since 2026-10-31)
+### Inheriting, or not: the Clipboard menu's WanGP Settings
 
-There was a choice here until 2026-10-31, `minipaint_inherit_wangp_settings`,
-and it was **off by default**. Off, `compose` asked for no recorded form and
-WanGP filled the job in from that model's saved settings file - the last
-run's settings, or the model's defaults where nothing had been saved - whatever
-the WanGP tab showed. That is exactly what the user reported: "the video that
-gets generated is not the setting that are visible in wan2gp, but the last run
-settings, or default if I haven't generated yet". Retired at their word ("I
-want all of my send to wan2gp to use the settings that are in view!"):
-`outbox.inherit_settings()` answers yes, the setting is no longer registered,
-and a value a `config.json` still holds for it is read by nothing.
+There was a Forge setting here until 2026-10-31,
+`minipaint_inherit_wangp_settings`, **off by default** and under *Settings ->
+miniPaint / Canvas*, where the user never found it. Off, `compose` asked for no
+recorded form and WanGP filled the job in from that model's saved settings
+file, whatever the WanGP tab showed - which is exactly what the user reported:
+"the video that gets generated is not the setting that are visible in wan2gp,
+but the last run settings, or default if I haven't generated yet". The first
+answer retired it ("I want all of my send to wan2gp to use the settings that
+are in view!"); the second brought the choice back, where the presses are
+("I want to bring the setting back so I can have the old style ... a setting
+that I can enable or disable"): the Clipboard's **Menu -> WanGP Settings**,
+kept in `clipboard.json` as `wangp_settings` - `in_view`, what the WanGP tab
+shows (the default), or `saved`, WanGP's saved settings for the model, or its
+defaults. `outbox.inherit_settings()` reads it on every press; the old Forge
+key is read by nothing, and the Settings page's WanGP notice says where the
+choice is now.
 
-A public-API request may still ask for the model's defaults (`inherit: false`
-in `enqueue`'s request), and the job then says so - *the model's defaults (the
-request asked not to take the WanGP page's settings)*. That is not "read it
-and discard it": a base that was read and thrown away is still a base that was
-read, and the job would then record `recorded_form` about settings it never
-used, so `compose` asks for no recorded form at all. The choice is frozen onto
-the job at the press.
+With `saved`, the interop snapshot says `inherit_settings: false`, so the WanGP
+tab saves nothing and a send asks for no save; the press still composes at the
+press (with `inherit: false`) and still asks WanGP's check, and the job says
+*WanGP's saved settings for the model, or its defaults (chosen in place of what
+the WanGP tab shows)* - with no warning at the press, because that is what was
+chosen (`settings_warning` is empty for a job not inheriting). A menu choice
+takes one bounded snapshot at once (`minipaintInterop.wangp.sync()`), so the
+tab starts or stops saving without a reload. A public-API request may still
+ask for the same with `inherit: false`. That is not "read it and discard it":
+a base that was read and thrown away is still a base that was read, and the
+job would then record `recorded_form` about settings it never used, so
+`compose` asks for no recorded form at all. The choice is frozen onto the job
+at the press.
 
 ### Frozen at the press, and checked by WanGP
 

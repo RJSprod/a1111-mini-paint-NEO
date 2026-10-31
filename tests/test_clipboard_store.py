@@ -348,7 +348,8 @@ def document_checks(r: Results, base: pathlib.Path) -> None:
     written = config.path_of(config.CONFIG_NAME).read_text(encoding="utf-8")
     r.check("the file holds exactly the declared keys",
             set(json.loads(written)) == {"schema_version", "storage_root", "root_id", "intercept", "intercept_target", "intercept_inherit",
-                                         "sort", "thumbnail", "outputs_folder", "archives", "view", "auto_roles"},
+                                         "sort", "thumbnail", "outputs_folder", "archives", "view", "auto_roles",
+                                         "wangp_settings"},
             str(sorted(json.loads(written))))
     # The intercept is a destination now, and the older switch is a view of
     # it in both directions: an old file reads as the destination it meant,
@@ -547,6 +548,43 @@ def http_door_checks(r: Results, base: pathlib.Path) -> None:
     r.check("a sort leaves Auto's roles where they are",
             client.post(routes.SETTINGS_ROUTE, json={"sort": "newest"}).json()["auto_roles"] == ["first_frame", "last_frame"])
     client.post(routes.SETTINGS_ROUTE, json={"sort": config.DEFAULT_SORT, "auto_roles": list(config.DEFAULT_AUTO_ROLES)})
+
+    # WanGP Settings: where every WanGP job's settings come from. Asked for
+    # back once it had gone: "I want to bring the setting back so I can have
+    # the old style ... a setting that I can enable or disable".
+    from minipaint_neo.clipboard import outbox
+
+    outbox.use_inherit(None)
+    r.check("WanGP jobs take what the WanGP tab shows until somebody chooses otherwise",
+            config.load().wangp_settings == config.WANGP_SETTINGS_IN_VIEW == config.DEFAULT_WANGP_SETTINGS
+            and outbox.inherit_settings() is True, str(config.load().wangp_settings))
+    told = client.post(routes.SETTINGS_ROUTE, json={"wangp_settings": config.WANGP_SETTINGS_SAVED}).json()
+    r.check("the route keeps the other choice - WanGP's saved settings, or the defaults - and says so",
+            told["ok"] is True and told["wangp_settings"] == config.WANGP_SETTINGS_SAVED
+            and told["menu"]["wangp_settings"] == config.WANGP_SETTINGS_SAVED
+            and told["status"] == routes.WANGP_SETTINGS_SENTENCES[config.WANGP_SETTINGS_SAVED]
+            and "not what the WanGP tab shows" in told["status"]
+            and told["menu"]["wangp_settings_choices"] == [[config.WANGP_SETTINGS_IN_VIEW, "What the WanGP tab shows"],
+                                                           [config.WANGP_SETTINGS_SAVED, "WanGP's saved settings, or the defaults"]],
+            str(told)[:300])
+    r.check("and every press from then on is built without the WanGP tab's settings - read on each press, no restart",
+            config.load().wangp_settings == config.WANGP_SETTINGS_SAVED and outbox.inherit_settings() is False)
+    unknown = client.post(routes.SETTINGS_ROUTE, json={"wangp_settings": "sideways"}).json()
+    r.check("a word that is not one of the two changes nothing and says nothing",
+            unknown["wangp_settings"] == config.WANGP_SETTINGS_SAVED and unknown["status"] == "", str(unknown)[:160])
+    r.check("a sort leaves the choice where it is",
+            client.post(routes.SETTINGS_ROUTE, json={"sort": "newest"}).json()["wangp_settings"] == config.WANGP_SETTINGS_SAVED)
+    back = client.post(routes.SETTINGS_ROUTE, json={"sort": config.DEFAULT_SORT, "wangp_settings": config.WANGP_SETTINGS_IN_VIEW}).json()
+    r.check("and choosing what the WanGP tab shows again puts every later press back on it",
+            back["wangp_settings"] == config.WANGP_SETTINGS_IN_VIEW and outbox.inherit_settings() is True
+            and back["status"].endswith(routes.WANGP_SETTINGS_SENTENCES[config.WANGP_SETTINGS_IN_VIEW]), str(back["status"]))
+    r.check("a hand-edited value in the file reads as the default, never as no source at all",
+            config.Config.from_dict({"wangp_settings": "nowhere"}).wangp_settings == config.WANGP_SETTINGS_IN_VIEW
+            and config.Config.from_dict({}).wangp_settings == config.WANGP_SETTINGS_IN_VIEW)
+    from minipaint_neo.wangp import settings as wangp_settings
+
+    r.check("and the Settings page, where the old switch was and nobody found it, says where the choice is now",
+            "Clipboard → Menu → WanGP Settings" in wangp_settings.NOTICE_HTML, wangp_settings.NOTICE_HTML[-240:])
 
     enhancement = client.get(routes.ENHANCE_SETTINGS_ROUTE).json()
     r.check("the enhancement settings describe themselves over HTTP",

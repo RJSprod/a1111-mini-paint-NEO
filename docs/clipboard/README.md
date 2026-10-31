@@ -145,6 +145,18 @@ Refresh, and every card and history entry that used it says so.
   list open for the next; the last one ticked cannot be unticked (*Auto needs at least one
   role, so it is as it was.*). First Frame and Reference until changed. Kept on the Forge host
   (`clipboard.json`'s `auto_roles`), like the intercept. See *Auto* below.
+* **WanGP Settings ›** — where every WanGP job's settings come from, for Add to Queue, Auto and
+  the gallery's Send to WanGP alike - one of two, the one in use ticked: **What the WanGP tab
+  shows** (the default: the page saves WanGP's form as you press, and the job is read there and
+  then), or **WanGP's saved settings, or the defaults** (the way jobs were built before
+  2026-10-31: WanGP's saved settings for the model - what its own Save Settings button writes,
+  and what it loads when you switch to that model - or the model's defaults when none are saved;
+  nothing on the WanGP tab is read, and the page stops saving its form). A press closes the
+  menu and says what it means; the page is told at once, with no reload. Kept on the Forge host
+  (`clipboard.json`'s `wangp_settings`) and read on every press, so a job already queued keeps
+  the settings it was pressed with. It replaces the Forge setting *WanGP queue: build queued
+  jobs from the WanGP page's settings*, which sat in *Settings → miniPaint / Canvas* where
+  nobody looked; the Settings page now says where the choice is.
 * **Refresh** — read the folder again. The toolbar has the same thing as a button (below).
 * **Sort ›** — by name, newest, oldest, largest, smallest. The same list the toolbar's own
   sort button opens.

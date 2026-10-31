@@ -51,6 +51,9 @@ NOTICE_HTML = (
     "<br>Reinitialize only forgets which WanGP installation, environment and GPU this "
     "extension was pointed at. It does not uninstall WanGP, and it deletes no models, "
     "no LoRAs, no presets, no outputs and no unrelated plugins."
+    "<br>Where a queued WanGP job takes its settings from - what the WanGP tab shows, or "
+    "WanGP's saved settings for the model (or its defaults) - is chosen in "
+    "<b>Clipboard → Menu → WanGP Settings</b>."
 )
 
 

@@ -396,9 +396,15 @@ a *Settings* line, and the executor journals it once per job. The gallery's `sub
 the queue route's `add` and `auto` actions all take `settings_flush` from the page, filtered
 against the five outcomes like `enqueue`'s.
 
-**The settings in view** (2026-10-31). Every job is built from the WanGP page's settings
-(`inherit_settings()` answers yes; the setting `minipaint_inherit_wangp_settings` is retired,
-and only a public-API request's own `inherit: false` asks for the model's defaults). A
+**The settings in view** (2026-10-31). A job is built from the WanGP page's settings unless the
+Clipboard menu's WanGP Settings says otherwise: `config.wangp_settings` is
+`WANGP_SETTINGS_IN_VIEW` (`"in_view"`, the default) or `WANGP_SETTINGS_SAVED` (`"saved"`:
+WanGP's saved settings for the model, or its defaults - the way jobs were built before), read by
+`outbox.inherit_settings()` on every press; the settings route takes `{"wangp_settings": ...}`
+(anything else changes nothing) with a `WANGP_SETTINGS_SENTENCES` status, and `menu_facts`
+carries `wangp_settings` and `wangp_settings_choices`. A public-API request's own
+`inherit: false` asks for the same. The Forge setting `minipaint_inherit_wangp_settings` is
+read by nothing. A
 Clipboard or gallery press, which the readiness gate has just found WanGP up for, composes its
 job at the press and asks WanGP's own check of it (bridge 1.16.0, `control.validate`) - both
 BEFORE the job is stored (`executor.settings_at_press` from `submit`; the job is stored with its
@@ -414,7 +420,8 @@ presses' answers carry `settings`, `outbox.settings_view(job)`: `{source, senten
 warning}` - `in_view` true only for `saved_at_send` and `live_page` (`SETTINGS_IN_VIEW`), and
 `warning`, `settings_warning(job)`, otherwise one unpunctuated sentence: *Not the settings on
 WanGP's screen: this job runs at <sentence>*, or `SETTINGS_AT_TURN` for a server job not
-composed at its press. The warning is also the first of the status line's notes, and the
+composed at its press - and nothing for a job not inheriting (WanGP's saved settings were
+chosen), whose `in_view` is false all the same. The warning is also the first of the status line's notes, and the
 press journals one line naming the source's key.
 
 **The queue is one Forge session's.** `start_session()` runs before anything sweeps and

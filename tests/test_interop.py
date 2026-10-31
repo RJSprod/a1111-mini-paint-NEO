@@ -361,6 +361,17 @@ def spine_checks(r: Results) -> None:
         clipboard_outbox.use_inherit(None)
     r.check("and with nothing set it says yes: every job is built from the settings in view",
             interop.snapshot("a" * 16)["inherit_settings"] is True)
+    # The Clipboard menu's WanGP Settings, as a press reads it: the next
+    # snapshot says so, which is how the WanGP tab learns to stop saving its
+    # form when nothing reads it, and to start again.
+    clipboard_config.update(wangp_settings=clipboard_config.WANGP_SETTINGS_SAVED)
+    try:
+        r.check("WanGP Settings on WanGP's saved settings makes the next snapshot say no",
+                interop.snapshot("a" * 16)["inherit_settings"] is False)
+    finally:
+        clipboard_config.update(wangp_settings=clipboard_config.WANGP_SETTINGS_IN_VIEW)
+    r.check("and back on what the WanGP tab shows, yes again",
+            interop.snapshot("a" * 16)["inherit_settings"] is True)
     events.reset_for_tests()
 
 

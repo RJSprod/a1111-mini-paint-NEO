@@ -42,12 +42,13 @@ UNATTENDED_QUEUE = "minipaint_unattended_queue"
 DISPLAY_OBJECTS = "minipaint_display_objects"
 # There was a choice here until 2026-10-31, ``minipaint_inherit_wangp_settings``:
 # whether a queued job is built from the settings the WanGP page is on, off by
-# default. Off, a job took the model's saved settings file, which only WanGP's
-# own Save Settings button writes, so nothing the WanGP tab showed reached it.
-# Retired at the user's word ("I want all of my send to wan2gp to use the
-# settings that are in view!"): every job is built from them now
-# (``clipboard.outbox.inherit_settings``), and a value a config.json still
-# holds for it is read by nothing.
+# default and hard to find - the user never knew it was there. Off, a job took
+# the model's saved settings file, which only WanGP's own Save Settings button
+# writes, so nothing the WanGP tab showed reached it. The choice lives in the
+# Clipboard now, where the presses that use it are: Menu -> WanGP Settings
+# (``clipboard.config.wangp_settings``, read by
+# ``clipboard.outbox.inherit_settings``), what the WanGP tab shows by default.
+# A value a config.json still holds for the old key is read by nothing.
 #: What the WanGP page is dressed in.
 #:
 #: The bridge plugin inside WanGP carries a stylesheet that overrides

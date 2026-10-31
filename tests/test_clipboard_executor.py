@@ -145,7 +145,11 @@ class FakeChild:
             self.composes.append(dict(payload))
             if not self.can_compose:
                 return 409, {"ok": False, "code": wire.COMPOSE_UNAVAILABLE, "message": "no settings"}
-            return 200, {"ok": True, "settings": dict(self.form), "source": self.source,
+            # As the bridge answers: a compose asked not to inherit reads no
+            # recorded form, and its base is the model's saved settings, or
+            # its defaults - factory_defaults.
+            source = self.source if payload.get("inherit", True) is not False else wire.BASE_FACTORY
+            return 200, {"ok": True, "settings": dict(self.form), "source": source,
                          "model_type": payload.get("model_type") or "t2v", "wan2gp_version": "8.4",
                          "residency_key": "t2v||", "model": {"type": payload.get("model_type") or "t2v", "label": "T2V"}}
         if operation == wire.CONTROL_SUBMIT:
@@ -1165,7 +1169,46 @@ def press_check_checks(r: Results, clock) -> None:
                 and len(child.validations) == asked_before and child.unanswered_validations == 1, str(control.can_validate()))
         child.can_validate = True
         _run(child, runtime)
+
+        # WanGP Settings on WanGP's saved settings, or the defaults - the way
+        # jobs were built before, chosen again: "I want to bring the setting
+        # back so I can have the old style". Read from the Clipboard's own
+        # config on every press, no seam.
+        outbox.use_inherit(None)
+        config.update(wangp_settings=config.WANGP_SETTINGS_SAVED)
+        control.use_transport(child)
+        control.hello()
+        asked = len(child.validations)
+        composes = len(child.composes)
+        mark = len(log())
+        chosen = outbox.submit(_request(prompt="the old way"), PAGE, settings_flush="")
+        stored = outbox.get(chosen["job_id"]) or {}
+        r.check("with WanGP's saved settings chosen, a press composes without the WanGP tab's form, at the press",
+                len(child.composes) == composes + 1 and child.composes[-1].get("inherit") is False
+                and stored.get("inherit_settings") is False and (stored.get("snapshot") or {}).get("source") == wire.BASE_FACTORY
+                and outbox.settings_source(stored) == outbox.SETTINGS_OFF, str((child.composes[-1:], stored.get("snapshot"))))
+        r.check("and WanGP still checks the job before it is stored",
+                len(child.validations) == asked + 1 and child.validations[-1].get("jobs_stored") == len(outbox.jobs()) - 1,
+                str(child.validations[-1:]))
+        r.check("and the press warns of nothing: the settings it runs at are the ones chosen, and its line says which",
+                outbox.settings_view(chosen) == {"source": outbox.SETTINGS_OFF, "sentence": outbox.SETTINGS_TEXT[outbox.SETTINGS_OFF],
+                                                 "in_view": False, "warning": ""}
+                and outbox.SETTINGS_TEXT[outbox.SETTINGS_OFF].startswith("WanGP's saved settings for the model, or its defaults")
+                and f"job {chosen['job_id'][:8]}: t2v settings - WanGP's saved settings for the model" in since(mark),
+                str(outbox.settings_view(chosen)))
+        _run(child, runtime)
+        child.finish(outbox.get(chosen["job_id"])["execution_id"])
+        _run(child, runtime)
+        config.update(wangp_settings=config.WANGP_SETTINGS_IN_VIEW)
+        control.use_transport(child)
+        back = outbox.submit(_request(prompt="in view again"), PAGE, settings_flush=wire.FLUSH_COMMITTED)
+        r.check("and choosing what the WanGP tab shows again builds the next press from it",
+                outbox.get(back["job_id"]).get("inherit_settings") is True and child.composes[-1].get("inherit") is True
+                and (outbox.get(back["job_id"]).get("snapshot") or {}).get("source") == wire.BASE_FLUSHED,
+                str(child.composes[-1:]))
+        _run(child, runtime)
     finally:
+        config.update(wangp_settings=config.WANGP_SETTINGS_IN_VIEW)
         control.use_transport(None)
         _restore(monkey)
 
@@ -1242,7 +1285,7 @@ def flush_attribution_checks(r: Results, clock) -> None:
                 str(said["a fifth"]))
         source_for("a sixth", "", inherit=False)
         r.check("while one that was told not to take the page's settings says that, not 'nothing saved'",
-                said["a sixth"]["sentence"] == "the model's defaults (the request asked not to take the WanGP page's settings)",
+                said["a sixth"]["sentence"] == "WanGP's saved settings for the model, or its defaults (chosen in place of what the WanGP tab shows)",
                 str(said["a sixth"]))
     finally:
         control.use_transport(None)

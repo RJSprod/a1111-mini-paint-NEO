@@ -1055,6 +1055,51 @@ window.minipaintClipboard = (function () {
         if (button.title !== title) { button.title = title; }
     }
 
+    //: Where every WanGP job's settings come from: the two choices the menu's
+    //: WanGP Settings section offers, for a page whose menu state predates
+    //: them, and the one it starts with (config.DEFAULT_WANGP_SETTINGS).
+    const WANGP_SETTINGS = [["in_view", "What the WanGP tab shows"], ["saved", "WanGP's saved settings, or the defaults"]];
+    const DEFAULT_WANGP_SETTINGS = "in_view";
+
+    function wangpChoices() {
+        const state = menuState();
+        return Array.isArray(state.wangp_settings_choices) && state.wangp_settings_choices.length
+            ? state.wangp_settings_choices : WANGP_SETTINGS;
+    }
+
+    /** Where WanGP jobs' settings come from, as the host keeps it. */
+    function wangpSettings() {
+        const chosen = String(menuState().wangp_settings || "");
+        return wangpChoices().some(function (pair) { return pair[0] === chosen; }) ? chosen : DEFAULT_WANGP_SETTINGS;
+    }
+
+    /**
+     * WanGP Settings chosen: saved over the tab's own route, said on the
+     * status line and as a notice where the press was, and the page told at
+     * once - one bounded snapshot of the public API's, which hands the WanGP
+     * tab the server's new answer - so it stops saving WanGP's form when
+     * nothing reads it any more, and starts again, with one save at once,
+     * when something does.
+     */
+    function setWangpSettings(mode) {
+        const wanted = String(mode || "");
+        if (!wangpChoices().some(function (pair) { return pair[0] === wanted; })) { return Promise.resolve(false); }
+        return postSettings({ wangp_settings: wanted }).then(function (answer) {
+            const said = (answer && answer.status) || "";
+            setStatus(said);
+            if (said) { toast(said); }
+            note("WanGP jobs' settings now come from " + wangpSettings());
+            const api = window.minipaintInterop;
+            if (api && api.wangp && typeof api.wangp.sync === "function") {
+                try { api.wangp.sync(); } catch (e) { /* the next snapshot says */ }
+            }
+            return true;
+        }, function () {
+            setStatus("That setting could not be saved.");
+            return false;
+        });
+    }
+
     /**
      * One of Auto Options' roles pressed: on if it was off, off if it was on.
      * Saved over the tab's own route as the whole list the menu now means,
@@ -5236,6 +5281,18 @@ window.minipaintClipboard = (function () {
             }
             return list;
         }
+        if (section === "wangp") {
+            // Where every WanGP job's settings come from - the Clipboard's
+            // presses and the gallery's Send to WanGP alike: one of two, the
+            // one in use ticked.
+            const list = back.slice();
+            const current = wangpSettings();
+            list.push({ menu: "status", label: "WanGP jobs take" });
+            for (const pair of wangpChoices()) {
+                list.push({ menu: "wangp", value: pair[0], label: tick(current === pair[0]) + pair[1], radio: current === pair[0] });
+            }
+            return list;
+        }
         if (section === "intercept") {
             // Where the gallery's 🖌️ button sends: three mutually exclusive
             // choices, the current one ticked. The labels come from the
@@ -5252,6 +5309,7 @@ window.minipaintClipboard = (function () {
         return [
             { menu: "section", value: "intercept", label: "Intercept Options ›" },
             { menu: "section", value: "auto", label: "Auto Options ›" },
+            { menu: "section", value: "wangp", label: "WanGP Settings ›" },
             { menu: "press", value: PRESS.refresh, label: "Refresh" },
             { menu: "section", value: "sort", label: "Sort ›" },
             { menu: "paste", label: "Paste image" },
@@ -5277,8 +5335,10 @@ window.minipaintClipboard = (function () {
             button.dataset.menu = item.menu;
             if (item.value) { button.dataset.value = item.value; }
             if (item.menu === "status" || item.disabled) { button.disabled = true; button.classList.add("minipaint-clip-menu-dim"); }
-            button.setAttribute("role", typeof item.checked === "boolean" ? "menuitemcheckbox" : "menuitem");
+            button.setAttribute("role", typeof item.checked === "boolean" ? "menuitemcheckbox"
+                : typeof item.radio === "boolean" ? "menuitemradio" : "menuitem");
             if (typeof item.checked === "boolean") { button.setAttribute("aria-checked", item.checked ? "true" : "false"); }
+            if (typeof item.radio === "boolean") { button.setAttribute("aria-checked", item.radio ? "true" : "false"); }
             button.textContent = item.label;
             panel.appendChild(button);
         }
@@ -5299,6 +5359,7 @@ window.minipaintClipboard = (function () {
             // Not closed: Auto's roles are several at once, so the list is
             // drawn again ticked and stays for the next one.
             case "auto": toggleAuto(value); return;
+            case "wangp": closeMenu(); setWangpSettings(value); return;
             // Over the tab's own route, and the grid re-drawn from the
             // answer. The hidden box still goes so the toolbar dropdown
             // follows on a page whose Gradio is alive; nothing waits on it.
@@ -6976,6 +7037,7 @@ window.minipaintClipboard = (function () {
                  intercept: interceptTarget() === "clipboard",
                  interceptTarget: interceptTarget(),
                  auto: autoRoles(),
+                 wangpSettings: wangpSettings(),
                  takeovers: S.takeovers,
                  sort: menuState().sort || S.library.sort,
                  library: { revision: S.library.revision, page: S.library.page, pages: S.library.pages,
@@ -7048,6 +7110,8 @@ window.minipaintClipboard = (function () {
         autoQueue: autoQueue,
         autoRoles: autoRoles,
         toggleAuto: toggleAuto,
+        wangpSettings: wangpSettings,
+        setWangpSettings: setWangpSettings,
         cancelAll: cancelAll,
         refreshQueue: refreshOutbox,
         refreshAll: refreshAll,

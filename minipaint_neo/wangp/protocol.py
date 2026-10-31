@@ -961,8 +961,16 @@ CONTROL_FLUSH = "flush"
 #: downloaded and nothing is loaded. Additive, so CONTROL_VERSION does not
 #: move; an older bridge answers 404, which Forge reads as "cannot say".
 CONTROL_MODEL = "model"
+#: Bridge 1.16.0: would WanGP take this job? WanGP's own check of a task - the
+#: one its queue loader runs before it queues one - over the job exactly as a
+#: submission would hand it over, with nothing queued. Asked at the press, so
+#: settings WanGP would not generate with are said to the person pressing
+#: rather than found by the job a minute later. Additive, so CONTROL_VERSION
+#: does not move; an older bridge leaves ``capabilities.validate`` out of its
+#: hello and is not asked.
+CONTROL_VALIDATE = "validate"
 CONTROL_OPERATIONS = (CONTROL_HELLO, CONTROL_COMPOSE, CONTROL_SUBMIT, CONTROL_STATUS, CONTROL_CANCEL, CONTROL_FORGET,
-                      CONTROL_HOLD, CONTROL_RESUME, CONTROL_FLUSH, CONTROL_MODEL)
+                      CONTROL_HOLD, CONTROL_RESUME, CONTROL_FLUSH, CONTROL_MODEL, CONTROL_VALIDATE)
 
 #: An execution id is the same grammar as a request id, for the same reason.
 #: It is the ledger key, and the bridge writes it into WanGP's own
@@ -1260,8 +1268,10 @@ def normalize_control_hello(raw: typing.Any) -> dict:
         # activity as the hold sees it, each None when it cannot be read.
         # Bridge 1.13.0, the model check: ``capabilities.model`` says the bridge
         # answers CONTROL_MODEL; an older one leaves it out, which reads False.
+        # Bridge 1.16.0, the check at the press: ``capabilities.validate``.
         "capabilities": {"hold": isinstance(raw.get("capabilities"), dict) and raw["capabilities"].get("hold") is True,
-                         "model": isinstance(raw.get("capabilities"), dict) and raw["capabilities"].get("model") is True},
+                         "model": isinstance(raw.get("capabilities"), dict) and raw["capabilities"].get("model") is True,
+                         "validate": isinstance(raw.get("capabilities"), dict) and raw["capabilities"].get("validate") is True},
         **_activity(raw),
         "hold": raw.get("hold") if raw.get("hold") in HOLD_STATES else "",
     }
@@ -1498,6 +1508,44 @@ def normalize_model_facts(raw: typing.Any) -> dict:
         "files": _whole(raw.get("files")) if checked else 0,
         "missing_count": max(count, len(kept)) if checked else 0,
         "missing": kept if checked else [],
+        "diagnosis": str(raw.get("diagnosis") or "")[:200],
+        "code": "" if ok else _code_or(raw.get("code"), CONTROL_UNAVAILABLE),
+        "message": str(raw.get("message") or "")[:200],
+    }
+
+
+# -- would WanGP take it: the check at the press (bridge 1.16.0) --------------
+#
+# The answer to CONTROL_VALIDATE is WanGP's own verdict on one job, in WanGP's
+# own words: ``validate_task`` over the job as a submission would queue it,
+# after the same two steps WanGP's queue loader takes first (the model type,
+# and the pictures opened as images). ``checked`` False is "could not ask" -
+# a WanGP without the check, or a loader step this one lacks - never "valid":
+# the press then goes ahead as it always did, and the job meets WanGP's check
+# when WanGP queues it. The request is a submission's (``normalize_execution_
+# request``), so the job checked is the job that would be sent.
+
+#: How long WanGP's sentence may be in an answer. WanGP's own are a line.
+VALIDATION_ERROR_MAX = 400
+
+
+def normalize_validate_answer(raw: typing.Any) -> dict:
+    """WanGP's verdict on one job, as Forge will read it.
+
+    ``valid`` is True only when the check ran (``checked``) and passed, and
+    ``error`` is WanGP's reason only when it ran and failed - so a missing or
+    malformed answer can never read as either verdict.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    ok = raw.get("ok") is True
+    checked = ok and raw.get("checked") is True
+    valid = checked and raw.get("valid") is True
+    error = str(raw.get("error") or "").strip()[:VALIDATION_ERROR_MAX] if checked and not valid else ""
+    return {
+        "ok": ok,
+        "checked": checked,
+        "valid": valid,
+        "error": error or ("WanGP's check refused the task" if checked and not valid else ""),
         "diagnosis": str(raw.get("diagnosis") or "")[:200],
         "code": "" if ok else _code_or(raw.get("code"), CONTROL_UNAVAILABLE),
         "message": str(raw.get("message") or "")[:200],

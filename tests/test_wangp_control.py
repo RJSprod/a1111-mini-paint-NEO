@@ -162,6 +162,12 @@ class FakeService:
             manifest = [{"id": 0, "params": inline}] if isinstance(inline, dict) else list(inline)
             for entry in manifest:
                 params = dict((entry or {}).get("params") or {})
+                if getattr(self, "loader_refuses", ""):
+                    # Wan2GP's loader: validate_task said no, so the task is
+                    # skipped and record_queue_error keeps the reason under
+                    # its client id, as (error, abort, ...).
+                    gen.setdefault("queue_errors", {})[params.get("client_id", "")] = (self.loader_refuses, False, False)
+                    continue
                 if not params.get("model_type"):
                     # Wan2GP: "Settings must contain 'model_type'. Skipping."
                     self.skipped.append(params)
@@ -939,6 +945,273 @@ def flush_checks(r: Results) -> None:
             str(live[compatibility.SESSION_STATE]))
 
 
+def commit_count_checks(r: Results) -> None:
+    """Bridge 1.16.0: every save WanGP makes of a form is counted.
+
+    The fingerprint moves only when the recorded values do, so a save that
+    found the record already current looked exactly like a save that never
+    ran, and the page, out of time, took "nothing moved" for "nothing to
+    carry" - which is how a job came to run at the last run's settings while
+    other settings were on screen. A count moves on every save, whatever it
+    saved, so the page can tell a save that landed from one that did not.
+
+    What is asserted beside that: the count is per model, WanGP's own call
+    goes through exactly as it was made (its record written, its answer
+    returned, its keywords kept, a raise not counted), a reloaded plugin finds
+    the counts already there instead of wrapping its own wrapper, and every
+    flush answer - press and probe - carries the count.
+    """
+    compatibility, _compose, _control, _execution, _ledger, protocol = _modules()
+    scratch = tempfile.mkdtemp(prefix="minipaint-commits-")
+    environ = _environ(scratch)
+    gen = {"queue": [], "in_progress": False, "model_type": "t2v"}
+    service = FakeService(gen)
+    service.forms["t2v"] = {"steps": 30, "loras_multipliers": "0.5"}
+    original = service.record_model_form
+    host = compatibility.Host(FakeHost({"service_for": lambda *_a: service, "get_gen_info": lambda state: state["gen"]}))
+    compat = compatibility.Compatibility(host=host, environ=environ)
+    compat.declare_globals()
+
+    r.check("before anything is saved the count is zero, not missing",
+            compat.commit_count(service, "t2v") == 0, str(compat.commit_count(service, "t2v")))
+    r.check("and WanGP's method is wrapped on its one instance, carrying the counts",
+            service.record_model_form is not original
+            and isinstance(getattr(service.record_model_form, compatibility.COMMITS_ATTRIBUTE, None),
+                           compatibility.CommitCounts))
+
+    fingerprint = compat.recorded_fingerprint(service, "t2v")
+    service.record_model_form("t2v", {"steps": 30, "loras_multipliers": "0.5"})
+    r.check("a save of the values already recorded leaves the fingerprint where it was",
+            compat.recorded_fingerprint(service, "t2v") == fingerprint)
+    r.check("and still moves the count: a save is seen to land whatever it saved",
+            compat.commit_count(service, "t2v") == 1, str(compat.commit_count(service, "t2v")))
+
+    service.record_model_form("i2v", {"steps": 8})
+    r.check("the count is per model: another model's save moves only its own",
+            compat.commit_count(service, "t2v") == 1 and compat.commit_count(service, "i2v") == 1,
+            str((compat.commit_count(service, "t2v"), compat.commit_count(service, "i2v"))))
+
+    answer = service.record_model_form(model_type="t2v", values={"steps": 12})
+    r.check("WanGP's call goes through as it was made: keywords kept, the record written, its answer returned",
+            service.forms["t2v"] == {"steps": 12} and answer is None and compat.commit_count(service, "t2v") == 2,
+            str((service.forms.get("t2v"), compat.commit_count(service, "t2v"))))
+
+    wrapper = service.record_model_form
+    reloaded = compatibility.Compatibility(host=host, environ=environ)
+    reloaded.declare_globals()
+    reloaded.commit_count(service, "t2v")
+    compat.commit_count(service, "t2v")
+    service.record_model_form("t2v", {"steps": 12})
+    r.check("a reloaded plugin finds the counts already there rather than wrapping the wrapper",
+            service.record_model_form is wrapper and reloaded.commit_count(service, "t2v") == 3,
+            str(reloaded.commit_count(service, "t2v")))
+
+    class Failing:
+        def record_model_form(self, model_type, values):
+            raise RuntimeError("disk full")
+
+    failing = Failing()
+    compat.commit_count(failing, "t2v")
+    try:
+        failing.record_model_form("t2v", {})
+    except RuntimeError:
+        raised = True
+    else:
+        raised = False
+    r.check("a save that raises is passed on to WanGP and counts nothing",
+            raised and compat.commit_count(failing, "t2v") == 0, str(compat.commit_count(failing, "t2v")))
+
+    class Slotted:
+        __slots__ = ()
+
+        def record_model_form(self, model_type, values):
+            return None
+
+    class Bare:
+        pass
+
+    r.check("no count without a service, a model, a method to count or an instance that takes the wrapper - "
+            "and the page then reads the fingerprint as it always did",
+            compat.commit_count(None, "t2v") is None and compat.commit_count(service, "") is None
+            and compat.commit_count(Bare(), "t2v") is None and compat.commit_count(Slotted(), "t2v") is None)
+
+    bridge = _bridge_class()(host=host, environ=environ)
+    bridge.declare()
+    bridge.compat.host.accept_components({"save_form_trigger": _Component()})
+    bridge.resolve()
+    pressed, writes = bridge.flush({}, {compatibility.SESSION_STATE: {"gen": gen}})
+    r.check("a flush's press says how many saves there have been before it writes the trigger",
+            pressed["flush"] == protocol.FLUSH_REQUESTED and pressed.get("commits") == 3 and writes, str(pressed))
+    service.record_model_form("t2v", {"steps": 12})
+    looked, writes = bridge.flush({"probe": True}, {compatibility.SESSION_STATE: {"gen": gen}})
+    r.check("and the probe after WanGP's save says one more, with the fingerprint unmoved",
+            looked.get("commits") == 4 and looked.get("fingerprint") == pressed.get("fingerprint") and writes is None,
+            str(looked))
+
+    # WanGP's console: what the flush did and the count, never the digest.
+    plugin = sys.modules[type(bridge).__module__]
+    line = plugin._summary("flush", dict(looked), 0.003)
+    r.check("the console line for a flush says what it did and how many saves were counted, never the fingerprint",
+            line.startswith("flush: requested in ") and "4 save(s)" in line
+            and str(looked.get("fingerprint")) not in line and "receiver" not in line, line)
+
+
+def press_check_checks(r: Results) -> None:
+    """Bridge 1.16.0: would WanGP take this job? Its own check, nothing queued.
+
+    Asked for: "if the settings are invalid, and prevents generation, I
+    would like those to get an error when adding to queue or press auto."
+    WanGP checks a task only when its queue loader unpacks it, and skips one
+    that fails, so a job at settings it would not generate with used to be
+    submitted and called refused a minute later. The check runs the loader's
+    steps on a copy of the task ``submit`` would build - the model type, the
+    pictures opened, ``validate_task`` - and queues and records nothing.
+    """
+    compatibility, _compose, control, execution, ledger, protocol = _modules()
+    scratch = tempfile.mkdtemp(prefix="minipaint-check-")
+    environ = _environ(scratch, _free_port())
+    gen = {"queue": [], "in_progress": False, "model_type": "t2v"}
+    service = FakeService(gen)
+    seen = {"tasks": [], "states": [], "loaded": [], "extracted": []}
+    verdict = {"error": "", "raise": None}
+
+    def validate_task(task, state):
+        seen["tasks"].append(task)
+        seen["states"].append(state)
+        if verdict["raise"] is not None:
+            raise verdict["raise"]
+        if verdict["error"]:
+            return None, verdict["error"]
+        return dict(task["params"]), ""
+
+    def extract(params, state, prefix):
+        seen["extracted"].append(prefix)
+        return params.get("model_type"), None
+
+    def has_paths(params):
+        return any(isinstance(params.get(key), str) and params[key] for key in ("image_start", "image_end")) \
+            or bool(params.get("image_refs"))
+
+    def load(params, base, cache, prefix):
+        # WanGP's own: a path becomes the image the check reads.
+        seen["loaded"].append(prefix)
+        for key in ("image_start", "image_end"):
+            if isinstance(params.get(key), str):
+                params[key] = ("image", os.path.basename(params[key]))
+        if params.get("image_refs"):
+            params["image_refs"] = [("image", os.path.basename(item)) for item in params["image_refs"]]
+
+    wangp = {"service_for": lambda *_a: service, "get_gen_info": lambda state: state["gen"],
+             "validate_task": validate_task, "_extract_model_type": extract,
+             "_task_has_path_attachments": has_paths, "_load_task_attachments": load,
+             "get_model_def": lambda model_type: {"name": model_type} if model_type == "t2v" else None}
+
+    def runner_with(globals_map):
+        compat = compatibility.Compatibility(host=compatibility.Host(FakeHost(globals_map)), environ=environ)
+        compat.declare_globals()
+        return execution.Executor(compat, ledger.Ledger(root=scratch, instance="i" * 32), environ=environ)
+
+    runner = runner_with(wangp)
+    picture = "c" * 32
+    (pathlib.Path(scratch) / (picture + ".png")).write_bytes(b"\x89PNG")
+
+    def job(**extra):
+        request = {"execution_id": "a" * 32, "settings": _settings(steps=8), "media": {"start": picture},
+                   "model_type": "t2v", "prompt": "a cat on a mat"}
+        request.update(extra)
+        return request
+
+    answer = runner.validate(job())
+    task = seen["tasks"][-1] if seen["tasks"] else {}
+    params = task.get("params") or {}
+    r.check("a job WanGP would take is checked and passes",
+            answer == {"ok": True, "checked": True, "valid": True, "error": ""}, str(answer))
+    r.check("checked as submit would queue it: its prompt, its model, its id as the client id, its picture",
+            params.get("prompt") == "a cat on a mat" and params.get("model_type") == "t2v" and params.get("client_id") == "a" * 32
+            and params.get("steps") == 8 and params.get("image_start") == ("image", picture + ".png"), str(params)[:300])
+    r.check("after the loader's own steps, in its order: the model type, the pictures opened, then the check",
+            seen["extracted"] == [execution.CHECK_LOG_PREFIX] and seen["loaded"] == [execution.CHECK_LOG_PREFIX]
+            and task.get(compatibility.PLUGIN_DATA_KEY) == {}, str((seen["extracted"], seen["loaded"])))
+    r.check("handed the state the shared record lives in, as the loader hands its page's",
+            seen["states"][-1] is service._state and params.get("state") is service._state)
+    r.check("and nothing is queued or recorded: no inline queue, no task, no ledger record, no command",
+            "inline_queue" not in gen and gen["queue"] == [] and not runner.ledger.records() and service.commands == [],
+            str((gen.keys(), service.commands)))
+
+    verdict["error"] = "Prompt cannot be empty."
+    answer = runner.validate(job(prompt=""))
+    r.check("a job WanGP would not take is answered with WanGP's own reason",
+            answer == {"ok": True, "checked": True, "valid": False, "error": "Prompt cannot be empty."}, str(answer))
+    verdict["error"] = ""
+
+    verdict["raise"] = KeyError("resolution")
+    answer = runner.validate(job())
+    r.check("an error WanGP raises inside its own check is a refusal, as its loader's would be, in its words",
+            answer.get("checked") is True and answer.get("valid") is False
+            and answer.get("error", "").startswith("WanGP's own check of these settings failed: KeyError"), str(answer))
+    verdict["raise"] = None
+
+    asked = len(seen["tasks"])
+    answer = runner.validate(job(media={"start": "d" * 32}))
+    r.check("a picture that is gone is refused as submit would refuse it, before WanGP is asked",
+            answer.get("checked") is True and answer.get("valid") is False and "no longer there" in answer.get("error", "")
+            and len(seen["tasks"]) == asked, str(answer))
+    answer = runner.validate(job(model_type="nope"))
+    r.check("and so is a model this WanGP does not have",
+            answer.get("valid") is False and "not a model this WanGP has" in answer.get("error", "")
+            and len(seen["tasks"]) == asked, str(answer))
+
+    answer = runner_with({key: value for key, value in wangp.items() if key != "validate_task"}).validate(job())
+    r.check("a WanGP with no check of its own cannot be asked: not checked, never valid, and the press goes ahead",
+            answer.get("checked") is False and answer.get("valid") is False and "validate_task" in answer.get("diagnosis", ""),
+            str(answer))
+    answer = runner_with({key: value for key, value in wangp.items() if key != "_load_task_attachments"}).validate(job())
+    r.check("nor one that cannot open the job's pictures the way its loader does",
+            answer.get("checked") is False and "_load_task_attachments" in answer.get("diagnosis", ""), str(answer))
+    answer = runner_with({key: value for key, value in wangp.items() if key != "_load_task_attachments"}).validate(
+        job(media={}))
+    r.check("while a job with no picture needs no loader to be checked",
+            answer.get("checked") is True and answer.get("valid") is True, str(answer))
+
+    surface = control.ControlSurface(runner.compat, environ=environ, note=lambda _text: None)
+    r.check("the surface opens for the check", surface.start() is True)
+    try:
+        r.check("its hello says it answers the check, so Forge asks it",
+                surface.hello().get("capabilities", {}).get("validate") is True
+                and protocol.normalize_control_hello(surface.hello())["capabilities"]["validate"] is True,
+                str(surface.hello().get("capabilities")))
+        status, body = surface.dispatch(protocol.CONTROL_VALIDATE, job())
+        r.check("and answers it over the control plane, normalised as Forge reads it",
+                status == 200 and protocol.normalize_validate_answer(body) == {
+                    "ok": True, "checked": True, "valid": True, "error": "", "diagnosis": "", "code": "", "message": ""},
+                str((status, body)))
+        status, body = surface.dispatch(protocol.CONTROL_VALIDATE, {"settings": {}})
+        r.check("a check that does not name a job as a submission would is refused, nothing asked",
+                status == 400 and body.get("ok") is False, str((status, body)))
+    finally:
+        surface.stop()
+
+    r.check("Forge's reading of an answer can never mistake a missing verdict for one",
+            protocol.normalize_validate_answer({"ok": True})["valid"] is False
+            and protocol.normalize_validate_answer({"ok": True})["checked"] is False
+            and protocol.normalize_validate_answer({"ok": True, "checked": True, "valid": False})["error"]
+            == "WanGP's check refused the task"
+            and protocol.normalize_validate_answer({"ok": True, "checked": False, "valid": True})["valid"] is False)
+
+    # A submission WanGP's loader skipped: failed at once, in WanGP's words,
+    # rather than as a task that never arrived once a minute had passed.
+    tracked_gen = {"queue": [], "in_progress": False}
+    tracker, tracked_service, tracked_gen, book = _executor(tracked_gen)
+    tracked_service.loader_refuses = "You must provide a Start Image"
+    _submit(tracker, "e" * 32)
+    tracker._tick()
+    record = book.get("e" * 32) or {}
+    r.check("a task WanGP skipped fails at the next look, with WanGP's reason, not after the minute's grace",
+            record.get("state") == protocol.EXEC_FAILED and record.get("code") == compatibility.WANGP_VALIDATION_REFUSED
+            and "You must provide a Start Image" in str(record.get("message")), str(record))
+    tracker.stop()
+
+
 def session_checks(r: Results) -> None:
     """Bridge 1.8.0: the page's Gradio session, reported and guarded.
 
@@ -1104,8 +1377,8 @@ def session_checks(r: Results) -> None:
     bridge.resolve()
     bridge.state_keys = (compatibility.SESSION_STATE,) + tuple(k for k in bridge.state_keys if k != compatibility.SESSION_STATE)
     handshake = bridge.compat.handshake(bridge_session="s", environ=environ)
-    r.check("the handshake offers the session capability, and the bridge is 1.15.1",
-            compatibility.BRIDGE_VERSION == "1.15.1"
+    r.check("the handshake offers the session capability, and the bridge is 1.16.0",
+            compatibility.BRIDGE_VERSION == "1.16.0"
             and handshake["capabilities"].get("session") is True)
     r.check("and, from 1.11.0, says the page may be made compact under focus (LAYOUT_STATE)",
             handshake["capabilities"].get("layout_compact") is True, str(handshake["capabilities"]))
@@ -1116,7 +1389,7 @@ def session_checks(r: Results) -> None:
             and handshake["capabilities"].get("theme_font") is True, str(handshake["capabilities"]))
     info = json.loads((BRIDGE_DIR / "plugin_info.json").read_text(encoding="utf-8"))
     r.check("and plugin_info.json says the same version twice, and lists the palette, the typeface, the compact layout, the studio, the hold, the model check and the prompt edit among its capabilities",
-            info.get("version") == "1.15.1" and info.get("bridge_version") == "1.15.1"
+            info.get("version") == "1.16.0" and info.get("bridge_version") == "1.16.0"
             and "prompt_edit" in (info.get("capabilities") or []) and "layout_studio" in (info.get("capabilities") or [])
             and "theme_palette" in (info.get("capabilities") or []) and "theme_font" in (info.get("capabilities") or [])
             and "layout_compact" in (info.get("capabilities") or []) and "hold" in (info.get("capabilities") or [])
@@ -1434,6 +1707,8 @@ def run() -> Results:
     cancellation_checks(r)
     unavailable_checks(r)
     flush_checks(r)
+    commit_count_checks(r)
+    press_check_checks(r)
     session_checks(r)
     service_lookup_checks(r)
     manifest_checks(r)

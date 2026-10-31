@@ -239,6 +239,11 @@ if (MODE.indexOf("stage") === 0) {
     window.minipaintWanGP = { note: function (line) { journal.push(String(line)); } };
     window.minipaintInterceptTiming = { timeout: 50, retryDelay: 10 };
 }
+if (MODE === "settings") { window.minipaintWanGP = { note: function (line) { journal.push(String(line)); } }; }
+
+//: What the server says of a job that will not run at the settings on
+//: WanGP's screen (outbox.settings_warning).
+const NOT_IN_VIEW = "Not the settings on WanGP's screen: this job runs at WanGP's last saved settings (its form was not saved at send)";
 
 global.fetch = function (url, options) {
     const text = String(url);
@@ -256,9 +261,16 @@ global.fetch = function (url, options) {
                 : MODE === "autorefused"
                 ? { ok: false, code: "INTERCEPT_NO_IMAGE_ROLE", message: "Auto sends the picture as Reference, and a frames model reads none of them. Nothing was queued.",
                     notes: ["choose where Auto puts a picture under Clipboard → Menu → Auto Options"] }
+                : MODE === "settings" && body.prompt === "warn me"
+                ? { ok: true, job_id: "0123456789abcdef", instruction: { nonce: "w", job_id: "0123456789abcdef", executor: "server", state: "admitted" },
+                    status: "Queued on the server.", notes: [NOT_IN_VIEW, "it goes next"],
+                    settings: { source: "last_saved_no_answer", sentence: "WanGP's last saved settings (its form was not saved at send)",
+                                in_view: false, warning: NOT_IN_VIEW },
+                    roles: body.roles, dropped_roles: [], auto: false, history: [] }
                 : { ok: true, job_id: "0123456789abcdef", instruction: { nonce: "n", job_id: "0123456789abcdef", executor: "server", state: "admitted" },
                     status: body.auto ? "Auto: the picture as First Frame and Reference. Queued on the server." : "Queued on the server.",
-                    notes: ["it goes next"], roles: body.auto ? ["first_frame", "reference"] : body.roles, dropped_roles: [], auto: !!body.auto, history: [] };
+                    notes: ["it goes next"], roles: body.auto ? ["first_frame", "reference"] : body.roles, dropped_roles: [], auto: !!body.auto, history: [],
+                    settings: { source: "saved_at_send", sentence: "saved from the WanGP page at send", in_view: true, warning: "" } };
         }
         else if (action === "history_load") {
             payload = { ok: true, id: body.id, prompt: "loaded prompt", enhance: false, inherit: true, roles: ["reference"], dropped_roles: [], defaulted: false,
@@ -407,6 +419,28 @@ async function main() {
         root().querySelector(".minipaint-intercept-auto").click();
         await tick(40);
         report({ before: before, order: order });
+    }
+    if (MODE === "settings") {
+        // One press whose job runs at the settings on screen, then one whose
+        // job will not: only the second says so, marked.
+        const toastNow = function () {
+            const t = body.querySelector(".minipaint-intercept-toast");
+            return t && !t.hidden ? { text: t.textContent, failure: t.classList.contains("minipaint-intercept-toast-failure") } : null;
+        };
+        popup.open(H1, {});
+        await tick(40);
+        root().querySelector(".minipaint-intercept-prompt").value = "in view";
+        root().querySelector(".minipaint-intercept-prompt").dispatchEvent(new FakeEvent("input"));
+        await popup.generate();
+        await tick(20);
+        const inView = toastNow();
+        popup.open(H2, {});
+        await tick(40);
+        root().querySelector(".minipaint-intercept-prompt").value = "warn me";
+        root().querySelector(".minipaint-intercept-prompt").dispatchEvent(new FakeEvent("input"));
+        await popup.generate();
+        await tick(20);
+        report({ inView: inView, warned: toastNow(), journal: journal.slice() });
     }
     if (MODE === "autorefused") {
         popup.open(H1, {});
@@ -611,6 +645,20 @@ def run() -> Results:
                 and submit.get("handoff") == "wangp:" + "a" * 32 + ":64x48:txt2img" and auto["message"] == "", str(submit)[:200])
         r.check("and closes the popup with the server's sentence, like Generate",
                 auto["hidden"] is True and auto["toast"].startswith("Auto: the picture as First Frame and Reference."), str(auto["toast"]))
+    # The settings in view: a press whose job will not run at them says so.
+    told = _run("settings")
+    r.check("the settings scenario ran", told is not None and "error" not in told, str(told)[:300])
+    if told and "error" not in told:
+        r.check("a press whose job runs at the settings on WanGP's screen closes with the server's sentence, unmarked",
+                told.get("inView") == {"text": "Queued on the server. it goes next.", "failure": False}, str(told.get("inView")))
+        r.check("one whose job will not says so in the notice, in place of the first note, marked",
+                told.get("warned") == {"text": "Queued on the server. Not the settings on WanGP's screen: this job runs at "
+                                               "WanGP's last saved settings (its form was not saved at send).", "failure": True},
+                str(told.get("warned")))
+        r.check("and the journal says it with the source's key, never the prompt",
+                [line for line in told.get("journal") or [] if "not the settings" in line]
+                == ["intercept: generate: not the settings on WanGP's screen (last_saved_no_answer)"]
+                and not [line for line in told.get("journal") or [] if "warn me" in line], str(told.get("journal")))
     refused = _run("autorefused")
     if refused and "error" not in refused:
         r.check("an Auto the server refuses leaves the popup open with its sentence and its note",

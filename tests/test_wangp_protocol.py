@@ -1631,6 +1631,10 @@ function classChanged() {
 // ---- WanGP, inside the frame -------------------------------------------------
 const B = {
   loaded: true, answerPing: true, answerFlush: true, answerLook: true, suppress: false, dirty: false, fp: 1, commitMs: 100, flushReplyMs: 5,
+  // Bridge 1.16.0 counts every save WanGP makes, whatever it saved: a save of
+  // an unchanged form moves the count and not the fingerprint. ``stall`` is a
+  // WanGP that takes the press and never saves.
+  counting: MODE.indexOf("counted") === 0, commits: 0, stall: false,
   // The page attaches while it loads, so an older bridge is one from the start.
   capabilities: MODE === "legacy" ? { queue: true, start: true, track: true }
     : MODE === "noping" ? { queue: true, start: true, track: true, form_watch: true }
@@ -1711,10 +1715,14 @@ function toBridge(message) {
     if (look) { B.looks += 1; } else { B.presses += 1; }
     if (!B.answerFlush || (look && !B.answerLook)) { return; }
     const told = B.session === null ? undefined : B.session;
-    if (!look && B.suppress) { reply("WANGP_FORM_FLUSHED", message.request_id, { ok: true, flush: "suppressed", fingerprint: "fp" + B.fp, session: told }); return; }
+    const counted = B.counting ? { commits: B.commits } : {};
+    if (!look && B.suppress) { reply("WANGP_FORM_FLUSHED", message.request_id, Object.assign({ ok: true, flush: "suppressed", fingerprint: "fp" + B.fp, session: told }, counted)); return; }
     const before = "fp" + B.fp;
-    if (!look && B.dirty) { B.dirty = false; vSet(function () { B.fp += 1; }, B.commitMs); }
-    reply("WANGP_FORM_FLUSHED", message.request_id, { ok: true, flush: "requested", fingerprint: look ? "fp" + B.fp : before, session: told });
+    if (!look && !B.stall) {
+      if (B.dirty) { B.dirty = false; vSet(function () { B.fp += 1; }, B.commitMs); }
+      if (B.counting) { vSet(function () { B.commits += 1; }, B.commitMs); }
+    }
+    reply("WANGP_FORM_FLUSHED", message.request_id, Object.assign({ ok: true, flush: "requested", fingerprint: look ? "fp" + B.fp : before, session: told }, counted));
   }
 }
 // Somebody touched the form in the WanGP page.
@@ -2174,6 +2182,58 @@ const scenarios = {
     return { answer: sent.answer, took: sent.at - t0, presses: B.presses - base, watched: api.state().settings.watched,
              hello: B.hellos[0] || {} };
   },
+  // Bridge 1.16.0: WanGP's saves counted, so a save is seen to land whatever
+  // it saved, and one that never lands is said as not saved.
+  counted: async function () {
+    api.inheritSettings(true);
+    api.attach(null);
+    await advance(1000);
+    const afterReady = { presses: B.presses, looks: B.looks, commits: B.commits, current: api.state().settings.current,
+                         counted: api.state().settings.counted };
+    // Nothing touched since that save, and a send still saves: answered as
+    // soon as WanGP's save lands, not at once from the last save and not
+    // after the whole limit spent waiting on a fingerprint that cannot move.
+    let base = B.presses;
+    const t0 = now;
+    const same = settleSend(api.saveForSend("the gallery's Generate"));
+    await advance(2500);
+    const sameResult = { answer: same.answer, took: same.at - t0, presses: B.presses - base, commits: B.commits, fp: B.fp,
+                         current: api.state().settings.current };
+    changed(); await advance(50);
+    const t1 = now;
+    const dirty = settleSend(api.saveForSend("Clipboard's Add to Queue"));
+    await advance(2500);
+    const dirtyResult = { answer: dirty.answer, took: dirty.at - t1, fp: B.fp, current: api.state().settings.current };
+    // A touch left alone: saved in the background a second later, and landed.
+    changed(); await advance(1000 + 400 + 100);
+    const quietSave = { current: api.state().settings.current, fp: B.fp, saves: api.state().settings.saves };
+    // A touch, and WanGP takes the send's press and never saves: not saved,
+    // said so, and the change not taken as saved - never "nothing to carry".
+    B.stall = true;
+    changed(); await advance(50);
+    base = B.presses;
+    const t2 = now;
+    const stalled = settleSend(api.saveForSend("Clipboard's Auto"));
+    await advance(2000);
+    const stallResult = { answer: stalled.answer, took: stalled.at - t2, presses: B.presses - base,
+                          current: api.state().settings.current, said: linesWith("WanGP did not save its form within").length };
+    // The save the send could not make is tried once more in the background,
+    // and a save WanGP never makes is no save there either.
+    await advance(1000 + 400 + 100);
+    const background = { current: api.state().settings.current, saves: api.state().settings.saves, presses: B.presses - base };
+    B.stall = false;
+    await advance(3000);
+    const quietAfter = B.presses - base;
+    // The change is still to carry, and the next send carries it.
+    const t3 = now;
+    const after = settleSend(api.saveForSend("the gallery's Generate"));
+    await advance(2500);
+    const afterStall = { answer: after.answer, took: after.at - t3, current: api.state().settings.current, fp: B.fp };
+    return { afterReady, same: sameResult, dirty: dirtyResult, quietSave, stall: stallResult, background, quietAfter, afterStall,
+             quiet: linesWith("flush: committed [the WanGP page became ready]").length,
+             carried: linesWith("flush: committed [the WanGP form changed]").length,
+             pressed: linesWith("flush: committed [before ").length, already: linesWith("nothing new since the last save").length };
+  },
   // The public API loaded first: the tab reads what it knows.
   pull: async function () {
     api.attach(null);
@@ -2427,7 +2487,7 @@ def live_settings_checks(r: Results) -> None:
     most - for a save of anything still unsaved. Every answer is a word the
     job records, so a job can say where its settings came from.
     """
-    answers = _run_live(("save", "slow", "leave", "off", "send", "legacy", "pull", "pulloff"))
+    answers = _run_live(("save", "slow", "leave", "off", "send", "legacy", "counted", "pull", "pulloff"))
     if answers is None:
         r.check("node is available for the live settings checks (skipped)", True)
         return
@@ -2495,6 +2555,46 @@ def live_settings_checks(r: Results) -> None:
             legacy.get("watched") is False and legacy.get("presses") == 1
             and (legacy.get("answer") or {}).get("flush") == "unchanged" and 1000 < (legacy.get("took") or 0) <= 2000,
             repr(legacy))
+
+    counted = answers.get("counted", {})
+    r.check("the harness drove the bundle against a bridge that counts WanGP's saves",
+            "error" not in counted and not counted.get("thrown"), repr(counted)[:400])
+    ready = counted.get("afterReady") or {}
+    r.check("the page becoming ready saves once, sees the save land at its one look, and knows the bridge counts",
+            ready == {"presses": 1, "looks": 1, "commits": 1, "current": True, "counted": True}, repr(ready))
+    same = counted.get("same") or {}
+    r.check("from such a bridge a send saves even with nothing touched since the last save, so no change it was not told of is missed",
+            same.get("presses") == 1 and same.get("commits") == 2 and same.get("fp") == 1, repr(same))
+    r.check("and is answered as soon as WanGP's save lands - committed in a fraction of a second, not unchanged at the limit",
+            (same.get("answer") or {}).get("flush") == "committed" and 0 < (same.get("took") or 0) < 500
+            and same.get("current") is True, repr(same))
+    dirty = counted.get("dirty") or {}
+    r.check("a send right after a touch saves the change and answers once it has landed",
+            (dirty.get("answer") or {}).get("flush") == "committed" and 0 < (dirty.get("took") or 0) < 500
+            and dirty.get("fp") == 2 and dirty.get("current") is True, repr(dirty))
+    quiet_save = counted.get("quietSave") or {}
+    r.check("a touch left alone is saved in the background, and the record is current once that save lands",
+            quiet_save == {"current": True, "fp": 3, "saves": 1}, repr(quiet_save))
+    stall = counted.get("stall") or {}
+    r.check("a WanGP that takes the press and never saves is answered as not saved, never as nothing to carry",
+            (stall.get("answer") or {}).get("flush") == "unavailable" and stall.get("presses") == 1
+            and 1700 <= (stall.get("took") or 0) <= 2000, repr(stall))
+    r.check("and says so in the journal, and the record is not taken as current",
+            stall.get("said") == 1 and stall.get("current") is False, repr(stall))
+    background = counted.get("background") or {}
+    r.check("the save the send could not make is tried once more in the background a second later",
+            background.get("presses") == 2 and background.get("saves") == 2 and counted.get("quietAfter") == 2,
+            repr({"background": background, "quietAfter": counted.get("quietAfter")}))
+    r.check("and a save in the background that WanGP never makes leaves the record not current",
+            background.get("current") is False, repr(background))
+    after_stall = counted.get("afterStall") or {}
+    r.check("and the next send carries the change that save missed",
+            (after_stall.get("answer") or {}).get("flush") == "committed" and after_stall.get("fp") == 4
+            and after_stall.get("current") is True, repr(after_stall))
+    r.check("a save in the background that carried nothing writes no line, one that carried a change writes one, "
+            "and every send's save says what it got",
+            counted.get("quiet") == 0 and counted.get("carried") == 1 and counted.get("pressed") == 3
+            and counted.get("already") == 0, repr({key: counted.get(key) for key in ("quiet", "carried", "pressed", "already")}))
 
     pull = answers.get("pull", {})
     r.check("a WanGP tab that loads after the public API took its snapshot still learns that jobs use its settings",

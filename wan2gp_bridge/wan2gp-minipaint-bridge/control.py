@@ -231,6 +231,8 @@ class ControlSurface:
                 return self._flush(payload)
             if operation == protocol.CONTROL_MODEL:
                 return self._model(payload)
+            if operation == protocol.CONTROL_VALIDATE:
+                return self._validate(payload)
         except execution.ExecutionError as error:
             return 409, {"ok": False, "code": error.code, "message": error.detail[:200]}
         except compose.ComposeError as error:
@@ -292,9 +294,10 @@ class ControlSurface:
             "code": code,
             "message": "",
             # The flags an older bridge leaves out, which is how Forge knows
-            # not to send it hold, resume or flush (1.12.0) or ask it whether
-            # a model is set up (1.13.0) at all.
-            "capabilities": {"hold": True, "model": True},
+            # not to send it hold, resume or flush (1.12.0), ask it whether
+            # a model is set up (1.13.0) or whether WanGP would take a job
+            # (1.16.0) at all.
+            "capabilities": {"hold": True, "model": True, "validate": True},
             "hold": held.get("hold") or protocol.HOLD_NONE,
             **activity,
         }
@@ -325,6 +328,24 @@ class ControlSurface:
         answer = model_check.facts(self.compat._wgp(), request["model_type"])
         if answer.get("ok") and answer.get("defined") and not answer.get("checked"):
             self._note(f"model check: {request['model_type'][:60]} could not be checked ({answer.get('diagnosis', '')[:120]})")
+        return 200, answer
+
+    def _validate(self, payload: typing.Any) -> typing.Tuple[int, dict]:
+        """Bridge 1.16.0: would WanGP take this job, by its own check, with
+        nothing queued? The request is a submission's, so the job checked is
+        the job that would be sent."""
+        request, code = protocol.normalize_execution_request(payload)
+        if code:
+            return 400, {"ok": False, "code": code, "message": "the check names a job as a submission would"}
+        if self.executor is None:
+            return 409, {"ok": False, "code": protocol.CONTROL_UNAVAILABLE, "message": "the control surface is not started"}
+        answer = self.executor.validate(request)
+        if answer.get("checked") and not answer.get("valid"):
+            # The model, never WanGP's sentence: one about a prompt template
+            # can quote the prompt. The sentence goes back to the press.
+            self._note(f"check: {request['model_type'][:60] or 'a job'} would not be taken; WanGP's reason went to the press")
+        elif not answer.get("checked"):
+            self._note(f"check: could not be made ({str(answer.get('diagnosis') or '')[:120]})")
         return 200, answer
 
     def _compose(self, payload: typing.Any) -> typing.Tuple[int, dict]:

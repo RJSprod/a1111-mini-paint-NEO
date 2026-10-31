@@ -135,6 +135,31 @@ def auto_roles_of(value: typing.Any) -> typing.List[str]:
     return chosen or list(DEFAULT_AUTO_ROLES)
 
 
+#: Where a WanGP job's settings come from - the menu's WanGP Settings, one of
+#: two. ``in_view``: what the WanGP tab shows, saved by the page at the press
+#: and read there and then (since 2026-10-31). ``saved``: the way this
+#: extension built jobs before that - WanGP's saved settings for the model,
+#: which its own Save Settings button writes and it loads when you switch to
+#: that model, or the model's defaults where none are saved; nothing on the
+#: WanGP tab is read. A choice, not a fallback: asked for, once the first had
+#: replaced the second - "I want to bring the setting back so I can have the
+#: old style ... a setting that I can enable or disable".
+WANGP_SETTINGS_IN_VIEW = "in_view"
+WANGP_SETTINGS_SAVED = "saved"
+WANGP_SETTINGS = (WANGP_SETTINGS_IN_VIEW, WANGP_SETTINGS_SAVED)
+WANGP_SETTINGS_LABELS = {
+    WANGP_SETTINGS_IN_VIEW: "What the WanGP tab shows",
+    WANGP_SETTINGS_SAVED: "WanGP's saved settings, or the defaults",
+}
+DEFAULT_WANGP_SETTINGS = WANGP_SETTINGS_IN_VIEW
+
+
+def wangp_settings_of(value: typing.Any) -> str:
+    """The choice out of whatever a document holds; the default for anything
+    else, so a hand-edited value cannot leave jobs with no source at all."""
+    return value if value in WANGP_SETTINGS else DEFAULT_WANGP_SETTINGS
+
+
 def auto_roles_text(roles: typing.Sequence[str]) -> str:
     """Some of Auto's roles as words, in the menu's order: ``First Frame and Reference``."""
     labels = [AUTO_ROLE_LABELS[role] for role in AUTO_ROLES if role in roles]
@@ -312,6 +337,8 @@ class Config:
     view: str = ""
     #: Where Auto puts a picture: some of AUTO_ROLES, never none.
     auto_roles: typing.List[str] = dataclasses.field(default_factory=lambda: list(DEFAULT_AUTO_ROLES))
+    #: Where a WanGP job's settings come from: one of WANGP_SETTINGS.
+    wangp_settings: str = DEFAULT_WANGP_SETTINGS
 
     @property
     def intercept(self) -> bool:
@@ -340,6 +367,7 @@ class Config:
             "archives": archives_of(self.archives),
             "view": self.view if _ARCHIVE_ID.match(str(self.view or "")) else "",
             "auto_roles": auto_roles_of(self.auto_roles),
+            "wangp_settings": wangp_settings_of(self.wangp_settings),
         }
 
     @classmethod
@@ -363,6 +391,7 @@ class Config:
             archives=archives_of(data.get("archives")),
             view=str(data.get("view") or "") if _ARCHIVE_ID.match(str(data.get("view") or "")) else "",
             auto_roles=auto_roles_of(data.get("auto_roles")),
+            wangp_settings=wangp_settings_of(data.get("wangp_settings")),
         )
 
     @property
@@ -404,6 +433,11 @@ __all__ = [
     "AUTO_ROLE_LABELS",
     "CONFIG_NAME",
     "DEFAULT_AUTO_ROLES",
+    "DEFAULT_WANGP_SETTINGS",
+    "WANGP_SETTINGS",
+    "WANGP_SETTINGS_IN_VIEW",
+    "WANGP_SETTINGS_LABELS",
+    "WANGP_SETTINGS_SAVED",
     "Config",
     "DEFAULT_INTERCEPT",
     "DEFAULT_INTERCEPT_INHERIT",
@@ -426,6 +460,7 @@ __all__ = [
     "THUMBNAIL_MIN",
     "archives_of",
     "auto_roles_of",
+    "wangp_settings_of",
     "auto_roles_text",
     "clamp_thumbnail",
     "config_dir",

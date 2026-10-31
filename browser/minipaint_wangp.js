@@ -506,6 +506,10 @@ window.minipaintWanGP = (function () {
         changeTimer: 0,
         //: How many saves the form's changes have made, for a bug report.
         saves: 0,
+        //: Whether the last save's bridge counts WanGP's saves (1.16.0), so a
+        //: save is seen to land: from such a bridge every send saves first,
+        //: because a save then costs a moment and no notice can be missed.
+        counted: false,
         //: The WanGP page's own change notices alone - a person's hand on its
         //: form - without the prompt writes this page made. What the assistant
         //: panel's prompt box reads to know the page's prompt may have moved
@@ -1574,8 +1578,10 @@ window.minipaintWanGP = (function () {
         S.promptEdit = declared && !!(payload.capabilities && payload.capabilities.prompt_edit === true);
         noteSession(payload.session, "ready");
         // A session this page has saved nothing from yet: whatever WanGP has
-        // recorded may be from before, so no send may take it as current.
+        // recorded may be from before, so no send may take it as current -
+        // and whether its saves are counted is for its own first save to say.
         P.current = false;
+        P.counted = false;
         S.generationRunning = typeof payload.generation_running === "boolean" ? payload.generation_running : null;
         S.lastCode = declared ? "" : (failure || "BRIDGE_COMPONENT_INCOMPATIBLE");
         report(declared, S.lastCode);
@@ -1857,11 +1863,15 @@ window.minipaintWanGP = (function () {
             settle(requestId, failure(code(payload.code) || INTERNAL_ERROR, text(payload.detail, 200)));
             return;
         }
-        settle(requestId, {
+        const answer = {
             ok: true,
             flush: text(payload.flush, 40),
             fingerprint: text(payload.fingerprint, 128)
-        });
+        };
+        // Bridge 1.16.0: how many times WanGP has saved this model's form.
+        // Kept only as a count; anything else is an older bridge's silence.
+        if (isCount(payload.commits)) { answer.commits = payload.commits; }
+        settle(requestId, answer);
     }
 
     /** The bridge's answer to a prompt read or write (bridge 1.14.0). */
@@ -1927,15 +1937,22 @@ window.minipaintWanGP = (function () {
             ? Math.min(FLUSH_CALL_TIMEOUT_MS, Number(settings.callTimeoutMs)) : FLUSH_CALL_TIMEOUT_MS;
         const started = Date.now();
         const why = settings.reason ? " [" + text(settings.reason, 60) + "]" : "";
+        // Whether this bridge counts WanGP's saves (1.16.0): known from its
+        // first answer, and what decides whether an outcome can be trusted.
+        let counted = false;
+        // Whether the save that landed changed WanGP's record. From a bridge
+        // that counts, a save lands whatever it saved, so "committed" alone
+        // no longer says that anything was carried.
+        let moved = false;
         const give = function (outcome, detail) {
             // A press says what it got either way. A flush nobody asked for
             // says so only when it carried something, because a line every
             // time the user changes tab is noise in the one log that has to
             // stay readable.
-            if (!settings.quiet || outcome === FLUSH_COMMITTED) {
+            if (!settings.quiet || (outcome === FLUSH_COMMITTED && moved)) {
                 say("flush: " + outcome + why + (detail ? " (" + text(detail, 120) + ")" : ""));
             }
-            return { ok: true, flush: outcome };
+            return { ok: true, flush: outcome, counted: counted };
         };
 
         if (!ensure() || !S.ready || !S.bridgeSession) { return give(FLUSH_UNAVAILABLE, "no bridge session in this page"); }
@@ -1956,10 +1973,20 @@ window.minipaintWanGP = (function () {
         if (first.flush !== FLUSH_REQUESTED) { return give(FLUSH_UNAVAILABLE, first.flush); }
 
         const before = String(first.fingerprint || "");
+        // Bridge 1.16.0 counts every save WanGP makes of this model's form,
+        // so a save is seen to land whatever it saved. An older bridge has
+        // only the fingerprint, which moves only when the values do - and a
+        // save that found nothing new looked exactly like one that never ran.
+        counted = isCount(first.commits);
+        const landed = function (look) {
+            moved = String(look.fingerprint || "") !== before;
+            return counted ? isCount(look.commits) && look.commits > first.commits : moved;
+        };
         if (settle) {
-            // One look. Moved is a commit; not moved is either nothing to
-            // carry or a commit still on its way, and both are the press
-            // having been taken - which is all a save in the background needs.
+            // One look. Landed is a commit; not landed is a commit still on
+            // its way (or, from an older bridge, nothing to carry), and both
+            // are the press having been taken - which is all a save in the
+            // background needs. Only a landing makes the record current.
             await new Promise(function (resume) { window.setTimeout(resume, settle); });
             let look;
             try {
@@ -1968,7 +1995,7 @@ window.minipaintWanGP = (function () {
                 return give(FLUSH_REQUESTED, "the press was taken; the look after it was not answered");
             }
             if (!look || look.ok === false) { return give(FLUSH_REQUESTED, "the press was taken; the look after it was refused"); }
-            return give(String(look.fingerprint || "") !== before ? FLUSH_COMMITTED : FLUSH_REQUESTED);
+            return give(landed(look) ? FLUSH_COMMITTED : FLUSH_REQUESTED);
         }
         while (Date.now() - started < budget) {
             await new Promise(function (resume) { window.setTimeout(resume, FLUSH_POLL_MS); });
@@ -1979,11 +2006,37 @@ window.minipaintWanGP = (function () {
                 return give(FLUSH_UNAVAILABLE, "the bridge stopped answering mid-flush");
             }
             if (!probe || probe.ok === false) { return give(FLUSH_UNAVAILABLE, probe && probe.code); }
-            if (String(probe.fingerprint || "") !== before) { return give(FLUSH_COMMITTED); }
+            if (landed(probe)) { return give(FLUSH_COMMITTED); }
+        }
+        if (counted) {
+            // Counted, and the count never moved: WanGP did not save the form
+            // in time. Said as what it is - the job goes with WanGP's last
+            // saved settings - and never as "nothing to carry", the guess
+            // that put a last run's settings on a job the user had changed.
+            return give(FLUSH_UNAVAILABLE, "WanGP did not save its form within " + budget + " ms");
         }
         // Either there was nothing to commit, or the page never got to it.
-        // The two are indistinguishable from here and have the same answer.
+        // From a bridge that does not count, the two are indistinguishable
+        // here and have the same answer.
         return give(FLUSH_UNCHANGED, "the recorded form did not move within " + budget + " ms");
+    }
+
+    function isCount(value) {
+        return typeof value === "number" && isFinite(value) && value >= 0;
+    }
+
+    /**
+     * Whether a save's outcome lets the page take WanGP's record as current.
+     * From a bridge that counts WanGP's saves, only a save seen to land does:
+     * a press that was merely taken is not one, and treating it as one let
+     * every later send skip its own save while the record still held the
+     * last run. From an older bridge, a press taken or a record that did not
+     * move is the best there is, as it always was.
+     */
+    function savedOutcome(answer) {
+        const outcome = answer && answer.flush;
+        if (answer && answer.counted) { return outcome === FLUSH_COMMITTED; }
+        return SAVED.indexOf(outcome) !== -1;
     }
 
     /* ------------------------------------------------------------------ */
@@ -2123,8 +2176,8 @@ window.minipaintWanGP = (function () {
 
     function afterSave(answer, covered) {
         P.running = false;
-        const outcome = answer && answer.flush;
-        if (P.changes === covered && SAVED.indexOf(outcome) !== -1) { P.current = true; }
+        if (answer) { P.counted = !!answer.counted; }
+        if (P.changes === covered && savedOutcome(answer)) { P.current = true; }
         // A notice that landed while this save ran has its own quiet second
         // coming, or had it while this one held the flag; either way it gets
         // a save of its own and is never folded into one that began before it.
@@ -2152,7 +2205,15 @@ window.minipaintWanGP = (function () {
             say("save before send: " + FLUSH_UNAVAILABLE + " [" + why + "] (no WanGP page in this browser to ask)");
             return Promise.resolve({ ok: true, flush: FLUSH_UNAVAILABLE });
         }
-        if (S.formWatch && P.current && !P.running && !P.changeTimer) {
+        // "Nothing new since the last save" is only ever as good as the
+        // notices behind it, and a WanGP page that changes its own form by
+        // script - a settings file loaded, a preset applied - sends none. So
+        // a bridge that counts WanGP's saves, where a save is seen to land in
+        // a moment whatever it saved, is always asked: what is on its screen
+        // is what the job gets. Only an older bridge, whose save of an
+        // unchanged form can be told from no save at all only by waiting out
+        // the whole limit, keeps the shortcut.
+        if (S.formWatch && P.current && !P.counted && !P.running && !P.changeTimer) {
             say("save before send: nothing new since the last save [" + why + "]");
             return Promise.resolve({ ok: true, flush: FLUSH_UNCHANGED, already: true });
         }
@@ -2184,7 +2245,15 @@ window.minipaintWanGP = (function () {
             }
             Promise.resolve(asked).then(function (answer) {
                 const outcome = answer && typeof answer.flush === "string" && answer.flush ? answer.flush : FLUSH_UNAVAILABLE;
-                if (!settled && P.changes === covered && SAVED.indexOf(outcome) !== -1) { P.current = true; }
+                if (answer) { P.counted = !!answer.counted; }
+                if (!settled && P.changes === covered && savedOutcome(answer)) { P.current = true; }
+                // A save the send could not make - WanGP mid settings-load,
+                // or one it never made - is tried again in the background a
+                // second later, as one past the limit is: what is on WanGP's
+                // screen still has to reach its record for the next job.
+                if (!settled && !P.current && !savedOutcome(answer) && !P.changeTimer) {
+                    P.changeTimer = setTimeout(saveOnChange, SAVE_QUIET_MS);
+                }
                 finish({ ok: true, flush: outcome });
             }, function () { finish({ ok: true, flush: FLUSH_UNAVAILABLE }); });
         });
@@ -3948,6 +4017,7 @@ window.minipaintWanGP = (function () {
                 wanted: P.wanted,
                 watched: S.formWatch,
                 current: P.current,
+                counted: P.counted,
                 saving: P.running,
                 changes: P.changes,
                 saves: P.saves

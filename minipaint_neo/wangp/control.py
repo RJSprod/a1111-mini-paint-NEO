@@ -73,6 +73,10 @@ FLUSH_TIMEOUT = 90.0
 #: dozen files. Answered in milliseconds; a short deadline, because it is
 #: asked on behalf of a page waiting to know whether to show its composer.
 MODEL_TIMEOUT = 8.0
+#: The check at the press (bridge 1.16.0) runs WanGP's own check of one task,
+#: pictures opened and all: well under a second. Bounded like the model check,
+#: because a person is waiting on the press it is asked for.
+VALIDATE_TIMEOUT = 10.0
 
 _LOG_PREFIX = "MiniPaint WanGP:"
 _lock = threading.RLock()
@@ -353,6 +357,46 @@ def model(model_type: str, timeout: float = MODEL_TIMEOUT) -> dict:
     return protocol.normalize_model_facts(answer)
 
 
+def validate(
+    execution_id: str,
+    settings: typing.Mapping[str, typing.Any],
+    prompt: typing.Optional[str] = None,
+    media: typing.Optional[typing.Mapping[str, typing.Any]] = None,
+    model_type: str = "",
+    timeout: float = VALIDATE_TIMEOUT,
+) -> dict:
+    """Would WanGP take this job? Its own check, by the child. Bridge 1.16.0.
+
+    The same request ``submit`` would send, so the job checked is the job
+    that would be queued; nothing is queued and nothing is recorded. Answers
+    ``{ok, checked, valid, error}``: ``checked`` False is "could not ask",
+    never valid, and ``error`` is WanGP's own reason when it would not.
+    Raises IntegrationError like every call here; an older bridge has no such
+    operation and answers 404, which arrives as ``REQUEST_INVALID``.
+    """
+    payload: typing.Dict[str, typing.Any] = {
+        "execution_id": execution_id,
+        "settings": dict(settings),
+        "media": dict(media or {}),
+        "model_type": model_type,
+    }
+    if prompt is not None:
+        payload["prompt"] = prompt
+    answer = call(protocol.CONTROL_VALIDATE, payload, timeout)
+    return protocol.normalize_validate_answer(answer)
+
+
+def can_validate(answer: typing.Optional[dict] = None) -> typing.Optional[bool]:
+    """Whether the bridge answers the check at the press (1.16.0): from
+    ``answer`` or the last recent hello, None when nothing recent has said.
+    Never asks."""
+    found = answer if answer is not None else last_hello()
+    if not isinstance(found, dict):
+        return None
+    capabilities = found.get("capabilities")
+    return bool(capabilities.get("validate")) if isinstance(capabilities, dict) else False
+
+
 def can_check_models(answer: typing.Optional[dict] = None) -> typing.Optional[bool]:
     """Whether the bridge answers the model check (1.13.0): from ``answer`` or
     the last recent hello, None when nothing recent has said. Never asks."""
@@ -414,7 +458,8 @@ def why_not() -> str:
 
 __all__ = [
     "CALL_TIMEOUT", "COMPOSE_TIMEOUT", "CONNECT_TIMEOUT", "FLUSH_TIMEOUT", "HOLD_TIMEOUT", "LOOPBACK", "MODEL_TIMEOUT",
-    "HELLO_TTL", "available", "call", "can_check_models", "can_hold", "cancel", "compose", "flush", "forget", "hello",
-    "hold", "last_hello", "model", "reset_for_tests", "executable_ever", "resume", "status", "submit", "use_transport",
-    "why_not",
+    "VALIDATE_TIMEOUT",
+    "HELLO_TTL", "available", "call", "can_check_models", "can_hold", "can_validate", "cancel", "compose", "flush",
+    "forget", "hello", "hold", "last_hello", "model", "reset_for_tests", "executable_ever", "resume", "status", "submit",
+    "use_transport", "validate", "why_not",
 ]

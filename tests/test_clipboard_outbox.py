@@ -281,7 +281,7 @@ def settings_source_checks(r: Results) -> None:
         ("a flushed base", server(wire.BASE_FLUSHED, wire.FLUSH_COMMITTED), outbox.SETTINGS_SAVED_AT_SEND,
          "saved from the WanGP page at send"),
         ("a recorded base whose page did not answer", server(wire.BASE_RECORDED, wire.FLUSH_UNAVAILABLE), outbox.SETTINGS_NO_ANSWER,
-         "WanGP's last saved settings (the page didn't answer)"),
+         "WanGP's last saved settings (its form was not saved at send)"),
         ("a recorded base whose WanGP was loading settings", server(wire.BASE_RECORDED, wire.FLUSH_SUPPRESSED), outbox.SETTINGS_LOADING,
          "WanGP's last saved settings (WanGP was loading a model's settings at send)"),
         ("a recorded base nobody tried to save", server(wire.BASE_RECORDED, ""), outbox.SETTINGS_LAST_SAVED,
@@ -289,7 +289,7 @@ def settings_source_checks(r: Results) -> None:
         ("factory, inheriting", server(wire.BASE_FACTORY, wire.FLUSH_COMMITTED), outbox.SETTINGS_DEFAULTS,
          "the model's defaults (nothing saved yet)"),
         ("factory, by choice", server(wire.BASE_FACTORY, "", inherit=False), outbox.SETTINGS_OFF,
-         "the model's defaults (taking the WanGP page's settings is switched off)"),
+         "WanGP's saved settings for the model, or its defaults (chosen in place of what the WanGP tab shows)"),
         ("a job not composed yet", server(None, wire.FLUSH_COMMITTED), "", ""),
         ("a page-run job WanGP took", {"executor": outbox.EXECUTOR_BROWSER, "state": outbox.QUEUED}, outbox.SETTINGS_LIVE,
          "the WanGP page itself, as it was when this browser queued the job"),
@@ -316,14 +316,56 @@ def settings_source_checks(r: Results) -> None:
     r.check("the press's own line says what was done about WanGP's form, before anything is composed",
             notes["committed"] == "WanGP's form saved from its page at send"
             and notes["unchanged"] == "WanGP's form already saved from its page"
-            and notes["unavailable"] == "the WanGP page did not answer, so its form was not saved at send"
+            and notes["unavailable"] == "WanGP's form was not saved at send (its page did not answer, or WanGP did not save it in time)"
             and notes["suppressed"] == "WanGP was loading a model's settings, so its form was not saved at send"
             and notes["none"] == "WanGP's form was not asked to save at send", repr(notes))
     r.check("and says plainly when the page's settings are not taken at all, or are the page's own",
-            notes["off"] == "WanGP's settings are not taken from its page (switched off)"
+            notes["off"] == "WanGP's settings are not taken from its page (WanGP's saved settings for the model, or its defaults, as chosen)"
             and notes["page"] == "WanGP's settings are its page's own when this browser queues it", repr(notes))
     r.check("a job a page runs itself drives the live form whatever the setting says, and its line says so",
             notes["page off"] == notes["page"], repr(notes))
+
+    # What a press says: nothing when its job runs at the settings on WanGP's
+    # screen, and one sentence naming the fallback when it will not.
+    quiet = {
+        "a save WanGP made at the send": server(wire.BASE_FLUSHED, wire.FLUSH_COMMITTED),
+        "a page-run job, at its press": {"executor": outbox.EXECUTOR_BROWSER, "state": outbox.PENDING},
+        "a page-run job WanGP took": {"executor": outbox.EXECUTOR_BROWSER, "state": outbox.QUEUED},
+    }
+    for name, job in quiet.items():
+        view = outbox.settings_view(job)
+        r.check(f"the press says nothing more for {name}",
+                outbox.settings_warning(job) == "" and view["in_view"] is True and view["warning"] == "", repr(view))
+    said = {
+        outbox.SETTINGS_NO_ANSWER: server(wire.BASE_RECORDED, wire.FLUSH_UNAVAILABLE),
+        outbox.SETTINGS_LOADING: server(wire.BASE_RECORDED, wire.FLUSH_SUPPRESSED),
+        outbox.SETTINGS_LAST_SAVED: server(wire.BASE_RECORDED, ""),
+        outbox.SETTINGS_DEFAULTS: server(wire.BASE_FACTORY, wire.FLUSH_COMMITTED),
+        outbox.SETTINGS_SESSION: server(wire.BASE_SESSION, wire.FLUSH_COMMITTED),
+    }
+    for key, job in said.items():
+        view = outbox.settings_view(job)
+        r.check(f"and names the fallback when the job runs at {key}",
+                view == {"source": key, "sentence": outbox.SETTINGS_TEXT[key], "in_view": False,
+                         "warning": "Not the settings on WanGP's screen: this job runs at " + outbox.SETTINGS_TEXT[key]}
+                and outbox.settings_warning(job) == view["warning"], repr(view))
+    # WanGP's saved settings chosen in the menu's WanGP Settings (or by a
+    # caller's ``inherit: false``): what the job runs at is what was asked
+    # for, so the press says nothing - and does not claim it is in view.
+    chosen = outbox.settings_view(server(wire.BASE_FACTORY, "", inherit=False))
+    r.check("a job built from WanGP's saved settings by choice is not in view, and the press warns of nothing",
+            chosen == {"source": outbox.SETTINGS_OFF, "sentence": outbox.SETTINGS_TEXT[outbox.SETTINGS_OFF],
+                       "in_view": False, "warning": ""}
+            and outbox.settings_warning(server(wire.BASE_RECORDED, wire.FLUSH_UNAVAILABLE, inherit=False)) == "", repr(chosen))
+    r.check("every source is either the settings on screen, the saved settings by choice, or a fallback the press names",
+            set(said) | set(outbox.SETTINGS_IN_VIEW) | {outbox.SETTINGS_OFF} == set(outbox.SETTINGS_KEYS)
+            and not set(said) & (set(outbox.SETTINGS_IN_VIEW) | {outbox.SETTINGS_OFF}), repr(outbox.SETTINGS_IN_VIEW))
+    undecided = outbox.settings_view(server(None, wire.FLUSH_COMMITTED))
+    r.check("a server job not composed at its press says its turn reads them",
+            undecided == {"source": "", "sentence": "", "in_view": False, "warning": outbox.SETTINGS_AT_TURN}
+            and "when its turn comes" in outbox.SETTINGS_AT_TURN, repr(undecided))
+    r.check("and a warning is one unpunctuated sentence, like every note, in the words a person reads",
+            all(not view.endswith(".") for view in [outbox.settings_warning(job) for job in said.values()] + [outbox.SETTINGS_AT_TURN]))
 
 
 def run() -> Results:

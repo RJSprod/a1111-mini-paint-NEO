@@ -732,7 +732,7 @@ same server-owned queue as the tab's presses, ids are never paths, and the answe
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
 API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 or LTX 2.3 / 2.5 rewrite (the page's
 model travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
-and its place in WanGP. Bridge plugin 1.15.1 carries the queue, start and track operations
+and its place in WanGP. Bridge plugin 1.16.0 carries the queue, start and track operations
 (protocol 5) and the control plane server-owned execution runs on (protocol 6), answers the
 WanGP tab's heartbeat and says when its form is touched, guards the page's Gradio session
 (below), dresses the WanGP page in the colours this page sends (above), refuses
@@ -745,7 +745,9 @@ WanGP section is blocked on - and, from 1.14.0, reads and writes the page's prom
 SD-Neo-ModelSwitchRefiner's assistant panel, whose prompt box on the WanGP tab edits the
 prompt WanGP shows, and from 1.15.0 lays the WanGP page out as a studio under that
 assistant's Super Focused mode (since 1.15.1 its prompt alone beside its Generate, progress
-and gallery, stacked only on a phone) - so
+and gallery, stacked only on a phone), and from 1.16.0 counts every save WanGP makes of its
+form, so a send knows its save landed, and checks a job as WanGP's own queue would before
+anything is stored (below) - so
 WanGP's bridge must be updated and WanGP restarted; a
 build lacking one of the six queue components keeps the image send and refuses the queue
 with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking the generate trigger queues but never
@@ -763,31 +765,74 @@ because of your own work; and on Windows a Forge crash loses a generation that w
 which is reported as "could not be proved" rather than retried. `docs/wangp/SERVER_EXECUTION.md`
 is the whole of it, including what is still an inference waiting for a real install.
 
-**Settings come from the WanGP page.** With *WanGP queue: build queued jobs from the WanGP
-page's settings* on, a job takes its prompt and pictures from where you sent it and
-everything else — LoRAs and their weights, steps, guidance, resolution — from what the WanGP
-tab is set to. WanGP builds a job from the settings it last *saved* for the model, so the
-page keeps that save current without anything held open:
+**Settings come from the WanGP page - or, if you choose, from WanGP's saved settings.** Every
+job takes its prompt and pictures from where you sent it. Everything else - LoRAs and their
+weights, steps, guidance, resolution - comes from where **☰ Menu → WanGP Settings ›** in the
+Clipboard tab says, for the Clipboard's presses and the gallery's Send to WanGP alike:
+
+- **What the WanGP tab shows** (the default): the settings on the WanGP tab when you press.
+- **WanGP's saved settings, or the defaults**: the way jobs were built before 2026-10-31 -
+  WanGP's saved settings for the model (what its own Save Settings button writes, and what it
+  loads when you switch to that model), or the model's defaults when none are saved. Nothing on
+  the WanGP tab is read, the page stops saving its form, and no press warns that the settings
+  are not the ones on screen, because that is what was chosen.
+
+The choice is read on every press, so a job already queued keeps what it was pressed with. It
+used to be a Forge setting, *WanGP queue: build queued jobs from the WanGP page's settings*, off
+by default and easy to miss under *Settings → miniPaint / Canvas*; that page now says where the
+choice is. With what the WanGP tab shows, WanGP builds a job from the settings it last *saved*
+for the model, so the page keeps that save current without anything held open, and a press
+reads it at the press:
 
 - **As you change them.** About a second after you stop changing something in the WanGP
   form, the page saves it: one short request, never two at once, each with a time limit, and
   skipped while WanGP is loading a model's settings so a half-loaded form is never saved.
-- **Before every send.** The gallery's Generate, Clipboard's Add to Queue and the public API
-  ask the WanGP page to save just before they submit. With nothing changed since the last
-  save that costs nothing; otherwise it waits at most two seconds, and a WanGP page that is
-  not there or does not answer sends the job with WanGP's last saved settings.
+- **Before every send.** The gallery's Generate and Auto, Clipboard's Add to Queue and Auto,
+  and the public API ask the WanGP page to save just before they submit, and wait until
+  WanGP's save is seen to land - bridge 1.16.0 counts every save WanGP makes, whatever it
+  saved, so that is a fraction of a second - and two seconds at most. Every send saves, even
+  with nothing touched since the last save, because a WanGP page that changes its own form
+  (a settings file loaded, a preset applied) says nothing about it. A save a send could not
+  make is tried once more a second later.
+- **Frozen at the press.** A press in the Clipboard or the popup reads the settings WanGP has
+  just saved there and then and keeps them on the job, so a job that waits behind others
+  still runs at what was on screen when you pressed, not at what the WanGP tab holds when its
+  turn comes. A job from the public API, which may arrive with WanGP not running, reads them
+  when its turn comes.
 - **Once when the page loads.** One status check, with a fifteen-second limit, tells the
   WanGP tab that jobs use its settings. (Before this it was never told — the check only
   happened on returning from the background, and the listener for that was only installed by
   the check itself.)
 
-Every job then says where its settings came from — on its card in the Queue, in Queue Send
-History, in the Send to WanGP popup's history, and in the log: *saved from the WanGP page at
-send*, *WanGP's last saved settings (the page didn't answer)*, *WanGP's last saved settings
-(WanGP was loading a model's settings at send)*, or *the model's defaults (nothing saved
-yet)*. Saving as you change needs bridge 1.7.0, the session guard 1.8.0, the page's colours 1.9.0, its typeface 1.10.1 and the compact page under focus 1.11.0; with an older bridge the save before every
-send still happens, and waits up to two seconds each time because it cannot know nothing
-changed.
+**A job WanGP would not generate is refused at the press,** whichever WanGP Settings says. The
+press also asks WanGP's own check of the job - the one WanGP's queue makes before it takes a task, made on a copy with nothing
+queued (bridge 1.16.0): the job's model, its pictures, its prompt and the settings on screen. If
+WanGP would not generate it - no start image for a model that needs one, an empty prompt where one
+is required, a resolution or a frame count the model refuses - Add to Queue, Auto and the popup's
+Generate and Auto are refused there and then with *WanGP would not generate this with the settings
+on its screen:* and WanGP's own reason, nothing is stored, and the popup stays open: change the
+setting in the WanGP tab and press again. Before, such a job was stored, handed over, skipped by
+WanGP's queue and reported a minute later as never having reached it; a job that still meets
+WanGP's refusal later - one from the public API, or one pressed with an older bridge - now fails
+at once, with WanGP's reason. A job whose prompt the enhancer will write is checked with a stand-in
+for it, so its settings are judged and not its empty box; WanGP checks the written prompt when it
+queues the job.
+
+**A press that cannot have them says so.** When a job will not run at the settings on WanGP's
+screen — WanGP did not save its form in time, was loading a model's settings, had nothing saved
+for the model yet, or could not be asked at the press — the press says *Not the settings on
+WanGP's screen: this job runs at …* as the notice it leaves (marked like a failure) and first
+in the Queue's status line, and the log says which. Every job then says where its settings
+came from — on its card in the Queue, in Queue Send History, in the Send to WanGP popup's
+history, and in the log: *saved from the WanGP page at send*, *WanGP's last saved settings
+(its form was not saved at send)*, *WanGP's last saved settings (WanGP was loading a model's
+settings at send)*, or *the model's defaults (nothing saved yet)*. Saving as you change needs
+bridge 1.7.0, the session guard 1.8.0, the page's colours 1.9.0, its typeface 1.10.1, the
+compact page under focus 1.11.0, and knowing each save landed and the check at the press 1.16.0;
+with an older bridge the
+save before every send still happens, but nothing changed since the last save is taken on the
+page's word, and anything else waits out the two seconds because a save of an unchanged form
+cannot be told from no save at all.
 
 ## Legacy editor (Old UI)
 

@@ -116,6 +116,14 @@ class FakeChild:
         self.form = {"steps": 30, "image_prompt_type": "", "video_prompt_type": "", "image_start": None, "image_end": None, "image_refs": []}
         self.source = wire.BASE_RECORDED
         self.refuse = ""
+        #: Bridge 1.16.0's check at the press: whether this child answers it,
+        #: what WanGP would say about a job ("" takes it), and every ask -
+        #: with how many jobs were stored when it came, which is how a check
+        #: made before the job exists is told from one made after.
+        self.can_validate = True
+        self.invalid = ""
+        self.validations = []
+        self.unanswered_validations = 0
 
     def __call__(self, operation, payload):
         if operation == wire.CONTROL_HELLO:
@@ -126,12 +134,22 @@ class FakeChild:
                          "service": self.can_execute_ever, "service_possible": self.can_execute_ever,
                          "code": "" if self.can_execute_ever else wire.SERVICE_UNAVAILABLE,
                          "generation_running": self.busy, "queue_depth": 2 if self.busy else 0,
-                         "instance": self.instance}
+                         "instance": self.instance, "capabilities": {"validate": self.can_validate}}
+        if operation == wire.CONTROL_VALIDATE:
+            if not self.can_validate:
+                self.unanswered_validations += 1
+                return 404, {"ok": False, "code": "REQUEST_INVALID", "message": "no such operation"}
+            self.validations.append(dict(payload, jobs_stored=len(outbox.jobs())))
+            return 200, {"ok": True, "checked": True, "valid": not self.invalid, "error": self.invalid}
         if operation == wire.CONTROL_COMPOSE:
             self.composes.append(dict(payload))
             if not self.can_compose:
                 return 409, {"ok": False, "code": wire.COMPOSE_UNAVAILABLE, "message": "no settings"}
-            return 200, {"ok": True, "settings": dict(self.form), "source": self.source,
+            # As the bridge answers: a compose asked not to inherit reads no
+            # recorded form, and its base is the model's saved settings, or
+            # its defaults - factory_defaults.
+            source = self.source if payload.get("inherit", True) is not False else wire.BASE_FACTORY
+            return 200, {"ok": True, "settings": dict(self.form), "source": source,
                          "model_type": payload.get("model_type") or "t2v", "wan2gp_version": "8.4",
                          "residency_key": "t2v||", "model": {"type": payload.get("model_type") or "t2v", "label": "T2V"}}
         if operation == wire.CONTROL_SUBMIT:
@@ -568,6 +586,18 @@ def inheritance_toggle_checks(r: Results, clock) -> None:
     try:
         control.use_transport(child)
 
+        # Nothing said: the settings in view. There was a setting, off by
+        # default, and with it off no job carried what the WanGP tab showed.
+        outbox.use_inherit(None)
+        job = outbox.submit(_request("as nothing said"), PAGE)
+        r.check("with nothing said, a press is built from the WanGP page's settings",
+                outbox.inherit_settings() is True and outbox.get(job["job_id"])["inherit_settings"] is True)
+        _run(child, runtime)
+        r.check("and the child is asked to read the user's form",
+                child.composes and child.composes[-1].get("inherit") is True, str(child.composes[-1:]))
+        child.finish(outbox.get(job["job_id"])["execution_id"])
+        _run(child, runtime)
+
         outbox.use_inherit(False)
         job = outbox.submit(_request(), PAGE)
         r.check("a press with inheritance off records that it was off",
@@ -937,6 +967,252 @@ def event_loop_checks(r: Results, clock) -> None:
         _restore(monkey)
 
 
+def press_freeze_checks(r: Results, clock) -> None:
+    """A job runs at the settings in view at its press, not at its turn.
+
+    Reported: "the video that gets generated is not the setting that are
+    visible in wan2gp, but the last run settings ... I want all of my send to
+    wan2gp to use the settings that are in view!" A job used to be composed
+    when its turn came, from whatever WanGP had recorded by then. A press of
+    the Clipboard's or the gallery's own with WanGP up is frozen as it is
+    pressed, right after its page has saved WanGP's form.
+    """
+    _setup(clock)
+    process_log.begin("e" * 32, "executor press freeze check")
+    runtime = FakeRuntime()
+    runtime.state = FakeRuntime.READY
+    runtime.instance_id = "child-one"
+    child = FakeChild(clock)
+    monkey = []
+    _install(monkey, runtime)
+
+    def journal(job_id):
+        log = pathlib.Path(str(process_log.path()))
+        text = log.read_text(encoding="utf-8") if log.exists() else ""
+        return [line for line in text.splitlines() if job_id[:8] + ":" in line and "settings" in line]
+
+    try:
+        control.use_transport(child)
+        child.form["steps"] = 12
+        job = outbox.submit(_request(prompt="at the press"), PAGE, settings_flush=wire.FLUSH_COMMITTED)
+        stored = outbox.get(job["job_id"])
+        r.check("a Clipboard press with WanGP up is composed as it is pressed",
+                len(child.composes) == 1 and (stored.get("snapshot") or {}).get("settings_count"), str(child.composes))
+        r.check("from the form its page saved at send, and says so",
+                stored["snapshot"]["source"] == wire.BASE_FLUSHED
+                and outbox.settings_sentence(stored) == "saved from the WanGP page at send", str(stored["snapshot"]))
+        r.check("without moving it: it still waits its turn, and the press's own answer carries the snapshot",
+                stored["state"] == outbox.ADMITTED and (job.get("snapshot") or {}).get("settings_count"), str(stored["state"]))
+        r.check("the journal says when, in the one line every job writes about its settings",
+                [line for line in journal(job["job_id"]) if "settings - saved from the WanGP page at send, frozen at the press" in line]
+                and len([line for line in journal(job["job_id"]) if "settings - " in line]) == 1, str(journal(job["job_id"])))
+
+        # Somebody changes the WanGP tab while the job waits its turn.
+        child.form["steps"] = 40
+        _run(child, runtime)
+        r.check("a change made in WanGP after the press does not reach the job: it runs at the settings of its press",
+                child.submissions and child.submissions[-1]["settings"].get("steps") == 12 and len(child.composes) == 1,
+                str([item["settings"].get("steps") for item in child.submissions]))
+        child.finish(outbox.get(job["job_id"])["execution_id"])
+        _run(child, runtime)
+
+        control.use_transport(child)
+        later = outbox.submit(_request(prompt="the next one"), PAGE, settings_flush=wire.FLUSH_COMMITTED)
+        _run(child, runtime)
+        r.check("and the next press takes the ones in view now",
+                child.submissions[-1]["settings"].get("steps") == 40, str(child.submissions[-1]["settings"]))
+        child.finish(outbox.get(later["job_id"])["execution_id"])
+        _run(child, runtime)
+
+        # A compose that cannot be had at the press is had at the turn.
+        control.use_transport(child)
+        child.can_compose = False
+        cold = outbox.submit(_request(prompt="not now"), PAGE, settings_flush=wire.FLUSH_COMMITTED)
+        r.check("a press whose settings cannot be read at once is stored all the same, nothing frozen, and says so",
+                cold["state"] == outbox.ADMITTED and not outbox.get(cold["job_id"]).get("snapshot")
+                and [line for line in journal(cold["job_id"]) if "not frozen at the press" in line], str(journal(cold["job_id"])))
+        child.can_compose = True
+        composes = len(child.composes)
+        _run(child, runtime)
+        r.check("and is composed at its turn, as before",
+                len(child.composes) == composes + 1 and (outbox.get(cold["job_id"]).get("snapshot") or {}).get("settings_count"),
+                str(len(child.composes)))
+        child.finish(outbox.get(cold["job_id"])["execution_id"])
+        _run(child, runtime)
+
+        # Another extension's job may have been sent with WanGP stopped.
+        control.use_transport(child)
+        composes = len(child.composes)
+        api = outbox.submit(_request(prompt="from elsewhere"), PAGE, outbox.ORIGIN_API)
+        r.check("a public-API job is not frozen at its press: it is composed at its turn",
+                len(child.composes) == composes and not outbox.get(api["job_id"]).get("snapshot"), str(child.composes[composes:]))
+        _run(child, runtime)
+        r.check("where it gets one", len(child.composes) == composes + 1, str(len(child.composes)))
+    finally:
+        control.use_transport(None)
+        _restore(monkey)
+
+
+def press_check_checks(r: Results, clock) -> None:
+    """A job WanGP would not generate is refused at its press, nothing stored.
+
+    Asked for: "if the settings are invalid, and prevents generation, I would
+    like those to get an error when adding to queue or press auto." The press
+    reads the settings in view and asks WanGP's own check (bridge 1.16.0)
+    BEFORE the job exists: a stored job wakes the executor, which could send
+    a lone job before a check made afterwards had answered.
+    """
+    _setup(clock)
+    process_log.begin("d" * 32, "executor press check")
+    runtime = FakeRuntime()
+    runtime.state = FakeRuntime.READY
+    runtime.instance_id = "child-one"
+    child = FakeChild(clock)
+    monkey = []
+    _install(monkey, runtime)
+
+    def log():
+        path = pathlib.Path(str(process_log.path()))
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    # The journal is the checkout's own log file, kept across runs - a line a
+    # mutation run left there is still there - so every check below reads
+    # only what was written since its own press.
+    def since(mark):
+        return log()[mark:]
+
+    try:
+        control.use_transport(child)
+        child.form["steps"] = 9
+        before = len(outbox.jobs())
+        job = outbox.submit(_request(prompt="a lantern at dusk", start={"kind": "clipboard_asset", "id": _asset()}), PAGE,
+                            settings_flush=wire.FLUSH_COMMITTED)
+        asked = child.validations[-1] if child.validations else {}
+        stored = outbox.get(job["job_id"]) or {}
+        r.check("a press asks WanGP's check before its job exists, once",
+                len(child.validations) == 1 and asked.get("jobs_stored") == before and len(outbox.jobs()) == before + 1,
+                str([item.get("jobs_stored") for item in child.validations]))
+        r.check("about the job as it would be sent: the settings frozen, the prompt as typed, its own picture, its model",
+                asked.get("settings", {}).get("steps") == 9 and asked.get("prompt") == "a lantern at dusk"
+                and asked.get("media", {}).get(wire.EXEC_SLOT_START) == (stored.get("inputs") or {}).get(wire.EXEC_SLOT_START)
+                and asked.get("model_type") == (stored.get("snapshot") or {}).get("model_type")
+                and wire.valid_execution_id(asked.get("execution_id")) and asked.get("execution_id") != stored.get("execution_id"),
+                str({key: asked.get(key) for key in ("prompt", "media", "model_type")}))
+        r.check("and a job WanGP would take is stored frozen, and says WanGP would take it",
+                (stored.get("snapshot") or {}).get("source") == wire.BASE_FLUSHED and stored["state"] == outbox.ADMITTED
+                and f"job {job['job_id'][:8]}: t2v settings - saved from the WanGP page at send, frozen at the press; "
+                    "WanGP would take it" in log(), log()[-300:])
+        child.finish = getattr(child, "finish")
+        _run(child, runtime)
+        r.check("and is not composed again at its turn", len(child.composes) == 1, str(len(child.composes)))
+        child.finish(outbox.get(job["job_id"])["execution_id"])
+        _run(child, runtime)
+
+        control.use_transport(child)
+        child.invalid = "You must provide a Start Image"
+        before = len(outbox.jobs())
+        composes = len(child.composes)
+        pinned = job_inputs.pinned_ids()
+        mark = len(log())
+        refused = None
+        try:
+            outbox.submit(_request(prompt="a secret prompt", start={"kind": "clipboard_asset", "id": _asset((90, 10, 10, 255))}),
+                          PAGE, settings_flush=wire.FLUSH_COMMITTED)
+        except IntegrationError as error:
+            refused = error
+        r.check("a job WanGP would not generate is refused at its press, with WanGP's own reason",
+                refused is not None and refused.code == errors.WANGP_VALIDATION_REFUSED
+                and refused.detail == "You must provide a Start Image", str(refused and (refused.code, refused.detail)))
+        r.check("and nothing is stored: no job, no picture left pinned, nothing composed at a turn that will never come",
+                len(outbox.jobs()) == before and job_inputs.pinned_ids() == pinned and len(child.composes) == composes + 1,
+                str((len(outbox.jobs()) - before, len(job_inputs.pinned_ids() - pinned))))
+        written = since(mark)
+        r.check("and the journal says it by its code, never WanGP's sentence or the prompt",
+                f"press: refused - WanGP would not generate this job at its settings ({errors.WANGP_VALIDATION_REFUSED})" in written
+                and "a secret prompt" not in written and "You must provide a Start Image" not in written, written[-400:])
+        r.check("and the sentence the press shows is WanGP's reason after this extension's lead",
+                outbox.validation_refusal(refused) == "WanGP would not generate this with the settings on its screen: "
+                                                      "You must provide a Start Image", outbox.validation_refusal(refused))
+        child.invalid = ""
+
+        # A press whose prompt the enhancer will write is checked with a
+        # stand-in, so an empty typed prompt is not refused for being empty.
+        control.use_transport(child)
+        checked = executor.settings_at_press("t2v", True, wire.FLUSH_COMMITTED, {}, "", True)
+        r.check("a job whose prompt is still to be written is checked with a stand-in for it, never the empty box",
+                checked is not None and checked["checked"] is True
+                and child.validations[-1].get("prompt") == executor.CHECK_STAND_IN_PROMPT, str(child.validations[-1].get("prompt")))
+        checked = executor.settings_at_press("t2v", True, wire.FLUSH_COMMITTED, {}, None, False)
+        r.check("and one that inherits the page's prompt is checked with that, nothing laid over it",
+                checked is not None and "prompt" not in child.validations[-1], str(child.validations[-1]))
+
+        # A bridge that cannot check: the press goes ahead, as it always did.
+        control.use_transport(child)
+        child.can_validate = False
+        asked_before = len(child.validations)
+        mark = len(log())
+        quiet = outbox.submit(_request(prompt="not checked"), PAGE, settings_flush=wire.FLUSH_COMMITTED)
+        written = since(mark)
+        r.check("a bridge without the check is asked nothing more, and the press is stored frozen all the same",
+                quiet["state"] == outbox.ADMITTED and (outbox.get(quiet["job_id"]).get("snapshot") or {}).get("settings_count")
+                and len(child.validations) == asked_before
+                and [line for line in written.splitlines() if "WanGP's check could not be asked" in line]
+                and f"job {quiet['job_id'][:8]}: t2v settings - saved from the WanGP page at send, frozen at the press\n" in written + "\n"
+                and "WanGP would take it" not in written,
+                written[-300:])
+        r.check("one whose last hello still offered the check is asked, finds it gone, and the press goes ahead",
+                child.unanswered_validations == 1, str(child.unanswered_validations))
+        control.hello()
+        r.check("and once its hello says it has none, it is not even asked",
+                control.can_validate() is False
+                and executor.settings_at_press("t2v", True, wire.FLUSH_COMMITTED, {}, None, False)["checked"] is False
+                and len(child.validations) == asked_before and child.unanswered_validations == 1, str(control.can_validate()))
+        child.can_validate = True
+        _run(child, runtime)
+
+        # WanGP Settings on WanGP's saved settings, or the defaults - the way
+        # jobs were built before, chosen again: "I want to bring the setting
+        # back so I can have the old style". Read from the Clipboard's own
+        # config on every press, no seam.
+        outbox.use_inherit(None)
+        config.update(wangp_settings=config.WANGP_SETTINGS_SAVED)
+        control.use_transport(child)
+        control.hello()
+        asked = len(child.validations)
+        composes = len(child.composes)
+        mark = len(log())
+        chosen = outbox.submit(_request(prompt="the old way"), PAGE, settings_flush="")
+        stored = outbox.get(chosen["job_id"]) or {}
+        r.check("with WanGP's saved settings chosen, a press composes without the WanGP tab's form, at the press",
+                len(child.composes) == composes + 1 and child.composes[-1].get("inherit") is False
+                and stored.get("inherit_settings") is False and (stored.get("snapshot") or {}).get("source") == wire.BASE_FACTORY
+                and outbox.settings_source(stored) == outbox.SETTINGS_OFF, str((child.composes[-1:], stored.get("snapshot"))))
+        r.check("and WanGP still checks the job before it is stored",
+                len(child.validations) == asked + 1 and child.validations[-1].get("jobs_stored") == len(outbox.jobs()) - 1,
+                str(child.validations[-1:]))
+        r.check("and the press warns of nothing: the settings it runs at are the ones chosen, and its line says which",
+                outbox.settings_view(chosen) == {"source": outbox.SETTINGS_OFF, "sentence": outbox.SETTINGS_TEXT[outbox.SETTINGS_OFF],
+                                                 "in_view": False, "warning": ""}
+                and outbox.SETTINGS_TEXT[outbox.SETTINGS_OFF].startswith("WanGP's saved settings for the model, or its defaults")
+                and f"job {chosen['job_id'][:8]}: t2v settings - WanGP's saved settings for the model" in since(mark),
+                str(outbox.settings_view(chosen)))
+        _run(child, runtime)
+        child.finish(outbox.get(chosen["job_id"])["execution_id"])
+        _run(child, runtime)
+        config.update(wangp_settings=config.WANGP_SETTINGS_IN_VIEW)
+        control.use_transport(child)
+        back = outbox.submit(_request(prompt="in view again"), PAGE, settings_flush=wire.FLUSH_COMMITTED)
+        r.check("and choosing what the WanGP tab shows again builds the next press from it",
+                outbox.get(back["job_id"]).get("inherit_settings") is True and child.composes[-1].get("inherit") is True
+                and (outbox.get(back["job_id"]).get("snapshot") or {}).get("source") == wire.BASE_FLUSHED,
+                str(child.composes[-1:]))
+        _run(child, runtime)
+    finally:
+        config.update(wangp_settings=config.WANGP_SETTINGS_IN_VIEW)
+        control.use_transport(None)
+        _restore(monkey)
+
+
 def flush_attribution_checks(r: Results, clock) -> None:
     """"What you were looking at" and "what WanGP had recorded" are different.
 
@@ -988,7 +1264,7 @@ def flush_attribution_checks(r: Results, clock) -> None:
         r.check("the flushed one says its settings were saved from the WanGP page at send",
                 said[PROMPT]["sentence"] == "saved from the WanGP page at send", str(said[PROMPT]))
         r.check("the one whose page did not answer says it got WanGP's last saved settings, and why",
-                said["a fourth"]["sentence"] == "WanGP's last saved settings (the page didn't answer)", str(said["a fourth"]))
+                said["a fourth"]["sentence"] == "WanGP's last saved settings (its form was not saved at send)", str(said["a fourth"]))
         r.check("the one WanGP refused mid settings-load says that",
                 said["a third"]["sentence"] == "WanGP's last saved settings (WanGP was loading a model's settings at send)",
                 str(said["a third"]))
@@ -1009,7 +1285,7 @@ def flush_attribution_checks(r: Results, clock) -> None:
                 str(said["a fifth"]))
         source_for("a sixth", "", inherit=False)
         r.check("while one that was told not to take the page's settings says that, not 'nothing saved'",
-                said["a sixth"]["sentence"] == "the model's defaults (taking the WanGP page's settings is switched off)",
+                said["a sixth"]["sentence"] == "WanGP's saved settings for the model, or its defaults (chosen in place of what the WanGP tab shows)",
                 str(said["a sixth"]))
     finally:
         control.use_transport(None)
@@ -1207,6 +1483,8 @@ def run() -> Results:
     event_checks(r, clock)
     event_loop_checks(r, clock)
     flush_attribution_checks(r, clock)
+    press_freeze_checks(r, clock)
+    press_check_checks(r, clock)
     privacy_checks(r, clock)
     migration_checks(r, clock)
     enhanced_checks(r, clock)

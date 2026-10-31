@@ -3924,6 +3924,151 @@ def check_auto_sends_the_selected_picture(r: Results, page) -> None:
         settle_jobs()
 
 
+def check_a_press_says_when_the_settings_in_view_were_not_used(r: Results, page) -> None:
+    """The settings in view: a press whose job will not run at them says so.
+
+    Asked for: "I want all of my send to wan2gp to use the settings that are
+    in view!" A job built from a save WanGP made at the press runs at them,
+    and the page says no more than it did; one that falls back - WanGP did
+    not save its form in time, was loading a model's settings, or could not
+    be asked at the press - is said out loud, as the notice left on screen
+    and marked, by both of the tab's presses. The server's answers are
+    stood in for here; which answer a job gets is the outbox's, and its
+    checks hold every row.
+    """
+    open_clipboard(page)
+    warning = ("Not the settings on WanGP's screen: this job runs at WanGP's last saved settings "
+               "(its form was not saved at send)")
+    refusal = "WanGP would not generate this with the settings on its screen: You must provide a Start Image"
+    asked = []
+
+    def answer(route, request):
+        if request.method != "POST":
+            route.continue_()
+            return
+        try:
+            body = json.loads(request.post_data or "{}")
+        except ValueError:
+            body = {}
+        asked.append(body.get("action"))
+        if body.get("prompt") == "refuse me":
+            # WanGP's own check would not take the job: nothing stored.
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "ok": False, "code": "WANGP_VALIDATION_REFUSED", "instruction": None,
+                "status": refusal + " <small>nothing was stored; change the settings in the WanGP tab and press again</small>"}))
+            return
+        warned = body.get("prompt") == "warn me"
+        settings = ({"source": "last_saved_no_answer", "sentence": "WanGP's last saved settings (its form was not saved at send)",
+                     "in_view": False, "warning": warning} if warned else
+                    {"source": "saved_at_send", "sentence": "saved from the WanGP page at send", "in_view": True, "warning": ""})
+        status = ("Auto: square.png as First Frame and Reference. " if body.get("action") == "auto" else "") \
+            + "Queued on the server. <small>it goes next</small>"
+        mark = 7000 + len(asked)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "ok": True, "status": status, "settings": settings,
+            "instruction": {"nonce": "%08x" % mark, "job_id": "%032x" % mark, "executor": "server", "state": "admitted"}}))
+
+    shown = """() => { const t = document.querySelector('#minipaint_clipboard_root .minipaint-clip-toast');
+        return t && !t.hidden ? [t.textContent, t.classList.contains('minipaint-clip-toast-failure')] : null; }"""
+    page.route("**/minipaint-clipboard/queue*", answer)
+    try:
+        picked = _select_tile(page, "square.png")
+        page.evaluate("() => window.minipaintClipboard.addToQueue('in view', false)")
+        in_view = page.evaluate(shown)
+        page.evaluate("() => window.minipaintClipboard.addToQueue('warn me', false)")
+        added = page.evaluate(shown)
+        page.evaluate("() => window.minipaintClipboard.autoQueue('warn me', false)")
+        auto = page.evaluate(shown)
+        page.evaluate("() => window.minipaintClipboard.autoQueue('in view', false)")
+        auto_in_view = page.evaluate(shown)
+        page.evaluate("() => window.minipaintClipboard.addToQueue('refuse me', false)")
+        add_refused = page.evaluate(shown)
+        page.evaluate("() => window.minipaintClipboard.autoQueue('refuse me', false)")
+        auto_refused = page.evaluate(shown)
+        r.check("the presses reached the queue route, Add to Queue's and Auto's",
+                bool(picked) and asked == ["add", "add", "auto", "auto", "add", "auto"], str(asked))
+        r.check("a press WanGP's check refused leaves WanGP's reason as the notice, marked - Add to Queue's and Auto's",
+                add_refused == [refusal, True] and auto_refused == [refusal, True], str((add_refused, auto_refused)))
+        r.check("a press whose job runs at the settings on WanGP's screen says what it always said, unmarked",
+                in_view == ["Sent to WanGP. It is in Queue Send History.", False]
+                and auto_in_view == ["Auto: square.png as First Frame and Reference. Queued on the server.", False],
+                str((in_view, auto_in_view)))
+        r.check("Add to Queue whose job will not run at them leaves the warning as the notice, marked",
+                added == [warning + ".", True], str(added))
+        r.check("and Auto says where the picture went and the warning together, marked",
+                auto == ["Auto: square.png as First Frame and Reference. Queued on the server. " + warning + ".", True], str(auto))
+    finally:
+        page.unroute("**/minipaint-clipboard/queue*")
+        page.evaluate("() => window.minipaintClipboard.select('')")
+
+
+def check_wangp_settings_is_a_choice_in_the_menu(r: Results, page) -> None:
+    """Menu → WanGP Settings: where every WanGP job's settings come from.
+
+    Asked for once it had gone - "I didn't know this was a setting. I couldn't
+    find it. So I actually want to bring the setting back so I can have the
+    old style" - and put where the presses that use it are, beside Auto
+    Options: what the WanGP tab shows (the default), or WanGP's saved settings
+    for the model, or its defaults. A choice is saved over the tab's route,
+    said where the press was, and the page told at once with one snapshot, so
+    the WanGP tab stops (or starts) saving its form without a reload.
+    """
+    from minipaint_neo.clipboard import config as clip_config
+    from minipaint_neo.clipboard import outbox as clip_outbox
+
+    open_clipboard(page)
+    radios = """() => Array.from(document.querySelectorAll('.minipaint-clip-menu [role=menuitemradio]'))
+        .map(b => [b.textContent.replace('\u2713', '').trim(), b.getAttribute('aria-checked')])"""
+    synced = []
+
+    def heard(request):
+        if "/minipaint-interop/sync" in request.url:
+            synced.append(request.url)
+
+    clip_outbox.use_inherit(None)
+    page.on("request", heard)
+    try:
+        page.evaluate("() => window.minipaintClipboard.toggleMenu()")
+        listed = page.evaluate("""() => Array.from(document.querySelectorAll('.minipaint-clip-menu .minipaint-clip-menu-item'))
+            .map(b => b.textContent.trim())""")
+        r.check("the menu has WanGP Settings, right after Auto Options",
+                "WanGP Settings ›" in listed and listed.index("WanGP Settings ›") == listed.index("Auto Options ›") + 1, str(listed))
+        r.check("which opens", menu_click(page, "WanGP Settings") == "clicked")
+        r.check("on two choices, what the WanGP tab shows ticked until changed",
+                page.evaluate(radios) == [["What the WanGP tab shows", "true"], ["WanGP's saved settings, or the defaults", "false"]],
+                str(page.evaluate(radios)))
+        before = len(synced)
+        r.check("choosing WanGP's saved settings is one press", menu_click(page, "WanGP's saved settings") == "clicked")
+        page.wait_for_function("() => window.minipaintClipboard.wangpSettings() === 'saved'", timeout=8000)
+        for _ in range(40):
+            if len(synced) > before:
+                break
+            page.wait_for_timeout(100)
+        r.check("which the host keeps, and every later press reads",
+                clip_config.load().wangp_settings == clip_config.WANGP_SETTINGS_SAVED and clip_outbox.inherit_settings() is False,
+                str(clip_config.load().wangp_settings))
+        said = toast(page)
+        r.check("and says what it means, where the press was, closing the menu",
+                said.startswith("WanGP jobs now take WanGP’s saved settings for the model, or its defaults")
+                and page.evaluate("() => window.minipaintClipboard.debug().menuOpen") is False, said)
+        r.check("and the page is told at once - one snapshot - so the WanGP tab stops saving its form",
+                len(synced) == before + 1, str(synced[before:]))
+        page.evaluate("() => window.minipaintClipboard.toggleMenu()")
+        menu_click(page, "WanGP Settings")
+        r.check("opened again, the tick has moved",
+                page.evaluate(radios) == [["What the WanGP tab shows", "false"], ["WanGP's saved settings, or the defaults", "true"]],
+                str(page.evaluate(radios)))
+        menu_click(page, "What the WanGP tab shows")
+        page.wait_for_function("() => window.minipaintClipboard.wangpSettings() === 'in_view'", timeout=8000)
+        r.check("and choosing what the WanGP tab shows puts every later press back on it",
+                clip_config.load().wangp_settings == clip_config.WANGP_SETTINGS_IN_VIEW and clip_outbox.inherit_settings() is True
+                and toast(page).startswith("WanGP jobs now take what the WanGP tab shows"), toast(page))
+    finally:
+        page.remove_listener("request", heard)
+        clip_config.update(wangp_settings=clip_config.WANGP_SETTINGS_IN_VIEW)
+        page.evaluate("() => window.minipaintClipboard.closeMenu()")
+
+
 # --------------------------------------------------------------------------
 # PNG Info, archives and the full-screen view
 # --------------------------------------------------------------------------
@@ -4908,6 +5053,10 @@ def run() -> Results:
                     ("check_the_prompt_editor_fills_the_window", lambda: check_the_prompt_editor_fills_the_window(r, page)),
                     ("check_the_history_button_opens_the_last_prompts", lambda: check_the_history_button_opens_the_last_prompts(r, page)),
                     ("check_auto_sends_the_selected_picture", lambda: check_auto_sends_the_selected_picture(r, page)),
+                    ("check_a_press_says_when_the_settings_in_view_were_not_used",
+                     lambda: check_a_press_says_when_the_settings_in_view_were_not_used(r, page)),
+                    ("check_wangp_settings_is_a_choice_in_the_menu",
+                     lambda: check_wangp_settings_is_a_choice_in_the_menu(r, page)),
                     ("check_the_toolbar_flyouts_are_the_one_door", lambda: check_the_toolbar_flyouts_are_the_one_door(r, page)),
                     ("check_view_outputs_is_a_gallery", lambda: check_view_outputs_is_a_gallery(r, page)),
                     ("check_the_player_is_the_pages", lambda: check_the_player_is_the_pages(r, page)),

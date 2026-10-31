@@ -80,12 +80,13 @@ import time
 import typing
 
 try:
-    from . import admission, compatibility, handoff, protocol
+    from . import admission, compatibility, handoff, protocol, scrub
 except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import admission  # type: ignore[no-redef]
     import compatibility  # type: ignore[no-redef]
     import handoff  # type: ignore[no-redef]
     import protocol  # type: ignore[no-redef]
+    import scrub  # type: ignore[no-redef]
 
 
 #: How often the tracker looks at the shared queue. Seconds, never
@@ -112,6 +113,15 @@ MERGE_GRACE_SECONDS = 60.0
 #: What a completed task's outputs are looked for under, in the shared
 #: record. The first that is a list of strings wins.
 OUTPUT_KEYS: typing.Tuple[str, ...] = ("file_list", "files", "output_files", "generated_files")
+
+
+#: What WanGP's console says before its own lines for a check at the press, so
+#: they are never read as a task being loaded.
+CHECK_LOG_PREFIX = "[minipaint check]"
+
+#: The picture slots a task's settings carry, for a WanGP whose loader cannot
+#: say which settings hold paths (its own ``ATTACHMENT_KEYS``' image half).
+PICTURE_KEYS: typing.Tuple[str, ...] = ("image_start", "image_end", "image_refs", "image_guide", "image_mask")
 
 
 class ExecutionError(Exception):
@@ -233,7 +243,83 @@ class Executor:
         )
         return self.ledger.get(execution_id) or record
 
-    def _prepare(self, request: typing.Mapping[str, typing.Any]) -> typing.Dict[str, typing.Any]:
+    # -- the check at the press (bridge 1.16.0) --------------------------------
+
+    def validate(self, request: typing.Mapping[str, typing.Any]) -> dict:
+        """Would WanGP take this job? Its own check, over the job exactly as
+        ``submit`` would queue it - with nothing queued and nothing recorded.
+
+        WHY THIS EXISTS.
+
+        WanGP checks a task only when its queue loader unpacks it
+        (``load_queue_action`` -> ``_parse_task_manifest`` ->
+        ``validate_task``), on an event of its own after ``submit`` has
+        returned, and a task that fails is skipped: the reason goes into
+        ``gen["queue_errors"]`` under the task's client id and into a toast on
+        whatever page ran the load. So a job whose settings WanGP would not
+        generate with was submitted, never reached the queue, and was called
+        refused a minute later in none of WanGP's words. Asked for: "if the
+        settings are invalid, and prevents generation, I would like those to
+        get an error when adding to queue or press auto."
+
+        So the loader's steps for one task are taken here, on a copy of the
+        task ``submit`` would build: the model type (``_extract_model_type``),
+        the pictures opened as images (``_load_task_attachments`` - the check
+        reads images, never paths), then ``validate_task``. What ``submit``
+        would refuse before WanGP saw it - a picture gone, a model this WanGP
+        does not have - is refused here too. A WanGP without the check, or
+        without the loader step a picture needs, is ``checked: False``, and
+        the press goes ahead as it always did. An exception WanGP raises in
+        those steps is the loader's own failure ("Inline queue validation
+        failed"), so it is a verdict, not a reason to give up.
+        """
+        host = self.compat.host
+        validator = host.read_global("validate_task")
+        if not callable(validator):
+            return {"ok": True, "checked": False, "valid": False, "error": "",
+                    "diagnosis": "this WanGP has no validate_task to ask"}
+        try:
+            settings = self._prepare(request, quiet=True)
+        except ExecutionError as error:
+            return {"ok": True, "checked": True, "valid": False,
+                    "error": scrub.line(error.detail or error.code, protocol.VALIDATION_ERROR_MAX)}
+        params = dict(settings)
+        params.pop(compatibility.PLUGIN_DATA_KEY, None)
+        task: typing.Dict[str, typing.Any] = {"id": 0, "params": params, compatibility.PLUGIN_DATA_KEY: {}}
+        extract = host.read_global("_extract_model_type")
+        has_paths = host.read_global("_task_has_path_attachments")
+        loader = host.read_global("_load_task_attachments")
+        try:
+            state = self.compat.shared_state(self.service())
+            pictures = bool(has_paths(params)) if callable(has_paths) else any(
+                isinstance(params.get(key), (str, list)) and params.get(key) for key in PICTURE_KEYS)
+        except Exception as error:
+            return {"ok": True, "checked": False, "valid": False, "error": "",
+                    "diagnosis": f"the check could not be set up ({type(error).__name__})"}
+        if pictures and not callable(loader):
+            return {"ok": True, "checked": False, "valid": False, "error": "",
+                    "diagnosis": "this WanGP has no _load_task_attachments to open the pictures with"}
+        try:
+            if callable(extract):
+                _model_type, error = extract(params, state, CHECK_LOG_PREFIX)
+                if error:
+                    return self._refused(error)
+            params["state"] = state
+            if pictures:
+                loader(params, "", None, CHECK_LOG_PREFIX)
+            validated, error = validator(task, state)
+        except Exception as error:
+            return self._refused(f"WanGP's own check of these settings failed: {type(error).__name__}: {error}")
+        if validated is None:
+            return self._refused(error or "")
+        return {"ok": True, "checked": True, "valid": True, "error": ""}
+
+    @staticmethod
+    def _refused(error: typing.Any) -> dict:
+        said = scrub.line(str(error or "").strip() or "WanGP's check refused the task", protocol.VALIDATION_ERROR_MAX)
+        return {"ok": True, "checked": True, "valid": False, "error": said}
+
+    def _prepare(self, request: typing.Mapping[str, typing.Any], quiet: bool = False) -> typing.Dict[str, typing.Any]:
         """The composed base, with this job's own prompt, media and id on it.
 
         Everything the request does not own is the user's configuration and
@@ -250,7 +336,7 @@ class Executor:
             settings[key] = prompt
         media = self._resolve_media(request.get("media") or {})
         switched = self.compat.apply_media_to_settings(settings, media)
-        if switched:
+        if switched and not quiet:
             self._note(f"execute {request['execution_id'][:8]}: switched on {', '.join(switched)}")
         client_key = self.compat.settings_key(compatibility.CLIENT_ID) or "client_id"
         settings[client_key] = request["execution_id"]
@@ -569,15 +655,20 @@ class Executor:
                 # completion - unless it recorded a refusal against the id,
                 # which is the one piece of correlated evidence there is.
                 if admission.refusal_evidence(gen, execution_id):
-                    self.ledger.update(execution_id, state=protocol.EXEC_FAILED,
-                                       code=compatibility.WANGP_VALIDATION_REFUSED,
-                                       message="WanGP declined the task", stage="")
-                    self._note(f"execute {execution_id[:8]}: WanGP declined it")
+                    self._declined(execution_id, gen)
                 else:
                     files = self._outputs(gen, float(seen["submitted_at"]))
                     self.ledger.update(execution_id, state=protocol.EXEC_DONE, stage="",
                                        generated_files=files, position=None, queue_depth=depth)
                     self._note(f"execute {execution_id[:8]}: finished with {len(files)} file(s)")
+                with self._lock:
+                    self._watched.pop(execution_id, None)
+            elif admission.refusal_evidence(gen, execution_id):
+                # Never queued, and WanGP said why: its loader checked the task
+                # and skipped it, recording the reason under the client id.
+                # Said now and in its words, rather than as a task that never
+                # arrived once the grace below had run out.
+                self._declined(execution_id, gen)
                 with self._lock:
                     self._watched.pop(execution_id, None)
             elif now - float(seen["submitted_at"]) > MERGE_GRACE_SECONDS:
@@ -595,6 +686,16 @@ class Executor:
             for execution_id, seen in watching.items():
                 if execution_id in self._watched:
                     self._watched[execution_id] = seen
+
+    def _declined(self, execution_id: str, gen: typing.Any) -> None:
+        """WanGP refused this task: the job fails with WanGP's own reason."""
+        reason = scrub.line(admission.refusal_reason(gen, execution_id), protocol.VALIDATION_ERROR_MAX)
+        self.ledger.update(execution_id, state=protocol.EXEC_FAILED,
+                           code=compatibility.WANGP_VALIDATION_REFUSED,
+                           message=f"WanGP declined the task: {reason}" if reason else "WanGP declined the task", stage="")
+        # WanGP's reason goes to the job, not to this line: a sentence about a
+        # prompt template can quote the prompt.
+        self._note(f"execute {execution_id[:8]}: WanGP declined it")
 
     def _outputs(self, gen: typing.Any, since: float) -> typing.List[str]:
         """The files this generation produced, as far as the record will say.

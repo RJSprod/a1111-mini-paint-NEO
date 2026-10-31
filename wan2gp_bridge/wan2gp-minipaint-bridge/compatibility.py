@@ -32,6 +32,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import threading
 import typing
 
 try:  # the plugin folder is loaded both as a package and as a bare directory
@@ -40,7 +41,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.15.1"
+BRIDGE_VERSION = "1.16.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -315,6 +316,29 @@ COMPONENTS: typing.Tuple[ComponentSpec, ...] = (
 
 COMPONENTS_BY_KEY = {spec.key: spec for spec in COMPONENTS}
 
+#: The attribute WanGP's ``record_model_form`` carries once the bridge counts
+#: its calls (``Compatibility.commit_count``).
+COMMITS_ATTRIBUTE = "_minipaint_commits"
+
+
+class CommitCounts:
+    """How many forms WanGP has recorded, per model, since the bridge began
+    counting. Written from WanGP's Gradio workers, read from the bridge's own
+    event, so every touch is under one lock."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: typing.Dict[str, int] = {}
+
+    def add(self, model_type: typing.Any) -> None:
+        key = str(model_type or "")
+        with self._lock:
+            self._counts[key] = self._counts.get(key, 0) + 1
+
+    def get(self, model_type: typing.Any) -> int:
+        with self._lock:
+            return int(self._counts.get(str(model_type or ""), 0))
+
 #: Globals asked for through ``request_global``. These are session/process
 #: facts rather than widgets, and the plugin API is the only sanctioned way to
 #: see them.
@@ -352,6 +376,11 @@ GLOBALS: typing.Tuple[str, ...] = (
     # is the only module import this whole plugin makes into Wan2GP and is
     # confined to this file on purpose.
     "service_for",
+    # Bridge 1.16.0, the check at the press: WanGP's own check of a task, and
+    # the two steps its queue loader takes before it - the model type, and
+    # the pictures opened as images - so a job is checked exactly as WanGP
+    # would check it when it queued it, with nothing queued.
+    "validate_task", "_extract_model_type", "_task_has_path_attachments", "_load_task_attachments",
 )
 
 #: The exact Wan2GP revision the protocol-6 control plane was proven against.
@@ -1437,6 +1466,23 @@ class Compatibility:
                 return found
         return None
 
+    def shared_state(self, service: typing.Any = None) -> typing.Any:
+        """The state the shared generation record lives in, or None.
+
+        WanGP's queue loader hands its page's state to every step of a task's
+        check; the check at the press has no page, and hands the one the
+        service itself keeps - the state whose ``gen`` is the shared record.
+        """
+        if service is None:
+            service = self.service()
+        if service is None:
+            return None
+        for attribute in ("_state", "state", "shared_state"):
+            candidate = getattr(service, attribute, None)
+            if self._gen_of_state(candidate) is not None:
+                return candidate
+        return None
+
     def _gen_of_state(self, state: typing.Any) -> typing.Any:
         if state is None:
             return None
@@ -1974,6 +2020,53 @@ class Compatibility:
         except Exception:
             return ""
         return hashlib.sha256(canonical.encode("utf-8", "replace")).hexdigest()[:32]
+
+    def commit_count(self, service: typing.Any, model_type: str) -> typing.Optional[int]:
+        """How many times WanGP has recorded a form for this model, or None.
+
+        THE ONE WAY A SAVE IS SEEN TO HAPPEN, WHATEVER IT SAVED (bridge 1.16.0).
+
+        ``recorded_fingerprint`` moves only when the values do, so a save that
+        found the record already current looked exactly like a save that
+        never ran, and a parent waiting on one could only run out its limit
+        and guess - and guessing "saved" is how a job came to run at the last
+        run's settings. Every commit ends in ``service.record_model_form``
+        (``save_inputs`` with target "state"), so the calls are counted: the
+        service's own method, wrapped on its one instance the first time this
+        is asked, counting after the record is written. A count that moved
+        since a flush was pressed is a save that landed. It is per model and
+        process-wide, so another page saving the same model at the same moment
+        would count too, and that page's form is what is then recorded.
+
+        The wrapper carries its counts, so a reloaded plugin finds the first
+        one's rather than wrapping a wrapper. None when there is no service or
+        no such method to count, and the parent then reads the fingerprint
+        as it always did.
+        """
+        if service is None or not model_type:
+            return None
+        method = getattr(service, "record_model_form", None)
+        if not callable(method):
+            return None
+        counts = getattr(method, COMMITS_ATTRIBUTE, None)
+        if not isinstance(counts, CommitCounts):
+            counts = CommitCounts()
+            original = method
+
+            def counted(*args: typing.Any, **keywords: typing.Any) -> typing.Any:
+                # WanGP's call goes through exactly as it was made, whatever
+                # its shape: the count is the only thing added, and only once
+                # the record is written (a call that raises counts nothing).
+                answer = original(*args, **keywords)
+                counts.add(args[0] if args else keywords.get("model_type", keywords.get("model")))
+                return answer
+
+            setattr(counted, COMMITS_ATTRIBUTE, counts)
+            try:
+                setattr(service, "record_model_form", counted)
+            except Exception:
+                return None
+        return counts.get(model_type)
 
     def current_model_type(self, service: typing.Any = None) -> str:
         """The model this child is on, with no page to ask.

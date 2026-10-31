@@ -778,8 +778,13 @@ def submit(
             notes.append("a Clipboard slot names a file that is gone; switch off Inherit, or press Refresh in Clipboard")
         elif view is not None:
             notes.append("nothing was stored")
-        refused = {"ok": False, "code": error.code, "message": (view or {}).get("message") or errors.message(error.code),
-                   "notes": notes}
+        message = (view or {}).get("message") or errors.message(error.code)
+        if error.code == errors.WANGP_VALIDATION_REFUSED:
+            # WanGP's own check of the job at its settings said no: its
+            # reason, in its words, and the popup stays open to say it.
+            message = outbox.validation_refusal(error)
+            notes = [outbox.VALIDATION_REFUSED_NOTE]
+        refused = {"ok": False, "code": error.code, "message": message, "notes": notes}
         if view is not None:
             refused["readiness"] = view
         return refused
@@ -815,7 +820,14 @@ def submit(
         line = "Queued; the prompt is being enhanced first."
     if auto:
         line = f"Auto: the picture as {config.auto_roles_text(kept)}. {line}"
+    settings = outbox.settings_view(job)
     notes = [f"{pending - 1} ahead of it" if pending > 1 else "it goes next"]
+    if settings["warning"]:
+        # First among the notes, and in the answer for the popup to say out
+        # loud: a job that will not run at what WanGP is showing.
+        notes.insert(0, settings["warning"])
+        _journal(f"{'auto' if auto else 'generate'}: job {job['job_id'][:8]} - not the settings on WanGP's screen "
+                 f"({settings['source'] or 'read at its turn'})")
     if dropped and auto:
         notes.append(config.auto_roles_text(dropped) + (" is" if len(dropped) == 1 else " are")
                      + " not read by the current model, so Auto left " + ("it" if len(dropped) == 1 else "them") + " out")
@@ -833,6 +845,7 @@ def submit(
                         "executor": job.get("executor", outbox.EXECUTOR_BROWSER), "state": job.get("state", "")},
         "status": line,
         "notes": notes,
+        "settings": settings,
         "roles": kept,
         "dropped_roles": dropped,
         "auto": bool(auto),

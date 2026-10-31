@@ -1076,8 +1076,13 @@ window.minipaintIntercept = (function () {
             mirrorPrompt(body.prompt);
             mirrorEnhance(body.enhance);
             close();
+            // A job that will not run at the settings on WanGP's screen is
+            // the server's first note, and the notice is marked for it: it is
+            // the one thing about the press worth stopping for.
+            const warning = answer.settings && typeof answer.settings.warning === "string" ? answer.settings.warning : "";
             const first = Array.isArray(answer.notes) && answer.notes.length ? " " + answer.notes[0] + "." : "";
-            toast(String(answer.status || "Queued for WanGP.") + first, false);
+            toast(String(answer.status || "Queued for WanGP.") + first, !!warning);
+            if (warning) { note((viaAuto ? "auto" : "generate") + ": not the settings on WanGP's screen (" + String(answer.settings.source || "read at its turn") + ")"); }
             afterSubmit(answer.instruction);
             const used = Array.isArray(answer.roles) ? answer.roles : body.roles;
             note((viaAuto ? "auto" : "generate") + ": job " + String(answer.job_id || "").slice(0, 8) + " stored as " + (used.join(", ") || "no role"));

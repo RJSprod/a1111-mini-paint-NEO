@@ -416,6 +416,30 @@ def refusal_evidence(gen: typing.Any, request_id: str) -> bool:
     return False
 
 
+def refusal_reason(gen: typing.Any, request_id: str) -> str:
+    """WanGP's own words for the rejection it recorded against this request,
+    or "" when it recorded none or said nothing.
+
+    Read from the same entry ``refusal_evidence`` finds: WanGP's
+    ``record_queue_error`` keeps ``(error, abort, ...)`` under the client id,
+    and a build that keeps a mapping is read for its ``error`` or
+    ``message``.
+    """
+    if not isinstance(gen, dict):
+        return ""
+    errors = gen.get("queue_errors")
+    entry: typing.Any = None
+    if isinstance(errors, dict):
+        entry = errors.get(request_id)
+    elif isinstance(errors, (list, tuple)):
+        entry = next((item for item in errors if isinstance(item, dict) and item.get("client_id") == request_id), None)
+    if isinstance(entry, (list, tuple)) and entry:
+        entry = entry[0]
+    if isinstance(entry, dict):
+        entry = entry.get("error") or entry.get("message")
+    return entry.strip()[:400] if isinstance(entry, str) else ""
+
+
 __all__ = [
     "GALLERY_KEYS",
     "LETTER_KEYS",
@@ -428,7 +452,7 @@ __all__ = [
     "letters",
     "matching_tasks",
     "queue_length",
-    "refusal_evidence",
+    "refusal_evidence", "refusal_reason",
     "restore_plan",
     "task_position",
     "track_state",

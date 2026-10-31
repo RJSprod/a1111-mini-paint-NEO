@@ -245,8 +245,10 @@ class World:
         for _ in range(count):
             executor.step()
 
-    def job(self, prompt="a lighthouse in a storm"):
-        return outbox.submit({"request_id": os.urandom(16).hex(), "prompt": prompt}, PAGE)
+    def job(self, prompt="a lighthouse in a storm", origin=None):
+        """A press - the Clipboard's unless another origin is named."""
+        return outbox.submit({"request_id": os.urandom(16).hex(), "prompt": prompt}, PAGE,
+                             **({"origin": origin} if origin else {}))
 
     def journal(self):
         path = pathlib.Path(str(process_log.path()))
@@ -542,7 +544,10 @@ def gate_checks(r: Results) -> None:
     world = World()
     try:
         world.runtime.ready()
-        job = world.job()
+        # A job with nothing frozen at its press - a public-API caller's. The
+        # Clipboard's own presses freeze their settings as they are pressed
+        # (executor.settings_at_press), which is before any lease; see below.
+        job = world.job(origin=outbox.ORIGIN_API)
         world.steps(2)
         r.check("a job about to compose", outbox.get(job["job_id"])["state"] == outbox.COMPOSING)
         lease = turns.request(OWNER)["lease"]
@@ -553,6 +558,25 @@ def gate_checks(r: Results) -> None:
         world.steps(4)
         r.check("and composes and submits once it is given back",
                 len(world.child.composes) == 1 and len(world.child.submissions) == 1)
+    finally:
+        world.close()
+
+    world = World()
+    try:
+        world.runtime.ready()
+        job = world.job()
+        pressed = len(world.child.composes)
+        r.check("a Clipboard press with WanGP up has its settings frozen as it is pressed",
+                pressed == 1 and (outbox.get(job["job_id"]).get("snapshot") or {}).get("settings_count"), str(world.child.composes))
+        world.steps(2)
+        lease = turns.request(OWNER)["lease"]
+        world.steps(3)
+        r.check("a lease that begins after it asks for nothing more of WanGP's settings while it lasts",
+                len(world.child.composes) == pressed and world.child.submissions == [], str(world.child.composes))
+        turns.release(lease)
+        world.steps(4)
+        r.check("and given back, the job is submitted at the settings of its press, composed once",
+                len(world.child.composes) == pressed and len(world.child.submissions) == 1, str(world.child.submissions))
     finally:
         world.close()
 

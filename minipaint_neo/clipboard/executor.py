@@ -66,6 +66,7 @@ this is the one thread allowed to use the control plane.
 
 from __future__ import annotations
 
+import secrets
 import threading
 import time
 import typing
@@ -633,14 +634,144 @@ def _wait_for_service(job: dict, code: str) -> bool:
     return True
 
 
+#: How long a press waits for its settings to be composed. Far less than a
+#: turn's own compose may take: a press is a person waiting on a button, and a
+#: compose that cannot be had in this long is left to the job's turn.
+PRESS_COMPOSE_TIMEOUT = 8.0
+
+
+def _snapshot_from(answer: typing.Mapping[str, typing.Any], job: typing.Mapping[str, typing.Any]) -> dict:
+    """The frozen base a compose answer makes for this job, and where it came from."""
+    source = answer["source"]
+    if source == wire.BASE_RECORDED and job.get("settings_flush") in wire.FLUSH_FRESH:
+        # Same seam, different promise. The page committed its live form on
+        # purpose before it pressed, so this base is what was on screen -
+        # not whatever WanGP happened to have recorded last. The job says
+        # which, because those are answers to different questions and a
+        # reader of the queue is entitled to tell them apart.
+        source = wire.BASE_FLUSHED
+    return {
+        "schema": 1,
+        "model_type": answer["model_type"],
+        "settings": answer["settings"],
+        "source": source,
+        "captured_at": _now(),
+        "wan2gp_version": answer["wan2gp_version"],
+        "residency_key": answer["residency_key"],
+    }
+
+
+#: The prompt a job whose prompt is still to be written is checked with. The
+#: enhancer writes the real one after the press, so the check at the press
+#: judges the settings and leaves the prompt's own rules to the prompt the job
+#: will have - which WanGP checks again when it queues it.
+CHECK_STAND_IN_PROMPT = "A prompt the enhancer will write."
+
+
+def settings_at_press(
+    model_type: str,
+    inherit: bool,
+    settings_flush: str,
+    media: typing.Mapping[str, typing.Any],
+    prompt: typing.Optional[str],
+    enhancing: bool,
+) -> typing.Optional[dict]:
+    """A Clipboard or gallery press's settings, read at the press - and
+    WanGP's own word that it would generate the job - before the job exists.
+
+    THE SETTINGS IN VIEW ARE THE PRESS'S, NOT THE TURN'S. A job used to be
+    composed when its turn came - after every job ahead of it had been sent,
+    which behind a long generation is minutes after the press - from whatever
+    WanGP had recorded by then: a change made in the WanGP tab since, or
+    nothing newer than the last run. Asked for: "I want all of my send to
+    wan2gp to use the settings that are in view!" The page saves WanGP's form
+    just before it presses (the WanGP bundle's ``saveForSend``), so the moment
+    after the press is when the record holds what was on screen; this reads
+    it then, and the job is stored with it.
+
+    AND WANGP IS ASKED WHETHER IT WOULD RUN IT. Asked for: "if the settings
+    are invalid, and prevents generation, I would like those to get an error
+    when adding to queue or press auto." WanGP checks a task only when it
+    queues it, and skips one that fails, so a job at settings it would not
+    generate with used to be stored, sent, and called refused a minute later.
+    The bridge (1.16.0) runs WanGP's own check over the job as it would be
+    sent (``control.validate``), and a job WanGP would not take is refused
+    here, with WanGP's reason, before anything is stored - the raise is an
+    IntegrationError the press answers with.
+
+    BEFORE THE JOB IS STORED, AND THAT ORDER IS THE POINT. Storing a job wakes
+    the executor's own thread, which takes a lone job on at once: one stored
+    first and checked after could be composed, and sent, before its check had
+    answered.
+
+    Only while WanGP is up to be asked, which the Clipboard's and the
+    gallery's readiness gate has just said. Settings that cannot be read in
+    time leave the job to be composed at its turn, as before (None); a check
+    that cannot be made - an older bridge, a WanGP without the check - leaves
+    the job to meet WanGP's check when WanGP queues it (``checked`` False).
+    Neither refuses the press.
+    """
+    from ..wangp import control
+
+    try:
+        answer = control.compose(model_type, inherit=bool(inherit), timeout=PRESS_COMPOSE_TIMEOUT)
+    except Exception as error:  # noqa: BLE001 - its turn composes it, as it always did
+        _journal(f"press: settings not read at the press ({getattr(error, 'code', '') or type(error).__name__}); "
+                 "composed at the job's turn")
+        return None
+    if not answer.get("ok"):
+        _journal(f"press: settings not read at the press ({answer.get('code') or 'no base'}); composed at the job's turn")
+        return None
+    snapshot = _snapshot_from(answer, {"settings_flush": settings_flush})
+    checked = _check_at_press(snapshot, media, CHECK_STAND_IN_PROMPT if enhancing else prompt)
+    return {"snapshot": snapshot, "model": answer.get("model"), "checked": checked}
+
+
+def _check_at_press(snapshot: typing.Mapping[str, typing.Any], media: typing.Mapping[str, typing.Any],
+                    prompt: typing.Optional[str]) -> bool:
+    """WanGP's own check of the job, through the bridge. True when it passed,
+    False when it could not be made; raises when WanGP would not take it."""
+    from ..wangp import control
+
+    if control.can_validate() is False:
+        # A recent hello said this bridge has no check: not asked at all.
+        return False
+    try:
+        verdict = control.validate(secrets.token_hex(16), snapshot["settings"], prompt=prompt, media=media,
+                                   model_type=str(snapshot.get("model_type") or ""), timeout=control.VALIDATE_TIMEOUT)
+    except IntegrationError as error:
+        _journal(f"press: WanGP's check could not be asked ({error.code}); WanGP checks the job when it queues it")
+        return False
+    if not verdict["checked"]:
+        _journal(f"press: WanGP's check could not be made ({verdict.get('diagnosis') or 'no reason given'}); "
+                 "WanGP checks the job when it queues it")
+        return False
+    if not verdict["valid"]:
+        # WanGP's sentence travels to the press; the journal names the code
+        # alone, because a sentence about a prompt template can quote it.
+        _journal(f"press: refused - WanGP would not generate this job at its settings ({errors.WANGP_VALIDATION_REFUSED})")
+        raise IntegrationError(errors.WANGP_VALIDATION_REFUSED, verdict["error"])
+    return True
+
+
+def note_frozen(job_id: str, frozen: typing.Mapping[str, typing.Any], sentence: str) -> None:
+    """The one line every job writes when its settings are frozen, saying when:
+    at the press, rather than at its turn - and whether WanGP checked them."""
+    snapshot = frozen.get("snapshot") or {}
+    _journal(f"job {str(job_id)[:8]}: {str(snapshot.get('model_type') or '')[:40]} settings - "
+             f"{sentence or 'from ' + str(snapshot.get('source') or '')}, frozen at the press"
+             f"{'; WanGP would take it' if frozen.get('checked') else ''}")
+
+
 def _stage_composing(job: dict) -> bool:
     """Read the settings this job runs at, once, and freeze them.
 
-    Composed now rather than at press because at press there may have been no
-    process to ask - cold start is a stage that happens after admission. The
-    job records when its base was captured and where it came from, and the
-    queue says so, because "the settings as of when it ran" and "the settings
-    as of when you pressed" are different promises.
+    A job pressed in the Clipboard or the gallery while WanGP was up has them
+    already, frozen at the press (``settings_at_press``), and goes on. Anything
+    else is composed now - a public-API job may have been admitted with no
+    process to ask, since cold start is a stage that happens after admission.
+    The job records when its base was captured and where it came from, and
+    the queue says so.
     """
     from ..wangp import control
 
@@ -657,23 +788,8 @@ def _stage_composing(job: dict) -> bool:
         return bool(outbox.fail(job["job_id"], error.code, error.detail))
     if not answer["ok"]:
         return bool(outbox.fail(job["job_id"], answer["code"] or errors.COMPOSE_UNAVAILABLE, answer["message"]))
-    source = answer["source"]
-    if source == wire.BASE_RECORDED and job.get("settings_flush") in wire.FLUSH_FRESH:
-        # Same seam, different promise. The page committed its live form on
-        # purpose before it pressed, so this base is what was on screen -
-        # not whatever WanGP happened to have recorded last. The job says
-        # which, because those are answers to different questions and a
-        # reader of the queue is entitled to tell them apart.
-        source = wire.BASE_FLUSHED
-    snapshot = {
-        "schema": 1,
-        "model_type": answer["model_type"],
-        "settings": answer["settings"],
-        "source": source,
-        "captured_at": _now(),
-        "wan2gp_version": answer["wan2gp_version"],
-        "residency_key": answer["residency_key"],
-    }
+    snapshot = _snapshot_from(answer, job)
+    source = snapshot["source"]
     moved = outbox.record_snapshot(job["job_id"], snapshot, expect_revision=job["revision"])
     if moved is None:
         return True

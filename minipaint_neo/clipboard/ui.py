@@ -1452,8 +1452,15 @@ class ClipboardTab:
                 notes.append("nothing was stored; switch enhanced prompts off to queue the prompt as typed")
             elif view is not None and error.code != errors.WANGP_NOT_RUNNING:
                 notes.append("nothing was stored")
+            message = (view or {}).get("message") or errors.message(error.code)
+            if error.code == errors.WANGP_VALIDATION_REFUSED:
+                # WanGP's own check of the job at its settings said no: its
+                # reason, in its words (never in the journal, which keeps the
+                # code alone - a sentence about a template can quote it).
+                message = outbox.validation_refusal(error)
+                notes = [outbox.VALIDATION_REFUSED_NOTE]
             refused = {"ok": False, "code": error.code, "instruction": None,
-                       "status": _status((view or {}).get("message") or errors.message(error.code), notes),
+                       "status": _status(message, notes),
                        "jobs": self._outbox_view(page_id), "queue_button": self._queue_button_view()}
             if view is not None:
                 # The press's own fresh answer, so the page redraws itself
@@ -1464,7 +1471,14 @@ class ClipboardTab:
         record = job.get("enhance") or {}
         self._journal(f"{press}: job {job['job_id'][:8]} (overrides {', '.join(history.draft_overrides(draft)) or 'none'}"
                       f"{'; enhancing as ' + record['variant'] if record else ''}); {pending} waiting; {outbox.flush_note(job)}")
+        settings = outbox.settings_view(job)
         notes = [f"{pending - 1} ahead of it" if pending > 1 else "it goes next", *extra]
+        if settings["warning"]:
+            # First among the notes, and in the answer for the page to say
+            # out loud: a job that will not run at what WanGP is showing.
+            notes.insert(0, settings["warning"])
+            self._journal(f"{press}: job {job['job_id'][:8]} - not the settings on WanGP's screen "
+                          f"({settings['source'] or 'read at its turn'})")
         if job.get("executor") == outbox.EXECUTOR_BROWSER and outbox.unattended_enabled():
             # The setting says unattended and the job is not. That is this
             # WanGP saying it has no queue worker to submit into, and the
@@ -1506,7 +1520,7 @@ class ClipboardTab:
             notes.append("keep this page open until it is queued")
         if lead:
             line = f"{lead} {line}"
-        return {"ok": True, "instruction": instruction, "status": _status(line, notes),
+        return {"ok": True, "instruction": instruction, "status": _status(line, notes), "settings": settings,
                 "jobs": self._outbox_view(page_id), "queue_button": self._queue_button_view()}
 
     def _draft_from_request(self, request: typing.Mapping[str, typing.Any], job: typing.Optional[typing.Mapping[str, typing.Any]] = None) -> dict:

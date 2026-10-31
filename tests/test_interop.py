@@ -359,6 +359,8 @@ def spine_checks(r: Results) -> None:
         r.check("in both directions", interop.snapshot("a" * 16)["inherit_settings"] is False)
     finally:
         clipboard_outbox.use_inherit(None)
+    r.check("and with nothing set it says yes: every job is built from the settings in view",
+            interop.snapshot("a" * 16)["inherit_settings"] is True)
     events.reset_for_tests()
 
 

@@ -185,23 +185,82 @@ job that falls all the way through still runs at the user's saved defaults
 for that model, which is also why a genuinely cold child (Forge just started,
 the WanGP tab never opened, nothing recorded) is far less bad than it sounds.
 
-### Inheriting, or not: `minipaint_inherit_wangp_settings`
+### Inheriting: always (since 2026-10-31)
 
-Two answers somebody chooses between, not a preference and a fallback:
+There was a choice here until 2026-10-31, `minipaint_inherit_wangp_settings`,
+and it was **off by default**. Off, `compose` asked for no recorded form and
+WanGP filled the job in from that model's saved settings file - the last
+run's settings, or the model's defaults where nothing had been saved - whatever
+the WanGP tab showed. That is exactly what the user reported: "the video that
+gets generated is not the setting that are visible in wan2gp, but the last run
+settings, or default if I haven't generated yet". Retired at their word ("I
+want all of my send to wan2gp to use the settings that are in view!"):
+`outbox.inherit_settings()` answers yes, the setting is no longer registered,
+and a value a `config.json` still holds for it is read by nothing.
 
-* **On** — the press commits the WanGP page's live form and the job composes
-  from it, so it runs at the LoRAs, steps, guidance and profile that were on
-  screen. More promise, more moving parts.
-* **Off** (the default) — nothing is read and nothing is carried. `compose`
-  does not ask for the recorded form *at all*, and WanGP fills the job in from
-  that model's own saved settings. For somebody whose saved defaults are
-  already what they want, that is the same result with nothing in the way.
+A public-API request may still ask for the model's defaults (`inherit: false`
+in `enqueue`'s request), and the job then says so - *the model's defaults (the
+request asked not to take the WanGP page's settings)*. That is not "read it
+and discard it": a base that was read and thrown away is still a base that was
+read, and the job would then record `recorded_form` about settings it never
+used, so `compose` asks for no recorded form at all. The choice is frozen onto
+the job at the press.
 
-Off does not mean "read it and discard it". A base that was read and thrown
-away is still a base that was read, and the job would then record
-`recorded_form` about settings it never used. The choice is frozen onto the
-job at the press, so moving the checkbox afterwards does not reach back into
-work already queued.
+### Frozen at the press, and checked by WanGP
+
+A job used to be composed when its turn came - after every job ahead of it
+had been sent, which behind a long generation is minutes after the press -
+from whatever WanGP had recorded by then: a change made in the WanGP tab since,
+or nothing newer than the last run. Now a press in the Clipboard (Add to Queue,
+Auto) or the gallery's popup (Generate, Auto), whose readiness gate has just
+found WanGP up, composes there and then (`executor.settings_at_press`, from
+`outbox.submit`), right after the page's save (below), and the job is **stored
+with** its snapshot (`_store`'s `frozen`). `_stage_composing` passes a job that
+has one straight on, so a job that waits still runs at what was on screen when
+it was pressed. It is bounded (`PRESS_COMPOSE_TIMEOUT`, eight seconds) and
+never a reason to refuse the press: settings that cannot be read in time leave
+the job to be composed at its turn as before, and the press says so. A
+public-API job, which may be admitted with WanGP cold, is composed at its turn.
+
+**And WanGP is asked whether it would generate it** (bridge 1.16.0,
+`CONTROL_VALIDATE`), at the user's word: "if the settings are invalid, and
+prevents generation, I would like those to get an error when adding to queue or
+press auto." WanGP checks a task only when its queue loader unpacks it
+(`load_queue_action` -> `_parse_task_manifest` -> `validate_task`), on an event
+of its own after the submission has returned, and a task that fails is
+skipped: the reason goes into `gen["queue_errors"]` under the task's client id
+and into a toast on whatever page ran the load. So a job at settings WanGP
+would not generate with was stored, submitted, never reached the queue, and
+was called refused a minute later in none of WanGP's words. The bridge's
+`Executor.validate` now takes the loader's steps on a copy of the task
+`submit` would build - the model type (`_extract_model_type`), the pictures
+opened as images (`_load_task_attachments`; the check reads images, never
+paths), then `validate_task` with the state the shared record lives in - and
+queues and records nothing. What `submit` itself would refuse (a picture gone,
+a model this WanGP lacks) is refused there too; an exception inside WanGP's
+own steps is the loader's failure as well ("Inline queue validation failed"),
+so it is a verdict. A WanGP with no `validate_task`, or no loader step a
+picture needs, answers `checked: false`, never valid, and the press goes
+ahead; so does a bridge whose hello leaves `capabilities.validate` out.
+
+The order is the point: **the check is made before the job is stored.**
+Storing a job wakes the executor's thread, which takes a lone job on at once -
+a job stored first and checked after could be composed and sent before its
+check had answered. A job WanGP would not take raises
+`IntegrationError(WANGP_VALIDATION_REFUSED, <WanGP's reason>)` out of
+`outbox.submit`, its pinned pictures are released, and the press answers *WanGP
+would not generate this with the settings on its screen: <reason>* with the
+note *nothing was stored; change the settings in the WanGP tab and press
+again*. The journal names the code alone, because a sentence about a prompt
+template can quote the prompt. A job whose prompt the enhancer will write is
+checked with `CHECK_STAND_IN_PROMPT` in place of it, so the settings are judged
+and not the empty box; WanGP checks the written prompt when it queues the job.
+
+And a refusal that still happens later - a public-API job, a bridge without
+the check - is no longer a minute's silence: the tracker reads WanGP's
+`queue_errors` for a task it has not yet seen queued, and fails the job at its
+next look with `WANGP_VALIDATION_REFUSED` and WanGP's own reason
+(`admission.refusal_reason`).
 
 ### Flushing: the settings that were on screen
 
@@ -224,8 +283,10 @@ browser              bridge                     Wan2GP
   │                                        └─▶ validate_wizard_prompt
   │                                            save_inputs(target="state")
   │                                            service.record_model_form(...)
-  │  probe ─────────▶ fingerprint of load_model_form(model_type)
-  │  …until it moves, or the budget runs out
+  │  probe ─────────▶ fingerprint of load_model_form(model_type),
+  │                   and how many saves WanGP has made of it (1.16.0)
+  │  …until the count moves (the fingerprint, from an older
+  │    bridge), or the budget runs out
   │  submit ────────▶ outbox
                        └─▶ compose reads the record, now current
 ```
@@ -239,7 +300,7 @@ as the prompt type with nothing looking wrong. That is the hazard
 component of coupling, and WanGP commits its own form with its own full input
 list.
 
-Two things make it safe rather than merely clever:
+Three things make it safe rather than merely clever:
 
 * **A probe never writes.** The commit happens after the call that asked for
   it returns, so a flush cannot observe its own result; the caller polls a
@@ -250,14 +311,33 @@ Two things make it safe rather than merely clever:
   just loaded, and `save_inputs` pops it. A flush that popped it first would
   let that clobber happen and make it look like the user's own press did it,
   so a page carrying the flag is refused (`suppressed`) rather than flushed.
+* **A save is seen to land (bridge 1.16.0).** The fingerprint moves only when
+  the recorded values do, so a save that found the record already current
+  looked exactly like a save that never ran, and a page out of time took
+  "nothing moved" for "nothing to carry" - and so for a current record, which
+  let every later send skip its own save. The bridge now counts every call of
+  `record_model_form` (`Compatibility.commit_count`: the service's own method
+  wrapped on its one instance the first time it is asked, WanGP's call passed
+  through exactly as made, counted only once the record is written; a reloaded
+  plugin finds the counts on the wrapper rather than wrapping it again), and
+  every flush answer, press and probe, carries `commits`. The page takes a
+  save as landed only when the count moved past the press's; a counted save
+  that never lands is `unavailable` ("WanGP did not save its form within …"),
+  never `unchanged`, and leaves the record not current. From such a bridge
+  every send saves, even with nothing touched since the last save, because a
+  WanGP page that changes its own form by script - a settings file loaded, a
+  preset applied - sends no notice; a save then costs a fraction of a second.
+  A send whose save did not land tries once more in the background a second
+  later. An older bridge (no `commits`) keeps the fingerprint, the shortcut and
+  the two-second wait.
 
-It is an **optimisation and never a rule**. No WanGP tab, a bridge without the
-trigger, a page mid settings-load, or a wait that runs out all mean the job
-composes from the recorded form — which is exactly what it did before any of
-this existed. The job records what the page managed (`settings_flush`) and
-compose turns that into the base's `source`, so `flushed_form` and
-`recorded_form` can be told apart by a reader of the queue even though both
-came out of `load_model_form`.
+It **never stops a press**. No WanGP tab, a bridge without the trigger, a page
+mid settings-load, or a wait that runs out all mean the job composes from the
+recorded form — which is exactly what it did before any of this existed — and
+the press says so (below). The job records what the page managed
+(`settings_flush`) and compose turns that into the base's `source`, so
+`flushed_form` and `recorded_form` can be told apart by a reader of the queue
+even though both came out of `load_model_form`.
 
 The one thing it cannot do is work with no page at all: a truly cold start has
 no Gradio session, so there is no live form to commit and the saved defaults
@@ -266,8 +346,8 @@ above are what the job gets.
 **When the page commits it (2026-09-25).** A commit happens at five moments,
 none of which holds anything open:
 
-* **the page becoming ready**, and inheritance being switched on - which is
-  what removes "generate once first";
+* **the page becoming ready**, and the page learning that jobs read the
+  record - which is what removes "generate once first";
 * **about a second after somebody stops changing the form.** The script in the
   WanGP document reports touches (`FORM_CHANGED`: only `isTrusted` events,
   throttled to one per half second, only to a parent whose hello asked with
@@ -275,14 +355,16 @@ none of which holds anything open:
   (`settleMs`) - never two at a time, each question with its own limit;
 * **the WanGP tab leaving the screen**, and **the page going to the
   background**, when there is anything uncommitted;
-* **just before every send** - the gallery's Generate, Clipboard's Add to
-  Queue and `enqueue()` all wait on `saveForSend`, which answers at once when
-  every change the page was told of is already committed and otherwise commits
-  and polls for at most two seconds. The answer travels as `settings_flush`.
+* **just before every send** - the gallery's Generate and Auto, Clipboard's
+  Add to Queue and Auto, and `enqueue()` all wait on `saveForSend`, which from
+  a bridge that counts always commits and answers once WanGP's save has
+  landed, and from an older one answers at once when every change the page was
+  told of is already committed and otherwise commits and polls; two seconds at
+  most either way. The answer travels as `settings_flush`.
 
 None of it happens until the page knows jobs read the record: the interop
 bundle takes one bounded snapshot when it loads, and passes `inherit_settings`
-to the WanGP bundle. Before 2026-09-25 that snapshot was never taken - the only
+(always true now, while the server runs the queue) to the WanGP bundle. Before 2026-09-25 that snapshot was never taken - the only
 caller was a return from the background, whose listener the snapshot itself
 installed - so the tab was never told and no commit ever happened.
 
@@ -290,10 +372,20 @@ installed - so the tab was never told and no commit ever happened.
 `settings_flush` become one of a closed set of words (`outbox.SETTINGS_*`), on
 the Queue card, in Queue Send History, in the popup's history and in one
 journal line per job: *saved from the WanGP page at send*, *WanGP's last saved
-settings (the page didn't answer)*, *WanGP's last saved settings (WanGP was
-loading a model's settings at send)*, *WanGP's last saved settings*, *the
-model's defaults (nothing saved yet)*, or *the model's defaults (taking the
-WanGP page's settings is switched off)*.
+settings (its form was not saved at send)*, *WanGP's last saved settings (WanGP
+was loading a model's settings at send)*, *WanGP's last saved settings*, *the
+model's defaults (nothing saved yet)*, *the model's defaults (the request asked
+not to take the WanGP page's settings)*, or *the WanGP page's own session*.
+
+**And a press says so when it is not the settings on screen.** Only *saved
+from the WanGP page at send* (and a job a page runs itself, which drives the
+live form) is what was on screen. For every other word the press's answer
+carries `settings` (`outbox.settings_view`: the key, its sentence, `in_view`
+and `warning`), the warning - *Not the settings on WanGP's screen: this job
+runs at …*, or, for a job its turn will compose, that WanGP could not be read
+at the press - goes first among the status line's notes, the Clipboard and the
+popup leave it as their notice, marked like a failure, and the journal writes
+one line naming the key, never the prompt.
 
 Two things the job owns and the base does not: the prompt, and `client_id`.
 The base carries the *composing page's* client id, WanGP routes a

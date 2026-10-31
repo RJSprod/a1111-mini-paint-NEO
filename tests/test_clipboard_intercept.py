@@ -37,6 +37,7 @@ from minipaint_neo.clipboard import config, enhance, executor, history, intercep
 from minipaint_neo.clipboard import ui as clipboard_ui  # noqa: E402
 from minipaint_neo.wangp import config as wangp_config  # noqa: E402
 from minipaint_neo.wangp import errors, process_log, protocol  # noqa: E402
+from minipaint_neo.wangp.errors import IntegrationError  # noqa: E402
 from test_clipboard_enhance import FakeApi  # noqa: E402
 from test_clipboard_ui import RECEIVE_STATE, RECEIVE_STATUS, _skipped, build_page, component_of, config_of, dangling  # noqa: E402
 
@@ -695,6 +696,86 @@ def settings_history_checks(r: Results) -> None:
             intercept.load_history()[0]["settings"] == "" and intercept.history_view(REFERENCE_MODEL, ALL_THREE)[0]["settings"] == "")
 
 
+def press_settings_checks(r: Results) -> None:
+    """Generate and Auto say when the job will not run at the settings on
+    WanGP's screen.
+
+    Asked for: "I want all of my send to wan2gp to use the settings that are
+    in view!" Which source a job's settings came from is the outbox's (its
+    own checks hold every row); held here is that the popup's answer carries
+    it - the warning first among the notes, the whole view for the popup to
+    say out loud - and that a job at the settings on screen adds nothing.
+    """
+    outbox.use_running(lambda: True)
+    outbox.use_executor(outbox.EXECUTOR_BROWSER)
+    enhance.set_enabled(False)
+    real = outbox.submit
+    served: dict = {}
+
+    def submit(*args, **kwargs):
+        return dict(real(*args, **kwargs), **served)
+
+    loading = ("Not the settings on WanGP's screen: this job runs at WanGP's last saved settings "
+               "(WanGP was loading a model's settings at send)")
+    outbox.submit = submit
+    try:
+        answer = intercept.submit(intercept.stage(_photo((30, 60, 90)), "txt2img"), "on screen", ["reference"],
+                                  False, False, PAGE, REFERENCE_MODEL, ALL_THREE, settings_flush=protocol.FLUSH_COMMITTED)
+        r.check("a gallery job this page runs drives the live page, and its answer says nothing more about settings",
+                answer.get("ok") and (answer.get("settings") or {}).get("in_view") is True
+                and (answer.get("settings") or {}).get("warning") == ""
+                and not [note for note in answer.get("notes") or [] if "Not the settings" in note], str(answer.get("notes")))
+
+        served.update(executor=outbox.EXECUTOR_SERVER, state=outbox.ADMITTED, inherit_settings=True,
+                      settings_flush=protocol.FLUSH_SUPPRESSED, snapshot={"source": protocol.BASE_RECORDED, "settings_count": 5})
+        answer = intercept.submit(intercept.stage(_photo((31, 60, 90)), "txt2img"), "a secret prompt", ["reference"],
+                                  False, False, PAGE, REFERENCE_MODEL, ALL_THREE, settings_flush=protocol.FLUSH_SUPPRESSED)
+        r.check("one that will not run at them says so, first among its notes",
+                answer.get("ok") and (answer.get("notes") or [""])[0] == loading, str(answer.get("notes")))
+        r.check("and in the answer, for the popup to say out loud",
+                answer.get("settings") == {"source": outbox.SETTINGS_LOADING, "in_view": False, "warning": loading,
+                                           "sentence": outbox.SETTINGS_TEXT[outbox.SETTINGS_LOADING]}, str(answer.get("settings")))
+
+        served.update(settings_flush=protocol.FLUSH_COMMITTED, snapshot={"source": protocol.BASE_FLUSHED, "settings_count": 5})
+        answer = intercept.submit(intercept.stage(_photo((32, 60, 90)), "txt2img"), "saved", [], False, False, PAGE,
+                                  REFERENCE_MODEL, ALL_THREE, settings_flush=protocol.FLUSH_COMMITTED, auto=True)
+        r.check("an Auto whose job was frozen from the save WanGP made at the press says nothing more",
+                answer.get("ok") and answer.get("auto") is True and (answer.get("settings") or {}).get("in_view") is True
+                and not [note for note in answer.get("notes") or [] if "Not the settings" in note], str(answer.get("notes")))
+
+        served.pop("snapshot")
+        answer = intercept.submit(intercept.stage(_photo((33, 60, 90)), "txt2img"), "later", [], False, False, PAGE,
+                                  REFERENCE_MODEL, ALL_THREE, settings_flush=protocol.FLUSH_COMMITTED, auto=True)
+        r.check("and one whose settings could not be read at the press says its turn reads them",
+                (answer.get("notes") or [""])[0] == outbox.SETTINGS_AT_TURN
+                and (answer.get("settings") or {}).get("warning") == outbox.SETTINGS_AT_TURN, str(answer.get("notes")))
+
+        log = pathlib.Path(str(process_log.path()))
+        text = log.read_text(encoding="utf-8") if log.is_file() else ""
+        r.check("the log says it by the source's key, never the prompt",
+                "- not the settings on WanGP's screen (last_saved_loading)" in text
+                and "auto: job " in text and "- not the settings on WanGP's screen (read at its turn)" in text
+                and "a secret prompt" not in text, text[-500:])
+
+        # WanGP's own check would not take the job: refused, in its words,
+        # and the popup stays open to say it.
+        def refuse(*_args, **_kwargs):
+            raise IntegrationError(errors.WANGP_VALIDATION_REFUSED, "Prompt cannot be empty.")
+
+        outbox.submit = refuse
+        answer = intercept.submit(intercept.stage(_photo((34, 60, 90)), "txt2img"), "", ["reference"], False, False, PAGE,
+                                  REFERENCE_MODEL, ALL_THREE, settings_flush=protocol.FLUSH_COMMITTED)
+        r.check("a press WanGP's check refuses answers with WanGP's reason, and the note says how to fix it",
+                answer == {"ok": False, "code": errors.WANGP_VALIDATION_REFUSED,
+                           "message": "WanGP would not generate this with the settings on its screen: Prompt cannot be empty.",
+                           "notes": [outbox.VALIDATION_REFUSED_NOTE]}, str(answer))
+    finally:
+        outbox.submit = real
+        for listed in outbox.jobs():
+            if listed["state"] == "pending":
+                outbox.cancel(listed["job_id"])
+
+
 # ------------------------------------------------------------------- routes --
 
 
@@ -840,6 +921,7 @@ def run() -> Results:
                 enhancer_checks(r, tab)
                 history_checks(r)
                 settings_history_checks(r)
+                press_settings_checks(r)
                 route_checks(r)
             bundle_checks(r)
         finally:

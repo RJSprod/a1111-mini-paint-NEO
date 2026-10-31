@@ -673,17 +673,22 @@ class MiniPaintBridge:
             refused rather than flushed.
 
         *   **Claim it worked.** The chain runs after this event returns, so
-            this call cannot see its own result. What it returns is the
-            fingerprint of the recorded form *before* the write; the caller
-            asks again until it moves, and gives up on a bounded wait. A flush
-            that never lands is not an error - it is the recorded form, which
-            is what composing used before any of this existed.
+            this call cannot see its own result. What it returns is where the
+            record is *before* the write - its fingerprint, and since bridge
+            1.16.0 how many times WanGP has recorded this model's form
+            (``commits``) - and the caller asks again until the count moves,
+            which every save does whatever it saved, and gives up on a bounded
+            wait. A flush that never lands is not an error - it is the
+            recorded form, which is what composing used before any of this
+            existed - but the parent can now say it did not land rather than
+            guess that it did.
         """
         service = self.compat.service()
         trigger = self.compat.resolution.component(compatibility.SAVE_FORM_TRIGGER)
         model_type = self.compat.current_model_type(service)
         before = self.compat.recorded_fingerprint(service, model_type)
-        answer = {"flush": protocol.FLUSH_UNAVAILABLE, "fingerprint": before, "model_type": model_type}
+        answer = {"flush": protocol.FLUSH_UNAVAILABLE, "fingerprint": before, "model_type": model_type,
+                  "commits": self.compat.commit_count(service, model_type)}
 
         if bool(request.get("probe")):
             # The poll, not the press: say where the record is and write
@@ -1311,6 +1316,12 @@ def _summary(operation: typing.Any, ack: typing.Mapping[str, typing.Any], second
     if operation == "receive":
         line = f"receive: {ack.get('receiver_id')} {ack.get('operation')} {ack.get('verification')} in {took}"
         return line + (f", switched {ack['switched']}" if ack.get("switched") else "")
+    if operation == "flush":
+        # What happened and how many saves there have been - never the form's
+        # values, which are the user's, and never the fingerprint, a digest.
+        commits = ack.get("commits")
+        counted = f", {commits} save(s) of this model's form counted" if isinstance(commits, int) else ""
+        return f"flush: {ack.get('flush') or '?'} in {took}{counted}"
     if operation == "track":
         tracked = ack.get("tracked") if isinstance(ack.get("tracked"), dict) else {}
         tally: typing.Dict[str, int] = {}

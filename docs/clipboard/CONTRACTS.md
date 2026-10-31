@@ -393,8 +393,29 @@ composed. The key is what a record stores - Queue Send History's `settings`, the
 history's `settings` (learned from the job once it is composed, and kept after the job has
 gone) - and anything outside the list is read as empty. The Queue card shows the sentence as
 a *Settings* line, and the executor journals it once per job. The gallery's `submit` action and
-the queue route's `add` action both take `settings_flush` from the page, filtered against the
-five outcomes like `enqueue`'s.
+the queue route's `add` and `auto` actions all take `settings_flush` from the page, filtered
+against the five outcomes like `enqueue`'s.
+
+**The settings in view** (2026-10-31). Every job is built from the WanGP page's settings
+(`inherit_settings()` answers yes; the setting `minipaint_inherit_wangp_settings` is retired,
+and only a public-API request's own `inherit: false` asks for the model's defaults). A
+Clipboard or gallery press, which the readiness gate has just found WanGP up for, composes its
+job at the press and asks WanGP's own check of it (bridge 1.16.0, `control.validate`) - both
+BEFORE the job is stored (`executor.settings_at_press` from `submit`; the job is stored with its
+snapshot, `_store`'s `frozen`) - so a job that waits still runs at what was on screen when it
+was pressed, and one WanGP would not generate is refused: `submit` raises
+`WANGP_VALIDATION_REFUSED` with WanGP's reason as its detail, nothing is stored and its pinned
+pictures are released, and both presses answer `validation_refusal(error)` - *WanGP would not
+generate this with the settings on its screen: <reason>* - with `VALIDATION_REFUSED_NOTE`. A
+compose that cannot be had leaves the job to its turn; a check that cannot be made (an older
+bridge, a WanGP without `validate_task`) leaves it to WanGP's own check when WanGP queues it,
+which the child's tracker now reports at once, in WanGP's words. Both
+presses' answers carry `settings`, `outbox.settings_view(job)`: `{source, sentence, in_view,
+warning}` - `in_view` true only for `saved_at_send` and `live_page` (`SETTINGS_IN_VIEW`), and
+`warning`, `settings_warning(job)`, otherwise one unpunctuated sentence: *Not the settings on
+WanGP's screen: this job runs at <sentence>*, or `SETTINGS_AT_TURN` for a server job not
+composed at its press. The warning is also the first of the status line's notes, and the
+press journals one line naming the source's key.
 
 **The queue is one Forge session's.** `start_session()` runs before anything sweeps and
 empties it: every job, in every state, and every pinned input released. Nothing carries into
@@ -853,7 +874,7 @@ def describe(handoff, model=None, inputs=None, fresh=False) -> dict           # 
                                                                              # + auto: {roles, dropped, label} - where its Auto would put the picture on this model
 def save_prompt(prompt) -> dict; def cancel(handoff) -> dict
 def submit(handoff, prompt, roles, inherit, enhance_wanted, page, model=None, inputs=None, settings_flush="", auto=False)
-    -> {ok, instruction, status, notes, roles, dropped_roles, auto, history}
+    -> {ok, instruction, status, notes, settings, roles, dropped_roles, auto, history}
                                                                              # auto: the roles are auto_roles(caps), not the ticked ones, and none left is
                                                                              # INTERCEPT_NO_IMAGE_ROLE with auto_refusal's sentence - never a fallback
                                                                              # saves the prompt to the draft, repairs the enhance switch, outbox.submit(..., ORIGIN_GALLERY, ...), records the recipe;
@@ -935,7 +956,8 @@ class ClipboardTab:
     open_prompt_editor(model, variant, mode) -> (variant, mode, box, state)            # the full-window editor's one backend half: pick the pair a press would use, then read it
     _draft_has_picture_for(variant) -> bool                                            # a picture that variant's model reads (enhance.SLOTS_FOR), resolved through the library exactly as a press does
     cancel_all(page) -> {ok, cancelled, jobs, status}                                   # outbox.cancel_all()
-    add_to_queue(prompt, page, model=None, enhance_wanted=None) -> {ok, instruction {nonce, job_id, executor, state} | None, status, jobs, queue_button}
+    add_to_queue(prompt, page, model=None, enhance_wanted=None, settings_flush="") -> {ok, instruction {nonce, job_id, executor, state} | None, status, settings, jobs, queue_button}
+                                                                                      # settings: outbox.settings_view(job); its warning is also the status line's first note
     auto_queue(picture, prompt, page, model=None, inputs=None, enhance_wanted=None, settings_flush="") -> the same shape (+ code on a refusal)
                                                                                       # Add to Queue with the picture laid over the draft in intercept.auto_roles(...);
                                                                                       # the draft's cards are not changed; an archive picture is adopted first

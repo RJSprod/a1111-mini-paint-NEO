@@ -188,15 +188,22 @@ SETTINGS_SESSION = "page_session"
 SETTINGS_LIVE = "live_page"
 SETTINGS_TEXT = {
     SETTINGS_SAVED_AT_SEND: "saved from the WanGP page at send",
-    SETTINGS_NO_ANSWER: "WanGP's last saved settings (the page didn't answer)",
+    SETTINGS_NO_ANSWER: "WanGP's last saved settings (its form was not saved at send)",
     SETTINGS_LOADING: "WanGP's last saved settings (WanGP was loading a model's settings at send)",
     SETTINGS_LAST_SAVED: "WanGP's last saved settings",
     SETTINGS_DEFAULTS: "the model's defaults (nothing saved yet)",
-    SETTINGS_OFF: "the model's defaults (taking the WanGP page's settings is switched off)",
+    SETTINGS_OFF: "the model's defaults (the request asked not to take the WanGP page's settings)",
     SETTINGS_SESSION: "the WanGP page's own session",
     SETTINGS_LIVE: "the WanGP page itself, as it was when this browser queued the job",
 }
 SETTINGS_KEYS = tuple(SETTINGS_TEXT)
+#: The two of them that are the settings on WanGP's screen at the press: a
+#: save WanGP made at the send, or the live page itself driving the job.
+SETTINGS_IN_VIEW = (SETTINGS_SAVED_AT_SEND, SETTINGS_LIVE)
+#: What a press says about a job whose settings are not decided at the press
+#: - WanGP could not be asked then - so its turn reads them instead.
+SETTINGS_AT_TURN = ("WanGP's settings could not be read at the press, so this job takes the ones WanGP has "
+                    "saved when its turn comes")
 
 #: What was done about WanGP's form at the press, for the line the press
 #: writes - before the job has been composed and its settings are known.
@@ -205,7 +212,7 @@ FLUSH_NOTES = {
     protocol.FLUSH_UNCHANGED: "WanGP's form already saved from its page",
     protocol.FLUSH_REQUESTED: "WanGP's form asked to save at send",
     protocol.FLUSH_SUPPRESSED: "WanGP was loading a model's settings, so its form was not saved at send",
-    protocol.FLUSH_UNAVAILABLE: "the WanGP page did not answer, so its form was not saved at send",
+    protocol.FLUSH_UNAVAILABLE: "WanGP's form was not saved at send (its page did not answer, or WanGP did not save it in time)",
 }
 
 ORIGIN_CLIPBOARD = "clipboard"
@@ -338,25 +345,22 @@ def unattended_enabled() -> bool:
 
 
 def inherit_settings() -> bool:
-    """Whether a new job is built from the WanGP page's live settings.
+    """Whether a new job is built from the WanGP page's settings: yes.
 
-    Read per press, like the executor choice, and frozen onto the job: what
-    the checkbox said when the button went down is what that job composes
-    from, however it moves afterwards.
+    There was a setting for this until 2026-10-31, off by default, and with
+    it off a job took the model's saved settings file - which only WanGP's own
+    Save Settings button writes - in place of what the WanGP tab showed.
+    Asked for: "I want all of my send to wan2gp to use the settings that are
+    in view!" So every job is built from them; a public-API caller can still
+    ask for the model's defaults with ``inherit: false``. Frozen onto the job
+    at the press either way, so the record says which it was.
     """
     seam = _seams.get("inherit")
-    if seam is not None:
-        return bool(seam)
-    try:
-        from .. import settings
-
-        return bool(settings.inherit_settings())
-    except Exception:
-        return False
+    return True if seam is None else bool(seam)
 
 
 def use_inherit(flag: typing.Optional[bool]) -> None:
-    """Test seam: force the inheritance choice. None restores the setting."""
+    """Test seam: force the inheritance choice. None restores the default, yes."""
     _seams["inherit"] = flag
 
 
@@ -597,15 +601,18 @@ def input_ids(job: typing.Mapping[str, typing.Any]) -> typing.List[str]:
 def _normalize_snapshot(raw: typing.Any) -> typing.Optional[dict]:
     """The immutable execution snapshot: what this job runs as, and from when.
 
-    The settings base is not captured at press. It cannot be: a job may be
-    admitted with the WanGP child stopped, and cold start is a server-side
-    stage that happens after admission - so at press there may be no process,
-    no session and no settings to read. It is composed at the WanGP stage
-    instead, from the process-wide record of what the user last committed for
-    that model, and *then* frozen. ``captured_at`` is when that happened and
-    the queue says so, because "the settings as of when it ran" and "the
-    settings as of when you pressed" are different promises and only one of
-    them is being made.
+    Captured at the press whenever WanGP is up to be asked - the Clipboard's
+    and the gallery's own presses, which the readiness gate lets through only
+    then - right after the page has saved WanGP's form, so a job runs at the
+    settings that were on screen when it was pressed and not at whatever is
+    recorded by its turn - the job is stored with it, after WanGP's own check
+    of the job (``executor.settings_at_press``; asked for: "I want all of my
+    send to wan2gp to use the settings that are in view!"). Otherwise - a
+    public-API job admitted with the child stopped, a compose that could not
+    be had at the press - it is composed at the WanGP stage, from the
+    process-wide record of what the user last committed for that model, and
+    *then* frozen (``record_snapshot``). ``captured_at`` is when that
+    happened and the queue says so.
     """
     if not isinstance(raw, dict):
         return None
@@ -819,13 +826,56 @@ def settings_sentence(job: typing.Mapping[str, typing.Any]) -> str:
     return SETTINGS_TEXT.get(settings_source(job), "")
 
 
+def settings_warning(job: typing.Mapping[str, typing.Any]) -> str:
+    """What a press says when its job will not run at the settings on WanGP's
+    screen - one sentence, unpunctuated like every note - or "" when it will.
+
+    Said at the press, in words, and not only in the queue afterwards: a
+    video made at settings nobody chose looks exactly like one made at the
+    settings its owner set up, and the press is the one moment the person
+    who set them is looking. A job a page runs itself drives the live form,
+    and a server job frozen from a save WanGP made at the send is what was on
+    screen; both say nothing. Anything else is a fallback, and says which.
+    """
+    if not isinstance(job, typing.Mapping) or job.get("executor", EXECUTOR_BROWSER) != EXECUTOR_SERVER:
+        return ""
+    source = settings_source(job)
+    if source in SETTINGS_IN_VIEW:
+        return ""
+    if not source:
+        return SETTINGS_AT_TURN
+    return f"Not the settings on WanGP's screen: this job runs at {SETTINGS_TEXT[source]}"
+
+
+def settings_view(job: typing.Mapping[str, typing.Any]) -> dict:
+    """A press's answer about its job's WanGP settings: where they came from
+    (a ``SETTINGS_*`` key, "" while undecided), that in words, whether they
+    are the settings on WanGP's screen, and the warning to say when not."""
+    source = settings_source(job) if isinstance(job, typing.Mapping) else ""
+    warning = settings_warning(job)
+    return {"source": source, "sentence": SETTINGS_TEXT.get(source, ""), "in_view": not warning, "warning": warning}
+
+
+#: What a press says when WanGP's own check would not take its job
+#: (``executor.settings_at_press``), before WanGP's reason, and the note after.
+VALIDATION_REFUSED_LEAD = "WanGP would not generate this with the settings on its screen"
+VALIDATION_REFUSED_NOTE = "nothing was stored; change the settings in the WanGP tab and press again"
+
+
+def validation_refusal(error: typing.Any) -> str:
+    """A press's sentence for a job WanGP's check refused, with WanGP's own
+    reason - the one refusal whose words are not this extension's."""
+    reason = str(getattr(error, "detail", "") or "").strip()
+    return f"{VALIDATION_REFUSED_LEAD}: {reason}" if reason else f"{VALIDATION_REFUSED_LEAD}."
+
+
 def flush_note(job: typing.Mapping[str, typing.Any]) -> str:
     """What the press did about WanGP's form, for its journal line."""
     # A job a page runs drives the live form whatever the setting says.
     if job.get("executor", EXECUTOR_BROWSER) != EXECUTOR_SERVER:
         return "WanGP's settings are its page's own when this browser queues it"
     if not job.get("inherit_settings"):
-        return "WanGP's settings are not taken from its page (switched off)"
+        return "WanGP's settings are not taken from its page (the request asked for the model's defaults)"
     return FLUSH_NOTES.get(job.get("settings_flush") or "", "WanGP's form was not asked to save at send")
 
 
@@ -1228,16 +1278,31 @@ def submit(
     owned: typing.Dict[str, typing.Any] = {}
     if server:
         owned = _adopt_inputs(normalised)
+    flushed = settings_flush if settings_flush in protocol.FLUSH_OUTCOMES else ""
+    inheriting = inherit_settings() if inherit is None else bool(inherit)
+    frozen: typing.Optional[dict] = None
     try:
-        answer = _store(
-            normalised, page_id, origin, who, block, wanted, planned, owned, enhancer,
-            settings_flush if settings_flush in protocol.FLUSH_OUTCOMES else "",
-            inherit_settings() if inherit is None else bool(inherit),
-        )
+        if server and ready is not None:
+            # The Clipboard's and the gallery's own presses, with WanGP ready
+            # to be asked: the settings the page has just saved are read now,
+            # and WanGP asked whether it would run the job, BEFORE anything is
+            # stored - a stored job wakes the executor, which could send it
+            # before a check made afterwards had answered. A job WanGP would
+            # not take raises here, and nothing is stored. See
+            # executor.settings_at_press.
+            frozen = _settings_at_press(normalised, block, flushed, inheriting, owned, planned is not None)
+        answer = _store(normalised, page_id, origin, who, block, wanted, planned, owned, enhancer,
+                        flushed, inheriting, frozen)
     except Exception:
         if owned:
             _release_inputs(_flatten_inputs(owned))
         raise
+    if frozen is not None:
+        _note_frozen(answer, frozen)
+    elif server and ready is not None:
+        # The press line above says why, before the job had an id; this ties
+        # it to the job.
+        _journal(f"job {answer['job_id'][:8]}: settings not frozen at the press; composed at its turn")
     if origin in (ORIGIN_CLIPBOARD, ORIGIN_GALLERY):
         _remember_prompt(normalised.get("prompt") if typed_prompt is None else typed_prompt, block,
                          (ready or {}).get("target", ""), wanted or typed_prompt is not None, origin)
@@ -1248,6 +1313,40 @@ def submit(
         _journal(f"job {answer['job_id'][:8]}: {', '.join(narrowed)} not sent - "
                  f"{(ready or {}).get('target_label') or 'this model'} takes no such input")
     return answer
+
+
+def _settings_at_press(
+    request: typing.Mapping[str, typing.Any],
+    block: typing.Mapping[str, typing.Any],
+    settings_flush: str,
+    inherit: bool,
+    owned: typing.Mapping[str, typing.Any],
+    enhancing: bool,
+) -> typing.Optional[dict]:
+    """The settings a press runs at, and WanGP's word on the job, before the
+    job is stored - or None, and its turn composes it. Raises only WanGP's
+    refusal (``WANGP_VALIDATION_REFUSED``), which the press answers with."""
+    from . import executor
+
+    try:
+        media, _missing = executor._media_for({"inputs": _normalize_inputs(owned)})
+        return executor.settings_at_press(str(block.get("type") or ""), inherit, settings_flush, media,
+                                          request.get("prompt"), enhancing)
+    except IntegrationError:
+        raise
+    except Exception as error:  # noqa: BLE001 - its turn still composes it
+        _journal(f"press: settings not read at the press ({type(error).__name__}); composed at the job's turn")
+        return None
+
+
+def _note_frozen(job: typing.Mapping[str, typing.Any], frozen: typing.Mapping[str, typing.Any]) -> None:
+    """The stored job's one line about its settings, frozen at the press."""
+    try:
+        from . import executor
+
+        executor.note_frozen(str(job.get("job_id") or ""), frozen, settings_sentence(job))
+    except Exception:  # noqa: BLE001 - a line in a journal is never worth a press
+        pass
 
 
 def _remember_prompt(prompt: typing.Any, block: typing.Mapping[str, typing.Any], target: str, enhanced: bool, origin: str) -> None:
@@ -1309,8 +1408,11 @@ def _store(
     enhancer: typing.Any,
     settings_flush: str = "",
     inherit: bool = False,
+    frozen: typing.Optional[typing.Mapping[str, typing.Any]] = None,
 ) -> dict:
-    """The stored half of ``submit``: the document, under the lock."""
+    """The stored half of ``submit``: the document, under the lock. ``frozen``
+    is what ``executor.settings_at_press`` read at the press: the job is born
+    with the settings it runs at, and the executor composes nothing for it."""
     server = who == EXECUTOR_SERVER
     with _lock:
         listed = _load()
@@ -1333,6 +1435,11 @@ def _store(
             "settings_flush": settings_flush,
             "inherit_settings": bool(inherit),
         })
+        if frozen is not None and isinstance(frozen.get("snapshot"), typing.Mapping):
+            captured = dict(frozen["snapshot"])
+            job["snapshot"] = _normalize_snapshot(dict(captured, captured_at=captured.get("captured_at") or now))
+            if isinstance(frozen.get("model"), typing.Mapping) and frozen["model"].get("type"):
+                job["model"] = _model(frozen["model"])
         if planned is not None:
             asked = enhancer.submit(normalised["prompt"], planned)
             job["state"] = ENHANCING
@@ -2219,8 +2326,10 @@ __all__ = [
     "MAX_PENDING", "ORIGIN_API", "ORIGIN_CLIPBOARD", "ORIGIN_GALLERY", "OUTBOX_NAME", "PAGE_ACTIVE_SECONDS", "PENDING",
     "PHASE_DONE", "PHASE_SENT", "POSITIVE", "QUEUED", "SCHEMA", "SENDING", "SERVER_ACTIVE",
     "FLUSH_NOTES", "SETTINGS_DEFAULTS", "SETTINGS_KEYS", "SETTINGS_LAST_SAVED", "SETTINGS_LIVE", "SETTINGS_LOADING",
+    "SETTINGS_AT_TURN", "SETTINGS_IN_VIEW",
     "SETTINGS_NO_ANSWER", "SETTINGS_OFF", "SETTINGS_SAVED_AT_SEND", "SETTINGS_SESSION", "SETTINGS_TEXT",
-    "flush_note", "settings_sentence", "settings_source",
+    "flush_note", "settings_sentence", "settings_source", "settings_view", "settings_warning",
+    "VALIDATION_REFUSED_LEAD", "VALIDATION_REFUSED_NOTE", "validation_refusal",
     "SERVER_SUBMITTED", "SERVER_TERMINAL", "STAGE_TEXT", "STARTED", "STATES", "SUBMITTING_WANGP",
     "TERMINAL", "UNCONFIRMED", "WAITING", "WAITING_FOR_CARD", "WAITING_TURN", "WAIT_BUSY_MS",
     "WAIT_ENHANCE_MS", "WAIT_TURN_MS", "WANGP_ACCEPTED", "WANGP_FINISHED", "WANGP_GENERATING",

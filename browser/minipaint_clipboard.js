@@ -6436,7 +6436,18 @@ window.minipaintClipboard = (function () {
             // A refused press carries the server's fresh readiness answer:
             // the section redraws itself blocked from it, with its reason.
             if (answer.readiness) { applyReadiness(answer.readiness); }
-            if (answer.instruction) { queue(JSON.stringify(answer.instruction), "the queue route"); }
+            if (answer.ok === false && answer.code === "WANGP_VALIDATION_REFUSED") {
+                // WanGP's own check would not take the job at the settings on
+                // its screen: said where the press was, not only in the
+                // queue's status line a screen away on a phone.
+                toast(statusText(answer.status), true);
+                return answer;
+            }
+            const ran = answer.instruction ? queue(JSON.stringify(answer.instruction), "the queue route") : "";
+            // Said last, so it is the notice left on screen: a job that will
+            // not run at the settings WanGP is showing.
+            const warning = settingsWarning(answer);
+            if (warning && ran !== "unavailable") { toast(warning + ".", true); }
             return answer;
         });
     }
@@ -6484,13 +6495,27 @@ window.minipaintClipboard = (function () {
                 // one - unless this page could not start the job it has to
                 // run, which is the more urgent thing to read.
                 const said = statusText(answer.status);
-                if (said && ran !== "unavailable") { toast(said, answer.ok === false); }
+                const warning = settingsWarning(answer);
+                if (warning && ran !== "unavailable") {
+                    // The press's sentence and the warning together, marked:
+                    // the job will not run at the settings WanGP is showing.
+                    toast((said ? said + " " : "") + warning + ".", true);
+                } else if (said && ran !== "unavailable") { toast(said, answer.ok === false); }
                 return answer;
             });
         };
         const run = (S.autoRun || Promise.resolve(null)).then(press, press);
         S.autoRun = run.then(function () { return null; }, function () { return null; });
         return run;
+    }
+
+    /**
+     * The server's word that a press's job will not run at the settings on
+     * WanGP's screen (``outbox.settings_warning``), or "".
+     */
+    function settingsWarning(answer) {
+        const settings = answer && answer.ok !== false && answer.settings;
+        return settings && typeof settings.warning === "string" ? settings.warning.trim() : "";
     }
 
     /** A status line's sentence as plain text, its notes and markup left out. */

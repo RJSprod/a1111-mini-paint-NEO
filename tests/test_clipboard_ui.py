@@ -1386,7 +1386,7 @@ def settings_line_checks(r: Results, tab) -> None:
     card = (clipboard_ui.outbox_view([composed], page_id) or [{}])[0]
     lines = {line.get("label"): line for line in card.get("lines") or []}
     r.check("a composed job's card has a Settings line saying where its settings came from",
-            (lines.get("Settings") or {}).get("text") == "WanGP's last saved settings (the page didn't answer)"
+            (lines.get("Settings") or {}).get("text") == "WanGP's last saved settings (its form was not saved at send)"
             and (lines.get("Settings") or {}).get("settings") == outbox.SETTINGS_NO_ANSWER, str(card.get("lines")))
     early = (clipboard_ui.outbox_view([waiting], page_id) or [{}])[0]
     r.check("and one not composed yet has none - nobody can say yet",
@@ -1401,6 +1401,109 @@ def settings_line_checks(r: Results, tab) -> None:
     r.check("and a record naming anything else shows nothing",
             forged and forged.get("settings") == "" and clipboard_ui.history_view([forged], lambda asset_id: None)[0].get("settings") == "",
             str(forged and forged.get("settings")))
+
+
+def press_settings_checks(r: Results, base: pathlib.Path, tab) -> None:
+    """A press says when its job will not run at the settings on WanGP's screen.
+
+    Asked for: "I want all of my send to wan2gp to use the settings that are
+    in view!" The outbox decides where a job's settings came from (its own
+    checks hold every row); what is held here is that Add to Queue and Auto
+    put that in their answers - the warning first among the status line's
+    notes, and the whole view for the page to say out loud - that a job at
+    the settings on screen adds nothing, and that the log says it by the
+    source's key and never by the prompt.
+    """
+    from minipaint_neo.wangp import protocol as wire
+
+    page_id = "e" * 32
+    real = outbox.submit
+    served: dict = {}
+    made: list = []
+
+    def submit(*args, **kwargs):
+        job = real(*args, **kwargs)
+        made.append(job["job_id"])
+        return dict(job, **served)
+
+    warning = ("Not the settings on WanGP's screen: this job runs at WanGP's last saved settings "
+               "(its form was not saved at send)")
+    outbox.submit = submit
+    try:
+        answer = tab.add_to_queue("in view on the page", page_id, None, False, settings_flush=wire.FLUSH_COMMITTED)
+        r.check("a job this page runs drives the live page, and its press says nothing more about settings",
+                answer.get("ok") and (answer.get("settings") or {}).get("in_view") is True
+                and (answer.get("settings") or {}).get("warning") == "" and "Not the settings" not in answer.get("status", ""),
+                str(answer.get("settings")))
+
+        served.update(executor=outbox.EXECUTOR_SERVER, state=outbox.ADMITTED, inherit_settings=True,
+                      settings_flush=wire.FLUSH_COMMITTED, snapshot={"source": wire.BASE_FLUSHED, "settings_count": 12})
+        answer = tab.add_to_queue("saved at the press", page_id, None, False, settings_flush=wire.FLUSH_COMMITTED)
+        r.check("a server job frozen from the save WanGP made at the press says nothing more either",
+                answer.get("ok") and answer.get("settings") == {"source": outbox.SETTINGS_SAVED_AT_SEND,
+                                                               "sentence": "saved from the WanGP page at send",
+                                                               "in_view": True, "warning": ""}
+                and answer["status"].startswith("Queued on the server. <small>") and "Not the settings" not in answer["status"]
+                and outbox.SETTINGS_AT_TURN not in answer["status"], str(answer.get("status"))[:200])
+
+        served.update(settings_flush=wire.FLUSH_UNAVAILABLE, snapshot={"source": wire.BASE_RECORDED, "settings_count": 12})
+        answer = tab.add_to_queue("a secret prompt", page_id, None, False, settings_flush=wire.FLUSH_UNAVAILABLE)
+        r.check("one that runs at WanGP's last saved settings says so, first among the notes",
+                answer.get("ok") and answer["status"].startswith(f"Queued on the server. <small>{warning}</small> <small>")
+                and (answer.get("settings") or {}).get("warning") == warning
+                and (answer.get("settings") or {}).get("in_view") is False, str(answer.get("status"))[:300])
+
+        served.pop("snapshot")
+        answer = tab.add_to_queue("read later", page_id, None, False, settings_flush=wire.FLUSH_COMMITTED)
+        r.check("and one whose settings could not be read at the press says its turn reads them",
+                answer["status"].startswith(f"Queued on the server. <small>{outbox.SETTINGS_AT_TURN}</small>")
+                and (answer.get("settings") or {}).get("source") == "", str(answer.get("status"))[:300])
+
+        made_pictures = [_write(base / "press" / "warned.png", "PNG", (24, 16), (10, 120, 30))]
+        tab.upload(made_pictures, "")
+        picture = next(asset.asset_id for asset in tab.library.assets() if asset.filename == "warned.png")
+        served.update(snapshot={"source": wire.BASE_FACTORY, "settings_count": 9})
+        answer = tab.auto_queue(picture, "auto prompt", page_id, None, None, False, settings_flush=wire.FLUSH_COMMITTED)
+        defaults = "Not the settings on WanGP's screen: this job runs at the model's defaults (nothing saved yet)"
+        r.check("Auto's answer carries it too, after the sentence that says where the picture went",
+                answer.get("ok") and answer["status"].startswith("Auto: warned.png as ")
+                and f"Queued on the server. <small>{defaults}</small>" in answer["status"]
+                and (answer.get("settings") or {}).get("warning") == defaults, str(answer.get("status"))[:300])
+
+        log = pathlib.Path(str(process_log.path()))
+        text = log.read_text(encoding="utf-8") if log.is_file() else ""
+        r.check("the log says a press was not at the settings on screen by the source's key, never the prompt",
+                f"queue clicked: job {made[2][:8]} - not the settings on WanGP's screen (last_saved_no_answer)" in text
+                and f"queue clicked: job {made[3][:8]} - not the settings on WanGP's screen (read at its turn)" in text
+                and f"auto clicked: job {made[4][:8]} - not the settings on WanGP's screen (model_defaults)" in text
+                and f"job {made[1][:8]} - not the settings" not in text and "a secret prompt" not in text, text[-600:])
+
+        # WanGP's own check would not take the job: refused, in its words.
+        def refuse(*_args, **_kwargs):
+            raise IntegrationError(errors.WANGP_VALIDATION_REFUSED, "You must provide a Start Image")
+
+        outbox.submit = refuse
+        count = len(outbox.jobs())
+        lead = "WanGP would not generate this with the settings on its screen: You must provide a Start Image"
+        answer = tab.add_to_queue("refused prompt", page_id, None, False, settings_flush=wire.FLUSH_COMMITTED)
+        r.check("a press WanGP's check refuses answers with WanGP's reason and how to fix it, and stores nothing",
+                answer.get("ok") is False and answer.get("code") == errors.WANGP_VALIDATION_REFUSED
+                and answer.get("status") == f"{lead} <small>{outbox.VALIDATION_REFUSED_NOTE}</small>"
+                and answer.get("instruction") is None and len(outbox.jobs()) == count, str(answer.get("status")))
+        answer = tab.auto_queue(picture, "refused prompt", page_id, None, None, False, settings_flush=wire.FLUSH_COMMITTED)
+        r.check("and so does Auto",
+                answer.get("ok") is False and answer.get("code") == errors.WANGP_VALIDATION_REFUSED
+                and str(answer.get("status")).startswith(lead), str(answer.get("status")))
+        text = log.read_text(encoding="utf-8") if log.is_file() else ""
+        r.check("and the log names the refusal by its code alone, never WanGP's sentence or the prompt",
+                f"queue clicked; refused - {errors.WANGP_VALIDATION_REFUSED}" in text
+                and f"auto clicked; refused - {errors.WANGP_VALIDATION_REFUSED}" in text
+                and "You must provide a Start Image" not in text and "refused prompt" not in text, text[-400:])
+    finally:
+        outbox.submit = real
+        for listed in outbox.jobs():
+            if listed["job_id"] in made and listed["state"] == "pending":
+                outbox.cancel(listed["job_id"])
 
 
 def run() -> Results:
@@ -1424,6 +1527,7 @@ def run() -> Results:
                 integration_checks(r, base, tab)
                 enhance_switch_checks(r, base, tab)
                 settings_line_checks(r, tab)
+                press_settings_checks(r, base, tab)
             fallback_checks(r)
             theming_checks(r)
         finally:

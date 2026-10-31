@@ -267,8 +267,9 @@ bridge writes WanGP's own generate trigger when WanGP is idle (route
 `generate`, status `started`) and its add-to-queue trigger when it is busy
 (route `queue`, status `queued`), and WanGP's own chain reads the live form.
 It deliberately does not go through `minipaintInterop.wangp.enqueue`: a job
-there is composed from WanGP's *recorded* form, or the model's defaults with
-inheritance off, which is not what is on screen. Its name and its answer's
+there is composed from WanGP's *recorded* form - what WanGP last saved, which
+the page keeps current but which is a save behind what is on screen, not the
+screen itself. Its name and its answer's
 `ok`, `status`, `route` and `message` are read by that extension; renaming it
 there or here breaks the button silently, and `tests/test_wangp_protocol.py`
 holds that it overrides nothing.
@@ -299,24 +300,36 @@ Protocol 6 adds `flushForm({timeoutMs, settleMs, callTimeoutMs})`: ask WanGP to
 commit this page's live settings form so a job composed later — on the server,
 with this page shut — runs at what was on screen. It writes one hidden trigger
 (`save_form_trigger`, which WanGP already wires to
-`save_inputs(target="state")`) rather than reading the form back, then polls a
-fingerprint of the recorded form until it moves or the budget (900 ms unless
-given) runs out; with `settleMs` it looks once, that long after the press, and
-stops. Resolves — never rejects — with one of `committed`, `unchanged`,
-`requested` (settle mode, not moved yet), `suppressed`, `unavailable`; every
-one of them is a fine outcome, because a job composes from the recorded form
-when a flush cannot happen. A probe never writes, and a page carrying
+`save_inputs(target="state")`) rather than reading the form back, then polls
+until the save lands or the budget (900 ms unless given) runs out; with
+`settleMs` it looks once, that long after the press, and stops. From bridge
+1.16.0 every `FORM_FLUSHED` answer, press and probe, carries `commits` - how
+many times WanGP has saved this model's form since the bridge began counting -
+and a save has landed when the count is past the press's, whatever it saved;
+from an older bridge (no `commits`) it has landed when the recorded form's
+fingerprint moved. Resolves — never rejects — with `{ok, flush, counted}`:
+`flush` one of `committed`, `unchanged` (an older bridge only: nothing moved),
+`requested` (settle mode, not landed yet), `suppressed`, `unavailable` (from a
+bridge that counts, also a save that never landed in time), and `counted`
+whether the bridge counts. None of them stops a press, because a job composes
+from the recorded form when a flush cannot happen - and the press then says the
+job is not at the settings on screen. A probe never writes, and a page carrying
 `ignore_save_form` is refused rather than flushed.
 
 `saveForSend(reason)` is the save every send path waits on — the gallery's
-Generate, Clipboard's Add to Queue and `minipaintInterop.enqueue` (pass
-`{flush: false}` to opt out). It resolves within 2 s with `{flush}`: `""` when
-nothing reads the record (inheritance off, or a queue this page runs itself),
-`unchanged` at once when the bridge reports its changes (`form_watch`) and
-every one it reported is already committed, otherwise the outcome of a flush,
-and `unavailable` when there is no bridge session or it did not answer in
-time. The page also commits about a second after the last `FORM_CHANGED`, one
-save at a time; `state().settings` says whether the record is current.
+Generate and Auto, Clipboard's Add to Queue and Auto, and
+`minipaintInterop.enqueue` (pass `{flush: false}` to opt out). It resolves
+within 2 s with `{flush}`: `""` when nothing reads the record (a queue this
+page runs itself); from a bridge that counts, always the outcome of a flush -
+`committed` once WanGP's save has landed - because a WanGP page that changes
+its own form by script sends no `FORM_CHANGED`; from an older bridge,
+`unchanged` at once when it reports its changes (`form_watch`) and every one
+it reported is already committed, otherwise the outcome of a flush; and
+`unavailable` when there is no bridge session or it did not answer in time. A
+save it could not make is tried once more a second later. The page also
+commits about a second after the last `FORM_CHANGED`, one save at a time;
+`state().settings` says whether the record is current (`current`) and whether
+the bridge counts (`counted`).
 
 **What the WanGP page wears** (bridge 1.9.0): `theme(mode?)` sends `THEME_STATE`
 `{mode, accent, skin, palette}` after READY and again whenever the tab comes back on
@@ -561,6 +574,10 @@ def can_hold(answer=None) -> bool | None                     # the hello's capab
 MODEL_TIMEOUT = 8.0
 def model(model_type) -> facts                               # normalize_model_facts; raises like every call here
 def can_check_models(answer=None) -> bool | None             # the hello's capabilities.model
+# bridge 1.16.0, the check at the press (only ``clipboard.executor.settings_at_press`` calls this)
+VALIDATE_TIMEOUT = 10.0
+def validate(execution_id, settings, prompt=None, media=None, model_type="") -> verdict   # normalize_validate_answer
+def can_validate(answer=None) -> bool | None                 # the hello's capabilities.validate
 ```
 
 The destination comes off the runtime object and nowhere else — the host and scheme are
@@ -872,6 +889,40 @@ gallery does, typed past its height under Gradio's inline height and a theme's c
 action bar grown, two columns at 700 px and stacked at 480, the scroll - with thirteen
 mutations; watched on a live 5.29 page with WanGP's own stylesheet and page script through
 a generation, 1.15.0 once and 1.15.1 at 1400, 680 and 400 px.
+
+## Bridge 1.16.0: a save is seen to land
+
+`FORM_FLUSHED` gains `commits`, on the press's answer and on every probe's: an
+integer, how many times WanGP has recorded this model's form
+(`service.record_model_form`) since the bridge began counting, process-wide.
+The bridge wraps the service's own method on its one instance the first time
+it is asked (`Compatibility.commit_count`, `CommitCounts`), passes WanGP's
+call through exactly as made and counts only once the record is written; the
+wrapper carries its counts (`_minipaint_commits`), so a reloaded plugin reads
+them rather than wrapping a wrapper. It is absent - and the parent reads the
+fingerprint as before - when there is no service or no such method, or the
+instance will not take the wrapper. The page keeps it only as a count
+(`onFormFlushed`), and WanGP's console line for a flush says the outcome and
+the count, never the fingerprint. The parent's own bundle reads either shape.
+
+And the control plane gains `validate` (`CONTROL_VALIDATE`, offered as
+`capabilities.validate` in the hello): would WanGP take this job? The request is
+a submission's (`normalize_execution_request`), so the job checked is the job
+that would be sent. `Executor.validate` builds the task `submit` would queue
+(`_prepare`, quiet) and takes WanGP's queue loader's own steps on a copy of it -
+`_extract_model_type`, `_load_task_attachments` (requested as globals beside
+`validate_task` and `_task_has_path_attachments`), then `validate_task(task,
+state)` with the state the shared record lives in (`Compatibility.shared_state`)
+- and queues and records nothing. The answer, `normalize_validate_answer`, is
+`{ok, checked, valid, error, diagnosis}`: `checked` False ("could not ask": no
+`validate_task`, or a picture with no loader to open it) is never valid; `error`
+is WanGP's own sentence when it ran and refused, scrubbed and at most
+`VALIDATION_ERROR_MAX` characters; an exception inside WanGP's steps is a refusal
+in its words, as the loader's own failure would be. WanGP's console line for a
+check names the model, never the prompt. And the tracker fails a task WanGP's
+loader skipped at its next look, `WANGP_VALIDATION_REFUSED` with WanGP's reason
+(`admission.refusal_reason`, from `gen["queue_errors"]`), rather than after the
+minute's grace as a task that never arrived.
 
 ## Bridge 1.13.0: `model`
 

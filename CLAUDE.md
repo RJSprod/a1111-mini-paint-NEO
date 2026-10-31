@@ -371,10 +371,34 @@ input events, and WanGP's model loads change the form by script, and either
 would otherwise be a save loop or a save of a half-loaded form) and the parent
 saves about a second after the last one. The count of notices a save covered
 is what decides whether the record is current: a save that began before the
-last touch is not the save of it. `saveForSend` answers at once when the record
-is current and otherwise waits at most two seconds - a poll that has nothing to
-find spends its whole budget, so it must not be the common case. A bridge
-without `form_watch` is never taken at its word.
+last touch is not the save of it. A bridge without `form_watch` is never taken
+at its word.
+
+**A save that changed nothing looked like no save at all.** Until bridge
+1.16.0 the only thing a page could watch was a fingerprint of WanGP's record,
+which moves only when the values do; a save of an unchanged form spent the
+whole two seconds and was then reported `unchanged` - and so was a save WanGP
+never made, which marked the record current and let every later send skip its
+save while the record still held the last run's settings. That, with the
+inheritance setting off by default, is what "the video ... is not the settings
+that are visible in wan2gp, but the last run settings" was (2026-10-31). The
+bridge now counts every `record_model_form` call (`commits` on every
+`FORM_FLUSHED`), the page trusts only a count that moved (`savedOutcome`), and
+from such a bridge every send saves, because a WanGP page that changes its own
+form by script - a settings file, a preset - sends no `FORM_CHANGED`. An older
+bridge keeps the old shortcut. And the press reads the job's settings there
+and then, asks WanGP's own check of the job, and only then stores it
+(`executor.settings_at_press`) - a job WanGP would not generate is refused at
+the press in WanGP's words, and one whose settings are not the ones on screen
+says so (`outbox.settings_warning`); `docs/wangp/SERVER_EXECUTION.md` §4 has all
+of it.
+
+**Check before you store.** Storing a server job wakes the executor's thread,
+which takes a lone job on at once - composed and handed to WanGP within the
+same moment. Anything that must decide whether a job may exist (the check at
+the press) has to happen before `outbox._store`, never after it on the stored
+job: the first build froze the settings onto a job already stored, and the
+executor could compose it at its turn while the press was still asking.
 
 **The heartbeat cannot see WanGP's own connection.** `PING` is answered by the
 script in the WanGP document itself, on the spot and never through Gradio, and
@@ -696,9 +720,19 @@ changes and the heartbeat need bridge 1.7.0 installed in WanGP, the session guar
 bridge 1.8.0, the theme hijack - the page's colours on the WanGP page, over
 WanGP's own themes - bridge 1.9.0, the page's typeface bridge 1.10.1, the
 compact WanGP page under focus bridge 1.11.0, the card lease's hold bridge
-1.12.0, the assistant's prompt box on the WanGP tab bridge 1.14.0, and the assistant's
+1.12.0, the assistant's prompt box on the WanGP tab bridge 1.14.0, the assistant's
 Super Focused studio bridge 1.15.0 (its second layout, the prompt alone beside Generate,
-the progress and the gallery, 1.15.1). The
+the progress and the gallery, 1.15.1), and a send knowing its save of WanGP's form landed
+bridge 1.16.0, which also checks a job at the press with WanGP's own `validate_task` (read
+against Wan2GP 3a8ced9's `wgp.py`, run only against a stand-in: if a press is refused that
+WanGP itself would take, WanGP's console's `check:` line and its `[minipaint check]` lines are
+the first thing to look at, and an older WanGP without `validate_task` is simply not checked).
+That count wraps WanGP's own `record_model_form` on its one service
+instance and has been checked against a fake service, never against the user's WanGP: if
+a press says *Not the settings on WanGP's screen* and the page journal's `flush:` line says
+"WanGP did not save its form within", WanGP's console's `flush:` lines - each with the count
+- are the first thing to look at (a count that never moves is a WanGP whose save never
+reaches the service the bridge wrapped). The
 prompt box has been checked against a fake of the bridge's event and a stand-in
 of WanGP's page, never against the user's own WanGP: if a typed prompt does not
 reach WanGP's box, the WanGP console's `prompt: written` line (or its absence)

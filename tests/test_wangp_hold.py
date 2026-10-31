@@ -824,8 +824,8 @@ def hello_checks(r: Results) -> None:
         try:
             status, body = call(protocol.CONTROL_HELLO)
             hello = protocol.normalize_control_hello(body)
-            r.check("hello says this bridge speaks hold, resume and flush (and, from 1.13.0, the model check)",
-                    status == 200 and body.get("capabilities") == {"hold": True, "model": True}
+            r.check("hello says this bridge speaks hold, resume and flush (and, from 1.13.0, the model check; from 1.16.0, the check at the press)",
+                    status == 200 and body.get("capabilities") == {"hold": True, "model": True, "validate": True}
                     and hello["capabilities"]["hold"] is True,
                     str(body.get("capabilities")))
             r.check("and carries every field the lease reads, with no hold yet",
@@ -833,7 +833,7 @@ def hello_checks(r: Results) -> None:
                                                 "waiter", "vram_free", "vram_total"))
                     and body["hold"] == protocol.HOLD_NONE and body["worker"] is False and body["task_running"] is False,
                     str({key: body.get(key) for key in ("hold", "worker", "task_running", "waiter")}))
-            r.check("and the bridge is 1.15.1", body["bridge_version"] == "1.15.1" == compatibility.BRIDGE_VERSION,
+            r.check("and the bridge is 1.16.0", body["bridge_version"] == "1.16.0" == compatibility.BRIDGE_VERSION,
                     str(body.get("bridge_version")))
 
             status, body = call(protocol.CONTROL_HOLD, {"lease": LEASE, "ttl_s": 45, "label": "Speech engine"})
@@ -870,7 +870,7 @@ def older_bridge_checks(r: Results) -> None:
     _compatibility, _control, _hold, protocol = _modules()
     old = protocol.normalize_control_hello({"ok": True, "control_version": 1, "bridge_version": "1.11.0"})
     r.check("a hello without the capability reads as a bridge that cannot hold",
-            old["capabilities"] == {"hold": False, "model": False}, str(old["capabilities"]))
+            old["capabilities"] == {"hold": False, "model": False, "validate": False}, str(old["capabilities"]))
     r.check("and its hold word is empty - it did not say - never 'none'", old["hold"] == "", repr(old["hold"]))
     r.check("the control version did not move, so everything else an older bridge does still works",
             protocol.CONTROL_VERSION == 1)

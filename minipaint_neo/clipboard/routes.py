@@ -554,7 +554,8 @@ async def _queue(request: typing.Any) -> typing.Any:
 
 
 def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
-    """One page of what WanGP made for this tab, newest first.
+    """One page of what WanGP made, newest first: every video in its output
+    folder, and what it made for this tab's requests (``outputs.gallery``).
 
     The same shape and the same page size as the picture index, because it
     is the same pager drawing it: a gallery that counted its pages
@@ -570,7 +571,7 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
     when neither exists - and the gallery says so rather than offering a
     button that would do nothing.
     """
-    listed = outputs.files()
+    listed = outputs.gallery()
     wanted = clamp_size(size)
     total = len(listed)
     pages = max(1, -(-total // wanted))
@@ -603,10 +604,10 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
         status = "WanGP has no output folder here yet. Launch it once, or set the folder in Clipboard's settings."
     elif not total:
         reason = "empty"
-        status = "Nothing yet. A video appears here after WanGP finishes a request made from this tab."
+        status = "Nothing yet. A video appears here once WanGP has written one to its output folder."
     else:
         reason = ""
-        status = f"{total} output{'s' if total != 1 else ''} from this tab."
+        status = f"{total} output{'s' if total != 1 else ''} in WanGP's output folder, newest first."
     return {
         "ok": True,
         "total": total,
@@ -627,6 +628,11 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
                 # because a match is not a fact and pretending otherwise is
                 # how a user comes to trust the wrong video.
                 "exact": item["exact"],
+                # "request" for a file WanGP made for one of this tab's
+                # requests, "folder" for every other video in its output
+                # folder - which has no request to match or to load, so
+                # nothing about it is marked as a guess.
+                "source": item.get("source") or "request",
                 # The prompt as it was typed - what Load puts back - and the
                 # one an enhancement wrote from it, which is what WanGP got.
                 "prompt": str(facts["prompt"])[:400],

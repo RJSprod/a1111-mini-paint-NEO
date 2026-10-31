@@ -52,6 +52,7 @@ page's, and only counts and states belong on it.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import pathlib
 import secrets
@@ -188,12 +189,14 @@ def _absolute(path: str, root: typing.Optional[pathlib.Path]) -> str:
     return str(root / text)
 
 
-def _media_in(where: pathlib.Path) -> typing.List[typing.Tuple[pathlib.Path, float, int]]:
+def _media_in(where: pathlib.Path, suffixes: typing.Tuple[str, ...] = MEDIA_SUFFIXES,
+              limit: int = MAX_SCANNED) -> typing.List[typing.Tuple[pathlib.Path, float, int]]:
     """Every media file under ``where``, with when it was written and how big.
 
     Recursive, because WanGP sorts its outputs into per-model folders on
     some versions and not others, and a gallery that only saw the top level
-    would be empty on half of them.
+    would be empty on half of them. A link is not followed into, and a file
+    that is a link is not listed: what is shown is what WanGP wrote here.
     """
     found: typing.List[typing.Tuple[pathlib.Path, float, int]] = []
     try:
@@ -202,15 +205,17 @@ def _media_in(where: pathlib.Path) -> typing.List[typing.Tuple[pathlib.Path, flo
         return found
     for parent, _dirs, names in walker:
         for name in names:
-            if not name.lower().endswith(MEDIA_SUFFIXES):
+            if not name.lower().endswith(suffixes):
                 continue
             path = pathlib.Path(parent) / name
             try:
+                if path.is_symlink():
+                    continue
                 stat = path.stat()
             except OSError:
                 continue
             found.append((path, float(stat.st_mtime), int(stat.st_size)))
-            if len(found) >= MAX_SCANNED:
+            if len(found) >= limit:
                 return found
     return found
 
@@ -517,6 +522,136 @@ def files(refresh: bool = True) -> typing.List[dict]:
     return listed
 
 
+# ---------------------------------------------------- the whole folder --
+#
+# View Outputs shows every video in WanGP's output folder, not only the ones
+# made for this tab's requests. Asked for: "i want the 'view outputs' videos to
+# actually be all the videos in wan2gp output folder, not just those that we
+# requested through clipboard" - most of what the user makes is set up and
+# generated in the WanGP tab itself, and that never had a place here.
+#
+# The ledger above stays exactly what it was: the files WanGP made for this
+# tab's requests, with each request's recipe, which is what Load needs and
+# what the "~" of a matched file is about. A video nobody claimed is listed
+# from the folder itself every time the gallery asks, never written down - a
+# record of somebody else's file would only go stale - and is named by an id
+# made from where it sits in the folder, so the same video has the same id
+# from one listing to the next and no path ever reaches the browser.
+
+#: The prefix of a folder video's id, which tells it from a ledger file's (16
+#: hex characters, made at random) at a glance.
+FOLDER_ID_PREFIX = "wf"
+#: How many files one listing of the whole folder looks at. Generous - a
+#: listing is directory entries and a stat each - and bounded, because a
+#: folder somebody pointed at their whole disk should be slow, not fatal.
+FOLDER_SCAN_MAX = 20000
+#: How long one listing is reused. The gallery asks for a page at a time and
+#: every page would walk the folder again; this long, a page turn is free and
+#: a video WanGP has just written is still there on the next look.
+FOLDER_LISTING_SECONDS = 3.0
+#: How soon an id nobody knows may walk the folder again to look for it. A
+#: player asks for a file in many ranges, and a file that has gone would
+#: otherwise walk the folder once per range.
+FOLDER_MISS_SECONDS = 1.0
+
+_folder: typing.Dict[str, typing.Any] = {"where": "", "at": 0.0, "files": [], "index": {}}
+
+
+def _key(path: typing.Any) -> str:
+    """One spelling per file, whatever wrote the path: a claimed path from
+    WanGP's own answer and the same file found by walking the folder must
+    compare equal, or one video is listed twice."""
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def _folder_id(where: pathlib.Path, path: pathlib.Path) -> str:
+    """The id of a file in the folder: its place there, hashed. The same file
+    gets the same id from one listing to the next and after a restart, and the
+    id says nothing about the name or the folders above it."""
+    try:
+        place = path.relative_to(where).as_posix()
+    except ValueError:
+        place = path.as_posix()
+    digest = hashlib.sha256(place.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+    return FOLDER_ID_PREFIX + digest
+
+
+def _folder_videos(fresh: bool = False) -> typing.List[dict]:
+    """Every video under the output folder, as ``{id, path, name, size, at}``.
+
+    Reused for ``FOLDER_LISTING_SECONDS`` unless ``fresh``. The walk is made
+    outside the module's lock, which the ledger's writers share: a slow disk
+    should slow the gallery, not a job recording its outputs.
+    """
+    where = folder()
+    if where is None:
+        with _lock:
+            _folder.update(where="", at=0.0, files=[], index={})
+        return []
+    moment = time.monotonic()
+    with _lock:
+        if (not fresh and _folder["where"] == str(where) and _folder["at"]
+                and moment - _folder["at"] < FOLDER_LISTING_SECONDS):
+            return list(_folder["files"])
+    found = [
+        {"id": _folder_id(where, path), "path": str(path), "name": path.name, "size": size, "at": at}
+        for path, at, size in _media_in(where, VIDEO_SUFFIXES, FOLDER_SCAN_MAX)
+    ]
+    with _lock:
+        _folder.update(where=str(where), at=moment, files=found, index={one["id"]: one["path"] for one in found})
+    return list(found)
+
+
+def gallery(refresh: bool = True) -> typing.List[dict]:
+    """What View Outputs lists: this tab's outputs and every other video in
+    WanGP's output folder, newest first, each said once.
+
+    A ledger file keeps what it always had - its request, whether WanGP named
+    it or it was matched by time, its recipe - and says ``source: "request"``.
+    A video only the folder knows says ``source: "folder"``, with no request,
+    no recipe and nothing to mark as a guess.
+    """
+    claimed = files(refresh=refresh)
+    with _lock:
+        taken = {_key(path) for path in _claimed_paths(_load())}
+    listed = [dict(item, source="request") for item in claimed]
+    for one in _folder_videos():
+        if _key(one["path"]) in taken:
+            continue
+        listed.append({
+            "id": one["id"], "name": one["name"], "kind": "video", "size": int(one["size"]), "at": float(one["at"]),
+            "job_id": "", "request_id": "", "exact": False, "model": "", "recipe": None, "source": "folder",
+        })
+    listed.sort(key=lambda item: (item["at"], item["id"]), reverse=True)
+    return listed
+
+
+def _folder_path(file_id: str) -> typing.Optional[pathlib.Path]:
+    """The folder video behind an id, still a file of the folder's, or None."""
+    with _lock:
+        found = _folder["index"].get(file_id)
+        recent = _folder["at"] and time.monotonic() - _folder["at"] < FOLDER_MISS_SECONDS
+    if found is None and not recent:
+        # A page loaded before a restart, or a listing that has since been
+        # replaced: walk the folder once and look again.
+        _folder_videos(fresh=True)
+        with _lock:
+            found = _folder["index"].get(file_id)
+    if found is None:
+        return None
+    path = pathlib.Path(found)
+    where = folder()
+    try:
+        if where is None or path.is_symlink() or not path.is_file():
+            return None
+        # Still inside the folder once both are followed: a directory in the
+        # path swapped for a link since the listing is not a way out.
+        path.resolve().relative_to(where.resolve())
+    except (OSError, ValueError):
+        return None
+    return path
+
+
 def entry_for_file(file_id: typing.Any) -> typing.Optional[dict]:
     """The entry an output belongs to - its request, model and recipe - or
     ``None``. Only facts about the request; the path stays with ``path_of``."""
@@ -536,6 +671,8 @@ def path_of(file_id: typing.Any) -> typing.Optional[pathlib.Path]:
     wanted = str(file_id or "")
     if not wanted:
         return None
+    if wanted.startswith(FOLDER_ID_PREFIX):
+        return _folder_path(wanted)
     with _lock:
         for entry in _load():
             for one in entry["files"]:
@@ -553,14 +690,24 @@ def forget_all() -> int:
         return count
 
 
+def forget_listing_for_tests() -> None:
+    """Drop the folder listing and its ids, as a restart does. The ledger, which
+    a restart keeps, is untouched."""
+    with _lock:
+        _folder.update(where="", at=0.0, files=[], index={})
+
+
 def reset_for_tests() -> None:
     with _lock:
         _save([])
+        _folder.update(where="", at=0.0, files=[], index={})
 
 
 __all__ = [
     "CLAIM_MAX_SECONDS",
     "CLOSE_GRACE_SECONDS",
+    "FOLDER_ID_PREFIX",
+    "FOLDER_LISTING_SECONDS",
     "IMAGE_SUFFIXES",
     "MAX_ENTRIES",
     "MEDIA_SUFFIXES",
@@ -570,6 +717,8 @@ __all__ = [
     "files",
     "folder",
     "forget_all",
+    "forget_listing_for_tests",
+    "gallery",
     "path_of",
     "remember",
     "reset_for_tests",

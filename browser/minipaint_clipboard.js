@@ -3362,12 +3362,20 @@ window.minipaintClipboard = (function () {
      * history record either - says so rather than offering a button that
      * would do nothing.
      */
+    /** A file matched to one of this tab's requests by when it was written,
+     *  rather than named by WanGP. Never a video only the folder knows: it was
+     *  not matched to anything, so there is nothing to call a guess. */
+    function guessedOutput(item) { return !!item && item.source !== "folder" && !item.exact; }
+
     function loadButton(item) {
         const button = el("button", "minipaint-clip-output-load", "Load");
         button.type = "button";
         if (!item.recipe) {
             button.disabled = true;
-            button.title = "No recipe was kept for this output, so there is nothing to load.";
+            button.title = item.source === "folder"
+                ? "Made in WanGP, not requested from this tab, so there is no request to load here. "
+                  + "Send to WanGP, in the player's bar, loads its settings in WanGP."
+                : "No recipe was kept for this output, so there is nothing to load.";
             return button;
         }
         button.title = "Put this output's prompt, as it was typed, and its pictures back in the request, to generate again. Nothing is queued.";
@@ -3393,7 +3401,7 @@ window.minipaintClipboard = (function () {
         const tile = el("button", "minipaint-clip-output-tile" + (chosen ? " minipaint-clip-output-chosen" : ""));
         tile.type = "button";
         tile.dataset.output = item.id;
-        tile.title = item.name + (item.exact ? "" : " — matched to a request by when it was written");
+        tile.title = item.name + (guessedOutput(item) ? " — matched to a request by when it was written" : "");
         let media;
         if (item.kind === "video") {
             // The poster is the frame at one second, asked for with a media
@@ -3414,7 +3422,7 @@ window.minipaintClipboard = (function () {
             media.dataset.src = item.url;
         }
         tile.appendChild(media);
-        if (!item.exact) { tile.appendChild(el("span", "minipaint-clip-output-guess", "~")); }
+        if (guessedOutput(item)) { tile.appendChild(el("span", "minipaint-clip-output-guess", "~")); }
         return tile;
     }
 
@@ -3479,7 +3487,7 @@ window.minipaintClipboard = (function () {
                 caption.appendChild(mark);
             }
         }
-        if (!item.exact) {
+        if (guessedOutput(item)) {
             const guess = el("span", "minipaint-clip-output-guess-note",
                              "matched to a request by when it was written");
             caption.appendChild(guess);

@@ -1758,6 +1758,80 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
             if (bar) { bar.remove(); }
             document.documentElement.style.removeProperty('--minipaint-clip-top'); }""")
         time.sleep(0.3)
+
+        # And a header that is pinned but does not start AT the edge. The
+        # Model Chain theme's tab bar is sticky inside the page's own padding,
+        # so at rest it starts 8 px down, and "at the top edge" missed it: the
+        # view opened over the window's top, under the bar, which is drawn at
+        # a higher layer. Asked for: "the view outputs gallery is rendering
+        # behind the tab bar when its on ... make sure the gallery respects
+        # the tab bar."
+        page.evaluate("""() => {
+            window.scrollTo(0, 0);
+            const pad = document.createElement('div');
+            pad.id = 'a-theme-pad';
+            pad.style.cssText = 'height:8px';
+            const bar = document.createElement('div');
+            bar.id = 'a-sticky-header';
+            bar.style.cssText = 'position:sticky;top:0;height:64px;z-index:940;background:#123';
+            document.body.insertBefore(bar, document.body.firstChild);
+            document.body.insertBefore(pad, bar);
+            document.body.dataset.tallForTest = document.body.style.minHeight || '';
+            document.body.style.minHeight = '4000px';
+        }""")
+        measure = """() => {
+            const panel = document.getElementById('minipaint_clipboard_outputs_panel');
+            const media = panel.querySelector('.minipaint-clip-output-stage-media');
+            const bar = document.getElementById('a-sticky-header') || document.getElementById('a-focus-bar');
+            const p = panel.getBoundingClientRect();
+            const b = bar.getBoundingClientRect();
+            return { top: Math.round(p.top), mediaTop: media ? Math.round(media.getBoundingClientRect().top) : -1,
+                     barTop: Math.round(b.top), barBottom: Math.round(b.bottom), scrolled: Math.round(window.scrollY) }; }"""
+        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
+        time.sleep(0.5)
+        resting = page.evaluate(measure)
+        r.check("a tab bar pinned a few pixels below the window's edge is cleared too: the view starts under it",
+                resting["barTop"] > 1 and resting["top"] >= resting["barBottom"] and resting["top"] - resting["barBottom"] <= 1,
+                str(resting))
+        r.check("and the video with it, so no part of the player is behind the bar",
+                resting["mediaTop"] >= resting["barBottom"], str(resting))
+        page.evaluate("() => window.scrollTo(0, 40)")
+        time.sleep(0.4)
+        stuck = page.evaluate(measure)
+        r.check("when the page scrolls and the bar climbs to the edge, the view follows it up, leaving no strip open",
+                stuck["scrolled"] > 0 and stuck["barTop"] == 0 and abs(stuck["top"] - stuck["barBottom"]) <= 1, str(stuck))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        page.evaluate("""() => {
+            for (const id of ['a-sticky-header', 'a-theme-pad']) { const n = document.getElementById(id); if (n) { n.remove(); } }
+            document.body.style.minHeight = document.body.dataset.tallForTest || '';
+            delete document.body.dataset.tallForTest;
+            window.scrollTo(0, 0);
+            document.documentElement.style.removeProperty('--minipaint-clip-top'); }""")
+        time.sleep(0.3)
+
+        # A bar that comes AFTER the view opened: the Forge Assistant's focus
+        # mode keeps the workspace's tab bar along the top of the window, and
+        # shows it, hides it or lets it peek, saying which on the body.
+        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
+        time.sleep(0.4)
+        page.evaluate("""() => {
+            const bar = document.createElement('div');
+            bar.id = 'a-focus-bar';
+            bar.style.cssText = 'position:fixed;top:0;left:8px;right:8px;height:44px;z-index:1102;background:#321';
+            document.body.appendChild(bar);
+            document.body.setAttribute('data-forge-assistant-focus-bar', 'shown');
+        }""")
+        time.sleep(0.4)
+        later = page.evaluate(measure)
+        r.check("a bar shown after the view opened is cleared as soon as the page says so",
+                later["top"] >= later["barBottom"] and later["barBottom"] == 44, str(later))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        page.evaluate("""() => { const bar = document.getElementById('a-focus-bar'); if (bar) { bar.remove(); }
+            document.body.removeAttribute('data-forge-assistant-focus-bar');
+            document.documentElement.style.removeProperty('--minipaint-clip-top'); }""")
+        time.sleep(0.3)
     finally:
         from minipaint_neo.clipboard import config as clip_config
         from minipaint_neo.clipboard import outputs

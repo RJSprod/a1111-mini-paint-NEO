@@ -2644,26 +2644,52 @@ window.minipaintClipboard = (function () {
      * also pinned and also crosses the top edge, and treating one as a header
      * would leave the panel nowhere to be.
      */
+    //: How far below the window's top edge a header may START and still be the
+    //: header. "At the top edge" was the first rule, and it found Lobe's bar,
+    //: which is fixed at 0 - and missed the Model Chain theme's, which is
+    //: sticky inside the page's own 8 px of padding and so starts 8 px down
+    //: until the page is scrolled: View Outputs opened over the window's top,
+    //: under that bar (it is drawn at a higher layer), with the bar covering
+    //: the top of the player. Asked for: "the view outputs gallery is
+    //: rendering behind the tab bar when its on ... make sure the gallery
+    //: respects the tab bar". A page's padding is a few pixels, a header is
+    //: tens, so the band is generous without reaching anything else.
+    const HEADER_SLACK_PX = 32;
+    //: Where in that band the window is asked what is there, from the edge
+    //: down: a bar that starts anywhere in it covers at least one of these.
+    const HEADER_PROBES_Y = [1, 8, 16, 24, 32];
+
     function headerInset() {
         if (typeof document.elementsFromPoint !== "function") { return 0; }
-        let found;
-        try {
-            found = document.elementsFromPoint(Math.round(window.innerWidth / 2), 1) || [];
-        } catch (e) { return 0; }
         const limit = Math.round(window.innerHeight / 3);
+        const x = Math.round(window.innerWidth / 2);
+        const seen = new Set();
         let bottom = 0;
-        for (let i = 0; i < found.length; i += 1) {
-            const node = found[i];
-            if (!node || node === document.body || node === document.documentElement) { continue; }
-            // A panel of ours is pinned to the top as well. Measuring one of
-            // those would push the next one that opened further down, and the
-            // one after that further still.
-            if (node.closest && (node.closest("." + EDITOR_OPEN_CLASS) || node.closest("." + PROMPTS_CLASS))) { continue; }
-            let style;
-            try { style = window.getComputedStyle(node); } catch (e) { continue; }
-            if (!style || (style.position !== "fixed" && style.position !== "sticky")) { continue; }
-            const box = node.getBoundingClientRect();
-            if (box.top <= 1 && box.bottom > bottom && box.bottom <= limit) { bottom = box.bottom; }
+        for (let p = 0; p < HEADER_PROBES_Y.length; p += 1) {
+            let found;
+            try {
+                found = document.elementsFromPoint(x, HEADER_PROBES_Y[p]) || [];
+            } catch (e) { return 0; }
+            for (let i = 0; i < found.length; i += 1) {
+                const node = found[i];
+                if (!node || seen.has(node) || node === document.body || node === document.documentElement) { continue; }
+                seen.add(node);
+                // A panel of ours is pinned to the top as well. Measuring one
+                // of those would push the next one that opened further down,
+                // and the one after that further still.
+                if (node.closest && (node.closest("." + EDITOR_OPEN_CLASS) || node.closest("." + PROMPTS_CLASS))) { continue; }
+                let style;
+                try { style = window.getComputedStyle(node); } catch (e) { continue; }
+                if (!style || (style.position !== "fixed" && style.position !== "sticky")) { continue; }
+                const box = node.getBoundingClientRect();
+                // A pinned thing that starts within the band and ends within a
+                // third of the window. Not one that ends further down: a
+                // full-height pinned sidebar, or a workspace laid over the
+                // whole window (the Forge Assistant's focus mode does that),
+                // also crosses the band, and taking one of those for a header
+                // would leave the panel nowhere to be.
+                if (box.top <= HEADER_SLACK_PX && box.bottom > bottom && box.bottom <= limit) { bottom = box.bottom; }
+            }
         }
         return Math.max(0, Math.round(bottom));
     }
@@ -2676,14 +2702,53 @@ window.minipaintClipboard = (function () {
         } catch (e) { /* a page that will not take a custom property still opens */ }
     }
 
-    /** Re-measure while a panel is open: a header's height is a function of
-     *  the window's width on every theme that wraps its tabs. */
+    function headerPanelOpen() { return outputsOpen() || editorOpen() || promptHistoryOpen(); }
+
+    /** Measure again, once a frame at most, while a panel is open. */
+    function scheduleHeaderInset() {
+        if (S.headerFrame || !headerPanelOpen()) { return; }
+        S.headerFrame = window.requestAnimationFrame(function () {
+            S.headerFrame = 0;
+            if (headerPanelOpen()) { applyHeaderInset(); }
+        });
+    }
+
+    /**
+     * Re-measure while a panel is open, whenever the header can have moved.
+     *
+     * A resize: a header's height is a function of the window's width on
+     * every theme that wraps its tabs. A scroll: a sticky header rests in the
+     * page's padding and climbs to the edge as the page scrolls - measured at
+     * rest, the panel would leave a strip open under it once stuck. Heard in
+     * the capture phase because a scroll does not bubble and the page that
+     * scrolls is not always the document (the Forge Assistant's focus mode
+     * scrolls the workspace itself). And a change of the page's own state on
+     * its root or body - focus mode coming on, the tab bar it keeps along the
+     * top being shown or hidden - which says so in attributes there, whoever
+     * drew it. All three do nothing while no panel is open.
+     */
     function watchHeaderInset() {
         if (S.headerWatch) { return; }
-        S.headerWatch = function () {
-            if (outputsOpen() || editorOpen() || promptHistoryOpen()) { applyHeaderInset(); }
-        };
+        S.headerWatch = scheduleHeaderInset;
         window.addEventListener("resize", S.headerWatch);
+        window.addEventListener("scroll", S.headerWatch, { capture: true, passive: true });
+        if (typeof MutationObserver === "function") {
+            try {
+                // The root's own style is where the inset is written, so a
+                // change to it is this code's and not the page's: answering
+                // it would measure for ever.
+                S.headerObserver = new MutationObserver(function (records) {
+                    for (let i = 0; i < records.length; i += 1) {
+                        const record = records[i];
+                        if (record.target === document.documentElement && record.attributeName === "style") { continue; }
+                        scheduleHeaderInset();
+                        return;
+                    }
+                });
+                if (document.body) { S.headerObserver.observe(document.body, { attributes: true }); }
+                S.headerObserver.observe(document.documentElement, { attributes: true });
+            } catch (e) { /* the resize and the scroll still re-measure */ }
+        }
     }
 
     function editorPanel() { return byId(ENHANCE_PANEL_ID); }

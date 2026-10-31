@@ -9,7 +9,8 @@ directory of pictures:
                                 (where the gallery's 🖌️ button sends), the
                                 sort order, the thumbnail size, the archives
                                 (read-only folders the grid can show instead
-                                of the storage root) and which one is shown;
+                                of the storage root) and which one is shown,
+                                and the roles Auto puts a picture in;
 * ``clipboard-index.json``      the asset index: opaque ids for the files of
                                 every root Clipboard has known;
 * ``clipboard-draft.json``      the composer: a prompt override and up to
@@ -107,6 +108,39 @@ DEFAULT_INTERCEPT = False
 #: What the WanGP popup's "Inherit Clipboard inputs" starts as: the last
 #: choice made, on by default.
 DEFAULT_INTERCEPT_INHERIT = True
+
+#: Where Auto puts a picture: the toolbar's Auto button sends the selected
+#: picture, and the gallery popup's Auto the frozen one, to WanGP in one
+#: press, in every one of these roles the model on the WanGP page reads.
+#: The generic role ids the enhancer spells (``intercept.ROLE_IDS`` holds
+#: the same three, and a check says so); the menu's Auto Options section
+#: ticks them, several at once, never none.
+AUTO_FIRST = "first_frame"
+AUTO_LAST = "last_frame"
+AUTO_REFERENCE = "reference"
+AUTO_ROLES = (AUTO_FIRST, AUTO_LAST, AUTO_REFERENCE)
+AUTO_ROLE_LABELS = {AUTO_FIRST: "First Frame", AUTO_LAST: "Last Frame", AUTO_REFERENCE: "Reference"}
+#: The same picture as the first frame and the reference - what Auto was
+#: asked for - and a pair that lands somewhere on every model the Clipboard
+#: sends to: MiniMax H3 FL2VA and LTX read the first frame, Ref2VA the
+#: reference.
+DEFAULT_AUTO_ROLES = (AUTO_FIRST, AUTO_REFERENCE)
+
+
+def auto_roles_of(value: typing.Any) -> typing.List[str]:
+    """The Auto roles out of whatever a document holds: the known ones, in
+    the menu's order, once each; the default when that leaves none, so a
+    hand-edited list can never leave Auto with nowhere to put a picture."""
+    chosen = [role for role in AUTO_ROLES if isinstance(value, (list, tuple)) and role in value]
+    return chosen or list(DEFAULT_AUTO_ROLES)
+
+
+def auto_roles_text(roles: typing.Sequence[str]) -> str:
+    """Some of Auto's roles as words, in the menu's order: ``First Frame and Reference``."""
+    labels = [AUTO_ROLE_LABELS[role] for role in AUTO_ROLES if role in roles]
+    if len(labels) < 2:
+        return labels[0] if labels else "no role"
+    return ", ".join(labels[:-1]) + " and " + labels[-1]
 
 
 def intercept_target_of(value: typing.Any, legacy: typing.Any = None) -> str:
@@ -276,6 +310,8 @@ class Config:
     #: The archive the grid shows in place of the storage folder, by id, or
     #: "" for the storage folder.
     view: str = ""
+    #: Where Auto puts a picture: some of AUTO_ROLES, never none.
+    auto_roles: typing.List[str] = dataclasses.field(default_factory=lambda: list(DEFAULT_AUTO_ROLES))
 
     @property
     def intercept(self) -> bool:
@@ -303,6 +339,7 @@ class Config:
             "intercept_inherit": self.intercept_inherit is not False,
             "archives": archives_of(self.archives),
             "view": self.view if _ARCHIVE_ID.match(str(self.view or "")) else "",
+            "auto_roles": auto_roles_of(self.auto_roles),
         }
 
     @classmethod
@@ -325,6 +362,7 @@ class Config:
             intercept_inherit=data.get("intercept_inherit", DEFAULT_INTERCEPT_INHERIT) is not False,
             archives=archives_of(data.get("archives")),
             view=str(data.get("view") or "") if _ARCHIVE_ID.match(str(data.get("view") or "")) else "",
+            auto_roles=auto_roles_of(data.get("auto_roles")),
         )
 
     @property
@@ -359,7 +397,13 @@ def update(**changes: typing.Any) -> Config:
 
 __all__ = [
     "ARCHIVE_LIMIT",
+    "AUTO_FIRST",
+    "AUTO_LAST",
+    "AUTO_REFERENCE",
+    "AUTO_ROLES",
+    "AUTO_ROLE_LABELS",
     "CONFIG_NAME",
+    "DEFAULT_AUTO_ROLES",
     "Config",
     "DEFAULT_INTERCEPT",
     "DEFAULT_INTERCEPT_INHERIT",
@@ -381,6 +425,8 @@ __all__ = [
     "THUMBNAIL_MAX",
     "THUMBNAIL_MIN",
     "archives_of",
+    "auto_roles_of",
+    "auto_roles_text",
     "clamp_thumbnail",
     "config_dir",
     "load",

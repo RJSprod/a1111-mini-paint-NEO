@@ -463,6 +463,91 @@ def submit_checks(r: Results, tab) -> None:
     outbox.use_executor(outbox.EXECUTOR_BROWSER)
 
 
+def auto_checks(r: Results, tab) -> None:
+    """The popup's Auto: Generate with the roles Auto Options names, not the ticks.
+
+    One setting for both of the Clipboard's doors - the toolbar's Auto and
+    this one - so a picture from the gallery lands where a picture from the
+    grid does, and a model that reads none of those roles is refused rather
+    than sent the picture somewhere nobody chose.
+    """
+    library = tab.library
+    end = _write_asset(library, "end.png", (10, 10, 160))
+    draft = history.empty_draft()
+    draft["last_asset_id"] = end.asset_id
+    draft["prompt_override"] = "the composer's prompt"
+    history.save_draft(draft)
+    outbox.use_running(lambda: True)
+    outbox.use_executor(outbox.EXECUTOR_BROWSER)
+    enhance.set_enabled(False)
+    config.update(auto_roles=list(config.DEFAULT_AUTO_ROLES))
+
+    handoff = intercept.stage(_photo((140, 20, 20)), "txt2img")
+    token = _staged_of(handoff)
+    entries = len(intercept.load_history())
+    answer = intercept.submit(handoff, "a lighthouse", ["last_frame"], True, False, PAGE, REFERENCE_MODEL, ALL_THREE, auto=True)
+    job = outbox.get(answer.get("job_id", ""))
+    images = job["request"]["images"] if job else {}
+    r.check("Auto puts the frozen picture in Auto's roles, whatever is ticked",
+            answer["ok"] and images.get("start") == {"kind": "staged", "id": token}
+            and images.get("references") == [{"kind": "staged", "id": token}], json.dumps(images))
+    r.check("and the rest is Generate's: the composer's last frame inherited, the prompt as typed, from the gallery",
+            images.get("end") == {"kind": "clipboard_asset", "id": end.asset_id} and job["request"].get("prompt") == "a lighthouse"
+            and job["origin"] == outbox.ORIGIN_GALLERY and job["request"].get("start") == "auto", json.dumps(job["request"]))
+    r.check("the answer says Auto and where the picture went",
+            answer.get("auto") is True and answer["roles"] == ["first_frame", "reference"]
+            and answer["status"].startswith("Auto: the picture as First Frame and Reference. Queued for WanGP."), str(answer.get("status")))
+    r.check("one history entry, its roles the ones Auto used",
+            len(intercept.load_history()) == entries + 1 and intercept.load_history()[0]["roles"] == ["first_frame", "reference"],
+            str(intercept.load_history()[0].get("roles")))
+
+    handoff = intercept.stage(_photo((20, 140, 20)), "txt2img")
+    answer = intercept.submit(handoff, "frames", [], True, False, PAGE, FRAMES_MODEL, FIRST_AND_LAST, auto=True)
+    images = outbox.get(answer["job_id"])["request"]["images"] if answer.get("ok") else {}
+    r.check("a role the live page does not read is left out of Auto, and said",
+            answer.get("ok") and answer["roles"] == ["first_frame"] and answer["dropped_roles"] == ["reference"]
+            and "references" not in images and any("Reference is not read by the current model, so Auto left it out" in note
+                                                   for note in answer["notes"]), str(answer.get("notes")))
+
+    described = intercept.describe(intercept.stage(_photo((21, 141, 21)), "txt2img"), FRAMES_MODEL, FIRST_AND_LAST)
+    r.check("describe tells the popup where its Auto would put the picture on this model, for the tooltip",
+            described["auto"] == {"roles": ["first_frame"], "dropped": ["reference"], "label": "First Frame"}, str(described.get("auto")))
+
+    config.update(auto_roles=[config.AUTO_REFERENCE])
+    described = intercept.describe(intercept.stage(_photo((22, 142, 22)), "txt2img"), FRAMES_MODEL, FIRST_AND_LAST)
+    r.check("and says so when the model reads none of them", described["auto"]["label"] == "" and described["auto"]["roles"] == [],
+            str(described.get("auto")))
+    handoff = intercept.stage(_photo((20, 20, 140)), "txt2img")
+    count, entries = len(outbox.jobs()), len(intercept.load_history())
+    answer = intercept.submit(handoff, "nowhere", ["first_frame"], True, False, PAGE, FRAMES_MODEL, FIRST_AND_LAST, auto=True)
+    r.check("Auto left with only roles the model ignores is refused, never sent in a ticked role instead",
+            answer["ok"] is False and answer["code"] == errors.INTERCEPT_NO_IMAGE_ROLE and len(outbox.jobs()) == count
+            and len(intercept.load_history()) == entries
+            and answer["message"] == "Auto sends the picture as Reference, and frames model reads none of them. Nothing was queued."
+            and any("Auto Options" in note for note in answer["notes"]), str(answer)[:240])
+    r.check("and keeps the frozen picture, so Generate can still send it", _staged_path(_staged_of(handoff)).is_file())
+    answer = intercept.submit(handoff, "ticked", ["first_frame"], True, False, PAGE, FRAMES_MODEL, FIRST_AND_LAST)
+    r.check("Generate, beside it, still sends the ticked roles", answer.get("ok") and answer["roles"] == ["first_frame"]
+            and answer.get("auto") is False, str(answer)[:200])
+
+    config.update(auto_roles=list(config.DEFAULT_AUTO_ROLES))
+    handoff = intercept.stage(_photo((60, 60, 60)), "txt2img")
+    answer, status = routes.intercept_action({"action": "submit", "auto": True, "handoff": handoff, "prompt": "", "roles": ["last_frame"],
+                                              "inherit": False, "enhance": False, "page": PAGE, "model": REFERENCE_MODEL, "inputs": ALL_THREE})
+    images = outbox.get(answer["job_id"])["request"]["images"] if answer.get("ok") else {}
+    r.check("the route's submit carries `auto` through",
+            status == 200 and answer.get("auto") is True and set(images) == {"start", "references"}, f"{status} {json.dumps(images)}")
+    handoff = intercept.stage(_photo((61, 61, 61)), "txt2img")
+    answer, status = routes.intercept_action({"action": "submit", "auto": "yes", "handoff": handoff, "prompt": "", "roles": ["last_frame"],
+                                              "inherit": False, "enhance": False, "page": PAGE, "model": REFERENCE_MODEL, "inputs": ALL_THREE})
+    images = outbox.get(answer["job_id"])["request"]["images"] if answer.get("ok") else {}
+    r.check("and only `true` is Auto: anything else is Generate, with the ticks",
+            status == 200 and answer.get("auto") is False and set(images) == {"end"}, f"{status} {json.dumps(images)}")
+    for stored in outbox.jobs():
+        if stored["state"] == "pending":
+            outbox.cancel(stored["job_id"])
+
+
 def enhancer_checks(r: Results, tab) -> None:
     """Enhance on: the enhancer's own path, with Clipboard's saved instructions."""
     fake = FakeApi()
@@ -751,6 +836,7 @@ def run() -> Results:
                 capability_checks(r)
                 describe_checks(r, tab, token)
                 submit_checks(r, tab)
+                auto_checks(r, tab)
                 enhancer_checks(r, tab)
                 history_checks(r)
                 settings_history_checks(r)

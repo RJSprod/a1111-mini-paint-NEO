@@ -227,7 +227,10 @@ report says so rather than blaming itself.
 Playwright call.** A `time.sleep()` while waiting for a held request waits for
 ever, because nothing pumps the connection; use `page.wait_for_timeout()`.
 Answer every held route before `page.unroute()`, or the handler dies as a
-cancelled future.
+cancelled future. The same goes for `page.on("request")` and its kin: a loop
+that waits on server state with `time.sleep()` reads a request list the
+listener has not been given yet (the Auto check's first draft saw no press at
+all for a job the server had stored).
 
 **The Node DOM harness has two sharp edges.** A bare `new MutationObserver`
 resolves to the *global*, not to the stub window's, so `load()` sets both. And

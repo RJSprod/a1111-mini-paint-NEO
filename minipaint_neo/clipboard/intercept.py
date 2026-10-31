@@ -288,6 +288,28 @@ def reconcile_roles(wanted: typing.Any, caps: typing.Mapping[str, typing.Any]) -
     return kept, dropped
 
 
+def auto_roles(caps: typing.Mapping[str, typing.Any], chosen: typing.Any = None) -> typing.Tuple[typing.List[str], typing.List[str]]:
+    """Auto's roles against what the model takes: ``(kept, dropped)``.
+
+    ``chosen`` is the Auto Options setting unless a caller names its own. A
+    role the model on the WanGP page does not read is dropped - Reference on
+    LTX, a frame on Ref2VA - and, unlike ``reconcile_roles``, nothing stands
+    in for it: Auto with no role left is refused (``auto_refusal``) rather
+    than sending the picture in a role nobody chose.
+    """
+    roles = config.auto_roles_of(config.load().auto_roles if chosen is None else chosen)
+    available = [role["id"] for role in caps.get("roles") or []]
+    return [role for role in roles if role in available], [role for role in roles if role not in available]
+
+
+def auto_refusal(dropped: typing.Sequence[str], caps: typing.Mapping[str, typing.Any]) -> str:
+    """Why Auto queued nothing: every one of its roles is one the model ignores."""
+    block = caps.get("model") if isinstance(caps.get("model"), dict) else {}
+    model = str(block.get("label") or block.get("type") or "") or "the current WanGP model"
+    roles = config.auto_roles_text(dropped)
+    return f"Auto sends the picture as {roles}, and {model} reads none of them. Nothing was queued."
+
+
 # ------------------------------------------------------------------ status --
 
 
@@ -641,12 +663,18 @@ def describe(handoff: typing.Any, model: typing.Any = None, inputs: typing.Any =
     current = config.load()
     availability = enhance.availability(model)
     ready = targets.readiness(model, fresh=bool(fresh))
+    caps = capabilities(model, inputs)
+    auto_kept, auto_dropped = auto_roles(caps, current.auto_roles)
     return {
         "ok": True,
         "token": parsed["token"],
         "image": {"width": parsed["width"], "height": parsed["height"], "tab": parsed["tab"]},
         "readiness": ready,
-        "capabilities": capabilities(model, inputs),
+        "capabilities": caps,
+        # Where the popup's Auto would put the picture on this model, for its
+        # tooltip: Auto Options' roles less the ones the model does not read.
+        "auto": {"roles": auto_kept, "dropped": auto_dropped,
+                 "label": config.auto_roles_text(auto_kept) if auto_kept else ""},
         "prompt": draft["prompt_override"],
         "enhance": {"enabled": enhance.enabled(), "state": availability.get("state", "unknown"),
                     "text": availability.get("text", "")},
@@ -685,6 +713,7 @@ def submit(
     model: typing.Any = None,
     inputs: typing.Any = None,
     settings_flush: typing.Any = "",
+    auto: bool = False,
 ) -> dict:
     """Generate: capture, revalidate, build, submit, record - in that order.
 
@@ -699,6 +728,12 @@ def submit(
     form just before it pressed - saved it, found nothing new, or got no
     answer - and it is recorded on the job, never believed beyond that: see
     ``outbox.submit``.
+
+    ``auto`` is the popup's Auto rather than Generate: the picture goes in
+    the roles the Clipboard's Auto Options names (``auto_roles``) instead of
+    the ones ticked, and when the model reads none of those the press is
+    refused - never sent in a role nobody chose. Everything else is
+    Generate's: the prompt, Enhance and Inherit as they stand.
     """
     parsed = parse_handoff(handoff)
     if parsed is None:
@@ -707,7 +742,14 @@ def submit(
     if not staged_exists(token):
         return {"ok": False, "code": errors.INTERCEPT_IMAGE_EXPIRED, "message": errors.message(errors.INTERCEPT_IMAGE_EXPIRED)}
     caps = capabilities(model, inputs)
-    kept, dropped = reconcile_roles(roles, caps)
+    if auto:
+        kept, dropped = auto_roles(caps)
+        if not kept:
+            _journal(f"auto refused before storing - the model reads none of {', '.join(dropped)}")
+            return {"ok": False, "code": errors.INTERCEPT_NO_IMAGE_ROLE, "message": auto_refusal(dropped, caps),
+                    "notes": ["choose where Auto puts a picture under Clipboard → Menu → Auto Options"]}
+    else:
+        kept, dropped = reconcile_roles(roles, caps)
     if not kept:
         return {"ok": False, "code": errors.INTERCEPT_NO_IMAGE_ROLE, "message": errors.message(errors.INTERCEPT_NO_IMAGE_ROLE)}
     use_draft = inherit is not False
@@ -764,15 +806,20 @@ def submit(
         # keeps it until the staging sweep.
         discard(token)
     pending = outbox.pending_count()
-    _journal(f"generate: job {job['job_id'][:8]} from {parsed['tab'] or 'a gallery'} as {', '.join(kept)}"
+    _journal(f"{'auto' if auto else 'generate'}: job {job['job_id'][:8]} from {parsed['tab'] or 'a gallery'} as {', '.join(kept)}"
              f"{'; inheriting Clipboard' if use_draft else ''}{'; enhanced' if job.get('enhance_requested') else ''}"
              f"{'; ' + str(len(dropped)) + ' role(s) no longer offered dropped' if dropped else ''}; {pending} waiting"
              f"; {outbox.flush_note(job)}")
     line = "Queued on the server." if server else "Queued for WanGP."
     if job.get("enhance"):
         line = "Queued; the prompt is being enhanced first."
+    if auto:
+        line = f"Auto: the picture as {config.auto_roles_text(kept)}. {line}"
     notes = [f"{pending - 1} ahead of it" if pending > 1 else "it goes next"]
-    if dropped:
+    if dropped and auto:
+        notes.append(config.auto_roles_text(dropped) + (" is" if len(dropped) == 1 else " are")
+                     + " not read by the current model, so Auto left " + ("it" if len(dropped) == 1 else "them") + " out")
+    elif dropped:
         notes.append(", ".join(ROLE_LABELS[role] for role in dropped) + " is not offered by the current model and was dropped")
     if job.get("narrowed"):
         notes.append(", ".join(ROLE_LABELS[FIELD_ROLES[field]] for field in job["narrowed"] if field in FIELD_ROLES)
@@ -788,6 +835,7 @@ def submit(
         "notes": notes,
         "roles": kept,
         "dropped_roles": dropped,
+        "auto": bool(auto),
         "history_id": entry["id"],
         "released": server,
         "history": history_view(model, inputs),
@@ -798,7 +846,7 @@ __all__ = [
     "FIELD_ROLES", "HISTORY_NAME", "HISTORY_SCHEMA", "MAX_PINNED", "MAX_UNPINNED", "POPUP_PREFIX", "PREVIEW_SIDE",
     "ROLES", "ROLE_FIELDS", "ROLE_FIRST", "ROLE_IDS", "ROLE_LABELS", "ROLE_LAST", "ROLE_REFERENCE",
     "STATUS_BUSY", "STATUS_IDLE", "STATUS_OFF", "STATUS_RUNNING", "STATUS_UNKNOWN",
-    "add_history", "build_request", "cancel", "capabilities", "delete_history", "describe", "discard",
+    "add_history", "auto_refusal", "auto_roles", "build_request", "cancel", "capabilities", "delete_history", "describe", "discard",
     "generate_button", "get_history", "handoff_text", "history_view", "load_history", "parse_handoff", "pin_history",
     "preview", "recipe", "reconcile_roles", "save_prompt", "stage", "staged_exists", "submit", "trim", "wangp_status",
 ]

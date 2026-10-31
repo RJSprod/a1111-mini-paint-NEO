@@ -137,10 +137,12 @@ window.minipaintClipboard = (function () {
         deleteNow: "minipaint_clipboard_delete_now"
     };
     const ROLE_IDS = { first: "minipaint_clipboard_to_first", last: "minipaint_clipboard_to_last", ref: "minipaint_clipboard_to_ref" };
+    //: The toolbar's Auto: the selected picture to WanGP, in Auto's roles.
+    const AUTO_ID = "minipaint_clipboard_auto";
     //: Every control that does something TO the selected picture.
     const NEEDS_SELECTION = function () {
         return Object.keys(ROLE_IDS).map(function (slot) { return ROLE_IDS[slot]; })
-            .concat([PRESS.deleteNow]);
+            .concat([PRESS.deleteNow, AUTO_ID]);
     };
     const SLOT_UPLOAD_PREFIX = "minipaint_clipboard_slot_upload_";
     const SLOT_FIELDS = { first: "start", last: "end", ref: "references" };
@@ -729,6 +731,7 @@ window.minipaintClipboard = (function () {
             // card (as a copy in the storage folder), never deleted.
             if (button) { button.disabled = !S.selected || (id === PRESS.deleteNow && isArchiveRef(S.selected)); }
         }
+        syncAuto();
         if (!quiet) { sendInput(BOXES.selected, S.selected); }
     }
 
@@ -1013,6 +1016,69 @@ window.minipaintClipboard = (function () {
     /** The older two-way switch, for anything that still calls it. */
     function toggleIntercept() {
         return setIntercept(interceptTarget() === "clipboard" ? "minipaint" : "clipboard");
+    }
+
+    //: Where Auto puts a picture: the roles the menu's Auto Options section
+    //: offers, in its order, for a page whose menu state predates them, and
+    //: the two it starts with (config.DEFAULT_AUTO_ROLES on the server).
+    const AUTOS = [["first_frame", "First Frame"], ["last_frame", "Last Frame"], ["reference", "Reference"]];
+    const DEFAULT_AUTO = ["first_frame", "reference"];
+
+    function autoChoices() {
+        const state = menuState();
+        return Array.isArray(state.autos) && state.autos.length ? state.autos : AUTOS;
+    }
+
+    /** Auto's roles as the host keeps them, in the menu's order. */
+    function autoRoles() {
+        const state = menuState();
+        const chosen = Array.isArray(state.auto_roles) ? state.auto_roles : [];
+        const kept = autoChoices().map(function (pair) { return pair[0]; })
+            .filter(function (role) { return chosen.indexOf(role) !== -1; });
+        return kept.length ? kept : DEFAULT_AUTO.slice();
+    }
+
+    /** Some of those roles as words: "First Frame and Reference". */
+    function autoWords(roles) {
+        const labels = autoChoices().filter(function (pair) { return roles.indexOf(pair[0]) !== -1; })
+            .map(function (pair) { return pair[1]; });
+        if (labels.length < 2) { return labels[0] || "no role"; }
+        return labels.slice(0, -1).join(", ") + " and " + labels[labels.length - 1];
+    }
+
+    /** The toolbar's Auto says, as its tooltip, where it puts the picture. */
+    function syncAuto() {
+        const host = byId(AUTO_ID);
+        const button = host ? (host.tagName === "BUTTON" ? host : host.querySelector("button")) : null;
+        if (!button) { return; }
+        const title = "Send the selected picture to WanGP as " + autoWords(autoRoles()) + " (Menu → Auto Options)";
+        if (button.title !== title) { button.title = title; }
+    }
+
+    /**
+     * One of Auto Options' roles pressed: on if it was off, off if it was on.
+     * Saved over the tab's own route as the whole list the menu now means,
+     * so a press that arrives twice lands once. The section stays open and
+     * is drawn again from the answer, so several can be ticked in a row; a
+     * list with no role is the server's to refuse, with its sentence.
+     */
+    function toggleAuto(role) {
+        const wanted = String(role || "");
+        if (!autoChoices().some(function (pair) { return pair[0] === wanted; })) { return Promise.resolve(false); }
+        const current = autoRoles();
+        const next = current.indexOf(wanted) !== -1
+            ? current.filter(function (one) { return one !== wanted; })
+            : current.concat([wanted]);
+        return postSettings({ auto_roles: next }).then(function (answer) {
+            setStatus((answer && answer.status) || "");
+            note("Auto now sends the picture as " + autoRoles().join(", "));
+            syncAuto();
+            if (S.menu && !S.menu.hidden && S.menuSection === "auto") { renderMenu("auto"); }
+            return true;
+        }, function () {
+            setStatus("That setting could not be saved.");
+            return false;
+        });
     }
 
     /**
@@ -5157,6 +5223,19 @@ window.minipaintClipboard = (function () {
             list.push({ menu: "archives", label: "Manage archives…" });
             return list;
         }
+        if (section === "auto") {
+            // Where Auto puts the selected picture: any of the three, several
+            // at once and never none, the ones it uses ticked. A press flips
+            // one and leaves the list open for the next.
+            const list = back.slice();
+            const current = autoRoles();
+            list.push({ menu: "status", label: "Auto sends the picture as" });
+            for (const pair of autoChoices()) {
+                const on = current.indexOf(pair[0]) !== -1;
+                list.push({ menu: "auto", value: pair[0], label: tick(on) + pair[1], checked: on });
+            }
+            return list;
+        }
         if (section === "intercept") {
             // Where the gallery's 🖌️ button sends: three mutually exclusive
             // choices, the current one ticked. The labels come from the
@@ -5172,6 +5251,7 @@ window.minipaintClipboard = (function () {
         }
         return [
             { menu: "section", value: "intercept", label: "Intercept Options ›" },
+            { menu: "section", value: "auto", label: "Auto Options ›" },
             { menu: "press", value: PRESS.refresh, label: "Refresh" },
             { menu: "section", value: "sort", label: "Sort ›" },
             { menu: "paste", label: "Paste image" },
@@ -5197,7 +5277,8 @@ window.minipaintClipboard = (function () {
             button.dataset.menu = item.menu;
             if (item.value) { button.dataset.value = item.value; }
             if (item.menu === "status" || item.disabled) { button.disabled = true; button.classList.add("minipaint-clip-menu-dim"); }
-            button.setAttribute("role", "menuitem");
+            button.setAttribute("role", typeof item.checked === "boolean" ? "menuitemcheckbox" : "menuitem");
+            if (typeof item.checked === "boolean") { button.setAttribute("aria-checked", item.checked ? "true" : "false"); }
             button.textContent = item.label;
             panel.appendChild(button);
         }
@@ -5215,6 +5296,9 @@ window.minipaintClipboard = (function () {
                 if (value === PRESS.history) { askQueue(null); }
                 return;
             case "intercept": closeMenu(); setIntercept(value); return;
+            // Not closed: Auto's roles are several at once, so the list is
+            // drawn again ticked and stays for the next one.
+            case "auto": toggleAuto(value); return;
             // Over the tab's own route, and the grid re-drawn from the
             // answer. The hidden box still goes so the toolbar dropdown
             // follows on a page whose Gradio is alive; nothing waits on it.
@@ -5983,12 +6067,14 @@ window.minipaintClipboard = (function () {
         if (parsed.executor === "server" || (parsed.state && SERVER_STATES.indexOf(String(parsed.state)) !== -1)) {
             note("queue: job " + String(parsed.job_id).slice(0, 8) + " admitted by the server" + how + "; it is in the history");
             toast("Sent to WanGP. It is in Queue Send History.");
-            return;
+            return "server";
         }
         note("queue: job " + String(parsed.job_id).slice(0, 8) + " appended by the server" + how + "; pumping");
         if (!pump()) {
             toast("WanGP is not available in this page.", true);
+            return "unavailable";
         }
+        return "pumped";
     }
 
     function outboxSentence(job) {
@@ -6356,15 +6442,75 @@ window.minipaintClipboard = (function () {
     }
 
     /**
+     * Auto, over this tab's own route: the selected picture to WanGP in one
+     * press, in every role Auto Options ticks that the model on the WanGP
+     * page reads, with the composer's prompt and its other cards - which it
+     * leaves as they are. See ``auto_queue`` on the server.
+     *
+     * What only this page knows travels with the press, as Add to Queue's
+     * does: the picture as selected when it was pressed, the prompt as typed,
+     * the switch as it stands, the model, and what the live page said it
+     * reads. A run of pictures is a tap on each and a tap here, so presses go
+     * to the server one after another in the order they were made - the
+     * second never overtakes the first on the wire - and each is one bounded
+     * ask of the route. The answer's sentence is a toast as well as the
+     * queue's status line, because on a phone the composer is a screen away
+     * from the toolbar.
+     */
+    function autoQueue(prompt, enhanceOn) {
+        const picture = S.selected;
+        if (!picture) { toast("Select an image first.", true); return Promise.resolve(null); }
+        let model = null;
+        try { model = JSON.parse(modelJson() || "null"); } catch (e) { model = null; }
+        const typed = String(prompt === undefined || prompt === null ? promptValue() : prompt);
+        const caps = S.capabilities;
+        const inputs = caps && caps.ok && caps.inputs && typeof caps.inputs === "object" ? caps.inputs : undefined;
+        const press = function () {
+            return saveWanGP("Auto").then(function (flushed) {
+                return askQueue({
+                    action: "auto",
+                    picture: picture,
+                    prompt: typed,
+                    enhance: typeof enhanceOn === "boolean" ? enhanceOn : undefined,
+                    model: model,
+                    inputs: inputs,
+                    settings_flush: flushed
+                });
+            }).then(function (answer) {
+                if (!answer) { toast("Forge is not answering; nothing was queued.", true); return null; }
+                if (answer.readiness) { applyReadiness(answer.readiness); }
+                const ran = answer.instruction ? queue(JSON.stringify(answer.instruction), "Auto") : "";
+                // The press's own sentence, said last, over queue()'s general
+                // one - unless this page could not start the job it has to
+                // run, which is the more urgent thing to read.
+                const said = statusText(answer.status);
+                if (said && ran !== "unavailable") { toast(said, answer.ok === false); }
+                return answer;
+            });
+        };
+        const run = (S.autoRun || Promise.resolve(null)).then(press, press);
+        S.autoRun = run.then(function () { return null; }, function () { return null; });
+        return run;
+    }
+
+    /** A status line's sentence as plain text, its notes and markup left out. */
+    function statusText(html) {
+        const entities = { amp: "&", lt: "<", gt: ">", quot: "\"", "#x27": "'", "#39": "'" };
+        return String(html || "").replace(/<small>[\s\S]*?<\/small>/g, "").replace(/<[^>]*>/g, "")
+            .replace(/&(amp|lt|gt|quot|#x27|#39);/g, function (all, name) { return entities[name]; })
+            .replace(/\s+/g, " ").trim();
+    }
+
+    /**
      * WanGP's form, saved just before the press goes to the server, which
      * builds the job from what WanGP saved. Two seconds at most, and never a
      * reason not to queue: see the WanGP bundle's saveForSend.
      */
-    function saveWanGP() {
+    function saveWanGP(press) {
         const bridge = window.minipaintWanGP;
         if (!bridge || typeof bridge.saveForSend !== "function") { return Promise.resolve("unavailable"); }
         let asked;
-        try { asked = bridge.saveForSend("Clipboard's Add to Queue"); } catch (e) { return Promise.resolve("unavailable"); }
+        try { asked = bridge.saveForSend("Clipboard's " + (press || "Add to Queue")); } catch (e) { return Promise.resolve("unavailable"); }
         return new Promise(function (resolve) {
             let settled = false;
             const done = function (value) { if (!settled) { settled = true; clearTimeout(backstop); resolve(value); } };
@@ -6804,6 +6950,7 @@ window.minipaintClipboard = (function () {
                             player: !!S.outputs.controls, clock: !!S.outputs.clock },
                  intercept: interceptTarget() === "clipboard",
                  interceptTarget: interceptTarget(),
+                 auto: autoRoles(),
                  takeovers: S.takeovers,
                  sort: menuState().sort || S.library.sort,
                  library: { revision: S.library.revision, page: S.library.page, pages: S.library.pages,
@@ -6873,6 +7020,9 @@ window.minipaintClipboard = (function () {
         interceptTarget: interceptTarget,
         queue: queue,
         addToQueue: addToQueue,
+        autoQueue: autoQueue,
+        autoRoles: autoRoles,
+        toggleAuto: toggleAuto,
         cancelAll: cancelAll,
         refreshQueue: refreshOutbox,
         refreshAll: refreshAll,

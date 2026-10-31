@@ -93,7 +93,7 @@ rule anywhere names a model.
    press can never start a forty-gigabyte download.
 
 Until then the cards, the prompt, History, the ⤢ enhancement button, Add to Queue and the
-toolbar's +First / +Last / +Ref are not there, and one quiet line says why - *WanGP is not
+toolbar's +First / +Last / +Ref and Auto are not there, and one quiet line says why - *WanGP is not
 running…*, *WanGP is on Wan2.2 Text2Video 14B. This sends only to MiniMax H3 FL2VA, MiniMax H3
 Ref2VA, LTX 2.3 Distilled or LTX 2.5 Distilled…*, *LTX-2 2.3 Distilled 1.0 22B is not downloaded yet (3 files missing).
 Generate with it once in the WanGP tab so WanGP fetches them.* - with **Check again** beside it.
@@ -139,6 +139,12 @@ Refresh, and every card and history entry that used it says so.
   WanGP from the gallery* below). The choice is saved on the Forge host, so a second
   browser and a Reload UI see the same setting; the old on/off switch is read as Mini
   Paint or Clipboard.
+* **Auto Options ›** — where the toolbar's **Auto** puts the selected picture (and the
+  gallery popup's Auto the picture it froze): **First Frame**, **Last Frame**, **Reference**,
+  any of them, several at once, the ones in use ticked. A press flips one and leaves the
+  list open for the next; the last one ticked cannot be unticked (*Auto needs at least one
+  role, so it is as it was.*). First Frame and Reference until changed. Kept on the Forge host
+  (`clipboard.json`'s `auto_roles`), like the intercept. See *Auto* below.
 * **Refresh** — read the folder again. The toolbar has the same thing as a button (below).
 * **Sort ›** — by name, newest, oldest, largest, smallest. The same list the toolbar's own
   sort button opens.
@@ -157,8 +163,9 @@ Refresh, and every card and history entry that used it says so.
 
 Sending is not in this list: it is a button on the toolbar, and there is only the one.
 
-The toolbar has **+First**, **+Last**, **+Ref** (the selected picture into that card), two
-flyout buttons and the **pictures-per-row** slider (see *The grid's size* below). The flyouts
+The toolbar has **+First**, **+Last**, **+Ref** (the selected picture into that card),
+**Auto** (the selected picture straight to WanGP; see *Auto* below), two flyout buttons and
+the **pictures-per-row** slider (see *The grid's size* below). The flyouts
 each open a compact list under the button that was pressed, and pressing that button again
 closes it:
 
@@ -443,6 +450,53 @@ A press does this, in order:
    named), or the sentence for the code; a toast says the same over the browser; the
    handoff files are released.
 
+## Auto
+
+Asked for: "I found that setting the same image as first and reference yields me best results
+in wan2gp, but that ends up being a lot of button presses ... i can quickly queue up a bunch
+of image to video by tapping to select and tapping auto. Two taps to add to queue." So
+**Auto**, on the toolbar beside +First, +Last and +Ref, is those three and Add to Queue in one
+press: tap a picture, tap Auto, and the request is in the queue - WanGP starts it when it is
+idle and queues it behind the run when it is not, as for every press here. Tap the next
+picture, tap Auto, and so on.
+
+* **Where the picture goes** is **Menu → Auto Options ›**: First Frame, Last Frame, Reference,
+  several at once, First Frame and Reference until changed. Only the roles **the model on the
+  WanGP page reads**: a reference is never sent to LTX 2.3 or 2.5 Distilled, and a role the
+  live page says it does not take (a reference on FL2VA, a first frame on Ref2VA) is left out
+  and said - *Reference is not read by MiniMax H3 FL2VA 33B, so Auto left it out*. With
+  First Frame and Reference, every one of the four models gets the picture somewhere. When
+  none of Auto's roles is one the model reads, the press is refused and nothing is stored
+  (*Auto sends the picture as Reference, and LTX-2 2.3 Distilled 1.0 22B reads none of them*):
+  it never sends the picture in a role nobody chose.
+* **Everything else is the composer's**: the prompt as typed, and every card Auto does not
+  fill - a Last Frame card, say - each the WanGP page's own where it is empty, exactly as Add
+  to Queue reads them. The enhancement switch and the WanGP settings save before a send apply
+  as they do to Add to Queue, and the typed prompt goes into History.
+* **The cards are left as they were.** Auto sends the picture; it does not put it on a card.
+  A card it fills is overridden for that one press (a First Frame card's own picture stays on
+  the card), so the composer stays the template a run of Auto presses is sent from, and a role
+  taken out of Auto Options later leaves no picture behind on its card to ride along.
+* **Off until a picture is selected**, like Delete, and its tooltip says where it puts one
+  (*Send the selected picture to WanGP as First Frame and Reference*). The status line under
+  Add to Queue and a toast over the grid say what went where: *Auto: cat.png as First Frame
+  and Reference. Queued for WanGP.*
+* **In the order pressed.** Presses go to the server one after another: the second is sent
+  once the first has its answer, so two quick taps can never reach the queue the other way
+  round. Each is one bounded request to the queue route (`action: "auto"`), the selected
+  picture named by id.
+* **An archive picture** is copied into the storage folder first, byte for byte and once for
+  the same bytes, as +First copies one - a request names library pictures.
+* **What it refuses**, before anything is stored: nothing selected, a picture that has left
+  the folder, a card it does not fill whose file has gone (as Add to Queue refuses it - a gone
+  file on a card Auto fills stops nothing), no role the model reads, and then every refusal
+  Add to Queue meets (WanGP not running, a model the Clipboard does not send to, an
+  enhancement that cannot be made).
+
+Queue Send History and View Outputs keep what Auto sent - the picture in its roles, the
+composer's other cards - so Load brings that request back like any other. The gallery popup
+has the same Auto (see *Send to WanGP from the gallery*).
+
 ## Enhanced prompts (ModelSwitchRefiner)
 
 *Two writers since 2026-10-03.* For MiniMax H3 the writer is ModelSwitchRefiner's MiniMax H3
@@ -722,7 +776,12 @@ What the popup shows, top to bottom:
   running when the page has not yet said which. Generate follows the composer's own
   *Add to Queue* rule, so it is a button exactly when a press there would be and greyed
   with the reason otherwise; a refused press stores nothing.
-* **Cancel** and **Generate**. Escape cancels; Ctrl+Enter generates.
+* **Cancel**, **Auto** and **Generate**. Escape cancels; Ctrl+Enter generates. **Auto** is
+  Generate with the roles **Auto Options** names (the toolbar Auto's setting) in place of the
+  ticked ones, so a gallery picture goes where a grid picture's Auto would put it - only the
+  roles the model reads, refused rather than sent elsewhere when it reads none of them - with
+  the prompt, Enhance and Inherit as they stand. The ticks stay for Generate. Its tooltip says
+  where the picture will go on the page's model; it is a button exactly when Generate is.
 
 **Blocked when the Clipboard is.** The popup asks the same readiness question as the composer
 (WanGP running, its bridge answering, the page on MiniMax H3 FL2VA, Ref2VA, LTX 2.3
@@ -731,7 +790,7 @@ reason and **Check again**, and nothing to send with - no prompt, Enhance, roles
 History or Generate; Cancel still lets the frozen picture go, and Ctrl+Enter only asks again.
 A Generate refused for the same reason redraws the popup that way from the refusal itself.
 
-Generate builds the request through the composer's own path (the draft, the public
+Generate (and Auto) builds the request through the composer's own path (the draft, the public
 request, the outbox), so the job appears in **the Queue** like any other press, marked
 *from the gallery*, runs on whichever executor the setting names, is enhanced when
 asked, and is confirmed, refused or unconfirmed by the same rules. The popup closes the
@@ -1013,7 +1072,7 @@ it was ignored" case.
 
 | what | where |
 | --- | --- |
-| the folder, the intercept destination, the sort, the outputs folder, the archives (id, path, name each) and which one is shown (and `thumbnail`, which only a page from before the per-row slider still writes) | `<Forge data_path>/a1111-mini-paint-NEO/clipboard.json` |
+| the folder, the intercept destination, the sort, the outputs folder, the archives (id, path, name each) and which one is shown, Auto's roles (and `thumbnail`, which only a page from before the per-row slider still writes) | `<Forge data_path>/a1111-mini-paint-NEO/clipboard.json` |
 | the index: id, filename, size, dimensions, digest, source per file | `…/clipboard-index.json` (rebuilt from the folder on Refresh) |
 | the composer's draft | `…/clipboard-draft.json` |
 | the queue outbox: every press as a job, with its request, its state, its enhancement and its place in WanGP | `…/clipboard-outbox.json` (schema 3; a finished job kept two minutes, a failure until it is dismissed, the list capped) |

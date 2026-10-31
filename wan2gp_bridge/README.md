@@ -43,6 +43,15 @@ It answers two questions and performs these actions:
   Forge may also ask for WanGP's weights to be moved off the card - into RAM
   (*soft*), or released outright so the next task reloads them (*hard*).
   `hold.py` is the whole of it.
+* *load the settings this video carries into this page* (bridge 1.17.0), for
+  the Clipboard tab's View Outputs: Forge names the file in a small note in
+  the handoff folder, the browser hands the bridge only the note's id, and
+  the bridge proves the note and the file and runs WanGP's own
+  `load_settings_from_file` - the model, the prompt, every setting and the
+  video's source pictures - writing its answer where WanGP's own *Load
+  Settings From Media File* writes it (`refresh_form_trigger`, or
+  `model_choice_target` to switch model) and putting the main tabs on the
+  generator. Forge saves the page's form first, as that box does.
 
 It also carries a dark stylesheet, because the embedded WanGP is a separate
 document and nothing the Forge page wears reaches into it.
@@ -192,6 +201,19 @@ holds with the flag alone and says `claim: absent`), and, for a flush, wgp's
 Hello says the bridge speaks the operations (`capabilities.hold`), so a Forge
 talking to an older bridge never sends them.
 
+The settings load (bridge 1.17.0) needs the global `load_settings_from_file`
+and two more of the form's variables, `refresh_form_trigger` and
+`model_choice_target`; `main_tabs` is used where it is handed over. A build
+that lacks one says `capabilities.settings_load: false` and refuses the load
+with `BRIDGE_COMPONENT_INCOMPATIBLE`. The same release keys the form's save on
+the page's own model (`get_state_model_type`), because WanGP never writes the
+`gen["model_type"]` earlier bridges read and every save they asked for was
+`unavailable`; and submits unattended work the way WanGP's own API does
+(since Wan2GP `9905f0d`): under `shared.api_webui._INLINE_QUEUE_LOCK`, only
+into an empty inline slot (`QUEUE_BUSY` otherwise, before anything is
+recorded), admitted with the service's `load_inline_queue`, which joins a
+running generation at once; a WanGP without it keeps the queue command.
+
 Adding a new receiver - a control image, a positioned reference - is three
 declarations and no new machinery: a row in `compatibility.COMPONENTS`, a row
 in `RECEIVER_COMPONENTS` and `SELECTION_RULES`, and a small subclass in
@@ -236,6 +258,14 @@ once per WanGP revision:
    <name> to release GPU resources...* until the lease is released. If a task
    starts under a hold, `compatibility.PAUSE_FLAG_KEY` is no longer the flag
    the worker loop checks on that build.
+7. The settings load: in the Clipboard tab's View Outputs, play an MP4 WanGP
+   made with another model than the one on WanGP's page and press Send to
+   WanGP. The WanGP tab must open on the video's model with its prompt and
+   settings, and its console must say `settings: loaded for <model>
+   (switching WanGP to it)`; one made with the page's own model must fill
+   the form without a switch. If nothing changes on the page while the
+   console says it loaded, `refresh_form_trigger` or `model_choice_target`
+   is no longer the component WanGP's own box writes on that build.
 
 ## Licence
 

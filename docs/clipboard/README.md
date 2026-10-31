@@ -669,9 +669,10 @@ not; a job in flight when WanGP restarts is marked unconfirmed (`WANGP_RESTARTED
 
 ## View Outputs
 
-Under the queue, one button opens a gallery of what WanGP made for this tab's requests,
-over the whole window: a large playback area with the filmstrip of everything else under
-it. Tap a tile to play it; tap the picture itself to hide the video controls and tap again
+Under the queue, one button opens a gallery of **every video in WanGP's output folder** - the
+ones this tab asked for and the ones made in WanGP itself, each once, newest first - over the
+whole window and below the tab bar, never under it: a large playback area with the filmstrip
+of everything else under it. Tap a tile to play it; tap the picture itself to hide the video controls and tap again
 to bring them back. It pages at 60, the same as the picture grid, and **Close** or Escape
 puts it away. Scrubbing works - the file is served with byte ranges, so the player can ask
 for the middle of a video rather than only playing it from the start.
@@ -697,6 +698,17 @@ exactly where WanGP wrote them, and nothing here ever moves, copies or deletes o
 A file is only ever claimed once, so two requests running back to back cannot both show
 the same video. A claim that a shut-down left open is finished at the next start, which is
 what makes a video written while Forge was not running turn up anyway.
+
+**The rest of the folder.** Asked for on 2026-10-31: "i want the 'view outputs' videos to
+actually be all the videos in wan2gp output folder, not just those that we requested through
+clipboard". Beside the ledger's files (`outputs.gallery`), every video under the folder is
+listed from its directory entries and a stat of each - nothing is opened, and a folder of more
+than `FOLDER_SCAN_MAX` (20,000) videos is listed in part rather than walked without end - each
+by an id of its own (`wf` and sixteen hex characters, a digest that names
+nothing and is the same at every listing and after a restart), and a file the ledger already
+holds is listed once, as the ledger's, however its path was spelled. Such a video has no
+request, so no recipe and no **~**: its Load is disabled and says to use Send to WanGP. A link
+in the folder pointing elsewhere is not WanGP's and is not listed.
 
 **Where it looks.** `<WanGP root>/outputs` and everything under it, unless the
 `outputs_folder` setting names somewhere else. Videos (`.mp4`, `.webm`, `.mkv`, `.mov`,
@@ -727,6 +739,27 @@ An entry from before recipes were kept loads from its Queue Send History record,
 always did, and one with neither offers a disabled Load that says why. Load reaches the
 server through the hidden box Queue Send History's own Load writes (`output:<id>` to
 `history_action`), because the slot cards it changes are still rendered by the framework.
+
+**Send to WanGP.** Asked for on 2026-10-31: "the ability to send a video from this view to
+wan2gp to load its settings! Using this option should be a new send button in the playback
+controls bar. Sending should open wan2gp tab to the newly loaded settings!" The player's bar
+has it beside full screen, for an MP4, MKV or MOV - the videos WanGP writes its settings into;
+a WebM or an M4V has none it can load and no button. A press:
+
+1. asks the server for a note naming the video (`POST /minipaint-clipboard/output/{id}/settings`):
+   a reference handoff in the WanGP handoff folder, `<id>.ref.json` holding the path and a time,
+   whose id - 32 hex characters naming nothing - is all the page gets;
+2. hands the id to the WanGP tab (`minipaintWanGP.loadSettings`), which saves WanGP's form first,
+   as WanGP's own *Load Settings From Media File* box saves it, and asks its page to load;
+3. the bridge proves the note and the file again and runs WanGP's own loader: the model, the
+   prompt, every setting and a video's source pictures, the form filled again for the page's
+   model or WanGP switched to the video's, and WanGP's main tabs put on its generator.
+
+Only once WanGP says it loaded them does the view close and the WanGP tab open, with the
+toast saying when WanGP is switching model. A refusal, a video WanGP read nothing from, or a
+WanGP page not open in this browser yet stays in the view and says which; a second press while
+one is going - on this video or another - is the same press. It needs bridge 1.17.0, and an
+older bridge is never asked: the toast says to reinstall it.
 
 ## Queue Send History
 

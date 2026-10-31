@@ -43,9 +43,10 @@ and obtain a durable admission. After that it is an observer.
                        ├─ COMPOSING      control.compose() ────▶ compose.py
                        ├─ WAITING_FOR_CARD control.hello() ───▶ control.py
                        ├─ SUBMITTING     control.submit() ────▶ execution.py
+                       │                                        under WanGP's _INLINE_QUEUE_LOCK:
                        │                                        ledger.reserve()
                        │                                        gen["inline_queue"]
-                       │                                        service.command(...)
+                       │                                        service.load_inline_queue()
                        └─ WANGP_*        control.status() ────▶ ledger + queue
   ◀── events ─────   events.publish()
 
@@ -147,6 +148,25 @@ Three defects in that path are handled explicitly, because they are real:
   worker handle, `gen["in_progress"]`. Never `main_process_running`: it is
   set one line before a call that can raise and cleared two branches later,
   so one exception leaks it `True` for the life of the process.
+* **Into the inline slot by WanGP's own discipline (bridge 1.17.0).** Wan2GP's
+  API, since `9905f0d`, puts a task in `gen["inline_queue"]` only while holding
+  `shared.api_webui._INLINE_QUEUE_LOCK` and only into an empty slot, and admits
+  it with `service.load_inline_queue()`, which merges it into a generation
+  that is running at once. The bridge used to write the slot and press
+  `load_queue_trigger`, and that command holds the service's generation lock
+  across the whole run it starts: a job sent while another bridge-started job
+  was generating sat in the slot, the executor reported it as never having
+  reached WanGP's queue, it generated later anyway, and a third job written
+  into the same slot replaced it. `Executor.submit` now takes the same lock
+  (`Compatibility.inline_queue_lock`; one of the bridge's own on a WanGP
+  without it), waits up to ten seconds for a slot WanGP has not taken yet,
+  and when it is still full refuses `QUEUE_BUSY` **before the ledger records
+  anything** - so Forge's retry is a new submission and never a duplicate -
+  and admits through `load_inline_queue`, falling back to the command on a
+  WanGP that has none. The re-trigger of a stranded queue is
+  `service.start_generation` where WanGP has it. Cancel is unchanged: it ends
+  Forge's own jobs and never what WanGP holds in its queue, because the
+  user also queues there by hand.
 
 ---
 
@@ -342,6 +362,19 @@ Three things make it safe rather than merely clever:
   A send whose save did not land tries once more in the background a second
   later. An older bridge (no `commits`) keeps the fingerprint, the shortcut and
   the two-second wait.
+* **Saved under the page's own model (bridge 1.17.0).** Every bridge before
+  1.17.0 keyed the save on `current_model_type()`, which read a
+  `gen["model_type"]` WanGP has never written and then a module global only a
+  non-default install ever bound, until WanGP stopped binding it on
+  2026-10-25, so on a real WanGP every flush answered
+  `unavailable` and saved nothing - and every press ran at the form WanGP had
+  last saved by itself, the "last run settings" the WanGP Settings choice
+  exists to prevent. The tests passed because they planted
+  `gen["model_type"]` themselves; they no longer do. The flush now keys on the
+  page's own model (`page_model`: `get_state_model_type` of the event's state,
+  which is the key `save_inputs` records under, and the edited task's on the
+  Edit form); `current_model_type` falls back to WanGP's own
+  `server_config["last_model_type"]`.
 
 It **never stops a press**. No WanGP tab, a bridge without the trigger, a page
 mid settings-load, or a wait that runs out all mean the job composes from the
@@ -553,12 +586,22 @@ inference and is now a citation:
 | `ignore_save_form` is a one-shot flag set only by settings loads that switch model | `wgp.py:9521,10177,10393`, popped at `10601` |
 | the third compose source is the model's **saved** settings file, not factory values | `wgp.py:3243-3252` |
 
+**Read at source for bridge 1.17.0, against Wan2GP v19 (`ee20770`), 2026-10-31:**
+
+| claim | where |
+| --- | --- |
+| nothing writes `gen["model_type"]`; a page's model is `get_state_model_type(state)`, the key `save_inputs` records the form under | `wgp.py`, `save_inputs` and `get_state_model_type` |
+| the API's inline slot is filled under `_INLINE_QUEUE_LOCK`, only when empty, and admitted by `load_inline_queue`, which joins a running generation | `shared/api_webui.py` (the lock, `_wait_for_inline_queue_slot`), `shared/deepy/hybrid.py` (`HybridService.load_inline_queue`), since `9905f0d` |
+| the `load_queue_trigger` command holds the service's generation lock for the run it starts | `shared/deepy/service.py` (`_run_generation_command`), `shared/deepy/hybrid.py` (`_process_inline_queue` joins the worker) |
+| *Load Settings From Media File* runs `validate_wizard_prompt -> save_inputs -> load_settings_from_file`, whose outputs are `refresh_form_trigger` (same model) and `model_choice_target` (`model|time`, another) | `wgp.py`, `settings_file.upload` and `load_settings_from_file` |
+| a video's settings are read only from `.mp4`, `.mkv` and `.mov`, a picture's from its own metadata | `wgp.py`, `get_settings_from_file` |
+
 **Still inferences, and what would settle each:**
 
 | claim | how to settle it |
 | --- | --- |
 | ~~the process-wide service is reachable from a server-side entry point with no browser session~~ | **Settled in the field, and the answer was no.** `service_for(state)` is `state.service if isinstance(state, SharedState) else None`, so a thread with no session gets `None` — by construction, not by accident. The global cannot be requested (Wan2GP copies globals onto the plugin before the service exists) and module-level archaeology is revision-specific and was wrong twice. The service is now **learned from the first page request** that reaches the bridge, which is the documented seam: every browser request carries a state, the first one resolves it, and the process keeps it because it is a singleton the pages share. |
-| a flush lands within its budget on a loaded page | press with a WanGP tab open and a slider moved; the job should record `settings_flush: committed` (or `unchanged` if the page had already saved it) and a `flushed_form` base, and its Queue card should say *saved from the WanGP page at send*. A send waits at most 2 s and a miss is not a failure — it composes from the record and says so — so this is a tuning question, not a correctness one. |
+| a flush lands within its budget on a loaded page (no flush saved anything on a real WanGP before bridge 1.17.0 - see *Saved under the page's own model*) | press with a WanGP tab open and a slider moved; the job should record `settings_flush: committed` (or `unchanged` if the page had already saved it) and a `flushed_form` base, and its Queue card should say *saved from the WanGP page at send*. A send waits at most 2 s and a miss is not a failure — it composes from the record and says so — so this is a tuning question, not a correctness one. |
 | alternating between the shared-queue path and ordinary WebUI use leaves `wgp`'s module state good | alternate several times on a real install, not once |
 | `preload_model_policy = "U"` does not fire on this path | check it on the target install; if it does, residency is defeated and the setting is the fix |
 | the enhancer/WanGP VRAM handover is needed at all | measure a cold enhanced chain with GPU memory sampled at each stage boundary. WanGP-then-enhancer is the protected direction; enhancer-then-WanGP is not, and that is the boundary `enhance.release_runtime()` targets |

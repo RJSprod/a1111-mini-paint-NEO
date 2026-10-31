@@ -793,6 +793,10 @@ through so the server can reconcile roles without a call into the child.
          404 {ok: false, code: REQUEST_INVALID, message, entries, max} for a prompt no longer in the list; 400 for any other action
     GET  /minipaint-clipboard/output/{file_id}     (also HEAD)
       -> the bytes, or 206 + Content-Range for a Range request
+    POST /minipaint-clipboard/output/{file_id}/settings   (a plain def: it writes a file)
+      -> {ok, handoff_id}: a reference note naming that output for the bridge's settings load (bridge 1.17.0);
+         404 CLIPBOARD_ASSET_UNKNOWN for an id that is no output, 409 OUTPUT_NO_SETTINGS for a file WanGP reads no
+         settings from (not in protocol.SETTINGS_FILE_SUFFIXES), 500 INTERNAL_ERROR if the note could not be written
 
 `Accept-Ranges: bytes` is on every answer and **206 is the point of the
 route**: a `<video>` served without ranges plays but cannot seek, so the
@@ -921,6 +925,9 @@ def sync()                                                                      
                                                                                       # and give every entry without a recipe its job's, while the job is still in the queue
 def files(refresh=True) -> [{id, name, kind, size, at, job_id, request_id, exact, model, recipe}]   # newest first; a file that has left the disk is dropped
 def entry_for_file(file_id) -> {job_id, request_id, model, recipe} | None             # facts about the request behind an output; never its path
+def gallery(refresh=True) -> [files()' items + {source: "request"}, and {id: "wf"+16 hex, ..., source: "folder"}]
+                                                                                      # what View Outputs lists: the ledger's files and every other video under the folder,
+                                                                                      # each once, newest first; a walk stops at FOLDER_SCAN_MAX files; a link is not listed
 def path_of(file_id) -> Path | None                                                   # the only place an id becomes a path
 def forget_all() -> int; def use_clock(clock); def reset_for_tests()
 # An entry: {entry_id, job_id, request_id, opened_at, closed_at, floor, exact, model, recipe | None, files: [{file_id, path, name, size, at}]}

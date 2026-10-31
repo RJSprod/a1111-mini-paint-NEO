@@ -364,6 +364,30 @@ def copy_and_send_checks(r: Results, base: pathlib.Path, archive: pathlib.Path, 
     r.check("a slot card given an archive picture holds the storage folder's copy, and says so",
             draft.get("first_asset_id") == asset.asset_id and "copied" in message, message)
 
+    # Auto takes an archive picture the same way: copied in, then sent by id.
+    from minipaint_neo.clipboard import outbox
+
+    outbox.reset_for_tests()
+    outbox.use_running(lambda: True)
+    try:
+        photo = archives.ref_for(archive_id, "a-photo.jpg")
+        answer = tab.auto_queue(photo, "", "a" * 16)
+        copies = [item for item in library.assets() if item.source == "archive" and item.filename.startswith("a-photo")]
+        images = (outbox.jobs()[-1]["request"].get("images") or {}) if outbox.jobs() else {}
+        r.check("Auto given an archive picture sends the storage folder's copy, by id, and says it was copied",
+                answer.get("ok") is True and len(copies) == 1
+                and images.get("start") == {"kind": "clipboard_asset", "id": copies[0].asset_id}
+                and images.get("references") == [{"kind": "clipboard_asset", "id": copies[0].asset_id}]
+                and "copied from the archive into the storage folder" in answer.get("status", ""), str(answer.get("status")))
+        tab.auto_queue(photo, "", "a" * 16)
+        r.check("and a second Auto of the same picture copies nothing more",
+                len([item for item in library.assets() if item.source == "archive" and item.filename.startswith("a-photo")]) == 1)
+        for job in outbox.jobs():
+            if job["state"] == "pending":
+                outbox.cancel(job["job_id"])
+    finally:
+        outbox.reset_for_tests()
+
 
 def read_only_checks(r: Results, archive: pathlib.Path, before: dict) -> None:
     r.check("after listing, thumbnailing, copying and sending, the archive is exactly as it was",

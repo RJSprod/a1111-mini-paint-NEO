@@ -812,6 +812,213 @@ def composer_checks(r: Results, base: pathlib.Path, tab, ids: dict) -> None:
     r.check("with the missing slot back to Use WanGP, and named", "Missing image" not in last and "minipaint-clip-card-inherit" in last and "last" in status.lower())
 
 
+# ---------------------------------------------------------------------- Auto --
+
+#: The two models the Auto checks put the WanGP page on, as its bridge
+#: describes them (the shapes test_clipboard_targets.py uses).
+FL2VA_MODEL = {"type": "minimax_h3_fl2va", "label": "MiniMax H3 FL2VA 33B", "family": "minimax_h3", "architecture": "minimax_h3_fl2va"}
+LTX_MODEL = {"type": "ltx2_22B_distilled", "label": "LTX-2 2.3 Distilled 1.0 22B", "family": "ltx2", "architecture": "ltx2_22B"}
+
+
+def auto_checks(r: Results, base: pathlib.Path, tab) -> None:
+    """Auto: the selected picture to WanGP in one press, in Auto's roles.
+
+    Asked for: "set auto to FIRST and REFERENCE (prompt and last image would
+    is what's set in clip board, and if not set, inherited from wan2gp) ...
+    tapping to select and tapping auto. Two taps to add to queue." So the
+    press is Add to Queue with the picture laid over the composer in the
+    roles Auto Options names, and nothing about the composer changes.
+    """
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from minipaint_neo.clipboard import prompts
+
+    page_id = "e" * 16
+    for job in outbox.jobs():
+        if job["state"] == "pending":
+            outbox.cancel(job["job_id"])
+    made = [_write(base / "auto" / f"{name}.png", "PNG", (24, 16), colour)
+            for name, colour in (("one", (200, 0, 0)), ("two", (0, 200, 0)), ("end", (0, 0, 200)), ("style", (90, 90, 90)), ("doomed", (1, 1, 1)))]
+    tab.upload(made, "")
+    found = {asset.filename: asset.asset_id for asset in tab.library.assets()}
+    one, two, end, style, doomed = (found[f"{name}.png"] for name in ("one", "two", "end", "style", "doomed"))
+    for slot in ("first", "last", "ref"):
+        tab.slot_action(f"clear:{slot}")
+    tab.assign("last", end)
+
+    r.check("Auto puts a picture in the first frame and the reference until it is told otherwise",
+            config.load().auto_roles == ["first_frame", "reference"] and config.DEFAULT_AUTO_ROLES == ("first_frame", "reference"),
+            str(config.load().auto_roles))
+    r.check("in the role ids the popup and the enhancer spell, so one setting serves both",
+            config.AUTO_ROLES == clipboard_ui.intercept.ROLE_IDS, str(config.AUTO_ROLES))
+
+    count = len(outbox.jobs())
+    answer = tab.auto_queue(one, " walk into the light ", page_id)
+    job = outbox.jobs()[-1]
+    request = job["request"]
+    r.check("Auto stores one job for the selected picture and says what went where",
+            answer["ok"] and (answer.get("instruction") or {}).get("job_id") == job["job_id"] and len(outbox.jobs()) == count + 1
+            and answer["status"].startswith("Auto: one.png as First Frame and Reference. Queued for WanGP.") and "it goes next" in answer["status"],
+            answer["status"])
+    r.check("the picture is the first frame and the reference; the last frame and the prompt are the composer's",
+            request["images"].get("start") == {"kind": "clipboard_asset", "id": one}
+            and request["images"].get("references") == [{"kind": "clipboard_asset", "id": one}]
+            and request["images"].get("end") == {"kind": "clipboard_asset", "id": end}
+            and request.get("prompt") == "walk into the light", json.dumps(request))
+    r.check("and it is an ordinary press: this page's, from the Clipboard, starting WanGP when it is idle",
+            job["origin"] == "clipboard" and job["page"] == page_id and request["start"] == "auto" and job["state"] == "pending", json.dumps(job)[:200])
+    after = history.load_draft()
+    r.check("the cards are left as they were - Auto sends the picture, it does not put it on a card",
+            after["first_asset_id"] == "" and after["reference_asset_ids"] == [] and after["last_asset_id"] == end
+            and after["prompt_override"] == " walk into the light ", json.dumps(after))
+    r.check("the prompt as typed goes to the top of History, as Add to Queue's does",
+            prompts.entries() and prompts.entries()[0]["prompt"] == "walk into the light" and prompts.entries()[0]["origin"] == "clipboard",
+            str(prompts.entries()[:1]))
+
+    answer = tab.auto_queue(two, " walk into the light ", page_id)
+    second = outbox.jobs()[-1]
+    r.check("the next picture is the next job, behind the first, in the order pressed",
+            answer["ok"] and second["job_id"] != job["job_id"] and second["request"]["images"]["start"]["id"] == two
+            and second["request"]["images"]["references"] == [{"kind": "clipboard_asset", "id": two}]
+            and "1 ahead of it" in answer["status"] and outbox.get(job["job_id"])["state"] == "pending", answer["status"])
+
+    tab.assign("first", style)
+    answer = tab.auto_queue(one, "", page_id)
+    request = outbox.jobs()[-1]["request"]
+    r.check("a card Auto fills is overridden for that press alone: the picture goes and the card keeps its own",
+            request["images"]["start"]["id"] == one and history.load_draft()["first_asset_id"] == style, json.dumps(request))
+    r.check("and an empty prompt box is the WanGP page's prompt, as for Add to Queue", "prompt" not in request, json.dumps(request))
+    tab.slot_action("clear:first")
+
+    # -- Auto Options: the setting, kept on the host
+    changed = routes.apply_settings({"auto_roles": ["first_frame"]})
+    r.check("Auto Options keep the roles on the host and say what Auto does now",
+            changed["auto_roles"] == ["first_frame"] and config.load().auto_roles == ["first_frame"]
+            and changed["status"] == "Auto now sends the picture as First Frame." and changed["menu"]["auto_roles"] == ["first_frame"]
+            and [role for role, _label in changed["menu"]["autos"]] == list(config.AUTO_ROLES), str(changed)[:200])
+    tab.assign("ref", style)
+    answer = tab.auto_queue(two, "", page_id)
+    request = outbox.jobs()[-1]["request"]
+    r.check("with Auto on First Frame alone, the Reference card is the composer's again",
+            request["images"]["start"]["id"] == two and request["images"]["references"] == [{"kind": "clipboard_asset", "id": style}]
+            and answer["status"].startswith("Auto: two.png as First Frame. "), json.dumps(request))
+    tab.slot_action("clear:ref")
+    refused = routes.apply_settings({"auto_roles": []})
+    r.check("a list with no role in it is refused with its sentence, and Auto keeps what it had",
+            refused["auto_roles"] == ["first_frame"] and config.load().auto_roles == ["first_frame"]
+            and refused["status"] == routes.AUTO_NONE_SENTENCE, str(refused)[:160])
+    routes.apply_settings({"auto_roles": ["reference", "first_frame", "sideways", "reference"]})
+    r.check("an unknown role is ignored and the rest kept once each, in the menu's order",
+            config.load().auto_roles == ["first_frame", "reference"], str(config.load().auto_roles))
+    r.check("all three at once is a list of three",
+            routes.apply_settings({"auto_roles": list(config.AUTO_ROLES)})["status"]
+            == "Auto now sends the picture as First Frame, Last Frame and Reference.")
+    routes.apply_settings({"auto_roles": list(config.DEFAULT_AUTO_ROLES)})
+    stored = json.loads(config.path_of(config.CONFIG_NAME).read_text(encoding="utf-8"))
+    r.check("and the choice is in clipboard.json, where a second browser and a restart read it",
+            stored.get("auto_roles") == ["first_frame", "reference"], str(stored.get("auto_roles")))
+    r.check("a role list is read one way, wherever it comes from: the menu's order, each role once",
+            config.auto_roles_of(["reference", "last_frame", "reference", "first_frame"]) == ["first_frame", "last_frame", "reference"]
+            and config.auto_roles_of(("reference",)) == ["reference"])
+    r.check("a document naming no role, or nothing Auto knows, reads as the default",
+            config.Config.from_dict({"auto_roles": []}).auto_roles == ["first_frame", "reference"]
+            and config.Config.from_dict({"auto_roles": ["sideways"]}).auto_roles == ["first_frame", "reference"]
+            and config.Config.from_dict({}).auto_roles == ["first_frame", "reference"])
+
+    # -- only the roles the model reads
+    fl2va_inputs = {"start": {"supported": True}, "end": {"supported": True}, "references": {"supported": False}}
+    answer = tab.auto_queue(one, "", page_id, FL2VA_MODEL, fl2va_inputs)
+    request = outbox.jobs()[-1]["request"]
+    r.check("a role the live WanGP page does not read is left out of Auto, and said",
+            answer["ok"] and request["images"].get("start", {}).get("id") == one and "references" not in request["images"]
+            and answer["status"].startswith("Auto: one.png as First Frame. ")
+            and "Reference is not read by MiniMax H3 FL2VA 33B, so Auto left it out" in answer["status"], answer["status"])
+    answer = tab.auto_queue(one, "", page_id, LTX_MODEL)
+    request = outbox.jobs()[-1]["request"]
+    r.check("LTX 2.3 Distilled is never sent a reference, so Auto puts the picture in the first frame alone",
+            answer["ok"] and request["images"].get("start", {}).get("id") == one and "references" not in request["images"]
+            and "Reference is not read by LTX-2 2.3 Distilled 1.0 22B" in answer["status"], answer["status"])
+    routes.apply_settings({"auto_roles": ["reference"]})
+    count = len(outbox.jobs())
+    answer = tab.auto_queue(one, "", page_id, LTX_MODEL)
+    r.check("Auto left with only roles the model ignores is refused, names the model and stores nothing",
+            not answer["ok"] and answer.get("code") == errors.INTERCEPT_NO_IMAGE_ROLE and len(outbox.jobs()) == count
+            and "Auto sends the picture as Reference, and LTX-2 2.3 Distilled 1.0 22B reads none of them." in answer["status"]
+            and "Auto Options" in answer["status"] and "jobs" not in answer, answer["status"])
+    r.check("never falling back to a role nobody chose", not any(job["request"]["images"].get("start", {}).get("id") == one
+                                                                 for job in outbox.jobs()[count:]))
+    routes.apply_settings({"auto_roles": list(config.DEFAULT_AUTO_ROLES)})
+
+    # -- refused before anything is stored
+    count = len(outbox.jobs())
+    answer = tab.auto_queue("", "x", page_id)
+    r.check("Auto with nothing selected says so and stores nothing",
+            not answer["ok"] and answer["status"].startswith("Select an image in the browser first.") and len(outbox.jobs()) == count, answer["status"])
+    answer = tab.auto_queue("f" * 32, "x", page_id)
+    r.check("a picture that has left the folder is refused before anything is stored",
+            not answer["ok"] and "no longer in the folder" in answer["status"] and len(outbox.jobs()) == count, answer["status"])
+    tab.assign("first", doomed)
+    (tab.library.root() / "doomed.png").unlink()
+    tab.library.refresh()
+    answer = tab.auto_queue(one, "", page_id)
+    r.check("a gone picture on a card Auto fills stops nothing: that card was never going to be read",
+            answer["ok"] and outbox.jobs()[-1]["request"]["images"]["start"]["id"] == one, answer["status"])
+    count = len(outbox.jobs())
+    draft = history.load_draft()
+    draft["first_asset_id"], draft["last_asset_id"] = "", doomed
+    history.save_draft(draft)
+    answer = tab.auto_queue(one, "", page_id)
+    r.check("but one on a card Auto leaves to the composer is refused, as Add to Queue refuses it",
+            not answer["ok"] and answer["status"].startswith("Last Frame: the image is no longer in the folder")
+            and len(outbox.jobs()) == count, answer["status"])
+    tab.assign("last", end)
+    outbox.use_running(lambda: False)
+    answer = tab.auto_queue(one, "", page_id)
+    r.check("Auto while WanGP is not running is refused the way Add to Queue is, and stores nothing",
+            not answer["ok"] and answer.get("code") == errors.WANGP_NOT_RUNNING and len(outbox.jobs()) == count, answer["status"])
+    outbox.use_running(lambda: True)
+
+    # -- over the queue route, the way the page presses it
+    app = FastAPI()
+    routes.install(app)
+    client = TestClient(app)
+    count = len(outbox.jobs())
+    pressed = client.post(routes.QUEUE_ROUTE, json={"action": "auto", "page": page_id, "picture": two, "prompt": "from the route",
+                                                    "model": FL2VA_MODEL, "inputs": fl2va_inputs, "enhance": False,
+                                                    "settings_flush": protocol.FLUSH_COMMITTED})
+    answer = pressed.json()
+    request = outbox.jobs()[-1]["request"] if len(outbox.jobs()) > count else {}
+    r.check("the queue route takes the press as `auto`, with the picture, the prompt, the model and what the page reads",
+            pressed.status_code == 200 and answer.get("ok") and answer.get("instruction") and len(outbox.jobs()) == count + 1
+            and request.get("prompt") == "from the route" and request["images"]["start"]["id"] == two
+            and "references" not in request["images"] and outbox.jobs()[-1].get("settings_flush") == protocol.FLUSH_COMMITTED,
+            json.dumps(answer)[:240])
+
+    # -- what was sent is what the record keeps
+    claimed = outbox.claim(page_id)
+    r.check("the page claims Auto's first job first", claimed and claimed["job"]["job_id"] == job["job_id"], str(claimed)[:120])
+    outbox.report(job["job_id"], claimed["lease"], "sent")
+    outbox.report(job["job_id"], claimed["lease"], "done", {
+        "ok": True, "status": "queued", "request_id": job["request"]["request_id"], "tasks_added": 1, "queue_depth": 0, "route": "queue",
+        "applied": {"prompt": True, "start": True, "end": True, "references": 1}, "inherited": [], "ignored": [],
+        "model": {"type": "video", "label": "A video model"},
+    })
+    tab.queue_answer(page_id)
+    record = next((item for item in history.load_history() if item.get("request_id") == job["request"]["request_id"]), {})
+    r.check("Queue Send History keeps what Auto sent: the picture in both roles and the composer's last frame",
+            record.get("first_asset_id") == one and record.get("reference_asset_ids") == [one] and record.get("last_asset_id") == end
+            and record.get("prompt_override") == "walk into the light", json.dumps(record))
+    log = pathlib.Path(str(process_log.path()))
+    text = log.read_text(encoding="utf-8") if log.is_file() else ""
+    r.check("the log says an Auto press by the picture's id, never its name or the prompt",
+            f"auto clicked: asset {one[:8]} as first_frame, reference" in text and "one.png" not in text
+            and "walk into the light" not in text and "from the route" not in text, text[-400:])
+    for listed in outbox.jobs():
+        if listed["state"] == "pending":
+            outbox.cancel(listed["job_id"])
+
+
 # ---------------------------------------------------------------- send out --
 
 
@@ -1211,6 +1418,7 @@ def run() -> Results:
             if tab is not None:
                 ids = browser_checks(r, base, tab)
                 composer_checks(r, base, tab, ids)
+                auto_checks(r, base, tab)
                 send_checks(r, base, tab)
                 unrendered_destination_checks(r)
                 integration_checks(r, base, tab)

@@ -1340,7 +1340,8 @@
 }
 .minipaint-intercept.minipaint-intercept-is-blocked :is(
     .minipaint-intercept-prompt, .minipaint-intercept-check, .minipaint-intercept-roles-row,
-    .minipaint-intercept-history-toggle, .minipaint-intercept-history, .minipaint-intercept-generate) {
+    .minipaint-intercept-history-toggle, .minipaint-intercept-history, .minipaint-intercept-auto,
+    .minipaint-intercept-generate) {
     display: none !important;
 }
 .minipaint-intercept-history {
@@ -1407,6 +1408,17 @@
     font-weight: 600;
 }
 .minipaint-intercept-generate[disabled] {
+    opacity: 0.5;
+    cursor: default;
+}
+/* Auto: Generate with the Clipboard's Auto Options for roles. Marked as the
+   toolbar's Auto is - the accent line, the weight - and never filled, so
+   Generate stays the one primary button. */
+.minipaint-intercept-actions .minipaint-intercept-auto {
+    border-color: var(--color-accent, #ff7c00);
+    font-weight: 600;
+}
+.minipaint-intercept-auto[disabled] {
     opacity: 0.5;
     cursor: default;
 }
@@ -1514,6 +1526,15 @@
 
 #minipaint_clipboard_root[data-clip-view="archive"] .minipaint-clip-menu-button {
     border-color: var(--color-accent, #ff7c00);
+}
+
+/* Auto sends, where +First, +Last and +Ref only fill a card: the selected
+   picture goes to WanGP in one press. Marked by the accent line and the
+   weight, the way the Menu button is marked while an archive is shown -
+   no fill, so it is not mistaken for Add to Queue's primary button. */
+#minipaint_clipboard_root .minipaint-clip-auto {
+    border-color: var(--color-accent, #ff7c00);
+    font-weight: 600;
 }
 
 /* The toolbar's two icon buttons, beside the menu.
@@ -2297,8 +2318,9 @@
  * rules do the rest: until it is "1" - including before the page has asked -
  * the cards, the prompt, the enhancement button, Add to Queue, the WanGP line
  * and the toolbar's +First / +Last / +Ref are not there, and one quiet line
- * says why. The queue, its Cancel everything and View Outputs stay: they are
- * the record of what was sent, not a way to send.
+ * says why - and Auto, which is those three and Add to Queue in one press. The
+ * queue, its Cancel everything and View Outputs stay: they are the record of
+ * what was sent, not a way to send.
  *
  * !important because the host theme's own display rules would otherwise win
  * (CLAUDE.md, "A theme's rule about button reaches the Clipboard tiles"), and
@@ -2306,7 +2328,8 @@
 #minipaint_clipboard_root:not([data-wangp-ready="1"]) :is(
     #minipaint_clipboard_wangp_line, #minipaint_clipboard_cards, #minipaint_clipboard_prompt,
     #minipaint_clipboard_prompt_history, #minipaint_clipboard_sp_open, #minipaint_clipboard_queue,
-    #minipaint_clipboard_to_first, #minipaint_clipboard_to_last, #minipaint_clipboard_to_ref) {
+    #minipaint_clipboard_to_first, #minipaint_clipboard_to_last, #minipaint_clipboard_to_ref,
+    #minipaint_clipboard_auto) {
     display: none !important;
 }
 

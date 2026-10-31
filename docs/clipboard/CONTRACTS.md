@@ -691,21 +691,38 @@ that exists, a size outside `PAGE_SIZE_MIN..PAGE_SIZE_MAX` is clamped.
 constantly while the library sits still. `v` is `<mtime_ns>-<size_bytes>` —
 the same identity both thumbnail caches are keyed by.
 
-    POST /minipaint-clipboard/settings   {sort?, thumbnail?, intercept_target?, intercept?}
-      -> {ok, status, sort, thumbnail, intercept_target, intercept, menu: {...}}
+    POST /minipaint-clipboard/settings   {sort?, thumbnail?, intercept_target?, intercept?, auto_roles?}
+      -> {ok, status, sort, thumbnail, intercept_target, intercept, auto_roles, menu: {...}}
 
 `intercept_target` is `minipaint` | `clipboard` | `wangp` (`config.INTERCEPT_*`).
 The legacy boolean `intercept` is still taken (true is `clipboard`, false is
 `minipaint`) and still answered (true exactly when the target is `clipboard`),
 so a page loaded before the destinations existed keeps working. `menu` is
 `routes.menu_facts(current)`: the current destination and the labels the
-menu's *Intercept Options ›* section draws from; the tab's own `menu_state`
-adds `intercept_bundle`, the URL the page fetches the popup bundle from on the
-first press that needs it.
+menu's *Intercept Options ›* section draws from, and `auto_roles` with
+`autos` (each role and its label), which *Auto Options ›* draws from; the tab's
+own `menu_state` adds `intercept_bundle`, the URL the page fetches the popup
+bundle from on the first press that needs it.
+
+`auto_roles` is where Auto puts a picture: some of `first_frame`,
+`last_frame`, `reference` (`config.AUTO_ROLES`, the popup's role ids), kept in
+that order, `["first_frame", "reference"]` until changed
+(`config.DEFAULT_AUTO_ROLES`). The menu sends the whole list it means after a
+press - never a toggle - so a press that arrives twice lands once. A list that
+leaves no role, or names none Auto knows, is refused: the answer says
+`routes.AUTO_NONE_SENTENCE` and carries the roles as they were. A document
+naming no role reads as the default (`config.auto_roles_of`).
 
     GET  /minipaint-clipboard/queue?page=<page id>
-    POST /minipaint-clipboard/queue      {action: add|cancel|retry|adopt|dismiss|cancel_all, ...}
+    POST /minipaint-clipboard/queue      {action: add|auto|cancel|retry|adopt|dismiss|cancel_all, ...}
       -> {ok, jobs: [...], history: [...], status, queue_button: {label, enabled}, instruction?}
+
+`auto` is the toolbar's Auto (`ClipboardTab.auto_queue`): Add to Queue's
+`prompt`, `enhance`, `model` and `settings_flush`, plus `picture` - the
+selected picture, a library id or an archive reference - and `inputs`, what
+the live WanGP page said it reads (the public API's `capabilities().inputs`).
+A press refused before anything is stored answers without `jobs`, as `add`'s
+does, and with `code` where there is one.
 
 The action list here and the verbs `outbox_view` puts on a card are one thing
 in two places, and `tests/test_clipboard_ui.py` holds them together as a
@@ -717,7 +734,7 @@ that did nothing.
     POST /minipaint-clipboard/enhance-settings  {action: toggle|override|restore, ...}
 
     POST /minipaint-clipboard/intercept  {action: describe|submit|cancel|draft|history|history_load|history_delete|history_pin,
-                                          handoff?, prompt?, roles?, inherit?, enhance?, page?, model?, inputs?, id?, pinned?}
+                                          handoff?, prompt?, roles?, inherit?, enhance?, page?, model?, inputs?, id?, pinned?, auto?}
       -> {ok, ...} per action; a refusal is {ok: false, code, message} with 409 for WANGP_NOT_RUNNING, QUEUE_BUSY
          and INTERCEPT_IMAGE_EXPIRED (the world said no) and 400 for everything else (the caller did)
     GET  /minipaint-clipboard/intercept/image/{token}
@@ -793,8 +810,8 @@ The block is drawn by the browser from this answer: the composer writes
 `data-wangp-ready` ("1" only when ready), `data-wangp-target` and
 `data-wangp-references` ("1" or "0" from the answer's `fields`, for a known
 target; "" otherwise) on `#minipaint_clipboard_root`, and `style.css` hides the
-WanGP line, the cards, the prompt, History, `sp_open`, Add to Queue and +First /
-+Last / +Ref until it is "1" (and the reference card and +Ref while
+WanGP line, the cards, the prompt, History, `sp_open`, Add to Queue, +First /
++Last / +Ref and Auto until it is "1" (and the reference card and +Ref while
 `data-wangp-references` is "0" - LTX 2.3 and 2.5 - so no rule names a model), showing `#minipaint_clipboard_blocked`
 (`ui.BLOCKED_HTML`: one quiet line and Check again) instead. The popup puts
 `minipaint-intercept-is-blocked` on its root from `describe().readiness`.
@@ -808,6 +825,9 @@ WanGP line, the cards, the prompt, History, `sp_open`, Add to Queue and +First /
 #         Config.intercept_target; Config.intercept_inherit; Config.intercept (bool: == clipboard; setting it maps to a target)
 #         clipboard.json carries intercept_target and the legacy intercept bool side by side; a document with only the bool is migrated on read
 # __init__: intercept_target() -> target (never raises: minipaint when unreadable); intercept_enabled() -> target == clipboard
+# config: AUTO_FIRST | AUTO_LAST | AUTO_REFERENCE = first_frame | last_frame | reference; AUTO_ROLES (== intercept.ROLE_IDS); AUTO_ROLE_LABELS
+#         DEFAULT_AUTO_ROLES = (first_frame, reference); Config.auto_roles (never empty); auto_roles_of(value) -> roles (the default for none);
+#         auto_roles_text(roles) -> "First Frame and Reference"
 
 # intercept.py: Send to WanGP from the gallery - the popup's server half. No model family is named anywhere in it.
 POPUP_PREFIX = "wangp:"; ROLES = ((first_frame, "First frame", "start"), (last_frame, "Last frame", "end"), (reference, "Reference", "references"))
@@ -820,6 +840,8 @@ def staged_exists(token) -> bool; def discard(token) -> bool; def preview(token,
 def capabilities(model=None, inputs=None) -> {roles: [{id, label, ...}], default_roles, ...}   # from the page's inputs, else enhance's mapping for the model; one default;
                                                                              # never a role whose field targets.FIELDS does not send the model (no Reference for LTX 2.3)
 def reconcile_roles(wanted, caps) -> (kept, dropped)                         # the defaults only when nothing valid remains
+def auto_roles(caps, chosen=None) -> (kept, dropped)                         # Auto Options' roles (or chosen) against caps["roles"]; NOTHING stands in for a dropped one
+def auto_refusal(dropped, caps) -> str                                       # "Auto sends the picture as Reference, and <model> reads none of them. Nothing was queued."
 def wangp_status() -> {state, running, generating, text}                     # outbox.wangp_running() and control.last_hello(): never a fresh call into the child
 def generate_button(ready=None) -> {label, enabled, reason}                 # ClipboardTab._queue_button_view(): one rule for the popup's button and the composer's;
                                                                              # never a button while `ready` (targets.readiness) says not ready, its message the reason
@@ -828,8 +850,12 @@ def get_history(id) -> entry | None; trim(entries) -> entries                # M
 def history_view(model=None, inputs=None) -> [row]; def recipe(entry_id, model=None, inputs=None) -> {prompt, roles, dropped_roles, inherit, enhance, ...}
 def build_request(prompt, roles, token, inherit) -> request                  # history.public_request(draft) with the staged token in every ticked role; inherit=False leaves the composer's cards out
 def describe(handoff, model=None, inputs=None, fresh=False) -> dict           # + readiness: targets.readiness(model, fresh) - the popup is drawn blocked from it
+                                                                             # + auto: {roles, dropped, label} - where its Auto would put the picture on this model
 def save_prompt(prompt) -> dict; def cancel(handoff) -> dict
-def submit(handoff, prompt, roles, inherit, enhance_wanted, page, model=None, inputs=None) -> {ok, instruction, status, notes, roles, dropped_roles, history}
+def submit(handoff, prompt, roles, inherit, enhance_wanted, page, model=None, inputs=None, settings_flush="", auto=False)
+    -> {ok, instruction, status, notes, roles, dropped_roles, auto, history}
+                                                                             # auto: the roles are auto_roles(caps), not the ticked ones, and none left is
+                                                                             # INTERCEPT_NO_IMAGE_ROLE with auto_refusal's sentence - never a fallback
                                                                              # saves the prompt to the draft, repairs the enhance switch, outbox.submit(..., ORIGIN_GALLERY, ...), records the recipe;
                                                                              # a job the server runs adopts the token at admission, so the popup's cancel afterwards is a no-op;
                                                                              # a refusal by the readiness gate answers {ok: false, code, message, notes, readiness}
@@ -846,9 +872,10 @@ class Store:
 # routes.py
 LIBRARY_ROUTE; SETTINGS_ROUTE; QUEUE_ROUTE; READINESS_ROUTE; ENHANCE_SETTINGS_ROUTE; OUTPUTS_ROUTE; OUTPUT_FILE_ROUTE; PAGE_SIZE = 60; PAGE_SIZE_MIN = 10; PAGE_SIZE_MAX = 250
 # READINESS_ROUTE = /minipaint-clipboard/readiness: POST {model, fresh} -> {ok: true, readiness: targets.readiness(...)} - a blocked answer is an answer.
-# The queue route's add, the readiness route and every intercept action run on the thread pool: each may ask the WanGP bridge, over a socket.
+# The queue route's add and auto, the readiness route and every intercept action run on the thread pool: each may ask the WanGP bridge, over a socket.
 IMMUTABLE_CACHE; REVALIDATED_CACHE; RANGE_CHUNK = 4 MiB
 def library_page(sort, page, size, selected="", refresh=False) -> dict; def apply_settings(changes) -> dict
+AUTO_NONE_SENTENCE; def auto_sentence(roles) -> "Auto now sends the picture as First Frame and Reference."
 def outputs_page(page=0, size=PAGE_SIZE) -> dict                                      # the gallery; syncs the ledger first; prompt, written and model from each
                                                                                       # entry's recipe, else joined on from its Queue Send History record
 def prompts_action(method, body) -> (answer, status)                                  # History's route as a function: GET the list; POST {action: "load", id}
@@ -892,7 +919,7 @@ def reset_for_tests()
 # ui.py
 PREFIX = "minipaint_clipboard"; SLOTS = (("first", "First Frame", "start"), ("last", "Last Frame", "end"), ("ref", "Reference", "references"))
 QUEUE_BUTTON_LABEL = "Add to Queue"; QUEUE_BUTTON_BLOCKED = "WanGP is not running"; OUTBOX_LABELS (+ Enhancing); ENHANCE_LABELS; WANGP_LABELS; NO_PAGE = "00000000"; OUTBOX_SHOWN = 40
-SP_VARIANT_CHOICES; SP_MODE_CHOICES; QUEUE_JS (prompt, switch -> addToQueue); CANCEL_ALL_JS; MENU_STATE_JS; OPEN_PROMPT_EDITOR_JS (passes its inputs through); CLOSE_PROMPT_EDITOR_JS
+SP_VARIANT_CHOICES; SP_MODE_CHOICES; QUEUE_JS (prompt, switch -> addToQueue); AUTO_JS (prompt, switch -> autoQueue); CANCEL_ALL_JS; MENU_STATE_JS; OPEN_PROMPT_EDITOR_JS (passes its inputs through); CLOSE_PROMPT_EDITOR_JS
 SORT_MENU_JS; SEND_MENU_JS (the toolbar's two flyouts); OPEN_OUTPUTS_JS; OPEN_PROMPT_HISTORY_JS (History, browser-only); GRID_MOUNT = ""; LIST_MOUNT = ""
 def card_html(slot, label, field, assets, missing=False)                              # the one server-rendered section left; see the V2 list
 def outbox_view(jobs, page) -> [dict]; def history_view(records, asset_of) -> [dict]   # content, not nodes: the browser draws it
@@ -909,6 +936,9 @@ class ClipboardTab:
     _draft_has_picture_for(variant) -> bool                                            # a picture that variant's model reads (enhance.SLOTS_FOR), resolved through the library exactly as a press does
     cancel_all(page) -> {ok, cancelled, jobs, status}                                   # outbox.cancel_all()
     add_to_queue(prompt, page, model=None, enhance_wanted=None) -> {ok, instruction {nonce, job_id, executor, state} | None, status, jobs, queue_button}
+    auto_queue(picture, prompt, page, model=None, inputs=None, enhance_wanted=None, settings_flush="") -> the same shape (+ code on a refusal)
+                                                                                      # Add to Queue with the picture laid over the draft in intercept.auto_roles(...);
+                                                                                      # the draft's cards are not changed; an archive picture is adopted first
     queue_answer(page) -> {ok, page, jobs, history, status, queue_button, running}      # records history for unrecorded positive Clipboard jobs, once
     outbox_action("cancel|retry|adopt|dismiss:<job>:<page>", page) -> {ok, jobs, status, queue_button?}
     show_history() -> gr.update(visible=True); history_action("load:<id>" | "delete:<id>" | "output:<file id>", prompt) -> (prompt, *cards, status)
@@ -938,7 +968,8 @@ framework's channel is alive, which is the one thing an HTTP request cannot
 tell it.
 
 The events that remain around the queue: `queue.click(js: addToQueue, [prompt,
-enhance_toggle])`, `cancel_all.click(js: cancelAll)`,
+enhance_toggle])`, `auto.click(js: autoQueue, [prompt, enhance_toggle])` (the
+toolbar's Auto; no backend fn, so no hidden component), `cancel_all.click(js: cancelAll)`,
 `menu_state.change(js: menuStateChanged)`,
 `enhance_toggle.input(toggle_enhance, [enhance_toggle, model] ->
 [enhance_line])`, `model.input(model_changed)`, the selectors' and Reload's

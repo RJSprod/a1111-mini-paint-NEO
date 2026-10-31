@@ -213,7 +213,9 @@ function describeAnswer(body) {
         enhance: { enabled: true, state: "ready", text: "ready line" },
         inherit: { default: false, supported: true, draft: [{ role: "first_frame", label: "First Frame", names: ["forest.png"] }] },
         wangp: { state: "idle", running: true, generating: false, text: "WanGP is idle" },
-        generate: { label: "Generate", enabled: true, reason: "" },
+        generate: MODE === "autooff" ? { label: "Generate", enabled: false, reason: "WanGP is not running" }
+                                     : { label: "Generate", enabled: true, reason: "" },
+        auto: { roles: ["first_frame", "reference"], dropped: [], label: "First Frame and Reference" },
         executor: "server",
         history: MODE === "history" ? HISTORY : []
     };
@@ -247,10 +249,16 @@ global.fetch = function (url, options) {
         const action = body.action;
         if (action === "describe") { payload = describeAnswer(body); }
         else if (action === "submit") {
+            // Auto's roles are the server's to choose, from Auto Options, as
+            // the real route does: the ticks travel for the record only.
             payload = MODE === "refused"
                 ? { ok: false, code: "WANGP_NOT_RUNNING", message: "WanGP is not running.", notes: ["nothing was stored"] }
+                : MODE === "autorefused"
+                ? { ok: false, code: "INTERCEPT_NO_IMAGE_ROLE", message: "Auto sends the picture as Reference, and a frames model reads none of them. Nothing was queued.",
+                    notes: ["choose where Auto puts a picture under Clipboard → Menu → Auto Options"] }
                 : { ok: true, job_id: "0123456789abcdef", instruction: { nonce: "n", job_id: "0123456789abcdef", executor: "server", state: "admitted" },
-                    status: "Queued on the server.", notes: ["it goes next"], roles: body.roles, dropped_roles: [], history: [] };
+                    status: body.auto ? "Auto: the picture as First Frame and Reference. Queued on the server." : "Queued on the server.",
+                    notes: ["it goes next"], roles: body.auto ? ["first_frame", "reference"] : body.roles, dropped_roles: [], auto: !!body.auto, history: [] };
         }
         else if (action === "history_load") {
             payload = { ok: true, id: body.id, prompt: "loaded prompt", enhance: false, inherit: true, roles: ["reference"], dropped_roles: [], defaulted: false,
@@ -387,6 +395,29 @@ async function main() {
         await tick(40);
         await popup.generate();
         await tick(20);
+        report();
+    }
+    if (MODE === "auto") {
+        popup.open(H1, {});
+        await tick(40);
+        const before = JSON.parse(JSON.stringify(popup.state()));
+        const order = root().querySelectorAll(".minipaint-intercept-actions button").map(function (b) { return b.textContent; });
+        // Nothing ticked: Generate would ask for a role, Auto has its own.
+        tickRole("reference", false);
+        root().querySelector(".minipaint-intercept-auto").click();
+        await tick(40);
+        report({ before: before, order: order });
+    }
+    if (MODE === "autorefused") {
+        popup.open(H1, {});
+        await tick(40);
+        root().querySelector(".minipaint-intercept-auto").click();
+        await tick(40);
+        report({ autoLabel: root().querySelector(".minipaint-intercept-auto").textContent });
+    }
+    if (MODE === "autooff") {
+        popup.open(H1, {});
+        await tick(40);
         report();
     }
     if (MODE === "cancel") {
@@ -562,6 +593,39 @@ def run() -> Results:
                 opened["overlays"] == ["intercept:open", "intercept:closed"], str(opened["overlays"]))
         r.check("a handoff already opened once is refused - the step that hands it over runs after a failed receive too",
                 opened.get("reopened") is False and opened["hidden"] is True and opened.get("describesAfter") == 1, str(opened.get("reopened")))
+
+    # Auto: Generate with the roles the Clipboard's Auto Options name, so a
+    # gallery picture goes where the toolbar's Auto sends a grid picture.
+    auto = _run("auto")
+    r.check("the Auto scenario ran", auto is not None and "error" not in auto, str(auto)[:300])
+    if auto and "error" not in auto:
+        before = auto.get("before") or {}
+        submit = auto["submits"][0] if auto["submits"] else {}
+        r.check("Auto sits between Cancel and Generate, a button while Generate is one",
+                auto.get("order") == ["Cancel", "Auto", "Generate"] and before.get("autoEnabled") is True, str(auto.get("order")))
+        r.check("and says, as its tooltip, where the picture will go on this model",
+                before.get("autoTitle") == "Send the picture as First Frame and Reference (Clipboard → Menu → Auto Options)",
+                str(before.get("autoTitle")))
+        r.check("its press is Generate's submit, marked auto, with nothing ticked asked for first",
+                len(auto["submits"]) == 1 and submit.get("auto") is True and submit.get("roles") == []
+                and submit.get("handoff") == "wangp:" + "a" * 32 + ":64x48:txt2img" and auto["message"] == "", str(submit)[:200])
+        r.check("and closes the popup with the server's sentence, like Generate",
+                auto["hidden"] is True and auto["toast"].startswith("Auto: the picture as First Frame and Reference."), str(auto["toast"]))
+    refused = _run("autorefused")
+    if refused and "error" not in refused:
+        r.check("an Auto the server refuses leaves the popup open with its sentence and its note",
+                refused["hidden"] is False and refused["state"]["open"] is True and len(refused["submits"]) == 1
+                and refused["message"].startswith("Auto sends the picture as Reference, and a frames model reads none of them.")
+                and "Auto Options" in refused["message"] and refused.get("autoLabel") == "Auto", str(refused.get("message")))
+    else:
+        r.check("the refused Auto scenario ran", False, str(refused)[:300])
+    off = _run("autooff")
+    if off and "error" not in off:
+        r.check("Auto is off exactly when Generate is, and says the same reason",
+                off["state"]["autoEnabled"] is False and off["state"]["generateEnabled"] is False
+                and off["state"]["autoTitle"] == "WanGP is not running", str(off["state"])[:200])
+    else:
+        r.check("the Auto-off scenario ran", False, str(off)[:300])
 
     # WanGP's form, saved just before the job is handed over - because the
     # server builds the job from what WanGP saved, and a LoRA weight changed

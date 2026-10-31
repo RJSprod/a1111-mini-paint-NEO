@@ -3715,6 +3715,7 @@ def check_the_section_is_blocked_until_wangp_is_ready(r: Results, page) -> None:
                  history: visible('minipaint_clipboard_prompt_history'),
                  references: root ? root.dataset.wangpReferences : null,
                  first: visible('minipaint_clipboard_to_first'), ref: visible('minipaint_clipboard_to_ref'),
+                 auto: visible('minipaint_clipboard_auto'),
                  cardFirst: visible('minipaint_clipboard_card_first'), cardRef: visible('minipaint_clipboard_card_ref'),
                  outbox: visible('minipaint_clipboard_outbox_list'), blocked: visible('minipaint_clipboard_blocked'),
                  text: line ? line.textContent : '', size: line ? getComputedStyle(line).fontSize : '' }; }"""
@@ -3723,8 +3724,8 @@ def check_the_section_is_blocked_until_wangp_is_ready(r: Results, page) -> None:
         page.evaluate("() => window.minipaintClipboard.refreshReadiness(true)")
         time.sleep(1.0)
         state = page.evaluate(shown)
-        r.check("blocked: no cards, prompt, History, enhancement button, Add to Queue or +First / +Ref",
-                state["ready"] == "0" and not any(state[key] for key in ("cards", "prompt", "history", "enhance", "queue", "first", "ref")), str(state))
+        r.check("blocked: no cards, prompt, History, enhancement button, Add to Queue, +First / +Ref or Auto",
+                state["ready"] == "0" and not any(state[key] for key in ("cards", "prompt", "history", "enhance", "queue", "first", "ref", "auto")), str(state))
         r.check("one quiet line in their place, with the reason and Check again, at a hint's size",
                 state["blocked"] and "Wan2.2 Text2Video 14B" in state["text"] and "Check again" in state["text"]
                 and state["size"] == "12px", str(state))
@@ -3741,6 +3742,8 @@ def check_the_section_is_blocked_until_wangp_is_ready(r: Results, page) -> None:
         r.check("for LTX 2.3 Distilled: a first-frame card and no reference card, no +Ref",
                 state["target"] == "ltx23" and state["cardFirst"] and state["cardRef"] is False and state["ref"] is False
                 and state["references"] == "0" and state["history"], str(state))
+        r.check("but Auto stays: it puts the picture in the first frame there, and leaves the reference out",
+                state["auto"] is True, str(state))
         ltx25 = {"type": "ltx2_25_22B_distilled", "label": "LTX-2 2.5 Distilled 22B", "family": "ltx2", "architecture": "ltx2_25_22B"}
         ready = targets._view(True, "", "Ready.", enhance.model_block(ltx25), "ltx25", checked=True)
         targets.use_readiness(lambda model=None, fresh=False: ready)
@@ -3757,6 +3760,168 @@ def check_the_section_is_blocked_until_wangp_is_ready(r: Results, page) -> None:
     state = page.evaluate(shown)
     r.check("and ready for MiniMax, every card is there again", state["ready"] == "1" and state["cardRef"] and state["ref"], str(state))
     r.check("a ready answer that names no model leaves the reference alone", state["references"] in ("", "1"), str(state))
+
+
+def check_auto_sends_the_selected_picture(r: Results, page) -> None:
+    """Auto: a tap on a picture, a tap on Auto, and the request is queued.
+
+    Asked for: "set auto to FIRST and REFERENCE (prompt and last image would
+    is what's set in clip board, and if not set, inherited from wan2gp) ...
+    tapping to select and tapping auto. Two taps to add to queue." So on a
+    real page: Auto is off until a picture is selected and says where it puts
+    one; the menu's Auto Options ticks the roles, several at once, and stays
+    open while it does; a press is one ask of the queue route that the server
+    stores as a job with the picture in those roles and the composer's prompt;
+    the cards stay as they were; and two presses reach the server one after
+    the other, in the order made.
+    """
+    from minipaint_neo.clipboard import config as clip_config
+    from minipaint_neo.clipboard import history as clip_history
+    from minipaint_neo.clipboard import outbox as clip_outbox
+
+    open_clipboard(page)
+    auto_state = """() => { const h = document.getElementById('minipaint_clipboard_auto');
+        const b = h && (h.tagName === 'BUTTON' ? h : h.querySelector('button'));
+        return b ? { disabled: b.disabled, title: b.title, text: b.textContent.trim(),
+                     shown: getComputedStyle(b).display !== 'none' && b.getClientRects().length > 0 } : null; }"""
+    items = """() => Array.from(document.querySelectorAll('.minipaint-clip-menu [role=menuitemcheckbox]'))
+        .map(b => [b.textContent.replace('\u2713', '').trim(), b.getAttribute('aria-checked')])"""
+
+    def settle_jobs():
+        for job in clip_outbox.jobs():
+            if job["state"] == "pending":
+                clip_outbox.cancel(job["job_id"])
+            elif job["state"] in ("failed", "cancelled", "unconfirmed") and not job.get("dismissed"):
+                try:
+                    clip_outbox.dismiss(job["job_id"])
+                except Exception:
+                    pass
+
+    presses = []
+
+    def pressed(request):
+        if request.method == "POST" and "/minipaint-clipboard/queue" in request.url:
+            try:
+                presses.append(("sent", json.loads(request.post_data or "{}")))
+            except ValueError:
+                presses.append(("sent", {}))
+
+    def answered(request):
+        if request.method == "POST" and "/minipaint-clipboard/queue" in request.url:
+            try:
+                presses.append(("answered", json.loads(request.post_data or "{}")))
+            except ValueError:
+                presses.append(("answered", {}))
+
+    settle_jobs()
+    draft = clip_history.load_draft()
+    for key in ("first_asset_id", "last_asset_id"):
+        draft[key] = ""
+    draft["reference_asset_ids"] = []
+    clip_history.save_draft(draft)
+    page.on("request", pressed)
+    page.on("requestfinished", answered)
+    try:
+        page.evaluate("() => window.minipaintClipboard.select('')")
+        state = page.evaluate(auto_state)
+        r.check("the toolbar has Auto, off while no picture is selected",
+                bool(state) and state["text"] == "Auto" and state["shown"] and state["disabled"] is True, str(state))
+        picked = _select_tile(page, "square.png")
+        state = page.evaluate(auto_state)
+        r.check("and on once one is, saying where it puts the picture",
+                bool(picked) and state["disabled"] is False
+                and state["title"] == "Send the selected picture to WanGP as First Frame and Reference (Menu → Auto Options)", str(state))
+
+        page.evaluate("() => window.minipaintClipboard.toggleMenu()")
+        r.check("the menu has Auto Options", menu_click(page, "Auto Options") == "clicked")
+        listed = page.evaluate(items)
+        r.check("three roles, First Frame and Reference ticked until changed",
+                listed == [["First Frame", "true"], ["Last Frame", "false"], ["Reference", "true"]], str(listed))
+        menu_click(page, "Last Frame")
+        page.wait_for_function("() => (window.minipaintClipboard.debug().auto || []).length === 3", timeout=8000)
+        listed = page.evaluate(items)
+        r.check("a press ticks one more and leaves the list open, and the host keeps it",
+                listed == [["First Frame", "true"], ["Last Frame", "true"], ["Reference", "true"]]
+                and page.evaluate("() => window.minipaintClipboard.debug().menuOpen") is True
+                and clip_config.load().auto_roles == ["first_frame", "last_frame", "reference"], str(listed))
+        r.check("and the tooltip follows", page.evaluate(auto_state)["title"].startswith(
+            "Send the selected picture to WanGP as First Frame, Last Frame and Reference"), page.evaluate(auto_state)["title"])
+        menu_click(page, "Last Frame")
+        page.wait_for_function("() => (window.minipaintClipboard.debug().auto || []).length === 2", timeout=8000)
+        r.check("pressed again it is unticked", clip_config.load().auto_roles == ["first_frame", "reference"]
+                and page.evaluate(items)[1] == ["Last Frame", "false"], str(page.evaluate(items)))
+        page.keyboard.press("Escape")
+
+        page.fill("#minipaint_clipboard_prompt textarea", "a slow push in")
+        page.evaluate("""() => {
+            window.__toasts = [];
+            const root = document.getElementById('minipaint_clipboard_root');
+            const seen = () => { const t = root.querySelector('.minipaint-clip-toast');
+                const text = t && !t.hidden ? t.textContent : '';
+                if (text && window.__toasts[window.__toasts.length - 1] !== text) { window.__toasts.push(text); } };
+            window.__toastWatch = new MutationObserver(seen);
+            window.__toastWatch.observe(root, { subtree: true, childList: true, characterData: true, attributes: true }); }""")
+        before = len(clip_outbox.jobs())
+        del presses[:]
+        page.evaluate("""() => { const h = document.getElementById('minipaint_clipboard_auto');
+            const b = h && (h.tagName === 'BUTTON' ? h : h.querySelector('button')); if (b) { b.click(); } }""")
+        # Waited on inside Playwright, not with time.sleep: the request
+        # listeners only run while this thread is in a Playwright call.
+        for _ in range(60):
+            if len(clip_outbox.jobs()) > before:
+                break
+            page.wait_for_timeout(100)
+        page.wait_for_timeout(300)
+        job = clip_outbox.jobs()[-1] if len(clip_outbox.jobs()) > before else {}
+        images = (job.get("request") or {}).get("images") or {}
+        sent = [body for kind, body in presses if kind == "sent" and body.get("action") == "auto"]
+        r.check("Auto is one ask of the queue route, with the selected picture and the prompt as typed",
+                len(sent) == 1 and sent[0].get("picture") == picked and sent[0].get("prompt") == "a slow push in", str(sent)[:200])
+        r.check("which the server stores as a job with that picture as the first frame and the reference",
+                images.get("start") == {"kind": "clipboard_asset", "id": picked}
+                and images.get("references") == [{"kind": "clipboard_asset", "id": picked}]
+                and (job.get("request") or {}).get("prompt") == "a slow push in" and "end" not in images, json.dumps(job.get("request"))[:240])
+        after = clip_history.load_draft()
+        r.check("and the composer's cards are as they were", after["first_asset_id"] == "" and after["reference_asset_ids"] == [], json.dumps(after))
+        try:
+            page.wait_for_function("() => (window.__toasts || []).some(t => t.indexOf('Auto: square.png as First Frame and Reference.') === 0)", timeout=8000)
+            told = True
+        except Exception:
+            told = False
+        r.check("the page says which picture went where, over the browser where the tap was",
+                told, str(page.evaluate("() => window.__toasts")))
+
+        # Two pictures in a row: the second waits for the first's answer.
+        ids = page.evaluate("""() => Array.from(document.querySelectorAll('#minipaint_clipboard_root .minipaint-clip-item'))
+            .filter(t => ['tall.png', 'wide.png'].indexOf(t.dataset.name) !== -1)
+            .sort((a, b) => a.dataset.name < b.dataset.name ? -1 : 1).map(t => t.dataset.asset)""")
+        before = len(clip_outbox.jobs())
+        del presses[:]
+        page.evaluate("""ids => { const c = window.minipaintClipboard;
+            c.select(ids[0], true); const one = c.autoQueue('', false);
+            c.select(ids[1], true); const two = c.autoQueue('', false);
+            return Promise.all([one, two]).then(answers => answers.map(a => !!(a && a.ok))); }""", ids)
+        for _ in range(60):
+            if len(clip_outbox.jobs()) >= before + 2:
+                break
+            page.wait_for_timeout(100)
+        page.wait_for_timeout(300)
+        order = [(kind, body.get("picture")) for kind, body in presses if body.get("action") == "auto"]
+        stored = [((job.get("request") or {}).get("images") or {}).get("start", {}).get("id") for job in clip_outbox.jobs()[before:]]
+        r.check("two quick Autos reach the server one after the other: the second is sent once the first is answered",
+                len(ids) == 2 and order == [("sent", ids[0]), ("answered", ids[0]), ("sent", ids[1]), ("answered", ids[1])], str(order))
+        r.check("and are stored in the order they were pressed", stored == ids, f"{stored} {ids}")
+    finally:
+        page.remove_listener("request", pressed)
+        page.remove_listener("requestfinished", answered)
+        page.evaluate("() => { if (window.__toastWatch) { window.__toastWatch.disconnect(); } }")
+        page.fill("#minipaint_clipboard_prompt textarea", "")
+        clip_config.update(auto_roles=list(clip_config.DEFAULT_AUTO_ROLES))
+        draft = clip_history.load_draft()
+        draft["prompt_override"] = ""
+        clip_history.save_draft(draft)
+        page.evaluate("() => window.minipaintClipboard.closeMenu()")
+        settle_jobs()
 
 
 # --------------------------------------------------------------------------
@@ -4742,6 +4907,7 @@ def run() -> Results:
                     ("check_queue_reads_are_one_at_a_time", lambda: check_queue_reads_are_one_at_a_time(r, page)),
                     ("check_the_prompt_editor_fills_the_window", lambda: check_the_prompt_editor_fills_the_window(r, page)),
                     ("check_the_history_button_opens_the_last_prompts", lambda: check_the_history_button_opens_the_last_prompts(r, page)),
+                    ("check_auto_sends_the_selected_picture", lambda: check_auto_sends_the_selected_picture(r, page)),
                     ("check_the_toolbar_flyouts_are_the_one_door", lambda: check_the_toolbar_flyouts_are_the_one_door(r, page)),
                     ("check_view_outputs_is_a_gallery", lambda: check_view_outputs_is_a_gallery(r, page)),
                     ("check_the_player_is_the_pages", lambda: check_the_player_is_the_pages(r, page)),

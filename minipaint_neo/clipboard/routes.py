@@ -337,6 +337,13 @@ INTERCEPT_SENTENCES = {
     config.INTERCEPT_CLIPBOARD: "The gallery’s 🖌️ button now sends into Clipboard.",
     config.INTERCEPT_WANGP: "The gallery’s 🖌️ button now opens a WanGP request.",
 }
+#: What the status line says when Auto Options were asked to leave no role.
+AUTO_NONE_SENTENCE = "Auto needs at least one role, so it is as it was."
+
+
+def auto_sentence(roles: typing.Sequence[str]) -> str:
+    """What the status line says when Auto's roles were changed."""
+    return f"Auto now sends the picture as {config.auto_roles_text(roles)}."
 
 
 def menu_facts(current: typing.Optional[config.Config] = None) -> dict:
@@ -359,11 +366,15 @@ def menu_facts(current: typing.Optional[config.Config] = None) -> dict:
         # and name - never a path - and which one it shows ("" for none).
         "archives": [[record["id"], record["name"]] for record in current.archives],
         "view": current.view if any(record["id"] == current.view for record in current.archives) else "",
+        # Where Auto puts a picture, and the three roles the menu's Auto
+        # Options section offers, in its order.
+        "auto_roles": list(current.auto_roles),
+        "autos": [[role, config.AUTO_ROLE_LABELS[role]] for role in config.AUTO_ROLES],
     }
 
 
 def apply_settings(changes: typing.Mapping[str, typing.Any]) -> dict:
-    """The three things the menu remembers: the sort, the tile size, the intercept.
+    """What the menu remembers: the sort, the tile size, the intercept, Auto's roles.
 
     Every one of them is request-and-response - press a thing, get an answer
     - so none of them needs anything held open, and each answers with its own
@@ -377,6 +388,12 @@ def apply_settings(changes: typing.Mapping[str, typing.Any]) -> dict:
     The intercept is a destination now - ``intercept_target`` - and the
     older switch is still taken, meaning Clipboard or Mini Paint, so a page
     from before the third destination existed keeps working.
+
+    ``auto_roles`` is the whole list the Auto Options section shows ticked,
+    with the one pressed flipped: the menu sends what it means rather than a
+    toggle, so a press that arrives twice lands once. A list that leaves no
+    role is the one value refused outright - with its sentence, and the roles
+    as they were - because "nowhere" is not a place Auto can put a picture.
     """
     changes = changes if isinstance(changes, dict) else {}
     said = []
@@ -397,6 +414,15 @@ def apply_settings(changes: typing.Mapping[str, typing.Any]) -> dict:
         target = config.INTERCEPT_CLIPBOARD if changes.get("intercept") else config.INTERCEPT_MINIPAINT
         wanted["intercept_target"] = target
         said.append(INTERCEPT_SENTENCES[target])
+    if "auto_roles" in changes:
+        asked = changes.get("auto_roles")
+        # Refused or taken, decided here; the order and the duplicates are
+        # config.auto_roles_of's, the one reading of a role list there is.
+        if isinstance(asked, (list, tuple)) and any(role in config.AUTO_ROLES for role in asked):
+            wanted["auto_roles"] = config.auto_roles_of(asked)
+            said.append(auto_sentence(wanted["auto_roles"]))
+        else:
+            said.append(AUTO_NONE_SENTENCE)
     current = config.update(**wanted) if wanted else config.load()
     return {
         "ok": True,
@@ -405,6 +431,7 @@ def apply_settings(changes: typing.Mapping[str, typing.Any]) -> dict:
         "thumbnail": current.thumbnail,
         "intercept": current.intercept,
         "intercept_target": current.intercept_target,
+        "auto_roles": list(current.auto_roles),
         # What the browser's menu draws itself from. Answered here so a menu
         # that changed a setting is correct without a Gradio render.
         "menu": menu_facts(current),
@@ -447,9 +474,11 @@ async def _queue(request: typing.Any) -> typing.Any:
     back needed the framework to show the job that had run fine without it.
 
     GET answers with the list, the history and the status sentence; POST
-    takes ``{action}`` - ``add``, ``cancel``, ``retry``, ``adopt``,
+    takes ``{action}`` - ``add``, ``auto``, ``cancel``, ``retry``, ``adopt``,
     ``cancel_all`` - and answers with the same shape, so one code path draws
-    the section however it changed.
+    the section however it changed. ``auto`` is the toolbar's Auto: Add to
+    Queue with the selected ``picture`` laid over the composer in Auto's
+    roles (``ClipboardTab.auto_queue``).
     """
     if not _signed_in(request):
         return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
@@ -479,6 +508,17 @@ async def _queue(request: typing.Any) -> typing.Any:
 
             answer = await run_in_threadpool(
                 tab.add_to_queue, body.get("prompt") or "", page, body.get("model"),
+                body.get("enhance") if isinstance(body.get("enhance"), bool) else None,
+                settings_flush=body.get("settings_flush"))
+        elif action == "auto":
+            # The same press with the picture laid over the composer; off
+            # the event loop for the same reason, and because an archive
+            # picture is copied into the storage folder on the way.
+            from starlette.concurrency import run_in_threadpool
+
+            answer = await run_in_threadpool(
+                tab.auto_queue, body.get("picture") or "", body.get("prompt") or "", page, body.get("model"),
+                body.get("inputs") if isinstance(body.get("inputs"), dict) else None,
                 body.get("enhance") if isinstance(body.get("enhance"), bool) else None,
                 settings_flush=body.get("settings_flush"))
         elif action == "cancel_all":
@@ -840,11 +880,13 @@ def intercept_action(body: typing.Mapping[str, typing.Any]) -> typing.Tuple[dict
     """The popup's one door, as a function: ``(answer, HTTP status)``.
 
     Every action is request-and-response. ``describe`` is what the popup
-    draws itself from; ``submit`` is Generate; ``cancel`` lets the frozen
-    picture go; ``draft`` keeps an edited prompt shared with Clipboard when
-    the popup closes without generating; the ``history_*`` verbs are the
-    list's own buttons. Refusals carry the code's sentence and a 4xx that
-    says whether the caller or the world was wrong.
+    draws itself from; ``submit`` is Generate, and with ``auto`` the popup's
+    Auto, whose roles come from the Clipboard's Auto Options rather than the
+    ticks; ``cancel`` lets the frozen picture go; ``draft`` keeps an edited
+    prompt shared with Clipboard when the popup closes without generating;
+    the ``history_*`` verbs are the list's own buttons. Refusals carry the
+    code's sentence and a 4xx that says whether the caller or the world was
+    wrong.
     """
     from . import intercept
 
@@ -863,6 +905,7 @@ def intercept_action(body: typing.Mapping[str, typing.Any]) -> typing.Tuple[dict
                 body.get("enhance") if isinstance(body.get("enhance"), bool) else None,
                 body.get("page") or "", model, inputs,
                 settings_flush=body.get("settings_flush"),
+                auto=body.get("auto") is True,
             )
         elif action == "cancel":
             answer = intercept.cancel(body.get("handoff"))
@@ -1192,9 +1235,9 @@ def install(app: typing.Any) -> None:
         scrub.console(f"the archive thumbnail cache could not be swept ({type(error).__name__}); it will be swept after the next writes.", _LOG_PREFIX)
 
 
-__all__ = ["ARCHIVES_ROUTE", "ARCHIVE_IMAGE_ROUTE", "ARCHIVE_LIST_ROUTE", "IMAGE_ROUTE", "IMMUTABLE_CACHE", "IMPORT_ROUTE", "INTERCEPT_ACTIONS", "INTERCEPT_IMAGE_ROUTE",
+__all__ = ["ARCHIVES_ROUTE", "ARCHIVE_IMAGE_ROUTE", "ARCHIVE_LIST_ROUTE", "AUTO_NONE_SENTENCE", "IMAGE_ROUTE", "IMMUTABLE_CACHE", "IMPORT_ROUTE", "INTERCEPT_ACTIONS", "INTERCEPT_IMAGE_ROUTE",
            "INTERCEPT_ROUTE", "INTERCEPT_SENTENCES", "LIBRARY_ROUTE", "PAGE_SIZE",
            "PAGE_SIZE_MAX", "PAGE_SIZE_MIN", "REVALIDATED_CACHE", "ROUTE_PREFIX",
            "SEND_ROUTE", "SETTINGS_ROUTE", "QUEUE_ROUTE", "READINESS_ROUTE", "ENHANCE_SETTINGS_ROUTE", "PROMPTS_ROUTE", "REQUEST_MEMORY_SECONDS",
-           "apply_settings", "archive_image_url", "archives_action", "archives_answer", "clamp_size", "forget_request", "image_url", "install", "intercept_action", "library_page",
+           "apply_settings", "archive_image_url", "archives_action", "archives_answer", "auto_sentence", "clamp_size", "forget_request", "image_url", "install", "intercept_action", "library_page",
            "menu_facts", "page_of", "prompts_action", "recent_request", "remember_request"]

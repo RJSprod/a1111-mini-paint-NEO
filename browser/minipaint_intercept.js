@@ -11,7 +11,9 @@
  * is idle or generating, whether Generate is a button, and the history.
  * Generate hands the visible values back to the same route, which builds the
  * request the way the Clipboard composer would and puts it in the same
- * queue; the popup closes the moment the server has stored it.
+ * queue; the popup closes the moment the server has stored it. Auto, beside
+ * it, is the same press with the roles the Clipboard's Auto Options name in
+ * place of the ticked ones - the toolbar Auto's, for the frozen picture.
  *
  * THIS FILE KNOWS NO MODEL. It renders the roles it is given, ticks the
  * defaults it is given, and sends the ids it is given. Which roles exist for
@@ -498,11 +500,18 @@ window.minipaintIntercept = (function () {
         const cancelButton = el("button", CLASS + "-cancel", "Cancel");
         cancelButton.type = "button";
         cancelButton.addEventListener("click", function () { cancel(); });
+        // Auto: Generate with the roles Auto Options names instead of the
+        // ticks, so a gallery picture lands where a grid picture's Auto puts
+        // one. The ticks are left as they are for Generate.
+        const auto = el("button", CLASS + "-auto", "Auto");
+        auto.type = "button";
+        auto.addEventListener("click", function () { submit(true); });
         const generate = el("button", CLASS + "-generate", "Generate");
         generate.type = "button";
         generate.title = "Ctrl+Enter";
         generate.addEventListener("click", function () { submit(); });
         actions.appendChild(cancelButton);
+        actions.appendChild(auto);
         actions.appendChild(generate);
         root.appendChild(actions);
 
@@ -510,7 +519,7 @@ window.minipaintIntercept = (function () {
         S.dom = { root: root, thumb: thumb, sub: sub, blocked: blocked, blockedText: blockedText, recheck: recheck,
                   prompt: prompt, enhance: enhance, enhanceNote: enhanceNote,
                   roles: roles, inherit: inherit, inheritNote: inheritNote, dot: dot, statusText: statusText,
-                  historyToggle: historyToggle, message: message, history: history, cancel: cancelButton, generate: generate };
+                  historyToggle: historyToggle, message: message, history: history, cancel: cancelButton, auto: auto, generate: generate };
         return S.dom;
     }
 
@@ -621,6 +630,12 @@ window.minipaintIntercept = (function () {
         const generate = (S.describe && S.describe.generate) || { enabled: true };
         dom.generate.disabled = !!S.busy || generate.enabled === false;
         dom.generate.title = generate.enabled === false ? String(generate.reason || "WanGP is not running") : "Ctrl+Enter";
+        // Auto is a button exactly when Generate is: the same press, other roles.
+        const auto = (S.describe && S.describe.auto) || {};
+        dom.auto.disabled = dom.generate.disabled;
+        dom.auto.title = generate.enabled === false ? dom.generate.title
+            : (auto.label === "" ? "The current model reads none of Auto's roles"
+                : "Send the picture as " + String(auto.label || "the Clipboard's Auto Options say")) + " (Clipboard → Menu → Auto Options)";
     }
 
     /** Whether the popup's sending half exists: the Clipboard's readiness. */
@@ -807,7 +822,7 @@ window.minipaintIntercept = (function () {
             if (!answer || !answer.ok) {
                 S.last = { action: "describe", code: (answer && answer.code) || "", message: (answer && answer.message) || "" };
                 showMessage((answer && answer.message) || "The request could not be prepared.", true);
-                if (S.dom) { S.dom.generate.disabled = true; }
+                if (S.dom) { S.dom.generate.disabled = true; S.dom.auto.disabled = true; }
                 return answer;
             }
             applyDescribe(answer);
@@ -882,6 +897,7 @@ window.minipaintIntercept = (function () {
         dom.sub.textContent = (parsed.tab ? parsed.tab + " · " : "") + S.size;
         dom.root.hidden = false;
         dom.generate.disabled = false;
+        dom.auto.disabled = false;
         showMessage("");
         renderStatus();
         position();
@@ -940,10 +956,12 @@ window.minipaintIntercept = (function () {
         return true;
     }
 
-    /** What Generate sends: the visible values, the frozen token, the facts. */
-    function planSubmission() {
+    /** What Generate sends: the visible values, the frozen token, the facts.
+     * Auto sends the same and says so; the server reads its roles from Auto
+     * Options, so the ticks travel only for the record. */
+    function planSubmission(auto) {
         const dom = S.dom;
-        return Object.assign({
+        const body = Object.assign({
             action: "submit",
             handoff: S.handoff,
             prompt: dom ? String(dom.prompt.value || "") : "",
@@ -952,6 +970,8 @@ window.minipaintIntercept = (function () {
             roles: selectedRoles(),
             page: pageId()
         }, factsBody());
+        if (auto) { body.auto = true; }
+        return body;
     }
 
     /**
@@ -1001,7 +1021,9 @@ window.minipaintIntercept = (function () {
         // the history, which is read when somebody opens it.
     }
 
-    function submit() {
+    /** Generate, or with ``auto`` the popup's Auto: the same press, whose
+     * roles are Auto Options' rather than the ticked ones. */
+    function submit(auto) {
         if (!S.open || S.busy) { return Promise.resolve(null); }
         if (blockedView()) {
             // Nothing to send with: Generate is not drawn, and Ctrl+Enter
@@ -1009,14 +1031,17 @@ window.minipaintIntercept = (function () {
             return recheckReadiness();
         }
         const dom = S.dom;
-        const body = planSubmission();
-        if (!body.roles.length && S.roles.available.length) {
+        const viaAuto = auto === true;
+        const body = planSubmission(viaAuto);
+        if (!viaAuto && !body.roles.length && S.roles.available.length) {
             showMessage("Tick at least one role for the picture.", true);
             return Promise.resolve(null);
         }
+        const pressed = viaAuto ? dom.auto : dom.generate;
+        const label = pressed.textContent;
         S.busy = true;
         renderStatus();
-        dom.generate.textContent = "Sending…";
+        pressed.textContent = "Sending…";
         showMessage("");
         const token = S.token;
         return saveWanGP().then(function (flushed) {
@@ -1027,7 +1052,7 @@ window.minipaintIntercept = (function () {
             if (answer === null) { return null; }
             if (!S.open || S.token !== token) { return answer; }
             S.busy = false;
-            dom.generate.textContent = "Generate";
+            pressed.textContent = label;
             if (!answer || !answer.ok) {
                 S.last = { action: "submit", code: (answer && answer.code) || "", message: (answer && answer.message) || "" };
                 if (answer && answer.readiness && S.describe) {
@@ -1036,24 +1061,26 @@ window.minipaintIntercept = (function () {
                     S.describe.readiness = answer.readiness;
                     renderBlocked();
                     renderStatus();
-                    note("generate refused - " + (answer.code || "not ready"));
+                    note((viaAuto ? "auto" : "generate") + " refused - " + (answer.code || "not ready"));
                     return answer;
                 }
                 const notes = answer && Array.isArray(answer.notes) && answer.notes.length ? " " + answer.notes[0] + "." : "";
                 showMessage(((answer && answer.message) || "The request was not queued.") + notes, true);
                 renderStatus();
-                note("generate refused - " + ((answer && answer.code) || "no answer"));
+                note((viaAuto ? "auto" : "generate") + " refused - " + ((answer && answer.code) || "no answer"));
                 return answer;
             }
-            S.last = { action: "submit", code: "", message: String(answer.status || "") };
-            S.userRoles = body.roles.slice();
+            S.last = { action: viaAuto ? "auto" : "submit", code: "", message: String(answer.status || "") };
+            // The ticks are Generate's: Auto leaves the ones the user chose.
+            if (!viaAuto) { S.userRoles = body.roles.slice(); }
             mirrorPrompt(body.prompt);
             mirrorEnhance(body.enhance);
             close();
             const first = Array.isArray(answer.notes) && answer.notes.length ? " " + answer.notes[0] + "." : "";
             toast(String(answer.status || "Queued for WanGP.") + first, false);
             afterSubmit(answer.instruction);
-            note("generate: job " + String(answer.job_id || "").slice(0, 8) + " stored as " + (body.roles.join(", ") || "no role"));
+            const used = Array.isArray(answer.roles) ? answer.roles : body.roles;
+            note((viaAuto ? "auto" : "generate") + ": job " + String(answer.job_id || "").slice(0, 8) + " stored as " + (used.join(", ") || "no role"));
             return answer;
         });
     }
@@ -1276,6 +1303,8 @@ window.minipaintIntercept = (function () {
             seen: Object.keys(S.seen).length,
             wangp: S.dom ? S.dom.dot.dataset.state : "",
             generateEnabled: S.dom ? !S.dom.generate.disabled : false,
+            autoEnabled: S.dom ? !S.dom.auto.disabled : false,
+            autoTitle: S.dom ? S.dom.auto.title : "",
             blocked: !!blockedView(),
             readiness: S.describe && S.describe.readiness ? { ready: S.describe.readiness.ready === true,
                                                              code: S.describe.readiness.code || "",
@@ -1290,7 +1319,8 @@ window.minipaintIntercept = (function () {
         open: open,
         close: close,
         cancel: cancel,
-        generate: submit,
+        generate: function () { return submit(false); },
+        auto: function () { return submit(true); },
         stageAndOpen: stageAndOpen,
         state: state,
         debug: state,

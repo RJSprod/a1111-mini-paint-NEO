@@ -348,7 +348,7 @@ def document_checks(r: Results, base: pathlib.Path) -> None:
     written = config.path_of(config.CONFIG_NAME).read_text(encoding="utf-8")
     r.check("the file holds exactly the declared keys",
             set(json.loads(written)) == {"schema_version", "storage_root", "root_id", "intercept", "intercept_target", "intercept_inherit",
-                                         "sort", "thumbnail", "outputs_folder", "archives", "view"},
+                                         "sort", "thumbnail", "outputs_folder", "archives", "view", "auto_roles"},
             str(sorted(json.loads(written))))
     # The intercept is a destination now, and the older switch is a view of
     # it in both directions: an old file reads as the destination it meant,
@@ -531,6 +531,22 @@ def http_door_checks(r: Results, base: pathlib.Path) -> None:
     r.check("a sort it does not know changes nothing rather than refusing",
             nonsense["ok"] is True and nonsense["sort"] == "largest", str(nonsense)[:120])
     client.post(routes.SETTINGS_ROUTE, json={"sort": config.DEFAULT_SORT, "intercept": False})
+
+    # Auto Options: where the toolbar's Auto and the popup's put a picture.
+    told = client.post(routes.SETTINGS_ROUTE, json={"auto_roles": ["last_frame", "first_frame"]}).json()
+    r.check("the route keeps Auto's roles, in the menu's order, and says what Auto does now",
+            told["auto_roles"] == ["first_frame", "last_frame"] and told["menu"]["auto_roles"] == ["first_frame", "last_frame"]
+            and told["status"] == "Auto now sends the picture as First Frame and Last Frame."
+            and [role for role, _label in told["menu"]["autos"]] == list(config.AUTO_ROLES), str(told)[:200])
+    emptied = client.post(routes.SETTINGS_ROUTE, json={"auto_roles": []}).json()
+    r.check("and refuses to leave Auto with no role, saying so and keeping what it had",
+            emptied["ok"] is True and emptied["auto_roles"] == ["first_frame", "last_frame"]
+            and emptied["status"] == routes.AUTO_NONE_SENTENCE and config.load().auto_roles == ["first_frame", "last_frame"], str(emptied)[:200])
+    r.check("a shape that is not a list is no role either",
+            client.post(routes.SETTINGS_ROUTE, json={"auto_roles": "reference"}).json()["auto_roles"] == ["first_frame", "last_frame"])
+    r.check("a sort leaves Auto's roles where they are",
+            client.post(routes.SETTINGS_ROUTE, json={"sort": "newest"}).json()["auto_roles"] == ["first_frame", "last_frame"])
+    client.post(routes.SETTINGS_ROUTE, json={"sort": config.DEFAULT_SORT, "auto_roles": list(config.DEFAULT_AUTO_ROLES)})
 
     enhancement = client.get(routes.ENHANCE_SETTINGS_ROUTE).json()
     r.check("the enhancement settings describe themselves over HTTP",

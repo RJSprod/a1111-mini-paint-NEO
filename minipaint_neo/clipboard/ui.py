@@ -34,6 +34,13 @@ on disk across sessions, and Restore default forgets it. Each job in the
 list says where its enhancement is and, once WanGP has it, where its task
 is in WanGP's queue; Cancel everything empties the line at once.
 
+Auto, on the browser's toolbar beside +First, +Last and +Ref, is those
+presses and Add to Queue in one: the selected picture goes to WanGP in
+every role the menu's Auto Options ticks (First Frame and Reference until
+changed) that the model on the WanGP page reads, with the composer's prompt
+and its other cards, which stay as they were. The gallery's popup has the
+same Auto beside Generate, for the picture it froze.
+
 The composer only exists while WanGP can take what it makes. It sends to
 four models - MiniMax H3 FL2VA, MiniMax H3 Ref2VA, LTX 2.3 Distilled and
 LTX 2.5 Distilled - and while WanGP is not running, its bridge is not
@@ -64,7 +71,7 @@ from ..canvas import host, imaging
 from ..canvas import ui as canvas_ui
 from ..wangp import errors, protocol
 from ..wangp.errors import IntegrationError
-from . import TAB_ID, TAB_LABEL, archives, config, enhance, history, outbox, routes, store
+from . import TAB_ID, TAB_LABEL, archives, config, enhance, history, intercept, outbox, routes, store
 
 #: How many answered send requests a tab remembers. Enough to cover a
 #: page whose framework is several sends behind, small enough that the
@@ -132,6 +139,11 @@ PER_ROW_DEFAULT = 6
 # the browser holds - the prompt as typed and the switch as it stands - and
 # the answer says whether the job is the server's to run or this page's.
 QUEUE_JS = f"(prompt, enhanceOn) => {{ if ({_JS}) {_JS}.addToQueue(prompt, enhanceOn); }}"
+# Auto: the same press with the selected picture laid over the composer in
+# the roles Auto Options names. The picture, the page's model and what the
+# live page reads are the browser's; the prompt and the switch travel as
+# Add to Queue's do, as they stand at the press.
+AUTO_JS = f"(prompt, enhanceOn) => {{ if ({_JS}) {_JS}.autoQueue(prompt, enhanceOn); }}"
 # Cancel everything, then answer any public-API caller still waiting on one
 # of those jobs.
 CANCEL_ALL_JS = f"() => {{ if ({_JS}) {_JS}.cancelAll(); }}"
@@ -204,6 +216,8 @@ SLOTS: typing.Tuple[typing.Tuple[str, str, str], ...] = (
     ("ref", "Reference", protocol.QUEUE_FIELD_REFERENCES),
 )
 SLOT_KEYS = {"first": "first_asset_id", "last": "last_asset_id", "ref": "reference_asset_ids"}
+#: Which slot each public request field is: how Auto finds the card a role fills.
+SLOT_OF_FIELD = {field: slot for slot, _label, field in SLOTS}
 FIELD_LABELS = {
     protocol.QUEUE_FIELD_PROMPT: "The prompt",
     protocol.QUEUE_FIELD_START: "The first frame",
@@ -1283,26 +1297,131 @@ class ClipboardTab:
         just before it pressed - see ``outbox.submit``. Recorded, never acted
         on here.
         """
-        page_id = _page_of(page)
-        block = _model_of(model)
+        draft = self._draft_with_prompt(prompt)
+        refused = self._refuse_missing(draft, "queue clicked")
+        if refused is not None:
+            return refused
+        return self._submit_press(history.public_request(draft), draft, page, model, enhance_wanted, settings_flush)
+
+    def auto_queue(self, picture, prompt, page, model=None, inputs=None, enhance_wanted=None, settings_flush=""):
+        """Auto: the selected picture to WanGP in one press.
+
+        Add to Queue with the picture laid over the composer. It fills every
+        role the Auto Options setting names that the model on the WanGP page
+        reads (``intercept.auto_roles``, judged against the live page's
+        ``inputs`` when the page has said them, and against what the
+        Clipboard sends that model otherwise); everything else - the prompt
+        as typed, the cards Auto does not fill - is the composer's, and is
+        the WanGP page's own where the composer leaves it empty, exactly as
+        for Add to Queue. A run of pictures sent this way is a tap on each
+        and a tap on Auto: WanGP starts the first when it is idle and queues
+        the rest behind it (``start: auto``), like every press here.
+
+        THE CARDS ARE LEFT AS THEY WERE. Auto sends the picture; it does not
+        put it on a card. The composer stays the template a run of Auto
+        presses is sent from - a Last Frame or a prompt set once rides along
+        with every picture - and a role taken out of Auto Options later
+        leaves no picture behind on its card to go with the next request.
+
+        An archive picture is copied into the storage folder first, the way
+        +First copies one, because a request names library assets. Refused,
+        with nothing stored, when nothing is selected, when the picture has
+        left the folder, when a card Auto does not fill names a file that has,
+        and when every one of Auto's roles is one the model ignores - and
+        after that by every rule Add to Queue meets (``outbox.submit``).
+        """
+        draft = self._draft_with_prompt(prompt)
+        handle = _picture(picture)
+        if not handle:
+            self._journal("auto clicked; refused before storing - nothing selected")
+            return self._refused_press("Select an image in the browser first.")
+        copied = archives.is_ref(handle)
+        if copied:
+            try:
+                asset = archives.adopt(handle)
+            except IntegrationError as error:
+                self._journal(f"auto clicked; refused before storing - {error.code}")
+                return self._refused_press(errors.message(error.code))
+        else:
+            asset = self._asset(handle)
+        if asset is None:
+            self._journal("auto clicked; refused before storing - the picture is not in the folder")
+            return self._refused_press("The selected picture is no longer in the folder. Press Refresh, then try again.")
+        caps = intercept.capabilities(_model_of(model), inputs)
+        kept, dropped = intercept.auto_roles(caps)
+        if not kept:
+            self._journal(f"auto clicked; refused before storing - the model reads none of {', '.join(dropped)}")
+            return self._refused_press(html.escape(intercept.auto_refusal(dropped, caps)),
+                                       ["choose where Auto puts a picture under Menu → Auto Options"],
+                                       code=errors.INTERCEPT_NO_IMAGE_ROLE)
+        laid = dict(draft)
+        for role in kept:
+            slot = SLOT_OF_FIELD[intercept.ROLE_FIELDS[role]]
+            laid[SLOT_KEYS[slot]] = [asset.asset_id] if slot == "ref" else asset.asset_id
+        # The cards Auto fills hold the picture just found; any other card
+        # is checked the way Add to Queue checks it.
+        refused = self._refuse_missing(laid, "auto clicked")
+        if refused is not None:
+            return refused
+        notes = []
+        if dropped:
+            model_name = (caps.get("model") or {}).get("label") or (caps.get("model") or {}).get("type") or "the current model"
+            notes.append(f"{config.auto_roles_text(dropped)} {'is' if len(dropped) == 1 else 'are'} not read by "
+                         f"{html.escape(str(model_name))}, so Auto left {'it' if len(dropped) == 1 else 'them'} out")
+        if copied:
+            notes.append("copied from the archive into the storage folder")
+        lead = f"Auto: {html.escape(asset.filename)} as {config.auto_roles_text(kept)}."
+        self._journal(f"auto clicked: asset {asset.asset_id[:8]} as {', '.join(kept)}"
+                      f"{'; ' + ', '.join(dropped) + ' not read by the model' if dropped else ''}")
+        return self._submit_press(history.public_request(laid), laid, page, model, enhance_wanted, settings_flush,
+                                  press="auto clicked", lead=lead, extra=notes)
+
+    def _draft_with_prompt(self, prompt) -> dict:
+        """The composer's draft, with the prompt as the press found it saved."""
         draft = history.load_draft()
         draft["prompt_override"] = str(prompt or "")
-        draft = history.save_draft(draft)
+        return history.save_draft(draft)
+
+    def _refused_press(self, message: str, notes: typing.Sequence[str] = (), code: str = "") -> dict:
+        """A press refused before anything was stored: the sentence, and no
+        ``jobs`` - nothing changed, so the queue is whatever it already was and
+        the page must keep showing it."""
+        answer = {"ok": False, "instruction": None,
+                  "status": _status(message, [*notes, "nothing was asked of WanGP"]),
+                  "queue_button": self._queue_button_view()}
+        if code:
+            answer["code"] = code
+        return answer
+
+    def _refuse_missing(self, draft: typing.Mapping[str, typing.Any], press: str) -> typing.Optional[dict]:
+        """The refusal for a card whose file has left the folder, or None."""
         missing = []
         for slot, label, _field in SLOTS:
             ids = draft["reference_asset_ids"] if slot == "ref" else ([draft[SLOT_KEYS[slot]]] if draft[SLOT_KEYS[slot]] else [])
             if any(self._asset(item) is None for item in ids):
                 missing.append(slot)
-        if missing:
-            labels = ", ".join(title for name, title, _field in SLOTS if name in missing)
-            self._journal(f"queue clicked; refused before storing - {labels.lower()} missing from the folder")
-            # No ``jobs``: nothing was stored, so the queue is whatever it
-            # already was and the page must keep showing it.
-            return {"ok": False, "instruction": None,
-                    "status": _status(f"{labels}: the image is no longer in the folder. Press Refresh, then try again.",
-                                      ["nothing was asked of WanGP; the rest of the draft is kept"]),
-                    "queue_button": self._queue_button_view()}
-        request = history.public_request(draft)
+        if not missing:
+            return None
+        labels = ", ".join(title for name, title, _field in SLOTS if name in missing)
+        self._journal(f"{press}; refused before storing - {labels.lower()} missing from the folder")
+        # No ``jobs``: nothing was stored, so the queue is whatever it
+        # already was and the page must keep showing it.
+        return {"ok": False, "instruction": None,
+                "status": _status(f"{labels}: the image is no longer in the folder. Press Refresh, then try again.",
+                                  ["nothing was asked of WanGP; the rest of the draft is kept"]),
+                "queue_button": self._queue_button_view()}
+
+    def _submit_press(self, request, draft, page, model, enhance_wanted, settings_flush,
+                      press: str = "queue clicked", lead: str = "", extra: typing.Sequence[str] = ()) -> dict:
+        """A composed request, into the server's outbox: the half of Add to
+        Queue that Auto shares, from the switch's decision to the answer.
+
+        ``press`` names the press in the journal; ``lead`` goes before the
+        status line's sentence and ``extra`` after its first note, so Auto's
+        answer says which picture went where without a second answer shape.
+        """
+        page_id = _page_of(page)
+        block = _model_of(model)
         request["start"] = protocol.START_AUTO
         try:
             wanted = None if enhance_wanted is None else bool(enhance_wanted)
@@ -1314,7 +1433,7 @@ class ClipboardTab:
                 decided = f"{'on' if enhance.enabled() else 'off'} (no switch was sent; the stored setting decided)"
             else:
                 decided = f"{'on' if wanted else 'off'} (from the switch, as it stood at the press)"
-            self._journal(f"queue clicked: enhancement {decided}")
+            self._journal(f"{press}: enhancement {decided}")
             if wanted is not None and wanted != enhance.enabled():
                 # The switch and the stored setting had drifted, so the click
                 # that should have written it never arrived. Take the press as
@@ -1326,7 +1445,7 @@ class ClipboardTab:
             job = outbox.submit(request, page_id, outbox.ORIGIN_CLIPBOARD, model=block, enhance=wanted,
                                 settings_flush=str(settings_flush or ""))
         except IntegrationError as error:
-            self._journal(f"queue clicked; refused - {error.code}")
+            self._journal(f"{press}; refused - {error.code}")
             view = error.extra.get("readiness") if isinstance(error.extra.get("readiness"), dict) else None
             notes = ["nothing was stored; press it again once WanGP is running"] if error.code == errors.WANGP_NOT_RUNNING else []
             if error.code.startswith("ENHANCE_"):
@@ -1343,9 +1462,9 @@ class ClipboardTab:
             return refused
         pending = outbox.pending_count()
         record = job.get("enhance") or {}
-        self._journal(f"queue clicked: job {job['job_id'][:8]} (overrides {', '.join(history.draft_overrides(draft)) or 'none'}"
+        self._journal(f"{press}: job {job['job_id'][:8]} (overrides {', '.join(history.draft_overrides(draft)) or 'none'}"
                       f"{'; enhancing as ' + record['variant'] if record else ''}); {pending} waiting; {outbox.flush_note(job)}")
-        notes = [f"{pending - 1} ahead of it" if pending > 1 else "it goes next"]
+        notes = [f"{pending - 1} ahead of it" if pending > 1 else "it goes next", *extra]
         if job.get("executor") == outbox.EXECUTOR_BROWSER and outbox.unattended_enabled():
             # The setting says unattended and the job is not. That is this
             # WanGP saying it has no queue worker to submit into, and the
@@ -1385,6 +1504,8 @@ class ClipboardTab:
             line = (f"Enhancing the prompt as {enhance.VARIANT_LABELS.get(record['variant'], record['variant'])}; "
                     "WanGP gets it when it is written.") if record else "Queued for WanGP."
             notes.append("keep this page open until it is queued")
+        if lead:
+            line = f"{lead} {line}"
         return {"ok": True, "instruction": instruction, "status": _status(line, notes),
                 "jobs": self._outbox_view(page_id), "queue_button": self._queue_button_view()}
 
@@ -1839,6 +1960,15 @@ class ClipboardTab:
                         to_first = gr.Button("+First", elem_id=_id("to_first"), elem_classes=["minipaint-clip-action", "minipaint-clip-role"], min_width=0)
                         to_last = gr.Button("+Last", elem_id=_id("to_last"), elem_classes=["minipaint-clip-action", "minipaint-clip-role"], min_width=0)
                         to_ref = gr.Button("+Ref", elem_id=_id("to_ref"), elem_classes=["minipaint-clip-action", "minipaint-clip-role"], min_width=0)
+                        # Auto: the three presses above and Add to Queue in
+                        # one. The selected picture goes to WanGP in every
+                        # role Menu → Auto Options ticks (First Frame and
+                        # Reference until changed), with the composer's
+                        # prompt and other cards, so a run of pictures is a
+                        # tap on each and a tap here. No backend fn: the
+                        # press is the browser's, over the queue route.
+                        auto_btn = gr.Button("Auto", elem_id=_id("auto"), min_width=0,
+                                             elem_classes=["minipaint-clip-action", "minipaint-clip-role", "minipaint-clip-auto"])
                         # Sort and Send to are flyouts, not a dropdown and a
                         # menu entry. Both open the same compact list the
                         # menu's own sections draw, anchored under whichever
@@ -2050,6 +2180,7 @@ class ClipboardTab:
         self._wire(
             grid=grid, status=status, selected_box=selected_box, menu_state=menu_state,
             cards=(card_first, card_last, card_ref), menu_btn=menu_btn, paste_btn=paste_btn, delete_btn=delete_btn, refresh_now_btn=refresh_now_btn, roles=(to_first, to_last, to_ref),
+            auto_btn=auto_btn,
             sort_btn=sort_btn, send_btn=send_btn, sort_request=sort_request, thumb=thumb, refresh_btn=refresh_btn, upload_btn=upload_btn,
             outputs_open=outputs_open, outputs_panel=outputs_panel, prompt_history=prompt_history,
             intercept_request=intercept_request, folder_open=folder_open, folder_panel=folder_panel, folder_text=folder_text,
@@ -2162,6 +2293,7 @@ class ClipboardTab:
         # The press still carries the switch's value and the page's model,
         # because those live in the browser - see ``add_to_queue``.
         p["queue_btn"].click(None, js=QUEUE_JS, inputs=[p["prompt"], p["enhance_toggle"]])
+        p["auto_btn"].click(None, js=AUTO_JS, inputs=[p["prompt"], p["enhance_toggle"]])
         p["cancel_all_btn"].click(None, js=CANCEL_ALL_JS, inputs=[], outputs=[])
 
         # -- prompt enhancement: the switch and the four system prompts. The

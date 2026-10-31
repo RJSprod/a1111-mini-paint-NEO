@@ -489,7 +489,7 @@ pipeline, the NVFP4 build included) - to either LTX a first and a last frame and
 reference: no Reference card, no +Ref, and an inherited one is taken out of the request. Not
 LTX 2.3 or 2.5 Dev, not the MSR or EditAnything workflows, nothing else in WanGP. The WanGP
 section - the cards, the prompt, History, the enhancement button, Add to Queue and the
-toolbar's +First / +Last / +Ref - is simply not there until WanGP is running, its bridge
+toolbar's +First / +Last / +Ref and Auto - is simply not there until WanGP is running, its bridge
 answers, its page is on one of the four, and that
 WanGP defines the model and already has every file it would fetch before generating (so a
 press never starts a download). One quiet line says which of those is missing, with **Check
@@ -499,6 +499,18 @@ every press is asked again on the server, fresh, so a refused press stores nothi
 Outputs stay. A file check WanGP could not finish is said (*Its files could not be
 checked.*) rather than read as a missing file. The public API (below) is not gated: another
 extension chooses its own model.
+
+**Auto: two taps a request.** Beside +First, +Last and +Ref the toolbar has **Auto**, which is
+those and Add to Queue in one press: tap a picture, tap Auto, and it is queued - WanGP starts
+it when idle and queues it behind the run when not. The picture goes in every role **☰ Menu →
+Auto Options ›** ticks (First Frame and Reference until changed; any of the three, several at
+once, never none) that the model on the WanGP page reads: never a reference to LTX 2.3 or 2.5,
+and a role the live page says it does not take is left out and said. A model that reads none
+of them is refused, never sent the picture somewhere else. Everything else is the composer's -
+the prompt as typed and the cards Auto does not fill, each the WanGP page's own where empty -
+and Auto changes none of the cards, so the composer is the template a run of pictures is sent
+from. Presses reach the server in the order made, an archive picture is copied into the storage
+folder first, and the gallery popup has the same Auto beside Generate.
 
 **Press as often as you like.** Every press is a job in a queue the **server** owns, kept
 beside the draft and the history, so a refresh, a closed tab or a second browser loses
@@ -685,7 +697,8 @@ the gallery: the composer's prompt and its *Enhanced prompts* switch, the image 
 WanGP page's model reads (first frame, last frame, reference, several at once - for LTX 2.3
 and 2.5 a first and a last frame, never a reference), *Inherit Clipboard inputs* for everything the
 popup does not override, a dot saying whether WanGP is idle, generating or not running, and
-Generate. It is blocked by the same answer as the Clipboard's section: until WanGP is ready
+Generate - with **Auto** beside it, which sends the picture in the roles the Clipboard's Auto
+Options name instead of the ticked ones. It is blocked by the same answer as the Clipboard's section: until WanGP is ready
 for its page's model, the popup holds the same quiet line and Check again where the prompt,
 the roles, the history and Generate would be. The press itself is finished by the
 page, the way the Clipboard tab's own sends are: no Gradio event, no queue, the picture

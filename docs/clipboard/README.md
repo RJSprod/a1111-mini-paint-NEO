@@ -245,8 +245,8 @@ eight hundred it drew besides, by the tile's id, so scrolling back is instant an
 back to the storage folder from an archive.
 
 **What the pages did, the scrolling way.** Page Up and Page Down on the grid move it a screen,
-and Home and End to the top and the end, as a scroll box's keys do (they turned a page). A
-selection is the page's and not the view's: a picture selected a thousand rows away has no
+where they turned a page, and Home and End take it to the top and the end, as a scroll box's
+keys do. A selection is the page's and not the view's: a picture selected a thousand rows away has no
 tile in the document and is still the selection - the Send menu, +First, Auto and Delete act
 on it - and **a short line across the scrubber marks where it is** in the folder while it is
 out of view; a press on that line brings the picture into the middle of the view (the pager

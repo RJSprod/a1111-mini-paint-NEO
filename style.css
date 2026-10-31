@@ -1655,13 +1655,14 @@
 #minipaint_clipboard_root .minipaint-clip-grid {
     /* A scroll box over one track as tall as the whole listing - the
        storage folder's or an archive's - in which the script places the
-       tiles that are near the view, at as many equal columns as the slider
-       counts, sharing the row to the pixel (layoutGrid). So the columns are
-       never a strip short of the row's end, a column is exactly the tile and
-       its square exactly the picture's box: the box is square and a square
-       picture fills it, which is what "the tile's border extends well beyond
-       the thumbnail" once was not. The script pins the box's display, gap
-       and padding; these are the readable copy, and what the layout reads
+       tiles near the view, at as many equal columns as the slider counts,
+       sharing the row to the pixel (layoutGrid). So no row ends a strip
+       short of the edge, a column is exactly the tile, and its square is
+       exactly the picture's box: a square picture fills it, where a track
+       stretched to fill the row once made every box wider than the picture
+       in it ("the tile's border extends well beyond the thumbnail"). The
+       script pins the box's display, gap and padding; these are the
+       readable copy, and the gap and padding are what the layout reads
        back. */
     display: block;
     gap: var(--minipaint-clip-gap);

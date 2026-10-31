@@ -751,10 +751,15 @@ def _seed_storage(library, count, prefix, salt):
 
 
 def _list_storage(page, total):
-    """The storage folder read again, by name, and waited for whole."""
+    """The storage folder read again, by name, and waited for whole. Whether
+    it came whole is the caller's to check: a listing that never does is a
+    failed check, not a run that stops here."""
     page.evaluate("() => window.minipaintClipboard.library({sort: 'name_asc', refresh: true})")
-    page.wait_for_function(f"() => window.minipaintClipboard.libraryState().total === {total}"
-                           " && !window.minipaintClipboard.libraryState().busy", timeout=30000)
+    try:
+        page.wait_for_function(f"() => window.minipaintClipboard.libraryState().total === {total}"
+                               " && !window.minipaintClipboard.libraryState().busy", timeout=30000)
+    except Exception:
+        pass
     page.wait_for_timeout(300)
 
 
@@ -768,6 +773,10 @@ GRID_JS = """() => {
 }"""
 
 STORAGE_COUNT = 240
+#: The loader's folder: at the smallest tiles a screen is some seventy
+#: pictures and the rows asked for past it as many again, so it takes this
+#: many for a fling to pass over hundreds that must never be asked for.
+LOADER_COUNT = 600
 
 
 def check_the_storage_folder_is_one_listing(r: Results, page, library) -> None:
@@ -851,8 +860,9 @@ def check_the_storage_folder_is_one_listing(r: Results, page, library) -> None:
         r.check("and the scrubber marks where it is in the folder - the pager's 'selection on page N', the virtual way",
                 _grid(page)["mark"] is True and scrub["mark"] and scrub["mark"]["top"] - scrub["bar"]["top"] < scrub["bar"]["height"] / 4,
                 str({"mark": scrub["mark"], "bar": scrub["bar"]}))
-        page.mouse.click(scrub["mark"]["left"] + scrub["mark"]["width"] / 2, scrub["mark"]["top"] + scrub["mark"]["height"] / 2)
-        page.wait_for_timeout(600)
+        if scrub["mark"]:
+            page.mouse.click(scrub["mark"]["left"] + scrub["mark"]["width"] / 2, scrub["mark"]["top"] + scrub["mark"]["height"] / 2)
+            page.wait_for_timeout(600)
         r.check("a press on the mark brings the selected picture back into view, and the mark goes",
                 _in_view(page, chosen) and _grid(page)["mark"] is False and page.evaluate(
                     "() => window.minipaintClipboard.debug().selected") == chosen, str(_grid(page)["rows"]))
@@ -1014,15 +1024,20 @@ def check_the_storage_folder_loads_what_is_in_view_first(r: Results, page, libra
         set_tile_size(page, 72)
         # Put in the folder only now: opening the tab reads the folder, and
         # must not have read these before the server was made slow.
-        made = _seed_storage(library, STORAGE_COUNT, "0-load-", 154)
+        made = _seed_storage(library, LOADER_COUNT, "0-load-", 154)
         total = _pictures_in(library)
         before = _grid(page)
         library_store.thumbnail = slow
         page.on("request", listener)
         page.evaluate("() => window.minipaintClipboard.library({sort: 'name_asc', refresh: true})")
-        page.wait_for_function(f"() => window.minipaintClipboard.libraryState().total === {total}", timeout=30000)
+        try:
+            page.wait_for_function(f"() => window.minipaintClipboard.libraryState().total === {total}", timeout=30000)
+        except Exception:
+            pass
         page.wait_for_timeout(250)
         state = _grid(page)
+        r.check("storage: the folder is listed whole before anything is measured", state["total"] == total,
+                str({"listed": state["total"], "folder": total}))
         visible_top = list(state["visible"])
         geometry = page.evaluate(GRID_JS)
         asked_top = state["order"][-(state["started"] - before["started"]):] if state["started"] > before["started"] else []
@@ -1049,7 +1064,15 @@ def check_the_storage_folder_loads_what_is_in_view_first(r: Results, page, libra
         r.check("storage: and the next thumbnails asked for are ones now in view - what you are seeing goes first",
                 bool(since) and all(key in set(visible_bottom) for key in since[:3]),
                 str({"first": since[:3], "visible": visible_bottom[:3]}))
-        page.wait_for_timeout(1500)
+        # Judged once the loader has nothing left it wants: a loader that
+        # wanted the whole folder would still be asking, and is caught by
+        # what it asked for on the way rather than by when it was looked at.
+        quiet = 0
+        for _ in range(60):
+            page.wait_for_timeout(250)
+            quiet = quiet + 1 if not _grid(page)["inflight"] else 0
+            if quiet >= 4:
+                break
         later = _grid(page)
         listing = page.evaluate("""() => fetch('/minipaint-clipboard/library?sort=name_asc', {credentials: 'same-origin'})
             .then(r => r.json()).then(a => a.items.map(i => i[0]))""")
@@ -1182,6 +1205,65 @@ def check_patching(r: Results, page, library) -> None:
     r.check("and the ones that survived are the ones that were there before",
             sorted(t["name"] for t in left) == sorted(t["name"] for t in before),
             str(sorted(t["name"] for t in left)))
+
+
+def check_the_empty_and_unconfigured_notices(r: Results, page) -> None:
+    """The grid's two empty states, said where the tiles would be.
+
+    They are states of the index, not of the transport: the route answers
+    them with no pictures and a reason, and the page says the sentence that
+    reason has always had, in place of the tiles - and puts the tiles back
+    and the sentence away the moment the folder lists pictures again. A
+    selection is not given up for an empty answer either: only a listing
+    that holds pictures, none of them it, says a picture has gone. Answered
+    here in the route's own shape, so the check needs neither an empty
+    folder nor no folder at all.
+    """
+    open_clipboard(page)
+    show_page(page, {"sort": "name_asc", "refresh": True})
+    chosen = _select_tile(page, page.evaluate("() => (document.querySelector('.minipaint-clip-item') || {dataset: {}}).dataset.name || ''"))
+    r.check("(a picture is selected before the folder answers empty)", bool(chosen), repr(chosen))
+
+    def answering(reason, configured):
+        def handler(route):
+            route.fulfill(json={"ok": True, "revision": "0:0", "configured": configured, "sort": "name_asc", "total": 0,
+                                "left_out": 0, "reason": reason, "status": "", "items": []})
+        return handler
+
+    drawn_js = """() => { const grid = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
+        const note = grid.querySelector('.minipaint-clip-nothing');
+        const box = note ? note.getBoundingClientRect() : null;
+        return { tiles: grid.querySelectorAll('.minipaint-clip-item').length, text: note ? note.textContent : '',
+                 shown: !!box && box.height > 0 && box.width > 0, empty: grid.classList.contains('minipaint-clip-empty'),
+                 selected: window.minipaintClipboard.debug().selected }; }"""
+    for reason, configured, words in (("unconfigured", False, "No storage folder yet"), ("empty", True, "No images yet")):
+        page.route("**/minipaint-clipboard/library*", answering(reason, configured))
+        try:
+            page.evaluate("() => window.minipaintClipboard.library({})")
+            try:
+                page.wait_for_function("() => window.minipaintClipboard.libraryState().total === 0"
+                                       " && !window.minipaintClipboard.libraryState().busy", timeout=10000)
+            except Exception:
+                pass
+            page.wait_for_timeout(300)
+            state = page.evaluate(drawn_js)
+            r.check(f"a folder answered {reason} says so where the tiles were - '{words}' - and draws no tile",
+                    state["tiles"] == 0 and words in state["text"] and state["shown"] and state["empty"], str(state))
+            r.check(f"and the selection is not given up for an answer with no pictures in it ({reason})",
+                    state["selected"] == chosen, str(state["selected"]))
+        finally:
+            page.unroute("**/minipaint-clipboard/library*")
+    page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
+    try:
+        page.wait_for_function("() => window.minipaintClipboard.libraryState().total > 0"
+                               " && !window.minipaintClipboard.libraryState().busy", timeout=15000)
+    except Exception:
+        pass
+    page.wait_for_timeout(300)
+    state = page.evaluate(drawn_js)
+    r.check("and a folder with pictures in it puts the tiles back and the sentence away, the selection still there",
+            state["tiles"] > 0 and not state["text"] and not state["empty"] and state["selected"] == chosen, str(state))
+    page.evaluate("() => window.minipaintClipboard.select('')")
 
 
 def check_the_failure_modes_have_answers(r: Results, page, library) -> None:
@@ -5342,6 +5424,7 @@ def run() -> Results:
                     ("check_the_storage_folder_loads_what_is_in_view_first",
                      lambda: check_the_storage_folder_loads_what_is_in_view_first(r, page, library)),
                     ("check_patching", lambda: check_patching(r, page, library)),
+                    ("check_the_empty_and_unconfigured_notices", lambda: check_the_empty_and_unconfigured_notices(r, page)),
                     ("check_sorting_is_separate_from_drawing", lambda: check_sorting_is_separate_from_drawing(r, page)),
                     ("check_the_failure_modes_have_answers", lambda: check_the_failure_modes_have_answers(r, page, library)),
                     ("check_the_section_is_blocked_until_wangp_is_ready", lambda: check_the_section_is_blocked_until_wangp_is_ready(r, page)),

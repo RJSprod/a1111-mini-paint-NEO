@@ -81,7 +81,7 @@ THEME_FILE = "theme.css"
 #: The operations the hidden trigger understands. A request naming anything
 #: else is answered with a refusal rather than ignored, so that a parent stuck
 #: on an older protocol gets a code instead of a timeout.
-OPERATIONS = ("hello", "receivers", "receive", "queue", "confirm", "track", "flush", "prompt")
+OPERATIONS = ("hello", "receivers", "receive", "queue", "confirm", "track", "flush", "prompt", "settings")
 
 #: What the answer to a queue operation is keyed by in the request box: the
 #: queue payload sits under its own key so its ``request_id`` - the public
@@ -92,6 +92,10 @@ QUEUE_KEY = "queue"
 #: Bridge 1.14.0: a prompt read or write sits under its own key for the same
 #: reason - ``protocol.normalize_prompt_edit`` reads it and nothing else.
 PROMPT_KEY = "edit"
+
+#: Bridge 1.17.0: a file's settings to load sit under their own key too -
+#: ``protocol.normalize_settings_request`` reads it and nothing else.
+SETTINGS_KEY = "settings"
 
 
 def _theme_css(folder: typing.Optional[pathlib.Path] = None) -> str:
@@ -685,7 +689,21 @@ class MiniPaintBridge:
         """
         service = self.compat.service()
         trigger = self.compat.resolution.component(compatibility.SAVE_FORM_TRIGGER)
-        model_type = self.compat.current_model_type(service)
+        # THE PAGE'S MODEL, BECAUSE THAT IS WHAT WANGP SAVES UNDER.
+        #
+        # ``save_inputs`` records the form under ``get_state_model_type(state)``
+        # - this page's own model, the edited task's while its Edit form is the
+        # one in use - and the count and the fingerprint are read per model, so
+        # the save is only seen to land when it is looked for under that key.
+        # Until bridge 1.17.0 the key came from ``current_model_type``, which
+        # reads a ``gen["model_type"]`` WanGP has never written and a module
+        # global it stopped binding on 2026-10-25: on a real WanGP it was
+        # always empty, every flush answered "unavailable" and wrote nothing,
+        # and every send ran at the last form WanGP had saved by itself - the
+        # "last run settings" this whole operation exists to prevent. The
+        # tests that passed planted the key themselves. The process-wide
+        # answer stays as the fallback for a page that cannot say.
+        model_type = self.compat.page_model(live)[0] or self.compat.current_model_type(service)
         before = self.compat.recorded_fingerprint(service, model_type)
         answer = {"flush": protocol.FLUSH_UNAVAILABLE, "fingerprint": before, "model_type": model_type,
                   "commits": self.compat.commit_count(service, model_type)}
@@ -785,6 +803,72 @@ class MiniPaintBridge:
             raise compatibility.BridgeError(compatibility.PROMPT_TOO_LONG, f"the page's prompt is {len(text)} characters")
         return {"prompt": text, "wizard": wizard_on, "written": False}, {}
 
+    def settings(
+        self,
+        raw: typing.Any,
+        live: typing.Mapping[str, typing.Any],
+    ) -> typing.Tuple[dict, typing.Dict[str, typing.Any]]:
+        """Bridge 1.17.0: a file's settings loaded into this page, the way
+        WanGP's own "Load Settings From Media File" loads them.
+
+        For View Outputs' Send to WanGP. The file is named by a reference
+        handoff Forge wrote (``handoff.resolve_reference``), never by a path
+        from the browser, and is read by WanGP's own ``load_settings_from_file``
+        - the settings it carries, and for a video the source pictures it
+        embeds - into the page's state. Its answer is written where WanGP's own
+        chain writes it: ``refresh_form_trigger`` to fill the form again when
+        the file is for the model the page is on, ``model_choice_target`` to
+        switch to the file's model otherwise, whose switch fills the form. And
+        on the Media Generator's form (``active_form`` "add") the main tabs
+        are set to it, so a page left on another of WanGP's apps shows the
+        settings it was sent; the Edit form, editing a queued task, is left
+        where it is.
+
+        WanGP's own chain saves the form before it loads, so the settings on
+        the screen are kept for the model they belong to: the parent asks for
+        that save first (a flush), because one event cannot save and load -
+        the load's switch carries ``ignore_save_form``, and a save chained
+        behind it would consume that and let the switch clobber the load.
+        """
+        request, code = protocol.normalize_settings_request(raw)
+        if code:
+            raise compatibility.BridgeError(code, "the settings request did not normalise")
+        loader = self.compat.host.read_global("load_settings_from_file")
+        if not callable(loader) or not self.compat.settings_loadable():
+            raise compatibility.BridgeError(
+                compatibility.BRIDGE_COMPONENT_INCOMPATIBLE,
+                "this WanGP handed over no load_settings_from_file, refresh_form_trigger or model_choice_target",
+            )
+        state = live.get(compatibility.SESSION_STATE)
+        if not isinstance(state, dict):
+            raise compatibility.BridgeError(compatibility.BRIDGE_COMPONENT_INCOMPATIBLE, "this page's state was not handed over")
+        target = handoff.resolve_reference(request["handoff_id"], self.environ)
+        try:
+            answered = loader(state, str(target))
+        except Exception as error:
+            raise compatibility.BridgeError(compatibility.INTERNAL_ERROR, f"WanGP's loader failed: {type(error).__name__}")
+        answered = list(answered) if isinstance(answered, (list, tuple)) else []
+        refresh = answered[0] if len(answered) > 0 else None
+        choice = answered[1] if len(answered) > 1 else None
+        writes: typing.Dict[str, typing.Any] = {}
+        if isinstance(refresh, str) and refresh:
+            writes[compatibility.REFRESH_FORM_TRIGGER] = refresh
+        if isinstance(choice, str) and choice:
+            writes[compatibility.MODEL_CHOICE_TARGET] = choice
+        if not writes:
+            # WanGP said why in its own page ("File not supported", "No
+            # Settings to Extract"); the reason it kept is passed on as text.
+            reason = str(state.get("_last_settings_file_error") or "")
+            return {"loaded": False, "model_type": "", "switched": False,
+                    "message": ("WanGP found no settings it could load in that file"
+                                + (f": {reason[:120]}" if reason else ""))}, {}
+        switched = compatibility.MODEL_CHOICE_TARGET in writes
+        model = str(choice).split("|", 1)[0].strip() if switched else self.compat.page_model(live)[0]
+        if (str(state.get("active_form", "add") or "add") == "add"
+                and self.compat.component(compatibility.MAIN_TABS) is not None):
+            writes[compatibility.MAIN_TABS] = {"selected": compatibility.MEDIA_TAB_ID}
+        return {"loaded": True, "model_type": model[:120], "switched": switched}, writes
+
     def _settle(
         self,
         record: "admission.PendingAdmission",
@@ -881,6 +965,10 @@ class MiniPaintBridge:
                 ack["ok"] = True
             elif operation == "prompt":
                 answer, result = self.prompt(request.get(PROMPT_KEY), self.live_values(values))
+                ack.update(answer)
+                ack["ok"] = True
+            elif operation == "settings":
+                answer, result = self.settings(request.get(SETTINGS_KEY), self.live_values(values))
                 ack.update(answer)
                 ack["ok"] = True
             else:
@@ -1313,6 +1401,12 @@ def _summary(operation: typing.Any, ack: typing.Mapping[str, typing.Any], second
         box = "the wizard's box" if ack.get("wizard") else "the prompt box"
         done = "written" if ack.get("written") else "read"
         return f"prompt: {done}, {len(str(ack.get('prompt') or ''))} character(s) in {box}, in {took}"
+    if operation == "settings":
+        # The model, never the file: its name and where it is are the user's.
+        if not ack.get("loaded"):
+            return f"settings: nothing WanGP could load in that file, in {took}"
+        how = "switching WanGP to it" if ack.get("switched") else "the page's own model"
+        return f"settings: loaded for {ack.get('model_type') or '?'} ({how}), in {took}"
     if operation == "receive":
         line = f"receive: {ack.get('receiver_id')} {ack.get('operation')} {ack.get('verification')} in {took}"
         return line + (f", switched {ack['switched']}" if ack.get("switched") else "")

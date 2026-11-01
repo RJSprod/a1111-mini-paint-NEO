@@ -1642,8 +1642,17 @@ const B = {
     : MODE === "promptLegacy" ? { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true }
     : MODE === "studio" ? { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true, prompt_edit: true,
                             layout_studio: true }
-    : { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true, prompt_edit: true },
+    // A 1.16.0 bridge: everything but the settings load.
+    : MODE === "settingsLegacy" ? { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true,
+                                    prompt_edit: true, layout_studio: true }
+    : { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true, prompt_edit: true,
+        settings_load: true },
   hellos: [], presses: 0, looks: 0, pings: 0, busyMs: 0, channel: "", navigations: 0, reloadMs: 500,
+  // Every SETTINGS_REQUEST (bridge 1.17.0) with how many saves had been
+  // pressed and made when it arrived; what the bridge answers one with (null
+  // for a load of the file's own model), the code it refuses with, and
+  // whether it answers at all.
+  settingsAsks: [], settingsAnswer: null, settingsRefusal: "", answerSettings: true,
   // Every THEME_STATE the parent sent, in order.
   themes: [],
   // And every LAYOUT_STATE (bridge 1.11.0); and, for a bridge that offers
@@ -1703,6 +1712,13 @@ function toBridge(message) {
     const writing = typeof asked.prompt === "string";
     if (writing) { B.prompt = asked.prompt; }
     reply("WANGP_PROMPT_RESULT", message.request_id, { ok: true, prompt: B.prompt, wizard: B.wizard, written: writing });
+    return;
+  }
+  if (message.type === "WANGP_SETTINGS_REQUEST") {
+    B.settingsAsks.push({ payload: message.payload || {}, presses: B.presses, commits: B.commits });
+    if (!B.answerSettings) { return; }
+    if (B.settingsRefusal) { reply("WANGP_SETTINGS_RESULT", message.request_id, { ok: false, code: B.settingsRefusal, detail: "the reference is no longer there" }); return; }
+    reply("WANGP_SETTINGS_RESULT", message.request_id, B.settingsAnswer || { ok: true, loaded: true, model_type: "ltx2_22B_distilled", switched: true });
     return;
   }
   if (message.type === "WANGP_PING") {
@@ -2053,6 +2069,65 @@ const scenarios = {
     const read = await answerOf(api.prompt());
     const write = await answerOf(api.setPrompt("a dog"));
     return { offered: api.state().prompt, read, write, asks: B.promptAsks.length };
+  },
+  // A file's settings loaded into the page, for View Outputs (bridge 1.17.0,
+  // which counts its saves as every bridge since 1.16.0 does).
+  settings: async function () {
+    B.counting = true;
+    const id = "0123456789abcdef0123456789abcdef";
+    const answerAfter = async function (promise, ms) { const box = settleSend(promise); await advance(ms); return box.answer; };
+    const early = await answerOf(api.loadSettings(id));
+    await bootOnScreen();
+    await advance(1000);
+    const fetchesBefore = FETCHES.length;
+    const openedBefore = OPENED.length;
+    const pressesAtStart = B.presses;
+    const notAnId = await answerOf(api.loadSettings("../" + id));
+    const upper = await answerOf(api.loadSettings(id.toUpperCase()));
+    const pressedForThose = B.presses - pressesAtStart;
+    const askedForThose = B.settingsAsks.length;
+    const pressesBefore = B.presses;
+    const commitsBefore = B.commits;
+    const loaded = await answerAfter(api.loadSettings(id), 3000);
+    const first = B.settingsAsks[0] || {};
+    const savedFirst = { pressed: (first.presses || 0) - pressesBefore, made: (first.commits || 0) - commitsBefore };
+    B.settingsAnswer = { ok: true, loaded: true, model_type: "t2v", switched: false };
+    const same = await answerAfter(api.loadSettings(id), 3000);
+    B.settingsAnswer = { ok: true, loaded: false, message: "WanGP found no settings it could load in that file" };
+    const nothing = await answerAfter(api.loadSettings(id), 3000);
+    B.settingsAnswer = { ok: true, loaded: true, model_type: "<b>not a model</b>", switched: true };
+    const odd = await answerAfter(api.loadSettings(id), 3000);
+    B.settingsAnswer = { ok: true, loaded: false, model_type: "t2v", switched: true };
+    const unloadedSwitch = await answerAfter(api.loadSettings(id), 3000);
+    B.settingsAnswer = null;
+    B.settingsRefusal = "HANDOFF_NOT_FOUND";
+    const refused = await answerAfter(api.loadSettings(id), 3000);
+    B.settingsRefusal = "";
+    // A WanGP that never answers the save is still asked to load.
+    B.answerFlush = false;
+    const asksBeforeUnsaved = B.settingsAsks.length;
+    const unsaved = await answerAfter(api.loadSettings(id), 8000);
+    const unsavedAsked = B.settingsAsks.length - asksBeforeUnsaved;
+    B.answerFlush = true;
+    // And a load that is never answered is answered for, in twenty seconds.
+    B.answerSettings = false;
+    const silent = settleSend(api.loadSettings(id));
+    await advance(15000);
+    const silentEarly = silent.answer;
+    await advance(10000);
+    const fetched = FETCHES.slice(fetchesBefore).filter((url) => url !== "/minipaint-wangp/client-log");
+    return { early, notAnId, upper, pressedForThose, askedForThose,
+             loaded, savedFirst, same, nothing, odd, unloadedSwitch, refused, unsaved, unsavedAsked, silentEarly, silent: silent.answer,
+             asks: B.settingsAsks.map((asked) => asked.payload), said: linesWith("settings:"),
+             fetched, opened: OPENED.slice(openedBefore), pending: api.state().pending };
+  },
+  settingsLegacy: async function () {
+    await bootOnScreen();
+    await advance(1000);
+    const pressesBefore = B.presses;
+    const box = settleSend(api.loadSettings("0123456789abcdef0123456789abcdef"));
+    await advance(3000);
+    return { answer: box.answer, asks: B.settingsAsks.length, pressed: B.presses - pressesBefore };
   },
   themeHost: themeScenario, themeBridge: themeScenario, themeOff: themeScenario,
   themeGradient: themeScenario, themeLight: themeScenario, themeUnknownLook: themeScenario,
@@ -2943,6 +3018,99 @@ def prompt_checks(r: Results) -> None:
             and (legacy.get("read") or {}).get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE"
             and (legacy.get("write") or {}).get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE"
             and "reinstalled" in (legacy.get("read") or {}).get("message", ""), str(legacy)[:400])
+
+
+def settings_load_checks(r: Results) -> None:
+    """A file's settings loaded into WanGP's page (bridge 1.17.0).
+
+    For View Outputs' Send to WanGP in the Clipboard tab: the vocabulary, the
+    two normalisers both sides apply, and the tab's half on the virtual clock
+    - ``loadSettings()`` asks with a handoff id and nothing else, presses
+    WanGP's save first as WanGP's own Load Settings box saves before it loads,
+    still loads when that save is not answered, reads the answer by the
+    normaliser's rules, keeps a refusal's code, answers for a load that is
+    never answered, and never asks a bridge older than 1.17.0. The plugin's
+    half is in tests/test_wangp_queue.py, the server's in
+    tests/test_wangp_handoff.py and tests/test_clipboard_outputs.py.
+    """
+    r.check("the parent may ask for a load, and only the WanGP page answers",
+            protocol.SETTINGS_REQUEST in protocol.TO_BRIDGE and protocol.SETTINGS_REQUEST not in protocol.TO_PARENT
+            and protocol.SETTINGS_RESULT in protocol.TO_PARENT and protocol.SETTINGS_RESULT not in protocol.TO_BRIDGE)
+    hid = "0123456789abcdef0123456789abcdef"
+    r.check("a load names a handoff and nothing else: a path, a model or a name beside it is not read",
+            protocol.normalize_settings_request({"handoff_id": hid, "path": "/srv/a.mp4", "model_type": "t2v"}) == ({"handoff_id": hid}, ""))
+    r.check("anything but a handoff id - a path, upper case, the wrong length, a number, no id - is REQUEST_INVALID",
+            all(protocol.normalize_settings_request(v) == ({}, "REQUEST_INVALID")
+                for v in (None, {}, [], hid, {"handoff_id": hid.upper()}, {"handoff_id": hid[:-1]}, {"handoff_id": "../" + hid},
+                          {"handoff_id": 7}, {"path": "/srv/a.mp4"})))
+    r.check("an answer is loaded only in as many words, with a model only in the model grammar",
+            protocol.normalize_settings_result({"ok": True, "loaded": True, "model_type": "ltx2_22B_distilled", "switched": True})
+            == {"ok": True, "loaded": True, "model_type": "ltx2_22B_distilled", "switched": True, "code": "", "message": ""}
+            and protocol.normalize_settings_result({"ok": True, "loaded": "yes"})["loaded"] is False
+            and protocol.normalize_settings_result({"ok": True, "loaded": True, "model_type": "<b>x</b>"})["model_type"] == "")
+    r.check("switched only beside loaded: a file that loaded nothing switches nothing",
+            protocol.normalize_settings_result({"ok": True, "loaded": False, "switched": True})["switched"] is False)
+    r.check("a refusal keeps a code in the code grammar and a message cut to a line",
+            protocol.normalize_settings_result({"ok": False, "code": "HANDOFF_NOT_FOUND", "message": "x" * 500})
+            == {"ok": False, "loaded": False, "model_type": "", "switched": False, "code": "HANDOFF_NOT_FOUND", "message": "x" * 200}
+            and protocol.normalize_settings_result({"ok": False, "code": "not a code"})["code"] == ""
+            and protocol.normalize_settings_result(None)["ok"] is False)
+    r.check("a reference may name only what WanGP's loader reads settings from: its three video containers and the"
+            " pictures it writes, never a WebM",
+            set(protocol.SETTINGS_FILE_SUFFIXES) == {".mp4", ".mkv", ".mov", ".png", ".jpg", ".jpeg", ".webp"}
+            and all(s == s.lower() for s in protocol.SETTINGS_FILE_SUFFIXES))
+    r.check("a reference is a small note, named apart from a picture's handoff",
+            protocol.HANDOFF_REFERENCE_SUFFIX == ".ref.json" and 0 < protocol.MAX_REFERENCE_BYTES <= 4096)
+
+    answers = _run_live(("settings", "settingsLegacy"))
+    if answers is None:
+        r.check("node is available for the settings-load checks (skipped)", True)
+        return
+    live = answers.get("settings") or {}
+    r.check("the settings scenario ran", "error" not in live and not live.get("thrown") and "loaded" in live, str(live)[:300])
+    r.check("before the WanGP page has answered, nothing is asked: IFRAME_NOT_READY",
+            (live.get("early") or {}).get("code") == "IFRAME_NOT_READY", str(live.get("early")))
+    r.check("something that is not a handoff id is refused here, with no save pressed and nothing asked",
+            (live.get("notAnId") or {}).get("code") == "REQUEST_INVALID" and (live.get("upper") or {}).get("code") == "REQUEST_INVALID"
+            and live.get("askedForThose") == 0 and live.get("pressedForThose") == 0,
+            str({k: live.get(k) for k in ("notAnId", "upper", "askedForThose", "pressedForThose")}))
+    r.check("the page is asked with the handoff id alone",
+            (live.get("asks") or [None])[0] == {"handoff_id": hid}, str((live.get("asks") or [None])[:1]))
+    r.check("WanGP's form is saved first - a save pressed and made before the load is asked - as WanGP's own Load Settings box saves",
+            (live.get("savedFirst") or {}).get("pressed") == 1 and (live.get("savedFirst") or {}).get("made") == 1,
+            str(live.get("savedFirst")))
+    r.check("a load of another model's file answers loaded, the model, and that WanGP is switching to it",
+            live.get("loaded") == {"ok": True, "loaded": True, "model_type": "ltx2_22B_distilled", "switched": True, "message": ""},
+            str(live.get("loaded")))
+    r.check("and one of the page's own model, that nothing is switching",
+            (live.get("same") or {}).get("loaded") is True and (live.get("same") or {}).get("switched") is False
+            and (live.get("same") or {}).get("model_type") == "t2v", str(live.get("same")))
+    r.check("a file with nothing WanGP could load answers ok, not loaded, with WanGP's sentence",
+            (live.get("nothing") or {}).get("ok") is True and (live.get("nothing") or {}).get("loaded") is False
+            and "no settings" in (live.get("nothing") or {}).get("message", ""), str(live.get("nothing")))
+    r.check("a model outside the grammar is dropped, and nothing that did not load is switching",
+            (live.get("odd") or {}).get("model_type") == "" and (live.get("odd") or {}).get("loaded") is True
+            and (live.get("unloadedSwitch") or {}).get("switched") is False,
+            str(live.get("odd")) + str(live.get("unloadedSwitch")))
+    r.check("a refusal from the bridge keeps its code",
+            (live.get("refused") or {}).get("ok") is False and (live.get("refused") or {}).get("code") == "HANDOFF_NOT_FOUND",
+            str(live.get("refused")))
+    r.check("a WanGP that does not answer the save is still asked to load, and its answer is the answer",
+            live.get("unsavedAsked") == 1 and (live.get("unsaved") or {}).get("loaded") is True, str(live.get("unsaved")))
+    r.check("a load never answered is answered for within its twenty seconds, and not before fifteen",
+            live.get("silentEarly") is None and (live.get("silent") or {}).get("code") == "RECEIVER_QUERY_TIMEOUT",
+            str(live.get("silentEarly")) + str(live.get("silent")))
+    r.check("the journal says what loaded for which model, and never the handoff",
+            any("settings: loaded for ltx2_22B_distilled" in line for line in live.get("said") or [])
+            and not any(hid in line for line in live.get("said") or []), str(live.get("said"))[:300])
+    r.check("no live connection: a load opens no stream, makes no request of its own and leaves nothing waiting",
+            live.get("opened") == [] and live.get("fetched") == [] and live.get("pending") == 0,
+            str({k: live.get(k) for k in ("opened", "fetched", "pending")}))
+    legacy = answers.get("settingsLegacy") or {}
+    r.check("a bridge older than 1.17.0 is never asked - nor its form saved - and the answer says to reinstall it",
+            "error" not in legacy and legacy.get("asks") == 0 and legacy.get("pressed") == 0
+            and (legacy.get("answer") or {}).get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE"
+            and "reinstalled" in (legacy.get("answer") or {}).get("message", ""), str(legacy)[:400])
 
 
 def bridge_js_config() -> dict:
@@ -6120,6 +6288,7 @@ def run() -> Results:
     theme_checks(r)
     layout_checks(r)
     prompt_checks(r)
+    settings_load_checks(r)
     heartbeat_checks(r)
     panel_checks(r)
     session_checks(r)

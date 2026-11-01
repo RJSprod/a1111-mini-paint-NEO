@@ -36,10 +36,11 @@
  * a timer. The press is checked again on the server, fresh, whatever this
  * page last drew.
  *
- * The grid shows the storage folder, paged, or - from Menu → Archives - an
- * archive in its place: a read-only folder on the Forge host listed whole,
- * its tiles empty places until they are in view, its thumbnails asked for in
- * view first and re-ordered whenever the view moves (see "Archives"). Any
+ * The grid shows the storage folder or - from Menu → Archives - an archive
+ * in its place, a read-only folder on the Forge host, and both the same way:
+ * listed whole, its tiles empty places until they are in view, only the
+ * rows near the view in the document, its thumbnails asked for in view
+ * first and re-ordered whenever the view moves (see "In view first"). Any
  * tile of either opens its picture full screen from the small button in its
  * corner, the one time a whole picture is loaded.
  *
@@ -213,7 +214,7 @@ window.minipaintClipboard = (function () {
         menuAnchor: null,
         //: The gallery's own working set: what this page of it holds, which
         //: one is in the stage, and the element playing it.
-        outputs: { items: [], page: 0, pages: 1, chosen: "", stage: null, strip: null, player: null },
+        outputs: { items: [], page: 0, pages: 1, chosen: "", stage: null, strip: null, player: null, sending: false },
         outputsKey: null,
         //: The History dialog: its nodes, the one read of its list in flight,
         //: the Load in flight, how many entries it drew, and its Escape.
@@ -272,51 +273,44 @@ window.minipaintClipboard = (function () {
         //: What is wrong, if anything. Two different faults with two
         //: different sentences; see renderNotice.
         offline: { server: false, queue: false, stale: STALE_WITHOUT_THE_CHANNEL },
-        //: The grid, which the browser draws now. See "The library".
-        library: {
-            //: The library's own generation, as the index route said it.
-            //: Not the event spine's: an unrelated job must not make this
-            //: page re-fetch its pictures.
-            revision: "",
-            sort: "",
-            page: 0,
-            pages: 1,
-            total: 0,
-            size: 60,
-            configured: true,
-            //: Which page holds the selection, or -1. The pager's only job
-            //: towards a selection the user has paged away from.
-            selectedPage: -1,
-            //: The tiles in the document, by asset id, so a page that is
-            //: drawn again reuses the nodes it already has - which is what
-            //: keeps decoded pictures, scroll position and the selection.
-            tiles: new Map(),
-            ids: [],
-            busy: false,
-            inflight: null,
-            pending: false,
-            //: The page that was last ASKED for, and which request's answer
-            //: is still the current one. See stepPage and fetchLibrary.
-            wanted: 0,
-            ticket: 0
-        },
-        //: An archive shown in place of the storage folder. See "Archives".
-        archive: {
-            //: The archive's id, or "" while the storage folder is shown.
+        //: The grid: the folder it shows, listed whole, its tiles only near
+        //: the view and its thumbnails asked for in view first. One of these
+        //: for both folders it can show - see "The grid" and "In view first".
+        grid: {
+            //: Which folder: "" for the storage folder, or the id of the
+            //: archive shown in its place (see "Archives").
             view: "",
-            mounted: false,
-            //: Every picture: [key, name, bytes, version], in the order asked.
+            //: Every picture, in the order asked: [key, name, bytes, version]
+            //: and, for the storage folder, [..., width, height]. An
+            //: archive's key is the second half of its reference; the
+            //: storage folder's is the asset id itself. See tileId.
             items: [],
             //: key -> position in items.
             index: new Map(),
             sort: "",
+            //: The storage folder's own: the library's generation as the
+            //: index route said it (not the event spine's: an unrelated job
+            //: must not make this page re-read its pictures), and whether a
+            //: folder is chosen at all.
+            revision: "",
+            configured: true,
             busy: false,
+            //: Which listing's answer is still the current one, the read in
+            //: flight, and whether the library moved while it was.
             ticket: 0,
+            reading: null,
+            pending: false,
             //: The worked-out grid (columns, cell, gap, rows, height).
             layout: null,
-            //: position -> tile, for the rows the document holds.
+            //: key -> tile, for the rows the document holds. A tile is kept
+            //: for as long as its picture is listed and near the view - a
+            //: listing that comes back moves it and tells it what changed,
+            //: never builds it again - which is what keeps a decoded
+            //: picture, the scroll position and a focused tile.
             rendered: new Map(),
-            //: key -> { url, state, tries }: the thumbnails this page has.
+            //: tile id -> { url, state, tries, v }: the thumbnails this page
+            //: has drawn. By tile id, so the two folders never mix and going
+            //: back to one finds its pictures still here.
             thumbs: new Map(),
             //: key -> { controller, timer, ... }: the requests out now.
             inflight: new Map(),
@@ -326,8 +320,6 @@ window.minipaintClipboard = (function () {
             startedAt: 0,
             pumpTimer: 0,
             frame: 0,
-            watched: null,
-            observer: null,
             //: What the loader did, for the journal and the checks: how many
             //: thumbnails it asked for, dropped, got and gave up on, and the
             //: order it asked for the last few hundred in.
@@ -618,10 +610,11 @@ window.minipaintClipboard = (function () {
             return;
         }
         // A server that is not answering is asked over the transport this
-        // tab actually uses. The route takes the line down itself when it
-        // answers, so there is nothing to poll for here.
+        // tab actually uses: the listing of the folder on screen. The route
+        // takes the line down itself when it answers, so there is nothing to
+        // poll for here.
         if (S.offline.server) {
-            fetchLibrary({ quiet: true }).then(function () {
+            fetchListing({ quiet: true }).then(function () {
                 if (!S.offline.server) {
                     note("server: answered again after " + Math.round(S.retryDelay / 1000) + "s");
                     toast("Forge is answering again.");
@@ -662,9 +655,9 @@ window.minipaintClipboard = (function () {
     function checkConnection() {
         const before = S.gradioSeenAt;
         const armed = Date.now();
-        // Always the cheap HTTP question first: it is the one that decides
+        // Always the plain HTTP question first: it is the one that decides
         // which of the two sentences the line should be showing at all.
-        fetchLibrary({ quiet: true });
+        fetchListing({ quiet: true });
         const pressed = pressHidden(PRESS.refresh);
         let waited = 0;
         const timer = setInterval(function () {
@@ -732,6 +725,8 @@ window.minipaintClipboard = (function () {
             if (button) { button.disabled = !S.selected || (id === PRESS.deleteNow && isArchiveRef(S.selected)); }
         }
         syncAuto();
+        // The scrubber's mark follows the selection (drawMark).
+        scheduleScrubber();
         if (!quiet) { sendInput(BOXES.selected, S.selected); }
     }
 
@@ -751,42 +746,17 @@ window.minipaintClipboard = (function () {
      * when this page has none of its own, and a selection is given up only
      * when the grid is listing pictures and the selected one is not among
      * them - never merely because a render came back empty.
+     *
+     * "Among them" is the LISTING, not the tiles in the document: only the
+     * rows near the view are drawn, so a selected picture a thousand rows
+     * away has no tile and is still the selection - the send path names a
+     * picture by id, and the listing holds every id in the folder.
      */
     function afterRender() {
-        if (archiveActive()) {
-            // The grid is an archive's: its tiles are drawn only near the
-            // view, so "not on the grid" means nothing here. A selection is
-            // kept while the archive still lists it.
-            const confirmed = boxValue(BOXES.selected);
-            let keep = S.selected;
-            const listed = function (id) {
-                return isArchiveRef(id) && id.indexOf(ARCHIVE_REF_PREFIX + S.archive.view + "-") === 0
-                    && S.archive.index.has(id.slice(ARCHIVE_REF_PREFIX.length + 17));
-            };
-            if (keep && !listed(keep) && S.archive.items.length) { keep = ""; }
-            if (!keep && listed(confirmed)) { keep = confirmed; }
-            select(keep, true);
-            S.renderedAt = Date.now();
-            if (confirmed !== keep) { sendInput(BOXES.selected, keep); }
-            applyPerRow();
-            refreshBadges();
-            scheduleFit();
-            scheduleScrubber();
-            return;
-        }
         const confirmed = boxValue(BOXES.selected);
-        const listed = items();
-        const onGrid = function (assetId) {
-            return !!assetId && listed.some(function (item) { return item.dataset.asset === assetId; });
-        };
         let keep = S.selected;
-        if (!keep) { keep = onGrid(confirmed) ? confirmed : ""; }
-        // A selection survives paging: the selected id is browser state and
-        // does not belong to a page, and the send path names a picture by
-        // id. So it is given up only when the library is listing pictures,
-        // this page is the one the library says holds it, and it is not
-        // among them - never merely because you paged away from it.
-        else if (listed.length && !onGrid(keep) && S.library.selectedPage < 0) { keep = ""; }
+        if (keep && !listed(keep) && S.grid.items.length) { keep = ""; }
+        if (!keep && listed(confirmed)) { keep = confirmed; }
         select(keep, true);
         S.renderedAt = Date.now();
         if (confirmed !== keep) { sendInput(BOXES.selected, keep); }
@@ -961,8 +931,8 @@ window.minipaintClipboard = (function () {
         const expand = thumb >= EXPAND_MIN_THUMB ? "1" : "0";
         if (grid.dataset.expand !== expand) { grid.dataset.expand = expand; }
         syncSlider(count, range);
-        if (moved && archiveActive()) { onArchiveResize(); }
-        if (moved) { scheduleScrubber(); }
+        // A new share of the row is a new place for every tile.
+        if (moved) { onGridResize(); scheduleScrubber(); }
         return moved;
     }
 
@@ -1210,7 +1180,7 @@ window.minipaintClipboard = (function () {
     }
 
     /* ------------------------------------------------------------------ */
-    /* The library: the grid, its pager, and the patching                    */
+    /* The grid: the folder on screen, listed whole, and the patching        */
     /* ------------------------------------------------------------------ */
 
     /**
@@ -1219,8 +1189,8 @@ window.minipaintClipboard = (function () {
      * The grid used to be markup the server rendered and a Gradio event
      * delivered: 571 bytes a tile, 279 KiB at five hundred pictures, over a
      * transport that dies when the tab is backgrounded, when a session is
-     * forgotten and when Forge restarts. The same index as JSON is 73 KiB,
-     * one page of it is 9 KiB, and it comes over the plain HTTP that has
+     * forgotten and when Forge restarts. The same index as JSON arrays is a
+     * few dozen bytes a picture, and it comes over the plain HTTP that has
      * kept working through every failure this tab has had.
      *
      * The division is the one the whole programme follows: the server owns
@@ -1231,6 +1201,17 @@ window.minipaintClipboard = (function () {
      * that sees one re-asks and patches from the answer. There are no deltas
      * to get wrong and no way for a missed event to leave a page quietly
      * incorrect.
+     *
+     * NOT PAGES. The storage folder was paged, sixty at a time with a row of
+     * Back, the page and Next under it, while an archive was listed whole
+     * and drawn only where it was looked at. Asked for: "the clipboard
+     * storage thumbnail gallery still works by pages, but i prefer the way
+     * archive loads, which is not pages, but only rendering thumbnails in
+     * view and cache. Let's make the storage option work like that." So
+     * both folders are one listing, read whole in one answer, and one
+     * renderer and one loader draw it (see "In view first"); what differs is
+     * where the listing and a thumbnail are asked for, what a tile is named
+     * by, and whether its pictures may be renamed and deleted.
      */
     const LIBRARY_ROUTE = "/minipaint-clipboard/library";
     const SETTINGS_ROUTE = "/minipaint-clipboard/settings";
@@ -1238,6 +1219,9 @@ window.minipaintClipboard = (function () {
     //: because the second answer is authoritative and a third would be a
     //: poll wearing a different hat.
     const LIBRARY_RETRY_MS = 250;
+    //: One listing of a folder of tens of thousands - an archive on a slow
+    //: disk, or a storage folder whose new files are read for the first time.
+    const LISTING_TIMEOUT_MS = 60000;
 
     function imageUrl(id, version) {
         return "/minipaint-clipboard/image/" + encodeURIComponent(id) + "?thumb=1"
@@ -1289,8 +1273,7 @@ window.minipaintClipboard = (function () {
         }
     }
 
-    //: The mount: the grid over its pager, laid out together, and what the
-    //: scrubber is placed against.
+    //: The mount: the grid, and what the scrubber is placed against.
     const MOUNT_GEOMETRY = {
         "position": "relative",
         "display": "flex",
@@ -1302,22 +1285,18 @@ window.minipaintClipboard = (function () {
         "max-width": "100%"
     };
 
-    //: The grid: as many equal columns as the slider counts, sharing the row
-    //: to the pixel, and rows of the tile size worked out from that share
-    //: plus the caption (applyPerRow) - so a column is exactly the tile, its
-    //: square exactly the picture's box, and every cell is identical before
-    //: any picture has loaded. No scroll bar of its own: the scrubber is the
-    //: grid's bar, and a bar that came and went would change the width the
-    //: row was shared out from.
+    //: The grid: a scroll box holding one track as tall as every row of the
+    //: listing, whose tiles the script places itself (layoutGrid) - as many
+    //: equal columns as the slider counts, sharing the row to the pixel, and
+    //: rows of the tile size worked out from that share plus the caption
+    //: (applyPerRow). So a column is exactly the tile, its square exactly the
+    //: picture's box, every cell is identical before any picture has loaded,
+    //: and the place of tile ten thousand is a multiplication. Its gap and
+    //: padding are the numbers the layout reads back. No scroll bar of its
+    //: own: the scrubber is the grid's bar, and a bar that came and went
+    //: would change the width the row was shared out from.
     const GRID_GEOMETRY = {
-        "display": "grid",
-        "grid-template-columns": "repeat(var(--minipaint-clip-cols, 4), minmax(0, 1fr))",
-        "grid-auto-rows": "calc(var(--minipaint-clip-thumb) + " + TILE_CAPTION + "px)",
-        "grid-auto-flow": "row",
-        "justify-content": "start",
-        "align-content": "start",
-        "justify-items": "stretch",
-        "align-items": "stretch",
+        "display": "block",
         "gap": "var(--minipaint-clip-gap, 8px)",
         "padding": "var(--minipaint-clip-gap, 8px)",
         "margin": "0",
@@ -1331,9 +1310,25 @@ window.minipaintClipboard = (function () {
         "scrollbar-width": "none"
     };
 
-    //: The tile is the boundary: exactly its cell, one cell, and nothing it
-    //: holds is drawn outside it. It centres what it holds; the two
-    //: full-width children opt back out below.
+    //: The track: the whole listing's height, so the scroll box and the
+    //: scrubber know how far there is to go while only the rows near the
+    //: view are in it. What every tile is placed against.
+    const TRACK_GEOMETRY = {
+        "display": "block",
+        "position": "relative",
+        "box-sizing": "border-box",
+        "width": "100%",
+        "min-width": "0",
+        "max-width": "100%",
+        "margin": "0",
+        "padding": "0",
+        "border-width": "0",
+        "overflow": "visible"
+    };
+
+    //: The tile is the boundary: exactly its cell (placeTile states the
+    //: cell), and nothing it holds is drawn outside it. It centres what it
+    //: holds; the two full-width children opt back out below.
     const TILE_GEOMETRY = {
         "display": "flex",
         "flex-direction": "column",
@@ -1342,16 +1337,10 @@ window.minipaintClipboard = (function () {
         "justify-content": "flex-start",
         "gap": "4px",
         "box-sizing": "border-box",
-        "grid-column": "auto",
-        "grid-row": "auto",
-        "justify-self": "stretch",
-        "align-self": "stretch",
-        "width": "100%",
         "min-width": "0",
         "max-width": "100%",
-        "height": "100%",
         "min-height": "0",
-        "max-height": "100%",
+        "max-height": "none",
         "margin": "0",
         "padding": "4px",
         "border-width": "2px",
@@ -1362,9 +1351,10 @@ window.minipaintClipboard = (function () {
         "aspect-ratio": "auto",
         //: A double tap is the tile's own (PNG Info), never the browser's zoom.
         "touch-action": "manipulation",
-        //: What the full-screen button in the corner is placed against. An
-        //: archive's tile is placed absolutely instead, which does the same.
-        "position": "relative"
+        //: Placed in its row and column by placeTile, which states its left,
+        //: top, width and height; it is also what the full-screen button in
+        //: its corner is placed against.
+        "position": "absolute"
     };
 
     //: The full-screen button: a small square in the tile's top right corner,
@@ -1480,23 +1470,25 @@ window.minipaintClipboard = (function () {
         grid.setAttribute("tabindex", "0");
         grid.dataset.count = "0";
         pin(grid, GRID_GEOMETRY);
-        const pager = document.createElement("div");
-        pager.className = "minipaint-clip-pager";
-        pager.hidden = true;
+        const track = document.createElement("div");
+        track.className = "minipaint-clip-track";
+        pin(track, TRACK_GEOMETRY);
+        pin(track, { "height": "0px" });
+        grid.appendChild(track);
         mount.appendChild(grid);
-        mount.appendChild(pager);
         host.appendChild(mount);
         // The row the slider counts, on the grid before its first tile: the
-        // tracks above are measured from it, and a page whose stylesheet
-        // never arrived would otherwise have nothing to measure them from.
+        // tiles are placed from it, and a page whose stylesheet never
+        // arrived would otherwise have nothing to place them from.
         applyPerRow();
         watchGrid(grid);
         return mount;
     }
 
     /**
-     * The grid's own size, watched: a new width is a new share of the row,
-     * a new height a new view for the archive's rows and the scrubber.
+     * The grid's own size and scroll, watched: a new width is a new share of
+     * the row, a new height a new view for the rows and the scrubber, and a
+     * scroll the rows drawn and the thumbnails asked for again.
      *
      * Only read here. Nothing this writes can change the grid's own box -
      * its height is the fit's (fitTab) and its width the column's - so the
@@ -1509,8 +1501,9 @@ window.minipaintClipboard = (function () {
         if (typeof ResizeObserver !== "function") { return; }
         if (S.gridObserver) { S.gridObserver.disconnect(); }
         S.gridObserver = new ResizeObserver(function () {
-            applyPerRow();
-            if (archiveActive()) { onArchiveResize(); }
+            // A row shared out anew places every tile itself; a new height
+            // with the same row is a new view to fill.
+            if (!applyPerRow()) { onGridResize(); }
             drawScrubber();
         });
         S.gridObserver.observe(grid);
@@ -1519,6 +1512,11 @@ window.minipaintClipboard = (function () {
     function gridElement() {
         const mount = gridMount();
         return mount ? mount.querySelector(".minipaint-clip-grid") : null;
+    }
+
+    function gridTrack() {
+        const grid = gridElement();
+        return grid ? grid.querySelector(".minipaint-clip-track") : null;
     }
 
     /* ------------------------------------------------------------------ */
@@ -1729,9 +1727,6 @@ window.minipaintClipboard = (function () {
                     if (!child.contains(gridElement())) { sizes.observe(child); }
                 }
             }
-            // The pager, which is inside the grid's host but never sized.
-            const pager = pagerElement();
-            if (pager) { sizes.observe(pager); }
             // Every block of the composer but the Prompt's own.
             if (composer) {
                 for (const child of Array.from(composer.children)) {
@@ -1759,11 +1754,18 @@ window.minipaintClipboard = (function () {
     // handle and the grid follows it; press anywhere else on the bar and the
     // view jumps there and follows the pointer from then on. While it is
     // held a bubble beside the handle says where you are - which picture of
-    // how many, and the date, name or size the sort orders by - and an
-    // archive asks for no thumbnails until it is let go, so a scrub across
-    // ten thousand pictures asks for the screen it stops on and nothing on
-    // the way there. The wheel, a finger on the grid and the keys scroll the
-    // grid as they always did; the bar follows them.
+    // how many, and the date, name or size the sort orders by - and the
+    // grid asks for no thumbnails until it is let go or rests, so a scrub
+    // across ten thousand pictures asks for the screen it stops on and
+    // nothing on the way there. The wheel, a finger on the grid and the keys
+    // scroll the grid as they always did; the bar follows them.
+    //
+    // THE SELECTION'S MARK. A short line across the bar says where the
+    // selected picture is in the whole list, and a press on it brings that
+    // picture into view. It is what the pager's "selection on page N" was
+    // while the storage folder was paged: the one thing owed to somebody who
+    // has scrolled away from what they chose, which the grid does not take
+    // away from them - the selection is the page's, wherever it is.
     //
     // It is shown only while the grid holds more than it shows.
 
@@ -1833,6 +1835,22 @@ window.minipaintClipboard = (function () {
         "text-align": "right",
         "pointer-events": "none"
     };
+    //: The selection's mark: as wide as the bar and taller than the line the
+    //: stylesheet draws in its middle (its padding is left unpainted), so a
+    //: finger finds it. Its top is measured (drawScrubber).
+    const SCRUB_MARK_GEOMETRY = {
+        "position": "absolute",
+        "top": "0",
+        "right": "0",
+        "box-sizing": "border-box",
+        "width": "14px",
+        "height": "12px",
+        "margin": "0",
+        "padding": "4px 0",
+        "border-width": "0",
+        "pointer-events": "auto",
+        "cursor": "pointer"
+    };
 
     function scrubberElement() {
         const mount = gridMount();
@@ -1861,8 +1879,14 @@ window.minipaintClipboard = (function () {
         bubble.hidden = true;
         bubble.setAttribute("aria-live", "polite");
         pin(bubble, SCRUB_BUBBLE_GEOMETRY);
+        const mark = document.createElement("span");
+        mark.className = "minipaint-clip-scrubber-mark";
+        mark.hidden = true;
+        mark.title = "The selected picture: press to bring it into view";
+        pin(mark, SCRUB_MARK_GEOMETRY);
         bar.appendChild(rail);
         bar.appendChild(handle);
+        bar.appendChild(mark);
         bar.appendChild(bubble);
         bar.addEventListener("pointerdown", onScrubDown);
         bar.addEventListener("pointermove", onScrubMove);
@@ -1932,15 +1956,34 @@ window.minipaintClipboard = (function () {
         }
         const now = String(facts.max ? Math.round(100 * facts.top / facts.max) : 0);
         if (bar.getAttribute("aria-valuenow") !== now) { bar.setAttribute("aria-valuenow", now); }
+        drawMark(bar, box, facts);
         if (S.scrub) { drawBubble(bar, box); }
+    }
+
+    /**
+     * The selection's mark: where the handle's middle would be with the
+     * selected picture in the middle of the view, so a press on it and the
+     * handle arriving there are one place. Shown only while the picture is
+     * listed and out of view, as the pager's mark was shown only while the
+     * selection was on another page - in view, it would sit under the
+     * handle a drag starts from.
+     */
+    function drawMark(bar, box, facts) {
+        const mark = bar.querySelector(".minipaint-clip-scrubber-mark");
+        if (!mark) { return; }
+        const place = selectionPlace();
+        const shown = !!place && !place.inView && facts.max > 0;
+        if (mark.hidden === shown) { mark.hidden = !shown; }
+        if (!shown) { return; }
+        const middle = box.travel * Math.min(1, Math.max(0, place.target / facts.max)) + box.size / 2;
+        const top = Math.round(middle - (parseFloat(SCRUB_MARK_GEOMETRY.height) || 12) / 2) + "px";
+        if (mark.style.getPropertyValue("top") !== top) { mark.style.setProperty("top", top, "important"); }
     }
 
     function scheduleScrubber() {
         if (S.scrubFrame) { return; }
         S.scrubFrame = window.requestAnimationFrame(drawScrubber);
     }
-
-    function onGridScroll() { scheduleScrubber(); }
 
     /** The date a version names: ``<mtime_ns>-<size>``. */
     function versionDate(version) {
@@ -1967,43 +2010,24 @@ window.minipaintClipboard = (function () {
      */
     function scrubPlace() {
         const grid = gridElement();
-        if (!grid) { return null; }
-        const style = getComputedStyle(grid);
-        const gap = parseFloat(style.rowGap) || 8;
-        const padTop = parseFloat(style.paddingTop) || 0;
+        const layout = S.grid.layout;
+        if (!grid || !layout || !layout.rows) { return null; }
         const facts = scrollFacts(grid);
-        const perRow = Math.max(1, S.perRow || 1);
-        const rowHeight = (S.thumb || DEFAULT_THUMB) + TILE_CAPTION + gap;
+        const step = layout.cellHeight + layout.gap;
+        const total = S.grid.items.length;
         // The last screen's first row is the end of the list, whatever row
         // the arithmetic lands on: at the bottom, say the last picture.
         const atEnd = facts.max > 0 && facts.top >= facts.max - 1;
-        let row = Math.max(0, Math.floor(Math.max(0, facts.top - padTop) / rowHeight + 0.5));
-        let sort = "";
-        let total = 0;
-        let offset = 0;
-        let pick = null;
-        if (archiveActive()) {
-            sort = S.archive.sort;
-            total = S.archive.items.length;
-            const at = atEnd ? total - 1 : Math.min(total - 1, row * perRow);
-            const item = S.archive.items[at];
-            if (!item) { return null; }
-            pick = { index: at, name: item[1], bytes: item[2], v: item[3] };
-        } else {
-            sort = S.library.sort;
-            const tiles = items();
-            total = S.library.total || tiles.length;
-            offset = S.library.page * S.library.size;
-            const at = atEnd ? tiles.length - 1 : Math.min(tiles.length - 1, row * perRow);
-            const tile = tiles[at];
-            if (!tile) { return null; }
-            pick = { index: offset + at, name: tile.dataset.name || "", bytes: tile.dataset.bytes, v: tile.dataset.v };
-        }
+        const row = Math.max(0, Math.floor(Math.max(0, facts.top - layout.padTop) / step + 0.5));
+        const at = atEnd ? total - 1 : Math.min(total - 1, row * layout.columns);
+        const item = S.grid.items[at];
+        if (!item) { return null; }
+        const sort = S.grid.sort;
         let detail = "";
-        if (sort === "newest" || sort === "oldest") { detail = versionDate(pick.v); }
-        else if (sort === "largest" || sort === "smallest") { detail = pick.bytes ? bytesText(pick.bytes) : ""; }
-        else { detail = pick.name; }
-        return { position: pick.index + 1, total: total, detail: detail };
+        if (sort === "newest" || sort === "oldest") { detail = versionDate(item[3]); }
+        else if (sort === "largest" || sort === "smallest") { detail = item[2] ? bytesText(item[2]) : ""; }
+        else { detail = item[1]; }
+        return { position: at + 1, total: total, detail: detail };
     }
 
     function drawBubble(bar, box) {
@@ -2038,6 +2062,11 @@ window.minipaintClipboard = (function () {
         if (!grid || !bar || bar.hidden) { return; }
         event.preventDefault();
         event.stopPropagation();
+        // The selection's mark is a press that goes somewhere, not a drag.
+        if (event.target && event.target.closest && event.target.closest(".minipaint-clip-scrubber-mark")) {
+            showSelection();
+            return;
+        }
         const facts = scrollFacts(grid);
         const height = parseFloat(bar.style.getPropertyValue("height")) || grid.clientHeight;
         const box = handleBox(height, facts);
@@ -2086,7 +2115,8 @@ window.minipaintClipboard = (function () {
             held.pauseTimer = 0;
             if (S.scrub !== held) { return; }
             held.paused = true;
-            if (archiveActive()) { renderArchive(); pumpThumbs(true); }
+            renderGrid();
+            pumpThumbs(true);
         }, SCRUB_PAUSE_MS);
     }
 
@@ -2107,12 +2137,8 @@ window.minipaintClipboard = (function () {
             const bubble = bar.querySelector(".minipaint-clip-scrubber-bubble");
             if (bubble) { bubble.hidden = true; }
         }
-        if (archiveActive()) { renderArchive(); pumpThumbs(true); }
-    }
-
-    function pagerElement() {
-        const mount = gridMount();
-        return mount ? mount.querySelector(".minipaint-clip-pager") : null;
+        renderGrid();
+        pumpThumbs(true);
     }
 
     /** The full-screen button's glyph: four corners, drawn, never a character. */
@@ -2135,10 +2161,10 @@ window.minipaintClipboard = (function () {
         return svg;
     }
 
-    /** One tile. Built once per picture and then reused - see drawLibrary.
-     *  An archive's tile is built without a picture address: it is a place
-     *  until its thumbnail's turn comes (see pumpThumbs). */
-    function buildTile(item, placeholder) {
+    /** One tile: a place for a picture, without the picture. Built when its
+     *  row comes near the view and kept while it is near - see drawListing -
+     *  and given its picture when the thumbnail's turn comes (pumpThumbs). */
+    function buildTile(item) {
         const tile = document.createElement("button");
         tile.type = "button";
         tile.className = "minipaint-clip-item";
@@ -2153,20 +2179,24 @@ window.minipaintClipboard = (function () {
         const thumb = document.createElement("span");
         thumb.className = "minipaint-clip-thumb";
         pin(thumb, THUMB_GEOMETRY);
+        // Not `loading="lazy"`: a tile is in the document only near the view,
+        // and its picture is given an address only once its thumbnail is
+        // here, so there is nothing left for the browser to put off.
         const picture = document.createElement("img");
         picture.alt = "";
-        picture.loading = "lazy";
         picture.draggable = false;
         pin(picture, PICTURE_GEOMETRY);
-        // A thumbnail that 404s costs that tile its picture and the page
-        // nothing else: the name and a missing mark, where the picture was.
+        // A thumbnail that will not draw costs that tile its picture and the
+        // page nothing else: the name and a missing mark, where the picture
+        // was. The loader marks a tile whose request the server refused
+        // (paintThumb); this is for one that arrived and would not decode.
         // The picture is hidden inline, because its display is stated
         // inline and the stylesheet's rule for a missing one would lose.
         picture.addEventListener("error", function () {
+            if (!picture.getAttribute("src")) { return; }
             tile.classList.add("minipaint-clip-item-missing");
             pin(picture, { "display": "none" });
         });
-        if (!placeholder) { picture.src = imageUrl(item.id, item.v); }
         thumb.appendChild(picture);
         const label = document.createElement("span");
         label.className = "minipaint-clip-name";
@@ -2190,10 +2220,12 @@ window.minipaintClipboard = (function () {
     /**
      * The same tile, told what changed about its picture.
      *
-     * A rename changes the caption and not the file, so mtime is unchanged,
-     * the URL is unchanged, and nothing is re-fetched - the asked-for
-     * behaviour falling out of the versioned URL rather than being
-     * special-cased. Only a genuinely new version costs a request.
+     * A rename changes the caption and not the file, so the version is
+     * unchanged, the thumbnail this page holds for it is still the one, and
+     * nothing is asked for again - the asked-for behaviour falling out of
+     * the versioned address rather than being special-cased. Only a
+     * genuinely new version costs a request: the tile is a place again until
+     * the new thumbnail's turn comes.
      */
     function refreshTile(tile, item) {
         if (tile.dataset.name !== item.name) {
@@ -2205,79 +2237,72 @@ window.minipaintClipboard = (function () {
         if (String(tile.dataset.v || "") !== String(item.v || "")) {
             tile.dataset.v = item.v || "";
             tile.dataset.bytes = String(item.bytes || 0);
+            tile.title = item.name + " · " + sizeText(item);
             tile.classList.remove("minipaint-clip-item-missing");
             const picture = tile.querySelector("img");
             if (picture) {
                 // Shown again, in case the version before was the one that
-                // 404ed and hid it.
+                // could not be drawn and hid it.
                 pin(picture, { "display": PICTURE_GEOMETRY.display });
-                picture.src = imageUrl(item.id, item.v);
+                picture.removeAttribute("src");
             }
         }
         return tile;
     }
 
     /**
-     * Put this page of the library on screen, keeping every tile it can.
+     * Put a listing on screen, keeping every tile it can.
      *
-     * Building a page and patching one are the same operation against the
-     * same page, so there is one code path that puts tiles on screen and no
-     * second one to drift. An import that lands on your page adds one node;
-     * a delete removes one; a rename changes one caption. The other
-     * fifty-nine are untouched, the scroll position is untouched, and
-     * nothing is decoded twice.
-     *
-     * Re-ordering MOVES existing nodes: insertBefore on an element already
-     * in the document relocates it rather than recreating it, and the loop
-     * only touches the ones that are actually out of place.
+     * Building and patching are the same operation against the same grid,
+     * so there is one code path that puts tiles on screen and no second one
+     * to drift. An import adds one picture to the listing and, near the
+     * view, one node; a delete takes one out; a rename changes one caption.
+     * Every tile already drawn is moved to its new place and told what
+     * changed, never built again: the scroll position is untouched, nothing
+     * is decoded twice, and a focused tile keeps the focus. A new order
+     * alone starts at the top (`top`), because a position in one order means
+     * nothing in another - which is what turning to page 0 of a new sort was.
      */
-    function drawLibrary(answer) {
+    function drawListing(answer, options) {
+        const opts = options || {};
         const grid = gridElement();
         if (!grid) { return; }
-        // An archive is on screen: the storage folder's page is not drawn
-        // under it. Going back reads it again.
-        if (archiveActive()) { return; }
-        const items = Array.isArray(answer.items) ? answer.items : [];
-        const next = new Map();
-        for (const item of items) {
-            const held = S.library.tiles.get(item.id);
-            next.set(item.id, held ? refreshTile(held, item) : buildTile(item));
+        const rows = Array.isArray(answer.items) ? answer.items.filter(Array.isArray) : [];
+        S.grid.items = rows;
+        S.grid.sort = String(answer.sort || S.grid.sort);
+        if (!S.grid.view) {
+            S.grid.revision = String(answer.revision || "");
+            S.grid.configured = answer.configured !== false;
         }
-        for (const entry of S.library.tiles) {
-            if (!next.has(entry[0]) && entry[1].parentNode) { entry[1].parentNode.removeChild(entry[1]); }
+        const index = new Map();
+        for (let i = 0; i < rows.length; i += 1) { index.set(String(rows[i][0]), i); }
+        S.grid.index = index;
+        forgetStale();
+        for (const entry of Array.from(S.grid.rendered)) {
+            const at = index.get(entry[0]);
+            if (at === undefined) {
+                if (entry[1].parentNode) { entry[1].parentNode.removeChild(entry[1]); }
+                S.grid.rendered.delete(entry[0]);
+                continue;
+            }
+            refreshTile(entry[1], itemAt(at));
         }
-        let cursor = grid.firstElementChild;
-        for (const item of items) {
-            const tile = next.get(item.id);
-            if (cursor === tile) { cursor = tile.nextElementSibling; continue; }
-            grid.insertBefore(tile, cursor);
+        grid.dataset.count = String(rows.length);
+        grid.classList.toggle("minipaint-clip-empty", !rows.length);
+        emptyNotice(grid, rows.length ? "" : S.grid.view ? "archive-empty" : String(answer.reason || "empty"));
+        if (opts.top) {
+            grid.scrollTop = 0;
+            S.grid.scrollTop = 0;
         }
-        // Anything the grid still holds that this page does not name: a tile
-        // from a render the server made before the browser took over.
-        while (cursor) {
-            const following = cursor.nextElementSibling;
-            if (!next.has(cursor.dataset ? cursor.dataset.asset : "")) { grid.removeChild(cursor); }
-            cursor = following;
-        }
-        S.library.tiles = next;
-        S.library.ids = items.map(function (item) { return item.id; });
-        S.library.revision = String(answer.revision || "");
-        S.library.sort = String(answer.sort || S.library.sort);
-        S.library.page = Number(answer.page || 0);
-        S.library.pages = Math.max(1, Number(answer.pages || 1));
-        S.library.total = Number(answer.total || 0);
-        S.library.size = Number(answer.size || S.library.size);
-        S.library.configured = answer.configured !== false;
-        S.library.selectedPage = Number(answer.selected_page);
-        S.library.wanted = S.library.page;
-        grid.dataset.count = String(items.length);
-        grid.classList.toggle("minipaint-clip-empty", !items.length);
-        emptyNotice(grid, items.length ? "" : String(answer.reason || "empty"));
-        drawPager();
-        // The selection is the browser's and does not belong to a page: it
-        // survives paging because the send path names a picture by id, and it
-        // gives way to truth only when the library says the picture is not in
-        // it at all. That rule, the size and the badges are all one step.
+        layoutGrid();
+        renderGrid();
+        drawViewName();
+        pumpThumbs(true);
+        // The selection is the browser's and does not belong to the rows on
+        // screen: it survives a re-draw wherever its picture is in the
+        // listing, and gives way to truth only when the listing says the
+        // picture is not in the folder at all. That rule, the size and the
+        // badges are all one step.
         afterRender();
     }
 
@@ -2306,200 +2331,75 @@ window.minipaintClipboard = (function () {
         if (!existing) { grid.appendChild(note); }
     }
 
-    /**
-     * One row under the grid: Back, the page, Next, and the whole count.
-     *
-     * The ends are DISABLED rather than hidden, so the row does not change
-     * width as you move through it; the number box is committed on Enter or
-     * blur and clamped rather than refused; the count is the whole library,
-     * because that is the number a person wants and it is free to say. The
-     * row is hidden entirely when there is one page.
-     */
-    function drawPager() {
-        const pager = pagerElement();
-        if (!pager) { return; }
-        const many = S.library.pages > 1;
-        pager.hidden = !many && S.library.total <= S.library.size;
-        // Hidden, not emptied. The controls are built once and then only
-        // updated, so throwing them away here would leave the row built but
-        // blank the next time a library grew past one page - a pager with no
-        // buttons in it, which is worse than no pager at all.
-        if (pager.hidden) { return; }
-        if (!pager.dataset.built) {
-            pager.dataset.built = "1";
-            pager.innerHTML = "";
-            const back = document.createElement("button");
-            back.type = "button";
-            back.className = "minipaint-clip-pager-back";
-            back.textContent = "‹ Back";
-            back.addEventListener("click", function () { stepPage(-1); });
-            const label = document.createElement("span");
-            label.className = "minipaint-clip-pager-label";
-            const lead = document.createElement("span");
-            lead.textContent = "Page ";
-            const box = document.createElement("input");
-            box.type = "number";
-            box.className = "minipaint-clip-pager-number";
-            box.min = "1";
-            box.setAttribute("aria-label", "Page number");
-            const commit = function () { goToPage(Number(box.value) - 1); };
-            box.addEventListener("change", commit);
-            box.addEventListener("blur", commit);
-            box.addEventListener("keydown", function (event) {
-                if (event.key === "Enter") { event.preventDefault(); commit(); }
-            });
-            const of = document.createElement("span");
-            of.className = "minipaint-clip-pager-of";
-            label.appendChild(lead);
-            label.appendChild(box);
-            label.appendChild(of);
-            const next = document.createElement("button");
-            next.type = "button";
-            next.className = "minipaint-clip-pager-next";
-            next.textContent = "Next ›";
-            next.addEventListener("click", function () { stepPage(1); });
-            const count = document.createElement("span");
-            count.className = "minipaint-clip-pager-count";
-            const mark = document.createElement("button");
-            mark.type = "button";
-            mark.className = "minipaint-clip-pager-mark";
-            mark.hidden = true;
-            mark.addEventListener("click", function () { goToPage(S.library.selectedPage); });
-            pager.appendChild(back);
-            pager.appendChild(label);
-            pager.appendChild(next);
-            pager.appendChild(mark);
-            pager.appendChild(count);
-        }
-        const box = pager.querySelector(".minipaint-clip-pager-number");
-        if (box && document.activeElement !== box) { box.value = String(S.library.page + 1); }
-        if (box) { box.max = String(S.library.pages); }
-        const of = pager.querySelector(".minipaint-clip-pager-of");
-        if (of) { of.textContent = " of " + S.library.pages; }
-        const back = pager.querySelector(".minipaint-clip-pager-back");
-        if (back) { back.disabled = S.library.page <= 0; }
-        const next = pager.querySelector(".minipaint-clip-pager-next");
-        if (next) { next.disabled = S.library.page >= S.library.pages - 1; }
-        const count = pager.querySelector(".minipaint-clip-pager-count");
-        if (count) {
-            count.textContent = S.library.total + " picture" + (S.library.total === 1 ? "" : "s");
-        }
-        // Where the selection is, when it is not here. The selected id is
-        // browser state and does not belong to a page; this is the one thing
-        // the pager owes a user who has paged away from it.
-        const mark = pager.querySelector(".minipaint-clip-pager-mark");
-        if (mark) {
-            const elsewhere = S.selected && S.library.selectedPage >= 0 && S.library.selectedPage !== S.library.page;
-            mark.hidden = !elsewhere;
-            if (elsewhere) { mark.textContent = "selection on page " + (S.library.selectedPage + 1); }
-        }
-    }
-
-    /**
-     * Move by a page, from the page that was ASKED FOR rather than the one on
-     * screen.
-     *
-     * Two presses of Next in quick succession are two pages, not one: the
-     * second arrives before the first answer has landed, and computing from
-     * what is drawn would make it a no-op. The pager is a control, and a
-     * control that ignores a press because the network was slow is a control
-     * people press twice more.
-     */
-    function stepPage(delta) {
-        const base = S.library.wanted === undefined ? S.library.page : S.library.wanted;
-        goToPage(base + delta);
-    }
-
-    function goToPage(number) {
-        const wanted = Math.max(0, Math.min(S.library.pages - 1, Number(number) || 0));
-        if (wanted === S.library.page && wanted === S.library.wanted) { drawPager(); return; }
-        S.library.wanted = wanted;
-        fetchLibrary({ page: wanted });
-    }
-
     /** Busy is a state of the grid, not a reason to empty it. */
     function setBusy(on) {
         const grid = gridElement();
         if (grid) { grid.setAttribute("aria-busy", on ? "true" : "false"); }
-        S.library.busy = !!on;
+        S.grid.busy = !!on;
     }
 
     /**
-     * Ask the server for one page of the index, and draw what it answers.
+     * Ask for the whole listing of the folder on screen, and draw what it
+     * answers: the storage folder from the index route, an archive from its
+     * own. The newest ask wins.
      *
      * Nothing on screen moves until the answer arrives. That is the whole of
      * "sorting is separate from drawing": a sort that cannot be fetched
      * leaves the grid exactly as it was AND SAYS SO, where a failed round
      * trip used to leave it stale with nothing to indicate the sort did not
-     * take.
+     * take. Every ask has a deadline (LISTING_TIMEOUT_MS), as every request
+     * here has: one that never answers is a grid that keeps its tiles and a
+     * line saying Forge is not answering, never a request held open.
      */
-    function fetchLibrary(options) {
+    function fetchListing(options) {
         const opts = options || {};
-        // The storage folder is not on screen; it is read again on the way
-        // back to it (leaveArchive).
-        if (archiveActive()) { return Promise.resolve(null); }
-        const page = opts.page === undefined ? S.library.page : Number(opts.page);
-        const sort = opts.sort === undefined ? S.library.sort : String(opts.sort || "");
-        // The page size is one constant and the route takes it, so it stays
-        // a decision rather than becoming a migration. The answer says what
-        // the server clamped it to, and that is what the pager counts in.
-        if (opts.size !== undefined) { S.library.size = Number(opts.size) || S.library.size; }
-        const url = LIBRARY_ROUTE + "?page=" + encodeURIComponent(page)
-            + "&size=" + encodeURIComponent(S.library.size)
-            + (sort ? "&sort=" + encodeURIComponent(sort) : "")
-            + (opts.refresh ? "&refresh=1" : "")
-            + (S.selected ? "&selected=" + encodeURIComponent(S.selected) : "");
+        const view = S.grid.view;
+        const sort = String(opts.sort || S.grid.sort || menuState().sort || "");
+        // Only the newest answer draws. Two asks in flight at once can come
+        // back in either order, and the order the user last asked for is the
+        // order they get - never whichever request the network finished.
+        const ticket = ++S.grid.ticket;
         setBusy(true);
-        // Only the newest answer draws. Two presses in flight at once can
-        // come back in either order, and the page the user last asked for is
-        // the page they get - never whichever request the network finished.
-        const ticket = ++S.library.ticket;
-        const request = fetch(url, { credentials: "same-origin", cache: "no-store" })
-            .then(function (response) {
-                if (!response.ok) { throw new Error("HTTP " + response.status); }
-                return response.json();
-            })
-            .then(function (answer) {
-                if (!answer || answer.ok !== true) { throw new Error((answer && answer.message) || "the library could not be read"); }
-                serverSilent(false);
-                if (ticket !== S.library.ticket) { return answer; }
-                setBusy(false);
-                S.library.inflight = null;
-                drawLibrary(answer);
-                if (!opts.quiet) { setStatus(answer.status || ""); }
-                // The revision moved between asking and drawing: draw, then
-                // re-ask once. Nine kilobytes, and the answer is
-                // authoritative - which is cheaper than being wrong.
-                if (S.library.pending) {
-                    S.library.pending = false;
-                    setTimeout(function () { fetchLibrary({ quiet: true }); }, LIBRARY_RETRY_MS);
-                }
-                return answer;
-            }, function (error) {
-                // A superseded request's failure is not news: the page that
-                // replaced it is the one being waited on, and its own
-                // handler will say whether the server answered.
-                if (ticket !== S.library.ticket) { return null; }
-                setBusy(false);
-                S.library.inflight = null;
+        const url = view
+            ? ARCHIVE_LIST_ROUTE + "?id=" + encodeURIComponent(view) + (sort ? "&sort=" + encodeURIComponent(sort) : "")
+            : LIBRARY_ROUTE + "?sort=" + encodeURIComponent(sort) + (opts.refresh ? "&refresh=1" : "");
+        const reading = askJson(url, null, LISTING_TIMEOUT_MS, view ? "archive listing" : "library").then(function (answer) {
+            if (S.grid.reading === reading) { S.grid.reading = null; }
+            // A superseded ask's answer is not news: the one that replaced
+            // it is the one being waited on, and its own answer will say
+            // whether the server answered.
+            if (ticket !== S.grid.ticket || view !== S.grid.view) { return answer; }
+            setBusy(false);
+            if (!answer || answer.ok !== true) {
                 // Whatever asked for a re-read while this was in flight is
                 // answered by the retry the notice arms, not by a flag held
-                // over a fetch that never landed.
-                S.library.pending = false;
+                // over a read that never landed.
+                S.grid.pending = false;
                 // The tiles it has are kept: they were right when they were
                 // drawn and nothing has said otherwise.
-                note("library: could not be re-read (" + ((error && error.message) || error) + ")");
-                setStatus("The library could not be re-read. Trying again.");
-                serverSilent(true, "the library");
+                setStatus((answer && answer.message) || (view ? "The archive could not be read. Press Refresh to try again."
+                                                               : "The library could not be re-read. Trying again."));
+                drawViewName();
                 return null;
-            });
-        S.library.inflight = request;
-        return request;
+            }
+            drawListing(answer, opts);
+            if (!opts.quiet) { setStatus(answer.status || ""); }
+            // The library moved between asking and drawing: draw, then re-ask
+            // once. The answer is authoritative - which is cheaper than being
+            // wrong.
+            if (S.grid.pending) {
+                S.grid.pending = false;
+                setTimeout(function () { fetchListing({ quiet: true }); }, LIBRARY_RETRY_MS);
+            }
+            return answer;
+        });
+        S.grid.reading = reading;
+        return reading;
     }
 
     /**
-     * Something on this page changed the library: re-ask for the page being
-     * shown and patch from it.
+     * Something on this page changed the library: re-ask for the listing
+     * and patch from it.
      *
      * THE GRID IS READ, NOT TOLD. It used to patch itself from events the
      * server pushed down a connection held open for the life of the page;
@@ -2509,13 +2409,15 @@ window.minipaintClipboard = (function () {
      * pressed. A picture another page or a finished WanGP job put in the
      * library shows up at the next of those - which is when anybody looks.
      *
-     * A new picture does not move you. An import while you are on page 3
-     * updates the count and the page total; the page you are on is the page
-     * you keep.
+     * A new picture does not move you. An import while you are a thousand
+     * rows down updates the count and the rows; the place you are at is the
+     * place you keep. An archive on screen is not written to, and the
+     * storage folder is read again on the way back to it (showFolder).
      */
     function libraryChanged() {
-        if (S.library.inflight) { S.library.pending = true; return; }
-        fetchLibrary({ quiet: true });
+        if (archiveActive()) { return; }
+        if (S.grid.reading) { S.grid.pending = true; return; }
+        fetchListing({ quiet: true });
     }
 
     /** The toolbar's Refresh: the grid, the composer's cards and the
@@ -2527,23 +2429,20 @@ window.minipaintClipboard = (function () {
         askQueue(null);
     }
 
-    /** The grid read again: the storage folder, or the archive on screen. */
+    /** The grid read again: the storage folder, with its folder re-read, or
+     *  the archive on screen. */
     function refreshGrid() {
-        if (archiveActive()) { return fetchArchive({}); }
-        return fetchLibrary({ refresh: true });
+        return fetchListing(archiveActive() ? {} : { refresh: true });
     }
 
     /** The sort, over HTTP: remembered first, then drawn when it arrives. */
     function setSort(mode) {
         const wanted = String(mode || "");
-        if (!wanted || wanted === S.library.sort) { return Promise.resolve(false); }
+        if (!wanted || wanted === S.grid.sort) { return Promise.resolve(false); }
         setBusy(true);
         return postSettings({ sort: wanted }).then(function (answer) {
-            S.library.sort = (answer && answer.sort) || wanted;
-            if (archiveActive()) { return fetchArchive({ sort: S.library.sort }); }
-            // Page 0 of the new sort. Not the page you were on: a position
-            // in one order means nothing in another.
-            return fetchLibrary({ sort: (answer && answer.sort) || wanted, page: 0 });
+            S.grid.sort = (answer && answer.sort) || wanted;
+            return fetchListing({ sort: S.grid.sort, top: true });
         }, function () {
             setBusy(false);
             setStatus("The sort could not be changed; the grid is as it was.");
@@ -2593,17 +2492,6 @@ window.minipaintClipboard = (function () {
         statusTarget(host).innerHTML = String(text);
     }
 
-    /** PageUp / PageDown move a page while the grid has focus. A listbox is
-     * expected to do this, and this grid says it is one. */
-    function onLibraryKey(event) {
-        if (event.key !== "PageUp" && event.key !== "PageDown") { return; }
-        const grid = gridElement();
-        if (!grid || !grid.contains(event.target)) { return; }
-        if (S.library.pages <= 1) { return; }
-        event.preventDefault();
-        stepPage(event.key === "PageDown" ? 1 : -1);
-    }
-
     /* ------------------------------------------------------------------ */
     /* The system prompt editor, full window                                 */
     /* ------------------------------------------------------------------ */
@@ -2644,26 +2532,52 @@ window.minipaintClipboard = (function () {
      * also pinned and also crosses the top edge, and treating one as a header
      * would leave the panel nowhere to be.
      */
+    //: How far below the window's top edge a header may START and still be the
+    //: header. "At the top edge" was the first rule, and it found Lobe's bar,
+    //: which is fixed at 0 - and missed the Model Chain theme's, which is
+    //: sticky inside the page's own 8 px of padding and so starts 8 px down
+    //: until the page is scrolled: View Outputs opened over the window's top,
+    //: under that bar (it is drawn at a higher layer), with the bar covering
+    //: the top of the player. Asked for: "the view outputs gallery is
+    //: rendering behind the tab bar when its on ... make sure the gallery
+    //: respects the tab bar". A page's padding is a few pixels, a header is
+    //: tens, so the band is generous without reaching anything else.
+    const HEADER_SLACK_PX = 32;
+    //: Where in that band the window is asked what is there, from the edge
+    //: down: a bar that starts anywhere in it covers at least one of these.
+    const HEADER_PROBES_Y = [1, 8, 16, 24, 32];
+
     function headerInset() {
         if (typeof document.elementsFromPoint !== "function") { return 0; }
-        let found;
-        try {
-            found = document.elementsFromPoint(Math.round(window.innerWidth / 2), 1) || [];
-        } catch (e) { return 0; }
         const limit = Math.round(window.innerHeight / 3);
+        const x = Math.round(window.innerWidth / 2);
+        const seen = new Set();
         let bottom = 0;
-        for (let i = 0; i < found.length; i += 1) {
-            const node = found[i];
-            if (!node || node === document.body || node === document.documentElement) { continue; }
-            // A panel of ours is pinned to the top as well. Measuring one of
-            // those would push the next one that opened further down, and the
-            // one after that further still.
-            if (node.closest && (node.closest("." + EDITOR_OPEN_CLASS) || node.closest("." + PROMPTS_CLASS))) { continue; }
-            let style;
-            try { style = window.getComputedStyle(node); } catch (e) { continue; }
-            if (!style || (style.position !== "fixed" && style.position !== "sticky")) { continue; }
-            const box = node.getBoundingClientRect();
-            if (box.top <= 1 && box.bottom > bottom && box.bottom <= limit) { bottom = box.bottom; }
+        for (let p = 0; p < HEADER_PROBES_Y.length; p += 1) {
+            let found;
+            try {
+                found = document.elementsFromPoint(x, HEADER_PROBES_Y[p]) || [];
+            } catch (e) { return 0; }
+            for (let i = 0; i < found.length; i += 1) {
+                const node = found[i];
+                if (!node || seen.has(node) || node === document.body || node === document.documentElement) { continue; }
+                seen.add(node);
+                // A panel of ours is pinned to the top as well. Measuring one
+                // of those would push the next one that opened further down,
+                // and the one after that further still.
+                if (node.closest && (node.closest("." + EDITOR_OPEN_CLASS) || node.closest("." + PROMPTS_CLASS))) { continue; }
+                let style;
+                try { style = window.getComputedStyle(node); } catch (e) { continue; }
+                if (!style || (style.position !== "fixed" && style.position !== "sticky")) { continue; }
+                const box = node.getBoundingClientRect();
+                // A pinned thing that starts within the band and ends within a
+                // third of the window. Not one that ends further down: a
+                // full-height pinned sidebar, or a workspace laid over the
+                // whole window (the Forge Assistant's focus mode does that),
+                // also crosses the band, and taking one of those for a header
+                // would leave the panel nowhere to be.
+                if (box.top <= HEADER_SLACK_PX && box.bottom > bottom && box.bottom <= limit) { bottom = box.bottom; }
+            }
         }
         return Math.max(0, Math.round(bottom));
     }
@@ -2676,14 +2590,53 @@ window.minipaintClipboard = (function () {
         } catch (e) { /* a page that will not take a custom property still opens */ }
     }
 
-    /** Re-measure while a panel is open: a header's height is a function of
-     *  the window's width on every theme that wraps its tabs. */
+    function headerPanelOpen() { return outputsOpen() || editorOpen() || promptHistoryOpen(); }
+
+    /** Measure again, once a frame at most, while a panel is open. */
+    function scheduleHeaderInset() {
+        if (S.headerFrame || !headerPanelOpen()) { return; }
+        S.headerFrame = window.requestAnimationFrame(function () {
+            S.headerFrame = 0;
+            if (headerPanelOpen()) { applyHeaderInset(); }
+        });
+    }
+
+    /**
+     * Re-measure while a panel is open, whenever the header can have moved.
+     *
+     * A resize: a header's height is a function of the window's width on
+     * every theme that wraps its tabs. A scroll: a sticky header rests in the
+     * page's padding and climbs to the edge as the page scrolls - measured at
+     * rest, the panel would leave a strip open under it once stuck. Heard in
+     * the capture phase because a scroll does not bubble and the page that
+     * scrolls is not always the document (the Forge Assistant's focus mode
+     * scrolls the workspace itself). And a change of the page's own state on
+     * its root or body - focus mode coming on, the tab bar it keeps along the
+     * top being shown or hidden - which says so in attributes there, whoever
+     * drew it. All three do nothing while no panel is open.
+     */
     function watchHeaderInset() {
         if (S.headerWatch) { return; }
-        S.headerWatch = function () {
-            if (outputsOpen() || editorOpen() || promptHistoryOpen()) { applyHeaderInset(); }
-        };
+        S.headerWatch = scheduleHeaderInset;
         window.addEventListener("resize", S.headerWatch);
+        window.addEventListener("scroll", S.headerWatch, { capture: true, passive: true });
+        if (typeof MutationObserver === "function") {
+            try {
+                // The root's own style is where the inset is written, so a
+                // change to it is this code's and not the page's: answering
+                // it would measure for ever.
+                S.headerObserver = new MutationObserver(function (records) {
+                    for (let i = 0; i < records.length; i += 1) {
+                        const record = records[i];
+                        if (record.target === document.documentElement && record.attributeName === "style") { continue; }
+                        scheduleHeaderInset();
+                        return;
+                    }
+                });
+                if (document.body) { S.headerObserver.observe(document.body, { attributes: true }); }
+                S.headerObserver.observe(document.documentElement, { attributes: true });
+            } catch (e) { /* the resize and the scroll still re-measure */ }
+        }
     }
 
     function editorPanel() { return byId(ENHANCE_PANEL_ID); }
@@ -2751,6 +2704,9 @@ window.minipaintClipboard = (function () {
 
     const OUTPUTS_PANEL_ID = "minipaint_clipboard_outputs_panel";
     const OUTPUTS_ROUTE = "/minipaint-clipboard/outputs";
+    //: One output's own address, by its opaque id; ``/settings`` after it is
+    //: the note Send to WanGP asks for (routes.OUTPUT_SETTINGS_ROUTE).
+    const OUTPUTS_FILE_PREFIX = "/minipaint-clipboard/output/";
 
     function outputsPanel() { return byId(OUTPUTS_PANEL_ID); }
 
@@ -2841,6 +2797,8 @@ window.minipaintClipboard = (function () {
         sound: "M3 9v6h4l5 5V4L7 9zM16.5 12A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4zM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6z",
         muted: "M3 9v6h4l5 5V4L7 9zM16 9.4l1.4-1.4L19.5 10l2.1-2.1L23 9.4 20.9 11.5 23 13.6l-1.4 1.4-2.1-2.1-2.1 2.1L16 13.6l2.1-2.1z",
         full: "M5 5h5v2H7v3H5zM14 5h5v5h-2V7h-3zM5 14h2v3h3v2H5zM17 14h2v5h-5v-2h3z",
+        // Sliders: a video's settings, sent to WanGP to be loaded there.
+        settings: "M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z",
         exit: "M8 5h2v5H5V8h3zM14 5h2v3h3v2h-5zM5 14h5v5H8v-3H5zM14 14h5v2h-3v3h-2z"
     };
 
@@ -3049,7 +3007,7 @@ window.minipaintClipboard = (function () {
     }
 
     /** The control bar for one video. */
-    function buildPlayer(video) {
+    function buildPlayer(video, item) {
         const prefs = playerPrefs();
         video.loop = prefs.loop;
         video.muted = prefs.muted;
@@ -3132,9 +3090,17 @@ window.minipaintClipboard = (function () {
         const canFullscreen = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled
                                  || video.webkitEnterFullscreen);
         full.hidden = !canFullscreen;
-        for (const button of [restart, back, play, forward, loop, sound, speed, full]) { row.appendChild(button); }
+        // Send to WanGP: this video's settings loaded in WanGP, which then
+        // shows them. Only where WanGP's loader reads a video's settings; a
+        // .webm or an .m4v carries none it can load, and offers no button.
+        const send = playerButton("settings", "Send to WanGP: load this video's settings there", function (button) {
+            sendSettings(item, button);
+        });
+        send.classList.add("minipaint-clip-player-send");
+        send.hidden = !settingsReadable(item);
+        for (const button of [restart, back, play, forward, loop, sound, speed, send, full]) { row.appendChild(button); }
         root.appendChild(row);
-        Object.assign(controls, { play: play, loop: loop, sound: sound, speed: speed, full: full });
+        Object.assign(controls, { play: play, loop: loop, sound: sound, speed: speed, full: full, send: send });
 
         video.addEventListener("play", function () { drawPlay(controls); startClock(controls); });
         video.addEventListener("pause", function () { drawPlay(controls); stopClockFor(video); drawTime(controls); });
@@ -3297,12 +3263,20 @@ window.minipaintClipboard = (function () {
      * history record either - says so rather than offering a button that
      * would do nothing.
      */
+    /** A file matched to one of this tab's requests by when it was written,
+     *  rather than named by WanGP. Never a video only the folder knows: it was
+     *  not matched to anything, so there is nothing to call a guess. */
+    function guessedOutput(item) { return !!item && item.source !== "folder" && !item.exact; }
+
     function loadButton(item) {
         const button = el("button", "minipaint-clip-output-load", "Load");
         button.type = "button";
         if (!item.recipe) {
             button.disabled = true;
-            button.title = "No recipe was kept for this output, so there is nothing to load.";
+            button.title = item.source === "folder"
+                ? "Made in WanGP, not requested from this tab, so there is no request to load here. "
+                  + "Send to WanGP, in the player's bar, loads its settings in WanGP."
+                : "No recipe was kept for this output, so there is nothing to load.";
             return button;
         }
         button.title = "Put this output's prompt, as it was typed, and its pictures back in the request, to generate again. Nothing is queued.";
@@ -3311,6 +3285,95 @@ window.minipaintClipboard = (function () {
             loadRecipe(item);
         });
         return button;
+    }
+
+    //: The videos WanGP's settings loader reads (its get_settings_from_file):
+    //: the containers it writes its settings into. A picture has no player.
+    const SETTINGS_VIDEO_SUFFIXES = [".mp4", ".mkv", ".mov"];
+    //: How long the server may take to write the note that names the video.
+    const OUTPUT_SETTINGS_TIMEOUT_MS = 15000;
+    //: What a refused load says, by its code, where the WanGP tab's own
+    //: sentence is about a picture's send (HANDOFF_NOT_FOUND) or is not
+    //: what to do next (IFRAME_NOT_READY). Anything else says the tab's.
+    const SETTINGS_REFUSALS = {
+        IFRAME_NOT_READY: "WanGP's page is not open in this browser yet. Open the WanGP tab once, then send again.",
+        HANDOFF_NOT_FOUND: "the video is no longer where WanGP can read it. Refresh View Outputs and try again.",
+        HANDOFF_INVALID_ID: "WanGP would not read that file."
+    };
+
+    function settingsReadable(item) {
+        const name = String((item && item.name) || "").toLowerCase();
+        return SETTINGS_VIDEO_SUFFIXES.some(function (suffix) { return name.endsWith(suffix); });
+    }
+
+    /**
+     * Send to WanGP: one video's settings loaded in WanGP, and the WanGP tab
+     * opened on them.
+     *
+     * Asked for: "the ability to send a video from this view to wan2gp to
+     * load its settings ... a new send button in the playback controls bar.
+     * Sending should open wan2gp tab to the newly loaded settings!" Two
+     * steps, each bounded. The server writes a note naming the file and
+     * answers with the note's id - this page holds the output's id and
+     * nothing else, so no path is ever in it - and the WanGP tab hands that
+     * id to its page, whose bridge loads the file through WanGP's own loader,
+     * the way WanGP's Load Settings box does: the model, the prompt, every
+     * setting, and a video's source pictures (``minipaintWanGP.loadSettings``,
+     * which saves the form on WanGP's screen first, as WanGP's box does).
+     * Only once WanGP has said it loaded them does the view close and the
+     * WanGP tab open; a refusal stays here and says why. A second press while
+     * one is going is the same press.
+     */
+    function sendSettings(item, button) {
+        if (!item || S.outputs.sending) { return Promise.resolve(false); }
+        const wangp = window.minipaintWanGP;
+        if (!wangp || typeof wangp.loadSettings !== "function") {
+            toast("The WanGP tab is not on this page, so there is nowhere to send the settings.", true);
+            return Promise.resolve(false);
+        }
+        S.outputs.sending = true;
+        if (button) { button.disabled = true; button.setAttribute("aria-busy", "true"); }
+        const controller = typeof AbortController === "function" ? new AbortController() : null;
+        const limit = setTimeout(function () { if (controller) { controller.abort(); } }, OUTPUT_SETTINGS_TIMEOUT_MS);
+        note("outputs: settings of " + String(item.id).slice(0, 8) + " to WanGP");
+        return fetch(OUTPUTS_FILE_PREFIX + encodeURIComponent(item.id) + "/settings", {
+            method: "POST", credentials: "same-origin", cache: "no-store",
+            signal: controller ? controller.signal : undefined
+        }).then(function (response) {
+            return response.json().catch(function () { return { ok: false, message: "HTTP " + response.status }; });
+        }).then(function (answer) {
+            clearTimeout(limit);
+            if (!answer || answer.ok !== true || typeof answer.handoff_id !== "string") {
+                throw new Error((answer && answer.message) || "the server would not name that video");
+            }
+            return wangp.loadSettings(answer.handoff_id);
+        }).then(function (result) {
+            if (!result || result.ok !== true) {
+                const why = (result && SETTINGS_REFUSALS[result.code]) || (result && result.message) || "WanGP did not answer.";
+                toast("Its settings were not sent: " + why, true);
+                note("outputs: settings not loaded (" + ((result && result.code) || "no answer") + ")");
+                return false;
+            }
+            if (!result.loaded) {
+                toast(result.message || "WanGP found no settings it could load in that video.", true);
+                return false;
+            }
+            closeOutputs();
+            if (typeof wangp.switchToWanGP === "function") { wangp.switchToWanGP(); }
+            toast("Loaded its settings in WanGP" + (result.switched
+                ? ", which is switching to " + (result.model_type || "its model") + "." : "."));
+            return true;
+        }).catch(function (error) {
+            clearTimeout(limit);
+            const aborted = error && error.name === "AbortError";
+            toast("Its settings were not sent: " + (aborted ? "the server did not answer in time."
+                : ((error && error.message) || "something went wrong.")), true);
+            note("outputs: settings send failed (" + (aborted ? "timed out" : ((error && error.message) || error)) + ")");
+            return false;
+        }).finally(function () {
+            S.outputs.sending = false;
+            if (button) { button.disabled = false; button.removeAttribute("aria-busy"); }
+        });
     }
 
     function loadRecipe(item) {
@@ -3328,7 +3391,7 @@ window.minipaintClipboard = (function () {
         const tile = el("button", "minipaint-clip-output-tile" + (chosen ? " minipaint-clip-output-chosen" : ""));
         tile.type = "button";
         tile.dataset.output = item.id;
-        tile.title = item.name + (item.exact ? "" : " — matched to a request by when it was written");
+        tile.title = item.name + (guessedOutput(item) ? " — matched to a request by when it was written" : "");
         let media;
         if (item.kind === "video") {
             // The poster is the frame at one second, asked for with a media
@@ -3349,7 +3412,7 @@ window.minipaintClipboard = (function () {
             media.dataset.src = item.url;
         }
         tile.appendChild(media);
-        if (!item.exact) { tile.appendChild(el("span", "minipaint-clip-output-guess", "~")); }
+        if (guessedOutput(item)) { tile.appendChild(el("span", "minipaint-clip-output-guess", "~")); }
         return tile;
     }
 
@@ -3371,7 +3434,7 @@ window.minipaintClipboard = (function () {
             media.playsInline = true;
             media.preload = "auto";
             S.outputs.player = media;
-            controls = buildPlayer(media);
+            controls = buildPlayer(media, item);
             S.outputs.controls = controls;
             // A press on the picture is play and pause, the way every video
             // on a phone works. Only on the picture: the bar has its own.
@@ -3414,7 +3477,7 @@ window.minipaintClipboard = (function () {
                 caption.appendChild(mark);
             }
         }
-        if (!item.exact) {
+        if (guessedOutput(item)) {
             const guess = el("span", "minipaint-clip-output-guess-note",
                              "matched to a request by when it was written");
             caption.appendChild(guess);
@@ -3849,45 +3912,46 @@ window.minipaintClipboard = (function () {
     }
 
     /* ------------------------------------------------------------------ */
-    /* Archives: other folders, shown in place of the storage folder        */
+    /* In view first: the grid's tiles and their thumbnails                 */
     /* ------------------------------------------------------------------ */
     //
-    // An archive is a folder on the Forge host - usually thousands of
-    // pictures in one place - that the grid can show instead of the storage
-    // folder, one at a time, and that nothing writes to (``archives.py``).
-    // It is not paged: the server answers every picture in one listing, read
-    // from the folder's directory entries alone, and the grid draws all of
-    // them - as tiles that are only places until they are looked at.
+    // The grid shows one folder at a time - the storage folder, or an
+    // archive in its place (below) - and both the same way. Neither is
+    // paged: the server answers every picture in one listing, and the grid
+    // draws all of them - as tiles that are only places until they are
+    // looked at. This was an archive's way first; the storage folder was
+    // paged, sixty at a time, until it was asked for: "i prefer the way
+    // archive loads, which is not pages, but only rendering thumbnails in
+    // view and cache". So what is here is one renderer and one loader for
+    // both, told apart by three things only: where a thumbnail is asked for
+    // (thumbUrlOf), what a tile is named by (tileId), and whether a picture
+    // may be renamed and deleted (an archive's may not; see select).
     //
     // WHAT A TILE COSTS. Nothing, until it is on screen: a tile's picture has
     // no address until its turn comes, so ten thousand tiles are ten
     // thousand empty boxes and no request. And only the rows near the view
     // are in the document at all; the rest are a height the scroll bar
-    // knows about. A grid of a whole archive is a few hundred nodes.
+    // knows about. A grid of a whole folder is a few hundred nodes, in
+    // reading order, so a Tab from one tile goes to the next.
     //
     // WHAT LOADS, AND IN WHAT ORDER. What is in view, in reading order, and
     // then what is about to be. A thumbnail is asked for over plain HTTP - no
     // stream, nothing held open - a few at a time, each with a deadline, and
-    // made on the server the first time anybody looks (``Thumbnails``). The
-    // order is decided again whenever the view moves: a request for a tile
-    // that has left the view is dropped while what is now in view waits, so
-    // what you are looking at is always what comes next - scroll a long way
-    // and the pictures you scrolled past are never asked for at all. The
-    // server finishes a thumbnail it started, so a dropped request costs it
-    // nothing it will not use: the next look at that tile is a cache read.
+    // made on the server the first time anybody looks. The order is decided
+    // again whenever the view moves: a request for a tile that has left the
+    // view is dropped while what is now in view waits, so what you are
+    // looking at is always what comes next - scroll a long way and the
+    // pictures you scrolled past are never asked for at all. The server
+    // finishes a thumbnail it started, so a dropped request costs it nothing
+    // it will not use: the next look at that tile is a cache read.
     //
     // WHAT IS KEPT. Each thumbnail's URL carries the file's size and time, so
     // the server answers it as immutable and the browser keeps it; a picture
     // seen once is not asked of the server again until the file changes or
     // the browser's cache is cleared. The page keeps the last few hundred it
-    // drew as object URLs besides, so scrolling back is instant.
+    // drew as object URLs besides, by tile id, so scrolling back - or going
+    // back to the folder from an archive - is instant.
 
-    const ARCHIVES_ROUTE = "/minipaint-clipboard/archives";
-    const ARCHIVE_LIST_ROUTE = "/minipaint-clipboard/archive/list";
-    const ARCHIVE_IMAGE_ROUTE = "/minipaint-clipboard/archive/image/";
-    const ARCHIVE_REF_PREFIX = "ar-";
-    //: One listing of a folder of tens of thousands, on a slow disk.
-    const ARCHIVE_LIST_TIMEOUT_MS = 60000;
     //: One thumbnail: a cache read in milliseconds, a large photograph's
     //: first decode in a second or two. Past this the request is dropped and
     //: tried once more later; a second miss marks the tile.
@@ -3899,38 +3963,502 @@ window.minipaintClipboard = (function () {
     //: Drawn thumbnails kept as object URLs, for scrolling back.
     const THUMB_KEEP = 800;
     //: Rows in the document beyond the view, each way.
-    const ARCHIVE_OVERSCAN_ROWS = 2;
+    const OVERSCAN_ROWS = 2;
     //: How far past the view is asked for once the view itself is done, in
     //: screens.
-    const ARCHIVE_AHEAD_SCREENS = 1;
+    const AHEAD_SCREENS = 1;
     //: New requests wait for the view to settle this long after a scroll -
     //: a fling across a thousand rows starts nothing for the rows it passes -
     //: and are started at least this often during a long slow scroll.
     const PUMP_SETTLE_MS = 80;
     const PUMP_EVERY_MS = 200;
+
+    /* -- what the two folders differ in --------------------------------- */
+
+    /** The id a tile carries for the listing's `key`: an archive picture's
+     *  reference, or the storage folder's asset id, which is its key. */
+    function tileId(key) { return archiveActive() ? archiveRef(key) : String(key); }
+
+    /** The key in the listing on screen that a tile id names, or "". */
+    function keyOf(id) {
+        if (typeof id !== "string" || !id) { return ""; }
+        if (!archiveActive()) { return isArchiveRef(id) ? "" : id; }
+        const prefix = ARCHIVE_REF_PREFIX + S.grid.view + "-";
+        return id.indexOf(prefix) === 0 ? id.slice(prefix.length) : "";
+    }
+
+    /** Whether the folder on screen lists this picture: on screen or not. */
+    function listed(id) {
+        const key = keyOf(id);
+        return !!key && S.grid.index.has(key);
+    }
+
+    /** Where a thumbnail is asked for: the archive's route or the library's. */
+    function thumbUrlOf(key, version) {
+        return archiveActive() ? archiveThumbUrl(archiveRef(key), version) : imageUrl(key, version);
+    }
+
+    /** The listing's row at `index`, as a tile reads it. */
+    function itemAt(index) {
+        const row = S.grid.items[index] || [];
+        const key = String(row[0] || "");
+        return { key: key, id: tileId(key), name: String(row[1] || ""), bytes: Number(row[2] || 0),
+                 v: String(row[3] || ""), w: Number(row[4] || 0), h: Number(row[5] || 0) };
+    }
+
+    /* -- placing tiles ------------------------------------------------- */
+
+    /**
+     * The grid, worked out rather than laid out: as many columns as the
+     * slider counts, sharing the row (applyPerRow), the same row height and
+     * the same gap the grid declares - so every cell is identical, and the
+     * place of tile ten thousand is a multiplication. Every tile drawn is
+     * put where the layout says it belongs, which only writes the ones that
+     * moved: a listing that came back, or a row shared out anew.
+     */
+    function layoutGrid() {
+        const grid = gridElement();
+        const track = gridTrack();
+        if (!grid || !track) { return null; }
+        // Hidden with its tab: nothing to measure, and a layout worked out
+        // from a width of nothing would be one column ten thousand rows high.
+        // The one it had stands until the tab is back (onGridResize).
+        if (!grid.clientWidth) { return S.grid.layout; }
+        const style = getComputedStyle(grid);
+        const gap = parseFloat(style.rowGap) || parseFloat(style.columnGap) || 8;
+        const room = Math.max(1, track.clientWidth || (grid.clientWidth - parseFloat(style.paddingLeft || 0) - parseFloat(style.paddingRight || 0)));
+        // The row the slider counts, shared out the same way (applyPerRow).
+        const columns = Math.max(1, S.perRow || Math.floor((room + gap) / (DEFAULT_THUMB + TILE_FRAME + gap)) || 1);
+        const cellWidth = Math.max(1, (room - (columns - 1) * gap) / columns);
+        const thumb = cellWidth - TILE_FRAME;
+        const cellHeight = thumb + TILE_CAPTION;
+        const rows = Math.ceil(S.grid.items.length / columns);
+        const height = rows ? rows * cellHeight + (rows - 1) * gap : 0;
+        const layout = { columns: columns, rows: rows, cellWidth: cellWidth, cellHeight: cellHeight, gap: gap,
+                         padTop: parseFloat(style.paddingTop || 0), height: height };
+        S.grid.layout = layout;
+        if (track.style.getPropertyValue("height") !== height + "px") { pin(track, { "height": height + "px" }); }
+        for (const entry of S.grid.rendered) {
+            const at = S.grid.index.get(entry[0]);
+            if (at !== undefined) { placeTile(entry[1], at); }
+        }
+        return layout;
+    }
+
+    /** The rows in view, and the ones the document holds around them. */
+    function gridRows() {
+        const grid = gridElement();
+        const layout = S.grid.layout;
+        if (!grid || !layout || !layout.rows) { return null; }
+        const step = layout.cellHeight + layout.gap;
+        const top = Math.max(0, grid.scrollTop - layout.padTop);
+        const bottom = top + Math.max(0, grid.clientHeight);
+        const first = Math.max(0, Math.min(layout.rows - 1, Math.floor(top / step)));
+        const last = Math.min(layout.rows - 1, Math.max(first, Math.floor(Math.max(0, bottom - 1) / step)));
+        return { first: first, last: last, step: step, screenRows: Math.max(1, last - first + 1) };
+    }
+
+    /** Put a tile in its row and column, writing only what moved. */
+    function placeTile(tile, index) {
+        const layout = S.grid.layout;
+        if (!layout) { return; }
+        const row = Math.floor(index / layout.columns);
+        const column = index % layout.columns;
+        // Fractions kept: the row is shared to the pixel, and a column
+        // rounded on its own would leave the row a pixel short or over.
+        const px = function (value) { return (Math.round(value * 100) / 100) + "px"; };
+        const wanted = {
+            "left": px(column * (layout.cellWidth + layout.gap)),
+            "top": px(row * (layout.cellHeight + layout.gap)),
+            "width": px(layout.cellWidth),
+            "height": px(layout.cellHeight)
+        };
+        for (const property in wanted) {
+            if (tile.style.getPropertyValue(property) !== wanted[property]) {
+                tile.style.setProperty(property, wanted[property], "important");
+            }
+        }
+    }
+
+    function buildPlace(index) {
+        const item = itemAt(index);
+        const tile = buildTile(item);
+        tile.dataset.key = item.key;
+        placeTile(tile, index);
+        const on = !!S.selected && S.selected === item.id;
+        tile.classList.toggle("minipaint-clip-selected", on);
+        tile.setAttribute("aria-selected", on ? "true" : "false");
+        paintThumb(tile, item.key);
+        return tile;
+    }
+
+    /**
+     * Put the rows near the view in the document, and only those - in
+     * reading order, so the keyboard walks them as they are seen. A tile
+     * already there is left where it is in the document; only one that is
+     * out of its order is moved, which is what a new sort asks of nearly
+     * all of them and a scroll of none.
+     */
+    function renderGrid() {
+        const track = gridTrack();
+        if (!track) { return; }
+        const rows = gridRows();
+        if (!rows) {
+            for (const tile of S.grid.rendered.values()) { if (tile.parentNode) { tile.parentNode.removeChild(tile); } }
+            S.grid.rendered = new Map();
+            return;
+        }
+        const columns = S.grid.layout.columns;
+        const from = Math.max(0, (rows.first - OVERSCAN_ROWS) * columns);
+        const to = Math.min(S.grid.items.length, (rows.last + 1 + OVERSCAN_ROWS) * columns);
+        for (const entry of Array.from(S.grid.rendered)) {
+            const at = S.grid.index.get(entry[0]);
+            if (at === undefined || at < from || at >= to) {
+                if (entry[1].parentNode) { entry[1].parentNode.removeChild(entry[1]); }
+                S.grid.rendered.delete(entry[0]);
+            }
+        }
+        let cursor = track.firstElementChild;
+        for (let index = from; index < to; index += 1) {
+            const key = String(S.grid.items[index][0]);
+            let tile = S.grid.rendered.get(key);
+            if (!tile) {
+                tile = buildPlace(index);
+                S.grid.rendered.set(key, tile);
+            }
+            if (cursor === tile) { cursor = tile.nextElementSibling; continue; }
+            track.insertBefore(tile, cursor);
+        }
+        // Anything the track still holds that is not one of these: nothing,
+        // unless something other than this file put it there.
+        while (cursor) {
+            const following = cursor.nextElementSibling;
+            if (!S.grid.rendered.has(cursor.dataset ? cursor.dataset.key : "")) { track.removeChild(cursor); }
+            cursor = following;
+        }
+    }
+
+    /* -- where the selection is ---------------------------------------- */
+
+    /** The scroll that puts position `index`'s row in the middle of the
+     *  view, where the list lets it be there. */
+    function centredTop(index) {
+        const grid = gridElement();
+        const layout = S.grid.layout;
+        if (!grid || !layout || !layout.columns) { return 0; }
+        const row = Math.floor(index / layout.columns);
+        const top = layout.padTop + row * (layout.cellHeight + layout.gap);
+        const max = Math.max(0, grid.scrollHeight - grid.clientHeight);
+        return Math.min(max, Math.max(0, Math.round(top - (grid.clientHeight - layout.cellHeight) / 2)));
+    }
+
+    /** Bring the picture at `index` into the middle of the view, and fill
+     *  the view in as after a scroll. */
+    function centreOn(index) {
+        const grid = gridElement();
+        if (!grid || !S.grid.layout) { return false; }
+        grid.scrollTop = centredTop(index);
+        S.grid.scrollTop = grid.scrollTop;
+        renderGrid();
+        pumpThumbs(true);
+        scheduleScrubber();
+        return true;
+    }
+
+    /** Where the selected picture is in the folder on screen - its place in
+     *  the listing, the scroll that centres it, and whether any of its tile
+     *  is in view - or null when nothing listed here is selected. */
+    function selectionPlace() {
+        const grid = gridElement();
+        const layout = S.grid.layout;
+        if (!S.selected || !grid || !layout || !layout.columns) { return null; }
+        const index = S.grid.index.get(keyOf(S.selected));
+        if (index === undefined) { return null; }
+        const top = layout.padTop + Math.floor(index / layout.columns) * (layout.cellHeight + layout.gap);
+        const inView = top + layout.cellHeight > grid.scrollTop && top < grid.scrollTop + grid.clientHeight;
+        return { index: index, target: centredTop(index), inView: inView };
+    }
+
+    /** The scrubber's mark, pressed: the selected picture brought into view
+     *  wherever it is in the folder - the virtual "selection on page N". */
+    function showSelection() {
+        const place = selectionPlace();
+        if (!place) { return false; }
+        note("grid: brought the selection into view from the scrubber's mark");
+        return centreOn(place.index);
+    }
+
+    /* -- the thumbnails, in view first ---------------------------------- */
+
+    function paintThumb(tile, key) {
+        const id = tileId(key);
+        const held = S.grid.thumbs.get(id);
+        const picture = tile.querySelector("img");
+        if (!picture) { return; }
+        if (held && held.url) {
+            // Used again: the newest end of the keep list.
+            S.grid.thumbs.delete(id);
+            S.grid.thumbs.set(id, held);
+            pin(picture, { "display": PICTURE_GEOMETRY.display });
+            tile.classList.remove("minipaint-clip-item-missing");
+            if (picture.getAttribute("src") !== held.url) { picture.src = held.url; }
+        } else if (held && held.state === "failed") {
+            tile.classList.add("minipaint-clip-item-missing");
+            pin(picture, { "display": "none" });
+        }
+    }
+
+    function needsThumb(key) {
+        if (S.grid.inflight.has(key)) { return false; }
+        const held = S.grid.thumbs.get(tileId(key));
+        return !held || (!held.url && held.state !== "failed");
+    }
+
+    /**
+     * After a new listing: a thumbnail - or a request for one - of a version
+     * the listing no longer names is let go, because a file that changed is
+     * a new picture; so is one of a picture this folder no longer lists.
+     * Another folder's are left alone, for going back to it.
+     */
+    function forgetStale() {
+        const version = function (key) {
+            const at = S.grid.index.get(key);
+            return at === undefined ? null : String(S.grid.items[at][3] || "");
+        };
+        for (const entry of Array.from(S.grid.inflight)) {
+            if (version(entry[0]) !== entry[1].v) { dropThumb(entry[0], entry[1]); }
+        }
+        for (const entry of Array.from(S.grid.thumbs)) {
+            const key = keyOf(entry[0]);
+            if (!key || version(key) === entry[1].v) { continue; }
+            if (entry[1].url) { try { URL.revokeObjectURL(entry[1].url); } catch (e) { /* gone already */ } }
+            S.grid.thumbs.delete(entry[0]);
+        }
+    }
+
+    /**
+     * What to ask for, in order: the tiles in view in reading order, then
+     * the rows below the view, then the rows above it, nearest first.
+     */
+    function wantedThumbs() {
+        const rows = gridRows();
+        const visible = [];
+        const ahead = [];
+        if (!rows || !tabVisible()) { return { visible: visible, ahead: ahead }; }
+        const columns = S.grid.layout.columns;
+        const count = S.grid.items.length;
+        const take = function (row, into) {
+            for (let index = row * columns; index < Math.min(count, (row + 1) * columns); index += 1) {
+                into.push(String(S.grid.items[index][0]));
+            }
+        };
+        for (let row = rows.first; row <= rows.last; row += 1) { take(row, visible); }
+        const reach = Math.ceil(rows.screenRows * AHEAD_SCREENS);
+        for (let step = 1; step <= reach; step += 1) {
+            if (rows.last + step < S.grid.layout.rows) { take(rows.last + step, ahead); }
+            if (rows.first - step >= 0) { take(rows.first - step, ahead); }
+        }
+        return { visible: visible, ahead: ahead };
+    }
+
+    /**
+     * Decide again what is asked for, and ask.
+     *
+     * Every request for a tile outside the view and what is just past it is
+     * dropped; so is every request for a tile outside the view while a tile
+     * IN it is still waiting - what you are looking at goes first, always.
+     * New requests start only once the view has settled (``PUMP_SETTLE_MS``)
+     * or every ``PUMP_EVERY_MS`` while it keeps moving, so a fling across the
+     * folder asks for nothing on its way.
+     */
+    function pumpThumbs(now) {
+        S.grid.pumpTimer = 0;
+        const want = wantedThumbs();
+        const visible = new Set(want.visible);
+        const keep = new Set(want.visible.concat(want.ahead));
+        const waiting = want.visible.some(needsThumb);
+        for (const entry of Array.from(S.grid.inflight)) {
+            if (!keep.has(entry[0]) || (waiting && !visible.has(entry[0]))) { dropThumb(entry[0], entry[1]); }
+        }
+        // Held on the scrubber and moving: nothing new is asked for until it
+        // rests (armScrubPause) or is let go (endScrub), and then only for
+        // where it stopped.
+        if (S.scrub && !S.scrub.paused) { return; }
+        const moment = Date.now();
+        const settled = now || moment - S.grid.scrolledAt >= PUMP_SETTLE_MS || moment - S.grid.startedAt >= PUMP_EVERY_MS;
+        if (!settled) {
+            const wait = Math.max(0, Math.min(PUMP_SETTLE_MS - (moment - S.grid.scrolledAt),
+                                              PUMP_EVERY_MS - (moment - S.grid.startedAt)));
+            schedulePump(wait + 1);
+            return;
+        }
+        const order = want.visible.concat(want.ahead).filter(needsThumb);
+        while (S.grid.inflight.size < THUMB_CONCURRENCY && order.length) {
+            startThumb(order.shift());
+        }
+    }
+
+    function schedulePump(delay) {
+        if (S.grid.pumpTimer) { return; }
+        S.grid.pumpTimer = setTimeout(function () { pumpThumbs(false); }, Math.max(0, delay || 0));
+    }
+
+    function startThumb(key) {
+        const index = S.grid.index.get(key);
+        if (index === undefined) { return; }
+        const version = String(S.grid.items[index][3] || "");
+        const id = tileId(key);
+        let controller = null;
+        try { controller = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { controller = null; }
+        const job = { controller: controller, timedOut: false, dropped: false, timer: 0, view: S.grid.view, v: version };
+        job.timer = setTimeout(function () {
+            job.timedOut = true;
+            if (controller) { try { controller.abort(); } catch (e) { /* settled */ } }
+        }, THUMB_TIMEOUT_MS);
+        S.grid.inflight.set(key, job);
+        S.grid.startedAt = Date.now();
+        S.grid.stats.started += 1;
+        S.grid.stats.order.push(key);
+        if (S.grid.stats.order.length > 400) { S.grid.stats.order.splice(0, 200); }
+        const options = { credentials: "same-origin" };
+        if (controller) { options.signal = controller.signal; }
+        // What is still this folder's, at this version, when the answer comes.
+        const current = function () {
+            const at = S.grid.index.get(key);
+            return job.view === S.grid.view && at !== undefined && String(S.grid.items[at][3] || "") === job.v;
+        };
+        fetch(thumbUrlOf(key, version), options).then(function (response) {
+            if (!response.ok) {
+                const error = new Error("HTTP " + response.status);
+                error.status = response.status;
+                throw error;
+            }
+            return response.blob();
+        }).then(function (blob) {
+            if (!current()) { return; }
+            const was = S.grid.thumbs.get(id);
+            if (was && was.url) { try { URL.revokeObjectURL(was.url); } catch (e) { /* gone already */ } }
+            S.grid.thumbs.set(id, { url: URL.createObjectURL(blob), state: "done", tries: 0, v: job.v });
+            S.grid.stats.done += 1;
+            keepThumbs();
+            const tile = S.grid.rendered.get(key);
+            if (tile) { paintThumb(tile, key); }
+        }).catch(function (error) {
+            if (job.dropped || !current()) { return; }
+            let held = S.grid.thumbs.get(id);
+            if (!held || held.v !== job.v) { held = { url: "", state: "idle", tries: 0, v: job.v }; }
+            held.tries = (held.tries || 0) + 1;
+            const status = error && error.status;
+            // A picture the server says is not there, or not a picture, will
+            // not be one on the next try either. A deadline missed, or the
+            // server's own trouble, is tried once more.
+            const final = (status >= 400 && status < 500) || held.tries >= THUMB_TRIES;
+            held.state = final ? "failed" : "idle";
+            S.grid.thumbs.set(id, held);
+            if (final) {
+                S.grid.stats.failed += 1;
+                const tile = S.grid.rendered.get(key);
+                if (tile) { paintThumb(tile, key); }
+            }
+            if (job.timedOut) {
+                note((job.view ? "archive" : "library") + ": a thumbnail took longer than " + (THUMB_TIMEOUT_MS / 1000) + "s"
+                     + (final ? "; its tile is marked" : "; it will be asked for again"));
+            }
+        }).then(function () {
+            clearTimeout(job.timer);
+            if (S.grid.inflight.get(key) === job) { S.grid.inflight.delete(key); }
+            // A request this page dropped is not a free slot to fill at once:
+            // it was dropped because the view moved, and the view's own pump
+            // decides what comes next - otherwise a fling would start and
+            // drop three requests a frame all the way down.
+            if (!job.dropped && job.view === S.grid.view) { pumpThumbs(true); }
+        });
+    }
+
+    /** A request for a tile that is no longer wanted first. */
+    function dropThumb(key, job) {
+        job.dropped = true;
+        clearTimeout(job.timer);
+        if (job.controller) { try { job.controller.abort(); } catch (e) { /* settled */ } }
+        if (S.grid.inflight.get(key) === job) { S.grid.inflight.delete(key); }
+        S.grid.stats.dropped += 1;
+    }
+
+    /** Only so many object URLs: the oldest not on screen go first. */
+    function keepThumbs() {
+        if (S.grid.thumbs.size <= THUMB_KEEP) { return; }
+        const shown = new Set();
+        for (const tile of S.grid.rendered.values()) { shown.add(tile.dataset.asset); }
+        for (const entry of Array.from(S.grid.thumbs)) {
+            if (S.grid.thumbs.size <= THUMB_KEEP) { break; }
+            if (shown.has(entry[0]) || !entry[1].url) { continue; }
+            try { URL.revokeObjectURL(entry[1].url); } catch (e) { /* gone already */ }
+            S.grid.thumbs.delete(entry[0]);
+        }
+    }
+
+    /** Every request dropped: another folder. What was drawn is kept, by
+     *  tile id, for going back to it. */
+    function stopThumbs() {
+        for (const entry of Array.from(S.grid.inflight)) { dropThumb(entry[0], entry[1]); }
+        if (S.grid.pumpTimer) { clearTimeout(S.grid.pumpTimer); S.grid.pumpTimer = 0; }
+    }
+
+    /** The grid moved: the rows are drawn at once, the asking re-decided, and
+     *  the scrubber follows. */
+    function onGridScroll() {
+        scheduleScrubber();
+        S.grid.scrolledAt = Date.now();
+        // Where the reader is, kept while the grid is on screen: a hidden
+        // tab's grid has no layout, and coming back to it is coming back to
+        // the top - of five thousand pictures, after a send to PNG Info.
+        const grid = gridElement();
+        if (grid && grid.clientHeight > 0) { S.grid.scrollTop = grid.scrollTop; }
+        if (S.grid.frame) { return; }
+        S.grid.frame = window.requestAnimationFrame(function () {
+            S.grid.frame = 0;
+            renderGrid();
+            pumpThumbs(false);
+        });
+    }
+
+    /** A new size or a new share of the row: everything placed again. */
+    function onGridResize() {
+        const grid = gridElement();
+        // Hidden with its tab: nothing to measure. See layoutGrid.
+        if (!grid || !grid.clientWidth || !grid.clientHeight) { return; }
+        layoutGrid();
+        if (S.grid.scrollTop && Math.abs(grid.scrollTop - S.grid.scrollTop) > 1) {
+            grid.scrollTop = S.grid.scrollTop;
+        }
+        renderGrid();
+        pumpThumbs(true);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Archives: other folders, shown in place of the storage folder        */
+    /* ------------------------------------------------------------------ */
+    //
+    // An archive is a folder on the Forge host - usually thousands of
+    // pictures in one place - that the grid can show instead of the storage
+    // folder, one at a time, and that nothing writes to (``archives.py``).
+    // Its listing is read from the folder's directory entries alone, and the
+    // grid draws it as it draws the storage folder (see "In view first"):
+    // what is particular to an archive is its reference for a picture, its
+    // own routes, and that nothing in it may be renamed or deleted.
+
+    const ARCHIVES_ROUTE = "/minipaint-clipboard/archives";
+    const ARCHIVE_LIST_ROUTE = "/minipaint-clipboard/archive/list";
+    const ARCHIVE_IMAGE_ROUTE = "/minipaint-clipboard/archive/image/";
+    const ARCHIVE_REF_PREFIX = "ar-";
     const ARCHIVES_TIMEOUT_MS = 20000;
     const ARCHIVES_CLASS = "minipaint-clip-archives";
     const ARCHIVES_TITLE_ID = "minipaint_clipboard_archives_title";
     const ARCHIVES_OVERLAY = "clipboard-archives";
 
-    //: The archive's tile: absolutely placed in its row and column, which
-    //: the script works out; everything else is the library tile's.
-    const ARCHIVE_TRACK_GEOMETRY = {
-        "display": "block",
-        "position": "relative",
-        "box-sizing": "border-box",
-        "width": "100%",
-        "min-width": "0",
-        "max-width": "100%",
-        "margin": "0",
-        "padding": "0",
-        "border-width": "0",
-        "overflow": "visible"
-    };
-
     function isArchiveRef(id) { return typeof id === "string" && id.indexOf(ARCHIVE_REF_PREFIX) === 0; }
 
-    function archiveActive() { return !!S.archive.view; }
+    function archiveActive() { return !!S.grid.view; }
 
     function archiveThumbUrl(ref, version) {
         return ARCHIVE_IMAGE_ROUTE + encodeURIComponent(ref) + "?thumb=1"
@@ -3941,7 +4469,7 @@ window.minipaintClipboard = (function () {
         return ARCHIVE_IMAGE_ROUTE + encodeURIComponent(ref) + (version ? "?v=" + encodeURIComponent(version) : "");
     }
 
-    function archiveRef(key) { return ARCHIVE_REF_PREFIX + S.archive.view + "-" + key; }
+    function archiveRef(key) { return ARCHIVE_REF_PREFIX + S.grid.view + "-" + key; }
 
     /** One bounded JSON request: an answer, or null with the reason noted. */
     function askJson(url, body, timeoutMs, what) {
@@ -4008,7 +4536,7 @@ window.minipaintClipboard = (function () {
      */
     function drawViewName() {
         const list = archiveList();
-        const name = archiveActive() ? (archiveName(S.archive.view) || "Archive") : "Storage folder";
+        const name = archiveActive() ? (archiveName(S.grid.view) || "Archive") : "Storage folder";
         const button = byId(MENU_ID);
         if (button) {
             const shown = list.length > 0 || archiveActive();
@@ -4052,474 +4580,47 @@ window.minipaintClipboard = (function () {
             // An archive that has left the list is the storage folder.
             return applyView("");
         }
-        if (wanted === S.archive.view && (wanted ? S.archive.mounted : !S.archive.mounted)) {
+        if (wanted === S.grid.view) {
             drawViewName();
             return;
         }
         if (S.selected && (isArchiveRef(S.selected) || wanted)) { select("", false); }
-        if (wanted) {
-            enterArchive(wanted);
-        } else {
-            leaveArchive();
-        }
+        showFolder(wanted);
         drawViewName();
     }
 
-    function enterArchive(id) {
+    /**
+     * Put a folder on the grid in place of the one there: the storage folder
+     * (""), or an archive. The same grid either way - the tiles of the
+     * folder that goes leave the document, the thumbnails this page drew
+     * for it stay (by tile id, so going back finds them decoded), and the
+     * new folder's listing is asked for: an archive's as it is, the storage
+     * folder's with the folder read again first, since coming back to it is
+     * when it may have moved underneath the page.
+     */
+    function showFolder(id) {
         const grid = gridElement();
         if (!grid) { return; }
         stopThumbs();
-        S.archive.view = id;
-        S.archive.items = [];
-        S.archive.index = new Map();
-        S.archive.rendered = new Map();
-        // The storage folder's tiles leave the document but not the page's
-        // memory: going back reuses every one of them, decoded.
-        for (const tile of S.library.tiles.values()) {
-            if (tile.parentNode) { tile.parentNode.removeChild(tile); }
-        }
+        // What the loader did is said of the folder on screen.
+        S.grid.stats = { started: 0, dropped: 0, done: 0, failed: 0, order: [] };
+        S.grid.view = id;
+        S.grid.items = [];
+        S.grid.index = new Map();
+        // Whatever was being read was the other folder's.
+        S.grid.ticket += 1;
+        S.grid.reading = null;
+        S.grid.pending = false;
+        for (const tile of S.grid.rendered.values()) { if (tile.parentNode) { tile.parentNode.removeChild(tile); } }
+        S.grid.rendered = new Map();
         emptyNotice(grid, "");
-        const pager = pagerElement();
-        if (pager) { pager.hidden = true; }
-        pin(grid, { "display": "block" });
-        grid.classList.add("minipaint-clip-archive-grid");
-        grid.setAttribute("aria-label", "Archive images");
-        let track = grid.querySelector(".minipaint-clip-track");
-        if (!track) {
-            track = document.createElement("div");
-            track.className = "minipaint-clip-track";
-            pin(track, ARCHIVE_TRACK_GEOMETRY);
-            grid.appendChild(track);
-        }
-        track.innerHTML = "";
-        pin(track, { "height": "0px" });
+        grid.classList.toggle("minipaint-clip-archive-grid", !!id);
+        grid.setAttribute("aria-label", id ? "Archive images" : "Clipboard images");
+        const track = gridTrack();
+        if (track) { pin(track, { "height": "0px" }); }
         grid.scrollTop = 0;
-        S.archive.scrollTop = 0;
-        S.archive.mounted = true;
-        watchArchive(grid);
-        fetchArchive({});
-    }
-
-    function leaveArchive() {
-        const grid = gridElement();
-        stopThumbs();
-        S.archive.view = "";
-        S.archive.items = [];
-        S.archive.index = new Map();
-        S.archive.rendered = new Map();
-        S.archive.mounted = false;
-        S.archive.ticket += 1;
-        if (!grid) { return; }
-        const track = grid.querySelector(".minipaint-clip-track");
-        if (track) { grid.removeChild(track); }
-        grid.classList.remove("minipaint-clip-archive-grid");
-        grid.setAttribute("aria-label", "Clipboard images");
-        pin(grid, { "display": GRID_GEOMETRY.display });
-        emptyNotice(grid, "");
-        fetchLibrary({ quiet: true, refresh: true });
-    }
-
-    /* -- the listing --------------------------------------------------- */
-
-    /** Ask for the whole archive and draw it. The newest ask wins. */
-    function fetchArchive(options) {
-        const opts = options || {};
-        if (!archiveActive()) { return Promise.resolve(null); }
-        const id = S.archive.view;
-        const sort = opts.sort || S.library.sort || menuState().sort || "";
-        const ticket = ++S.archive.ticket;
-        S.archive.busy = true;
-        setBusy(true);
-        drawViewName();
-        const url = ARCHIVE_LIST_ROUTE + "?id=" + encodeURIComponent(id) + (sort ? "&sort=" + encodeURIComponent(sort) : "");
-        return askJson(url, null, ARCHIVE_LIST_TIMEOUT_MS, "archive listing").then(function (answer) {
-            if (ticket !== S.archive.ticket || id !== S.archive.view) { return answer; }
-            S.archive.busy = false;
-            setBusy(false);
-            if (!answer || answer.ok !== true) {
-                setStatus((answer && answer.message) || "The archive could not be read. Press Refresh to try again.");
-                drawViewName();
-                return answer;
-            }
-            drawArchive(answer);
-            if (!opts.quiet) { setStatus(answer.status || ""); }
-            return answer;
-        });
-    }
-
-    function drawArchive(answer) {
-        const items = Array.isArray(answer.items) ? answer.items : [];
-        S.archive.items = items;
-        S.archive.sort = String(answer.sort || "");
-        const index = new Map();
-        for (let i = 0; i < items.length; i += 1) { index.set(items[i][0], i); }
-        S.archive.index = index;
-        // A tile drawn for an order that is no longer this one is a tile in
-        // the wrong place: every one is placed again.
-        const track = archiveTrack();
-        for (const tile of S.archive.rendered.values()) {
-            if (tile.parentNode) { tile.parentNode.removeChild(tile); }
-        }
-        S.archive.rendered = new Map();
-        if (track) { track.innerHTML = ""; }
-        const grid = gridElement();
-        if (grid) {
-            grid.dataset.count = String(items.length);
-            grid.classList.toggle("minipaint-clip-empty", !items.length);
-            emptyNotice(grid, items.length ? "" : "archive-empty");
-        }
-        if (S.selected && isArchiveRef(S.selected)) {
-            const key = S.selected.slice(ARCHIVE_REF_PREFIX.length + 17);
-            if (!index.has(key)) { select("", false); }
-        }
-        layoutArchive();
-        renderArchive();
-        drawViewName();
-        pumpThumbs(true);
-        S.renderedAt = Date.now();
-        applyPerRow();
-        refreshBadges();
-        scheduleFit();
-        scheduleScrubber();
-    }
-
-    function archiveTrack() {
-        const grid = gridElement();
-        return grid ? grid.querySelector(".minipaint-clip-track") : null;
-    }
-
-    /* -- placing tiles ------------------------------------------------- */
-
-    /**
-     * The storage folder's grid, worked out rather than laid out: the same
-     * columns its `repeat(auto-fill, ...)` makes (the thumbnail plus the
-     * tile's frame, never stretched, at least one), the same row height and
-     * the same gap - so an archive looks exactly like the storage folder,
-     * and the place of tile ten thousand is a multiplication.
-     */
-    function layoutArchive() {
-        const grid = gridElement();
-        const track = archiveTrack();
-        if (!grid || !track) { return null; }
-        const style = getComputedStyle(grid);
-        const gap = parseFloat(style.rowGap) || parseFloat(style.columnGap) || 8;
-        const room = Math.max(1, track.clientWidth || (grid.clientWidth - parseFloat(style.paddingLeft || 0) - parseFloat(style.paddingRight || 0)));
-        // The storage folder's row, shared out the same way (applyPerRow).
-        const columns = Math.max(1, S.perRow || Math.floor((room + gap) / (DEFAULT_THUMB + TILE_FRAME + gap)) || 1);
-        const cellWidth = Math.max(1, (room - (columns - 1) * gap) / columns);
-        const thumb = cellWidth - TILE_FRAME;
-        const cellHeight = thumb + TILE_CAPTION;
-        const rows = Math.ceil(S.archive.items.length / columns);
-        const height = rows ? rows * cellHeight + (rows - 1) * gap : 0;
-        const layout = { columns: columns, rows: rows, cellWidth: cellWidth, cellHeight: cellHeight, gap: gap,
-                         padTop: parseFloat(style.paddingTop || 0), height: height };
-        const before = S.archive.layout;
-        S.archive.layout = layout;
-        if (track.style.getPropertyValue("height") !== height + "px") { pin(track, { "height": height + "px" }); }
-        if (before && (before.columns !== columns || before.cellWidth !== cellWidth || before.cellHeight !== cellHeight)) {
-            for (const entry of S.archive.rendered) { placeTile(entry[1], entry[0]); }
-        }
-        return layout;
-    }
-
-    /** The rows in view, and the ones the document holds around them. */
-    function archiveRows() {
-        const grid = gridElement();
-        const layout = S.archive.layout;
-        if (!grid || !layout || !layout.rows) { return null; }
-        const step = layout.cellHeight + layout.gap;
-        const top = Math.max(0, grid.scrollTop - layout.padTop);
-        const bottom = top + Math.max(0, grid.clientHeight);
-        const first = Math.max(0, Math.floor(top / step));
-        const last = Math.min(layout.rows - 1, Math.max(first, Math.floor(Math.max(0, bottom - 1) / step)));
-        return { first: first, last: last, step: step, screenRows: Math.max(1, last - first + 1) };
-    }
-
-    function placeTile(tile, index) {
-        const layout = S.archive.layout;
-        if (!layout) { return; }
-        const row = Math.floor(index / layout.columns);
-        const column = index % layout.columns;
-        // Fractions kept: the row is shared to the pixel, and a column
-        // rounded on its own would leave the row a pixel short or over.
-        const px = function (value) { return (Math.round(value * 100) / 100) + "px"; };
-        pin(tile, {
-            "position": "absolute",
-            "left": px(column * (layout.cellWidth + layout.gap)),
-            "top": px(row * (layout.cellHeight + layout.gap)),
-            "width": px(layout.cellWidth),
-            "height": px(layout.cellHeight)
-        });
-    }
-
-    function buildArchiveTile(index) {
-        const item = S.archive.items[index];
-        const ref = archiveRef(item[0]);
-        const tile = buildTile({ id: ref, name: item[1], v: item[3], bytes: item[2] }, true);
-        tile.dataset.key = item[0];
-        placeTile(tile, index);
-        const on = S.selected === ref;
-        tile.classList.toggle("minipaint-clip-selected", on);
-        tile.setAttribute("aria-selected", on ? "true" : "false");
-        paintThumb(tile, item[0]);
-        return tile;
-    }
-
-    /** Put the rows near the view in the document, and only those. */
-    function renderArchive() {
-        const track = archiveTrack();
-        const rows = archiveRows();
-        if (!track) { return; }
-        if (!rows) {
-            for (const tile of S.archive.rendered.values()) { if (tile.parentNode) { tile.parentNode.removeChild(tile); } }
-            S.archive.rendered = new Map();
-            return;
-        }
-        const columns = S.archive.layout.columns;
-        const from = Math.max(0, (rows.first - ARCHIVE_OVERSCAN_ROWS) * columns);
-        const to = Math.min(S.archive.items.length, (rows.last + 1 + ARCHIVE_OVERSCAN_ROWS) * columns);
-        for (const entry of Array.from(S.archive.rendered)) {
-            if (entry[0] < from || entry[0] >= to) {
-                if (entry[1].parentNode) { entry[1].parentNode.removeChild(entry[1]); }
-                S.archive.rendered.delete(entry[0]);
-            }
-        }
-        for (let index = from; index < to; index += 1) {
-            if (S.archive.rendered.has(index)) { continue; }
-            const tile = buildArchiveTile(index);
-            S.archive.rendered.set(index, tile);
-            track.appendChild(tile);
-        }
-    }
-
-    /* -- the thumbnails, in view first ---------------------------------- */
-
-    function paintThumb(tile, key) {
-        const held = S.archive.thumbs.get(key);
-        const picture = tile.querySelector("img");
-        if (!picture) { return; }
-        if (held && held.url) {
-            // Used again: the newest end of the keep list.
-            S.archive.thumbs.delete(key);
-            S.archive.thumbs.set(key, held);
-            pin(picture, { "display": PICTURE_GEOMETRY.display });
-            tile.classList.remove("minipaint-clip-item-missing");
-            if (picture.getAttribute("src") !== held.url) { picture.src = held.url; }
-        } else if (held && held.state === "failed") {
-            tile.classList.add("minipaint-clip-item-missing");
-            pin(picture, { "display": "none" });
-        }
-    }
-
-    function needsThumb(key) {
-        const held = S.archive.thumbs.get(key);
-        if (S.archive.inflight.has(key)) { return false; }
-        return !held || (!held.url && held.state !== "failed");
-    }
-
-    /**
-     * What to ask for, in order: the tiles in view in reading order, then
-     * the rows below the view, then the rows above it, nearest first.
-     */
-    function wantedThumbs() {
-        const rows = archiveRows();
-        const visible = [];
-        const ahead = [];
-        if (!rows || !tabVisible()) { return { visible: visible, ahead: ahead }; }
-        const columns = S.archive.layout.columns;
-        const count = S.archive.items.length;
-        const take = function (row, into) {
-            for (let index = row * columns; index < Math.min(count, (row + 1) * columns); index += 1) {
-                into.push(S.archive.items[index][0]);
-            }
-        };
-        for (let row = rows.first; row <= rows.last; row += 1) { take(row, visible); }
-        const reach = Math.ceil(rows.screenRows * ARCHIVE_AHEAD_SCREENS);
-        for (let step = 1; step <= reach; step += 1) {
-            if (rows.last + step < S.archive.layout.rows) { take(rows.last + step, ahead); }
-            if (rows.first - step >= 0) { take(rows.first - step, ahead); }
-        }
-        return { visible: visible, ahead: ahead };
-    }
-
-    /**
-     * Decide again what is asked for, and ask.
-     *
-     * Every request for a tile outside the view and what is just past it is
-     * dropped; so is every request for a tile outside the view while a tile
-     * IN it is still waiting - what you are looking at goes first, always.
-     * New requests start only once the view has settled (``PUMP_SETTLE_MS``)
-     * or every ``PUMP_EVERY_MS`` while it keeps moving, so a fling across the
-     * archive asks for nothing on its way.
-     */
-    function pumpThumbs(now) {
-        S.archive.pumpTimer = 0;
-        if (!archiveActive()) { return; }
-        const want = wantedThumbs();
-        const visible = new Set(want.visible);
-        const keep = new Set(want.visible.concat(want.ahead));
-        const waiting = want.visible.some(needsThumb);
-        for (const entry of Array.from(S.archive.inflight)) {
-            if (!keep.has(entry[0]) || (waiting && !visible.has(entry[0]))) { dropThumb(entry[0], entry[1]); }
-        }
-        // Held on the scrubber and moving: nothing new is asked for until it
-        // rests (armScrubPause) or is let go (endScrub), and then only for
-        // where it stopped.
-        if (S.scrub && !S.scrub.paused) { return; }
-        const moment = Date.now();
-        const settled = now || moment - S.archive.scrolledAt >= PUMP_SETTLE_MS || moment - S.archive.startedAt >= PUMP_EVERY_MS;
-        if (!settled) {
-            const wait = Math.max(0, Math.min(PUMP_SETTLE_MS - (moment - S.archive.scrolledAt),
-                                              PUMP_EVERY_MS - (moment - S.archive.startedAt)));
-            schedulePump(wait + 1);
-            return;
-        }
-        const order = want.visible.concat(want.ahead).filter(needsThumb);
-        while (S.archive.inflight.size < THUMB_CONCURRENCY && order.length) {
-            startThumb(order.shift());
-        }
-    }
-
-    function schedulePump(delay) {
-        if (S.archive.pumpTimer) { return; }
-        S.archive.pumpTimer = setTimeout(function () { pumpThumbs(false); }, Math.max(0, delay || 0));
-    }
-
-    function startThumb(key) {
-        const index = S.archive.index.get(key);
-        if (index === undefined) { return; }
-        const item = S.archive.items[index];
-        const ref = archiveRef(key);
-        let controller = null;
-        try { controller = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { controller = null; }
-        const job = { controller: controller, timedOut: false, dropped: false, timer: 0, view: S.archive.view };
-        job.timer = setTimeout(function () {
-            job.timedOut = true;
-            if (controller) { try { controller.abort(); } catch (e) { /* settled */ } }
-        }, THUMB_TIMEOUT_MS);
-        S.archive.inflight.set(key, job);
-        S.archive.startedAt = Date.now();
-        S.archive.stats.started += 1;
-        S.archive.stats.order.push(key);
-        if (S.archive.stats.order.length > 400) { S.archive.stats.order.splice(0, 200); }
-        const options = { credentials: "same-origin" };
-        if (controller) { options.signal = controller.signal; }
-        fetch(archiveThumbUrl(ref, item[3]), options).then(function (response) {
-            if (!response.ok) {
-                const error = new Error("HTTP " + response.status);
-                error.status = response.status;
-                throw error;
-            }
-            return response.blob();
-        }).then(function (blob) {
-            if (job.view !== S.archive.view) { return; }
-            const url = URL.createObjectURL(blob);
-            S.archive.thumbs.set(key, { url: url, state: "done", tries: 0 });
-            S.archive.stats.done += 1;
-            keepThumbs();
-            const at = S.archive.index.get(key);
-            const tile = at === undefined ? null : S.archive.rendered.get(at);
-            if (tile) { paintThumb(tile, key); }
-        }).catch(function (error) {
-            if (job.view !== S.archive.view) { return; }
-            if (job.dropped) { return; }
-            const held = S.archive.thumbs.get(key) || { url: "", state: "idle", tries: 0 };
-            held.tries = (held.tries || 0) + 1;
-            const status = error && error.status;
-            // A picture the server says is not there, or not a picture, will
-            // not be one on the next try either. A deadline missed, or the
-            // server's own trouble, is tried once more.
-            const final = (status >= 400 && status < 500) || held.tries >= THUMB_TRIES;
-            held.state = final ? "failed" : "idle";
-            S.archive.thumbs.set(key, held);
-            if (final) {
-                S.archive.stats.failed += 1;
-                const at = S.archive.index.get(key);
-                const tile = at === undefined ? null : S.archive.rendered.get(at);
-                if (tile) { paintThumb(tile, key); }
-            }
-            if (job.timedOut) { note("archive: a thumbnail took longer than " + (THUMB_TIMEOUT_MS / 1000) + "s" + (final ? "; its tile is marked" : "; it will be asked for again")); }
-        }).then(function () {
-            clearTimeout(job.timer);
-            if (S.archive.inflight.get(key) === job) { S.archive.inflight.delete(key); }
-            // A request this page dropped is not a free slot to fill at once:
-            // it was dropped because the view moved, and the view's own pump
-            // decides what comes next - otherwise a fling would start and
-            // drop three requests a frame all the way down.
-            if (!job.dropped && job.view === S.archive.view) { pumpThumbs(true); }
-        });
-    }
-
-    /** A request for a tile that is no longer wanted first. */
-    function dropThumb(key, job) {
-        job.dropped = true;
-        clearTimeout(job.timer);
-        if (job.controller) { try { job.controller.abort(); } catch (e) { /* settled */ } }
-        S.archive.inflight.delete(key);
-        S.archive.stats.dropped += 1;
-    }
-
-    /** Only so many object URLs: the oldest not on screen go first. */
-    function keepThumbs() {
-        if (S.archive.thumbs.size <= THUMB_KEEP) { return; }
-        const shown = new Set();
-        for (const tile of S.archive.rendered.values()) { shown.add(tile.dataset.key); }
-        for (const entry of Array.from(S.archive.thumbs)) {
-            if (S.archive.thumbs.size <= THUMB_KEEP) { break; }
-            if (shown.has(entry[0]) || !entry[1].url) { continue; }
-            try { URL.revokeObjectURL(entry[1].url); } catch (e) { /* gone already */ }
-            S.archive.thumbs.delete(entry[0]);
-        }
-    }
-
-    /** Every request dropped and every object URL let go: a new view. */
-    function stopThumbs() {
-        for (const entry of Array.from(S.archive.inflight)) { dropThumb(entry[0], entry[1]); }
-        for (const held of S.archive.thumbs.values()) {
-            if (held.url) { try { URL.revokeObjectURL(held.url); } catch (e) { /* gone already */ } }
-        }
-        S.archive.thumbs = new Map();
-        if (S.archive.pumpTimer) { clearTimeout(S.archive.pumpTimer); S.archive.pumpTimer = 0; }
-    }
-
-    /** The grid moved: the rows are drawn at once, the asking re-decided. */
-    function onArchiveScroll() {
-        if (!archiveActive()) { return; }
-        S.archive.scrolledAt = Date.now();
-        // Where the reader is, kept while the grid is on screen: a hidden
-        // tab's grid has no layout, and coming back to it is coming back to
-        // the top - of five thousand pictures, after a send to PNG Info.
-        const grid = gridElement();
-        if (grid && grid.clientHeight > 0) { S.archive.scrollTop = grid.scrollTop; }
-        if (S.archive.frame) { return; }
-        S.archive.frame = window.requestAnimationFrame(function () {
-            S.archive.frame = 0;
-            renderArchive();
-            pumpThumbs(false);
-        });
-    }
-
-    function onArchiveResize() {
-        if (!archiveActive()) { return; }
-        const grid = gridElement();
-        // Hidden with its tab: nothing to measure, and a layout worked out
-        // from a width of nothing would be one column ten thousand rows high.
-        if (!grid || !grid.clientWidth || !grid.clientHeight) { return; }
-        layoutArchive();
-        if (S.archive.scrollTop && Math.abs(grid.scrollTop - S.archive.scrollTop) > 1) {
-            grid.scrollTop = S.archive.scrollTop;
-        }
-        renderArchive();
-        pumpThumbs(true);
-    }
-
-    function watchArchive(grid) {
-        if (S.archive.watched === grid) { return; }
-        S.archive.watched = grid;
-        grid.addEventListener("scroll", onArchiveScroll, { passive: true });
-        // Its size is watched with the grid's (watchGrid), which sizes the
-        // row first and then places the archive's tiles from it.
-        watchGrid(grid);
+        S.grid.scrollTop = 0;
+        if (id) { fetchListing({}); } else { fetchListing({ quiet: true, refresh: true }); }
     }
 
     /* -- the Archives screen ------------------------------------------- */
@@ -4741,15 +4842,15 @@ window.minipaintClipboard = (function () {
     // image view capable of browsing the folder in either random or date
     // sorted order. Exiting the view should land that image in view in the
     // gallery as if i scrolled to it." So the view steps through every
-    // picture in the folder the grid shows - the whole storage folder, not
-    // its page, or the whole archive - by the arrow keys, a swipe, or the
-    // arrows drawn at its sides. **Date** is newest to oldest by the file's
-    // time; **Random** shuffles the folder once, with the picture on screen
-    // first, so stepping back retraces the way. The choice is the browser
-    // tab's (sessionStorage), like the pictures per row. The next and the
-    // previous whole pictures are fetched while one is looked at, so a step
-    // is a swap. Leaving the view selects the picture it ended on and scrolls
-    // the grid to it, turning the storage folder's page if it has to.
+    // picture in the folder the grid shows - the whole storage folder or
+    // the whole archive, whose listing is already on the page - by the arrow
+    // keys, a swipe, or the arrows drawn at its sides. **Date** is newest to
+    // oldest by the file's time; **Random** shuffles the folder once, with
+    // the picture on screen first, so stepping back retraces the way. The
+    // choice is the browser tab's (sessionStorage), like the pictures per
+    // row. The next and the previous whole pictures are fetched while one is
+    // looked at, so a step is a swap. Leaving the view selects the picture
+    // it ended on and scrolls the grid to it, wherever it is in the listing.
 
     const VIEWER_CLASS = "minipaint-clip-viewer";
     const VIEWER_OVERLAY = "clipboard-viewer";
@@ -4763,8 +4864,6 @@ window.minipaintClipboard = (function () {
     //: The browser tab's choice of order.
     const VIEWER_ORDER_KEY = "minipaint-clipboard:viewer-order";
     const VIEWER_ORDERS = [["date", "Date"], ["random", "Random"]];
-    //: One read of the storage folder's whole order.
-    const VIEWER_ORDER_TIMEOUT_MS = 20000;
 
     function viewerOpen() { return !!(S.viewer && S.viewer.root && !S.viewer.root.hidden); }
 
@@ -4881,30 +4980,28 @@ window.minipaintClipboard = (function () {
         return isArchiveRef(item.id) ? archiveThumbUrl(item.id, item.v) : imageUrl(item.id, item.v);
     }
 
-    /** Newest first, by the time in a version (``<mtime_ns>-<size>``). */
+    /** Newest first, by the time in a version (``<mtime_ns>-<size>``); two
+     *  pictures of one time by their ids, so the order is the same however
+     *  the grid happens to be sorted - the storage folder's own "newest". */
     function newestFirst(a, b) {
         const x = String(a.v || "").split("-")[0];
         const y = String(b.v || "").split("-")[0];
         if (x.length !== y.length) { return y.length - x.length; }
-        return x < y ? 1 : x > y ? -1 : 0;
+        if (x !== y) { return x < y ? 1 : -1; }
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
     }
 
     /**
-     * The folder the grid shows, newest first. An archive's listing is
-     * already on the page; the storage folder's is read once, whole, since
-     * the grid holds only its page.
+     * The folder the grid shows, newest first: every picture its listing
+     * holds, which is the whole folder - the listing is on the page, so the
+     * view asks the server for nothing to step through it.
      */
-    function viewerFolder(source) {
-        if (isArchiveRef(source)) {
-            const items = S.archive.items.map(function (item) { return { id: archiveRef(item[0]), name: item[1], v: item[3] }; });
-            items.sort(newestFirst);
-            return Promise.resolve(items);
-        }
-        return askJson(LIBRARY_ROUTE + "?every=1&sort=newest", null, VIEWER_ORDER_TIMEOUT_MS, "the viewer's folder")
-            .then(function (answer) {
-                if (!answer || answer.ok !== true || !Array.isArray(answer.items)) { return null; }
-                return answer.items.map(function (item) { return { id: item[0], name: item[1], v: item[2] }; });
-            });
+    function viewerFolder() {
+        const items = S.grid.items.map(function (row) {
+            return { id: tileId(row[0]), name: String(row[1] || ""), v: String(row[3] || "") };
+        });
+        items.sort(newestFirst);
+        return Promise.resolve(items);
     }
 
     /** A shuffle of the folder with the picture on screen first. */
@@ -5037,12 +5134,13 @@ window.minipaintClipboard = (function () {
             document.addEventListener("fullscreenchange", view.change);
             document.addEventListener("webkitfullscreenchange", view.change);
         }
-        // The folder, read afresh on every open (what was added since is in
-        // it) while the first picture is already on screen.
+        // The folder as the grid lists it, put in order on every open (what
+        // the grid has read since is in it) while the first picture is
+        // already on screen.
         view.dated = null;
         view.list = null;
         view.at = -1;
-        const reading = viewerFolder(archive ? item.id : "");
+        const reading = viewerFolder();
         view.reading = reading;
         reading.then(function (items) {
             if (view.reading !== reading) { return; }
@@ -5104,43 +5202,15 @@ window.minipaintClipboard = (function () {
     /**
      * The grid, at the picture the view ended on: selected, and scrolled to
      * as though you had scrolled there - in the middle of the grid where it
-     * can be. The storage folder turns to the page that holds it first.
+     * can be, its thumbnails asked for as after a scroll. Wherever it is in
+     * the folder: the listing holds every picture in it, so this is what
+     * turning the storage folder to the page that held it used to be.
      */
     function landOn(id) {
         if (S.selected !== id) { select(id); }
-        if (isArchiveRef(id)) {
-            const key = id.slice(ARCHIVE_REF_PREFIX.length + 17);
-            const index = S.archive.index.get(key);
-            const grid = gridElement();
-            const layout = S.archive.layout;
-            if (index === undefined || !grid || !layout) { return Promise.resolve(false); }
-            const row = Math.floor(index / layout.columns);
-            const top = layout.padTop + row * (layout.cellHeight + layout.gap);
-            grid.scrollTop = Math.max(0, Math.round(top - (grid.clientHeight - layout.cellHeight) / 2));
-            S.archive.scrollTop = grid.scrollTop;
-            renderArchive();
-            pumpThumbs(true);
-            return Promise.resolve(true);
-        }
-        const centre = function () {
-            const tile = S.library.tiles.get(id);
-            const grid = gridElement();
-            if (!tile || !grid || !tile.isConnected) { return false; }
-            const box = tile.getBoundingClientRect();
-            const frame = grid.getBoundingClientRect();
-            grid.scrollTop = Math.max(0, Math.round(grid.scrollTop + (box.top - frame.top) - (grid.clientHeight - box.height) / 2));
-            return true;
-        };
-        if (S.library.tiles.has(id) && S.library.ids.indexOf(id) !== -1) { return Promise.resolve(centre()); }
-        // Another page: the server says which (it alone holds the whole
-        // order), and that page is drawn before the grid is moved.
-        return fetchLibrary({ quiet: true }).then(function (answer) {
-            const page = answer ? Number(answer.selected_page) : -1;
-            if (!answer || page < 0 || page === Number(answer.page)) { return answer; }
-            return fetchLibrary({ page: page, quiet: true });
-        }).then(function () {
-            return centre();
-        });
+        const index = S.grid.index.get(keyOf(id));
+        if (index === undefined) { return Promise.resolve(false); }
+        return Promise.resolve(centreOn(index));
     }
 
     function onViewerKey(event) {
@@ -5259,7 +5329,7 @@ window.minipaintClipboard = (function () {
             // What the grid shows: the storage folder or one archive, ticked;
             // and the screen that adds and removes archives.
             const list = back.slice();
-            const current = archiveActive() ? S.archive.view : "";
+            const current = archiveActive() ? S.grid.view : "";
             list.push({ menu: "view", value: "", label: tick(!current) + "Storage folder" });
             for (const pair of archiveList()) {
                 list.push({ menu: "view", value: pair[0], label: tick(current === pair[0]) + pair[1] });
@@ -6303,7 +6373,7 @@ window.minipaintClipboard = (function () {
         // Redrawn wholesale, and that is fine HERE in a way it was not
         // before: this list is short, bounded and rebuilt from one small
         // answer, and it is not the thing whose scroll position and decoded
-        // pictures had to survive. The grid is; see drawLibrary.
+        // pictures had to survive. The grid is; see drawListing.
         mount.innerHTML = "";
         mount.dataset.count = String(jobs.length);
         mount.classList.toggle("minipaint-clip-empty", !jobs.length);
@@ -6928,14 +6998,14 @@ window.minipaintClipboard = (function () {
                     // A tab that was hidden was not measured while it was.
                     if (S.fitRewatch) { S.fitRewatch(); }
                     scheduleFit();
-                    // Opening the tab is one of the moments the grid is read -
-                    // over HTTP, and with a folder re-read, because coming
-                    // back to the tab is exactly when the folder may have
-                    // moved underneath it.
-                    fetchLibrary({ quiet: true, refresh: true });
-                    // An archive is not re-listed for a look - an archive is
-                    // an archive - but its view was not measured while hidden.
-                    if (archiveActive()) { onArchiveResize(); }
+                    // Opening the tab is one of the moments the storage
+                    // folder is read - over HTTP, and with a folder re-read,
+                    // because coming back to the tab is exactly when the
+                    // folder may have moved underneath it. An archive is not
+                    // re-listed for a look - an archive is an archive.
+                    if (!archiveActive()) { fetchListing({ quiet: true, refresh: true }); }
+                    // Either way its view was not measured while hidden.
+                    onGridResize();
                     refreshCapabilities(false);
                     // Whatever the throttle above decided: coming back to
                     // the tab is when a model changed in the WanGP tab shows.
@@ -6981,7 +7051,6 @@ window.minipaintClipboard = (function () {
         // The page's identity, so a press submits under it; and the jobs this
         // page composed before a reload resume without another press - as
         // does the tracking of the ones WanGP already took from this page.
-        element.addEventListener("keydown", onLibraryKey);
         watchTab();
         // The grid, from the index route, before anything else is asked of
         // the server: it is the thing the user is looking at.
@@ -6998,7 +7067,9 @@ window.minipaintClipboard = (function () {
             if (answer.menu) { S.menuOverride = Object.assign({}, S.menuOverride || {}, answer.menu); }
             applyView(String(answer.view || ""));
         });
-        fetchLibrary({ quiet: true, refresh: true });
+        // The storage folder's listing, unless the view above put an archive
+        // in its place, which asked for its own.
+        if (!archiveActive()) { fetchListing({ quiet: true, refresh: true }); }
         // And the queue: what ran while this browser was closed, from the
         // route rather than from a framework render that a closed browser
         // could never have received.
@@ -7033,33 +7104,41 @@ window.minipaintClipboard = (function () {
                  outputs: { page: S.outputs.page, pages: S.outputs.pages,
                             items: S.outputs.items.length, chosen: S.outputs.chosen,
                             drawn: S.outputs.drawn || 0,
-                            player: !!S.outputs.controls, clock: !!S.outputs.clock },
+                            player: !!S.outputs.controls, clock: !!S.outputs.clock,
+                            sending: !!S.outputs.sending },
                  intercept: interceptTarget() === "clipboard",
                  interceptTarget: interceptTarget(),
                  auto: autoRoles(),
                  wangpSettings: wangpSettings(),
                  takeovers: S.takeovers,
-                 sort: menuState().sort || S.library.sort,
-                 library: { revision: S.library.revision, page: S.library.page, pages: S.library.pages,
-                            total: S.library.total, shown: S.library.ids.length, busy: S.library.busy },
+                 sort: menuState().sort || S.grid.sort,
+                 library: libraryState(),
                  tileReport: S.tileReport,
-                 archive: archiveState(),
+                 grid: gridState(),
                  archivesOpen: archivesOpen(),
                  viewerOpen: viewerOpen(),
                  fitted: S.fitted || null };
     }
 
-    /** What the archive loader is doing, for the journal and the checks. */
-    function archiveState() {
-        const rows = archiveActive() ? archiveRows() : null;
-        return { view: S.archive.view, total: S.archive.items.length, busy: S.archive.busy,
-                 rendered: S.archive.rendered.size, inflight: Array.from(S.archive.inflight.keys()),
-                 thumbs: S.archive.thumbs.size, columns: S.archive.layout ? S.archive.layout.columns : 0,
+    /** The folder on screen, as a person would ask about it. */
+    function libraryState() {
+        return { view: S.grid.view, revision: S.grid.revision, sort: S.grid.sort, total: S.grid.items.length,
+                 shown: S.grid.rendered.size, busy: S.grid.busy, configured: S.grid.configured };
+    }
+
+    /** What the grid's loader is doing, for the journal and the checks. */
+    function gridState() {
+        const rows = gridRows();
+        const mark = gridMount() ? gridMount().querySelector(".minipaint-clip-scrubber-mark") : null;
+        return { view: S.grid.view, total: S.grid.items.length, busy: S.grid.busy,
+                 rendered: S.grid.rendered.size, inflight: Array.from(S.grid.inflight.keys()),
+                 thumbs: S.grid.thumbs.size, columns: S.grid.layout ? S.grid.layout.columns : 0,
                  rows: rows ? { first: rows.first, last: rows.last } : null,
-                 started: S.archive.stats.started, dropped: S.archive.stats.dropped,
-                 done: S.archive.stats.done, failed: S.archive.stats.failed,
-                 order: S.archive.stats.order.slice(-200),
-                 visible: archiveActive() ? wantedThumbs().visible : [],
+                 started: S.grid.stats.started, dropped: S.grid.stats.dropped,
+                 done: S.grid.stats.done, failed: S.grid.stats.failed,
+                 order: S.grid.stats.order.slice(-200),
+                 visible: wantedThumbs().visible,
+                 mark: !!(mark && !mark.hidden),
                  scrubbing: !!S.scrub, paused: !!(S.scrub && S.scrub.paused) };
     }
 
@@ -7075,15 +7154,9 @@ window.minipaintClipboard = (function () {
         menuStateChanged: menuStateChanged,
         openPromptEditor: openPromptEditor,
         closePromptEditor: closePromptEditor,
-        library: fetchLibrary,
-        goToPage: goToPage,
+        library: fetchListing,
         setSort: setSort,
-        libraryState: function () {
-            return { revision: S.library.revision, sort: S.library.sort, page: S.library.page,
-                     pages: S.library.pages, total: S.library.total, size: S.library.size,
-                     shown: S.library.ids.length, busy: S.library.busy,
-                     selectedPage: S.library.selectedPage };
-        },
+        libraryState: libraryState,
         toggleMenu: toggleMenu,
         openToolbarMenu: openToolbarMenu,
         openOutputs: openOutputs,
@@ -7129,7 +7202,7 @@ window.minipaintClipboard = (function () {
         setView: setView,
         openArchives: openArchives,
         closeArchives: closeArchives,
-        archiveState: archiveState,
+        gridState: gridState,
         openViewer: function (assetId) {
             const grid = gridElement();
             const tile = grid ? Array.from(grid.querySelectorAll(".minipaint-clip-item")).find(function (one) {

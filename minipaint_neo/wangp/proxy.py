@@ -83,6 +83,67 @@ DEEPY_PREFIX = DEEPY_PATH + "/"
 DEEPY_ROOTED = "rooted"
 DEEPY_BARE = "bare"
 
+#: A WanGP plugin's own web app, which is Deepy's case asked for from inside
+#: our prefix.
+#:
+#: Since Wan2GP v19 (2026-10-31) a plugin can register a web app - an ASGI
+#: app of its own - and the child mounts it on its Gradio app at one path
+#: segment (``app.mount(path, factory())``, shared/utils/plugin_navigation.py).
+#: Showrunner, which v19 switches on at its first start, is one; its tab is an
+#: iframe on ``./showrunner/?embedded=1``, resolved against the page's own
+#: ``<base href="/wan2gp/">``, and its API and event socket follow it there. So
+#: it arrives here as ``/wan2gp/showrunner/...``, under our prefix, unlike
+#: Deepy's root-relative address - and went on as ``/showrunner/...``, which a
+#: mounted app under GRADIO_ROOT_PATH answers 404 to, for exactly the reason
+#: ``deepy_upstream_path`` gives. The tab was a blank "Not Found".
+#:
+#: Which segments are such apps is each plugin's choice, so they are learnt,
+#: never listed: a GET or HEAD under a segment shaped like one WanGP accepts
+#: (``WEB_APP_SEGMENT_RE`` is WanGP's own ``_WEB_APP_PATH_RE``) and outside the
+#: routes WanGP reserves from plugins (``RESERVED_WEB_APP_SEGMENTS``, its
+#: ``_RESERVED_WEB_APP_PATHS``) that answers 404 is asked once more with our
+#: prefix left on, and a segment that answers there is sent that way from
+#: then on - every method, and its WebSockets. Kept on is safe for anything
+#: else under that segment as well: Starlette strips a root path off before it
+#: matches a route, so the child's own pages answer either way, and v19's
+#: navigation middleware takes ``root_path`` off its folder addresses itself.
+#: Nothing is learnt from a success: the folder address of an app (its
+#: full-screen page, the Gradio page with the app's tab selected) answers
+#: without the prefix too, and taking that for "this segment is bare" would
+#: break the embedded app that shares its name.
+WEB_APP_SEGMENT_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+RESERVED_WEB_APP_SEGMENTS = frozenset({
+    "apps", "plugins", "auth", "deepy", "deepy_api", "gradio_api", "file", "assets", "config", "queue", "upload",
+    "static", "theme", "login", "logout", "mcp",
+})
+#: What a segment is once it has answered under our prefix.
+WEB_APP_ROOTED = "rooted"
+#: How many times a segment that answers 404 both ways is asked twice before
+#: it is asked once. A real missing file under a real app looks like that, so
+#: nothing is concluded from one; a segment that never answers either way
+#: stops costing a second request soon after.
+WEB_APP_MISSES_MAX = 3
+#: How many segments are remembered at all.
+WEB_APPS_NOTED_MAX = 32
+
+
+def web_app_segment(path: typing.Any) -> typing.Optional[str]:
+    """The segment a plugin's web app could be mounted at, for an upstream
+    path - ``/showrunner/api/state`` -> ``showrunner`` - or None for the root,
+    a reserved route or anything WanGP would not accept as a plugin's path."""
+    text = str(path or "")
+    if not text.startswith("/"):
+        return None
+    segment = text[1:].split("/", 1)[0].split("?", 1)[0]
+    if not segment or segment in RESERVED_WEB_APP_SEGMENTS or not WEB_APP_SEGMENT_RE.match(segment):
+        return None
+    return segment
+
+
+def web_app_rooted(segment: typing.Optional[str]) -> bool:
+    """Whether this segment has been found to answer only with our prefix."""
+    return bool(segment) and _state["web_apps"].get(segment) == WEB_APP_ROOTED
+
 
 #: A route under our own prefix that answers nothing and proves everything.
 #: Section 12.6 says route registration is not authentication coverage and
@@ -176,7 +237,8 @@ _ASSET_RE = re.compile(
 
 #: Module state: the shared client, the loop it belongs to, and the keys of
 #: one-shot log lines. None of it is persisted, and none of it is a secret.
-_state: typing.Dict[str, typing.Any] = {"client": None, "loop": None, "injected": None, "logged": set(), "deepy": set(), "deepy_form": None}
+_state: typing.Dict[str, typing.Any] = {"client": None, "loop": None, "injected": None, "logged": set(), "deepy": set(), "deepy_form": None,
+                                         "web_apps": {}}
 
 
 def _log(text: str) -> None:
@@ -901,6 +963,63 @@ async def _retry_deepy(
     return _proxied(request, second)
 
 
+async def _retry_web_app(
+    request: typing.Any,
+    first: httpx.Response,
+    segment: str,
+    raw_path: bytes,
+    raw_query: bytes,
+    headers: typing.Mapping[str, str],
+    method: str,
+) -> typing.Any:
+    """The same GET once more with our prefix left on, for a segment that
+    may be a plugin's mounted web app (see ``WEB_APP_SEGMENT_RE``).
+
+    An answer there makes the segment rooted for the life of the process and
+    is what the page gets. A 404 there too is handed back as the first one
+    was - a missing file under a real app looks exactly like that, so it is
+    counted rather than concluded from, and after ``WEB_APP_MISSES_MAX`` of
+    them the segment is not asked twice again. Only 404 is retried, as for
+    Deepy: anything else is the child's real answer.
+    """
+    noted = _state["web_apps"]
+    misses = noted.get(segment, 0)
+    if not isinstance(misses, int) or misses >= WEB_APP_MISSES_MAX:
+        return None
+    if segment not in noted and len(noted) >= WEB_APPS_NOTED_MAX:
+        return None
+    target = upstream()
+    if not target:
+        return None
+    second_path = PROXY_PATH.encode("latin-1") + raw_path
+    url = httpx.URL(target).copy_with(raw_path=second_path + (b"?" + raw_query if raw_query else b""))
+    try:
+        second = await _client().send(
+            _client().build_request(
+                method, url, headers=dict(headers), content=None,
+                timeout=timeout_for(second_path.decode("latin-1", "ignore"), headers.get("accept", "")),
+            ),
+            stream=True,
+            follow_redirects=False,
+        )
+    except httpx.HTTPError:
+        return None
+    if second.status_code == 404:
+        noted[segment] = misses + 1
+        with contextlib.suppress(Exception):
+            await second.aclose()
+        return None
+    noted[segment] = WEB_APP_ROOTED
+    _log_once(
+        f"web-app {segment}",
+        f"WanGP's /{segment}/ is a web app mounted on WanGP that answers under our prefix; "
+        "its requests are sent that way now.",
+    )
+    with contextlib.suppress(Exception):
+        await first.aclose()
+    return _proxied(request, second)
+
+
 async def _stream_response(response: httpx.Response) -> typing.AsyncIterator[bytes]:
     """The body, raw and unbuffered. Nothing here holds more than a chunk."""
     if getattr(response, "is_stream_consumed", False):
@@ -954,12 +1073,18 @@ async def forward(request: typing.Any) -> typing.Any:
     raw_query = _raw_query(request)
     raw_path = _raw_target(request)
     arrived_at = raw_path if raw_path.startswith(DEEPY_PREFIX.encode("latin-1")) else None
+    segment = None
     if arrived_at is not None:
         # See ``deepy_upstream_path``. Our prefix goes back on unless this
         # child has been found to be one of the ones that wants it off.
         raw_path = deepy_upstream_path(
             arrived_at.decode("latin-1", "ignore"), _state["deepy_form"]
         ).encode("latin-1")
+    else:
+        # A plugin's web app mounted on the child: see WEB_APP_SEGMENT_RE.
+        segment = web_app_segment(raw_path.decode("latin-1", "ignore"))
+        if web_app_rooted(segment):
+            raw_path = PROXY_PATH.encode("latin-1") + raw_path
     url = httpx.URL(target).copy_with(raw_path=raw_path + (b"?" + raw_query if raw_query else b""))
 
     method = str(getattr(request, "method", "GET") or "GET").upper()
@@ -1002,6 +1127,11 @@ async def forward(request: typing.Any) -> typing.Any:
         if len(_state["deepy"]) < DEEPY_NOTED_MAX:
             _state["deepy"].add(decoded)
             _log_once(f"deepy {decoded}", f"a Deepy request answered {response.status_code}.")
+    elif (segment is not None and not web_app_rooted(segment) and response.status_code == 404
+          and method in ("GET", "HEAD") and content is None):
+        retried = await _retry_web_app(request, response, segment, raw_path, raw_query, headers, method)
+        if retried is not None:
+            return retried
 
     return _proxied(request, response)
 
@@ -1147,6 +1277,11 @@ async def _websocket_endpoint(websocket: typing.Any) -> None:
     # Deepy's event stream is a WebSocket, and it needs the same address the
     # rest of its API does. See ``deepy_upstream_path``.
     path = deepy_upstream_path(path, _state["deepy_form"])
+    # So does a plugin's mounted web app's (Showrunner's event socket), once
+    # its page's own GET has found it answering under our prefix. A socket
+    # cannot be asked twice, and the page always comes first.
+    if not path.startswith(PROXY_PATH + "/") and web_app_rooted(web_app_segment(path)):
+        path = PROXY_PATH + path
     query = _raw_query(websocket).decode("latin-1", "ignore")
     url = "ws" + target[len("http") :] + path + (f"?{query}" if query else "")
 

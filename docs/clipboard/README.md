@@ -29,7 +29,7 @@ variables and by nothing else. No fixed white, no fixed black: a night-mode them
 theme, for one) reaches every corner of the tab, including the thumbnail grid, the cards,
 the menu, the toast, the queue and the history list.
 
-The grid, its pager, the queue and the history are drawn **by the browser**, from routes
+The grid, the queue and the history are drawn **by the browser**, from routes
 this extension serves over plain HTTP; the composer's three slot cards are still
 server-rendered HTML the browser script listens to. What that division buys, what it cost
 and what is left of it is
@@ -201,16 +201,72 @@ id (`/minipaint-clipboard/image/<id>?thumb=1`), the file's name is shown as text
 route refuses an id that is not in the index, a name that is not a plain filename, a
 symlink, and a file that has moved outside the folder (`CLIPBOARD_ASSET_OUTSIDE_ROOT`).
 
+## The whole folder, in view first
+
+The grid is **not paged**. The storage folder was, sixty pictures at a time with a row of
+*Back*, the page and *Next* under the grid, while an archive was listed whole and drawn only
+where it was looked at; asked for: "the clipboard storage thumbnail gallery still works by
+pages, but i prefer the way archive loads, which is not pages, but only rendering thumbnails in
+view and cache. Let's make the storage option work like that." So both folders are drawn one
+way, by one renderer and one loader in the page, and differ only in where the listing and a
+thumbnail are asked for, what a tile is named by, and whether a picture may be renamed and
+deleted (an archive's may not; see *Archives*).
+
+**Listed whole.** One answer from `/minipaint-clipboard/library` carries every picture in the
+storage folder - `[id, name, bytes, version, width, height]` each, arrays because there may be
+thousands, and in an archive's own first four places (`routes.library_listing`) - sorted by
+the six orders over the whole folder, and read from the folder again first when the tab is
+opened and on Refresh. Past a hundred thousand pictures, an archive's limit too, the answer
+stops and the status line says how many it left out. There is no pager, and the scrubber's
+handle is where the view is in the whole folder.
+
+**In view first.** Every picture gets a tile, but a tile is an empty place until it is looked
+at - no address, no request - and only the rows near the view are in the page at all, in
+reading order; the rest are a height the scroll bar knows about, so a grid of ten thousand
+pictures is a few hundred nodes. The thumbnails of the tiles **in view** are asked for first,
+in reading order, then the screen past the view, a few at a time (three, which leaves the rest
+of the six connections a page has on HTTP/1.1 to everything else), over plain requests with a
+deadline each (twenty seconds; one more try, then the tile is marked as missing). **When the
+view moves the order is decided again**: a request for a tile that has left the view is
+dropped, and while a tile in view is still waiting no request outside the view goes on, so
+what you are looking at always comes next. New requests wait for a scroll to settle (or start
+every fifth of a second during a long one), so a fling across the folder asks for nothing on
+its way - the pictures it passed over are never requested. The server finishes a thumbnail it
+started even when the page dropped the request, so the next look at that tile is a cache read.
+
+**Kept, three times.** A thumbnail is made once and kept in the server's memory and on its
+disk - the storage folder's under its 64 MiB, an archive's under a budget of its own (see
+*Archives*). Its address carries the file's size and time (`?thumb=1&v=<mtime>-<size>`), so it
+is answered `immutable` for a year and the browser keeps it: a picture seen once is not asked
+of the server again until the file changes or the browser's cache is cleared. (A browser that
+clears its cache when it closes - LibreWolf does, as it ships - asks again after a restart, and
+the server answers from its disk without opening the original.) And the page keeps the last
+eight hundred it drew besides, by the tile's id, so scrolling back is instant and so is going
+back to the storage folder from an archive.
+
+**What the pages did, the scrolling way.** Page Up and Page Down on the grid move it a screen,
+where they turned a page, and Home and End take it to the top and the end, as a scroll box's
+keys do. A selection is the page's and not the view's: a picture selected a thousand rows away has no
+tile in the document and is still the selection - the Send menu, +First, Auto and Delete act
+on it - and **a short line across the scrubber marks where it is** in the folder while it is
+out of view; a press on that line brings the picture into the middle of the view (the pager
+said *selection on page N* and turned to it). It is given up only when the folder is read
+again and no longer has it. A rename changes its tile's caption where it stands - the same
+tile, the scroll untouched, and nothing asked for again, since the file's version is the same.
+A picture added appears in its place in the order and the place you are at is the place you
+keep; a new sort starts from the top, a place in one order meaning nothing in another.
+Leaving the full-screen view lands the grid on its picture wherever it is (*Full screen*).
+
 ## The grid's size, and the scrubber
 
 **Pictures per row.** The slider counts pictures per row, not pixels. It used to name a tile
 size in steps of 8 px with columns of that size that never stretched, so nearly every size
 left a strip of empty grid at the right of every row; asked for: "slide based on number of
-images that can fit one row without empty space". Now the row is shared out: the grid has
-that many equal columns (`repeat(var(--minipaint-clip-cols), minmax(0, 1fr))`), and the
-script works the tile size out of the row - the width less the gaps, divided, less the tile's
-frame - and writes it as `--minipaint-clip-thumb`, from which the rows are measured. Every
-row is filled to the pixel at every count, and every tile is still exactly its cell. The
+images that can fit one row without empty space". Now the row is shared out: the script
+places every tile itself, at that many equal columns (`--minipaint-clip-cols`), and works the
+tile size out of the row - the width less the gaps, divided, less the tile's frame - which it
+writes as `--minipaint-clip-thumb`, from which the rows are measured. Every row is filled to
+the pixel at every count, and every tile is exactly its cell. The
 picture keeps its aspect ratio inside its square (`object-fit: contain`): a wide picture has
 space above and below it, a tall one at its sides, and nothing is cropped or stretched; the
 browser suite measures that on a wide, a tall and a square picture.
@@ -224,8 +280,8 @@ while it is on that default; a count you choose is that tab's (`sessionStorage`,
 `minipaint-clipboard:per-row`), kept through reloads and resizes (within what the width
 allows), and nothing about it reaches the host - the slider has no backend function. The
 host's old `thumbnail` setting stays in `clipboard.json` for pages loaded before this, which
-are the only thing that still writes it. An archive's grid shares its row the same way: its
-tiles are placed by the script, at the same columns and the same size.
+are the only thing that still writes it. The storage folder and an archive share the row the
+same way: the same columns and the same size.
 
 The grid draws **no scroll bar of its own** (`scrollbar-width: none`, and the WebKit
 pseudo-element): a bar that came and went with the content would change the width the row was
@@ -234,22 +290,24 @@ shared out from, and the tiles would be sized for a width they no longer have.
 **The scrubber** is the grid's bar instead: a strip 14 px wide laid over the grid's right-hand
 padding (it overlaps nothing but the tiles' own frames), absolutely placed in the grid's
 mount, so it takes no room and moves nothing when it comes and goes. Its rail is a hairline;
-its handle is where the view is in the whole list - an archive's whole listing, or the
-storage folder's page - as tall as the share in view and never shorter than 32 px, and it
-widens under the pointer. Dragging the handle moves the grid with it; pressing anywhere else
+its handle is where the view is in the whole listing - the storage folder's or an archive's -
+as tall as the share in view and never shorter than 32 px, and it widens under the pointer. Dragging the handle moves the grid with it; pressing anywhere else
 on the bar jumps the handle's middle to the pointer and drags on from there (pointer capture,
 `touch-action: none`, and a non-passive `touchmove` cancelled while it is held). While it is
 held a bubble beside the handle says which picture of how many is at the top of the view
 (`1,234 of 18,928`) and what the sort orders by: the date for *Newest*/*Oldest* (from the
 file's modification time, which every tile's version carries), the size for
-*Largest*/*Smallest*, the name otherwise. An archive asks for **no thumbnails while it is
+*Largest*/*Smallest*, the name otherwise. The grid asks for **no thumbnails while it is
 moving**: the rows it passes are drawn as empty places, requests for tiles that left the view
 are dropped as always, and **resting** on it - held still for 300 ms without letting go
 (`SCRUB_PAUSE_MS`; asked for: "if i pause with out releasing the scrubber, the thumbs in that
 view should start loading as if i released the scrubber") - or letting go asks for the screen
-it stopped on. Moving again holds new requests back until the next rest. It is drawn only
-while the grid holds more than it shows. The wheel, a finger on the grid, the keys and
-Page Up/Down scroll the grid as before, and the bar follows.
+it stopped on. Moving again holds new requests back until the next rest. While the selected
+picture is out of view, **a line across the bar marks where it is** - where the handle's
+middle would be with the picture in the middle of the view - and a press on it brings the
+picture there (the box a finger finds is 12 px tall around the line). It is drawn only while
+the grid holds more than it shows. The wheel, a finger on the grid, the keys and Page Up/Down
+scroll the grid as before, and the bar follows.
 
 ## Archives
 
@@ -278,42 +336,24 @@ archive picture (the menu's two and the toolbar's Delete), and a server asked an
 `ARCHIVE_READ_ONLY`. Paste, upload, a drop on a card and the gallery's 🖌️ still save to the
 **storage folder** while an archive is on screen - the toast says so.
 
-**Listed whole, opened only when looked at.** An archive is not paged: one answer from
+**Listed whole, opened only when looked at.** One answer from
 `/minipaint-clipboard/archive/list` carries every picture in it, sorted by the same six
-orders as the storage folder. It is read from the folder's **directory entries alone** - the
-name, the size, the time - so listing ten thousand photographs opens none of them (the
+orders as the storage folder, and the grid draws it exactly as it draws the storage folder
+(*The whole folder, in view first*). It is read from the folder's **directory entries alone**
+- the name, the size, the time - so listing ten thousand photographs opens none of them (the
 storage folder's Refresh hashes every new file, which is what keeps a renamed file's id; done
 to an archive it would read the whole archive). What is listed: the PNG, JPEG and WebP files
 directly in the folder - not its subfolders, hidden files, links, empty files or anything over
 the handoff ceiling. A file that is not the picture its name says is listed, and its tile is
 marked once the server has found that out.
 
-**In view first.** Every picture gets a tile, laid out exactly as the storage folder's grid
-lays out its own, but a tile is an empty place until it is looked at - no address, no
-request - and only the rows near the view are in the page at all; the rest are a height the
-scroll bar knows about. The thumbnails of the tiles **in view** are asked for first, in
-reading order, then the screen past the view, a few at a time (three, which leaves the rest
-of the six connections a page has on HTTP/1.1 to everything else), over plain requests with
-a deadline each (twenty seconds; one more try, then the tile is marked). **When the view
-moves the order is decided again**: a request for a tile that has left the view is dropped,
-and while a tile in view is still waiting no request outside the view goes on, so what you
-are looking at always comes next. New requests wait for a scroll to settle (or start every
-fifth of a second during a long one), so a fling across the archive asks for nothing on its
-way - the pictures it passed over are never requested. The server finishes a thumbnail it
-started even when the page dropped the request, so the next look at that tile is a cache
-read.
-
-**Kept, three times.** A thumbnail is made once (320 px WebP, about 10-12 KiB for a
-photograph; a JPEG decoded at a fraction of its size; turned upright by its EXIF) and kept in
-the server's memory and on its disk under a **budget of its own** - 1 GiB, about eighty-five
-thousand thumbnails - least recently used out, so an archive never pushes the storage
-folder's thumbnails out of their 64 MiB. Two asks for one thumbnail at the same moment make
-it once. And its address carries the file's size and time (`?thumb=1&v=<mtime>-<size>`), so it
-is answered `immutable` for a year and the browser keeps it: a picture seen once is not asked
-of the server again until the file changes or the browser's cache is cleared. (A browser that
-clears its cache when it closes - LibreWolf does, as it ships - asks again after a restart,
-and the server answers from its disk without opening the original.) The page keeps the last
-eight hundred it drew besides, so scrolling back is instant.
+**Its thumbnails, kept apart.** An archive's thumbnail is made once (320 px WebP, about
+10-12 KiB for a photograph; a JPEG decoded at a fraction of its size; turned upright by its
+EXIF) and kept in the server's memory and on its disk under a **budget of its own** - 1 GiB,
+about eighty-five thousand thumbnails - least recently used out, so an archive never pushes the
+storage folder's thumbnails out of their 64 MiB. Two asks for one thumbnail at the same moment
+make it once. The rest of how a thumbnail is kept is the storage folder's (*Kept, three
+times*).
 
 **A picture is named by reference, never by path.** `ar-<archive id>-<name in URL-safe
 base64>`: the archive's id says which folder and the name which file, and the server proves
@@ -356,10 +396,9 @@ arrives. **A double tap** - or a double click, or Escape - closes it.
 
 **It steps through the whole folder.** Asked for: "make full screen image view capable of
 browser the folder in either random or date sorted order. Exiting the view should land that
-image in view in the gallery as if i scrolled to it." The folder is the one the grid shows: an
-archive's listing is already on the page; the storage folder's whole order, which the grid
-holds only a page of, is read once per opening from the library route's `every=1` form
-(`routes.library_order`: `[id, name, version]` per picture, never a path). ←/↑/Page Up and
+image in view in the gallery as if i scrolled to it." The folder is the one the grid shows,
+whole: its listing is already on the page, the storage folder's as an archive's, so the view
+asks the server for nothing to step through it. ←/↑/Page Up and
 →/↓/Page Down step, as do a swipe (48 px sideways, more sideways than up or down) and the two
 drawn arrows at its sides; the view takes every touch (`touch-action: none`), so a swipe is
 never the browser's Back and a double tap never a zoom. The bar at its top says *N of TOTAL*
@@ -368,9 +407,8 @@ version carries - or **Random**, the folder shuffled with the picture on screen 
 stepping back retraces the shuffle and pressing Random again reshuffles. The order is the
 browser tab's (`sessionStorage`, `minipaint-clipboard:viewer-order`), Date until changed.
 **Leaving it lands the grid** on the picture it ended on: selected, and scrolled so it sits in
-the middle of the grid where it can. In an archive that is the row the layout puts it on, and
-its thumbnails are asked for as after a scroll; in the storage folder the library route says
-which page holds it (`selected_page`) and the grid turns to that page first. It asks whether *it* is the full
+the middle of the grid where it can - the row the layout puts it on, wherever it is in the
+folder - and its thumbnails are asked for as after a scroll. It asks whether *it* is the full
 screen element before leaving full screen, so over the Forge Assistant's focus mode, which
 makes the whole document full screen, closing it leaves the page's full screen where it was.
 It says it has taken the page (`minipaint:overlay`, name `clipboard-viewer`), as the History
@@ -669,10 +707,12 @@ not; a job in flight when WanGP restarts is marked unconfirmed (`WANGP_RESTARTED
 
 ## View Outputs
 
-Under the queue, one button opens a gallery of what WanGP made for this tab's requests,
-over the whole window: a large playback area with the filmstrip of everything else under
-it. Tap a tile to play it; tap the picture itself to hide the video controls and tap again
-to bring them back. It pages at 60, the same as the picture grid, and **Close** or Escape
+Under the queue, one button opens a gallery of **every video in WanGP's output folder** - the
+ones this tab asked for and the ones made in WanGP itself, each once, newest first - over the
+whole window and below the tab bar, never under it: a large playback area with the filmstrip
+of everything else under it. Tap a tile to play it; tap the picture itself to hide the video controls and tap again
+to bring them back. It pages at 60 - the storage folder's grid used to, and is listed whole
+now - and **Close** or Escape
 puts it away. Scrubbing works - the file is served with byte ranges, so the player can ask
 for the middle of a video rather than only playing it from the start.
 
@@ -697,6 +737,17 @@ exactly where WanGP wrote them, and nothing here ever moves, copies or deletes o
 A file is only ever claimed once, so two requests running back to back cannot both show
 the same video. A claim that a shut-down left open is finished at the next start, which is
 what makes a video written while Forge was not running turn up anyway.
+
+**The rest of the folder.** Asked for on 2026-10-31: "i want the 'view outputs' videos to
+actually be all the videos in wan2gp output folder, not just those that we requested through
+clipboard". Beside the ledger's files (`outputs.gallery`), every video under the folder is
+listed from its directory entries and a stat of each - nothing is opened, and a folder of more
+than `FOLDER_SCAN_MAX` (20,000) videos is listed in part rather than walked without end - each
+by an id of its own (`wf` and sixteen hex characters, a digest that names
+nothing and is the same at every listing and after a restart), and a file the ledger already
+holds is listed once, as the ledger's, however its path was spelled. Such a video has no
+request, so no recipe and no **~**: its Load is disabled and says to use Send to WanGP. A link
+in the folder pointing elsewhere is not WanGP's and is not listed.
 
 **Where it looks.** `<WanGP root>/outputs` and everything under it, unless the
 `outputs_folder` setting names somewhere else. Videos (`.mp4`, `.webm`, `.mkv`, `.mov`,
@@ -727,6 +778,27 @@ An entry from before recipes were kept loads from its Queue Send History record,
 always did, and one with neither offers a disabled Load that says why. Load reaches the
 server through the hidden box Queue Send History's own Load writes (`output:<id>` to
 `history_action`), because the slot cards it changes are still rendered by the framework.
+
+**Send to WanGP.** Asked for on 2026-10-31: "the ability to send a video from this view to
+wan2gp to load its settings! Using this option should be a new send button in the playback
+controls bar. Sending should open wan2gp tab to the newly loaded settings!" The player's bar
+has it beside full screen, for an MP4, MKV or MOV - the videos WanGP writes its settings into;
+a WebM or an M4V has none it can load and no button. A press:
+
+1. asks the server for a note naming the video (`POST /minipaint-clipboard/output/{id}/settings`):
+   a reference handoff in the WanGP handoff folder, `<id>.ref.json` holding the path and a time,
+   whose id - 32 hex characters naming nothing - is all the page gets;
+2. hands the id to the WanGP tab (`minipaintWanGP.loadSettings`), which saves WanGP's form first,
+   as WanGP's own *Load Settings From Media File* box saves it, and asks its page to load;
+3. the bridge proves the note and the file again and runs WanGP's own loader: the model, the
+   prompt, every setting and a video's source pictures, the form filled again for the page's
+   model or WanGP switched to the video's, and WanGP's main tabs put on its generator.
+
+Only once WanGP says it loaded them does the view close and the WanGP tab open, with the
+toast saying when WanGP is switching model. A refusal, a video WanGP read nothing from, or a
+WanGP page not open in this browser yet stays in the view and says which; a second press while
+one is going - on this video or another - is the same press. It needs bridge 1.17.0, and an
+older bridge is never asked: the toast says to reinstall it.
 
 ## Queue Send History
 

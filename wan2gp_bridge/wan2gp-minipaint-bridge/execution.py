@@ -211,22 +211,45 @@ class Executor:
         gen = self.compat.shared_gen(service)
         settings = self._prepare(request)
         residency = self.compat.residency_key(settings, request.get("model_type", ""))
+        if not isinstance(gen, dict):
+            raise ExecutionError(protocol.SERVICE_UNAVAILABLE, "the shared generation record could not be read")
+        admit = self.compat.service_entry(service, compatibility.SERVICE_ADMIT)
 
-        # BEFORE the submission, and flushed. A record with no outcome is an
-        # honest "we asked and cannot prove what happened"; no record at all
-        # is a submission that looks new and generates a second time.
-        record = self.ledger.reserve(execution_id, model_type=request.get("model_type", ""), residency_key=residency)
+        # WanGP's inline slot holds one submission until WanGP loads it, so it
+        # is used the way WanGP's own API sessions use it: under their lock,
+        # and only once it is empty (``compatibility.INLINE_QUEUE_LOCK_NAME``).
+        with self.compat.inline_queue_lock():
+            # THE SLOT BEFORE THE RECORD. A slot still holding a submission
+            # WanGP has not loaded is refused as busy, and refused before
+            # anything is written here: a record is what answers a repeated
+            # submission, so a refusal that left one would turn Forge's retry
+            # into a reading of "failed". With the admitter the slot empties
+            # as each submission is admitted, so a full one is somebody else
+            # in the middle of theirs and is waited for, as WanGP waits for
+            # it; behind the old command it can stay full for a whole
+            # generation, and is not waited on at all.
+            wait = compatibility.INLINE_SLOT_TIMEOUT_SECONDS if admit is not None else 0.0
+            if not self._slot_free(gen, wait):
+                self._note(f"execute {execution_id[:8]}: WanGP's inline queue slot is still full; refused as busy")
+                raise ExecutionError(compatibility.QUEUE_BUSY,
+                                     "WanGP has not yet taken the previous submission from its inline queue")
 
-        try:
-            self._enqueue(service, gen, settings, execution_id)
-        except ExecutionError:
-            self.ledger.update(execution_id, state=protocol.EXEC_FAILED, code=protocol.EXECUTION_REFUSED,
-                               message="WanGP would not take the task", stage="")
-            raise
-        except Exception as error:
-            self.ledger.update(execution_id, state=protocol.EXEC_FAILED, code=protocol.EXECUTION_REFUSED,
-                               message=f"{type(error).__name__}", stage="")
-            raise ExecutionError(protocol.EXECUTION_REFUSED, f"{type(error).__name__}: {error}")
+            # BEFORE the submission, and flushed. A record with no outcome is
+            # an honest "we asked and cannot prove what happened"; no record
+            # at all is a submission that looks new and generates a second
+            # time.
+            record = self.ledger.reserve(execution_id, model_type=request.get("model_type", ""), residency_key=residency)
+
+            try:
+                self._enqueue(service, gen, settings, execution_id, admit)
+            except ExecutionError:
+                self.ledger.update(execution_id, state=protocol.EXEC_FAILED, code=protocol.EXECUTION_REFUSED,
+                                   message="WanGP would not take the task", stage="")
+                raise
+            except Exception as error:
+                self.ledger.update(execution_id, state=protocol.EXEC_FAILED, code=protocol.EXECUTION_REFUSED,
+                                   message=f"{type(error).__name__}", stage="")
+                raise ExecutionError(protocol.EXECUTION_REFUSED, f"{type(error).__name__}: {error}")
 
         with self._lock:
             self._watched[execution_id] = {
@@ -400,19 +423,38 @@ class Executor:
         if definition is None or definition is False:
             raise ExecutionError(protocol.MODEL_UNAVAILABLE, f"{model_type[:60]} is not a model this WanGP has")
 
+    def _slot_free(self, gen: typing.Mapping[str, typing.Any], wait: float) -> bool:
+        """Whether WanGP's inline slot is empty, waiting up to ``wait`` seconds
+        for it to empty - the caller holds the inline lock, so nothing of the
+        bridge's can fill it meanwhile, and only WanGP's loader empties it."""
+        deadline = time.monotonic() + max(0.0, float(wait))
+        while gen.get(compatibility.INLINE_QUEUE_KEY) is not None:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(compatibility.INLINE_SLOT_POLL_SECONDS)
+        return True
+
     def _enqueue(
         self,
         service: typing.Any,
         gen: typing.Any,
         settings: typing.Mapping[str, typing.Any],
         execution_id: str,
+        admit: typing.Optional[typing.Callable[[], typing.Any]] = None,
     ) -> None:
-        """Leave the task where the one worker will find it, and ask it to look.
+        """Leave the task where the one worker will find it, and have it taken.
 
         Two statements, and they are Wan2GP's own: the inline slot the queue
-        loader reads, and the command that starts or joins the worker. The
-        command returns at once - it spawns a detached worker of the
-        service's own - so no handler thread waits on a generation here.
+        loader reads, and the call that takes it. Where the service has its
+        admitter (Wan2GP from 2026-10-26) that is the call: the loader runs
+        there and then, the task is in WanGP's queue when this returns -
+        behind a generation already running, if there is one, exactly as a
+        Deepy or MCP submission joins it - and a worker is started if none is
+        running. Otherwise it is the command, which returns at once and
+        spawns a worker of the service's own; behind a run that command
+        itself started, its loader waits for that run to end. Either way no
+        handler thread here waits on a generation. The caller holds the
+        inline lock and has made sure the slot is empty.
         """
         if not isinstance(gen, dict):
             raise ExecutionError(protocol.SERVICE_UNAVAILABLE, "the shared generation record could not be read")
@@ -457,23 +499,38 @@ class Executor:
             "params": params,
             compatibility.PLUGIN_DATA_KEY: plugin_data if isinstance(plugin_data, dict) else {},
         }
-        gen[compatibility.INLINE_QUEUE_KEY] = [entry]
+        slot = [entry]
+        gen[compatibility.INLINE_QUEUE_KEY] = slot
         try:
-            service.command(compatibility.LOAD_QUEUE_COMMAND, {"client_id": execution_id})
+            if admit is not None:
+                admit()
+            else:
+                service.command(compatibility.LOAD_QUEUE_COMMAND, {"client_id": execution_id})
         except Exception as error:
-            gen.pop(compatibility.INLINE_QUEUE_KEY, None)
+            # Only our own entry is taken back out: by the time a call
+            # raises, the loader may have taken it, and the slot may hold
+            # somebody else's.
+            if gen.get(compatibility.INLINE_QUEUE_KEY) is slot:
+                gen.pop(compatibility.INLINE_QUEUE_KEY, None)
             raise ExecutionError(protocol.EXECUTION_REFUSED, f"{type(error).__name__}: {error}")
 
     def _retrigger(self, service: typing.Any, execution_id: str) -> bool:
         """Ask the service to look again, without offering it anything new.
 
-        WITHOUT the inline slot, which is what makes it idempotent: the queue
-        loader with no inline entry leaves a non-empty queue exactly as it
-        is, and only the worker is started. Setting the slot again would
-        merge a second copy of the task.
+        WITHOUT the inline slot, which is what makes it idempotent: a worker
+        is started if none is running and the queue holds something, and a
+        non-empty queue is left exactly as it is. Setting the slot again
+        would merge a second copy of the task. ``start_generation`` where the
+        service has it, which is all the command's way in did besides
+        running the loader over an empty slot - and that loader, given no
+        slot and no file, writes a warning to WanGP's console every time.
         """
+        start = self.compat.service_entry(service, compatibility.SERVICE_START)
         try:
-            service.command(compatibility.LOAD_QUEUE_COMMAND, {"client_id": execution_id})
+            if start is not None:
+                start()
+            else:
+                service.command(compatibility.LOAD_QUEUE_COMMAND, {"client_id": execution_id})
             return True
         except Exception as error:
             self._note(f"execute {execution_id[:8]}: re-trigger refused ({type(error).__name__})")

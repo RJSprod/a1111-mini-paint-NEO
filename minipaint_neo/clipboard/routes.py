@@ -6,6 +6,9 @@ regular file inside the configured root. It is the Clipboard contract for
 showing a picture in the browser; the WebUI's ``/file=<path>`` route is not,
 because a route that takes a path is a route that one day takes another.
 
+``/minipaint-clipboard/library`` is the storage folder: every picture in it,
+in one listing the browser lays out itself - the way an archive is listed.
+
 ``/minipaint-clipboard/import`` takes image bytes and nothing else - a paste
 from the browser's clipboard, a file dropped on a slot - and answers with
 the asset id the store gave them. No path, no filename beyond the basename
@@ -58,6 +61,8 @@ ENHANCE_SETTINGS_ROUTE = ROUTE_PREFIX + "/enhance-settings"
 PROMPTS_ROUTE = ROUTE_PREFIX + "/prompts"
 OUTPUTS_ROUTE = ROUTE_PREFIX + "/outputs"
 OUTPUT_FILE_ROUTE = ROUTE_PREFIX + "/output/{file_id}"
+#: A reference handoff for one output, for View Outputs' Send to WanGP.
+OUTPUT_SETTINGS_ROUTE = OUTPUT_FILE_ROUTE + "/settings"
 #: The gallery's Send to WanGP popup: everything it asks, over one POST, and
 #: the small copy of the picture it froze.
 INTERCEPT_ROUTE = ROUTE_PREFIX + "/intercept"
@@ -71,7 +76,9 @@ ARCHIVE_LIST_ROUTE = ROUTE_PREFIX + "/archive/list"
 #: One archive picture by its reference; ``?thumb=1`` for its thumbnail.
 ARCHIVE_IMAGE_ROUTE = ROUTE_PREFIX + "/archive/image/{ref}"
 
-#: How many pictures one page of the grid carries.
+#: How many items one page carries: View Outputs' gallery, as the picture
+#: grid's pages did until the storage folder was listed whole
+#: (``library_listing``).
 #:
 #: THE BINDING CONSTRAINT IS CONNECTIONS, NOT BYTES. Every thumbnail is its
 #: own request and a browser allows six per origin on HTTP/1.1 - already
@@ -197,13 +204,13 @@ def clamp_size(value: typing.Any) -> int:
 
 
 def page_of(value: typing.Any, pages: int) -> int:
-    """A page number inside the library, counting from zero.
+    """A page number inside a paged list, counting from zero.
 
-    Zero-based because that is what the grid asks for - "page 0 of the new
-    sort" - and because a pager that shows "Page 3 of 8" is displaying
-    ``page + 1``, which is presentation and belongs in the browser. Out of
-    range is clamped rather than refused: a grid that shows nothing because
-    a query string was wrong is a worse answer than a grid.
+    Zero-based because that is what the browser asks for - "page 0" - and
+    because a pager that shows "Page 3 of 8" is displaying ``page + 1``,
+    which is presentation and belongs in the browser. Out of range is
+    clamped rather than refused: a page that shows nothing because a query
+    string was wrong is a worse answer than a page.
     """
     try:
         number = int(str(value).strip())
@@ -212,54 +219,60 @@ def page_of(value: typing.Any, pages: int) -> int:
     return max(0, min(max(1, int(pages)) - 1, number))
 
 
-def library_page(sort: typing.Any = "", page: typing.Any = 0, size: typing.Any = PAGE_SIZE,
-                 selected: typing.Any = "", refresh: bool = False) -> dict:
-    """One page of the picture index, and everything the grid draws it from.
+def library_listing(sort: typing.Any = "", refresh: bool = False) -> dict:
+    """The whole storage folder in one answer, and everything the grid draws it from.
 
-    SORTING IS APPLIED OVER THE WHOLE LIBRARY, THEN SLICED. ``store.assets``
-    already returns the complete ordered list from the in-memory index, so
-    this is a slice of work the store does correctly today: the ordering
-    logic is not moved, rewritten or duplicated.
+    NOT PAGED, AT THE USER'S WORD: "the clipboard storage thumbnail gallery
+    still works by pages, but i prefer the way archive loads, which is not
+    pages, but only rendering thumbnails in view and cache". So the storage
+    folder is listed the way an archive is (``archives.listing``): every
+    picture, in one of the same six orders over the whole library, in one
+    answer the browser lays out itself - only the rows near the view are in
+    its document, and their thumbnails are asked for in view first. The order
+    is the store's (``store.assets`` already returns the complete ordered list
+    from the in-memory index), not a second ordering kept in step with it.
 
-    Bad input is answered rather than refused throughout. An unknown sort
-    falls back to the stored one, a page past the end returns the last page
-    that exists, and a size outside its bounds is clamped.
+    ``items`` is ``[id, name, bytes, version, width, height]`` per picture:
+    arrays, as an archive's ``[key, name, bytes, version]`` are, and in the
+    same first four places, because there may be thousands of them and
+    because the browser reads both with one renderer. The id is the asset's
+    opaque id, never a path; the version (``<mtime_ns>-<size>``) is what makes
+    the picture's thumbnail address one the browser may keep. Past an
+    archive's ``LISTING_LIMIT`` the answer says how many it left out rather
+    than answering with a document nobody can draw.
+
+    Bad input is answered rather than refused: an unknown sort falls back to
+    the stored one.
     """
     library = store_module.store()
     if refresh:
-        # Read the folder again first. The index is what this route slices,
-        # and the index is a memory of the folder rather than the folder: a
-        # file somebody deleted outside Clipboard is still in it, and a tile
-        # for a file that is gone is a broken picture. Opening the tab has
-        # always re-read the folder; this is that, over HTTP, so it no longer
-        # needs the framework's channel to be the thing that heals a page.
+        # Read the folder again first. The index is what this lists, and the
+        # index is a memory of the folder rather than the folder: a file
+        # somebody deleted outside Clipboard is still in it, and a tile for a
+        # file that is gone is a broken picture. Opening the tab has always
+        # re-read the folder; this is that, over HTTP, so it does not need
+        # the framework's channel to be the thing that heals a page.
         try:
             library.refresh()
         except IntegrationError:
             pass
-    current = config.load()
     mode = str(sort or "")
     if mode not in config.SORT_MODES:
-        mode = current.sort
-    wanted = clamp_size(size)
+        mode = config.load().sort
     configured = library.configured()
     assets = library.assets(mode) if configured else []
+    limit = int(archives.LISTING_LIMIT)
+    left_out = max(0, len(assets) - limit)
+    assets = assets[:limit]
     total = len(assets)
-    pages = max(1, -(-total // wanted))
-    index = page_of(page, pages)
-    shown = assets[index * wanted:(index + 1) * wanted]
-    # Which page holds the selection, so the pager can mark it. The selected
-    # id is the browser's and does not belong to a page; this is the one
-    # thing the server can say about it that the browser cannot work out for
-    # itself, because only the server holds the whole order.
-    chosen = str(selected or "")
-    at = next((position for position, asset in enumerate(assets) if asset.asset_id == chosen), -1)
     if not configured:
         reason, status = "unconfigured", "Choose a storage folder from the menu to begin."
     elif not total:
         reason, status = "empty", "No images in the folder yet."
     else:
         reason, status = "", f"{total} image{'s' if total != 1 else ''} in the folder."
+    if left_out:
+        status += f" {left_out} more were left out; the grid lists at most {limit}."
     return {
         "ok": True,
         # The library's identity, not the event spine's: see ``Store.moved``.
@@ -267,47 +280,18 @@ def library_page(sort: typing.Any = "", page: typing.Any = 0, size: typing.Any =
         "configured": configured,
         "sort": mode,
         "total": total,
-        "page": index,
-        "pages": pages,
-        "selected_page": (at // wanted) if at >= 0 else -1,
-        "size": wanted,
+        "left_out": left_out,
         "reason": reason,
         "status": status,
         "items": [
-            {
-                "id": asset.asset_id,
-                "name": asset.filename,
-                "w": int(asset.width),
-                "h": int(asset.height),
-                "bytes": int(asset.size_bytes),
-                # The version of this picture's bytes, which is what makes
-                # the browser's own thumbnail cache work. See ``image_url``.
-                "v": store_module.version_of(asset),
-            }
-            for asset in shown
+            [asset.asset_id, asset.filename, int(asset.size_bytes), store_module.version_of(asset),
+             int(asset.width), int(asset.height)]
+            for asset in assets
         ],
     }
 
 
-def library_order(sort: typing.Any = "") -> dict:
-    """Every picture in the storage folder, in one order, and nothing else:
-    ``[id, name, version]`` each.
-
-    For the full-screen view, which steps through the whole folder while the
-    grid holds one page of it. Ids and names only - never a path - and the
-    version that makes each picture's address one the browser may keep. Read
-    from the index as it stands; the grid's own reads refresh it.
-    """
-    library = store_module.store()
-    mode = str(sort or "")
-    if mode not in config.SORT_MODES:
-        mode = config.load().sort
-    assets = library.assets(mode) if library.configured() else []
-    return {"ok": True, "sort": mode, "total": len(assets),
-            "items": [[asset.asset_id, asset.filename, store_module.version_of(asset)] for asset in assets]}
-
-
-async def _library(request: typing.Any) -> typing.Any:
+def _library(request: typing.Any) -> typing.Any:
     """The picture index, as its own route.
 
     NOT AN EXTENSION OF ``/send``: that one already has two jobs - prepare a
@@ -315,16 +299,17 @@ async def _library(request: typing.Any) -> typing.Any:
     policy and a different meaning when it fails. A send that fails is a
     picture that did not move; an index that fails is a page that keeps the
     tiles it has and says the library could not be re-read.
+
+    Not ``async``, for the archive listing's reason: with ``refresh`` it reads
+    the folder, which hashes every file it has not seen, and that is a
+    thread's work, not the event loop's - which is every other request on
+    this server.
     """
     if not _signed_in(request):
         return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
     params = request.query_params
     try:
-        if str(params.get("every") or "") in ("1", "true", "yes"):
-            answer = library_order(params.get("sort"))
-        else:
-            answer = library_page(params.get("sort"), params.get("page"), params.get("size"), params.get("selected"),
-                                  str(params.get("refresh") or "") in ("1", "true", "yes"))
+        answer = library_listing(params.get("sort"), str(params.get("refresh") or "") in ("1", "true", "yes"))
     except Exception as error:
         scrub.console(f"the library index could not be read ({type(error).__name__}).", _LOG_PREFIX)
         return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
@@ -554,7 +539,8 @@ async def _queue(request: typing.Any) -> typing.Any:
 
 
 def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
-    """One page of what WanGP made for this tab, newest first.
+    """One page of what WanGP made, newest first: every video in its output
+    folder, and what it made for this tab's requests (``outputs.gallery``).
 
     The same shape and the same page size as the picture index, because it
     is the same pager drawing it: a gallery that counted its pages
@@ -570,7 +556,7 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
     when neither exists - and the gallery says so rather than offering a
     button that would do nothing.
     """
-    listed = outputs.files()
+    listed = outputs.gallery()
     wanted = clamp_size(size)
     total = len(listed)
     pages = max(1, -(-total // wanted))
@@ -603,10 +589,10 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
         status = "WanGP has no output folder here yet. Launch it once, or set the folder in Clipboard's settings."
     elif not total:
         reason = "empty"
-        status = "Nothing yet. A video appears here after WanGP finishes a request made from this tab."
+        status = "Nothing yet. A video appears here once WanGP has written one to its output folder."
     else:
         reason = ""
-        status = f"{total} output{'s' if total != 1 else ''} from this tab."
+        status = f"{total} output{'s' if total != 1 else ''} in WanGP's output folder, newest first."
     return {
         "ok": True,
         "total": total,
@@ -627,6 +613,11 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
                 # because a match is not a fact and pretending otherwise is
                 # how a user comes to trust the wrong video.
                 "exact": item["exact"],
+                # "request" for a file WanGP made for one of this tab's
+                # requests, "folder" for every other video in its output
+                # folder - which has no request to match or to load, so
+                # nothing about it is marked as a guess.
+                "source": item.get("source") or "request",
                 # The prompt as it was typed - what Load puts back - and the
                 # one an enhancement wrote from it, which is what WanGP got.
                 "prompt": str(facts["prompt"])[:400],
@@ -752,6 +743,36 @@ def _output_file(request: typing.Any) -> typing.Any:
                         "Content-Range": f"bytes {start}-{start + len(data) - 1}/{size}",
                         "Content-Length": str(len(data)),
                     }))
+
+
+def _output_settings(request: typing.Any) -> typing.Any:
+    """A reference handoff for one output, for View Outputs' Send to WanGP.
+
+    The browser holds an output's opaque id and nothing else; the bridge inside
+    WanGP reads the file's settings through WanGP's own loader. Between the
+    two goes a note in the handoff root naming the file (``handoff
+    .write_reference``), and the browser is given its id - 32 hex characters
+    that name nothing - to hand the WanGP page. Only a file WanGP's loader
+    reads settings from is offered: an MP4, MKV or MOV video, or a picture.
+
+    Not ``async``: it writes a file, and the note is written whole or not at
+    all, which is a write the event loop should not wait on.
+    """
+    from ..wangp import handoff, protocol as wangp_protocol
+
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    path = outputs.path_of(request.path_params.get("file_id", ""))
+    if path is None:
+        return _json({"ok": False, "code": errors.CLIPBOARD_ASSET_UNKNOWN, "message": "That output is no longer there."}, 404)
+    if not path.name.lower().endswith(wangp_protocol.SETTINGS_FILE_SUFFIXES):
+        return _json({"ok": False, "code": errors.OUTPUT_NO_SETTINGS, "message": errors.message(errors.OUTPUT_NO_SETTINGS)}, 409)
+    try:
+        handoff_id = handoff.write_reference(path)
+    except Exception as error:
+        scrub.console(f"a settings reference could not be written ({type(error).__name__}).", _LOG_PREFIX)
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    return _json({"ok": True, "handoff_id": handoff_id})
 
 
 async def _enhance_settings(request: typing.Any) -> typing.Any:
@@ -1228,6 +1249,7 @@ def install(app: typing.Any) -> None:
             Route(PROMPTS_ROUTE, endpoint=_prompts, methods=["GET", "POST"]),
             Route(OUTPUTS_ROUTE, endpoint=_outputs, methods=["GET"]),
             Route(OUTPUT_FILE_ROUTE, endpoint=_output_file, methods=["GET", "HEAD"]),
+            Route(OUTPUT_SETTINGS_ROUTE, endpoint=_output_settings, methods=["POST"]),
             Route(IMPORT_ROUTE, endpoint=_import, methods=["POST"]),
             Route(SEND_ROUTE, endpoint=_send, methods=["POST"]),
             Route(INTERCEPT_ROUTE, endpoint=_intercept, methods=["POST"]),
@@ -1259,5 +1281,5 @@ __all__ = ["ARCHIVES_ROUTE", "ARCHIVE_IMAGE_ROUTE", "ARCHIVE_LIST_ROUTE", "AUTO_
            "INTERCEPT_ROUTE", "INTERCEPT_SENTENCES", "LIBRARY_ROUTE", "PAGE_SIZE",
            "PAGE_SIZE_MAX", "PAGE_SIZE_MIN", "REVALIDATED_CACHE", "ROUTE_PREFIX",
            "SEND_ROUTE", "SETTINGS_ROUTE", "QUEUE_ROUTE", "READINESS_ROUTE", "ENHANCE_SETTINGS_ROUTE", "PROMPTS_ROUTE", "REQUEST_MEMORY_SECONDS",
-           "apply_settings", "archive_image_url", "archives_action", "archives_answer", "auto_sentence", "clamp_size", "forget_request", "image_url", "install", "intercept_action", "library_page",
+           "apply_settings", "archive_image_url", "archives_action", "archives_answer", "auto_sentence", "clamp_size", "forget_request", "image_url", "install", "intercept_action", "library_listing",
            "menu_facts", "page_of", "prompts_action", "recent_request", "remember_request"]

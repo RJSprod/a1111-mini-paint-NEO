@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.16.0"
+BRIDGE_VERSION = "1.17.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -165,6 +165,18 @@ GALLERY_TAB = "gallery_tab"
 #: snapshot a server-side compose reads. Writing it is therefore how a page
 #: hands its live settings to a job that will run with no page at all.
 SAVE_FORM_TRIGGER = "save_form_trigger"
+#: Bridge 1.17.0, a file's settings loaded into the page: what WanGP's own
+#: "Load Settings From Media File" writes once ``load_settings_from_file`` has
+#: put the settings in the page's state - ``refresh_form_trigger`` to fill the
+#: form again for the same model, ``model_choice_target`` to switch to the
+#: file's model, whose switch fills the form - and the main tabs, so the form
+#: they land in is the one on screen.
+REFRESH_FORM_TRIGGER = "refresh_form_trigger"
+MODEL_CHOICE_TARGET = "model_choice_target"
+MAIN_TABS = "main_tabs"
+#: The main tab the generator form is in. WanGP has called it ``media_gen``
+#: since before 13.14; v19 maps an older plugin's ``video_gen`` onto it.
+MEDIA_TAB_ID = "media_gen"
 
 # VERIFY ON A REAL INSTALL (section 49.1): every elem_id below was taken from
 # WanGP's documented media-input naming and from the receiver example in
@@ -312,6 +324,16 @@ COMPONENTS: typing.Tuple[ComponentSpec, ...] = (
     # own post-processing buttons write ``generate_trigger`` to start a run.
     ComponentSpec(key=SAVE_FORM_TRIGGER, candidates=("save_form_trigger",), kind="text", mandatory=False,
                   known_for="Wan2GP: hidden gr.Text; its change commits the live form process-wide"),
+    # Bridge 1.17.0. Read against Wan2GP v19 (ee20770): ``settings_file.upload``
+    # runs validate_wizard_prompt -> save_inputs -> load_settings_from_file,
+    # whose outputs are exactly these two (and the file box). Both are hidden
+    # locals of generate_media_tab; ``main_tabs`` is its parameter.
+    ComponentSpec(key=REFRESH_FORM_TRIGGER, candidates=("refresh_form_trigger",), kind="text", mandatory=False,
+                  known_for="Wan2GP: hidden gr.Text; its change fills the form again from the page's state"),
+    ComponentSpec(key=MODEL_CHOICE_TARGET, candidates=("model_choice_target",), kind="text", mandatory=False,
+                  known_for="Wan2GP: hidden gr.Text; 'model|time' switches the page to that model"),
+    ComponentSpec(key=MAIN_TABS, candidates=("main_tabs",), kind="tabs", mandatory=False,
+                  known_for="Wan2GP: the main gr.Tabs (generate_media_tab's parameter); selected='media_gen' shows the form"),
 )
 
 COMPONENTS_BY_KEY = {spec.key: spec for spec in COMPONENTS}
@@ -381,6 +403,9 @@ GLOBALS: typing.Tuple[str, ...] = (
     # the pictures opened as images - so a job is checked exactly as WanGP
     # would check it when it queued it, with nothing queued.
     "validate_task", "_extract_model_type", "_task_has_path_attachments", "_load_task_attachments",
+    # Bridge 1.17.0: WanGP's own loader of a file's settings - a video's, a
+    # picture's - into a page's state, which its Load Settings box calls.
+    "load_settings_from_file",
 )
 
 #: The exact Wan2GP revision the protocol-6 control plane was proven against.
@@ -430,6 +455,36 @@ SERVICE_HOLDERS: typing.Tuple[str, ...] = ("__main__", "wgp", SERVICE_MODULE)
 #: not a re-implementation of the chain around it.
 INLINE_QUEUE_KEY = "inline_queue"
 LOAD_QUEUE_COMMAND = "load_queue_trigger"
+#: WanGP's own discipline for that slot, since Wan2GP 9905f0d (2026-10-26),
+#: and what bridge 1.17.0 follows. The slot holds ONE submission until the
+#: queue loader takes it, so WanGP's own API sessions hold this lock while
+#: they wait for the slot to be empty and fill it - ``_INLINE_QUEUE_LOCK`` in
+#: ``shared.api_webui``, looked up in ``sys.modules`` and never imported - and
+#: then admit the entry through the service's ``load_inline_queue``: "Admit
+#: API submissions into the live queue without a browser request or waiting
+#: for running work". ``LOAD_QUEUE_COMMAND`` is the older way in, and on a
+#: run the command itself started it waits for that whole run before the
+#: loader looks at the slot (``_run_generation_command`` holds the service's
+#: generation lock across ``worker.join()``), so a second submission sat in
+#: the slot unloaded and a third one overwrote it. The command stays as the
+#: way in for a WanGP from before the admitter, which never has the slot
+#: overwritten either: a slot still full is refused as busy, before anything
+#: is recorded, and Forge tries again.
+INLINE_QUEUE_LOCK_MODULE = "shared.api_webui"
+INLINE_QUEUE_LOCK_NAME = "_INLINE_QUEUE_LOCK"
+#: How long WanGP's own API waits for the slot (its
+#: ``_INLINE_QUEUE_SLOT_TIMEOUT_SECONDS``), used only where the admitter
+#: empties the slot at once - behind the old command a full slot can stay
+#: full for a whole generation, and nothing should wait on that here.
+INLINE_SLOT_TIMEOUT_SECONDS = 10.0
+INLINE_SLOT_POLL_SECONDS = 0.05
+#: The service's two entry points: admit what is in the slot, and start a
+#: worker if none is running and the queue holds something.
+SERVICE_ADMIT = "load_inline_queue"
+SERVICE_START = "start_generation"
+#: The lock the bridge's own submissions share when WanGP's is not loaded,
+#: so two of them at least never write the slot over each other.
+_OWN_INLINE_QUEUE_LOCK = threading.Lock()
 #: Plugin state, which travels BESIDE a task's params and never inside them.
 #: Wan2GP's queue entries are ``{id, params, plugin_data, ...}``; its unpacker
 #: reads this key off the manifest entry, and its worker passes what it finds
@@ -1154,8 +1209,15 @@ class Compatibility:
         ordering to keep in step.
         """
         keys = (PROMPT, WIZARD_PROMPT, CLIENT_ID, ADD_TO_QUEUE_TRIGGER, GENERATE_TRIGGER,
-                SAVE_FORM_TRIGGER)
+                SAVE_FORM_TRIGGER, REFRESH_FORM_TRIGGER, MODEL_CHOICE_TARGET, MAIN_TABS)
         return [(key, self.resolution.component(key)) for key in keys if self.resolution.component(key) is not None]
+
+    def settings_loadable(self) -> bool:
+        """Whether this build can load a file's settings into a page: WanGP's
+        loader handed over, and both triggers its answer is written to."""
+        return (callable(self.host.read_global("load_settings_from_file"))
+                and self.resolution.component(REFRESH_FORM_TRIGGER) is not None
+                and self.resolution.component(MODEL_CHOICE_TARGET) is not None)
 
     def queue_missing(self) -> typing.List[str]:
         """The queue-critical components this build did not hand over."""
@@ -1499,6 +1561,28 @@ class Compatibility:
         except Exception:
             return None
         return found if isinstance(found, dict) else None
+
+    def inline_queue_lock(self) -> typing.Any:
+        """The lock WanGP's own submissions hold while they use the inline
+        slot (see ``INLINE_QUEUE_LOCK_NAME``), or the bridge's own when this
+        WanGP has none loaded. Anything without ``acquire`` and ``release`` is
+        not a lock to hold, whatever it is called."""
+        import sys
+
+        module = sys.modules.get(INLINE_QUEUE_LOCK_MODULE)
+        found = getattr(module, INLINE_QUEUE_LOCK_NAME, None) if module is not None else None
+        if found is not None and callable(getattr(found, "acquire", None)) and callable(getattr(found, "release", None)):
+            return found
+        return _OWN_INLINE_QUEUE_LOCK
+
+    def service_entry(self, service: typing.Any, name: str) -> typing.Optional[typing.Callable[[], typing.Any]]:
+        """``SERVICE_ADMIT`` or ``SERVICE_START`` on this service, when it has
+        it as something callable, else None - a WanGP from before 2026-10-26
+        has no admitter, and the caller then takes the command's way in."""
+        if service is None or name not in (SERVICE_ADMIT, SERVICE_START):
+            return None
+        found = getattr(service, name, None)
+        return found if callable(found) else None
 
     def service_generation_running(self, service: typing.Any) -> typing.Optional[bool]:
         """Whether the one worker exists, from the thread handle rather than a flag.
@@ -2071,9 +2155,21 @@ class Compatibility:
     def current_model_type(self, service: typing.Any = None) -> str:
         """The model this child is on, with no page to ask.
 
-        Read off the shared state where there is one, then off the injected
-        global. Empty is a real answer - a child nobody has chosen a model in
-        - and the caller composes for the model the job named instead.
+        Read off the shared state where there is one, then off WanGP's own
+        record of the last model chosen, then off the injected global. Empty
+        is a real answer - a child nobody has chosen a model in - and the
+        caller composes for the model the job named instead.
+
+        WHERE WANGP ACTUALLY KEEPS IT. ``server_config["last_model_type"]``,
+        written by WanGP every time a page switches model (``change_model``)
+        and read back at start to choose the model it opens on - the one
+        process-wide record of it there is. The shared generation record has
+        never carried a model (the two keys below are read for a build that
+        might), and the ``model_type`` global was only ever a loop variable
+        of wgp.py's that a default install never bound and that 2026-10-25
+        removed: until bridge 1.17.0 this answered "" on every real WanGP.
+        A page's own model is ``page_model``'s answer, and is preferred
+        wherever there is a page to ask.
         """
         gen = self.shared_gen(service)
         if isinstance(gen, dict):
@@ -2081,6 +2177,11 @@ class Compatibility:
                 found = gen.get(key)
                 if isinstance(found, str) and found:
                     return found
+        config = self.host.read_global("server_config")
+        if isinstance(config, dict):
+            found = config.get("last_model_type")
+            if isinstance(found, str) and found:
+                return found
         found = self.host.read_global("model_type")
         return found if isinstance(found, str) else ""
 
@@ -2433,6 +2534,11 @@ class Compatibility:
                 # wizard's is read only while the wizard is on - so a build
                 # that did not hand it over says no.
                 "prompt_edit": bool(ready and self.resolution.component(PROMPT) is not None),
+                # Bridge 1.17.0: SETTINGS_REQUEST. A file's settings loaded into
+                # the page through WanGP's own loader, for View Outputs' Send
+                # to WanGP. It needs the loader and both of the triggers the
+                # loader's answer is written to.
+                "settings_load": bool(ready and self.settings_loadable()),
             },
             # Live, and process-wide: true while any page's generation runs,
             # false when none does, None when this build cannot say.

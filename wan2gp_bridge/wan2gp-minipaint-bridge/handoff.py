@@ -29,7 +29,9 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import io
+import json
 import os
+import stat
 import pathlib
 import typing
 
@@ -124,6 +126,71 @@ def resolve(handoff_id: typing.Any, environ: typing.Optional[typing.Mapping[str,
     if not resolved.is_file():
         raise compatibility.BridgeError(compatibility.HANDOFF_INVALID_IMAGE, "the handoff is not a regular file")
     return resolved
+
+
+# ------------------------------------------------- reference handoffs (1.17.0) --
+#
+# A note Forge writes, under an id of the same grammar and a suffix of its own,
+# naming one file WanGP wrote - for View Outputs' Send to WanGP, which loads
+# that file's settings into the page. A video is hundreds of megabytes and is
+# not copied to be read, so what crosses is the note; the browser still sends
+# nothing but the id. The note is read the way a picture is: the id required
+# rather than repaired, the path built here, the file a regular one inside the
+# root once followed, and small. What it names is checked as well - absolute,
+# a regular file and not a link, one of the kinds WanGP's loader reads - and
+# is then handed to that loader, which only reads it.
+
+
+def reference_path_for(handoff_id: typing.Any, environ: typing.Optional[typing.Mapping[str, str]] = None) -> pathlib.Path:
+    """``root/<id>.ref.json``, for an id that is already known to be well formed."""
+    if not protocol.valid_handoff_id(handoff_id):
+        raise compatibility.BridgeError(compatibility.HANDOFF_INVALID_ID, "a handoff id is 32 lowercase hex characters")
+    return handoff_root(environ) / (str(handoff_id) + protocol.HANDOFF_REFERENCE_SUFFIX)
+
+
+def resolve_reference(handoff_id: typing.Any, environ: typing.Optional[typing.Mapping[str, str]] = None) -> pathlib.Path:
+    """The file a reference handoff names, having proved the note is ours and
+    the file is one WanGP's settings loader may read."""
+    note_path = reference_path_for(handoff_id, environ)
+    root = handoff_root(environ)
+    try:
+        info = os.lstat(note_path)
+    except FileNotFoundError:
+        raise compatibility.BridgeError(compatibility.HANDOFF_NOT_FOUND, "the reference is no longer there")
+    except OSError as error:
+        # The type alone: an OSError's text carries the path, and this detail
+        # is printed in WanGP's console.
+        raise compatibility.BridgeError(compatibility.HANDOFF_NOT_FOUND, f"the reference could not be looked at: {type(error).__name__}")
+    if not stat.S_ISREG(info.st_mode):
+        raise compatibility.BridgeError(compatibility.HANDOFF_INVALID_ID, "the reference is not a regular file")
+    if info.st_size > protocol.MAX_REFERENCE_BYTES:
+        raise compatibility.BridgeError(compatibility.HANDOFF_INVALID_ID, "the reference is larger than any Forge writes")
+    try:
+        if note_path.resolve().parent != root.resolve():
+            raise compatibility.BridgeError(compatibility.HANDOFF_INVALID_ID, "the reference resolves outside its root")
+        with open(note_path, "rb") as handle:
+            note = json.loads(handle.read(protocol.MAX_REFERENCE_BYTES + 1).decode("utf-8"))
+    except compatibility.BridgeError:
+        raise
+    except (OSError, ValueError) as error:
+        raise compatibility.BridgeError(compatibility.HANDOFF_INVALID_ID, f"the reference could not be read: {type(error).__name__}")
+    named = note.get("path") if isinstance(note, dict) else None
+    if not isinstance(named, str) or not named or "\0" in named:
+        raise compatibility.BridgeError(compatibility.HANDOFF_INVALID_ID, "the reference names no file")
+    target = pathlib.Path(named)
+    if not target.is_absolute():
+        raise compatibility.BridgeError(compatibility.HANDOFF_INVALID_ID, "the reference names a relative path")
+    if target.suffix.lower() not in protocol.SETTINGS_FILE_SUFFIXES:
+        raise compatibility.BridgeError(compatibility.HANDOFF_INVALID_ID, "the reference names a kind of file WanGP reads no settings from")
+    try:
+        found = os.lstat(target)
+    except FileNotFoundError:
+        raise compatibility.BridgeError(compatibility.HANDOFF_NOT_FOUND, "the file the reference names is no longer there")
+    except OSError as error:
+        raise compatibility.BridgeError(compatibility.HANDOFF_NOT_FOUND, f"the file the reference names could not be looked at: {type(error).__name__}")
+    if not stat.S_ISREG(found.st_mode):
+        raise compatibility.BridgeError(compatibility.HANDOFF_INVALID_ID, "the file the reference names is not a regular file")
+    return target
 
 
 def pixel_digest(image: typing.Any) -> str:

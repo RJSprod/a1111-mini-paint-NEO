@@ -700,19 +700,25 @@ ones answer bytes and a revalidated cache header instead). They exist because ev
 one of this tab's events was a request with a response and none was ever a
 push: what made them fragile was the transport, not the interaction.
 
-    GET  /minipaint-clipboard/library?sort&page&size&selected&refresh
-      -> {ok, revision: "<epoch>:<n>", configured, sort, total, page, pages, size,
-          selected_page, reason: ""|"empty"|"unconfigured", status,
-          items: [{id, name, w, h, bytes, v}]}
+    GET  /minipaint-clipboard/library?sort&refresh
+      -> {ok, revision: "<epoch>:<n>", configured, sort, total, left_out,
+          reason: ""|"empty"|"unconfigured", status,
+          items: [[id, name, bytes, v, w, h], ...]}
 
-`routes.library_page(sort, page, size, selected, refresh)` is the whole of it;
-the route is a signed-in wrapper. **Sorting is applied over the whole library
-and then sliced** — `store.assets(sort)` already returns the complete ordered
-list, so this is a slice of work the store does correctly rather than a second
-ordering to keep in step. Bad input is answered, never refused: an unknown
-sort falls back to the stored one, a page past the end returns the last page
-that exists, a size outside `PAGE_SIZE_MIN..PAGE_SIZE_MAX` is clamped.
-`PAGE_SIZE = 60`. `refresh=1` re-reads the folder first.
+`routes.library_listing(sort, refresh)` is the whole of it; the route is a
+signed-in wrapper, and not `async`, because `refresh=1` reads the folder again
+first and hashes what it has not seen. **The whole storage folder in one
+answer, not a page of it**, at the user's word ("i prefer the way archive
+loads, which is not pages") - the archive listing's shape, its
+`[key, name, bytes, version]` in the same first four places, so the browser
+draws both with one renderer. The order is `store.assets(sort)`'s, the
+complete ordered list the store already keeps, not a second ordering to keep
+in step. An unknown sort falls back to the stored one. Past
+`archives.LISTING_LIMIT` (100 000) the listing stops and `left_out` and the
+status say how many it left out. The paged form (`page`, `size`, `selected`,
+`selected_page`) and the full-screen view's `every=1` form are gone: the
+browser finds a selection and steps through the folder in the listing it
+holds, and nothing outside the tab's own bundle asked for either.
 
 `revision` is the **library's own** generation (`Store.revision()`), not
 `events.revision()`: job, enhancement, runtime and WanGP events move that one
@@ -793,6 +799,10 @@ through so the server can reconcile roles without a call into the child.
          404 {ok: false, code: REQUEST_INVALID, message, entries, max} for a prompt no longer in the list; 400 for any other action
     GET  /minipaint-clipboard/output/{file_id}     (also HEAD)
       -> the bytes, or 206 + Content-Range for a Range request
+    POST /minipaint-clipboard/output/{file_id}/settings   (a plain def: it writes a file)
+      -> {ok, handoff_id}: a reference note naming that output for the bridge's settings load (bridge 1.17.0);
+         404 CLIPBOARD_ASSET_UNKNOWN for an id that is no output, 409 OUTPUT_NO_SETTINGS for a file WanGP reads no
+         settings from (not in protocol.SETTINGS_FILE_SUFFIXES), 500 INTERNAL_ERROR if the note could not be written
 
 `Accept-Ranges: bytes` is on every answer and **206 is the point of the
 route**: a `<video>` served without ranges plays but cannot seek, so the
@@ -898,11 +908,11 @@ class Store:
 # import_bytes / import_image / rename / delete / set_root / a refresh that found a difference all call moved()
 
 # routes.py
-LIBRARY_ROUTE; SETTINGS_ROUTE; QUEUE_ROUTE; READINESS_ROUTE; ENHANCE_SETTINGS_ROUTE; OUTPUTS_ROUTE; OUTPUT_FILE_ROUTE; PAGE_SIZE = 60; PAGE_SIZE_MIN = 10; PAGE_SIZE_MAX = 250
+LIBRARY_ROUTE; SETTINGS_ROUTE; QUEUE_ROUTE; READINESS_ROUTE; ENHANCE_SETTINGS_ROUTE; OUTPUTS_ROUTE; OUTPUT_FILE_ROUTE; PAGE_SIZE = 60; PAGE_SIZE_MIN = 10; PAGE_SIZE_MAX = 250   # the page sizes are View Outputs' now
 # READINESS_ROUTE = /minipaint-clipboard/readiness: POST {model, fresh} -> {ok: true, readiness: targets.readiness(...)} - a blocked answer is an answer.
 # The queue route's add and auto, the readiness route and every intercept action run on the thread pool: each may ask the WanGP bridge, over a socket.
 IMMUTABLE_CACHE; REVALIDATED_CACHE; RANGE_CHUNK = 4 MiB
-def library_page(sort, page, size, selected="", refresh=False) -> dict; def apply_settings(changes) -> dict
+def library_listing(sort="", refresh=False) -> dict; def apply_settings(changes) -> dict    # the whole storage folder, [id, name, bytes, v, w, h] each
 AUTO_NONE_SENTENCE; def auto_sentence(roles) -> "Auto now sends the picture as First Frame and Reference."
 def outputs_page(page=0, size=PAGE_SIZE) -> dict                                      # the gallery; syncs the ledger first; prompt, written and model from each
                                                                                       # entry's recipe, else joined on from its Queue Send History record
@@ -921,6 +931,9 @@ def sync()                                                                      
                                                                                       # and give every entry without a recipe its job's, while the job is still in the queue
 def files(refresh=True) -> [{id, name, kind, size, at, job_id, request_id, exact, model, recipe}]   # newest first; a file that has left the disk is dropped
 def entry_for_file(file_id) -> {job_id, request_id, model, recipe} | None             # facts about the request behind an output; never its path
+def gallery(refresh=True) -> [files()' items + {source: "request"}, and {id: "wf"+16 hex, ..., source: "folder"}]
+                                                                                      # what View Outputs lists: the ledger's files and every other video under the folder,
+                                                                                      # each once, newest first; a walk stops at FOLDER_SCAN_MAX files; a link is not listed
 def path_of(file_id) -> Path | None                                                   # the only place an id becomes a path
 def forget_all() -> int; def use_clock(clock); def reset_for_tests()
 # An entry: {entry_id, job_id, request_id, opened_at, closed_at, floor, exact, model, recipe | None, files: [{file_id, path, name, size, at}]}
@@ -1019,10 +1032,15 @@ why an unapplied edit does not survive a close and re-open.
 The tab's browser side, `browser/minipaint_clipboard.js`
 (`window.minipaintClipboard`): `attach` (mounts the grid, fetches the library
 and the queue, listens for `minipaint:outbox`, pumps once so a reloaded page
-resumes its jobs), `library(options)` / `goToPage` / `setSort` (the grid, its
-pager and the sort, over the index route; only the newest answer draws, and a
-LIBRARY event makes the page re-ask rather than apply a delta),
-`libraryState()`, `addToQueue(prompt, switch)`, `cancelAll`, `refreshQueue`,
+resumes its jobs), `library(options)` / `setSort` (the grid's listing - the
+storage folder whole over the index route, or the archive on screen over its
+own - and the sort; only the newest answer draws, nothing moves until it
+does, and a change makes the page re-ask rather than apply a delta; the tiles
+are placed by the script, only the rows near the view are in the document,
+and the thumbnails are asked for in view first, three at a time, each with a
+deadline, dropped when the view moves on), `libraryState()` and `gridState()`
+(the listing, and what its loader is doing), `addToQueue(prompt, switch)`,
+`cancelAll`, `refreshQueue`,
 `queue(instruction)` (→ `minipaintInterop.wangp.pump()`), `pump`, `pageId`,
 `modelJson`, `afterRender`, `toggleMenu`, `select`, `setThumbnailSize` (sizes
 now, remembers shortly, over `/settings`), `pasteFromClipboard`,
@@ -1039,7 +1057,7 @@ Sort and Send flyouts: the same list the menu's own sections draw, anchored
 under the button that asked and standing alone, so no Back row and a second
 press closes it), `openOutputs` / `closeOutputs` / `askOutputs(page)` (the
 gallery: the stage, the filmstrip, tap-to-hide the controls, and a pager at
-the grid's own 60 - `closeOutputs` clears the player's `src`, because a
+60 (`routes.PAGE_SIZE`) - `closeOutputs` clears the player's `src`, because a
 `<video>` left with a source keeps downloading the largest file this
 extension touches), `openPromptEditor` / `closePromptEditor`
 (the full-window system-prompt view: the class, the Escape key, the focus, and

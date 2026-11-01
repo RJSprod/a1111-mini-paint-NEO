@@ -397,6 +397,32 @@ the press in WanGP's words, and one whose settings are not the ones on screen
 says so (`outbox.settings_warning`); `docs/wangp/SERVER_EXECUTION.md` §4 has all
 of it.
 
+**A test that plants what the code reads proves only the code.** In every bridge
+before 1.17.0 (the flush arrived in 1.6.4), each save of WanGP's form keyed on
+`current_model_type()`, which read `gen["model_type"]` - a key WanGP has never
+written - and then a module global that only a non-default install ever bound,
+until WanGP stopped binding it on 2026-10-25; so on a real WanGP every flush
+answered `unavailable` and saved nothing, and every Clipboard and gallery send
+ran at the form WanGP had last saved by itself: the "last run settings" the user
+reported. The checks passed throughout because each fixture planted
+`gen["model_type"]` itself. Bridge 1.17.0 keys the save on the page's own model,
+the key WanGP's `save_inputs` records under (`get_state_model_type`); the
+fixtures no longer plant the key. Before a fixture hands the bridge a value,
+find the line in WanGP that writes it (`docs/wangp/SERVER_EXECUTION.md` §8 cites
+them); a value no WanGP line writes is a test of the fixture.
+
+**WanGP's queue command waits out the run it starts.** The `load_queue_trigger`
+command holds the service's generation lock for the whole run it starts
+(`shared/deepy/service.py`, `_run_generation_command`), so a second job written
+into the inline slot while a bridge-started job generated sat there - reported
+as never having reached WanGP's queue - and a third written into the same slot
+replaced it. Since 1.17.0 the bridge does what WanGP's own API does (since Wan2GP
+`9905f0d`): under `shared.api_webui._INLINE_QUEUE_LOCK`, only into an empty slot,
+`QUEUE_BUSY` before the ledger records anything when it stays full, admitted
+with the service's `load_inline_queue`, which joins a running generation. Cancel
+is deliberately not part of this: it ends Forge's jobs and never touches WanGP's
+queue, because the user queues there by hand too.
+
 **Check before you store.** Storing a server job wakes the executor's thread,
 which takes a lone job on at once - composed and handed to WanGP within the
 same moment. Anything that must decide whether a job may exist (the check at
@@ -736,7 +762,16 @@ instance and has been checked against a fake service, never against the user's W
 a press says *Not the settings on WanGP's screen* and the page journal's `flush:` line says
 "WanGP did not save its form within", WanGP's console's `flush:` lines - each with the count
 - are the first thing to look at (a count that never moves is a WanGP whose save never
-reaches the service the bridge wrapped). The
+reaches the service the bridge wrapped). Bridge 1.17.0 is the first whose saves can land
+at all (the trap above), joins a job to WanGP's running generation through
+`load_inline_queue`, and loads a video's settings into the page for View Outputs' Send to
+WanGP through WanGP's own `load_settings_from_file`; all three were read against Wan2GP v19
+(ee20770) and run only against stand-ins, never the user's WanGP. If a send still says *Not
+the settings on WanGP's screen*, WanGP's console's `flush:` lines say whether the save ran;
+if a second job is reported as never reaching WanGP's queue, its `queue` lines and a
+`QUEUE_BUSY` in Forge's journal are the first things to look at; and if Send to WanGP opens
+the WanGP tab without the video's settings, WanGP's console's `settings:` line says what the
+bridge loaded and for which model. The
 prompt box has been checked against a fake of the bridge's event and a stand-in
 of WanGP's page, never against the user's own WanGP: if a typed prompt does not
 reach WanGP's box, the WanGP console's `prompt: written` line (or its absence)

@@ -719,6 +719,193 @@ async def deepy_checks(r: Results) -> None:
         proxy._state["deepy_form"] = None
 
 
+class WebAppClient:
+    """A Wan2GP v19 child with a plugin's web app mounted on it.
+
+    Showrunner's app answers only with our prefix left on (``rooted``), like
+    Deepy's; v19's navigation middleware answers the app's folder address -
+    its full-screen page, which is the Gradio page - either way; and the
+    child's own Gradio routes answer either way, because Starlette strips a
+    root path before it matches. ``missing`` is a path nothing answers.
+    """
+
+    def __init__(self, broken=False):
+        self.paths = []
+        self.methods = []
+        self.broken = broken
+
+    def build_request(self, method, url, headers=None, content=None, timeout=None):
+        self.paths.append(str(httpx.URL(url).raw_path.decode("latin-1")))
+        self.methods.append(method)
+        return httpx.Request(method, url, headers=headers)
+
+    async def send(self, request, stream=False, follow_redirects=False):
+        raw = str(request.url.raw_path.decode("latin-1"))
+        path, _, query = raw.partition("?")
+        if self.broken:
+            return httpx.Response(500, headers=[("content-type", "text/plain")], content=b"inside")
+        bare = path[len(proxy.PROXY_PATH):] if path.startswith(proxy.PROXY_PATH + "/") else path
+        if bare.startswith("/showrunner/") and "missing" not in bare:
+            if "embedded=1" not in query and bare == "/showrunner/":
+                return httpx.Response(200, headers=[("content-type", "text/html")], content=b"gradio page")
+            if path.startswith(proxy.PROXY_PATH + "/showrunner/"):
+                return httpx.Response(200, headers=[("content-type", "text/html")], content=b"showrunner")
+        if bare in ("/", "/config") or bare.startswith("/gradio_api/queue"):
+            return httpx.Response(200, headers=[("content-type", "application/json")], content=b"{}")
+        return httpx.Response(404, headers=[("content-type", "text/plain")], content=b"Not Found")
+
+
+async def web_app_address_checks(r: Results) -> None:
+    """Why a plugin's web app needs our prefix kept: Starlette's fact again.
+
+    Wan2GP v19 mounts each plugin's web app on its Gradio app exactly as it
+    mounts Deepy (``app.mount(path, factory())``), so the same two moving
+    parts give the same answer, asserted against Starlette rather than
+    reasoned about.
+    """
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+
+    child = Starlette(routes=[Route("/", lambda request: PlainTextResponse("showrunner")),
+                              Route("/api/state", lambda request: PlainTextResponse("state"))])
+    parent = Starlette(routes=[Route("/config", lambda request: PlainTextResponse("gradio"))])
+    parent.mount("/showrunner", child)
+    r.check("under GRADIO_ROOT_PATH a plugin's mounted app answers 404 to the address we used to send",
+            await asgi_status(parent, "/showrunner/api/state", proxy.PROXY_PATH) == 404)
+    r.check("and answers with our prefix left on",
+            await asgi_status(parent, "/wan2gp/showrunner/api/state", proxy.PROXY_PATH) == 200)
+    r.check("while the child's own routes answer either way, so keeping it on costs nothing there",
+            await asgi_status(parent, "/wan2gp/config", proxy.PROXY_PATH) == 200
+            and await asgi_status(parent, "/config", proxy.PROXY_PATH) == 200)
+
+    r.check("a segment is one WanGP would let a plugin mount an app at",
+            proxy.web_app_segment("/showrunner/api/state") == "showrunner"
+            and proxy.web_app_segment("/media-flow/") == "media-flow"
+            and proxy.web_app_segment("/showrunner") == "showrunner")
+    r.check("and never the root, a route WanGP reserves from plugins, or a name WanGP would refuse",
+            all(proxy.web_app_segment(path) is None for path in
+                ("/", "", "/gradio_api/queue/join", "/assets/index.js", "/config", "/deepy/x", "/file=/a.png",
+                 "/Showrunner/", "/9lives/", "/theme.css", "relative/x")),
+            str([proxy.web_app_segment(path) for path in ("/theme.css", "/file=/a.png")]))
+
+
+async def web_app_checks(r: Results) -> None:
+    """A plugin's web app is found under our prefix once, and used there.
+
+    Found reading Wan2GP v19: Showrunner's tab is an iframe on
+    ``./showrunner/?embedded=1``, so it reaches this proxy as
+    ``/wan2gp/showrunner/...`` and went on as ``/showrunner/...``, which the
+    mounted app answers 404 to; the tab said "Not Found".
+    """
+    proxy._state["web_apps"] = {}
+    proxy._state["logged"] = set()
+    spy = WebAppClient()
+    proxy.use_client(spy)
+    try:
+        as_ready(PRETEND_PORT)
+        answer = await forwarded(request_for("GET", "/wan2gp/showrunner/", query=b"embedded=1"))
+        r.check("the embedded app's page is found, asked once more with our prefix on after its 404",
+                answer.status_code == 200 and spy.paths == ["/showrunner/?embedded=1", "/wan2gp/showrunner/?embedded=1"],
+                f"{answer.status_code} {spy.paths}")
+        before = len(spy.paths)
+        answer = await forwarded(request_for("GET", "/wan2gp/showrunner/api/state"))
+        r.check("and every request after it goes there first time",
+                answer.status_code == 200 and spy.paths[before:] == ["/wan2gp/showrunner/api/state"], str(spy.paths[before:]))
+        before = len(spy.paths)
+        answer = await forwarded(request_for("POST", "/wan2gp/showrunner/api/state", body=b"{}"))
+        r.check("including the ones with a body, which are never sent twice",
+                spy.paths[before:] == ["/wan2gp/showrunner/api/state"], str(spy.paths[before:]))
+        before = len(spy.paths)
+        answer = await forwarded(request_for("GET", "/wan2gp/showrunner/"))
+        r.check("the app's own full-screen folder address answers there too",
+                answer.status_code == 200 and spy.paths[before:] == ["/wan2gp/showrunner/"], str(spy.paths[before:]))
+
+        before = len(spy.paths)
+        answer = await forwarded(request_for("GET", "/wan2gp/"))
+        await forwarded(request_for("GET", "/wan2gp/config"))
+        r.check("the WanGP page and Gradio's routes are sent exactly as before",
+                spy.paths[before:] == ["/", "/config"], str(spy.paths[before:]))
+        before = len(spy.paths)
+        answer = await forwarded(request_for("GET", "/wan2gp/gradio_api/nothing-here"))
+        r.check("a 404 under a route WanGP reserves is the route's own answer, asked once",
+                answer.status_code == 404 and spy.paths[before:] == ["/gradio_api/nothing-here"], str(spy.paths[before:]))
+    finally:
+        proxy.use_client(None)
+
+    # Nothing is learnt from a success: an app's folder address answers
+    # without our prefix too, and calling that segment bare would break the
+    # embedded app that shares its name.
+    proxy._state["web_apps"] = {}
+    spy = WebAppClient()
+    proxy.use_client(spy)
+    try:
+        as_ready(PRETEND_PORT)
+        await forwarded(request_for("GET", "/wan2gp/showrunner/"))
+        answer = await forwarded(request_for("GET", "/wan2gp/showrunner/", query=b"embedded=1"))
+        r.check("a folder page that answered without the prefix does not stop the app being found after it",
+                answer.status_code == 200 and spy.paths[-1] == "/wan2gp/showrunner/?embedded=1", str(spy.paths))
+    finally:
+        proxy.use_client(None)
+
+    # A segment that answers 404 either way is a missing file or no app at
+    # all: asked twice a few times, then once.
+    proxy._state["web_apps"] = {}
+    spy = WebAppClient()
+    proxy.use_client(spy)
+    try:
+        as_ready(PRETEND_PORT)
+        for _ in range(proxy.WEB_APP_MISSES_MAX):
+            answer = await forwarded(request_for("GET", "/wan2gp/nowhere/x"))
+        before = len(spy.paths)
+        answer = await forwarded(request_for("GET", "/wan2gp/nowhere/x"))
+        r.check("a segment nothing answers under stops costing a second request",
+                answer.status_code == 404 and len(spy.paths) - before == 1
+                and len(spy.paths) == 2 * proxy.WEB_APP_MISSES_MAX + 1, str(spy.paths))
+        answer = await forwarded(request_for("GET", "/wan2gp/showrunner/missing.js"))
+        answer = await forwarded(request_for("GET", "/wan2gp/showrunner/", query=b"embedded=1"))
+        r.check("and a missing file under a real app does not stop the app being found",
+                answer.status_code == 200, str(spy.paths[-3:]))
+    finally:
+        proxy.use_client(None)
+
+    # A 500 is the child's real answer, as for Deepy.
+    proxy._state["web_apps"] = {}
+    spy = WebAppClient(broken=True)
+    proxy.use_client(spy)
+    try:
+        as_ready(PRETEND_PORT)
+        answer = await forwarded(request_for("GET", "/wan2gp/showrunner/", query=b"embedded=1"))
+        r.check("a 500 is handed back as it is, not retried", answer.status_code == 500 and len(spy.paths) == 1, str(spy.paths))
+    finally:
+        proxy.use_client(None)
+
+    # Its event socket follows its page there.
+    remembered = proxy._boundary
+    proxy._boundary = {"ok": True, "coverage": "covered", "mechanisms": ["asgi_middleware"]}
+    opened = []
+
+    @contextlib.asynccontextmanager
+    async def _pretend(url, headers, subprotocols=None):
+        opened.append(str(url))
+        yield None
+
+    real = proxy._connect_upstream
+    proxy._connect_upstream = _pretend
+    try:
+        as_ready(PRETEND_PORT)
+        proxy._state["web_apps"] = {"showrunner": proxy.WEB_APP_ROOTED}
+        await proxy._websocket_endpoint(_Socket("/wan2gp/showrunner/api/events", origin="http://forge.example.test:7860"))
+        proxy._state["web_apps"] = {}
+        await proxy._websocket_endpoint(_Socket("/wan2gp/gradio_api/queue/x", origin="http://forge.example.test:7860"))
+        r.check("a found app's WebSocket goes to the address its page answered at, and WanGP's own as before",
+                opened == [f"ws://127.0.0.1:{PRETEND_PORT}/wan2gp/showrunner/api/events",
+                           f"ws://127.0.0.1:{PRETEND_PORT}/gradio_api/queue/x"], str(opened))
+    finally:
+        proxy._connect_upstream = real
+        proxy._boundary = remembered
+        proxy._state["web_apps"] = {}
+
+
 async def forwarded(request):
     """``forward`` plus the small amount of work a real server would do."""
     response = await proxy.forward(request)
@@ -1147,6 +1334,8 @@ def run() -> Results:
         asyncio.run(websocket_origin_checks(r))
         asyncio.run(deepy_address_checks(r))
         asyncio.run(deepy_checks(r))
+        asyncio.run(web_app_address_checks(r))
+        asyncio.run(web_app_checks(r))
     finally:
         proxy.use_client(None)
         runtime.reset_for_tests()

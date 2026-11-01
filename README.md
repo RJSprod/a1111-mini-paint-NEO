@@ -336,6 +336,10 @@ browser never learns that port: the tab's iframe is `src="/wan2gp/"` — a path 
 origin — and a reverse proxy inside Forge streams both directions with nothing buffered, so
 a long generation's queue events are not cut short and a large upload is not held in
 memory. Its destination comes from the runtime object and from nowhere a request can reach.
+A WanGP plugin's own web app, which WanGP mounts at a path of its own (Showrunner's, since
+Wan2GP v19), is reached through the same proxy: a page there that is not found without the
+`/wan2gp` prefix is asked once more with it, and that path keeps the prefix from then on, its
+WebSockets included.
 Stopping only ever touches the child this extension started, by its own process group or
 Windows job object; nothing is ever killed by name, so a WanGP you started yourself is left
 alone.
@@ -561,15 +565,28 @@ takes an override that is kept across sessions, and restores the default.
 **Cancel everything** empties the whole line - the writer's requests and the pending jobs -
 in one press; jobs already being sent finish, and nothing in WanGP's own queue is touched.
 
-**View Outputs** (under the queue). What WanGP made for this tab's requests, over the whole
-window: the output in a stage with its own controls under it, a filmstrip of everything else,
-paged at 60. The controls are the page's rather than the browser's, so they are the same on
+**View Outputs** (under the queue). Every video in WanGP's output folder - its subfolders
+included, the ones this tab asked for and the ones made in WanGP itself, each once, newest
+first - over the whole window, below the tab bar and never under it: the output in a stage
+with its own controls under it, a filmstrip of everything else, sixty to a page. A video only the
+folder knows has no request behind it, so it has no recipe to Load (below) and is never
+marked as a match; it is listed by an id that names nothing, and the folder is read from its
+directory entries and a stat of each, nothing opened, so a file deleted meanwhile is gone at the
+next look. The controls are the page's rather than the browser's, so they are the same on
 every browser and phone - play and pause (or press the picture), a timeline to scrub
 (the file is served with byte ranges), a frame back and a frame forward, back to the start,
 **loop** (on by default; Android's own player has none), **mute**, **speed** from ¼× to 2×
 and **full screen**, which keeps these controls - and which is the stage's own, so it stacks on
 a page that is already full screen (the Forge Assistant's focus mode makes the whole page full
-screen) and comes off again leaving that one where it was. Loop, mute and speed are remembered. On a
+screen) and comes off again leaving that one where it was. **Send to WanGP**, beside full screen
+(an icon of sliders), loads the video's settings in WanGP and opens the WanGP tab on them: the
+model, the prompt, every setting and the source pictures the video carries, read by WanGP's own
+loader exactly as its *Load Settings From Media File* box reads them - WanGP's form is saved
+first, as that box saves it, and a video of another model switches WanGP to that model. The
+view closes and the WanGP tab opens only once WanGP says it loaded them; a video WanGP finds
+nothing in, a file that has gone, or a WanGP that is not open yet stays here and says why. It
+is offered for MP4, MKV and MOV, the videos WanGP writes its settings into, and for any of them,
+whoever asked for it. It needs bridge 1.17.0. Loop, mute and speed are remembered. On a
 keyboard: Space or K plays, ← and → step a frame (with Shift, a second), L loops, M mutes,
 F is full screen, and Escape leaves full screen and then the view. Under the picture: its
 name, the model that made it (LTX 2.3 or 2.5, MiniMax H3), and the prompt as it was typed,
@@ -580,12 +597,14 @@ that was never in the folder - and queues nothing. Every output keeps that recip
 taken from its job while the job was still in the queue, so Load works for any video: one
 the server generated while nobody had the tab open (a long LTX run), one the gallery's popup
 asked for, one older than the Queue Send History's two hundred. An output from before
-recipes were kept loads from its Queue Send History record, and one with neither says so. It is its own document,
+recipes were kept loads from its Queue Send History record, and one with neither says so; a
+video made in WanGP has no request to load here, and its Load says to use Send to WanGP. It is its own document,
 not a view of the queue, so closing the WebUI does not empty it — last week's videos are
 still there next week. A job the server ran is tied to its files exactly, by the paths WanGP
 handed back; a job a browser page ran is matched to the files that appeared while it was
 running, and the gallery marks those as a match rather than a fact. The videos are never
-moved, copied or deleted.
+moved, copied or deleted, and Send to WanGP names one to WanGP rather than copying it: a note
+in the handoff folder holds where it is, and the browser holds only the note's id.
 
 **The browser.** Menu → *Choose storage folder* first: Clipboard keeps its pictures in that
 folder on the machine running Forge and nowhere else, and never names it to the browser —
@@ -597,16 +616,26 @@ routes the Canvas takes - or to **PNG Info**, which only the Clipboard offers: i
 the file's own bytes, the way a file dropped on it would be, so it reads the generation
 parameters Forge wrote. A Forge PNG keeps every byte, so its generation parameters survive.
 
+**The whole folder, in view first.** The storage folder is **not paged**: it is listed whole,
+in one answer, and drawn the way an archive is (below) - every picture gets a tile, but only
+the rows near the view are in the page, the thumbnails **in view load first**, a few at a time
+with a deadline each, a fling across the folder asks for nothing on its way, and a thumbnail
+seen once is kept by the server, by the browser and by the page. Page Up and Page Down move
+the grid a screen, Home and End take it to the top and the end; a selection far from the view
+is still the selection, marked by a short line across the scrubber that brings it back when
+pressed; a rename changes a caption where it stands; and a new sort starts at the top. Past a
+hundred thousand pictures the listing stops and says how many it left out.
+
 **Archives.** Menu → *Archives ›* → *Manage archives…* takes folders on the machine running
 Forge - as many as you like - and the grid can show any one of them **in place of the storage
 folder**, chosen under Menu → *Archives ›*. Once there is an archive to choose, the Menu button
 carries the name of the folder the grid shows, and the status line says how many pictures it
 holds and where new ones go; no row over the grid is spent on it. An archive is **read-only**: nothing in this extension writes, renames, deletes or
 indexes anything in it, Rename and Delete are off for its pictures, and pasting, uploading,
-dropping or the gallery's 🖌️ still save to the storage folder while you look at one. It is
-**not paged**: the whole folder (its PNG, JPEG and WebP files, not its subfolders) is listed in
-one answer, from the folder's directory entries alone - no picture is opened to list it - and
-every picture gets a tile. A tile is an empty place costing nothing until it is in view; only
+dropping or the gallery's 🖌️ still save to the storage folder while you look at one. Like
+the storage folder it is **not paged**: the whole folder (its PNG, JPEG and WebP files, not its
+subfolders) is listed in one answer, from the folder's directory entries alone - no picture is
+opened to list it - and every picture gets a tile. A tile is an empty place costing nothing until it is in view; only
 the rows near the view are in the page at all. **What is in view loads first**, in reading
 order, a few thumbnails at a time over plain requests with a deadline each - nothing held
 open - and the order is decided again whenever you scroll: requests for tiles that have left
@@ -632,9 +661,10 @@ saved on the host.
 **The scrubber.** A thin bar over the grid's right-hand edge, in place of its scroll bar: it
 takes no room and moves nothing. Drag its handle, or press anywhere on it to jump there and
 drag on; while it is held a bubble beside it says which picture of how many is at the top of
-the view and the date, name or size the sort orders by. An archive asks for no thumbnails
+the view and the date, name or size the sort orders by. The grid asks for no thumbnails
 while it is moving, only for where it rests - held still for about a third of a second - or
-is let go. It is drawn only when the grid holds more than
+is let go. A selected picture out of view is a short line across it; a press there brings
+the picture back. It is drawn only when the grid holds more than
 it shows; the wheel, a finger on the grid and the keys scroll as they always did. Rest on it
 without letting go - about a third of a second - and the pictures in view start loading as
 though you had let go; move again and new loading waits until you rest or let go.
@@ -732,7 +762,7 @@ same server-owned queue as the tab's presses, ids are never paths, and the answe
 is the guide, and `docs/clipboard/CONTRACTS.md` the contract, for both the tab and the
 API. `enqueue(request, { enhance: true })` asks for the MiniMax H3 or LTX 2.3 / 2.5 rewrite (the page's
 model travels with it), `cancelAll()` empties the line, and `jobs()` shows each job's enhancement
-and its place in WanGP. Bridge plugin 1.16.0 carries the queue, start and track operations
+and its place in WanGP. Bridge plugin 1.17.0 carries the queue, start and track operations
 (protocol 5) and the control plane server-owned execution runs on (protocol 6), answers the
 WanGP tab's heartbeat and says when its form is touched, guards the page's Gradio session
 (below), dresses the WanGP page in the colours this page sends (above), refuses
@@ -747,7 +777,10 @@ prompt WanGP shows, and from 1.15.0 lays the WanGP page out as a studio under th
 assistant's Super Focused mode (since 1.15.1 its prompt alone beside its Generate, progress
 and gallery, stacked only on a phone), and from 1.16.0 counts every save WanGP makes of its
 form, so a send knows its save landed, and checks a job as WanGP's own queue would before
-anything is stored (below) - so
+anything is stored (below), and from 1.17.0 loads a video's settings into the page for View
+Outputs' Send to WanGP, saves the form under the page's own model (every bridge before it
+pressed a save WanGP never made, below), and joins a job to the generation WanGP is running
+rather than leaving it waiting behind it - so
 WanGP's bridge must be updated and WanGP restarted; a
 build lacking one of the six queue components keeps the image send and refuses the queue
 with `BRIDGE_COMPONENT_INCOMPATIBLE`, and one lacking the generate trigger queues but never
@@ -758,7 +791,11 @@ the default — Forge runs the job itself. It starts WanGP again if it has stopp
 press (a press here needs it running; a public-API job may find it cold from the start),
 waits if you are generating in the WanGP tab (and says so, and never interrupts you), writes
 the enhanced prompt if you asked for one, submits into WanGP's own queue and follows the
-generation to a file. The browser may be hidden, frozen, closed or on a phone that has gone to sleep; come
+generation to a file. Waiting for a generation already running - yours or an earlier job's -
+is a courtesy of a minute at most; after it the job joins WanGP's queue behind the running
+task at once, the way WanGP's own API admits a task (bridge 1.17.0) -
+before, it sat beside the queue until that run ended, was reported as never having reached
+WanGP, and a third job could take its place. The browser may be hidden, frozen, closed or on a phone that has gone to sleep; come
 back on any device and one sync shows you where it got to. Three things worth knowing: the
 job **is** in the WanGP tab's queue and can be cancelled there; it may wait for the card
 because of your own work; and on Windows a Forge crash loses a generation that was in flight,
@@ -828,7 +865,10 @@ history, and in the log: *saved from the WanGP page at send*, *WanGP's last save
 (its form was not saved at send)*, *WanGP's last saved settings (WanGP was loading a model's
 settings at send)*, or *the model's defaults (nothing saved yet)*. Saving as you change needs
 bridge 1.7.0, the session guard 1.8.0, the page's colours 1.9.0, its typeface 1.10.1, the
-compact page under focus 1.11.0, and knowing each save landed and the check at the press 1.16.0;
+compact page under focus 1.11.0, knowing each save landed and the check at the press 1.16.0,
+and - for any of it to save anything at all - 1.17.0: every bridge before it keyed the save on
+a model WanGP never records, so every save answered *unavailable* and every send ran at the
+form WanGP had last saved by itself;
 with an older bridge the
 save before every send still happens, but nothing changed since the last save is taken on the
 page's word, and anything else waits out the two seconds because a save of an unchanged form
@@ -1025,8 +1065,8 @@ minipaint_neo/
         job_inputs.py            the pictures a queued job owns, pinned until it is done and no sweeper's to take
         targets.py               the four models the Clipboard sends to, what each is sent, and whether the one in use is ready
         enhance.py               enhanced prompts: ModelSwitchRefiner's MiniMax H3 and LTX writers (mc_llm_api), the switch, the six system prompts and their overrides
-        outputs.py               what WanGP made for this tab's requests, and the recipe of each, kept where a restart can find it: View Outputs reads this, not the queue
-        routes.py                a picture by its id, and bytes in; the archives, an archive's listing, and its pictures
+        outputs.py               what WanGP made for this tab's requests, and the recipe of each, kept where a restart can find it, beside every other video in WanGP's output folder by an id that names nothing: View Outputs reads this, not the queue
+        routes.py                a picture by its id, and bytes in; the archives, an archive's listing, and its pictures; an output, and the note that names one to WanGP for Send to WanGP
         intercept.py             Send to WanGP from the gallery: the frozen picture behind a token, the roles a model reads,
                                  the popup's request path through the outbox, and its pinned history
         ui.py                    the tab: the browser, the composer, the enhancement panel, Add to Queue through the public API
@@ -1037,7 +1077,7 @@ minipaint_neo/
         lock.py                  one managed WanGP per machine: the lock a second Forge finds
         vram.py                  what the chosen GPU holds, as nvidia-smi reports it, for the restart's report
         proxy.py                 /wan2gp/* on the Forge origin, streamed to that one port
-        handoff.py               PNGs on their way out, as opaque ids under a fixed root
+        handoff.py               PNGs on their way out, and notes naming an output for its settings, as opaque ids under a fixed root
         bridge.py                which browser page is talking to which live WanGP session
         protocol.py              the vocabulary all three sides share (protocol 5: the queue, starting, tracking, the model a request insists on;
                                  protocol 6: the control plane between Forge and the child, which no browser is part of)
@@ -1050,7 +1090,7 @@ javascript/main.js               legacy bridge, parent-frame side, and the loade
 browser/minipaint_canvas.js      attaches the canvas; crop frame, touch gestures, tools, the rail's height, the layer list, the held mask, focus mode
 browser/minipaint_wangp.js       the WanGP iframe: handshake, receiver query, verified send, queue, confirm and track
 browser/minipaint_interop.js     window.minipaintInterop: the public queue API (v1, minipaint.wangp.queue/v1): enqueue (answers when the server has the job), sync (a bounded snapshot), cancelAll - no live connection
-browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid and its pager, the queue list and the history, History's dialog,
+browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid drawn in view, the queue list and the history, History's dialog,
                                  the menu, paste and drop, Add to Queue, the page's model, and the one standing notice;
                                  an archive's grid (tiles only near the view, thumbnails in view first), the Archives screen,
                                  and the full-screen view of one picture

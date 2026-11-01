@@ -29,6 +29,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import hashlib
+import json
 import os
 import pathlib
 import secrets
@@ -287,6 +288,30 @@ def write(image: Image.Image) -> Handoff:
     return Handoff(id=handoff_id, path=path, manifest=dict(manifest))
 
 
+def write_reference(target: typing.Any) -> str:
+    """A reference handoff for one file WanGP wrote, and its id.
+
+    For View Outputs' Send to WanGP: the bridge loads the settings that file
+    carries into the page, and a video is hundreds of megabytes - it is not
+    copied to be read. So what goes in the root is a note naming the file,
+    under a new id of the picture's grammar and a suffix of its own
+    (``protocol.HANDOFF_REFERENCE_SUFFIX``), written whole or not at all, and
+    the browser hands the bridge the id and nothing else. The note is the
+    resolved path the server already proved is an output (``outputs.path_of``);
+    the bridge checks the note and the file again before WanGP's loader reads
+    it. Swept with the pictures, by age, at the next start.
+    """
+    path = pathlib.Path(str(target or ""))
+    if not str(target or "") or not path.is_absolute():
+        raise IntegrationError(HANDOFF_INVALID_ID, "a reference names an absolute path")
+    data = json.dumps({"path": str(path), "written": _now_iso()}, ensure_ascii=False).encode("utf-8")
+    if len(data) > protocol.MAX_REFERENCE_BYTES:
+        raise IntegrationError(HANDOFF_TOO_LARGE, "the file's path is longer than a reference holds")
+    handoff_id = new_id()
+    _write_bytes(handoff_root() / (handoff_id + protocol.HANDOFF_REFERENCE_SUFFIX), data)
+    return handoff_id
+
+
 def manifest_of(handoff_id: typing.Any) -> typing.Optional[dict]:
     """What this process recorded for an id, or None once it is discarded."""
     if not protocol.valid_handoff_id(handoff_id):
@@ -419,25 +444,28 @@ def discard(handoff_id: typing.Any) -> None:
         path = path_for(handoff_id)
     except IntegrationError:
         return
-    try:
-        os.unlink(path)
-    except OSError:
-        pass  # already gone, held open by the reader, or not ours to remove
+    for one in (path, path.with_name(str(handoff_id) + protocol.HANDOFF_REFERENCE_SUFFIX)):
+        try:
+            os.unlink(one)
+        except OSError:
+            pass  # already gone, held open by the reader, or not ours to remove
 
 
 def _sweepable_id(name: str) -> typing.Optional[str]:
     """The handoff id a filename in our root belongs to, if it is one of ours.
 
-    Only two shapes are ever created here - ``<id>.png`` and the ``<id>.*.part``
-    a write in progress uses - and anything else in the directory was not put
-    there by this module. The sweeper leaves those alone: deleting an unknown
-    file because it is in a directory we happen to own is how a cleanup pass
-    turns into data loss.
+    Only three shapes are ever created here - ``<id>.png``, the reference
+    note ``<id>.ref.json`` (bridge 1.17.0) and the ``<id>.*.part`` a write in
+    progress uses - and anything else in the directory was not put there by
+    this module. The sweeper leaves those alone: deleting an unknown file
+    because it is in a directory we happen to own is how a cleanup pass turns
+    into data loss.
     """
     head, _, tail = name.partition(".")
     if not protocol.valid_handoff_id(head):
         return None
-    if name == head + protocol.HANDOFF_SUFFIX or name.endswith(PART_SUFFIX):
+    if (name == head + protocol.HANDOFF_SUFFIX or name == head + protocol.HANDOFF_REFERENCE_SUFFIX
+            or name.endswith(PART_SUFFIX)):
         return head
     return None
 

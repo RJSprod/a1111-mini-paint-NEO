@@ -6,8 +6,8 @@ job the browser ran is tied to them by the window it was running in and
 says so; a file is never claimed by two requests; a claim left open by a
 Forge that was shut down mid-generation is finished on the next sync, which
 is what makes the gallery still full after a restart; a file the user has
-deleted stops being listed; the page is the same size and shape as the
-picture grid's; and the byte route answers ranges, because a <video> that
+deleted stops being listed; a page holds sixty, the size the picture
+grid's pages were; and the byte route answers ranges, because a <video> that
 cannot ask for the middle of a file cannot be scrubbed.
 """
 
@@ -280,7 +280,7 @@ def page_checks(r: Results, clock: _Clock, folder: pathlib.Path) -> None:
     outputs.remember("3" * 16, [str(path) for path in made], request_id="r3")
 
     page = routes.outputs_page()
-    r.check("a page is 60, the same as the picture grid's, so there is one pager to learn",
+    r.check("a page is 60 (routes.PAGE_SIZE), the size the picture grid's pages were, so the strip turns as it always did",
             page["size"] == routes.PAGE_SIZE == 60 and len(page["items"]) == 60, str(len(page["items"])))
     r.check("and it counts the whole ledger, not the page", page["total"] == 65 and page["pages"] == 2)
     r.check("newest first", page["items"][0]["name"] == "v064.mp4", page["items"][0]["name"])
@@ -292,6 +292,80 @@ def page_checks(r: Results, clock: _Clock, folder: pathlib.Path) -> None:
         item["url"].startswith("/minipaint-clipboard/output/") and "/" not in item["name"] for item in page["items"]))
     r.check("what the browser is given names no folder anywhere in it",
             str(folder) not in json.dumps(page))
+
+
+def folder_gallery_checks(r: Results, clock: _Clock, folder: pathlib.Path) -> None:
+    """Every video in WanGP's output folder, not only this tab's.
+
+    Asked for: "i want the 'view outputs' videos to actually be all the videos
+    in wan2gp output folder, not just those that we requested through
+    clipboard". The ledger keeps what it always kept - a request's own files,
+    with their recipes - and the rest of the folder is listed beside it, each
+    file once, newest first, by an id that names nothing.
+    """
+    outputs.reset_for_tests()
+    config.update(outputs_folder=str(folder))
+    nested = folder / "ltx2"
+    nested.mkdir()
+    clock.now += 10
+    mine = _wrote(folder, "mine.mp4", clock.now + 1)
+    # Claimed under a spelling of its own, as WanGP's answer may have it (a
+    # relative save path rooted at its folder, a drive letter in another case
+    # on Windows): the walk finds the same file as ".../mine.mp4", and it is
+    # still one file. ``..`` is a spelling pathlib keeps as it is.
+    outputs.remember("5" * 16, [str(folder / "ltx2" / ".." / "mine.mp4")], request_id="r5")
+    _wrote(nested, "deeper.mkv", clock.now + 2)
+    _wrote(folder, "theirs.mp4", clock.now + 3)
+    _wrote(folder, "still.png", clock.now + 4)
+    elsewhere = folder.parent / "elsewhere-video.mp4"
+    elsewhere.write_bytes(b"not WanGP's" * 4)
+    try:
+        os.symlink(elsewhere, folder / "linked.mp4")
+        linked = True
+    except (OSError, NotImplementedError):
+        linked = False
+
+    listed = outputs.gallery(refresh=False)
+    r.check("every video in the folder is listed, the ones made here and the ones made in WanGP, newest first",
+            _names(listed) == ["theirs.mp4", "deeper.mkv", "mine.mp4"], str(_names(listed)))
+    r.check("a video in one of WanGP's own subfolders is there too", "deeper.mkv" in _names(listed))
+    r.check("a picture beside them is not: the view is the videos", "still.png" not in _names(listed))
+    if linked:
+        r.check("nor a link to a file elsewhere, which is not WanGP's", "linked.mp4" not in _names(listed))
+    by_name = {item["name"]: item for item in listed}
+    r.check("a file this tab asked for is the ledger's, with its request, and is listed once however its path was spelled",
+            _names(listed).count("mine.mp4") == 1 and (by_name.get("mine.mp4") or {}).get("source") == "request"
+            and (by_name.get("mine.mp4") or {}).get("request_id") == "r5"
+            and not (by_name.get("mine.mp4") or {}).get("id", "wf").startswith(outputs.FOLDER_ID_PREFIX),
+            str(by_name.get("mine.mp4")))
+    folder_items = [by_name.get("theirs.mp4") or {}, by_name.get("deeper.mkv") or {}]
+    r.check("a video only the folder knows says so, with no request, no recipe and no guess to mark",
+            all(item.get("source") == "folder" and not item.get("request_id") and item.get("recipe") is None
+                and str(item.get("id", "")).startswith(outputs.FOLDER_ID_PREFIX) for item in folder_items), str(folder_items))
+    r.check("and its id names nothing - not the file, not the folders above it",
+            all("theirs" not in item.get("id", "") and "ltx2" not in item.get("id", "") and len(item.get("id", "")) == 18
+                for item in folder_items))
+    r.check("the same video has the same id every time it is listed",
+            [item["id"] for item in outputs.gallery(refresh=False)] == [item["id"] for item in listed])
+    theirs_id = (by_name.get("theirs.mp4") or {}).get("id", "")
+    r.check("and the id opens the file", outputs.path_of(theirs_id) == folder / "theirs.mp4", str(outputs.path_of(theirs_id)))
+
+    # A restart: the listing is gone, a page still holds the id.
+    outputs.forget_listing_for_tests()
+    r.check("after a restart an id from the page before it still opens the file",
+            outputs.path_of(theirs_id) == folder / "theirs.mp4", str(outputs.path_of(theirs_id)))
+    r.check("an id that was never issued opens nothing",
+            outputs.path_of(outputs.FOLDER_ID_PREFIX + "0" * 16) is None and outputs.path_of("wf../../etc") is None)
+    (folder / "theirs.mp4").unlink()
+    r.check("and a video deleted since is not opened", outputs.path_of(theirs_id) is None)
+
+    page = routes.outputs_page()
+    r.check("the page says where the list comes from, and each item which kind it is",
+            "WanGP's output folder" in page["status"] and {item["source"] for item in page["items"]} == {"folder", "request"},
+            str((page["status"], [item["source"] for item in page["items"]])))
+    r.check("and names no folder anywhere in what the browser is given", str(folder) not in json.dumps(page))
+    if linked:
+        (folder / "linked.mp4").unlink()
 
 
 def recipe_checks(r: Results, clock: _Clock, folder: pathlib.Path) -> None:
@@ -413,6 +487,87 @@ def route_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
             "FileResponse(path" in source and "data = handle.read()" not in source, source[:200])
 
 
+def settings_route_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
+    """Send to WanGP's first half: a note naming one output, for the bridge.
+
+    Asked for: "the ability to send a video from this view to wan2gp to load
+    its settings ... a new send button in the playback controls bar". The
+    browser holds an output's id and nothing else; the server answers with the
+    id of a note in the handoff root naming the file, which the WanGP page's
+    bridge reads through WanGP's own loader. A video WanGP keeps no settings
+    in is refused here, and no answer names a folder or a file.
+    """
+    import inspect
+
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from minipaint_neo.wangp import handoff, protocol as wangp_protocol
+
+    outputs.reset_for_tests()
+    config.update(outputs_folder=str(folder))
+    clock.now += 10
+    requested = _wrote(folder, "requested here.mp4", clock.now + 1)
+    outputs.remember("6" * 16, [str(requested)], request_id="r6")
+    from_wangp = _wrote(folder, "made in wangp.mkv", clock.now + 2)
+    _wrote(folder, "a clip.webm", clock.now + 3)
+    _wrote(folder, "another.m4v", clock.now + 4)
+    listed = {item["name"]: item for item in outputs.gallery(refresh=False)}
+    app = FastAPI()
+    routes.install(app)
+    client = TestClient(app)
+
+    def route(output_id):
+        return f"/minipaint-clipboard/output/{output_id}/settings"
+
+    def named(answer):
+        try:
+            return pathlib.Path(json.loads((handoff.handoff_root() / (answer.json()["handoff_id"] + wangp_protocol.HANDOFF_REFERENCE_SUFFIX))
+                                           .read_text(encoding="utf-8"))["path"])
+        except Exception as error:  # the check below says what was wrong
+            return error
+
+    first = client.post(route(listed["requested here.mp4"]["id"]))
+    if first.status_code == 401:
+        r.check("the settings route is behind the sign-in gate (signed-out run)", True)
+        return
+    answers = [first]
+    r.check("a video this tab asked for answers with a note's id",
+            first.status_code == 200 and first.json().get("ok") is True and wangp_protocol.valid_handoff_id(first.json().get("handoff_id")),
+            first.text[:200])
+    r.check("and the note names that very file", named(first) == requested.resolve() or named(first) == requested, str(named(first)))
+    second = client.post(route(listed["made in wangp.mkv"]["id"]))
+    answers.append(second)
+    r.check("so does a video only WanGP's folder knows, an MKV among them",
+            second.status_code == 200 and (named(second) == from_wangp.resolve() or named(second) == from_wangp), second.text[:200])
+    again = client.post(route(listed["requested here.mp4"]["id"]))
+    answers.append(again)
+    r.check("each press is a note of its own", again.status_code == 200 and again.json().get("handoff_id") != first.json().get("handoff_id"))
+
+    before = {child.name for child in handoff.handoff_root().iterdir()}
+    for name in ("a clip.webm", "another.m4v"):
+        refused = client.post(route(listed[name]["id"]))
+        answers.append(refused)
+        r.check(f"{name.rsplit('.', 1)[1].upper()}, which WanGP keeps no settings in, is refused 409 OUTPUT_NO_SETTINGS",
+                refused.status_code == 409 and refused.json().get("code") == "OUTPUT_NO_SETTINGS", refused.text[:200])
+    unknown = client.post(route("deadbeefdeadbeef"))
+    never = client.post(route(outputs.FOLDER_ID_PREFIX + "0" * 16))
+    answers.extend([unknown, never])
+    r.check("an id that is not an output's is a 404, wherever it claims to be from",
+            unknown.status_code == 404 and never.status_code == 404 and unknown.json().get("code") == "CLIPBOARD_ASSET_UNKNOWN")
+    looked = client.get(route(listed["requested here.mp4"]["id"]))
+    r.check("a note is written by a POST alone", looked.status_code == 405, str(looked.status_code))
+    r.check("and none of the refusals left a note behind",
+            {child.name for child in handoff.handoff_root().iterdir()} == before)
+    r.check("no answer names a folder or a file",
+            not any(str(folder) in answer.text or "requested" in answer.text or "wangp.mkv" in answer.text for answer in answers))
+    r.check("writing the note is not a coroutine, so it is off the event loop",
+            not inspect.iscoroutinefunction(routes._output_settings))
+    (folder / "made in wangp.mkv").unlink()
+    gone = client.post(route(listed["made in wangp.mkv"]["id"]))
+    r.check("a video deleted since is a 404", gone.status_code == 404, str(gone.status_code))
+
+
 def run() -> Results:
     r = Results("clipboard outputs")
     with tempfile.TemporaryDirectory(prefix="minipaint-outputs-") as scratch:
@@ -430,7 +585,7 @@ def run() -> Results:
         try:
             folder_checks(r, base)
             folders = {}
-            for name in ("exact", "window", "restart", "page", "route", "recipe"):
+            for name in ("exact", "window", "restart", "page", "route", "recipe", "folder", "settings"):
                 folders[name] = base / name
                 folders[name].mkdir()
             exact_checks(r, clock, folders["exact"])
@@ -438,9 +593,11 @@ def run() -> Results:
             window_checks(r, clock, folders["window"])
             restart_checks(r, clock, folders["restart"])
             page_checks(r, clock, folders["page"])
+            folder_gallery_checks(r, clock, folders["folder"])
             recipe_checks(r, clock, folders["recipe"])
             range_checks(r)
             route_checks(r, folders["route"], clock)
+            settings_route_checks(r, folders["settings"], clock)
         finally:
             outputs.use_clock(None)
             outbox.use_clock(None)

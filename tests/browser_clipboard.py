@@ -718,119 +718,136 @@ def library_state(page):
 
 
 def show_page(page, options):
+    """Read the listing of the folder on screen, as the page itself does."""
     page.evaluate("o => window.minipaintClipboard.library(o)", options)
     time.sleep(1.2)
 
 
-def pager(page):
-    return page.evaluate("""() => {
-        const row = document.querySelector('.minipaint-clip-pager');
-        if (!row) { return null; }
-        const box = row.querySelector('.minipaint-clip-pager-number');
-        const back = row.querySelector('.minipaint-clip-pager-back');
-        const next = row.querySelector('.minipaint-clip-pager-next');
-        const mark = row.querySelector('.minipaint-clip-pager-mark');
-        return {
-            hidden: !!row.hidden,
-            number: box ? box.value : '',
-            of: (row.querySelector('.minipaint-clip-pager-of') || {}).textContent || '',
-            count: (row.querySelector('.minipaint-clip-pager-count') || {}).textContent || '',
-            backOff: !!(back && back.disabled), nextOff: !!(next && next.disabled),
-            mark: mark && !mark.hidden ? mark.textContent : ''
-        };
-    }""")
+def _grid(page):
+    """What the grid's loader is doing: the folder on screen, its rows, the
+    thumbnails asked for and in what order, and the selection's mark."""
+    return page.evaluate("() => window.minipaintClipboard.gridState()")
 
 
-def check_paging(r: Results, page, library) -> None:
-    """A page of the library, its row of controls, and the ends of it.
+def _pictures_in(folder) -> int:
+    return len([one for one in folder.iterdir() if one.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")])
 
-    Enough pictures are put in the folder to page through at the smallest
-    size the route allows - the clamp is part of the contract, so the test
-    works inside it rather than around it - and taken out again afterwards.
-    """
+
+def _seed_storage(library, count, prefix, salt):
+    """``count`` small pictures in the storage folder, named so that by name
+    they come first and in the order of their numbers - and every one
+    different, from each other and from any other check's (``salt``): the
+    library knows a file by its bytes as well as its name, so a file with
+    the bytes of one deleted a moment ago is that picture renamed, its id
+    and its thumbnail already known."""
     from PIL import Image
 
     made = []
-    for number in range(18):
-        name = f"page-{number:02d}.png"
-        Image.new("RGB", (40, 30), (number * 10 % 255, 60, 120)).save(library / name)
-        made.append(library / name)
-    open_clipboard(page)
-    show_page(page, {"size": 10, "page": 0, "sort": "name_asc", "refresh": True})
+    for number in range(count):
+        path = library / f"{prefix}{number:03d}.png"
+        Image.new("RGB", (40, 30), (number % 256, number // 256, salt)).save(path)
+        made.append(path)
+    return made
+
+
+def _list_storage(page, total):
+    """The storage folder read again, by name, and waited for whole. Whether
+    it came whole is the caller's to check: a listing that never does is a
+    failed check, not a run that stops here."""
+    page.evaluate("() => window.minipaintClipboard.library({sort: 'name_asc', refresh: true})")
     try:
-        state = library_state(page)
-        r.check("a page shows exactly `size` tiles", state["shown"] == 10, str(state["shown"]))
-        r.check("and the answer's totals describe the whole library, not the page",
-                state["total"] == 24 and state["pages"] == 3 and state["page"] == 0, str(state))
-        row = pager(page)
-        r.check("the pager says where you are and how many there are",
-                row and not row["hidden"] and row["number"] == "1" and row["of"].strip() == "of 3", str(row))
-        r.check("and the count is the whole library, because that is the number a person wants",
-                row and row["count"].startswith("24 picture"), str(row and row["count"]))
-        r.check("Back is disabled at the start, and Next is not - disabled rather than hidden, so the row does not change width",
-                row and row["backOff"] is True and row["nextOff"] is False, str(row))
+        page.wait_for_function(f"() => window.minipaintClipboard.libraryState().total === {total}"
+                               " && !window.minipaintClipboard.libraryState().busy", timeout=30000)
+    except Exception:
+        pass
+    page.wait_for_timeout(300)
 
-        first = [t["name"] for t in page.evaluate(READ_TILES_JS)]
-        page.evaluate("() => document.querySelector('.minipaint-clip-pager-next').click()")
-        time.sleep(1.4)
-        second = [t["name"] for t in page.evaluate(READ_TILES_JS)]
-        r.check("Next reaches the next pictures, and only them",
-                len(second) == 10 and not set(second) & set(first), f"{first[:3]} -> {second[:3]}")
 
-        page.evaluate("() => document.querySelector('.minipaint-clip-pager-next').click()")
-        time.sleep(1.4)
-        row = pager(page)
-        r.check("and at the end Next is disabled and Back is not",
-                row and row["nextOff"] is True and row["backOff"] is False and row["number"] == "3", str(row))
-        r.check("the last page is what is left over", len(page.evaluate(READ_TILES_JS)) == 4,
-                str(len(page.evaluate(READ_TILES_JS))))
+GRID_JS = """() => {
+    const grid = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
+    const tiles = Array.from(grid.querySelectorAll('.minipaint-clip-item'));
+    return { tiles: tiles.length, names: tiles.map(t => t.dataset.name),
+             withSrc: tiles.filter(t => t.querySelector('img').getAttribute('src')).length,
+             scroll: grid.scrollHeight, view: grid.clientHeight, top: grid.scrollTop,
+             max: grid.scrollHeight - grid.clientHeight };
+}"""
 
-        page.evaluate("() => document.querySelector('.minipaint-clip-pager-back').click()")
-        page.evaluate("() => document.querySelector('.minipaint-clip-pager-back').click()")
-        time.sleep(1.6)
-        r.check("Back comes back to exactly the pictures that were there",
-                [t["name"] for t in page.evaluate(READ_TILES_JS)] == first, str(first[:3]))
+STORAGE_COUNT = 240
+#: The loader's folder: at the smallest tiles a screen is some seventy
+#: pictures and the rows asked for past it as many again, so it takes this
+#: many for a fling to pass over hundreds that must never be asked for.
+LOADER_COUNT = 600
 
-        page.evaluate("""() => {
-            const box = document.querySelector('.minipaint-clip-pager-number');
-            box.value = '99';
-            box.dispatchEvent(new Event('change', {bubbles: true}));
-        }""")
-        time.sleep(1.4)
-        r.check("go-to is clamped rather than refused: a page past the end is the last one that exists",
-                library_state(page)["page"] == 2, str(library_state(page)["page"]))
 
-        page.evaluate("""() => {
-            const grid = document.querySelector('.minipaint-clip-grid');
-            grid.focus();
-            grid.dispatchEvent(new KeyboardEvent('keydown', {key: 'PageUp', bubbles: true}));
-        }""")
-        time.sleep(1.4)
-        r.check("PageUp moves a page while the grid has focus, because a listbox is expected to",
-                library_state(page)["page"] == 1, str(library_state(page)["page"]))
+def check_the_storage_folder_is_one_listing(r: Results, page, library) -> None:
+    """Asked for: "the clipboard storage thumbnail gallery still works by
+    pages, but i prefer the way archive loads, which is not pages, but only
+    rendering thumbnails in view and cache. Let's make the storage option
+    work like that."
 
-        # -- a selection is browser state and does not belong to a page
-        page.evaluate("() => { const c = document.querySelector('.minipaint-clip-item'); if (c) { c.click(); } }")
-        time.sleep(0.6)
-        chosen = page.evaluate("() => window.minipaintClipboard.debug().selected")
-        r.check("paging: a picture on this page is selected", bool(chosen), repr(chosen))
-        page.evaluate("() => document.querySelector('.minipaint-clip-pager-next').click()")
-        time.sleep(1.4)
-        r.check("and it is still selected a page away, because the send path names it by id",
-                page.evaluate("() => window.minipaintClipboard.debug().selected") == chosen, chosen)
-        r.check("and the pager marks the page that is holding it",
-                "selection on page 2" in (pager(page) or {}).get("mark", ""), str(pager(page)))
-        # A library that shrinks to one page hides the row; one that grows
-        # past it must show a row with its buttons still in it.
-        show_page(page, {"size": 60, "page": 0})
-        r.check("with one page the row is hidden entirely", (pager(page) or {}).get("hidden") is True, str(pager(page)))
-        show_page(page, {"size": 10, "page": 0})
-        row = pager(page)
-        r.check("and when the library grows past one page again the row comes back WITH its controls",
-                row and not row["hidden"] and row["number"] == "1" and row["of"].strip() == "of 3"
-                and row["count"].startswith("24 picture"), str(row))
-        show_page(page, {"size": 10, "page": 1})
+    So the storage folder is one listing, as an archive is: every picture in
+    one answer, no pager, only the rows near the view in the document. And
+    what the pages did for a person is still done, the virtual way: the keys
+    move a screen where they moved a page, a selection far away is kept and
+    the scrubber marks where it is - the pager's "selection on page N" - and
+    a press on the mark brings it back, and a rename changes its tile's
+    caption in place wherever it is in the folder.
+    """
+    made = _seed_storage(library, STORAGE_COUNT, "0-pic-", 77)
+    renamed = []
+    listings = []
+    heard = lambda request: listings.append(request.url) if "/minipaint-clipboard/library" in request.url else None
+    try:
+        open_clipboard(page)
+        total = _pictures_in(library)
+        page.on("request", heard)
+        _list_storage(page, total)
+        page.remove_listener("request", heard)
+        state = page.evaluate("() => window.minipaintClipboard.libraryState()")
+        r.check("the whole storage folder is one answer: every picture listed, read with one request",
+                state["total"] == total and len(listings) == 1, str({"state": state, "asked": listings}))
+        r.check("and nothing asks for a page of it: the request names a sort and no page or size",
+                listings and "page=" not in listings[0] and "size=" not in listings[0] and "sort=name_asc" in listings[0],
+                str(listings[:1]))
+        r.check("there is no pager: no row of Back, the page and Next under the grid",
+                page.evaluate("() => !document.querySelector('.minipaint-clip-pager')"))
+        first = page.evaluate(GRID_JS)
+        r.check("only the rows near the view are in the document, not every tile",
+                0 < first["tiles"] < total / 2 and first["scroll"] > first["view"] * 3, str({k: first[k] for k in ("tiles", "scroll", "view")}))
+        r.check("and they are in the document in reading order, so a Tab from one goes to the next",
+                first["names"] == sorted(first["names"], key=lambda name: (name.lower(), name)), str(first["names"][:4]))
 
+        # -- the keys move a screen, where they used to move a page
+        page.evaluate("() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid'); g.focus(); }")
+        page.keyboard.press("PageDown")
+        page.wait_for_timeout(500)
+        down = page.evaluate(GRID_JS)
+        r.check("PageDown on the grid moves it a screen, as a listbox's does, and draws the rows under it",
+                down["top"] >= first["view"] * 0.5 and down["names"] != first["names"], str({"top": down["top"], "view": first["view"]}))
+        page.keyboard.press("End")
+        page.wait_for_timeout(600)
+        end = page.evaluate(GRID_JS)
+        last = sorted((one.name for one in library.iterdir() if one.suffix.lower() == ".png"), key=lambda n: (n.lower(), n))[-1]
+        r.check("End reaches the last picture in the folder, drawn there and nowhere else",
+                end["top"] >= end["max"] - 2 and last in end["names"] and first["names"][0] not in end["names"], str(end["names"][-3:]))
+        page.keyboard.press("Home")
+        page.wait_for_timeout(600)
+        back = page.evaluate(GRID_JS)
+        r.check("and Home comes back to exactly the pictures that were there", back["top"] == 0 and back["names"] == first["names"],
+                str(back["names"][:3]))
+
+        # -- a selection far away is kept: it is the page's, not the view's
+        chosen = _select_tile(page, first["names"][0])
+        r.check("a picture at the top of the folder is selected", bool(chosen), repr(chosen))
+        page.evaluate("() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid'); g.scrollTop = g.scrollHeight; }")
+        page.wait_for_timeout(600)
+        page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
+        page.wait_for_function("() => !window.minipaintClipboard.libraryState().busy", timeout=20000)
+        page.wait_for_timeout(400)
+        away = page.evaluate("""a => ({ drawn: !!Array.from(document.querySelectorAll('.minipaint-clip-item')).find(t => t.dataset.asset === a),
+                                        selected: window.minipaintClipboard.debug().selected })""", chosen)
+        r.check("scrolled to the far end and read again, the selected picture is drawn nowhere and is still the selection",
+                not away["drawn"] and away["selected"] == chosen and box(page, "minipaint_clipboard_selected") == chosen, str(away))
         r.check("so the Send menu is still live, rather than greyed out with a picture plainly chosen",
                 page.evaluate("""() => { window.minipaintClipboard.openToolbarMenu('send');
                     const items = () => Array.from(document.querySelectorAll('.minipaint-clip-menu .minipaint-clip-menu-item'));
@@ -838,13 +855,264 @@ def check_paging(r: Results, page, library) -> None:
                                                    && b.textContent !== 'Cancel').length;
                     window.minipaintClipboard.closeMenu();
                     return on; }""") >= 1)
+        page.wait_for_timeout(300)
+        scrub = page.evaluate(SCRUB_JS)
+        r.check("and the scrubber marks where it is in the folder - the pager's 'selection on page N', the virtual way",
+                _grid(page)["mark"] is True and scrub["mark"] and scrub["mark"]["top"] - scrub["bar"]["top"] < scrub["bar"]["height"] / 4,
+                str({"mark": scrub["mark"], "bar": scrub["bar"]}))
+        if scrub["mark"]:
+            page.mouse.click(scrub["mark"]["left"] + scrub["mark"]["width"] / 2, scrub["mark"]["top"] + scrub["mark"]["height"] / 2)
+            page.wait_for_timeout(600)
+        r.check("a press on the mark brings the selected picture back into view, and the mark goes",
+                _in_view(page, chosen) and _grid(page)["mark"] is False and page.evaluate(
+                    "() => window.minipaintClipboard.debug().selected") == chosen, str(_grid(page)["rows"]))
+
+        # -- a rename changes its tile in place, wherever it is
+        page.evaluate("""() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
+            g.scrollTop = Math.round(g.scrollHeight / 2); }""")
+        page.wait_for_timeout(800)
+        # A picture in view half way down; "-renamed" after its stem keeps
+        # it in its place by name, so the rename moves nothing but a caption.
+        found = page.evaluate("""() => {
+            const grid = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
+            const g = grid.getBoundingClientRect();
+            const tile = Array.from(grid.querySelectorAll('.minipaint-clip-item')).find(t => {
+                const b = t.getBoundingClientRect();
+                return t.dataset.name.indexOf('0-pic-') === 0 && b.top >= g.top && b.bottom <= g.bottom; });
+            return tile ? [tile.dataset.asset, tile.dataset.name] : ['', '']; }""")
+        target, called = found
+        stem = called[:-len(".png")] if called.endswith(".png") else called
+        renamed.append(library / (stem + "-renamed.png"))
+        r.check("(a picture to rename is in view, half way down the folder)",
+                bool(target) and 60 < int(stem[-3:] or 0) < STORAGE_COUNT - 60, repr(called))
+        if target:
+            _select_tile(page, called)
+            stamped = page.evaluate(STAMP_TILES_JS)
+            # The ones in view: the rename's panel opens under the grid and
+            # shortens its view while it is open, which may take the far
+            # edge of the rows drawn past it out of the document - a scroll,
+            # not the listing - so the rows in view are the ones asked about.
+            seen = set(page.evaluate("""() => {
+                const grid = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
+                const g = grid.getBoundingClientRect();
+                return Array.from(grid.querySelectorAll('.minipaint-clip-item')).filter(t => {
+                    const b = t.getBoundingClientRect(); return b.top >= g.top && b.bottom <= g.bottom; })
+                    .map(t => t.dataset.asset); }"""))
+            scrolled = page.evaluate(GRID_JS)["top"]
+            asked = []
+            thumbs = lambda request: asked.append(request.url) if "/minipaint-clipboard/image/" in request.url else None
+            page.on("request", thumbs)
+            try:
+                page.evaluate("() => window.minipaintClipboard.pressHidden('minipaint_clipboard_rename_open')")
+                page.wait_for_selector("#minipaint_clipboard_rename_text textarea, #minipaint_clipboard_rename_text input",
+                                       state="visible", timeout=10000)
+                page.locator("#minipaint_clipboard_rename_text textarea, #minipaint_clipboard_rename_text input").first.fill(stem + "-renamed")
+                page.click("#minipaint_clipboard_rename_ok")
+                page.wait_for_function("""a => { const t = Array.from(document.querySelectorAll('.minipaint-clip-item'))
+                    .find(x => x.dataset.asset === a[0]); return !!t && t.dataset.name === a[1]; }""",
+                                       arg=[target, stem + "-renamed.png"], timeout=15000)
+                page.wait_for_timeout(500)
+            finally:
+                page.remove_listener("request", thumbs)
+            after = page.evaluate(READ_TILES_JS)
+            mine = next((tile for tile in after if tile["asset"] == target), {})
+            was = next((tile for tile in stamped if tile["asset"] == target), {})
+            r.check("a rename changes its tile's caption in place: the same element, half way down the folder",
+                    mine.get("name") == stem + "-renamed.png" and mine.get("stamp") and mine.get("stamp") == was.get("stamp")
+                    and renamed[0].is_file(), str({"was": was, "now": mine}))
+            kept = {tile["asset"]: tile["stamp"] for tile in stamped if tile["asset"] in seen}
+            still = {tile["asset"]: tile["stamp"] for tile in after}
+            r.check("and every other tile in view is the same element it was: the listing moved nothing",
+                    len(kept) > 6 and all(still.get(asset) == stamp for asset, stamp in kept.items()),
+                    str({"in view": len(kept), "rebuilt": [asset[:8] for asset, stamp in kept.items() if still.get(asset) != stamp][:4]}))
+            r.check("and nothing is asked for again: the file's version is the same, so is its thumbnail",
+                    not asked, str(asked[:2]))
+            r.check("and the grid did not move, and the picture is still the selection",
+                    abs(page.evaluate(GRID_JS)["top"] - scrolled) <= 1
+                    and page.evaluate("() => window.minipaintClipboard.debug().selected") == target,
+                    str({"before": scrolled, "after": page.evaluate(GRID_JS)["top"]}))
+
+            # -- a file changed where it stands is a new picture: its tile
+            #    stays, and only its thumbnail is asked for again
+            from PIL import Image
+            from urllib.parse import quote
+
+            old_version = page.evaluate("""a => (Array.from(document.querySelectorAll('.minipaint-clip-item'))
+                .find(x => x.dataset.asset === a) || {dataset: {}}).dataset.v || ''""", target)
+            Image.new("RGB", (40, 30), (250, 10, 10)).save(renamed[0])
+            asked.clear()
+            page.on("request", thumbs)
+            try:
+                page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
+                try:
+                    page.wait_for_function("""a => { const t = Array.from(document.querySelectorAll('.minipaint-clip-item'))
+                        .find(x => x.dataset.asset === a[0]); const i = t && t.querySelector('img');
+                        return !!i && t.dataset.v !== a[1] && (i.getAttribute('src') || '').indexOf('blob:') === 0
+                            && i.complete && i.naturalWidth > 0; }""", arg=[target, old_version], timeout=15000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(300)
+            finally:
+                page.remove_listener("request", thumbs)
+            changed = page.evaluate(READ_TILES_JS)
+            again = next((tile for tile in changed if tile["asset"] == target), {})
+            r.check("a file changed where it stands keeps its tile - the same element - and only its new thumbnail is asked for",
+                    again.get("stamp") == was.get("stamp") and len(asked) == 1
+                    and quote(target, safe="") in asked[0] and "v=" in asked[0] and quote(old_version, safe="") not in asked[0],
+                    str({"asked": asked[:3], "same": again.get("stamp") == was.get("stamp")}))
+
+        # -- a new order starts at the top: a place in one means nothing in another
+        from minipaint_neo.clipboard import config as clip_config
+
+        stored = clip_config.load().sort
+        page.evaluate("""() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
+            g.scrollTop = Math.round(g.scrollHeight / 2); }""")
+        page.wait_for_timeout(500)
+        page.evaluate("() => window.minipaintClipboard.setSort(window.minipaintClipboard.libraryState().sort === 'name_desc' ? 'name_asc' : 'name_desc')")
+        page.wait_for_function("() => !window.minipaintClipboard.libraryState().busy", timeout=15000)
+        page.wait_for_timeout(500)
+        sorted_view = page.evaluate(GRID_JS)
+        ordered = page.evaluate("() => window.minipaintClipboard.libraryState().sort")
+        r.check("a new sort starts the grid at its top, the new first picture first - what page 0 of a new sort was",
+                sorted_view["top"] == 0 and sorted_view["names"][:1] == ([last] if ordered == "name_desc" else [first["names"][0]]),
+                str({"top": sorted_view["top"], "first": sorted_view["names"][:1], "sort": ordered}))
+        page.evaluate("s => window.minipaintClipboard.setSort(s)", stored)
+        page.wait_for_timeout(800)
     finally:
+        try:
+            page.remove_listener("request", heard)
+        except Exception:
+            pass
+        for one in made + renamed:
+            try:
+                one.unlink()
+            except OSError:
+                pass
+        page.evaluate("() => window.minipaintClipboard.select('')")
+        page.evaluate("() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid'); g.scrollTop = 0; }")
+        show_page(page, {"sort": "name_asc", "refresh": True})
+
+
+def check_the_storage_folder_loads_what_is_in_view_first(r: Results, page, library) -> None:
+    """The storage folder's thumbnails come the archive's way: in view first,
+    in reading order, a few at a time, dropped the moment the view moves on,
+    and never asked for the rows a fling passes over.
+
+    The server is made slow on purpose, as for the archive - the first six
+    thumbnails take 1.5 s each, the rest a moment - so there are requests in
+    flight for the top of the folder when the grid is flung to the bottom,
+    and still in flight 300 ms later; what the page has done by then is the
+    measurement.
+    """
+    from minipaint_neo.clipboard import store as clip_store
+
+    made = []
+    library_store = clip_store.store()
+    real = library_store.thumbnail
+    counted = {"made": 0}
+
+    def slow(*args, **keywords):
+        counted["made"] += 1
+        time.sleep(1.5 if counted["made"] <= 6 else 0.05)
+        return real(*args, **keywords)
+
+    requests = []
+    listener = lambda request: requests.append(request.url) if ("/minipaint-clipboard/image/" in request.url
+                                                                and "thumb=1" in request.url) else None
+    try:
+        open_clipboard(page)
+        set_tile_size(page, 72)
+        # Put in the folder only now: opening the tab reads the folder, and
+        # must not have read these before the server was made slow.
+        made = _seed_storage(library, LOADER_COUNT, "0-load-", 154)
+        total = _pictures_in(library)
+        before = _grid(page)
+        library_store.thumbnail = slow
+        page.on("request", listener)
+        page.evaluate("() => window.minipaintClipboard.library({sort: 'name_asc', refresh: true})")
+        try:
+            page.wait_for_function(f"() => window.minipaintClipboard.libraryState().total === {total}", timeout=30000)
+        except Exception:
+            pass
+        page.wait_for_timeout(250)
+        state = _grid(page)
+        r.check("storage: the folder is listed whole before anything is measured", state["total"] == total,
+                str({"listed": state["total"], "folder": total}))
+        visible_top = list(state["visible"])
+        geometry = page.evaluate(GRID_JS)
+        asked_top = state["order"][-(state["started"] - before["started"]):] if state["started"] > before["started"] else []
+        r.check("storage: only the rows near the view are in the document",
+                0 < geometry["tiles"] < total / 2 and geometry["scroll"] > geometry["view"] * 3, str(geometry)[:160])
+        r.check("storage: a tile is a place until its turn - none outside the view has a picture address",
+                geometry["withSrc"] <= len(visible_top), str({"withSrc": geometry["withSrc"], "visible": len(visible_top)}))
+        r.check("storage: the first thumbnails asked for are the ones in view, in reading order, three at a time",
+                asked_top[:3] == visible_top[:3] and len(state["inflight"]) <= 3,
+                str({"asked": asked_top[:4], "visible": visible_top[:4], "inflight": len(state["inflight"])}))
+
+        # Flung to the bottom while the top is still loading.
+        in_flight = list(state["inflight"])
+        page.evaluate("() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid'); g.scrollTop = g.scrollHeight; }")
+        page.wait_for_timeout(300)
+        after = _grid(page)
+        visible_bottom = list(after["visible"])
+        r.check("storage: the fling leaves the top of the folder out of view", not (set(visible_bottom) & set(visible_top)),
+                str(after["rows"]))
+        r.check("storage: the requests still out for the top were dropped the moment the view moved - not at the next answer",
+                after["dropped"] > state["dropped"] and not (set(after["inflight"]) & set(in_flight)),
+                str({"dropped": after["dropped"] - state["dropped"], "in_flight_before": len(in_flight), "made": counted["made"]}))
+        since = after["order"][-(after["started"] - state["started"]):] if after["started"] > state["started"] else []
+        r.check("storage: and the next thumbnails asked for are ones now in view - what you are seeing goes first",
+                bool(since) and all(key in set(visible_bottom) for key in since[:3]),
+                str({"first": since[:3], "visible": visible_bottom[:3]}))
+        # Judged once the loader has nothing left it wants: a loader that
+        # wanted the whole folder would still be asking, and is caught by
+        # what it asked for on the way rather than by when it was looked at.
+        quiet = 0
+        for _ in range(60):
+            page.wait_for_timeout(250)
+            quiet = quiet + 1 if not _grid(page)["inflight"] else 0
+            if quiet >= 4:
+                break
+        later = _grid(page)
+        listing = page.evaluate("""() => fetch('/minipaint-clipboard/library?sort=name_asc', {credentials: 'same-origin'})
+            .then(r => r.json()).then(a => a.items.map(i => i[0]))""")
+        place = {key: at for at, key in enumerate(listing)}
+        columns = later["columns"] or 1
+        reach = 2 * (len(visible_top) // columns + 1) * columns
+        asked = later["order"][-(later["started"] - before["started"]):] if later["started"] > before["started"] else []
+        positions = [place[key] for key in asked if key in place]
+        passed = [at for at in positions if reach <= at < len(listing) - reach]
+        r.check("storage: and the pictures the fling passed over were never asked for at all",
+                positions and len(positions) == len(asked) and not passed,
+                str({"passed": sorted(passed)[:5], "reach": reach, "asked": len(asked)}))
+        try:
+            page.wait_for_function("""() => {
+                const s = window.minipaintClipboard.gridState();
+                const shown = Array.from(document.querySelectorAll('#minipaint_clipboard_root .minipaint-clip-item'))
+                    .filter(t => s.visible.indexOf(t.dataset.key) !== -1);
+                return shown.length > 0 && shown.every(t => (t.querySelector('img').getAttribute('src') || '').indexOf('blob:') === 0);
+            }""", timeout=30000)
+            filled = True
+        except Exception:
+            filled = False
+        r.check("storage: every tile in view gets its thumbnail", filled, str(_grid(page))[:300])
+        r.check("storage: over plain requests, a small fraction of the folder", 0 < len(requests) < total / 3, str(len(requests)))
+        r.check("storage: each carrying the file's version, so the browser may keep it",
+                all("v=" in url and "thumb=1" in url for url in requests), str(requests[:2]))
+    finally:
+        page.remove_listener("request", listener)
+        try:
+            del library_store.thumbnail
+        except AttributeError:
+            pass
         for one in made:
             try:
                 one.unlink()
             except OSError:
                 pass
-        show_page(page, {"size": 60, "page": 0, "sort": "name_asc", "refresh": True})
+        page.evaluate("() => { const g = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid'); g.scrollTop = 0; }")
+        show_page(page, {"sort": "name_asc", "refresh": True})
+        set_tile_size(page, 144)
 
 
 def check_patching(r: Results, page, library) -> None:
@@ -859,7 +1127,7 @@ def check_patching(r: Results, page, library) -> None:
     from PIL import Image
 
     open_clipboard(page)
-    show_page(page, {"size": 60, "page": 0, "sort": "name_asc", "refresh": True})
+    show_page(page, {"sort": "name_asc", "refresh": True})
     before = page.evaluate(STAMP_TILES_JS)
     r.check("patching: the grid is drawn and stamped", len(before) == 6, str(len(before)))
 
@@ -939,6 +1207,65 @@ def check_patching(r: Results, page, library) -> None:
             str(sorted(t["name"] for t in left)))
 
 
+def check_the_empty_and_unconfigured_notices(r: Results, page) -> None:
+    """The grid's two empty states, said where the tiles would be.
+
+    They are states of the index, not of the transport: the route answers
+    them with no pictures and a reason, and the page says the sentence that
+    reason has always had, in place of the tiles - and puts the tiles back
+    and the sentence away the moment the folder lists pictures again. A
+    selection is not given up for an empty answer either: only a listing
+    that holds pictures, none of them it, says a picture has gone. Answered
+    here in the route's own shape, so the check needs neither an empty
+    folder nor no folder at all.
+    """
+    open_clipboard(page)
+    show_page(page, {"sort": "name_asc", "refresh": True})
+    chosen = _select_tile(page, page.evaluate("() => (document.querySelector('.minipaint-clip-item') || {dataset: {}}).dataset.name || ''"))
+    r.check("(a picture is selected before the folder answers empty)", bool(chosen), repr(chosen))
+
+    def answering(reason, configured):
+        def handler(route):
+            route.fulfill(json={"ok": True, "revision": "0:0", "configured": configured, "sort": "name_asc", "total": 0,
+                                "left_out": 0, "reason": reason, "status": "", "items": []})
+        return handler
+
+    drawn_js = """() => { const grid = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
+        const note = grid.querySelector('.minipaint-clip-nothing');
+        const box = note ? note.getBoundingClientRect() : null;
+        return { tiles: grid.querySelectorAll('.minipaint-clip-item').length, text: note ? note.textContent : '',
+                 shown: !!box && box.height > 0 && box.width > 0, empty: grid.classList.contains('minipaint-clip-empty'),
+                 selected: window.minipaintClipboard.debug().selected }; }"""
+    for reason, configured, words in (("unconfigured", False, "No storage folder yet"), ("empty", True, "No images yet")):
+        page.route("**/minipaint-clipboard/library*", answering(reason, configured))
+        try:
+            page.evaluate("() => window.minipaintClipboard.library({})")
+            try:
+                page.wait_for_function("() => window.minipaintClipboard.libraryState().total === 0"
+                                       " && !window.minipaintClipboard.libraryState().busy", timeout=10000)
+            except Exception:
+                pass
+            page.wait_for_timeout(300)
+            state = page.evaluate(drawn_js)
+            r.check(f"a folder answered {reason} says so where the tiles were - '{words}' - and draws no tile",
+                    state["tiles"] == 0 and words in state["text"] and state["shown"] and state["empty"], str(state))
+            r.check(f"and the selection is not given up for an answer with no pictures in it ({reason})",
+                    state["selected"] == chosen, str(state["selected"]))
+        finally:
+            page.unroute("**/minipaint-clipboard/library*")
+    page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
+    try:
+        page.wait_for_function("() => window.minipaintClipboard.libraryState().total > 0"
+                               " && !window.minipaintClipboard.libraryState().busy", timeout=15000)
+    except Exception:
+        pass
+    page.wait_for_timeout(300)
+    state = page.evaluate(drawn_js)
+    r.check("and a folder with pictures in it puts the tiles back and the sentence away, the selection still there",
+            state["tiles"] > 0 and not state["text"] and not state["empty"] and state["selected"] == chosen, str(state))
+    page.evaluate("() => window.minipaintClipboard.select('')")
+
+
 def check_the_failure_modes_have_answers(r: Results, page, library) -> None:
     """Every failure in section 15 has a defined thing the page says.
 
@@ -948,7 +1275,7 @@ def check_the_failure_modes_have_answers(r: Results, page, library) -> None:
     from PIL import Image
 
     open_clipboard(page)
-    show_page(page, {"size": 60, "page": 0, "sort": "name_asc", "refresh": True})
+    show_page(page, {"sort": "name_asc", "refresh": True})
 
     # -- a selection gives way to truth, and only to truth
     page.evaluate("() => { const c = document.querySelector('.minipaint-clip-item'); if (c) { c.click(); } }")
@@ -969,22 +1296,46 @@ def check_the_failure_modes_have_answers(r: Results, page, library) -> None:
 
     # -- a thumbnail that will not load costs that tile its picture, and
     #    nothing else on the page anything at all
-    before = page.evaluate(READ_TILES_JS)
+    #
     # A real 404 from the real route, rather than a stubbed one: an id the
-    # library has never minted is exactly what a tile holds when the file
-    # behind it has gone.
-    page.evaluate("""() => {
-        const tile = document.querySelectorAll('.minipaint-clip-item')[1];
-        tile.querySelector('img').src = '/minipaint-clipboard/image/' + '0'.repeat(32) + '?thumb=1&v=1-1';
-    }""")
-    time.sleep(2.5)
-    r.check("a thumbnail that 404s marks its tile and leaves its name readable",
-            page.evaluate("""() => {
-                const tile = document.querySelectorAll('.minipaint-clip-item')[1];
-                return tile.classList.contains('minipaint-clip-item-missing') && !!tile.dataset.name;
-            }"""))
-    r.check("and the page is otherwise unaffected",
-            len(page.evaluate(READ_TILES_JS)) == len(before), f"{len(before)} -> {len(page.evaluate(READ_TILES_JS))}")
+    # library has never minted is exactly what a listing names when the file
+    # behind it has gone since it was read. The listing is the one thing
+    # added to; the thumbnail is asked for by the loader, of the server.
+    gone = "0" * 32
+    before = page.evaluate(STAMP_TILES_JS)
+
+    def with_a_gone_picture(route):
+        response = route.fetch()
+        answer = response.json()
+        answer["items"].insert(1, [gone, "gone.png", 1234, "1-1234", 10, 10])
+        answer["total"] = len(answer["items"])
+        route.fulfill(response=response, json=answer)
+
+    page.route("**/minipaint-clipboard/library*", with_a_gone_picture)
+    try:
+        page.evaluate("() => window.minipaintClipboard.library({})")
+        try:
+            page.wait_for_function("""id => { const t = Array.from(document.querySelectorAll('.minipaint-clip-item'))
+                .find(x => x.dataset.asset === id); return !!t && t.classList.contains('minipaint-clip-item-missing'); }""",
+                                   arg=gone, timeout=15000)
+        except Exception:
+            pass
+        r.check("a thumbnail that 404s marks its tile and leaves its name readable",
+                page.evaluate("""id => {
+                    const tile = Array.from(document.querySelectorAll('.minipaint-clip-item')).find(x => x.dataset.asset === id);
+                    return !!tile && tile.classList.contains('minipaint-clip-item-missing') && tile.dataset.name === 'gone.png'
+                        && getComputedStyle(tile.querySelector('img')).display === 'none';
+                }""", gone), str(_grid(page)["failed"]))
+        others = [tile for tile in page.evaluate(READ_TILES_JS) if tile["asset"] != gone]
+        r.check("and the page is otherwise unaffected: every other tile is the one it was, and none is marked",
+                len(others) == len(before) and all(tile["stamp"] for tile in others)
+                and page.evaluate("""id => Array.from(document.querySelectorAll('.minipaint-clip-item-missing'))
+                    .every(t => t.dataset.asset === id)""", gone),
+                f"{len(before)} -> {len(others)}")
+    finally:
+        page.unroute("**/minipaint-clipboard/library*")
+    page.evaluate("() => window.minipaintClipboard.library({refresh: true})")
+    time.sleep(2.0)
 
     # -- the index route unreachable: keep what is on screen, say so, retry
     held = [t["name"] for t in page.evaluate(READ_TILES_JS)]
@@ -1347,7 +1698,7 @@ def check_sorting_is_separate_from_drawing(r: Results, page) -> None:
     to indicate the sort did not take.
     """
     open_clipboard(page)
-    show_page(page, {"size": 60, "page": 0, "sort": "name_asc"})
+    show_page(page, {"sort": "name_asc"})
     before = [t["name"] for t in page.evaluate(READ_TILES_JS)]
 
     # Asked for and read back in the SAME turn of the browser's own loop, so
@@ -1758,6 +2109,80 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
             if (bar) { bar.remove(); }
             document.documentElement.style.removeProperty('--minipaint-clip-top'); }""")
         time.sleep(0.3)
+
+        # And a header that is pinned but does not start AT the edge. The
+        # Model Chain theme's tab bar is sticky inside the page's own padding,
+        # so at rest it starts 8 px down, and "at the top edge" missed it: the
+        # view opened over the window's top, under the bar, which is drawn at
+        # a higher layer. Asked for: "the view outputs gallery is rendering
+        # behind the tab bar when its on ... make sure the gallery respects
+        # the tab bar."
+        page.evaluate("""() => {
+            window.scrollTo(0, 0);
+            const pad = document.createElement('div');
+            pad.id = 'a-theme-pad';
+            pad.style.cssText = 'height:8px';
+            const bar = document.createElement('div');
+            bar.id = 'a-sticky-header';
+            bar.style.cssText = 'position:sticky;top:0;height:64px;z-index:940;background:#123';
+            document.body.insertBefore(bar, document.body.firstChild);
+            document.body.insertBefore(pad, bar);
+            document.body.dataset.tallForTest = document.body.style.minHeight || '';
+            document.body.style.minHeight = '4000px';
+        }""")
+        measure = """() => {
+            const panel = document.getElementById('minipaint_clipboard_outputs_panel');
+            const media = panel.querySelector('.minipaint-clip-output-stage-media');
+            const bar = document.getElementById('a-sticky-header') || document.getElementById('a-focus-bar');
+            const p = panel.getBoundingClientRect();
+            const b = bar.getBoundingClientRect();
+            return { top: Math.round(p.top), mediaTop: media ? Math.round(media.getBoundingClientRect().top) : -1,
+                     barTop: Math.round(b.top), barBottom: Math.round(b.bottom), scrolled: Math.round(window.scrollY) }; }"""
+        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
+        time.sleep(0.5)
+        resting = page.evaluate(measure)
+        r.check("a tab bar pinned a few pixels below the window's edge is cleared too: the view starts under it",
+                resting["barTop"] > 1 and resting["top"] >= resting["barBottom"] and resting["top"] - resting["barBottom"] <= 1,
+                str(resting))
+        r.check("and the video with it, so no part of the player is behind the bar",
+                resting["mediaTop"] >= resting["barBottom"], str(resting))
+        page.evaluate("() => window.scrollTo(0, 40)")
+        time.sleep(0.4)
+        stuck = page.evaluate(measure)
+        r.check("when the page scrolls and the bar climbs to the edge, the view follows it up, leaving no strip open",
+                stuck["scrolled"] > 0 and stuck["barTop"] == 0 and abs(stuck["top"] - stuck["barBottom"]) <= 1, str(stuck))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        page.evaluate("""() => {
+            for (const id of ['a-sticky-header', 'a-theme-pad']) { const n = document.getElementById(id); if (n) { n.remove(); } }
+            document.body.style.minHeight = document.body.dataset.tallForTest || '';
+            delete document.body.dataset.tallForTest;
+            window.scrollTo(0, 0);
+            document.documentElement.style.removeProperty('--minipaint-clip-top'); }""")
+        time.sleep(0.3)
+
+        # A bar that comes AFTER the view opened: the Forge Assistant's focus
+        # mode keeps the workspace's tab bar along the top of the window, and
+        # shows it, hides it or lets it peek, saying which on the body.
+        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
+        time.sleep(0.4)
+        page.evaluate("""() => {
+            const bar = document.createElement('div');
+            bar.id = 'a-focus-bar';
+            bar.style.cssText = 'position:fixed;top:0;left:8px;right:8px;height:44px;z-index:1102;background:#321';
+            document.body.appendChild(bar);
+            document.body.setAttribute('data-forge-assistant-focus-bar', 'shown');
+        }""")
+        time.sleep(0.4)
+        later = page.evaluate(measure)
+        r.check("a bar shown after the view opened is cleared as soon as the page says so",
+                later["top"] >= later["barBottom"] and later["barBottom"] == 44, str(later))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        page.evaluate("""() => { const bar = document.getElementById('a-focus-bar'); if (bar) { bar.remove(); }
+            document.body.removeAttribute('data-forge-assistant-focus-bar');
+            document.documentElement.style.removeProperty('--minipaint-clip-top'); }""")
+        time.sleep(0.3)
     finally:
         from minipaint_neo.clipboard import config as clip_config
         from minipaint_neo.clipboard import outputs
@@ -1772,6 +2197,7 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
 PLAYER_REQUEST = "ab" * 16
 LOAD_REQUEST = "cd" * 16
 NO_RECIPE_REQUEST = "ef" * 16
+SETTINGS_REQUEST = "aa" * 16
 
 
 def _open_outputs_fresh(page):
@@ -2082,6 +2508,148 @@ def check_the_players_full_screen_is_its_own(r: Results, page) -> None:
         page.wait_for_timeout(300)
         page.evaluate("() => window.minipaintClipboard.closeOutputs()")
         outputs.reset_for_tests()
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def check_an_output_sends_its_settings_to_wangp(r: Results, page) -> None:
+    """Asked for: "the ability to send a video from this view to wan2gp to
+    load its settings! Using this option should be a new send button in the
+    playback controls bar. Sending should open wan2gp tab to the newly loaded
+    settings!"
+
+    The button is in the player's bar for a video WanGP keeps its settings in
+    (MP4, MKV, MOV) and not for one it keeps none in. A press asks the server
+    for a note naming the file - a real one, in the handoff root - and hands
+    its id to the WanGP tab's ``loadSettings``, stood in for here because
+    there is no WanGP; only once WanGP says it loaded them does the view close
+    and the WanGP tab open. A refusal, or a file WanGP read nothing from,
+    leaves the view open and says why, and a second press while one is going
+    is the same press.
+    """
+    import json as _json
+
+    from minipaint_neo.clipboard import config as clip_config
+    from minipaint_neo.wangp import handoff, protocol as wangp_protocol
+
+    folder = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-settings-"))
+    send = ".minipaint-clip-player [data-control='settings']"
+    try:
+        made = _seed_outputs(folder, 2, kind="mp4", request_id=SETTINGS_REQUEST, job_id="b" * 16)
+        for name in ("plain.webm", "plain.m4v"):
+            (folder / name).write_bytes(b"not really a video" * 8)
+        clip_config.update(outputs_folder=str(folder))
+        page.evaluate("""() => {
+            window.__settingsSaved = window.minipaintWanGP;
+            window.__settingsCalls = [];
+            window.__switches = 0;
+            window.__settingsAnswer = { ok: true, loaded: true, model_type: 'ltx2_22B_distilled', switched: true, message: '' };
+            window.minipaintWanGP = Object.assign({}, window.__settingsSaved || {}, {
+                loadSettings: function (id) {
+                    window.__settingsCalls.push(id);
+                    const a = window.__settingsAnswer;
+                    return typeof a === 'function' ? a() : Promise.resolve(a);
+                },
+                switchToWanGP: function () { window.__switches += 1; return true; }
+            });
+        }""")
+
+        def toast():
+            return page.evaluate("() => { const t = document.querySelector('.minipaint-clip-toast'); return t && !t.hidden ? t.textContent : ''; }")
+
+        def button():
+            return page.evaluate("""s => { const b = document.querySelector(s);
+                return b ? { hidden: b.hidden, label: b.getAttribute('aria-label') || '', disabled: b.disabled,
+                             busy: b.getAttribute('aria-busy') === 'true',
+                             beforeFull: !!b.nextElementSibling && b.nextElementSibling.dataset.control === 'full' } : null; }""", send)
+
+        for name in ("plain.webm", "plain.m4v"):
+            _open_outputs_on(page, name)
+            page.wait_for_selector(".minipaint-clip-player", state="attached", timeout=8000)
+            shown = button()
+            r.check(f"a {name.rsplit('.', 1)[1].upper()}, which WanGP keeps no settings in, has no Send to WanGP in its bar",
+                    shown is not None and shown["hidden"] is True, str(shown))
+
+        _open_outputs_on(page, "clip000.mp4")
+        page.wait_for_selector(send, state="attached", timeout=8000)
+        shown = button()
+        r.check("an MP4 in the stage has a Send to WanGP button in the player's bar, beside full screen",
+                shown is not None and shown["hidden"] is False and "Send to WanGP" in shown["label"] and shown["beforeFull"], str(shown))
+
+        page.click(send)
+        page.wait_for_function("() => window.__switches >= 1", timeout=15000)
+        page.wait_for_timeout(300)
+        calls = page.evaluate("() => window.__settingsCalls.slice()")
+        r.check("a press hands the WanGP tab the id of a note and nothing else",
+                len(calls) == 1 and wangp_protocol.valid_handoff_id(calls[0]), str(calls))
+        note = handoff.handoff_root() / (str(calls[0] if calls else "") + wangp_protocol.HANDOFF_REFERENCE_SUFFIX)
+        named = _json.loads(note.read_text(encoding="utf-8")).get("path") if note.is_file() else None
+        r.check("a note the server wrote, naming the video in the stage",
+                named is not None and pathlib.Path(named).resolve() == pathlib.Path(made[0]).resolve(), str(named))
+        r.check("once WanGP says it loaded them, the view closes and the WanGP tab is opened",
+                page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is False
+                and page.evaluate("() => window.__switches") == 1)
+        r.check("and the toast says WanGP is switching to the video's model",
+                "Loaded its settings in WanGP, which is switching to ltx2_22B_distilled" in toast(), toast())
+
+        refusals = (
+            ("a refusal", {"ok": False, "code": "HANDOFF_NOT_FOUND", "message": "The prepared image was gone before WanGP read it."},
+             "no longer where WanGP can read it"),
+            ("a file WanGP read nothing from", {"ok": True, "loaded": False, "model_type": "", "switched": False,
+                                                 "message": "WanGP found no settings it could load in that file"},
+             "WanGP found no settings it could load"),
+            ("an older bridge", {"ok": False, "code": "BRIDGE_COMPONENT_INCOMPATIBLE",
+                                 "message": "This WanGP bridge needs to be reinstalled or updated."}, "reinstalled"),
+        )
+        for label, answer, said in refusals:
+            page.evaluate("a => { window.__settingsAnswer = a; }", answer)
+            before = page.evaluate("() => window.__settingsCalls.length")
+            _open_outputs_on(page, "clip000.mp4")
+            page.wait_for_selector(send, state="attached", timeout=8000)
+            page.click(send)
+            page.wait_for_function("""([s, n]) => window.__settingsCalls.length > n
+                && !document.querySelector(s).disabled""", arg=[send, before], timeout=15000)
+            r.check(f"{label} leaves the view open, the WanGP tab where it was, and says why",
+                    page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is True
+                    and page.evaluate("() => window.__switches") == 1 and said in toast(), toast())
+
+        page.evaluate("""() => {
+            window.__settingsAnswer = () => new Promise((resolve) => {
+                window.__release = () => resolve({ ok: true, loaded: true, model_type: 't2v', switched: false, message: '' });
+            });
+        }""")
+        before = page.evaluate("() => window.__settingsCalls.length")
+        page.evaluate("s => { const b = document.querySelector(s); b.click(); b.click(); }", send)
+        page.wait_for_function("n => window.__settingsCalls.length > n && typeof window.__release === 'function'", arg=before, timeout=15000)
+        page.evaluate("s => document.querySelector(s).click()", send)
+        waiting = button()
+        r.check("while a send is going the button says so, and two more presses are the same press",
+                waiting is not None and waiting["disabled"] and waiting["busy"]
+                and page.evaluate("() => window.__settingsCalls.length") == before + 1, str(waiting))
+        # Another video in the stage meanwhile, with a bar - and a button - of its own.
+        page.evaluate("""() => {
+            const tile = [...document.querySelectorAll('.minipaint-clip-output-tile')]
+                .find((t) => (t.title || '').indexOf('clip001.mp4') === 0);
+            if (tile) { tile.click(); }
+        }""")
+        page.wait_for_function("s => { const b = document.querySelector(s); return !!b && !b.disabled && !b.hidden; }",
+                               arg=send, timeout=8000)
+        page.click(send)
+        page.wait_for_timeout(400)
+        r.check("and so is a press on another video's button while it is going",
+                page.evaluate("() => window.__settingsCalls.length") == before + 1,
+                str(page.evaluate("() => window.__settingsCalls.length")))
+        page.evaluate("() => window.__release()")
+        page.wait_for_function("() => window.__switches >= 2", timeout=15000)
+        page.wait_for_timeout(300)
+        r.check("and its answer is the one that opens WanGP, once, saying nothing is switching",
+                page.evaluate("() => window.__settingsCalls.length") == before + 1 and page.evaluate("() => window.__switches") == 2
+                and "Loaded its settings in WanGP." in toast() and "switching" not in toast(), toast())
+    finally:
+        page.evaluate("""() => {
+            window.minipaintWanGP = window.__settingsSaved;
+            for (const k of ['__settingsSaved', '__settingsCalls', '__switches', '__settingsAnswer', '__release']) { delete window[k]; }
+            if (window.minipaintClipboard.debug().outputsOpen) { window.minipaintClipboard.closeOutputs(); }
+        }""")
         shutil.rmtree(folder, ignore_errors=True)
 
 
@@ -2504,9 +3072,16 @@ def check_a_thumbnail_is_fetched_once(r: Results, page) -> None:
     asked = page.evaluate("() => window.__minipaintImageRequests.length")
     r.check("a re-draw of the same pictures puts NO thumbnail request on the wire",
             asked == 0, f"{asked} request(s)")
-    r.check("because every tile's URL carries the version of its bytes",
+    # A tile's picture is the thumbnail the page holds for it (an object
+    # URL), and what was asked of the server for it is what the browser may
+    # keep: every address the loader ever asked for carries the version.
+    versions = page.evaluate("""() => performance.getEntriesByType('resource').map(e => String(e.name))
+        .filter(n => n.indexOf('/minipaint-clipboard/image/') !== -1 && n.indexOf('thumb=1') !== -1)""")
+    r.check("because every thumbnail address the page has asked for carries the version of its bytes",
+            versions and all("v=" in url for url in versions), str(versions[:2]))
+    r.check("and every tile drawn shows the thumbnail the page already holds",
             page.evaluate("""() => Array.from(document.querySelectorAll('.minipaint-clip-item img'))
-                .every(i => i.src.indexOf('v=') !== -1)"""))
+                .every(i => (i.getAttribute('src') || '').indexOf('blob:') === 0)"""))
 
 def check_send(r: Results, page, targets) -> None:
     """Each destination takes the picture, and the server says so.
@@ -3349,7 +3924,7 @@ def check_the_whole_tab_works_with_the_channel_cut(r: Results, page, targets) ->
     page.route("**/queue/**", lambda route: route.abort())
     page.route("**/gradio_api/**", lambda route: route.abort())
     try:
-        page.evaluate("() => window.minipaintClipboard.library({refresh: true, sort: 'name_asc', page: 0})")
+        page.evaluate("() => window.minipaintClipboard.library({refresh: true, sort: 'name_asc'})")
         time.sleep(2.0)
         state = library_state(page)
         r.check("cut: the library is read and drawn", state["shown"] > 0 and state["total"] > 0, str(state))
@@ -3381,7 +3956,7 @@ def check_the_whole_tab_works_with_the_channel_cut(r: Results, page, targets) ->
     finally:
         page.unroute("**/queue/**")
         page.unroute("**/gradio_api/**")
-        page.evaluate("() => window.minipaintClipboard.library({refresh: true, sort: 'name_asc', page: 0})")
+        page.evaluate("() => window.minipaintClipboard.library({refresh: true, sort: 'name_asc'})")
         time.sleep(1.5)
 
 def check_tab_switching_survives_reordering(r: Results, page) -> None:
@@ -4201,7 +4776,8 @@ def _seed_archive(folder):
 
 
 def _archive(page):
-    return page.evaluate("() => window.minipaintClipboard.archiveState()")
+    """The grid's loader, while an archive is the folder on screen."""
+    return _grid(page)
 
 
 def _snapshot(folder):
@@ -4259,11 +4835,11 @@ def check_an_archive_loads_what_is_in_view_first(r: Results, page) -> None:
         r.check("and with an archive to choose, the Menu button names the folder the grid shows",
                 page.evaluate(MENU_LABEL_JS) == "☰ Storage folder", repr(page.evaluate(MENU_LABEL_JS)))
         page.click(".minipaint-clip-archives-show")
-        page.wait_for_function(f"() => window.minipaintClipboard.archiveState().total === {ARCHIVE_COUNT}", timeout=20000)
+        page.wait_for_function(f"() => window.minipaintClipboard.gridState().total === {ARCHIVE_COUNT}", timeout=20000)
         state = _archive(page)
         r.check("Show puts the archive in place of the storage folder, every picture listed, no pages",
                 state["view"] == clip_config.load().view and state["total"] == ARCHIVE_COUNT
-                and page.evaluate("() => { const p = document.querySelector('.minipaint-clip-pager'); return !p || p.hidden; }"), str(state)[:200])
+                and page.evaluate("() => !document.querySelector('.minipaint-clip-pager')"), str(state)[:200])
         # No row over the grid for it: the Menu button carries the name and
         # the status line the rest. Asked for: "I don't like that the archive
         # switcher button is now a new row, lets make switching between
@@ -4335,7 +4911,7 @@ def check_an_archive_loads_what_is_in_view_first(r: Results, page) -> None:
                 positions and not passed, str({"passed": sorted(passed)[:5], "reach": reach}))
         try:
             page.wait_for_function("""() => {
-                const s = window.minipaintClipboard.archiveState();
+                const s = window.minipaintClipboard.gridState();
                 const shown = Array.from(document.querySelectorAll('#minipaint_clipboard_root .minipaint-clip-item'))
                     .filter(t => s.visible.indexOf(t.dataset.key) !== -1);
                 return shown.length > 0 && shown.every(t => (t.querySelector('img').getAttribute('src') || '').indexOf('blob:') === 0);
@@ -4421,14 +4997,19 @@ def check_an_archive_loads_what_is_in_view_first(r: Results, page) -> None:
         r.check("which ticks the archive on screen and offers the storage folder",
                 "✓ Archive of 480" in offered and "Storage folder" in offered, str(offered))
         r.check("and the storage folder is chosen from it", menu_click(page, "Storage folder") == "clicked")
-        page.wait_for_function("() => window.minipaintClipboard.archiveState().view === ''", timeout=10000)
-        page.wait_for_function("() => document.querySelectorAll('#minipaint_clipboard_root .minipaint-clip-grid > .minipaint-clip-item').length > 0", timeout=10000)
-        back = page.evaluate("""() => ({ view: document.getElementById('minipaint_clipboard_root').dataset.clipView,
-            tiles: document.querySelectorAll('#minipaint_clipboard_root .minipaint-clip-grid > .minipaint-clip-item').length,
-            track: !!document.querySelector('.minipaint-clip-track'),
-            display: getComputedStyle(document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid')).display })""")
-        r.check("and the storage folder's grid is back as it was", back["view"] == "storage" and back["tiles"] > 0
-                and not back["track"] and back["display"] == "grid", str(back))
+        page.wait_for_function("() => window.minipaintClipboard.gridState().view === ''", timeout=10000)
+        page.wait_for_function("""() => { const t = document.querySelectorAll('#minipaint_clipboard_root .minipaint-clip-grid .minipaint-clip-item');
+            return t.length > 0 && Array.from(t).every(x => x.dataset.asset.indexOf('ar-') !== 0); }""", timeout=10000)
+        back = page.evaluate("""() => { const grid = document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid');
+            const tiles = Array.from(grid.querySelectorAll('.minipaint-clip-item'));
+            return { view: document.getElementById('minipaint_clipboard_root').dataset.clipView,
+                     tiles: tiles.length, archived: tiles.filter(t => t.dataset.asset.indexOf('ar-') === 0).length,
+                     archiveGrid: grid.classList.contains('minipaint-clip-archive-grid'),
+                     label: grid.getAttribute('aria-label'),
+                     total: window.minipaintClipboard.libraryState().total }; }""")
+        r.check("and the storage folder's grid is back: its own listing, drawn the same way, nothing of the archive's left",
+                back["view"] == "storage" and back["tiles"] > 0 and back["archived"] == 0 and not back["archiveGrid"]
+                and back["label"] == "Clipboard images" and back["total"] == _pictures_in(storage), str(back))
         r.check("with the Menu button saying so", page.evaluate(MENU_LABEL_JS) == "☰ Storage folder",
                 repr(page.evaluate(MENU_LABEL_JS)))
         time.sleep(0.4)
@@ -4469,7 +5050,9 @@ SCRUB_JS = """() => {
         return {left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height}; };
     const handle = bar ? bar.querySelector('.minipaint-clip-scrubber-handle') : null;
     const bubble = bar ? bar.querySelector('.minipaint-clip-scrubber-bubble') : null;
+    const mark = bar ? bar.querySelector('.minipaint-clip-scrubber-mark') : null;
     return {hidden: !bar || bar.hidden, bar: rect(bar), handle: rect(handle), grid: rect(g ? grid : null),
+            mark: mark && !mark.hidden ? rect(mark) : null,
             position: bar ? getComputedStyle(bar).position : '',
             innerRight: g.left + parseFloat(cs.borderLeftWidth) + grid.clientWidth,
             paddingRight: parseFloat(cs.paddingRight),
@@ -4780,7 +5363,9 @@ def check_the_viewer_browses_the_folder(r: Results, page, library) -> None:
     random or date sorted order. Exiting the view should land that image in
     view in the gallery as if i scrolled to it." Thirteen pictures are added
     with their times a second apart, newest last by name, so the date order
-    is known; the grid is paged ten at a time so landing has a page to turn.
+    is known - and a hundred and twenty older ones behind them, so that by
+    date the view soon reaches pictures whose rows are far below the top of
+    the grid by name, and landing on one has somewhere to scroll to.
     """
     from PIL import Image
 
@@ -4791,8 +5376,14 @@ def check_the_viewer_browses_the_folder(r: Results, page, library) -> None:
         Image.new("RGB", (60 + number, 40), (number * 15, 90, 160)).save(path)
         os.utime(path, (future + number, future + number))
         made.append(path)
+    past = time.time() - 100000
+    for number in range(120):
+        path = library / f"browse-filler-{number:03d}.png"
+        Image.new("RGB", (40, 30), (number % 256, 30, 90)).save(path)
+        os.utime(path, (past + number, past + number))
+        made.append(path)
     open_clipboard(page)
-    show_page(page, {"size": 10, "page": 0, "sort": "name_asc", "refresh": True})
+    show_page(page, {"sort": "name_asc", "refresh": True})
     page.evaluate("() => { window.__menuShown = null; window.addEventListener('contextmenu', e => { window.__menuShown = !e.defaultPrevented; }); }")
     try:
         total = library_state(page)["total"]
@@ -4807,13 +5398,13 @@ def check_the_viewer_browses_the_folder(r: Results, page, library) -> None:
         r.check("and it is the selection", page.evaluate("() => window.minipaintClipboard.debug().selected") == opened)
         page.wait_for_function(f"() => window.minipaintClipboard.viewerState().count === {total}", timeout=10000)
         seen = page.evaluate(VIEWER_JS)
-        pairs = page.evaluate("""() => fetch('/minipaint-clipboard/library?every=1&sort=newest', {credentials: 'same-origin'})
+        pairs = page.evaluate("""() => fetch('/minipaint-clipboard/library?sort=newest', {credentials: 'same-origin'})
             .then(r => r.json()).then(a => a.items.map(i => [i[0], i[1]]))""")
         server = [pair[0] for pair in pairs]
         called = dict(pairs)
         names = [called.get(asset, asset) for asset in seen["list"]]
-        r.check("the view holds the whole folder, not the page, newest first by default",
-                seen["count"] == total > 10 and seen["order"] == "date" and seen["list"] == server
+        r.check("the view holds the whole folder, as the server orders it newest first, by default",
+                seen["count"] == total > 100 and seen["order"] == "date" and seen["list"] == server
                 and names[:3] == ["browse-12.png", "browse-11.png", "browse-10.png"], str(names[:5]))
         r.check("and opens at the picture pressed", seen["current"] == opened and seen["list"][seen["at"]] == opened,
                 str({"at": seen["at"], "current": seen["current"]}))
@@ -4875,8 +5466,10 @@ def check_the_viewer_browses_the_folder(r: Results, page, library) -> None:
         r.check("Date puts it back in date order, where the picture on screen is",
                 dated["order"] == "date" and dated["list"] == server and dated["list"][dated["at"]] == state["current"], str(dated["at"]))
 
-        # Out to a picture on the other page: the grid turns to it.
+        # Out to a picture whose row is not in the document: the grid
+        # scrolls to it, as turning to the page that held it used to.
         shown = set(page.evaluate("() => Array.from(document.querySelectorAll('#minipaint_clipboard_root .minipaint-clip-item')).map(t => t.dataset.asset)"))
+        top = page.evaluate("() => document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid').scrollTop")
         for _ in range(total):
             if page.evaluate(VIEWER_JS)["current"] not in shown:
                 break
@@ -4888,8 +5481,9 @@ def check_the_viewer_browses_the_folder(r: Results, page, library) -> None:
         r.check("leaving the view selects the picture it ended on",
                 not _viewer(page)["open"] and landing not in shown
                 and page.evaluate("() => window.minipaintClipboard.debug().selected") == landing, landing)
-        r.check("and the grid turns to the page that holds it, with it in view",
-                library_state(page)["page"] == 1 and _in_view(page, landing), str(library_state(page)))
+        landed = page.evaluate("() => document.querySelector('#minipaint_clipboard_root .minipaint-clip-grid').scrollTop")
+        r.check("and the grid scrolls to it, rows away from where it was, with it in view",
+                landed > top + 300 and _in_view(page, landing), str({"from": top, "to": landed, "rows": _grid(page)["rows"]}))
     finally:
         page.evaluate("() => window.minipaintClipboard.closeViewer()")
         page.evaluate("() => sessionStorage.removeItem('minipaint-clipboard:viewer-order')")
@@ -4898,7 +5492,7 @@ def check_the_viewer_browses_the_folder(r: Results, page, library) -> None:
                 path.unlink()
             except OSError:
                 pass
-        show_page(page, {"size": 60, "page": 0, "sort": "newest", "refresh": True})
+        show_page(page, {"sort": "newest", "refresh": True})
         page.evaluate("() => window.minipaintClipboard.select('')")
 
 
@@ -5043,8 +5637,11 @@ def run() -> Results:
                         page.evaluate("() => !!(window.minipaintClipboard && window.minipaintClipboard.debug)"))
                 steps = [
                     ("check_grid", lambda: check_grid(r, page)),
-                    ("check_paging", lambda: check_paging(r, page, library)),
+                    ("check_the_storage_folder_is_one_listing", lambda: check_the_storage_folder_is_one_listing(r, page, library)),
+                    ("check_the_storage_folder_loads_what_is_in_view_first",
+                     lambda: check_the_storage_folder_loads_what_is_in_view_first(r, page, library)),
                     ("check_patching", lambda: check_patching(r, page, library)),
+                    ("check_the_empty_and_unconfigured_notices", lambda: check_the_empty_and_unconfigured_notices(r, page)),
                     ("check_sorting_is_separate_from_drawing", lambda: check_sorting_is_separate_from_drawing(r, page)),
                     ("check_the_failure_modes_have_answers", lambda: check_the_failure_modes_have_answers(r, page, library)),
                     ("check_the_section_is_blocked_until_wangp_is_ready", lambda: check_the_section_is_blocked_until_wangp_is_ready(r, page)),
@@ -5062,6 +5659,7 @@ def run() -> Results:
                     ("check_the_player_is_the_pages", lambda: check_the_player_is_the_pages(r, page)),
                     ("check_the_players_full_screen_is_its_own", lambda: check_the_players_full_screen_is_its_own(r, page)),
                     ("check_an_output_loads_its_recipe", lambda: check_an_output_loads_its_recipe(r, page)),
+                    ("check_an_output_sends_its_settings_to_wangp", lambda: check_an_output_sends_its_settings_to_wangp(r, page)),
                     ("check_the_tab_fills_the_window", lambda: check_the_tab_fills_the_window(r, page)),
                     ("check_a_thumbnail_is_fetched_once", lambda: check_a_thumbnail_is_fetched_once(r, page)),
                     ("check_the_row_is_filled_per_row", lambda: check_the_row_is_filled_per_row(r, page, browser)),

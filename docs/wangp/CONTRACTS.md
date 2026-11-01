@@ -296,6 +296,14 @@ was touched by hand is never sent back to read its own writes. The names
 `state().prompt` are read by that extension; renaming any of them breaks its box
 silently.
 
+`loadSettings(handoffId)` (bridge 1.17.0) is the Clipboard's own, for View Outputs'
+Send to WanGP: the settings a file WanGP wrote carries, loaded into WanGP's page by
+WanGP's own loader, the file named by a reference handoff the server wrote and never
+by a path. It saves the form first and then sends one `SETTINGS_REQUEST`, and
+resolves - never rejects - with `{ok, loaded, model_type, switched, message}` or a
+failure's `{ok: false, code, message}`; a bridge whose READY did not say
+`capabilities.settings_load` is never asked. *Bridge 1.17.0* below has all of it.
+
 Protocol 6 adds `flushForm({timeoutMs, settleMs, callTimeoutMs})`: ask WanGP to
 commit this page's live settings form so a job composed later — on the server,
 with this page shut — runs at what was on screen. It writes one hidden trigger
@@ -923,6 +931,80 @@ check names the model, never the prompt. And the tracker fails a task WanGP's
 loader skipped at its next look, `WANGP_VALIDATION_REFUSED` with WanGP's reason
 (`admission.refusal_reason`, from `gen["queue_errors"]`), rather than after the
 minute's grace as a task that never arrived.
+
+## Bridge 1.17.0: a file's settings loaded into the page; the save keyed to the page; a queue that joins
+
+**The settings load.** One more page operation, additive (`PROTOCOL` stays 5) and advertised
+in READY as `capabilities.settings_load`, true when the build handed over WanGP's
+`load_settings_from_file` and both components its answer is written to,
+`refresh_form_trigger` and `model_choice_target` (`Compatibility.settings_loadable`); the
+main tabs (`main_tabs`) are optional. It is View Outputs' **Send to WanGP**, and no path ever
+crosses the browser:
+
+1. `POST /minipaint-clipboard/output/{id}/settings` (a plain `def` route, signed in): the
+   output's opaque id becomes the file through `outputs.path_of`, and only one WanGP's loader
+   reads settings from is taken (`protocol.SETTINGS_FILE_SUFFIXES`: `.mp4`, `.mkv`, `.mov`,
+   `.png`, `.jpg`, `.jpeg`, `.webp`; anything else `409 OUTPUT_NO_SETTINGS`, an unknown id
+   `404 CLIPBOARD_ASSET_UNKNOWN`). `handoff.write_reference` writes a **reference note** in
+   the handoff root - `<id>.ref.json`, `{"path", "written"}` and nothing else, at most
+   `MAX_REFERENCE_BYTES` (4096), whole or not at all, under a new id of the picture's grammar -
+   and the answer is `{ok, handoff_id}`. `discard` removes a note with the picture of the same
+   id, and the sweep takes a stale one at the next start like a picture.
+2. `minipaintWanGP.loadSettings(handoffId)` (the WanGP tab's bundle): a 32-hex id or
+   `REQUEST_INVALID`, no bridge session `IFRAME_NOT_READY`, no `settings_load`
+   `BRIDGE_COMPONENT_INCOMPATIBLE` - nothing asked in any of the three. Then one bounded save
+   of WanGP's form, the one a send makes (`flushForm`, `SEND_POLL_BUDGET_MS`), because
+   WanGP's own *Load Settings From Media File* runs `validate_wizard_prompt -> save_inputs ->
+   load_settings_from_file` and one event cannot save and load (the load's model switch
+   carries `ignore_save_form`, which a save chained behind it would consume); the load goes
+   ahead whatever the save answered. `SETTINGS_REQUEST {handoff_id}` follows
+   (`SETTINGS_TIMEOUT_MS`, 20 s on screen), and `SETTINGS_RESULT` is read by
+   `normalize_settings_result`'s rules: `loaded` only in as many words, `model_type` only in
+   the model grammar, `switched` only beside `loaded`, a refusal's code kept. Resolves, never
+   rejects. Switching Forge to the WanGP tab is the caller's (`switchToWanGP`), and View
+   Outputs does it only on `loaded`.
+3. The plugin's `settings`: `normalize_settings_request` reads `handoff_id` and nothing else;
+   `handoff.resolve_reference` proves the note (a regular file, never a link, no larger than
+   the limit, directly in the root, JSON naming an absolute path with no NUL and one of the
+   suffixes) and the file it names (a regular file, never a link) - `HANDOFF_NOT_FOUND` for
+   what has gone, `HANDOFF_INVALID_ID` for everything else, and the detail an `OSError`'s
+   type alone, since its text is the path and the detail is printed in WanGP's console. Then
+   WanGP's own `load_settings_from_file(state, path)` on this page's state - the settings,
+   and for a video the source pictures it embeds, put in the state by WanGP - and its answer
+   written where its own chain writes it: `refresh_form_trigger` (a time string: the page's
+   own model, the form filled again), `model_choice_target` (`model|time`: another model,
+   whose switch fills the form), and, on the Media Generator's form (`active_form` `add`),
+   `main_tabs` `{"selected": "media_gen"}` so a page left on another of WanGP's apps shows
+   them; the Edit form, editing a queued task, keeps its tab. A file WanGP reads nothing from
+   answers `loaded: false` with WanGP's reason when it kept one (`_last_settings_file_error`)
+   and writes nothing. A loader that raises is `INTERNAL_ERROR` with its type; a page whose
+   state was not handed over is `BRIDGE_COMPONENT_INCOMPATIBLE`. WanGP's console line names
+   the model and whether WanGP is switching, never the file.
+
+**The save keyed to the page.** Every bridge before 1.17.0 keyed its flush's save on
+`current_model_type()`, which read a `gen["model_type"]` WanGP has never written and then a
+module global only a non-default install ever bound, until WanGP stopped binding it on
+2026-10-25, so on a real WanGP every flush answered
+`unavailable` and saved nothing: every press and every *as you change* save ran at the form
+WanGP had last saved by itself. The tests passed because they planted `gen["model_type"]`
+themselves; they no longer do. The flush now saves under the page's own model
+(`page_model`: `get_state_model_type` of the event's state, the key `save_inputs` records
+under, the edited task's on the Edit form), and `current_model_type` falls back to WanGP's
+own `server_config["last_model_type"]`.
+
+**A queue that joins.** Wan2GP's API (since 9905f0d) puts a task in the service's inline slot
+under `shared.api_webui._INLINE_QUEUE_LOCK` and admits it with
+`service.load_inline_queue()`, which joins a generation that is running at once; the
+`load_queue_trigger` command the bridge used holds the service's generation lock across the
+whole run it starts, so a second job sat in the slot, was reported as never having reached
+WanGP's queue, generated later anyway, and a third written into the same slot replaced it.
+`Executor.submit` now takes that lock (`Compatibility.inline_queue_lock`; a lock of the
+bridge's own where the module has none), waits up to 10 s for the slot to be empty where there
+is an admitter, refuses `QUEUE_BUSY` **before anything is recorded** when it is not - so
+Forge's retry is a new submission, never a duplicate - and admits through
+`load_inline_queue`, falling back to the command on a WanGP without it; a stranded queue is
+restarted with `service.start_generation`. Cancel is unchanged: it ends Forge's own jobs and
+never touches what WanGP has in its queue.
 
 ## Bridge 1.13.0: `model`
 

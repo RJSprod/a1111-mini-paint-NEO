@@ -95,13 +95,22 @@ LAYOUT_RESULT = "WANGP_LAYOUT_RESULT"
 #: an older one drops a type it does not know.
 PROMPT_REQUEST = "WANGP_PROMPT_REQUEST"
 PROMPT_RESULT = "WANGP_PROMPT_RESULT"
+#: A file's settings, loaded into the page the way WanGP's own "Load Settings
+#: From Media File" loads them (bridge 1.17.0), for View Outputs' Send to
+#: WanGP. The payload names a reference handoff - a note Forge wrote naming
+#: one output (``HANDOFF_REFERENCE_SUFFIX``) - and never a path. Answered with
+#: whether the settings were loaded, the model they are for and whether WanGP
+#: is switching to it. Sent only to a bridge whose READY said
+#: ``settings_load``; an older one drops a type it does not know.
+SETTINGS_REQUEST = "WANGP_SETTINGS_REQUEST"
+SETTINGS_RESULT = "WANGP_SETTINGS_RESULT"
 
 #: What the parent page may send into the iframe.
 TO_BRIDGE = frozenset({HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH,
-                       PING, LAYOUT_STATE, PROMPT_REQUEST})
+                       PING, LAYOUT_STATE, PROMPT_REQUEST, SETTINGS_REQUEST})
 #: What the iframe may send out to the parent page.
 TO_PARENT = frozenset({READY, RECEIVERS, RECEIVE_RESULT, RUNTIME_STATE, QUEUE_RESULT, QUEUE_STATUS, QUEUE_TRACKED, FORM_FLUSHED,
-                       PONG, FORM_CHANGED, PROMPT_RESULT, LAYOUT_RESULT})
+                       PONG, FORM_CHANGED, PROMPT_RESULT, LAYOUT_RESULT, SETTINGS_RESULT})
 
 #: Stable logical receiver ids. The bridge maps these onto whatever the
 #: installed WanGP calls them; MiniPaint only ever sees these.
@@ -139,6 +148,16 @@ DEFAULT_MENU_LABELS = {
 #: exactly this and rejected otherwise.
 HANDOFF_ID_RE = re.compile(r"\A[0-9a-f]{32}\Z")
 HANDOFF_SUFFIX = ".png"
+#: A reference handoff (bridge 1.17.0): a short note Forge writes in the same
+#: root, under an id of the same grammar, naming one file WanGP wrote - for
+#: the bridge to open where it is, because a video is hundreds of megabytes
+#: and is not copied to be read. Its own suffix, so a picture's id never
+#: opens one, and a ceiling on its size, so reading one is never a large read.
+HANDOFF_REFERENCE_SUFFIX = ".ref.json"
+MAX_REFERENCE_BYTES = 4096
+#: The files WanGP's settings loader reads (``get_settings_from_file``): the
+#: three video containers it writes its settings into, and pictures.
+SETTINGS_FILE_SUFFIXES = (".mp4", ".mkv", ".mov", ".png", ".jpg", ".jpeg", ".webp")
 
 #: What a send will switch on in WanGP for a receiver the model allows but
 #: the page has not selected: a short token from the bridge, or nothing.
@@ -489,6 +508,42 @@ def normalize_prompt_edit(payload: typing.Any) -> typing.Tuple[dict, str]:
     if len(text) > PROMPT_MAX_CHARS:
         return {}, QUEUE_CODE_PROMPT_TOO_LONG
     return {"write": True, "prompt": text}, ""
+
+
+def normalize_settings_request(payload: typing.Any) -> typing.Tuple[dict, str]:
+    """A SETTINGS_REQUEST payload as the bridge takes it: ``(request, code)``.
+
+    One key, ``handoff_id``, a reference handoff's id - 32 lowercase hex - or
+    ``REQUEST_INVALID``. Nothing else is read: a path, a name or a model in the
+    payload is not a way to choose what is loaded.
+    """
+    source = payload if isinstance(payload, dict) else {}
+    handoff_id = source.get("handoff_id")
+    if not valid_handoff_id(handoff_id):
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    return {"handoff_id": handoff_id}, ""
+
+
+def normalize_settings_result(payload: typing.Any) -> dict:
+    """A SETTINGS_RESULT payload as the parent reads it.
+
+    ``loaded`` only when the bridge said so in as many words; ``model_type``
+    only in the model grammar; ``switched`` - WanGP is changing model to show
+    them - only beside ``loaded``; a refusal's ``code`` only in the code
+    grammar, and ``message`` cut to a line.
+    """
+    source = payload if isinstance(payload, dict) else {}
+    loaded = source.get("loaded") is True
+    model = source.get("model_type")
+    code = source.get("code")
+    return {
+        "ok": source.get("ok") is True,
+        "loaded": loaded,
+        "model_type": model if isinstance(model, str) and MODEL_TYPE_RE.match(model) else "",
+        "switched": loaded and source.get("switched") is True,
+        "code": code if isinstance(code, str) and CODE_RE.match(code) else "",
+        "message": str(source.get("message") or "")[:200],
+    }
 
 
 def canonical_json(value: typing.Any) -> str:

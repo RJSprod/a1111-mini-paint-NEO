@@ -181,6 +181,8 @@ def configuration(theme_css: str = "") -> dict:
             "formChanged": protocol.FORM_CHANGED,
             "promptRequest": protocol.PROMPT_REQUEST,
             "promptResult": protocol.PROMPT_RESULT,
+            "settingsRequest": protocol.SETTINGS_REQUEST,
+            "settingsResult": protocol.SETTINGS_RESULT,
         },
         "inbound": sorted(protocol.TO_BRIDGE),
         "receiverIds": list(protocol.RECEIVER_IDS),
@@ -689,6 +691,7 @@ __MINIPAINT_FRAME_WRAPPER__
     if (operation === "track") { return CONFIG.types.queueTracked; }
     if (operation === "flush") { return CONFIG.types.formFlushed; }
     if (operation === "prompt") { return CONFIG.types.promptResult; }
+    if (operation === "settings") { return CONFIG.types.settingsResult; }
     return "";
   }
 
@@ -983,6 +986,20 @@ __MINIPAINT_FRAME_WRAPPER__
         edit.prompt = text;
       }
       submit({ op: "prompt", request_id: message.request_id, channel_id: channelId, edit: edit });
+      return;
+    }
+
+    if (message.type === CONFIG.types.settingsRequest) {
+      // Bridge 1.17.0: a file's settings loaded into this page, named by a
+      // reference handoff Forge wrote. An id of the wrong shape is refused
+      // here rather than after a round trip; the plugin checks it again.
+      var reference = message.payload.handoff_id;
+      if (!isHex32(reference)) {
+        log("settings: refused before the click - REQUEST_INVALID");
+        post(CONFIG.types.settingsResult, message.request_id, { ok: false, code: "REQUEST_INVALID", detail: "not a handoff id" });
+        return;
+      }
+      submit({ op: "settings", request_id: message.request_id, channel_id: channelId, settings: { handoff_id: reference } });
       return;
     }
 

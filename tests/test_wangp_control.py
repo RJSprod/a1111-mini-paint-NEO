@@ -156,6 +156,12 @@ class FakeService:
         place ``_parse_task_manifest`` looks for it.
         """
         self.commands.append((name, dict(payload or {})))
+        self._load()
+        return self.start_generation()
+
+    def _load(self):
+        """Wan2GP's queue loader over the inline slot: the entry taken out of
+        the slot and merged into the one queue, or skipped as WanGP skips it."""
         gen = self._state["gen"]
         inline = gen.pop("inline_queue", None)
         if inline is not None:
@@ -174,7 +180,6 @@ class FakeService:
                     continue
                 plugin_data = (entry or {}).get("plugin_data") or {}
                 gen["queue"].append({"id": len(gen["queue"]) + 1, "params": params, "plugin_data": plugin_data})
-        return self.start_generation()
 
     def abort(self):
         self.aborted += 1
@@ -240,6 +245,73 @@ class FakeService:
         self.forms[model_type] = dict(values)
 
 
+class WanGPService(FakeService):
+    """The service's two ways in as Wan2GP really has them.
+
+    ``command("load_queue_trigger")`` is what ``shared/deepy/service.py``
+    does: a thread of its own that holds the service's generation lock across
+    the loader, the worker's start and ``worker.join()``. So behind a run that
+    a command started, a second command's loader waits for the whole run,
+    and its submission sits in the inline slot unloaded until then -
+    ``FakeService.command`` loads at once, which is kinder than WanGP and is
+    why no check ever saw it. ``admitter=True`` adds what Wan2GP has had since
+    2026-10-26, ``load_inline_queue``: the loader there and then, and a
+    worker started if none is running.
+    """
+
+    def __init__(self, gen, admitter=False):
+        super().__init__(gen)
+        self._generation_lock = threading.Lock()
+        self.admits = 0
+        self.starts = 0
+        if admitter:
+            self.load_inline_queue = self._load_inline_queue
+
+    def command(self, name, payload=None):
+        self.commands.append((name, dict(payload or {})))
+
+        def run():
+            with self._generation_lock:
+                self._load()
+                worker = FakeService.start_generation(self)
+                if worker is not None:
+                    worker.join()
+
+        threading.Thread(target=run, name="WanGP command", daemon=True).start()
+
+    def _load_inline_queue(self):
+        self.admits += 1
+        self._load()
+        FakeService.start_generation(self)
+
+    def start_generation(self):
+        self.starts += 1
+        return super().start_generation()
+
+
+def _wangp_executor(admitter):
+    """An executor on ``WanGPService``, with a real ledger."""
+    _compatibility, _compose, _control, execution, ledger, _protocol = _modules()
+    gen = {"queue": [], "in_progress": False}
+    service = WanGPService(gen, admitter=admitter)
+    compat = _compat({"service_for": lambda *_a: service, "get_gen_info": lambda state: state["gen"]})
+    book = ledger.Ledger(root=tempfile.mkdtemp(prefix="minipaint-inline-"), instance="i" * 32)
+    return execution.Executor(compat, book, environ={}), service, gen, book
+
+
+def _queued(gen):
+    return [(task.get("params") or {}).get("client_id") for task in gen["queue"]]
+
+
+def _wait(condition, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return bool(condition())
+
+
 class _Component:
     """As much of a Gradio component as ``Host.is_component`` looks at.
 
@@ -270,6 +342,13 @@ class FakeHost:
 
     def get_global(self, name):
         return self._globals.get(name)
+
+
+def _state_model_type(state):
+    """WanGP's ``get_state_model_type``, as wgp.py writes it: a page's model is
+    in its own state, the edited task's while the Edit form is the one in use."""
+    key = "model_type" if state.get("active_form", "add") == "add" else "edit_model_type"
+    return state[key]
 
 
 def _compat(globals_map=None, environ=None):
@@ -473,7 +552,7 @@ def inheritance_checks(r: Results) -> None:
     settings it did not use.
     """
     compatibility, compose, _control, _execution, _ledger, protocol = _modules()
-    gen = {"queue": [], "in_progress": False, "model_type": "t2v"}
+    gen = {"queue": [], "in_progress": False}
     service = FakeService(gen)
     service.forms["t2v"] = {"steps": 42, "loras_multipliers": "0.9"}
     asked = []
@@ -618,6 +697,120 @@ def ledger_checks(r: Results) -> None:
             changed == 1 and reopened.get("b" * 32)["state"] == protocol.EXEC_UNKNOWN)
     r.check("with the code that stops an automatic retry upstream",
             reopened.get("b" * 32)["code"] == protocol.EXECUTION_UNKNOWN)
+
+
+def inline_admission_checks(r: Results) -> None:
+    """Bridge 1.17.0: a job joins WanGP's queue when it is submitted, behind
+    a running generation if there is one, and never takes another's place.
+
+    Found reading Wan2GP v19 against the bridge: the command the bridge used
+    to hand a job over holds the service's generation lock for the whole run
+    it started, so a second Clipboard job submitted while the first one
+    generated sat in WanGP's inline slot, not in its queue - the executor
+    called it "never reached WanGP's queue" a minute later and it generated
+    after all - and a third one written into the same slot replaced it.
+    """
+    compatibility, _compose, _control, execution, _ledger, protocol = _modules()
+
+    # Wan2GP from 2026-10-26: the admitter takes the job there and then.
+    runner, service, gen, book = _wangp_executor(admitter=True)
+    service.gate.clear()
+    _submit(runner, "a" * 32)
+    _wait(lambda: service.generation_running)
+    _submit(runner, "b" * 32)
+    r.check("a job submitted while one generates is in WanGP's queue at once, behind it",
+            _queued(gen) == ["a" * 32, "b" * 32] and "inline_queue" not in gen, str((_queued(gen), gen.get("inline_queue"))))
+    r.check("taken through WanGP's own admitter, with no command left waiting on the run",
+            service.admits == 2 and service.commands == [], str((service.admits, service.commands)))
+    r.check("and joined to the run going, not given a worker of its own", len(service.workers) == 1, str(len(service.workers)))
+    service.gate.set()
+    r.check("both generate, in the order they were sent", _drain(service, gen) and gen.get("file_list") == [
+        f"/out/{'a' * 32}.mp4", f"/out/{'b' * 32}.mp4"], str(gen.get("file_list")))
+
+    # Somebody else's submission in the slot - WanGP's own API session, say -
+    # is waited for, under WanGP's lock, never written over.
+    runner, service, gen, book = _wangp_executor(admitter=True)
+    service.gate.clear()
+    theirs = [{"id": 0, "params": dict(_settings(), client_id="theirs"), "plugin_data": {}}]
+    gen["inline_queue"] = theirs
+    threading.Timer(0.3, service.load_inline_queue).start()
+    try:
+        _submit(runner, "c" * 32)
+        waited = ""
+    except execution.ExecutionError as error:
+        waited = error.code
+    r.check("a slot still holding another submission is waited for and never overwritten",
+            not waited and _queued(gen)[:2] == ["theirs", "c" * 32], str((waited, _queued(gen))))
+    service.gate.set()
+    _drain(service, gen)
+
+    import sys as _sys
+    import types as _types
+
+    held = threading.Lock()
+    fake = _types.ModuleType(compatibility.INLINE_QUEUE_LOCK_MODULE)
+    setattr(fake, compatibility.INLINE_QUEUE_LOCK_NAME, held)
+    previous = _sys.modules.get(compatibility.INLINE_QUEUE_LOCK_MODULE)
+    _sys.modules[compatibility.INLINE_QUEUE_LOCK_MODULE] = fake
+    try:
+        r.check("the lock is WanGP's own when WanGP has it loaded, so its API sessions and the bridge take turns",
+                runner.compat.inline_queue_lock() is held)
+        runner, service, gen, book = _wangp_executor(admitter=True)
+        service.gate.clear()
+        held.acquire()
+        done = threading.Event()
+        threading.Thread(target=lambda: (_submit(runner, "d" * 32), done.set()), daemon=True).start()
+        time.sleep(0.3)
+        waiting = "d" * 32 not in _queued(gen) and gen.get("inline_queue") is None and not done.is_set()
+        held.release()
+        done.wait(3.0)
+        r.check("and a submission waits while WanGP holds it, then goes in",
+                waiting and _queued(gen) == ["d" * 32], str((waiting, _queued(gen))))
+        service.gate.set()
+        _drain(service, gen)
+    finally:
+        if previous is None:
+            _sys.modules.pop(compatibility.INLINE_QUEUE_LOCK_MODULE, None)
+        else:
+            _sys.modules[compatibility.INLINE_QUEUE_LOCK_MODULE] = previous
+    r.check("without it, the bridge's own lock, so its submissions at least never collide",
+            runner.compat.inline_queue_lock() is not held and hasattr(runner.compat.inline_queue_lock(), "acquire"))
+
+    # A Wan2GP from before the admitter: the command, which loads the slot
+    # only once the run it started is over.
+    runner, service, gen, book = _wangp_executor(admitter=False)
+    service.gate.clear()
+    _submit(runner, "e" * 32)
+    _wait(lambda: service.generation_running)
+    _submit(runner, "f" * 32)
+    _wait(lambda: len(service.commands) == 2)
+    r.check("on an older WanGP the second job waits in the slot while the first generates (WanGP's own command)",
+            gen.get("inline_queue") is not None and _queued(gen) == ["e" * 32], str((_queued(gen), bool(gen.get("inline_queue")))))
+    try:
+        _submit(runner, "0" * 32)
+        refused = ""
+    except execution.ExecutionError as error:
+        refused = error.code
+    r.check("and a third is refused as busy rather than written over it", refused == compatibility.QUEUE_BUSY, refused)
+    r.check("refused before anything is recorded, so Forge's retry is a submission and not a reading of 'failed'",
+            book.get("0" * 32) is None, str(book.get("0" * 32)))
+    r.check("the one waiting in the slot is still the second job", (gen.get("inline_queue") or [{}])[0].get("params", {}).get(
+        "client_id") == "f" * 32, str(gen.get("inline_queue")))
+    service.gate.set()
+    _wait(lambda: "inline_queue" not in gen and "f" * 32 in (gen.get("file_list") or []) or
+          f"/out/{'f' * 32}.mp4" in (gen.get("file_list") or []))
+    _submit(runner, "0" * 32)
+    r.check("once WanGP has loaded it the retry goes in, and nothing was lost",
+            _drain(service, gen, timeout=5.0) and gen.get("file_list") == [
+                f"/out/{'e' * 32}.mp4", f"/out/{'f' * 32}.mp4", f"/out/{'0' * 32}.mp4"], str(gen.get("file_list")))
+
+    # A queue left holding a task with no worker is started again, through
+    # start_generation where WanGP has it: the command's loader, given an
+    # empty slot and no file, only writes a warning to WanGP's console.
+    runner, service, gen, book = _wangp_executor(admitter=True)
+    gen["queue"].append({"id": 1, "params": dict(_settings(), client_id="stranded"), "plugin_data": {}})
+    r.check("a stranded queue is restarted by starting a worker, not by running the loader over nothing",
+            runner._retrigger(service, "s" * 32) and service.commands == [] and _drain(service, gen), str(service.commands))
 
 
 def idempotency_checks(r: Results) -> None:
@@ -903,11 +1096,17 @@ def flush_checks(r: Results) -> None:
     compatibility, _compose, _control, _execution, _ledger, protocol = _modules()
     scratch = tempfile.mkdtemp(prefix="minipaint-flush-")
     environ = _environ(scratch)
+    # WanGP as it is: its generation record carries no model, and no module
+    # global names one. Each page's state does, and ``get_state_model_type``
+    # - WanGP's own, copied - is how its handlers read it, the edited task's
+    # model while the Edit form is the one in use. Until bridge 1.17.0 these
+    # checks planted ``gen["model_type"]``, which WanGP has never written,
+    # and passed while every real flush answered "unavailable".
     gen = {"queue": [], "in_progress": False}
     service = FakeService(gen)
     service.forms["t2v"] = {"steps": 30, "loras_multipliers": "0.5"}
-    gen["model_type"] = "t2v"
-    host = compatibility.Host(FakeHost({"service_for": lambda *_a: service, "get_gen_info": lambda state: state["gen"]}))
+    host = compatibility.Host(FakeHost({"service_for": lambda *_a: service, "get_gen_info": lambda state: state["gen"],
+                                        "get_state_model_type": _state_model_type}))
     compat = compatibility.Compatibility(host=host, environ=environ)
     compat.declare_globals()
     # The bridge object itself, with its components resolved the way a real
@@ -926,17 +1125,45 @@ def flush_checks(r: Results) -> None:
     r.check("a model with nothing recorded has no fingerprint rather than a made-up one",
             compat.recorded_fingerprint(service, "nothing-recorded") == "")
 
-    answer, writes = bridge.flush({}, {compatibility.SESSION_STATE: {"gen": gen}})
-    r.check("a press asks WanGP to commit its own form",
+    page = {"gen": gen, "model_type": "t2v"}
+    answer, writes = bridge.flush({}, {compatibility.SESSION_STATE: page})
+    r.check("on a WanGP whose record names no model, a press still asks WanGP to commit the page's form",
             answer["flush"] == protocol.FLUSH_REQUESTED and compatibility.SAVE_FORM_TRIGGER in (writes or {}), str(answer))
     r.check("by writing the trigger WanGP already wires to save_inputs, not by reading ninety components",
             list((writes or {}).keys()) == [compatibility.SAVE_FORM_TRIGGER], str(writes))
+    r.check("and it is looked for under the page's own model, the key save_inputs records under",
+            answer.get("model_type") == "t2v" and answer.get("fingerprint") == compat.recorded_fingerprint(service, "t2v"),
+            str(answer))
 
-    answer, writes = bridge.flush({"probe": True}, {compatibility.SESSION_STATE: {"gen": gen}})
+    editing = {"gen": gen, "model_type": "t2v", "active_form": "edit", "edit_model_type": "i2v"}
+    answer, writes = bridge.flush({}, {compatibility.SESSION_STATE: editing})
+    r.check("a page on its Edit form saves under the edited task's model, as WanGP's own save does",
+            answer.get("model_type") == "i2v" and writes, str(answer))
+
+    answer, writes = bridge.flush({"probe": True}, {compatibility.SESSION_STATE: page})
     r.check("a probe writes nothing, so polling cannot restart the wait it is ending",
             writes is None, str(writes))
 
-    live = {compatibility.SESSION_STATE: {"gen": gen, "ignore_save_form": True}}
+    nowhere, writes = bridge.flush({}, {compatibility.SESSION_STATE: {"gen": gen}})
+    r.check("a page that names no model, on a WanGP that never chose one, is unavailable and writes nothing",
+            nowhere["flush"] == protocol.FLUSH_UNAVAILABLE and writes is None, str(nowhere))
+
+    # With no page to ask - a server-side compose of a job that named no
+    # model, the control surface's hello - the answer is WanGP's own record
+    # of the last model chosen, which it writes on every switch.
+    config = {"last_model_type": "i2v"}
+    remembered = compatibility.Compatibility(host=compatibility.Host(FakeHost({
+        "service_for": lambda *_a: service, "get_gen_info": lambda state: state["gen"], "server_config": config})),
+        environ=environ)
+    remembered.declare_globals()
+    r.check("with no page to ask, the model is the one WanGP last switched to (server_config's last_model_type)",
+            remembered.current_model_type(service) == "i2v" and compat.current_model_type(service) == "",
+            str((remembered.current_model_type(service), compat.current_model_type(service))))
+    config["last_model_type"] = "t2v"
+    r.check("read live, not copied at start: a switch made after the plugin loaded is the answer",
+            remembered.current_model_type(service) == "t2v", remembered.current_model_type(service))
+
+    live = {compatibility.SESSION_STATE: {"gen": gen, "model_type": "t2v", "ignore_save_form": True}}
     suppressed, writes = bridge.flush({}, live)
     r.check("a page mid settings-load is refused rather than flushed",
             suppressed["flush"] == protocol.FLUSH_SUPPRESSED and writes is None, str(suppressed))
@@ -964,11 +1191,12 @@ def commit_count_checks(r: Results) -> None:
     compatibility, _compose, _control, _execution, _ledger, protocol = _modules()
     scratch = tempfile.mkdtemp(prefix="minipaint-commits-")
     environ = _environ(scratch)
-    gen = {"queue": [], "in_progress": False, "model_type": "t2v"}
+    gen = {"queue": [], "in_progress": False}
     service = FakeService(gen)
     service.forms["t2v"] = {"steps": 30, "loras_multipliers": "0.5"}
     original = service.record_model_form
-    host = compatibility.Host(FakeHost({"service_for": lambda *_a: service, "get_gen_info": lambda state: state["gen"]}))
+    host = compatibility.Host(FakeHost({"service_for": lambda *_a: service, "get_gen_info": lambda state: state["gen"],
+                                        "get_state_model_type": _state_model_type}))
     compat = compatibility.Compatibility(host=host, environ=environ)
     compat.declare_globals()
 
@@ -1039,11 +1267,11 @@ def commit_count_checks(r: Results) -> None:
     bridge.declare()
     bridge.compat.host.accept_components({"save_form_trigger": _Component()})
     bridge.resolve()
-    pressed, writes = bridge.flush({}, {compatibility.SESSION_STATE: {"gen": gen}})
+    pressed, writes = bridge.flush({}, {compatibility.SESSION_STATE: {"gen": gen, "model_type": "t2v"}})
     r.check("a flush's press says how many saves there have been before it writes the trigger",
             pressed["flush"] == protocol.FLUSH_REQUESTED and pressed.get("commits") == 3 and writes, str(pressed))
     service.record_model_form("t2v", {"steps": 12})
-    looked, writes = bridge.flush({"probe": True}, {compatibility.SESSION_STATE: {"gen": gen}})
+    looked, writes = bridge.flush({"probe": True}, {compatibility.SESSION_STATE: {"gen": gen, "model_type": "t2v"}})
     r.check("and the probe after WanGP's save says one more, with the fingerprint unmoved",
             looked.get("commits") == 4 and looked.get("fingerprint") == pressed.get("fingerprint") and writes is None,
             str(looked))
@@ -1070,7 +1298,7 @@ def press_check_checks(r: Results) -> None:
     compatibility, _compose, control, execution, ledger, protocol = _modules()
     scratch = tempfile.mkdtemp(prefix="minipaint-check-")
     environ = _environ(scratch, _free_port())
-    gen = {"queue": [], "in_progress": False, "model_type": "t2v"}
+    gen = {"queue": [], "in_progress": False}
     service = FakeService(gen)
     seen = {"tasks": [], "states": [], "loaded": [], "extracted": []}
     verdict = {"error": "", "raise": None}
@@ -1377,8 +1605,8 @@ def session_checks(r: Results) -> None:
     bridge.resolve()
     bridge.state_keys = (compatibility.SESSION_STATE,) + tuple(k for k in bridge.state_keys if k != compatibility.SESSION_STATE)
     handshake = bridge.compat.handshake(bridge_session="s", environ=environ)
-    r.check("the handshake offers the session capability, and the bridge is 1.16.0",
-            compatibility.BRIDGE_VERSION == "1.16.0"
+    r.check("the handshake offers the session capability, and the bridge is 1.17.0",
+            compatibility.BRIDGE_VERSION == "1.17.0"
             and handshake["capabilities"].get("session") is True)
     r.check("and, from 1.11.0, says the page may be made compact under focus (LAYOUT_STATE)",
             handshake["capabilities"].get("layout_compact") is True, str(handshake["capabilities"]))
@@ -1388,9 +1616,10 @@ def session_checks(r: Results) -> None:
             handshake["capabilities"].get("theme") is True and handshake["capabilities"].get("theme_palette") is True
             and handshake["capabilities"].get("theme_font") is True, str(handshake["capabilities"]))
     info = json.loads((BRIDGE_DIR / "plugin_info.json").read_text(encoding="utf-8"))
-    r.check("and plugin_info.json says the same version twice, and lists the palette, the typeface, the compact layout, the studio, the hold, the model check and the prompt edit among its capabilities",
-            info.get("version") == "1.16.0" and info.get("bridge_version") == "1.16.0"
+    r.check("and plugin_info.json says the same version twice, and lists the palette, the typeface, the compact layout, the studio, the hold, the model check, the prompt edit and the settings load among its capabilities",
+            info.get("version") == "1.17.0" and info.get("bridge_version") == "1.17.0"
             and "prompt_edit" in (info.get("capabilities") or []) and "layout_studio" in (info.get("capabilities") or [])
+            and "settings_load" in (info.get("capabilities") or [])
             and "theme_palette" in (info.get("capabilities") or []) and "theme_font" in (info.get("capabilities") or [])
             and "layout_compact" in (info.get("capabilities") or []) and "hold" in (info.get("capabilities") or [])
             and "model_check" in (info.get("capabilities") or []), str(info))
@@ -1700,6 +1929,7 @@ def run() -> Results:
     output_path_checks(r)
     ledger_checks(r)
     idempotency_checks(r)
+    inline_admission_checks(r)
     surface_checks(r)
     media_checks(r)
     client_id_checks(r)

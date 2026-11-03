@@ -809,3 +809,16 @@ read from the wheel, never on the user's machine: if WanGP still pins too much,
 WanGP's own console line *Switching to partial pinning* (or its absence) and the
 `reserved RAM:` line in the `runtime` column of `logs/wangp-log.txt` are the
 first things to look at.
+View Outputs' gallery (2026-11-03) draws every output as a tile with a poster
+made on the server by `minipaint_neo/clipboard/posters.py` with PyAV - Forge
+Neo's own `av` (17.1.0 in its requirements, the version `tests/requirements.txt`
+pins) - and OpenCV as the fallback. It has been checked with PyAV 17.1.0 on
+VP8 WebM, MPEG-4 Part 2 and H.264 MP4 and on 5,000 outputs in Chromium, never
+against the user's own WanGP folder or in LibreWolf: if the tiles show the ▶
+placeholder instead of pictures, a poster's own answer
+(`/minipaint-clipboard/output/<id>/poster`, its code) and the posters folder in
+the extension's data (`clipboard-output-posters/`) are the first things to look
+at; a gallery drawing `<video>` posters says the server had no decoder
+(`OUTPUT_POSTER_UNAVAILABLE`, and the page journal's `outputs:` line). The
+order, the shuffle and the search are the page's own, over the one listing;
+nothing about them is ever written on the host or in WanGP's folder.

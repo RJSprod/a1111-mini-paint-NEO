@@ -214,7 +214,30 @@ window.minipaintClipboard = (function () {
         menuAnchor: null,
         //: The gallery's own working set: what this page of it holds, which
         //: one is in the stage, and the element playing it.
-        outputs: { items: [], page: 0, pages: 1, chosen: "", stage: null, strip: null, player: null, sending: false },
+        outputs: {
+            //: The whole listing, by id, and the list both views show: it
+            //: narrowed by the search and put in the order (arrangeOutputs).
+            all: [], byId: new Map(), items: [], position: new Map(),
+            page: 0, pages: 1, drawn: 0, message: "", truncated: 0, reading: null, landing: false,
+            //: Which view, the order, the shuffle's seed, the search, the fit.
+            view: "gallery", sort: "newest", seed: 0, filter: "", findTimer: 0, fit: "fit",
+            //: The one selected - in the gallery's tile and on the stage alike.
+            chosen: "",
+            dom: null, stage: null, strip: null, stripStart: 0, stripOrder: null,
+            player: null, controls: null, sending: false, swiped: 0,
+            //: The tab is away (another Forge tab on screen), and whether that
+            //: paused the stage, so its return plays it again.
+            away: false, stageAway: false,
+            //: The server said it has no decoder: posters are the page's.
+            posterless: false,
+            visibilityWatch: null,
+            //: The gallery: its layout, its tiles near the view, its posters
+            //: as object URLs, the requests out now, and the one preview.
+            gallery: { layout: null, perRowWanted: 0, rendered: new Map(), posters: new Map(), inflight: new Map(),
+                       scrolledAt: 0, startedAt: 0, scrollTop: 0, pumpTimer: 0, frame: 0, scrub: null,
+                       preview: null, previewId: "", previewPaused: false, lastTap: null,
+                       stats: { started: 0, dropped: 0, done: 0, failed: 0, order: [] } }
+        },
         outputsKey: null,
         //: The History dialog: its nodes, the one read of its list in flight,
         //: the Load in flight, how many entries it drew, and its Escape.
@@ -3387,55 +3410,1798 @@ window.minipaintClipboard = (function () {
         return true;
     }
 
+    /* ------------------------------------------------------------------ */
+    /* View Outputs: one ordered list, two views of it                      */
+    /* ------------------------------------------------------------------ */
+    //
+    // Asked for: "In addition to slideshow, I want a gallery view of the
+    // videos. The gallery should work much like the clipboard archives and
+    // load as I slide into video. Tap to select with automatically and
+    // silently play that video on loop. Double tap in gallery open to slide
+    // show playback view of that item. Slider controls the same so I can
+    // choose how many gallery thumbs of those videos are in column grid. Only
+    // one video play back at a time on loop. Should be very easy to scroll
+    // the gallery and change its sort. Also should have a random shuffle
+    // function for the gallery (which should be only within our app and not
+    // impact windows file system)."
+    //
+    // ONE LIST. The server answers every output in one listing (``?all=1``),
+    // as an archive is listed, and the page holds it: it is sorted, searched
+    // and shuffled HERE, so a new order is instant and nothing about it is
+    // ever written anywhere - a shuffle is an order in this page, and no file
+    // is renamed, moved or touched. Both views show that one list in that one
+    // order: the gallery as a grid, the slideshow (the stage and the strip
+    // this view always had) one at a time, stepping through it.
+    //
+    // THE GALLERY is the picture grid's renderer again, for videos: every
+    // output a tile, only the rows near the view in the document, and each
+    // tile's poster - one frame, made once on the server (``posters.py``) and
+    // kept by the browser for a year - asked for in view first, three at a
+    // time, a request for a tile that has left the view dropped, nothing
+    // asked for while the view is flung past or the scrubber is held. A tap
+    // selects a tile and plays it there, muted and on loop; a double tap (or
+    // a right click, or Enter) opens it in the slideshow; a slider counts the
+    // tiles per row; the scrubber on its edge moves through the whole list.
+    //
+    // ONE VIDEO PLAYS. The gallery's preview is one <video> element moved
+    // into whichever tile is selected, and let go of - its source taken off,
+    // so it fetches nothing more - when its tile leaves the drawn rows, when
+    // the slideshow takes over, when the view closes and while the page is
+    // hidden. The slideshow's player is let go of the same way when the
+    // gallery comes back. There is never a second.
+
+    //: The view, the order, the row and the tiles' fit, kept per browser:
+    //: choices about watching, not about one video.
+    const OUTPUTS_PREFS_KEY = "minipaint-outputs:v1";
+    //: The shuffle's seed, kept per browser TAB: a reload keeps the order it
+    //: shuffled, another tab shuffles on its own, and nothing about it leaves
+    //: the page.
+    const OUTPUTS_SHUFFLE_KEY = "minipaint-outputs:shuffle";
+    const OUTPUT_VIEWS = [["gallery", "Gallery"], ["slideshow", "Slideshow"]];
+    const OUTPUT_SORTS = [["newest", "Newest"], ["oldest", "Oldest"], ["name", "Name A–Z"],
+                          ["name_desc", "Name Z–A"], ["largest", "Largest"], ["smallest", "Smallest"],
+                          ["shuffle", "Shuffled"]];
+    //: The whole listing is a walk of WanGP's output folder: a second on a
+    //: slow disk, never a minute. Every request here has a deadline.
+    const OUTPUTS_TIMEOUT_MS = 30000;
+    //: A tile's square, in pixels: the slider offers the counts per row whose
+    //: tiles come out between these at the gallery's width. The largest is
+    //: the poster's own side, so a tile is never drawn larger than its poster.
+    const OUTPUT_CELL_MIN = 96;
+    const OUTPUT_CELL_MAX = 480;
+    //: What a browser starts at, until a count is chosen.
+    const OUTPUT_CELL_DEFAULT = 220;
+    //: The name under the square, and the space between tiles.
+    const OUTPUT_CELL_CAPTION = 24;
+    const OUTPUT_CELL_GAP = 8;
+    //: Posters: the picture grid's numbers. One is a cache read in
+    //: milliseconds and a first decode in a tenth of a second.
+    const POSTER_TIMEOUT_MS = 20000;
+    const POSTER_TRIES = 2;
+    const POSTER_CONCURRENCY = 3;
+    //: Posters kept in the page as object URLs, for scrolling back.
+    const POSTER_KEEP = 600;
+    const OUTPUT_OVERSCAN_ROWS = 2;
+    //: The slideshow's strip holds this many of the list around the one on
+    //: the stage - the strip of a list of twenty thousand would be twenty
+    //: thousand buttons - and is drawn again around it when the stage gets
+    //: within this many of either end.
+    const STRIP_WINDOW = 60;
+    const STRIP_EDGE = 6;
+    //: The search waits for the typing to pause.
+    const OUTPUT_FIND_MS = 150;
+
+    const OUTPUT_ICONS = {
+        shuffle: "M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z",
+        prev: "M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z",
+        next: "M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z",
+        refresh: "M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4z",
+        // A frame round a smaller one: the whole picture, fitted.
+        fit: "M3 5h18v14H3zM5 7v10h14V7zM8 10h8v4H8z",
+        // A frame filled: the tile filled, the picture cropped to it.
+        fill: "M3 5h18v14H3z",
+        slideshow: "M8 5v14l11-7z"
+    };
+
+    function outputIcon(name) {
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", "0 0 24 24");
+        svg.setAttribute("aria-hidden", "true");
+        svg.setAttribute("focusable", "false");
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", OUTPUT_ICONS[name] || PLAYER_ICONS[name] || "");
+        path.setAttribute("fill", "currentColor");
+        if (name === "fit") { path.setAttribute("fill-rule", "evenodd"); }
+        svg.appendChild(path);
+        return svg;
+    }
+
+    //: The bar's buttons: a finger's target, pinned like the player's, a
+    //: little smaller because the bar is a row of them. Their display is
+    //: the stylesheet's, not pinned: an inline !important display would beat
+    //: the rule that hides the ones the other view has no use for.
+    const OUTPUT_TOOL_GEOMETRY = Object.assign({}, CONTROL_GEOMETRY, { "width": "38px", "min-width": "38px", "height": "38px" });
+    delete OUTPUT_TOOL_GEOMETRY.display;
+
+    function outputTool(name, label, onPress) {
+        const button = el("button", "minipaint-clip-output-tool");
+        button.type = "button";
+        button.dataset.control = name;
+        button.setAttribute("aria-label", label);
+        button.title = label;
+        button.appendChild(outputIcon(name));
+        pin(button, OUTPUT_TOOL_GEOMETRY);
+        button.addEventListener("click", function (event) {
+            event.stopPropagation();
+            onPress(button);
+        });
+        return button;
+    }
+
+    /* -- what is kept about watching ------------------------------------ */
+
+    function outputPrefs() {
+        let found = null;
+        try { found = JSON.parse(window.localStorage.getItem(OUTPUTS_PREFS_KEY) || "null"); } catch (e) { found = null; }
+        found = found && typeof found === "object" ? found : {};
+        const count = Number(found.perRow);
+        return {
+            view: found.view === "slideshow" ? "slideshow" : "gallery",
+            sort: OUTPUT_SORTS.some(function (one) { return one[0] === found.sort; }) ? found.sort : "newest",
+            perRow: isFinite(count) && count >= 1 ? Math.round(count) : 0,
+            fit: found.fit === "fill" ? "fill" : "fit"
+        };
+    }
+
+    function saveOutputPrefs(changes) {
+        const kept = Object.assign(outputPrefs(), changes || {});
+        try { window.localStorage.setItem(OUTPUTS_PREFS_KEY, JSON.stringify(kept)); } catch (e) { /* memory only */ }
+    }
+
+    /** The shuffle's seed: the tab's, or a new one. Never 0. */
+    function shuffleSeed(fresh) {
+        let seed = 0;
+        if (!fresh) {
+            try { seed = Number(window.sessionStorage.getItem(OUTPUTS_SHUFFLE_KEY)) >>> 0; } catch (e) { seed = 0; }
+        }
+        if (!seed) {
+            seed = (Math.floor(Math.random() * 4294967295) >>> 0) || 1;
+            try { window.sessionStorage.setItem(OUTPUTS_SHUFFLE_KEY, String(seed)); } catch (e) { /* memory only */ }
+        }
+        return seed;
+    }
+
+    /**
+     * Where an output falls in a shuffle: a number made of the seed and its
+     * id, the same pair always the same number. So a shuffled list is the
+     * same list after a search narrows it or a re-read adds to it - the
+     * outputs keep their places among each other - and a new seed is a new
+     * shuffle of everything.
+     */
+    function shuffleKey(seed, id) {
+        let hash = (2166136261 ^ seed) >>> 0;
+        for (let i = 0; i < id.length; i += 1) {
+            hash ^= id.charCodeAt(i);
+            hash = Math.imul(hash, 16777619) >>> 0;
+        }
+        hash ^= hash >>> 15;
+        hash = Math.imul(hash, 2246822507) >>> 0;
+        hash ^= hash >>> 13;
+        hash = Math.imul(hash, 3266489909) >>> 0;
+        hash ^= hash >>> 16;
+        return hash >>> 0;
+    }
+
+    let outputCollator = null;
+    function compareNames(a, b) {
+        if (!outputCollator) {
+            try { outputCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" }); } catch (e) { outputCollator = false; }
+        }
+        const by = outputCollator ? outputCollator.compare(a.name, b.name) : (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+        return by || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    }
+
+    /** Newest first, as the server lists them: by time, then by id. */
+    function outputNewest(a, b) {
+        if (a.at !== b.at) { return b.at - a.at; }
+        return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+    }
+
+    function outputHaystack(item) {
+        if (item.find === undefined) {
+            item.find = [item.name, item.prompt, item.written, item.model].filter(Boolean).join("\n").toLowerCase();
+        }
+        return item.find;
+    }
+
+    /**
+     * The list both views show: the listing, narrowed by the search and put
+     * in the chosen order. Every word typed must be in the name, the prompt
+     * (as typed or as written) or the model.
+     */
+    function arrangeOutputs() {
+        const O = S.outputs;
+        const words = String(O.filter || "").toLowerCase().split(/\s+/).filter(Boolean);
+        const list = words.length
+            ? O.all.filter(function (item) {
+                const hay = outputHaystack(item);
+                return words.every(function (word) { return hay.indexOf(word) >= 0; });
+            })
+            : O.all.slice();
+        const sort = O.sort;
+        if (sort === "oldest") { list.sort(function (a, b) { return outputNewest(b, a); }); }
+        else if (sort === "name") { list.sort(compareNames); }
+        else if (sort === "name_desc") { list.sort(function (a, b) { return compareNames(b, a); }); }
+        else if (sort === "largest") { list.sort(function (a, b) { return (b.size - a.size) || outputNewest(a, b); }); }
+        else if (sort === "smallest") { list.sort(function (a, b) { return (a.size - b.size) || outputNewest(a, b); }); }
+        else if (sort === "shuffle") {
+            const seed = O.seed || (O.seed = shuffleSeed(false));
+            const keys = new Map();
+            for (const item of list) { keys.set(item.id, shuffleKey(seed, item.id)); }
+            list.sort(function (a, b) { return (keys.get(a.id) - keys.get(b.id)) || (a.id < b.id ? -1 : 1); });
+        } else { list.sort(outputNewest); }
+        O.items = list;
+        O.position = new Map();
+        list.forEach(function (item, index) { O.position.set(item.id, index); });
+    }
+
+    /** The listing's items as the page holds them: every field there, with
+     *  what a folder video leaves out filled in empty. */
+    function takeListing(answer) {
+        const prefix = answer && typeof answer.prefix === "string" && answer.prefix ? answer.prefix : OUTPUTS_FILE_PREFIX;
+        const items = [];
+        for (const raw of (answer && answer.items) || []) {
+            if (!raw || typeof raw.id !== "string" || !raw.id) { continue; }
+            items.push({
+                id: raw.id,
+                name: String(raw.name || ""),
+                kind: raw.kind === "image" ? "image" : "video",
+                size: Number(raw.size) || 0,
+                at: Number(raw.at) || 0,
+                v: String(raw.v || ""),
+                source: raw.source === "folder" ? "folder" : "request",
+                exact: raw.exact === true,
+                prompt: String(raw.prompt || ""),
+                written: String(raw.written || ""),
+                model: String(raw.model || ""),
+                recipe: String(raw.recipe || ""),
+                url: typeof raw.url === "string" && raw.url ? raw.url : prefix + encodeURIComponent(raw.id)
+            });
+        }
+        return items;
+    }
+
+    function posterUrl(item) {
+        return OUTPUTS_FILE_PREFIX + encodeURIComponent(item.id) + "/poster" + (item.v ? "?v=" + encodeURIComponent(item.v) : "");
+    }
+
+    /** Whether this output's poster is drawn in the page, the old way: a
+     *  video, on a Forge that said it has no decoder to make one. */
+    function posterInPage(item) { return !!S.outputs.posterless && !!item && item.kind === "video"; }
+
+    function outputDate(item, withTime) {
+        if (!item || !item.at) { return ""; }
+        const when = new Date(item.at * 1000);
+        if (isNaN(when.getTime())) { return ""; }
+        try {
+            return withTime
+                ? when.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+                : when.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+        } catch (e) {
+            return withTime ? when.toString() : when.toDateString();
+        }
+    }
+
+    /** A clip's length as a tile says it: `0:05`, `1:12`. */
+    function durationText(seconds) {
+        const value = isFinite(seconds) && seconds > 0 ? Math.round(seconds) : 0;
+        if (!value && !(seconds > 0)) { return ""; }
+        const minutes = Math.floor(value / 60);
+        const rest = value - minutes * 60;
+        return minutes + ":" + (rest < 10 ? "0" : "") + rest;
+    }
+
+    function outputTooltip(item) {
+        const held = S.outputs.gallery.posters.get(item.id);
+        const facts = [outputDate(item, true), item.size ? bytesText(item.size) : "",
+                       held && held.duration > 0 ? durationText(held.duration) : ""].filter(Boolean).join(" · ");
+        return [item.name, item.model, facts, guessedOutput(item) ? "matched to a request by when it was written" : ""]
+            .filter(Boolean).join("\n");
+    }
+
+    /* -- the panel -------------------------------------------------------- */
+
+    /**
+     * The panel's parts, built once and kept: a bar along the top (the view,
+     * the order, the shuffle, the search, the row, the fit, a re-read, what
+     * is shown, Close), the gallery, and the slideshow - its stage and its
+     * strip. Whichever view is not on screen is hidden and holds no media.
+     */
+    function outputsDom() {
+        const panel = outputsPanel();
+        if (!panel) { return null; }
+        const O = S.outputs;
+        if (O.dom && O.dom.panel === panel && panel.contains(O.dom.bar)) { return O.dom; }
+        panel.innerHTML = "";
+        const dom = { panel: panel, viewButtons: {} };
+
+        const bar = el("div", "minipaint-clip-output-bar");
+        const views = el("div", "minipaint-clip-output-views");
+        views.setAttribute("role", "group");
+        views.setAttribute("aria-label", "How the outputs are shown");
+        for (const one of OUTPUT_VIEWS) {
+            const button = el("button", "minipaint-clip-output-view", one[1]);
+            button.type = "button";
+            button.dataset.view = one[0];
+            button.addEventListener("click", function (event) {
+                event.stopPropagation();
+                setOutputsView(one[0], true);
+            });
+            views.appendChild(button);
+            dom.viewButtons[one[0]] = button;
+        }
+        bar.appendChild(views);
+
+        const sort = el("select", "minipaint-clip-output-sort");
+        sort.setAttribute("aria-label", "Order");
+        sort.title = "The order of the gallery and the slideshow";
+        for (const one of OUTPUT_SORTS) {
+            const option = document.createElement("option");
+            option.value = one[0];
+            option.textContent = one[1];
+            sort.appendChild(option);
+        }
+        sort.addEventListener("change", function () { setOutputsSort(sort.value); });
+        bar.appendChild(sort);
+        const shuffle = outputTool("shuffle", "Shuffle: a new random order, in this page only - no file is renamed or moved",
+                                   function () { shuffleOutputs(); });
+        bar.appendChild(shuffle);
+
+        const find = el("input", "minipaint-clip-output-find");
+        find.type = "search";
+        find.placeholder = "Search";
+        find.setAttribute("aria-label", "Search the outputs by name, prompt or model");
+        find.title = "Search by name, prompt or model";
+        find.autocomplete = "off";
+        find.spellcheck = false;
+        find.addEventListener("input", function () { scheduleFind(find.value); });
+        bar.appendChild(find);
+
+        const perRow = el("label", "minipaint-clip-output-perrow minipaint-clip-output-gallery-only");
+        perRow.title = "Videos per row";
+        const slider = el("input", "minipaint-clip-output-perrow-input");
+        slider.type = "range";
+        slider.min = "1";
+        slider.max = "8";
+        slider.step = "1";
+        slider.setAttribute("aria-label", "Videos per row");
+        const count = el("span", "minipaint-clip-output-perrow-count", "");
+        slider.addEventListener("input", function () { setOutputsPerRow(Number(slider.value), true); });
+        perRow.appendChild(slider);
+        perRow.appendChild(count);
+        bar.appendChild(perRow);
+
+        const fit = outputTool("fit", "Fit each video in its tile", function () {
+            setOutputsFit(S.outputs.fit === "fill" ? "fit" : "fill");
+        });
+        fit.classList.add("minipaint-clip-output-gallery-only");
+        bar.appendChild(fit);
+
+        const steps = el("div", "minipaint-clip-output-steps minipaint-clip-output-show-only");
+        const prev = outputTool("prev", "Previous (↑ or Page Up)", function () { stepOutput(-1); });
+        const place = el("span", "minipaint-clip-output-count", "");
+        const next = outputTool("next", "Next (↓ or Page Down)", function () { stepOutput(1); });
+        steps.appendChild(prev);
+        steps.appendChild(place);
+        steps.appendChild(next);
+        bar.appendChild(steps);
+
+        const refresh = outputTool("refresh", "Read WanGP's output folder again", function () { askOutputs(0); });
+        bar.appendChild(refresh);
+        const status = el("span", "minipaint-clip-output-status", "");
+        bar.appendChild(status);
+        const close = el("button", "minipaint-clip-output-close", "Close");
+        close.type = "button";
+        close.addEventListener("click", closeOutputs);
+        bar.appendChild(close);
+        panel.appendChild(bar);
+
+        const gallery = el("div", "minipaint-clip-output-gallery");
+        const mount = el("div", "minipaint-clip-output-mount");
+        const scroller = el("div", "minipaint-clip-output-grid");
+        scroller.setAttribute("role", "listbox");
+        // Focusable by the page, for the keys, and not a stop of its own in
+        // the Tab order: the tiles are.
+        scroller.tabIndex = -1;
+        scroller.setAttribute("aria-label", "WanGP's outputs");
+        const track = el("div", "minipaint-clip-output-track");
+        scroller.appendChild(track);
+        mount.appendChild(scroller);
+        gallery.appendChild(mount);
+        const detail = el("div", "minipaint-clip-output-detail");
+        gallery.appendChild(detail);
+        panel.appendChild(gallery);
+
+        const show = el("div", "minipaint-clip-output-show");
+        const stage = el("div", "minipaint-clip-output-stage");
+        const strip = el("div", "minipaint-clip-output-strip");
+        show.appendChild(stage);
+        show.appendChild(strip);
+        panel.appendChild(show);
+
+        scroller.addEventListener("scroll", onOutputGridScroll, { passive: true });
+        track.addEventListener("click", onOutputCellClick);
+        track.addEventListener("contextmenu", onOutputCellMenu);
+        strip.addEventListener("click", function (event) {
+            const tile = event.target && event.target.closest ? event.target.closest("[data-output]") : null;
+            if (!tile) { return; }
+            const wanted = S.outputs.byId.get(tile.dataset.output);
+            if (wanted) { showOutput(wanted); }
+        });
+        watchStageSwipe(stage);
+        if (typeof ResizeObserver === "function") {
+            try {
+                // The panel too: it has no size while another of Forge's tabs
+                // is on screen, and a video playing in a tab nobody can see
+                // is still a video playing (see onOutputsShown).
+                dom.resizer = new ResizeObserver(function () {
+                    onOutputsShown();
+                    onOutputGridResize();
+                });
+                dom.resizer.observe(scroller);
+                dom.resizer.observe(panel);
+            } catch (e) { dom.resizer = null; }
+        }
+        Object.assign(dom, { bar: bar, sort: sort, shuffle: shuffle, find: find, perRow: perRow, slider: slider,
+                             perRowCount: count, fit: fit, steps: steps, prev: prev, place: place, next: next,
+                             refresh: refresh, status: status, close: close, gallery: gallery, mount: mount,
+                             scroller: scroller, track: track, detail: detail, show: show, stage: stage,
+                             strip: strip, scrubber: null, empty: null });
+        O.dom = dom;
+        O.stage = stage;
+        O.strip = strip;
+        // A new panel holds none of the old tiles.
+        O.gallery.rendered = new Map();
+        O.stripOrder = null;
+        return dom;
+    }
+
+    /** The bar's controls, said again from the state. */
+    function drawOutputsBar() {
+        const O = S.outputs;
+        const dom = O.dom;
+        if (!dom) { return; }
+        dom.panel.dataset.view = O.view;
+        dom.panel.dataset.fit = O.fit;
+        for (const one of OUTPUT_VIEWS) {
+            const on = O.view === one[0];
+            dom.viewButtons[one[0]].setAttribute("aria-pressed", on ? "true" : "false");
+            dom.viewButtons[one[0]].classList.toggle("minipaint-clip-output-view-on", on);
+        }
+        if (dom.sort.value !== O.sort) { dom.sort.value = O.sort; }
+        dom.shuffle.setAttribute("aria-pressed", O.sort === "shuffle" ? "true" : "false");
+        if (document.activeElement !== dom.find && dom.find.value !== (O.filter || "")) { dom.find.value = O.filter || ""; }
+        const fill = O.fit === "fill";
+        dom.fit.replaceChildren(outputIcon(fill ? "fill" : "fit"));
+        dom.fit.setAttribute("aria-pressed", fill ? "true" : "false");
+        const fitLabel = fill ? "Tiles filled, the picture cropped to them: press to fit the whole frame"
+                              : "Whole frames, fitted in the tiles: press to fill the tiles";
+        dom.fit.setAttribute("aria-label", fitLabel);
+        dom.fit.title = fitLabel;
+        dom.gallery.hidden = O.view !== "gallery";
+        dom.show.hidden = O.view !== "slideshow";
+        for (const node of Array.from(dom.bar.querySelectorAll(".minipaint-clip-output-gallery-only"))) { node.hidden = O.view !== "gallery"; }
+        for (const node of Array.from(dom.bar.querySelectorAll(".minipaint-clip-output-show-only"))) { node.hidden = O.view !== "slideshow"; }
+        drawOutputsStatus();
+    }
+
+    function countText(value) { try { return Number(value).toLocaleString(); } catch (e) { return String(value); } }
+
+    /** What is shown, said once on the bar: how many, of how many, in what
+     *  order - and where the stage is in it. */
+    function drawOutputsStatus() {
+        const O = S.outputs;
+        const dom = O.dom;
+        if (!dom) { return; }
+        let text = O.message || "";
+        if (O.all.length) {
+            const shown = O.items.length;
+            text = (O.filter ? countText(shown) + " of " + countText(O.all.length) + " match"
+                             : countText(shown) + " output" + (shown === 1 ? "" : "s"))
+                + (O.sort === "shuffle" ? " · shuffled here, nothing on disk moved" : "")
+                + (O.truncated ? " · " + countText(O.truncated) + " more not listed" : "");
+        }
+        if (dom.status.textContent !== text) { dom.status.textContent = text; }
+        const at = O.position.has(O.chosen) ? O.position.get(O.chosen) : -1;
+        const place = at >= 0 ? countText(at + 1) + " of " + countText(O.items.length) : "";
+        if (dom.place.textContent !== place) { dom.place.textContent = place; }
+        dom.prev.disabled = at <= 0;
+        dom.next.disabled = at < 0 || at >= O.items.length - 1;
+    }
+
+    /* -- the two views ----------------------------------------------------- */
+
+    /**
+     * Show one view, and only that one's media. ``keep`` saves it as this
+     * browser's view: a press on the bar's switch is a choice, a double tap
+     * into the slideshow is a visit.
+     */
+    function setOutputsView(view, keep) {
+        const O = S.outputs;
+        const wanted = view === "slideshow" ? "slideshow" : "gallery";
+        if (keep) { saveOutputPrefs({ view: wanted }); }
+        O.view = wanted;
+        if (!outputsDom()) { return false; }
+        drawOutputsBar();
+        if (wanted === "gallery") {
+            leaveSlideshow();
+            const reveal = O.chosen;
+            requestAnimationFrame(function () {
+                if (!outputsOpen() || S.outputs.view !== "gallery") { return; }
+                layoutOutputGrid();
+                if (reveal && O.position.has(reveal)) { centreOutput(O.position.get(reveal)); }
+                renderOutputGrid();
+                pumpPosters(true);
+                drawOutputScrubber();
+                startPreview();
+                try { O.dom.scroller.focus({ preventScroll: true }); } catch (e) { /* not focusable here */ }
+            });
+            drawOutputDetail();
+        } else {
+            releasePreview();
+            stopPosters();
+            endOutputScrub();
+            const item = O.byId.get(O.chosen);
+            const shown = item && O.position.has(item.id) ? item : O.items[0];
+            if (shown) { showOutput(shown); } else { drawEmptyStage(); }
+        }
+        return true;
+    }
+
+    /** The slideshow let go of: the player stopped and its file released,
+     *  the stage emptied, so nothing in a hidden view holds a video. */
+    function leaveSlideshow() {
+        stopPlayer();
+        if (S.outputs.controls && S.outputs.controls.forget) { S.outputs.controls.forget(); }
+        S.outputs.controls = null;
+        S.outputs.player = null;
+        stopTiles();
+        if (S.outputs.stage) { S.outputs.stage.innerHTML = ""; }
+        if (S.outputs.strip) { S.outputs.strip.innerHTML = ""; }
+        S.outputs.stripOrder = null;
+    }
+
+    function drawEmptyStage() {
+        const O = S.outputs;
+        if (!O.stage) { return; }
+        leaveSlideshow();
+        O.stage.appendChild(el("div", "minipaint-clip-output-empty", O.filter && O.all.length
+            ? "Nothing matches the search." : (O.message || "Nothing here yet.")));
+        drawOutputsStatus();
+    }
+
+    /** Double tap, a right click or Enter on a tile: that output in the
+     *  slideshow. A visit, not a choice of view: Escape comes back. */
+    function openSlideshowOn(id) {
+        const O = S.outputs;
+        if (!O.byId.has(id)) { return false; }
+        O.chosen = id;
+        note("outputs: the slideshow on " + String(id).slice(0, 8));
+        return setOutputsView("slideshow", false);
+    }
+
+    /** One step through the list, in either view. */
+    function stepOutput(by) {
+        const O = S.outputs;
+        if (!O.items.length) { return false; }
+        const at = O.position.has(O.chosen) ? O.position.get(O.chosen) : (by > 0 ? -1 : O.items.length);
+        const to = Math.max(0, Math.min(O.items.length - 1, at + by));
+        if (to === at) { return false; }
+        const item = O.items[to];
+        if (O.view === "slideshow") { showOutput(item); } else { selectOutput(item.id, true); }
+        return true;
+    }
+
+    /* -- order, search, shuffle, row, fit ----------------------------------- */
+
+    /** The list put in a new order, or narrowed: both views drawn from it. A
+     *  new order starts the gallery from the top, as the picture grid does -
+     *  a place in one order means nothing in another - and leaves the stage
+     *  on what it shows, the strip drawn round it. */
+    function rearrangeOutputs(toTop) {
+        const O = S.outputs;
+        arrangeOutputs();
+        if (!O.dom) { return; }
+        drawOutputsBar();
+        if (O.view === "gallery") {
+            const scroller = O.dom.scroller;
+            if (toTop && scroller) { scroller.scrollTop = 0; O.gallery.scrollTop = 0; }
+            layoutOutputGrid();
+            renderOutputGrid();
+            pumpPosters(true);
+            drawOutputScrubber();
+            startPreview();
+            drawOutputDetail();
+        } else if (O.position.has(O.chosen)) {
+            drawStrip();
+            drawOutputsStatus();
+        } else if (O.items.length) {
+            showOutput(O.items[0]);
+        } else {
+            drawEmptyStage();
+        }
+    }
+
+    function setOutputsSort(sort) {
+        const O = S.outputs;
+        const wanted = OUTPUT_SORTS.some(function (one) { return one[0] === sort; }) ? sort : "newest";
+        O.sort = wanted;
+        saveOutputPrefs({ sort: wanted });
+        note("outputs: sorted " + wanted);
+        rearrangeOutputs(true);
+        return wanted;
+    }
+
+    /** A new shuffle: a new seed, kept for this tab, and the list in it. Only
+     *  this page's order changes; nothing is written anywhere else. */
+    function shuffleOutputs() {
+        S.outputs.seed = shuffleSeed(true);
+        return setOutputsSort("shuffle");
+    }
+
+    function scheduleFind(text) {
+        const O = S.outputs;
+        if (O.findTimer) { clearTimeout(O.findTimer); }
+        O.findTimer = setTimeout(function () {
+            O.findTimer = 0;
+            setOutputsFilter(text);
+        }, OUTPUT_FIND_MS);
+    }
+
+    function setOutputsFilter(text) {
+        const O = S.outputs;
+        const wanted = String(text || "").trim();
+        if (O.findTimer) { clearTimeout(O.findTimer); O.findTimer = 0; }
+        if (wanted === O.filter) { return; }
+        O.filter = wanted;
+        rearrangeOutputs(true);
+    }
+
+    function setOutputsFit(mode) {
+        const O = S.outputs;
+        O.fit = mode === "fill" ? "fill" : "fit";
+        saveOutputPrefs({ fit: O.fit });
+        drawOutputsBar();
+        return O.fit;
+    }
+
+    /** The counts per row whose tiles come out between the two sizes at
+     *  this width: the slider's limits. */
+    function outputPerRowRange(room, gap) {
+        const most = Math.max(1, Math.floor((room + gap) / (OUTPUT_CELL_MIN + gap)));
+        const least = Math.min(most, Math.max(1, Math.ceil((room + gap) / (OUTPUT_CELL_MAX + gap))));
+        return { min: least, max: most };
+    }
+
+    /** The count whose tiles are nearest the default size. */
+    function outputDefaultPerRow(room, gap, range) {
+        const near = Math.round((room + gap) / (OUTPUT_CELL_DEFAULT + gap));
+        return Math.max(range.min, Math.min(range.max, near || 1));
+    }
+
+    /**
+     * A new count per row, kept for this browser when it was chosen. The
+     * output at the top of the view stays at the top of the view: a tile
+     * three screens down is still three screens down, only larger or smaller.
+     */
+    function setOutputsPerRow(count, keep) {
+        const O = S.outputs;
+        const G = O.gallery;
+        const wanted = Math.max(1, Math.round(Number(count) || 0));
+        const scroller = O.dom ? O.dom.scroller : null;
+        let anchor = -1;
+        if (scroller && G.layout && G.layout.columns) {
+            const step = G.layout.cellHeight + G.layout.gap;
+            anchor = Math.floor(Math.max(0, scroller.scrollTop - G.layout.padTop) / step) * G.layout.columns;
+        }
+        G.perRowWanted = wanted;
+        if (keep) { saveOutputPrefs({ perRow: wanted }); }
+        const layout = layoutOutputGrid();
+        if (layout && scroller && anchor >= 0) {
+            scroller.scrollTop = Math.floor(anchor / layout.columns) * (layout.cellHeight + layout.gap);
+            G.scrollTop = scroller.scrollTop;
+        }
+        renderOutputGrid();
+        pumpPosters(true);
+        drawOutputScrubber();
+        startPreview();
+        return layout ? layout.columns : 0;
+    }
+
+    /* -- the gallery's grid --------------------------------------------- */
+
+    const OUTPUT_CELL_GEOMETRY = {
+        "position": "absolute",
+        "display": "flex",
+        "flex-direction": "column",
+        "box-sizing": "border-box",
+        "margin": "0",
+        "padding": "0",
+        "min-width": "0",
+        "max-width": "none",
+        "min-height": "0",
+        "max-height": "none",
+        "overflow": "hidden",
+        // No double-tap zoom and no wait for one: the double tap is ours.
+        "touch-action": "manipulation"
+    };
+    const OUTPUT_BOX_GEOMETRY = {
+        "position": "relative",
+        "display": "block",
+        "box-sizing": "border-box",
+        "width": "100%",
+        "flex": "1 1 auto",
+        "min-width": "0",
+        "min-height": "0",
+        "margin": "0",
+        "padding": "0",
+        "overflow": "hidden"
+    };
+    const OUTPUT_MEDIA_GEOMETRY = {
+        "position": "absolute",
+        "left": "0",
+        "top": "0",
+        "width": "100%",
+        "height": "100%",
+        "max-width": "none",
+        "max-height": "none",
+        "margin": "0",
+        "padding": "0",
+        "border-width": "0"
+    };
+    const OUTPUT_NAME_GEOMETRY = {
+        "display": "block",
+        "box-sizing": "border-box",
+        "flex": "0 0 auto",
+        "width": "100%",
+        "height": OUTPUT_CELL_CAPTION + "px",
+        "min-width": "0",
+        "margin": "0",
+        "white-space": "nowrap",
+        "overflow": "hidden",
+        "text-overflow": "ellipsis"
+    };
+
+    /**
+     * The gallery worked out rather than laid out, as the picture grid is:
+     * as many equal columns as the slider counts, sharing the row to the
+     * pixel, a square for the poster and a line for the name - so the place
+     * of tile ten thousand is a multiplication and the scroll bar knows the
+     * whole height before a tile is drawn.
+     */
+    function layoutOutputGrid() {
+        const O = S.outputs;
+        const G = O.gallery;
+        const dom = O.dom;
+        if (!dom) { return null; }
+        const scroller = dom.scroller;
+        // Hidden: nothing to measure, and a layout worked out from a width of
+        // nothing would be one column ten thousand rows high.
+        if (!scroller.clientWidth || dom.gallery.hidden) { return G.layout; }
+        const style = getComputedStyle(scroller);
+        const gap = OUTPUT_CELL_GAP;
+        const room = Math.max(1, scroller.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0));
+        const range = outputPerRowRange(room, gap);
+        const columns = Math.max(range.min, Math.min(range.max, G.perRowWanted || outputDefaultPerRow(room, gap, range)));
+        const cellWidth = Math.max(1, (room - (columns - 1) * gap) / columns);
+        const cellHeight = cellWidth + OUTPUT_CELL_CAPTION;
+        const rows = Math.ceil(O.items.length / columns);
+        const height = rows ? rows * cellHeight + (rows - 1) * gap : 0;
+        G.layout = { columns: columns, rows: rows, cellWidth: cellWidth, cellHeight: cellHeight, gap: gap,
+                     padTop: parseFloat(style.paddingTop) || 0, room: room, range: range, height: height };
+        if (dom.track.style.getPropertyValue("height") !== height + "px") { dom.track.style.setProperty("height", height + "px", "important"); }
+        dom.slider.min = String(range.min);
+        dom.slider.max = String(range.max);
+        dom.slider.disabled = range.min === range.max;
+        if (dom.slider.value !== String(columns)) { dom.slider.value = String(columns); }
+        const said = columns + " per row";
+        if (dom.perRowCount.textContent !== said) { dom.perRowCount.textContent = said; }
+        dom.slider.setAttribute("aria-valuetext", said);
+        for (const entry of G.rendered) {
+            const at = O.position.get(entry[0]);
+            if (at !== undefined) { placeOutputCell(entry[1], at); }
+        }
+        return G.layout;
+    }
+
+    function outputGridRows() {
+        const O = S.outputs;
+        const layout = O.gallery.layout;
+        const scroller = O.dom ? O.dom.scroller : null;
+        if (!scroller || !layout || !layout.rows || O.dom.gallery.hidden) { return null; }
+        const step = layout.cellHeight + layout.gap;
+        const top = Math.max(0, scroller.scrollTop - layout.padTop);
+        const bottom = top + Math.max(0, scroller.clientHeight);
+        const first = Math.max(0, Math.min(layout.rows - 1, Math.floor(top / step)));
+        const last = Math.min(layout.rows - 1, Math.max(first, Math.floor(Math.max(0, bottom - 1) / step)));
+        return { first: first, last: last, step: step, screenRows: Math.max(1, last - first + 1) };
+    }
+
+    function placeOutputCell(cell, index) {
+        const layout = S.outputs.gallery.layout;
+        if (!layout) { return; }
+        const row = Math.floor(index / layout.columns);
+        const column = index % layout.columns;
+        const px = function (value) { return (Math.round(value * 100) / 100) + "px"; };
+        const wanted = {
+            "left": px(column * (layout.cellWidth + layout.gap)),
+            "top": px(row * (layout.cellHeight + layout.gap)),
+            "width": px(layout.cellWidth),
+            "height": px(layout.cellHeight)
+        };
+        for (const property in wanted) {
+            if (cell.style.getPropertyValue(property) !== wanted[property]) { cell.style.setProperty(property, wanted[property], "important"); }
+        }
+    }
+
+    /** One tile: a place for a poster, without the poster until its turn. */
+    function buildOutputCell(item, index) {
+        const O = S.outputs;
+        const cell = document.createElement("button");
+        cell.type = "button";
+        cell.className = "minipaint-clip-output-cell";
+        cell.dataset.output = item.id;
+        cell.dataset.kind = item.kind;
+        cell.dataset.v = item.v;
+        cell.setAttribute("role", "option");
+        cell.setAttribute("aria-label", item.name);
+        cell.title = outputTooltip(item);
+        pin(cell, OUTPUT_CELL_GEOMETRY);
+        const box = el("span", "minipaint-clip-output-cell-box");
+        pin(box, OUTPUT_BOX_GEOMETRY);
+        let poster;
+        if (posterInPage(item)) {
+            // No decoder on the server: the frame at one second, drawn by the
+            // browser, attached only when this tile's turn comes.
+            poster = document.createElement("video");
+            poster.className = "minipaint-clip-output-cell-poster";
+            poster.muted = true;
+            poster.playsInline = true;
+            poster.preload = "metadata";
+            poster.dataset.src = item.url + "#t=1";
+        } else {
+            poster = document.createElement("img");
+            poster.className = "minipaint-clip-output-cell-poster";
+            poster.alt = "";
+            poster.decoding = "async";
+            poster.draggable = false;
+        }
+        pin(poster, OUTPUT_MEDIA_GEOMETRY);
+        box.appendChild(poster);
+        const time = el("span", "minipaint-clip-output-cell-time", "");
+        time.hidden = true;
+        box.appendChild(time);
+        if (guessedOutput(item)) { box.appendChild(el("span", "minipaint-clip-output-guess", "~")); }
+        cell.appendChild(box);
+        const name = el("span", "minipaint-clip-output-cell-name", item.name);
+        pin(name, OUTPUT_NAME_GEOMETRY);
+        cell.appendChild(name);
+        placeOutputCell(cell, index);
+        const on = O.chosen === item.id;
+        cell.classList.toggle("minipaint-clip-output-cell-selected", on);
+        cell.setAttribute("aria-selected", on ? "true" : "false");
+        paintPoster(cell, item);
+        return cell;
+    }
+
+    /** Let go of whatever media a tile holds: it is leaving the document. */
+    function releaseOutputCell(cell) {
+        const poster = cell.querySelector("video.minipaint-clip-output-cell-poster");
+        if (poster && poster.getAttribute("src")) {
+            poster.removeAttribute("src");
+            try { poster.load(); } catch (e) { /* torn down already */ }
+        }
+        const G = S.outputs.gallery;
+        if (G.preview && cell.contains(G.preview)) { releasePreview(); }
+    }
+
+    /**
+     * Put the rows near the view in the document, and only those, in reading
+     * order - the picture grid's renderGrid, for the gallery's tiles.
+     */
+    function renderOutputGrid() {
+        const O = S.outputs;
+        const G = O.gallery;
+        const dom = O.dom;
+        if (!dom) { return; }
+        const track = dom.track;
+        drawOutputEmpty();
+        const rows = outputGridRows();
+        if (!rows) {
+            if (dom.gallery.hidden) { return; }
+            for (const cell of G.rendered.values()) { releaseOutputCell(cell); if (cell.parentNode) { cell.parentNode.removeChild(cell); } }
+            G.rendered = new Map();
+            return;
+        }
+        const columns = G.layout.columns;
+        const from = Math.max(0, (rows.first - OUTPUT_OVERSCAN_ROWS) * columns);
+        const to = Math.min(O.items.length, (rows.last + 1 + OUTPUT_OVERSCAN_ROWS) * columns);
+        for (const entry of Array.from(G.rendered)) {
+            const at = O.position.get(entry[0]);
+            if (at === undefined || at < from || at >= to) {
+                releaseOutputCell(entry[1]);
+                if (entry[1].parentNode) { entry[1].parentNode.removeChild(entry[1]); }
+                G.rendered.delete(entry[0]);
+            }
+        }
+        let cursor = track.firstElementChild;
+        for (let index = from; index < to; index += 1) {
+            const item = O.items[index];
+            let cell = G.rendered.get(item.id);
+            if (!cell) {
+                cell = buildOutputCell(item, index);
+                G.rendered.set(item.id, cell);
+            } else {
+                placeOutputCell(cell, index);
+            }
+            if (cursor === cell) { cursor = cell.nextElementSibling; continue; }
+            track.insertBefore(cell, cursor);
+        }
+        while (cursor) {
+            const following = cursor.nextElementSibling;
+            if (!G.rendered.has(cursor.dataset ? cursor.dataset.output : "")) { track.removeChild(cursor); }
+            cursor = following;
+        }
+        // The selected tile may have just come back into the drawn rows.
+        if (O.chosen && G.rendered.has(O.chosen) && G.previewId !== O.chosen) { startPreview(); }
+    }
+
+    /** "Nothing here", drawn where the tiles would be. */
+    function drawOutputEmpty() {
+        const O = S.outputs;
+        const dom = O.dom;
+        if (!dom) { return; }
+        const empty = !O.items.length;
+        if (empty && !dom.empty) {
+            dom.empty = el("div", "minipaint-clip-output-empty", "");
+            dom.mount.appendChild(dom.empty);
+        }
+        if (dom.empty) {
+            dom.empty.hidden = !empty;
+            const text = O.filter && O.all.length ? "Nothing matches the search." : (O.message || "Nothing here yet.");
+            if (dom.empty.textContent !== text) { dom.empty.textContent = text; }
+        }
+    }
+
+    /** The scroll that puts the row of position `index` in the middle. */
+    function centredOutputTop(index) {
+        const O = S.outputs;
+        const layout = O.gallery.layout;
+        const scroller = O.dom ? O.dom.scroller : null;
+        if (!scroller || !layout || !layout.columns) { return 0; }
+        const top = layout.padTop + Math.floor(index / layout.columns) * (layout.cellHeight + layout.gap);
+        const max = Math.max(0, layout.height + 2 * layout.padTop - scroller.clientHeight);
+        return Math.min(max, Math.max(0, Math.round(top - (scroller.clientHeight - layout.cellHeight) / 2)));
+    }
+
+    function centreOutput(index) {
+        const O = S.outputs;
+        const scroller = O.dom ? O.dom.scroller : null;
+        if (!scroller || !O.gallery.layout) { return false; }
+        scroller.scrollTop = centredOutputTop(index);
+        O.gallery.scrollTop = scroller.scrollTop;
+        return true;
+    }
+
+    /** Scroll as little as brings position `index`'s row whole into view. */
+    function revealOutput(index) {
+        const O = S.outputs;
+        const layout = O.gallery.layout;
+        const scroller = O.dom ? O.dom.scroller : null;
+        if (!scroller || !layout || !layout.columns) { return; }
+        const top = layout.padTop + Math.floor(index / layout.columns) * (layout.cellHeight + layout.gap);
+        if (top < scroller.scrollTop) { scroller.scrollTop = Math.max(0, top - layout.padTop); }
+        else if (top + layout.cellHeight > scroller.scrollTop + scroller.clientHeight) {
+            scroller.scrollTop = top + layout.cellHeight + layout.padTop - scroller.clientHeight;
+        }
+        O.gallery.scrollTop = scroller.scrollTop;
+        renderOutputGrid();
+        pumpPosters(true);
+        drawOutputScrubber();
+    }
+
+    function onOutputGridScroll() {
+        const O = S.outputs;
+        const G = O.gallery;
+        const scroller = O.dom ? O.dom.scroller : null;
+        G.scrolledAt = Date.now();
+        if (scroller && scroller.clientHeight > 0) { G.scrollTop = scroller.scrollTop; }
+        drawOutputScrubber();
+        if (G.frame) { return; }
+        G.frame = window.requestAnimationFrame(function () {
+            G.frame = 0;
+            renderOutputGrid();
+            pumpPosters(false);
+        });
+    }
+
+    function onOutputGridResize() {
+        const O = S.outputs;
+        const scroller = O.dom ? O.dom.scroller : null;
+        if (!scroller || !scroller.clientWidth || !scroller.clientHeight || !outputsOpen()) { return; }
+        const before = O.gallery.layout ? O.gallery.layout.columns : 0;
+        layoutOutputGrid();
+        if (O.gallery.scrollTop && Math.abs(scroller.scrollTop - O.gallery.scrollTop) > 1 && before === O.gallery.layout.columns) {
+            scroller.scrollTop = O.gallery.scrollTop;
+        }
+        renderOutputGrid();
+        pumpPosters(true);
+        drawOutputScrubber();
+    }
+
+    /* -- selection, and the one video that plays ---------------------------- */
+
+    /** Select an output in the gallery: its tile marked, the line under the
+     *  grid saying what it is, and it playing in its tile. */
+    function selectOutput(id, reveal) {
+        const O = S.outputs;
+        const G = O.gallery;
+        if (!O.byId.has(id)) { return false; }
+        if (O.chosen !== id) { G.previewPaused = false; }
+        O.chosen = id;
+        for (const entry of G.rendered) {
+            const on = entry[0] === id;
+            entry[1].classList.toggle("minipaint-clip-output-cell-selected", on);
+            entry[1].setAttribute("aria-selected", on ? "true" : "false");
+        }
+        if (reveal && O.position.has(id)) { revealOutput(O.position.get(id)); }
+        drawOutputDetail();
+        drawOutputsStatus();
+        startPreview();
+        return true;
+    }
+
+    /**
+     * Play the selected output in its tile: muted, on loop, inline. One
+     * element for the whole gallery, moved to the tile, so only one video
+     * ever plays; let go of when there is no tile to play in.
+     */
+    function startPreview() {
+        const O = S.outputs;
+        const G = O.gallery;
+        const item = O.byId.get(O.chosen);
+        if (!outputsOpen() || O.view !== "gallery" || !item || item.kind !== "video"
+            || !O.position.has(item.id) || document.hidden || O.away) {
+            releasePreview();
+            return false;
+        }
+        const cell = G.rendered.get(item.id);
+        if (!cell) { releasePreview(); return false; }
+        const box = cell.querySelector(".minipaint-clip-output-cell-box");
+        if (!box) { return false; }
+        let video = G.preview;
+        if (!video) {
+            video = document.createElement("video");
+            video.className = "minipaint-clip-output-cell-preview";
+            // Muted before it has a source, attribute and property both, so
+            // every browser's autoplay rule lets it start without a gesture.
+            video.muted = true;
+            video.defaultMuted = true;
+            video.setAttribute("muted", "");
+            video.loop = true;
+            video.playsInline = true;
+            video.setAttribute("playsinline", "");
+            video.preload = "auto";
+            video.controls = false;
+            video.disablePictureInPicture = true;
+            pin(video, OUTPUT_MEDIA_GEOMETRY);
+            video.addEventListener("playing", function () {
+                const at = G.rendered.get(G.previewId);
+                if (at) { at.classList.add("minipaint-clip-output-cell-playing"); }
+            });
+            video.addEventListener("pause", function () {
+                const at = G.rendered.get(G.previewId);
+                if (at) { at.classList.remove("minipaint-clip-output-cell-playing"); }
+            });
+            G.preview = video;
+        }
+        if (G.previewId && G.previewId !== item.id) {
+            const was = G.rendered.get(G.previewId);
+            if (was) { was.classList.remove("minipaint-clip-output-cell-playing"); }
+        }
+        if (video.parentNode !== box) {
+            const time = box.querySelector(".minipaint-clip-output-cell-time");
+            box.insertBefore(video, time || null);
+        }
+        if (G.previewId !== item.id || !video.getAttribute("src")) {
+            const held = G.posters.get(item.id);
+            video.poster = held && held.url && held.v === item.v ? held.url : "";
+            G.previewId = item.id;
+            video.src = item.url;
+            note("outputs: playing " + String(item.id).slice(0, 8) + " in the gallery");
+        }
+        if (G.previewPaused) { return true; }
+        const started = video.play();
+        if (started && typeof started.catch === "function") { started.catch(function () { /* refused; a tap plays it */ }); }
+        return true;
+    }
+
+    /** Stop the preview and let go of its file. */
+    function releasePreview() {
+        const G = S.outputs.gallery;
+        const video = G.preview;
+        const cell = G.previewId ? G.rendered.get(G.previewId) : null;
+        if (cell) { cell.classList.remove("minipaint-clip-output-cell-playing"); }
+        G.previewId = "";
+        if (!video) { return; }
+        try {
+            video.pause();
+            if (video.getAttribute("src")) {
+                video.removeAttribute("src");
+                video.load();
+            }
+        } catch (e) { /* already torn down */ }
+        if (video.parentNode) { video.parentNode.removeChild(video); }
+    }
+
+    /** A tap on the playing tile: pause it there, or play it again. */
+    function togglePreview() {
+        const G = S.outputs.gallery;
+        const video = G.preview;
+        if (!video || !video.getAttribute("src")) { G.previewPaused = false; return startPreview(); }
+        if (video.paused) {
+            G.previewPaused = false;
+            const started = video.play();
+            if (started && typeof started.catch === "function") { started.catch(function () { /* refused */ }); }
+        } else {
+            G.previewPaused = true;
+            video.pause();
+        }
+        return true;
+    }
+
+    function onOutputCellClick(event) {
+        const cell = event.target && event.target.closest ? event.target.closest(".minipaint-clip-output-cell") : null;
+        if (!cell) { return; }
+        event.stopPropagation();
+        const G = S.outputs.gallery;
+        const id = cell.dataset.output;
+        const now = Date.now();
+        const last = G.lastTap;
+        const twice = !!last && last.id === id && now - last.at <= DOUBLE_TAP_MS
+            && Math.abs(event.clientX - last.x) <= DOUBLE_TAP_PX && Math.abs(event.clientY - last.y) <= DOUBLE_TAP_PX;
+        if (twice) {
+            G.lastTap = null;
+            openSlideshowOn(id);
+            return;
+        }
+        G.lastTap = { id: id, at: now, x: event.clientX, y: event.clientY };
+        if (S.outputs.chosen === id) { togglePreview(); } else { selectOutput(id, false); }
+    }
+
+    /** A right click - a long press on a phone - opens the slideshow, as a
+     *  right click on a picture opens it full screen. */
+    function onOutputCellMenu(event) {
+        const cell = event.target && event.target.closest ? event.target.closest(".minipaint-clip-output-cell") : null;
+        if (!cell) { return; }
+        event.preventDefault();
+        event.stopPropagation();
+        openSlideshowOn(cell.dataset.output);
+    }
+
+    /** The line under the grid: what the selected output is, and what can
+     *  be done with it without leaving the gallery. */
+    function drawOutputDetail() {
+        const O = S.outputs;
+        const dom = O.dom;
+        if (!dom) { return; }
+        const detail = dom.detail;
+        const item = O.byId.get(O.chosen);
+        detail.replaceChildren();
+        if (!item || !O.position.has(item.id)) {
+            detail.appendChild(el("span", "minipaint-clip-output-hint", O.items.length
+                ? "Tap a video to play it here; double tap to open it in the slideshow."
+                : ""));
+            return;
+        }
+        detail.appendChild(el("span", "minipaint-clip-output-name", item.name));
+        if (item.model) { detail.appendChild(el("span", "minipaint-clip-output-model", item.model)); }
+        const held = O.gallery.posters.get(item.id);
+        const facts = [outputDate(item, true), item.size ? bytesText(item.size) : "",
+                       held && held.duration > 0 ? durationText(held.duration) : ""].filter(Boolean).join(" · ");
+        if (facts) { detail.appendChild(el("span", "minipaint-clip-output-facts", facts)); }
+        const shown = item.prompt || item.written || "";
+        if (shown) {
+            const prompt = el("span", "minipaint-clip-output-prompt", shown);
+            prompt.title = item.written && item.prompt
+                ? "As typed: " + item.prompt + "\n\nWritten for WanGP: " + item.written : shown;
+            detail.appendChild(prompt);
+        }
+        if (guessedOutput(item)) {
+            detail.appendChild(el("span", "minipaint-clip-output-guess-note", "matched to a request by when it was written"));
+        }
+        const actions = el("span", "minipaint-clip-output-actions");
+        const play = el("button", "minipaint-clip-output-open", "Slideshow");
+        play.type = "button";
+        play.title = "Open it in the slideshow (Enter)";
+        play.addEventListener("click", function (event) { event.stopPropagation(); openSlideshowOn(item.id); });
+        actions.appendChild(play);
+        actions.appendChild(loadButton(item));
+        if (settingsReadable(item)) {
+            const send = el("button", "minipaint-clip-output-send", "Send to WanGP");
+            send.type = "button";
+            send.title = "Load this video's settings in WanGP, and open the WanGP tab on them";
+            send.addEventListener("click", function (event) { event.stopPropagation(); sendSettings(item, send); });
+            actions.appendChild(send);
+        }
+        detail.appendChild(actions);
+    }
+
+    /* -- the posters, in view first ------------------------------------------ */
+
+    function needsPoster(id) {
+        const O = S.outputs;
+        const G = O.gallery;
+        if (G.inflight.has(id)) { return false; }
+        const item = O.byId.get(id);
+        if (!item) { return false; }
+        if (posterInPage(item)) {
+            const cell = G.rendered.get(id);
+            const poster = cell ? cell.querySelector("video.minipaint-clip-output-cell-poster") : null;
+            return !!poster && !poster.getAttribute("src");
+        }
+        const held = G.posters.get(id);
+        return !held || held.v !== item.v || (!held.url && held.state !== "failed");
+    }
+
+    /** What to ask for, in order: the tiles in view in reading order, then
+     *  the rows below the view, then above it, nearest first. */
+    function wantedPosters() {
+        const O = S.outputs;
+        const rows = outputGridRows();
+        const visible = [];
+        const ahead = [];
+        if (!rows || !tabVisible() || !outputsOpen() || O.view !== "gallery") { return { visible: visible, ahead: ahead }; }
+        const columns = O.gallery.layout.columns;
+        const take = function (row, into) {
+            for (let index = row * columns; index < Math.min(O.items.length, (row + 1) * columns); index += 1) {
+                into.push(O.items[index].id);
+            }
+        };
+        for (let row = rows.first; row <= rows.last; row += 1) { take(row, visible); }
+        for (let step = 1; step <= rows.screenRows; step += 1) {
+            if (rows.last + step < O.gallery.layout.rows) { take(rows.last + step, ahead); }
+            if (rows.first - step >= 0) { take(rows.first - step, ahead); }
+        }
+        return { visible: visible, ahead: ahead };
+    }
+
+    /**
+     * Decide again what is asked for, and ask: the picture grid's rule. Every
+     * request for a tile out of reach is dropped, so is every request outside
+     * the view while a tile in it still waits, and nothing new starts until
+     * the view settles, or while the scrubber is held and moving.
+     */
+    function pumpPosters(now) {
+        const O = S.outputs;
+        const G = O.gallery;
+        G.pumpTimer = 0;
+        const want = wantedPosters();
+        const visible = new Set(want.visible);
+        const keep = new Set(want.visible.concat(want.ahead));
+        const waiting = want.visible.some(needsPoster);
+        for (const entry of Array.from(G.inflight)) {
+            if (!keep.has(entry[0]) || (waiting && !visible.has(entry[0]))) { dropPoster(entry[0], entry[1]); }
+        }
+        if (G.scrub && !G.scrub.paused) { return; }
+        // Opening: what is drawn from the last listing shows the posters the
+        // page still holds, and asks for none until the folder has answered -
+        // the folder may not hold those outputs any more, or not there.
+        if (O.landing && O.reading) { return; }
+        const moment = Date.now();
+        const settled = now || moment - G.scrolledAt >= PUMP_SETTLE_MS || moment - G.startedAt >= PUMP_EVERY_MS;
+        if (!settled) {
+            const wait = Math.max(0, Math.min(PUMP_SETTLE_MS - (moment - G.scrolledAt), PUMP_EVERY_MS - (moment - G.startedAt)));
+            if (!G.pumpTimer) { G.pumpTimer = setTimeout(function () { pumpPosters(false); }, wait + 1); }
+            return;
+        }
+        const order = want.visible.concat(want.ahead).filter(needsPoster);
+        while (G.inflight.size < POSTER_CONCURRENCY && order.length) { startPoster(order.shift()); }
+    }
+
+    function paintPoster(cell, item) {
+        const G = S.outputs.gallery;
+        const held = G.posters.get(item.id);
+        const poster = cell.querySelector(".minipaint-clip-output-cell-poster");
+        const time = cell.querySelector(".minipaint-clip-output-cell-time");
+        if (!poster || posterInPage(item)) { return; }
+        if (held && held.v === item.v && held.url) {
+            G.posters.delete(item.id);
+            G.posters.set(item.id, held);
+            cell.classList.remove("minipaint-clip-output-cell-missing");
+            if (poster.getAttribute("src") !== held.url) { poster.src = held.url; }
+            const said = held.duration > 0 ? durationText(held.duration) : "";
+            if (time) {
+                if (time.textContent !== said) { time.textContent = said; }
+                time.hidden = !said;
+            }
+            cell.title = outputTooltip(item);
+        } else if (held && held.v === item.v && held.state === "failed") {
+            cell.classList.add("minipaint-clip-output-cell-missing");
+        }
+    }
+
+    function startPoster(id) {
+        const O = S.outputs;
+        const G = O.gallery;
+        const item = O.byId.get(id);
+        if (!item) { return; }
+        if (posterInPage(item)) { startPosterInPage(item); return; }
+        let controller = null;
+        try { controller = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { controller = null; }
+        const job = { controller: controller, timedOut: false, dropped: false, timer: 0, v: item.v };
+        job.timer = setTimeout(function () {
+            job.timedOut = true;
+            if (controller) { try { controller.abort(); } catch (e) { /* settled */ } }
+        }, POSTER_TIMEOUT_MS);
+        G.inflight.set(id, job);
+        G.startedAt = Date.now();
+        G.stats.started += 1;
+        G.stats.order.push(id);
+        if (G.stats.order.length > 400) { G.stats.order.splice(0, 200); }
+        const options = { credentials: "same-origin" };
+        if (controller) { options.signal = controller.signal; }
+        let duration = 0;
+        fetch(posterUrl(item), options).then(function (response) {
+            if (!response.ok) {
+                const error = new Error("HTTP " + response.status);
+                error.status = response.status;
+                throw error;
+            }
+            duration = Number(response.headers.get("X-Minipaint-Duration")) || 0;
+            return response.blob();
+        }).then(function (blob) {
+            const current = O.byId.get(id);
+            if (!current || current.v !== job.v) { return; }
+            const was = G.posters.get(id);
+            if (was && was.url) { try { URL.revokeObjectURL(was.url); } catch (e) { /* gone already */ } }
+            G.posters.set(id, { url: URL.createObjectURL(blob), state: "done", tries: 0, v: job.v, duration: duration });
+            G.stats.done += 1;
+            keepPosters();
+            const cell = G.rendered.get(id);
+            if (cell) { paintPoster(cell, current); }
+            if (G.preview && G.previewId === id && !G.preview.poster) { G.preview.poster = G.posters.get(id).url; }
+            if (O.chosen === id) { drawOutputDetail(); }
+        }).catch(function (error) {
+            if (job.dropped) { return; }
+            const status = error && error.status;
+            if (status === 501) {
+                // No decoder on this Forge: the page draws its posters itself
+                // from here on, and asks the server for none.
+                goPosterless();
+                return;
+            }
+            let held = G.posters.get(id);
+            if (!held || held.v !== job.v) { held = { url: "", state: "idle", tries: 0, v: job.v, duration: 0 }; }
+            held.tries = (held.tries || 0) + 1;
+            const final = (status >= 400 && status < 500) || held.tries >= POSTER_TRIES;
+            held.state = final ? "failed" : "idle";
+            G.posters.set(id, held);
+            if (final) {
+                G.stats.failed += 1;
+                const cell = G.rendered.get(id);
+                if (cell && O.byId.get(id)) { paintPoster(cell, O.byId.get(id)); }
+            }
+            if (job.timedOut) {
+                note("outputs: a poster took longer than " + (POSTER_TIMEOUT_MS / 1000) + "s"
+                     + (final ? "; its tile is marked" : "; it will be asked for again"));
+            }
+        }).then(function () {
+            clearTimeout(job.timer);
+            if (G.inflight.get(id) === job) { G.inflight.delete(id); }
+            if (!job.dropped) { pumpPosters(true); }
+        });
+    }
+
+    /** A poster drawn by the browser, the way the strip always drew them:
+     *  the tile's own <video>, given its address at its turn. */
+    function startPosterInPage(item) {
+        const G = S.outputs.gallery;
+        const cell = G.rendered.get(item.id);
+        const poster = cell ? cell.querySelector("video.minipaint-clip-output-cell-poster") : null;
+        if (!poster) { return; }
+        const job = { controller: null, timedOut: false, dropped: false, timer: 0, v: item.v, media: poster };
+        const done = function () {
+            clearTimeout(job.timer);
+            poster.removeEventListener("loadeddata", done);
+            poster.removeEventListener("error", done);
+            if (G.inflight.get(item.id) === job) { G.inflight.delete(item.id); }
+            if (!job.dropped) { G.stats.done += 1; pumpPosters(true); }
+        };
+        job.timer = setTimeout(function () { job.timedOut = true; done(); }, POSTER_TIMEOUT_MS);
+        poster.addEventListener("loadeddata", done);
+        poster.addEventListener("error", done);
+        G.inflight.set(item.id, job);
+        G.startedAt = Date.now();
+        G.stats.started += 1;
+        poster.src = poster.dataset.src;
+    }
+
+    function dropPoster(id, job) {
+        const G = S.outputs.gallery;
+        job.dropped = true;
+        clearTimeout(job.timer);
+        if (job.controller) { try { job.controller.abort(); } catch (e) { /* settled */ } }
+        if (job.media && !job.media.isConnected && job.media.getAttribute("src")) {
+            job.media.removeAttribute("src");
+            try { job.media.load(); } catch (e) { /* torn down */ }
+        }
+        if (G.inflight.get(id) === job) { G.inflight.delete(id); }
+        G.stats.dropped += 1;
+    }
+
+    function stopPosters() {
+        const G = S.outputs.gallery;
+        for (const entry of Array.from(G.inflight)) { dropPoster(entry[0], entry[1]); }
+        if (G.pumpTimer) { clearTimeout(G.pumpTimer); G.pumpTimer = 0; }
+    }
+
+    /** Only so many object URLs: the oldest not on screen go first. */
+    function keepPosters() {
+        const G = S.outputs.gallery;
+        if (G.posters.size <= POSTER_KEEP) { return; }
+        for (const entry of Array.from(G.posters)) {
+            if (G.posters.size <= POSTER_KEEP) { break; }
+            if (G.rendered.has(entry[0]) || entry[0] === G.previewId || !entry[1].url) { continue; }
+            try { URL.revokeObjectURL(entry[1].url); } catch (e) { /* gone already */ }
+            G.posters.delete(entry[0]);
+        }
+    }
+
+    /** The server has no decoder: every video tile drawn again with a
+     *  poster of the page's own. Said once, in the journal. */
+    function goPosterless() {
+        const O = S.outputs;
+        const G = O.gallery;
+        if (O.posterless) { return; }
+        O.posterless = true;
+        note("outputs: the server has no video decoder; posters are drawn in the page");
+        stopPosters();
+        for (const cell of G.rendered.values()) { releaseOutputCell(cell); if (cell.parentNode) { cell.parentNode.removeChild(cell); } }
+        G.rendered = new Map();
+        renderOutputGrid();
+        pumpPosters(true);
+    }
+
+    /* -- the gallery's scrubber --------------------------------------------- */
+    //
+    // The picture grid's scrubber, on the gallery's edge: the same bar, the
+    // same handle and bubble (and their geometry), the same rule that a held
+    // scrubber asks for nothing until it rests or is let go. A finger on a
+    // phone has no scroll bar to drag in a box like this one; this is it.
+
+    function outputScrubber() {
+        const O = S.outputs;
+        const dom = O.dom;
+        if (!dom) { return null; }
+        if (dom.scrubber && dom.mount.contains(dom.scrubber)) { return dom.scrubber; }
+        const bar = document.createElement("div");
+        bar.className = "minipaint-clip-scrubber minipaint-clip-output-scrubber";
+        bar.hidden = true;
+        bar.setAttribute("role", "scrollbar");
+        bar.setAttribute("aria-orientation", "vertical");
+        bar.setAttribute("aria-label", "Scroll through the outputs");
+        bar.setAttribute("aria-valuemin", "0");
+        bar.setAttribute("aria-valuemax", "100");
+        bar.setAttribute("aria-valuenow", "0");
+        bar.title = "Drag, or press anywhere on it, to move through the outputs";
+        pin(bar, SCRUBBER_GEOMETRY);
+        const rail = document.createElement("span");
+        rail.className = "minipaint-clip-scrubber-rail";
+        pin(rail, SCRUB_RAIL_GEOMETRY);
+        const handle = document.createElement("span");
+        handle.className = "minipaint-clip-scrubber-handle";
+        pin(handle, SCRUB_HANDLE_GEOMETRY);
+        const bubble = document.createElement("span");
+        bubble.className = "minipaint-clip-scrubber-bubble";
+        bubble.hidden = true;
+        pin(bubble, SCRUB_BUBBLE_GEOMETRY);
+        bar.appendChild(rail);
+        bar.appendChild(handle);
+        bar.appendChild(bubble);
+        bar.addEventListener("pointerdown", onOutputScrubDown);
+        bar.addEventListener("pointermove", onOutputScrubMove);
+        bar.addEventListener("pointerup", onOutputScrubEnd);
+        bar.addEventListener("pointercancel", onOutputScrubEnd);
+        bar.addEventListener("lostpointercapture", onOutputScrubEnd);
+        bar.addEventListener("touchmove", function (event) { if (S.outputs.gallery.scrub && event.cancelable) { event.preventDefault(); } }, { passive: false });
+        dom.mount.appendChild(bar);
+        dom.scrubber = bar;
+        return bar;
+    }
+
+    function drawOutputScrubber() {
+        const O = S.outputs;
+        const scroller = O.dom ? O.dom.scroller : null;
+        if (!scroller) { return; }
+        const bar = outputScrubber();
+        if (!bar) { return; }
+        const facts = scrollFacts(scroller);
+        const shown = scroller.clientHeight > 0 && facts.max > 2 && !O.dom.gallery.hidden;
+        if (bar.hidden === shown) { bar.hidden = !shown; }
+        if (!shown) {
+            if (O.gallery.scrub) { endOutputScrub(); }
+            return;
+        }
+        const height = placeScrubber(bar, scroller);
+        const box = handleBox(height, facts);
+        const handle = bar.querySelector(".minipaint-clip-scrubber-handle");
+        if (handle) {
+            const top = Math.round(box.top) + "px";
+            const size = Math.round(box.size) + "px";
+            if (handle.style.getPropertyValue("top") !== top) { handle.style.setProperty("top", top, "important"); }
+            if (handle.style.getPropertyValue("height") !== size) { handle.style.setProperty("height", size, "important"); }
+        }
+        const now = String(facts.max ? Math.round(100 * facts.top / facts.max) : 0);
+        if (bar.getAttribute("aria-valuenow") !== now) { bar.setAttribute("aria-valuenow", now); }
+        if (O.gallery.scrub) { drawOutputBubble(bar, box); }
+    }
+
+    /** Where the view is: the first output in it, and what the order is by. */
+    function outputScrubPlace() {
+        const O = S.outputs;
+        const layout = O.gallery.layout;
+        const scroller = O.dom ? O.dom.scroller : null;
+        if (!scroller || !layout || !layout.rows) { return null; }
+        const facts = scrollFacts(scroller);
+        const step = layout.cellHeight + layout.gap;
+        const total = O.items.length;
+        const atEnd = facts.max > 0 && facts.top >= facts.max - 1;
+        const row = Math.max(0, Math.floor(Math.max(0, facts.top - layout.padTop) / step + 0.5));
+        const at = atEnd ? total - 1 : Math.min(total - 1, row * layout.columns);
+        const item = O.items[at];
+        if (!item) { return null; }
+        let detail = item.name;
+        if (O.sort === "newest" || O.sort === "oldest") { detail = outputDate(item, false); }
+        else if (O.sort === "largest" || O.sort === "smallest") { detail = item.size ? bytesText(item.size) : ""; }
+        else if (O.sort === "shuffle") { detail = "shuffled"; }
+        return { position: at + 1, total: total, detail: detail };
+    }
+
+    function drawOutputBubble(bar, box) {
+        const bubble = bar.querySelector(".minipaint-clip-scrubber-bubble");
+        if (!bubble) { return; }
+        const place = outputScrubPlace();
+        if (!place) { bubble.hidden = true; return; }
+        const text = countText(place.position) + " of " + countText(place.total);
+        let first = bubble.firstChild;
+        if (!first) {
+            first = document.createElement("b");
+            bubble.appendChild(first);
+            bubble.appendChild(document.createElement("br"));
+            bubble.appendChild(document.createElement("span"));
+        }
+        if (first.textContent !== text) { first.textContent = text; }
+        const second = bubble.lastChild;
+        if (second.textContent !== place.detail) { second.textContent = place.detail; }
+        bubble.hidden = false;
+        const height = bubble.offsetHeight || 34;
+        const middle = box.top + box.size / 2 - height / 2;
+        const room = Math.max(0, (parseFloat(bar.style.getPropertyValue("height")) || 0) - height);
+        bubble.style.setProperty("top", Math.round(Math.min(room, Math.max(0, middle))) + "px", "important");
+    }
+
+    function onOutputScrubDown(event) {
+        if (event.pointerType === "mouse" && event.button !== 0) { return; }
+        const G = S.outputs.gallery;
+        const scroller = S.outputs.dom ? S.outputs.dom.scroller : null;
+        const bar = event.currentTarget;
+        if (!scroller || !bar || bar.hidden) { return; }
+        event.preventDefault();
+        event.stopPropagation();
+        const facts = scrollFacts(scroller);
+        const height = parseFloat(bar.style.getPropertyValue("height")) || scroller.clientHeight;
+        const box = handleBox(height, facts);
+        const rect = bar.getBoundingClientRect();
+        const y = event.clientY - rect.top;
+        const onHandle = y >= box.top && y <= box.top + box.size;
+        G.scrub = { pointer: event.pointerId, grab: onHandle ? y - box.top : box.size / 2, paused: false, pauseTimer: 0 };
+        armOutputScrubPause();
+        try { bar.setPointerCapture(event.pointerId); } catch (e) { /* the moves still come to the bar */ }
+        bar.classList.add("minipaint-clip-scrubbing");
+        if (!onHandle) { outputScrubTo(bar, event.clientY); }
+        drawOutputScrubber();
+    }
+
+    function outputScrubTo(bar, clientY) {
+        const G = S.outputs.gallery;
+        const scroller = S.outputs.dom ? S.outputs.dom.scroller : null;
+        if (!scroller || !G.scrub) { return; }
+        const facts = scrollFacts(scroller);
+        const height = parseFloat(bar.style.getPropertyValue("height")) || scroller.clientHeight;
+        const box = handleBox(height, facts);
+        const rect = bar.getBoundingClientRect();
+        const fraction = box.travel > 0 ? (clientY - rect.top - G.scrub.grab) / box.travel : 0;
+        const top = Math.round(Math.min(1, Math.max(0, fraction)) * facts.max);
+        if (Math.abs(scroller.scrollTop - top) >= 1) { scroller.scrollTop = top; }
+    }
+
+    function onOutputScrubMove(event) {
+        const G = S.outputs.gallery;
+        if (!G.scrub || event.pointerId !== G.scrub.pointer) { return; }
+        event.preventDefault();
+        const scroller = S.outputs.dom.scroller;
+        const before = scroller.scrollTop;
+        outputScrubTo(event.currentTarget, event.clientY);
+        if (scroller.scrollTop !== before) { G.scrub.paused = false; armOutputScrubPause(); }
+        drawOutputScrubber();
+    }
+
+    function armOutputScrubPause() {
+        const G = S.outputs.gallery;
+        const held = G.scrub;
+        if (!held) { return; }
+        if (held.pauseTimer) { clearTimeout(held.pauseTimer); }
+        held.pauseTimer = setTimeout(function () {
+            held.pauseTimer = 0;
+            if (G.scrub !== held) { return; }
+            held.paused = true;
+            renderOutputGrid();
+            pumpPosters(true);
+        }, SCRUB_PAUSE_MS);
+    }
+
+    function onOutputScrubEnd(event) {
+        const G = S.outputs.gallery;
+        if (!G.scrub || (event && event.pointerId !== undefined && event.pointerId !== G.scrub.pointer)) { return; }
+        endOutputScrub();
+    }
+
+    function endOutputScrub() {
+        const G = S.outputs.gallery;
+        const held = G.scrub;
+        const bar = S.outputs.dom ? S.outputs.dom.scrubber : null;
+        G.scrub = null;
+        if (held && held.pauseTimer) { clearTimeout(held.pauseTimer); }
+        if (bar) {
+            bar.classList.remove("minipaint-clip-scrubbing");
+            if (held) { try { bar.releasePointerCapture(held.pointer); } catch (e) { /* released already */ } }
+            const bubble = bar.querySelector(".minipaint-clip-scrubber-bubble");
+            if (bubble) { bubble.hidden = true; }
+        }
+        if (held) {
+            renderOutputGrid();
+            pumpPosters(true);
+        }
+    }
+
+    /* -- the slideshow ----------------------------------------------------- */
+
     function outputTile(item, chosen) {
         const tile = el("button", "minipaint-clip-output-tile" + (chosen ? " minipaint-clip-output-chosen" : ""));
         tile.type = "button";
         tile.dataset.output = item.id;
         tile.title = item.name + (guessedOutput(item) ? " — matched to a request by when it was written" : "");
         let media;
-        if (item.kind === "video") {
-            // The poster is the frame at one second, asked for with a media
-            // fragment. No ffmpeg, no server-side thumbnailing, no second
-            // copy of the file on disk: the browser already decodes video,
-            // and metadata plus one frame is all it has to fetch to draw this.
-            //
-            // The address goes in `data-src` and not in `src`: see watchTile.
+        if (posterInPage(item)) {
+            // No poster from the server: the frame at one second, asked for
+            // with a media fragment, by the browser. The address goes in
+            // `data-src` and not in `src`: see watchTiles.
             media = el("video", "minipaint-clip-output-thumb");
             media.preload = "metadata";
             media.muted = true;
             media.playsInline = true;
             media.dataset.src = item.url + "#t=1";
         } else {
+            // The poster the gallery shows, from the server's cache or the
+            // browser's: one small picture, never the video. The gallery's
+            // own copy, when it has one, is used as it is.
             media = el("img", "minipaint-clip-output-thumb");
-            media.loading = "lazy";
             media.alt = "";
-            media.dataset.src = item.url;
+            media.draggable = false;
+            const held = S.outputs.gallery.posters.get(item.id);
+            media.dataset.src = held && held.url && held.v === item.v ? held.url : posterUrl(item);
+            // A poster the server could not make is a marked tile, never the
+            // browser's broken-picture glyph.
+            media.addEventListener("error", function () {
+                if (media.getAttribute("src")) { tile.classList.add("minipaint-clip-output-tile-missing"); }
+            });
+            media.addEventListener("load", function () { tile.classList.remove("minipaint-clip-output-tile-missing"); });
         }
         tile.appendChild(media);
         if (guessedOutput(item)) { tile.appendChild(el("span", "minipaint-clip-output-guess", "~")); }
         return tile;
     }
 
+    /**
+     * The strip: the part of the list round the output on the stage, in the
+     * list's order. Drawn again when the order changes or the stage comes
+     * within ``STRIP_EDGE`` of the end of what it holds.
+     */
+    function drawStrip() {
+        const O = S.outputs;
+        const strip = O.strip;
+        if (!strip) { return; }
+        const total = O.items.length;
+        const at = O.position.has(O.chosen) ? O.position.get(O.chosen) : 0;
+        const size = Math.min(STRIP_WINDOW, total);
+        let start = O.stripStart || 0;
+        const end = start + size;
+        const fits = O.stripOrder === O.items && strip.childElementCount === size
+            && at >= start && at < end
+            && (start === 0 || at >= start + STRIP_EDGE)
+            && (end >= total || at < end - STRIP_EDGE);
+        if (!fits) {
+            start = Math.max(0, Math.min(total - size, at - Math.floor(size / 3)));
+            stopTiles();
+            strip.innerHTML = "";
+            for (let index = start; index < start + size; index += 1) { strip.appendChild(outputTile(O.items[index], false)); }
+            O.stripStart = start;
+            O.stripOrder = O.items;
+            watchTiles(strip);
+        }
+        for (const tile of Array.from(strip.querySelectorAll(".minipaint-clip-output-tile"))) {
+            tile.classList.toggle("minipaint-clip-output-chosen", tile.dataset.output === O.chosen);
+        }
+        const chosen = strip.querySelector(".minipaint-clip-output-chosen");
+        if (chosen && chosen.scrollIntoView) { chosen.scrollIntoView({ block: "nearest", inline: "nearest" }); }
+    }
+
+    /**
+     * A sideways swipe on the stage steps through the list: the way through a
+     * slideshow on a phone. A press that moved is not the tap that plays and
+     * pauses, so its click is not let through.
+     */
+    function watchStageSwipe(stage) {
+        let start = null;
+        stage.addEventListener("pointerdown", function (event) {
+            if (event.pointerType === "mouse" || !event.isPrimary) { start = null; return; }
+            if (event.target && event.target.closest && event.target.closest(".minipaint-clip-player")) { start = null; return; }
+            start = { x: event.clientX, y: event.clientY, at: Date.now() };
+        });
+        stage.addEventListener("pointerup", function (event) {
+            if (!start) { return; }
+            const dx = event.clientX - start.x;
+            const dy = event.clientY - start.y;
+            start = null;
+            if (Math.abs(dx) >= SWIPE_PX && Math.abs(dx) > Math.abs(dy) * 1.5) {
+                S.outputs.swiped = Date.now();
+                stepOutput(dx < 0 ? 1 : -1);
+            }
+        });
+        stage.addEventListener("pointercancel", function () { start = null; });
+        // The click a swipe ends with is not a tap.
+        stage.addEventListener("click", function (event) {
+            if (S.outputs.swiped && Date.now() - S.outputs.swiped < 400) {
+                event.stopPropagation();
+                event.preventDefault();
+            }
+        }, true);
+    }
+
     /** Put one output in the stage. Videos play; pictures just show. */
     function showOutput(item) {
-        const stage = S.outputs.stage;
+        const O = S.outputs;
+        const stage = O.stage;
         if (!stage || !item) { return; }
-        S.outputs.chosen = item.id;
+        O.chosen = item.id;
         stopPlayer();
         stage.innerHTML = "";
-        S.outputs.player = null;
+        O.player = null;
         let media;
-        if (S.outputs.controls && S.outputs.controls.forget) { S.outputs.controls.forget(); }
-        S.outputs.controls = null;
+        if (O.controls && O.controls.forget) { O.controls.forget(); }
+        O.controls = null;
         let controls = null;
         if (item.kind === "video") {
             media = el("video", "minipaint-clip-output-stage-media");
             media.controls = false;
             media.playsInline = true;
             media.preload = "auto";
-            S.outputs.player = media;
+            const held = O.gallery.posters.get(item.id);
+            if (held && held.url && held.v === item.v) { media.poster = held.url; }
+            O.player = media;
             controls = buildPlayer(media, item);
-            S.outputs.controls = controls;
+            O.controls = controls;
             // A press on the picture is play and pause, the way every video
             // on a phone works. Only on the picture: the bar has its own.
             media.addEventListener("click", function (event) {
@@ -3484,81 +5250,90 @@ window.minipaintClipboard = (function () {
         }
         caption.appendChild(loadButton(item));
         stage.appendChild(caption);
-        const strip = S.outputs.strip;
-        if (strip) {
-            for (const tile of Array.from(strip.querySelectorAll(".minipaint-clip-output-tile"))) {
-                tile.classList.toggle("minipaint-clip-output-chosen", tile.dataset.output === item.id);
-            }
-            const chosen = strip.querySelector(".minipaint-clip-output-chosen");
-            if (chosen && chosen.scrollIntoView) { chosen.scrollIntoView({ block: "nearest", inline: "nearest" }); }
-        }
+        drawStrip();
+        drawOutputsStatus();
     }
 
+    /* -- reading the listing --------------------------------------------- */
+
+    /** A listing arrived: the page's list replaced, and the view on screen
+     *  drawn from it - the selection kept wherever it is still listed. */
     function drawOutputs(answer) {
-        const panel = outputsPanel();
-        if (!panel) { return; }
-        const items = (answer && answer.items) || [];
-        S.outputs.items = items;
+        const O = S.outputs;
         // Counted, so a caller can tell this draw from the one left on the
         // panel by the last time it was open: closing does not clear it.
-        S.outputs.drawn = (S.outputs.drawn || 0) + 1;
-        S.outputs.page = (answer && answer.page) || 0;
-        S.outputs.pages = (answer && answer.pages) || 1;
-        panel.innerHTML = "";
-
-        const stage = el("div", "minipaint-clip-output-stage");
-        S.outputs.stage = stage;
-        panel.appendChild(stage);
-
-        const bar = el("div", "minipaint-clip-output-bar");
-        bar.appendChild(el("span", "minipaint-clip-output-status", (answer && answer.status) || ""));
-        if (S.outputs.pages > 1) {
-            const pager = el("div", "minipaint-clip-output-pager");
-            const back = el("button", "minipaint-clip-output-page", "‹");
-            back.type = "button";
-            back.disabled = S.outputs.page <= 0;
-            back.addEventListener("click", function () { askOutputs(S.outputs.page - 1); });
-            const forward = el("button", "minipaint-clip-output-page", "›");
-            forward.type = "button";
-            forward.disabled = S.outputs.page >= S.outputs.pages - 1;
-            forward.addEventListener("click", function () { askOutputs(S.outputs.page + 1); });
-            pager.appendChild(back);
-            pager.appendChild(el("span", "minipaint-clip-output-count",
-                                 "Page " + (S.outputs.page + 1) + " of " + S.outputs.pages));
-            pager.appendChild(forward);
-            bar.appendChild(pager);
+        O.drawn = (O.drawn || 0) + 1;
+        O.page = 0;
+        O.pages = 1;
+        O.all = takeListing(answer);
+        O.byId = new Map();
+        for (const item of O.all) { O.byId.set(item.id, item); }
+        O.message = (answer && answer.status) || "";
+        O.truncated = Number(answer && answer.truncated) || 0;
+        // Posters of a version no longer listed are let go: the file changed.
+        for (const entry of Array.from(O.gallery.posters)) {
+            const item = O.byId.get(entry[0]);
+            if (item && item.v === entry[1].v) { continue; }
+            if (entry[1].url) { try { URL.revokeObjectURL(entry[1].url); } catch (e) { /* gone already */ } }
+            O.gallery.posters.delete(entry[0]);
         }
-        const close = el("button", "minipaint-clip-output-close", "Close");
-        close.type = "button";
-        close.addEventListener("click", closeOutputs);
-        bar.appendChild(close);
-        panel.appendChild(bar);
-
-        const strip = el("div", "minipaint-clip-output-strip");
-        strip.addEventListener("click", function (event) {
-            const tile = event.target && event.target.closest ? event.target.closest("[data-output]") : null;
-            if (!tile) { return; }
-            const wanted = (S.outputs.items || []).filter(function (one) { return one.id === tile.dataset.output; })[0];
-            if (wanted) { showOutput(wanted); }
-        });
-        stopTiles();
-        S.outputs.strip = strip;
-        for (const item of items) { strip.appendChild(outputTile(item, false)); }
-        panel.appendChild(strip);
-        watchTiles(strip);
-
-        if (items.length) {
-            showOutput(items[0]);
+        arrangeOutputs();
+        if (!outputsDom()) { return; }
+        // Tiles of outputs that changed are built again.
+        for (const entry of Array.from(O.gallery.rendered)) {
+            const item = O.byId.get(entry[0]);
+            if (item && entry[1].dataset.kind === item.kind && entry[1].dataset.v === item.v) { continue; }
+            releaseOutputCell(entry[1]);
+            if (entry[1].parentNode) { entry[1].parentNode.removeChild(entry[1]); }
+            O.gallery.rendered.delete(entry[0]);
+        }
+        drawOutputsBar();
+        if (!outputsOpen()) { return; }
+        if (O.view === "gallery") {
+            layoutOutputGrid();
+            if (O.landing) {
+                // The first listing of an opening: the gallery lands on what
+                // was selected, where it is in the folder as it is now, or at
+                // the top when it has gone. What was drawn from the last
+                // listing while this one was read may have put it elsewhere.
+                O.landing = false;
+                if (O.chosen && O.position.has(O.chosen)) { centreOutput(O.position.get(O.chosen)); }
+                else if (O.dom.scroller) { O.dom.scroller.scrollTop = 0; O.gallery.scrollTop = 0; }
+            }
+            renderOutputGrid();
+            pumpPosters(true);
+            drawOutputScrubber();
+            drawOutputDetail();
+            startPreview();
         } else {
-            stage.appendChild(el("div", "minipaint-clip-output-empty",
-                                 (answer && answer.status) || "Nothing here yet."));
+            const playing = O.byId.get(O.chosen);
+            const onStage = O.stage && O.stage.querySelector(".minipaint-clip-output-stage-media");
+            if (playing && O.position.has(playing.id) && onStage) {
+                O.stripOrder = null;
+                drawStrip();
+                drawOutputsStatus();
+            } else if (O.items.length) {
+                showOutput(playing && O.position.has(playing.id) ? playing : O.items[0]);
+            } else {
+                drawEmptyStage();
+            }
         }
     }
 
+    /**
+     * Read the whole listing, with a deadline. ``page`` is kept for callers
+     * from before the gallery listed everything; it is the whole list now.
+     */
     function askOutputs(page) {
-        const wanted = Math.max(0, page || 0);
-        return fetch(OUTPUTS_ROUTE + "?page=" + encodeURIComponent(wanted),
-                     { credentials: "same-origin", cache: "no-store" })
+        const O = S.outputs;
+        if (O.reading) { return O.reading; }
+        let controller = null;
+        try { controller = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { controller = null; }
+        const limit = setTimeout(function () { if (controller) { controller.abort(); } }, OUTPUTS_TIMEOUT_MS);
+        const options = { credentials: "same-origin", cache: "no-store" };
+        if (controller) { options.signal = controller.signal; }
+        if (O.dom && O.dom.refresh) { O.dom.refresh.setAttribute("aria-busy", "true"); }
+        O.reading = fetch(OUTPUTS_ROUTE + "?all=1", options)
             .then(function (response) { return response.json(); })
             .then(function (answer) {
                 if (!answer || answer.ok !== true) { throw new Error((answer && answer.message) || "outputs"); }
@@ -3566,56 +5341,216 @@ window.minipaintClipboard = (function () {
                 drawOutputs(answer);
                 return answer;
             }, function (error) {
-                note("outputs: could not be read (" + ((error && error.message) || error) + ")");
+                const aborted = error && error.name === "AbortError";
+                note("outputs: could not be read (" + (aborted ? "timed out" : ((error && error.message) || error)) + ")");
                 serverSilent(true, "the outputs");
-                drawOutputs({ items: [], page: 0, pages: 1, status: "The outputs could not be read." });
+                if (!O.all.length) {
+                    drawOutputs({ items: [], status: aborted ? "WanGP's output folder took too long to read. Press ↻ to try again."
+                                                             : "The outputs could not be read." });
+                }
                 return null;
+            })
+            .then(function (answer) {
+                clearTimeout(limit);
+                O.reading = null;
+                if (O.dom && O.dom.refresh) { O.dom.refresh.removeAttribute("aria-busy"); }
+                if (O.landing) {
+                    // No answer: what is drawn is all there is to go on.
+                    O.landing = false;
+                    pumpPosters(true);
+                }
+                return answer;
             });
+        return O.reading;
+    }
+
+    /** The keys the view answers to, heard first (captured) while it is open. */
+    function outputsKey(event) {
+        const O = S.outputs;
+        const target = event.target;
+        const typing = !!target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ""))
+            && !(target.classList && target.classList.contains("minipaint-clip-player-scrub"));
+        if (event.key === "Escape") {
+            // Full screen first, the way every player does it: one Escape
+            // leaves full screen, the next leaves the view. Any full screen,
+            // not only the stage's: the browser spends this Escape on the
+            // page's as well.
+            if (fullscreenNow()) { return; }
+            event.stopPropagation();
+            event.preventDefault();
+            if (O.dom && target === O.dom.find && O.dom.find.value) {
+                O.dom.find.value = "";
+                setOutputsFilter("");
+                return;
+            }
+            // The slideshow is a step into the list: Escape steps back out to
+            // the gallery, and from the gallery closes the view.
+            if (O.view === "slideshow") { setOutputsView("gallery", false); } else { closeOutputs(); }
+            return;
+        }
+        if (typing || event.ctrlKey || event.metaKey || event.altKey) { return; }
+        // The bar's own buttons, and the gallery's under the grid, keep their
+        // keys: Enter on Close is Close.
+        if (O.dom && target && target.closest && (O.dom.bar.contains(target)
+            || (target.tagName === "BUTTON" && !target.classList.contains("minipaint-clip-output-cell")
+                && O.view === "gallery"))) { return; }
+        const key = event.key;
+        if (O.view === "slideshow") {
+            if (key === "ArrowUp" || key === "PageUp") { stepOutput(-1); }
+            else if (key === "ArrowDown" || key === "PageDown") { stepOutput(1); }
+            else { playerKey(event); return; }
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+        }
+        const columns = O.gallery.layout ? O.gallery.layout.columns : 1;
+        if (key === "ArrowRight") { stepOutput(1); }
+        else if (key === "ArrowLeft") { stepOutput(-1); }
+        else if (key === "ArrowDown") { stepOutput(columns); }
+        else if (key === "ArrowUp") { stepOutput(-columns); }
+        else if (key === "Home") { if (O.items.length) { selectOutput(O.items[0].id, true); } }
+        else if (key === "End") { if (O.items.length) { selectOutput(O.items[O.items.length - 1].id, true); } }
+        else if (key === "Enter") { if (O.chosen && O.position.has(O.chosen)) { openSlideshowOn(O.chosen); } else { return; } }
+        else if (key === "k" || key === "K") { togglePreview(); }
+        else { return; }
+        event.preventDefault();
+        event.stopPropagation();
     }
 
     /**
-     * Open the gallery over the whole window.
+     * Another of Forge's tabs on screen, with the view still open: the
+     * Clipboard tab's panel is not displayed and neither is this one, but a
+     * <video> in a box that is not displayed goes on playing - with sound, on
+     * the stage. Both are paused while the tab is away; the preview plays
+     * again when it is back, and so does the stage if this paused it.
+     */
+    function onOutputsShown() {
+        const O = S.outputs;
+        const panel = O.dom ? O.dom.panel : null;
+        if (!panel || !outputsOpen()) { return; }
+        const shown = panel.offsetWidth > 0 && panel.offsetHeight > 0;
+        if (shown === !O.away) { return; }
+        O.away = !shown;
+        const stage = O.player;
+        if (!shown) {
+            const preview = O.gallery.preview;
+            if (preview && !preview.paused) { try { preview.pause(); } catch (e) { /* torn down */ } }
+            O.stageAway = !!stage && !stage.paused;
+            if (O.stageAway) { try { stage.pause(); } catch (e) { /* torn down */ } }
+            note("outputs: paused while the tab is away");
+            return;
+        }
+        startPreview();
+        if (O.stageAway && stage && stage.isConnected && O.view === "slideshow") {
+            const started = stage.play();
+            if (started && typeof started.catch === "function") { started.catch(function () { /* refused */ }); }
+        }
+        O.stageAway = false;
+    }
+
+    /** The page hidden: the preview stops, and starts again on return. */
+    function onOutputsVisibility() {
+        if (!outputsOpen()) { return; }
+        if (document.hidden) {
+            const video = S.outputs.gallery.preview;
+            if (video && !video.paused) { try { video.pause(); } catch (e) { /* torn down */ } }
+        } else {
+            startPreview();
+        }
+    }
+
+    /**
+     * Open the view over the whole window.
      *
      * The same shape as the system-prompt editor - a panel with no shape on
      * the tab until a class puts it over everything - because they are the
      * same idea: a thing that wants the screen, reached from one button, and
-     * closed by Escape or its own Close.
+     * closed by Escape or its own Close. ``view`` opens that view for this
+     * visit; without it, the view this browser last chose (the gallery until
+     * one is chosen). What was read last time is drawn at once, and the
+     * folder is read again behind it.
      */
-    function openOutputs() {
+    function openOutputs(view) {
         const panel = outputsPanel();
         if (!panel) { return false; }
+        const O = S.outputs;
+        const prefs = outputPrefs();
+        O.sort = prefs.sort;
+        O.fit = prefs.fit;
+        O.gallery.perRowWanted = prefs.perRow;
+        O.view = view === "slideshow" || view === "gallery" ? view : prefs.view;
+        if (O.sort === "shuffle" && !O.seed) { O.seed = shuffleSeed(false); }
         // Before the class, so the measurement does not find this panel.
         applyHeaderInset();
         watchHeaderInset();
         panel.classList.add(EDITOR_OPEN_CLASS);
+        outputsDom();
         if (S.outputsKey) { document.removeEventListener("keydown", S.outputsKey, true); }
-        S.outputsKey = function (event) {
-            if (event.key === "Escape") {
-                // Full screen first, the way every player does it: one
-                // Escape leaves full screen, the next leaves the view. Any
-                // full screen, not only the stage's: the browser spends
-                // this Escape on the page's as well.
-                if (fullscreenNow()) { return; }
-                event.stopPropagation();
-                closeOutputs();
-                return;
-            }
-            playerKey(event);
-        };
+        S.outputsKey = outputsKey;
         document.addEventListener("keydown", S.outputsKey, true);
+        if (!O.visibilityWatch) {
+            O.visibilityWatch = onOutputsVisibility;
+            document.addEventListener("visibilitychange", O.visibilityWatch);
+        }
+        if (!O.all.length) { O.message = "Reading WanGP's output folder\u2026"; }
+        O.landing = true;
+        arrangeOutputs();
+        setOutputsView(O.view, false);
         askOutputs(0);
         return true;
     }
 
     function closeOutputs() {
         const panel = outputsPanel();
+        const O = S.outputs;
+        O.away = false;
+        O.stageAway = false;
+        releasePreview();
+        stopPosters();
+        endOutputScrub();
         stopPlayer();
-        if (S.outputs.controls && S.outputs.controls.forget) { S.outputs.controls.forget(); }
-        S.outputs.controls = null;
+        if (O.controls && O.controls.forget) { O.controls.forget(); }
+        O.controls = null;
+        O.player = null;
+        stopTiles();
+        if (O.stage) {
+            const media = O.stage.querySelector(".minipaint-clip-output-stage-media");
+            if (media && media.tagName === "VIDEO" && media.getAttribute("src")) {
+                media.removeAttribute("src");
+                try { media.load(); } catch (e) { /* torn down */ }
+            }
+        }
         if (panel) { panel.classList.remove(EDITOR_OPEN_CLASS); }
         if (S.outputsKey) { document.removeEventListener("keydown", S.outputsKey, true); S.outputsKey = null; }
         return true;
     }
+
+    /** What the view is doing, for the journal and the checks. */
+    function outputsState() {
+        const O = S.outputs;
+        const G = O.gallery;
+        const rows = outputGridRows();
+        const preview = G.preview;
+        return { open: outputsOpen(), view: O.view, sort: O.sort, filter: O.filter, fit: O.fit,
+                 total: O.all.length, shown: O.items.length, chosen: O.chosen,
+                 order: O.items.slice(0, 400).map(function (item) { return item.id; }),
+                 columns: G.layout ? G.layout.columns : 0,
+                 range: G.layout ? { min: G.layout.range.min, max: G.layout.range.max } : null,
+                 rows: rows ? { first: rows.first, last: rows.last } : null,
+                 rendered: G.rendered.size, posters: Array.from(G.posters.values()).filter(function (one) { return !!one.url; }).length,
+                 inflight: Array.from(G.inflight.keys()), visible: wantedPosters().visible,
+                 started: G.stats.started, dropped: G.stats.dropped, done: G.stats.done, failed: G.stats.failed,
+                 asked: G.stats.order.slice(-200),
+                 posterless: !!O.posterless,
+                 preview: G.previewId, playing: !!(preview && preview.isConnected && !preview.paused),
+                 previewMuted: !!(preview && preview.muted), previewLoop: !!(preview && preview.loop),
+                 videos: Array.from(document.querySelectorAll("#" + OUTPUTS_PANEL_ID + " video")).filter(function (video) {
+                     return !video.paused && !!video.getAttribute("src");
+                 }).length,
+                 strip: O.strip ? O.strip.childElementCount : 0, stripStart: O.stripStart || 0,
+                 scrubbing: !!G.scrub, scrubber: !!(O.dom && O.dom.scrubber && !O.dom.scrubber.hidden) };
+    }
+
 
     /* ------------------------------------------------------------------ */
     /* History: the last ten prompts sent from here, as typed                */
@@ -7105,7 +9040,9 @@ window.minipaintClipboard = (function () {
                             items: S.outputs.items.length, chosen: S.outputs.chosen,
                             drawn: S.outputs.drawn || 0,
                             player: !!S.outputs.controls, clock: !!S.outputs.clock,
-                            sending: !!S.outputs.sending },
+                            sending: !!S.outputs.sending,
+                            view: S.outputs.view, sort: S.outputs.sort, total: S.outputs.all.length,
+                            preview: S.outputs.gallery.previewId },
                  intercept: interceptTarget() === "clipboard",
                  interceptTarget: interceptTarget(),
                  auto: autoRoles(),
@@ -7166,6 +9103,16 @@ window.minipaintClipboard = (function () {
         loadPrompt: loadPrompt,
         askOutputs: askOutputs,
         loadRecipe: loadRecipe,
+        outputsState: outputsState,
+        setOutputsView: setOutputsView,
+        setOutputsSort: setOutputsSort,
+        shuffleOutputs: shuffleOutputs,
+        setOutputsFilter: setOutputsFilter,
+        setOutputsPerRow: setOutputsPerRow,
+        setOutputsFit: setOutputsFit,
+        selectOutput: selectOutput,
+        stepOutput: stepOutput,
+        openSlideshowOn: openSlideshowOn,
         fit: fitTab,
         closeMenu: closeMenu,
         select: select,

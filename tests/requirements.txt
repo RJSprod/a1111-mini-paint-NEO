@@ -35,6 +35,14 @@ fastapi==0.112.2
 pydantic==2.8.2
 pillow
 httpx
+# View Outputs' posters are decoded with PyAV, which Forge Neo installs (`av`
+# in its requirements, at this version): tests/test_clipboard_outputs.py writes
+# a real video with it and reads its poster back through the route, and the
+# browser suite's gallery check reads posters of real clips. Without it those
+# decode checks say they were not run, and the gallery's posters fall back to
+# the page's own.
+av==17.1.0
+numpy
 # The browser suites drive a real page; tests/run.py skips them when this is
 # missing rather than failing, because the rest of the suite does not need it.
 #

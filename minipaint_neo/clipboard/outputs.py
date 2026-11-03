@@ -508,6 +508,9 @@ def files(refresh: bool = True) -> typing.List[dict]:
                     "kind": _kind(one["name"]),
                     "size": int(stat.st_size),
                     "at": one["at"] or float(stat.st_mtime),
+                    # The file's own time, which its version is made of
+                    # (``posters.version_of``): ``at`` is when it was claimed.
+                    "mtime": float(stat.st_mtime),
                     "job_id": entry["job_id"],
                     "request_id": entry["request_id"],
                     "exact": entry["exact"],
@@ -620,6 +623,7 @@ def gallery(refresh: bool = True) -> typing.List[dict]:
             continue
         listed.append({
             "id": one["id"], "name": one["name"], "kind": "video", "size": int(one["size"]), "at": float(one["at"]),
+            "mtime": float(one["at"]),
             "job_id": "", "request_id": "", "exact": False, "model": "", "recipe": None, "source": "folder",
         })
     listed.sort(key=lambda item: (item["at"], item["id"]), reverse=True)

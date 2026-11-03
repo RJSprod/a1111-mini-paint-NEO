@@ -3121,7 +3121,7 @@
 
 #minipaint_clipboard_root .minipaint-clip-output-cell:hover,
 #minipaint_clipboard_root .minipaint-clip-output-cell:focus-visible {
-    border-color: var(--border-color-accent, var(--border-color-primary, rgba(127, 127, 127, 0.6)));
+    border-color: var(--border-color-primary, rgba(127, 127, 127, 0.6));
     outline: none;
 }
 

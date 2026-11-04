@@ -2129,8 +2129,8 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
                 placed["top"] >= placed["header"], str(placed))
         r.check("and the video with it, which is what covered the tab bar",
                 placed["mediaTop"] >= placed["header"], str(placed))
-        r.check("it still reaches the bottom of the window, so the room is taken not lost",
-                placed["bottom"] >= placed["vh"] - 2, str(placed))
+        r.check("it ends at the bottom of the window, not below it, so the room is taken not lost",
+                abs(placed["bottom"] - placed["vh"]) <= 1, str(placed))
         page.evaluate("() => window.minipaintClipboard.closeOutputs()")
         page.evaluate("""() => { const bar = document.getElementById('a-theme-header');
             if (bar) { bar.remove(); }
@@ -2254,6 +2254,30 @@ def _open_gallery_fresh(page):
         return s.view !== 'gallery' || (s.columns > 0 && s.rendered > 0); }""", timeout=8000)
 
 
+#: Read the middle pixel of what a tile's poster shows - a picture or a canvas -
+#: through the canvas read-back the page started with, which a check may have
+#: replaced to stand in for a browser that guards it.
+POSTER_PIXEL_JS = """id => {
+    const cell = document.querySelector('.minipaint-clip-output-cell[data-output="' + id + '"]');
+    const poster = cell ? cell.querySelector('.minipaint-clip-output-cell-poster') : null;
+    if (!poster) { return null; }
+    const w = poster.naturalWidth || poster.width, h = poster.naturalHeight || poster.height;
+    if (!w || !h) { return null; }
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const x = c.getContext('2d'); x.drawImage(poster, 0, 0);
+    const read = window.__realGetImageData || CanvasRenderingContext2D.prototype.getImageData;
+    const d = read.call(x, Math.floor(w * 0.8), Math.floor(h * 0.8), 1, 1).data;
+    return { tag: poster.tagName, rgb: [d[0], d[1], d[2]], src: (poster.getAttribute('src') || '').slice(0, 5) };
+}"""
+
+
+def _first_frame(pixel) -> bool:
+    """The colour of every seeded clip's first frame (``_real_clip``'s frame 0:
+    0, 80, 200), give or take what VP8 does to it. Frame 24 - the second a
+    poster used to be taken at - is 120, 80, 128."""
+    return bool(pixel) and abs(pixel["rgb"][0]) <= 30 and abs(pixel["rgb"][1] - 80) <= 30 and abs(pixel["rgb"][2] - 200) <= 30
+
+
 def _cell(index):
     return f".minipaint-clip-output-track .minipaint-clip-output-cell:nth-child({index + 1})"
 
@@ -2356,6 +2380,12 @@ def check_view_outputs_has_a_gallery(r: Results, page) -> None:
             r.check("and the clip's length on it",
                     page.evaluate("""() => { const t = document.querySelector('.minipaint-clip-output-cell-time');
                         return t && !t.hidden ? t.textContent.trim() : ''; }""") == "0:02")
+            pixel = page.evaluate(POSTER_PIXEL_JS, state["order"][0])
+            # Asked for: "I would like each video to use its first frame as a
+            # thumbnail". It was the frame at one second.
+            r.check("a tile's poster is its video's first frame", _first_frame(pixel), str(pixel))
+            r.check("asked for at an address that names the first frame, so a poster cached from before is not shown",
+                    all("r=first" in url for url in poster_asks), str(poster_asks[:1]))
         r.check("nothing plays until a tile is tapped", state["videos"] == 0 and not state["preview"], str(state["videos"]))
 
         # -- 3. a tap selects it, and it plays there, silently, on loop -------
@@ -2643,25 +2673,79 @@ def check_view_outputs_has_a_gallery(r: Results, page) -> None:
         page.evaluate("() => window.minipaintClipboard.setOutputsView('gallery', true)")
         page.evaluate("() => window.minipaintClipboard.closeOutputs()")
 
-        # -- a Forge without a decoder --------------------------------------------------
+        # -- a Forge that cannot make a poster ------------------------------------------
         # New versions of every file, so no poster is in the browser's cache
         # or the page's, and the server is asked - and says it has no decoder.
+        # The browser plays these videos, so it takes each first frame itself.
         posters.reset_for_tests("")
-        later = time.time() + 5
-        for path in folder.iterdir():
-            os.utime(path, (later, later))
-        outputs.forget_listing_for_tests()
+
+        def new_versions(ahead):
+            later = time.time() + ahead
+            for path in folder.iterdir():
+                os.utime(path, (later, later))
+            outputs.forget_listing_for_tests()
+
+        new_versions(5)
         page.evaluate("() => { const s = window.minipaintClipboard; s.closeOutputs(); }")
         page.reload(wait_until="load")
         page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
         time.sleep(2)
         open_clipboard(page)
+        page.evaluate("() => window.minipaintClipboard.setOutputsSort('newest')")
         _open_gallery_fresh(page)
-        page.wait_for_function("() => window.minipaintClipboard.outputsState().posterless", timeout=10000)
-        page.wait_for_function("""() => { const v = document.querySelector('video.minipaint-clip-output-cell-poster');
-            return !!v && (v.getAttribute('src') || '').indexOf('#t=1') > 0 && v.readyState >= 2; }""", timeout=15000)
-        r.check("on a Forge with no video decoder the gallery draws its posters itself, a frame of each video",
-                True)
+        took = _until(page, """() => { const s = window.minipaintClipboard.outputsState();
+            return s.posterless && s.visible.length > 0 && s.captured >= s.visible.length && s.inflight.length === 0; }""",
+                      timeout=30000)
+        taken = _gallery_state(page)
+        r.check("on a Forge with no video decoder the browser takes every tile's first frame itself, in view only",
+                took and taken["captured"] == len(taken["visible"]) and taken["captures"] <= len(taken["visible"]) + 2,
+                str({key: taken[key] for key in ("captures", "captured", "failed")}))
+        pixel = page.evaluate(POSTER_PIXEL_JS, taken["visible"][0])
+        r.check("each one the video's first frame, as a picture in its tile", _first_frame(pixel) and pixel["tag"] == "IMG",
+                str(pixel))
+        page.wait_for_function("n => window.minipaintClipboard.outputsState().given >= n", arg=len(taken["visible"]),
+                               timeout=15000)
+        r.check("and given to the server, which keeps them as its own posters",
+                posters.posters().stored >= len(taken["visible"]), str(posters.posters().stored))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        page.reload(wait_until="load")
+        page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
+        time.sleep(2)
+        open_clipboard(page)
+        _open_gallery_fresh(page)
+        cached = _until(page, """() => { const s = window.minipaintClipboard.outputsState();
+            return s.visible.length > 0 && s.posters >= s.visible.length && s.inflight.length === 0; }""", timeout=15000)
+        again = _gallery_state(page)
+        r.check("so the next look, from a fresh page, is the server's cache: no frame taken again",
+                cached and again["captures"] == 0, str({key: again[key] for key in ("captures", "posters", "done")}))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+
+        # A browser that guards what a page reads back from a canvas (LibreWolf,
+        # Firefox's fingerprinting defence): what it reads is not what it drew.
+        new_versions(10)
+        page.evaluate("""() => {
+            window.__realGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+            CanvasRenderingContext2D.prototype.getImageData = function () {
+                const data = window.__realGetImageData.apply(this, arguments);
+                for (let i = 0; i < data.data.length; i += 4) { data.data[i] = (data.data[i] + 1 + (i % 7)) % 256; }
+                return data;
+            };
+        }""")
+        stored = posters.posters().stored
+        _open_gallery_fresh(page)
+        guarded = _until(page, """() => { const s = window.minipaintClipboard.outputsState();
+            return s.visible.length > 0 && s.captured >= s.visible.length && s.inflight.length === 0; }""", timeout=30000)
+        shown = _gallery_state(page)
+        pixel = page.evaluate(POSTER_PIXEL_JS, shown["visible"][0])
+        r.check("such a browser still shows every first frame - drawn on a canvas in the tile",
+                guarded and _first_frame(pixel) and pixel["tag"] == "CANVAS"
+                and all(tag == "CANVAS" for tag in shown["drawnAs"][:len(shown["visible"])]), str(pixel))
+        page.wait_for_timeout(800)
+        r.check("and gives none to the server, where a scrambled one would be every other browser's poster",
+                _gallery_state(page)["guarded"] >= len(shown["visible"]) and posters.posters().stored == stored,
+                f"stored {posters.posters().stored - stored} more")
+        page.evaluate("""() => { if (window.__realGetImageData) {
+            CanvasRenderingContext2D.prototype.getImageData = window.__realGetImageData; delete window.__realGetImageData; } }""")
         page.evaluate("() => window.minipaintClipboard.closeOutputs()")
     finally:
         page.remove_listener("request", heard)
@@ -2671,6 +2755,151 @@ def check_view_outputs_has_a_gallery(r: Results, page) -> None:
         posters.reset_for_tests()
         clip_config.update(outputs_folder="")
         shutil.rmtree(folder.parent, ignore_errors=True)
+
+
+#: The Model Chain theme's tab bar as a rail (SD-Neo-ModelSwitchRefiner's
+#: style.css, "the tab bar as a rail", for the Forge Assistant's Transpose
+#: View): Forge's own `#tabs > .tab-nav` fixed down one side of the window, 48
+#: px, and the page padded beside it. Carried here as the focus rule is in
+#: browser_intercept.py, so the check measures against the real layout; a
+#: change to those rules there is made here too.
+RAIL_STAND_IN_CSS = """
+:root[data-mc-theme="on"][data-forge-assistant-rail] { --mc-theme-rail: 48px; --mc-theme-page-pad: 8px; }
+:root[data-mc-theme="on"][data-forge-assistant-rail] #tabs > .tab-nav {
+    position: fixed; top: 0; bottom: 0; left: 0; right: auto; z-index: 940;
+    flex-direction: column; align-items: center; width: var(--mc-theme-rail); height: auto; min-height: 0;
+    margin: 0; padding: 4px 0 0; overflow-x: hidden; overflow-y: auto; scrollbar-width: none;
+    border-bottom: 0; border-right: 1px solid #888; box-shadow: none; background: #222;
+}
+:root[data-mc-theme="on"][data-forge-assistant-rail="right"] #tabs > .tab-nav {
+    left: auto; right: 0; border-right: 0; border-left: 1px solid #888;
+}
+:root[data-mc-theme="on"][data-forge-assistant-rail="left"] .gradio-container.app {
+    padding-left: calc(var(--mc-theme-rail) + var(--mc-theme-page-pad));
+}
+:root[data-mc-theme="on"][data-forge-assistant-rail="right"] .gradio-container.app {
+    padding-right: calc(var(--mc-theme-rail) + var(--mc-theme-page-pad));
+}
+"""
+
+
+def check_the_views_stand_beside_a_side_tab_bar(r: Results, page) -> None:
+    """Asked for: "noticed that the gallery is not respecting my latest move
+    tab bar to side of screen instead of top, I need the entire clipboard
+    views including gallery to resize responsively to respect the tab bar
+    rather on top or sides. It should not overlap, but appear below when top,
+    or beside when tab bar on side."
+
+    The Forge Assistant's Transpose View puts the tab bar down the left or the
+    right of the window; the Model Chain theme lays it out as a fixed rail and
+    pads the page beside it. The Clipboard's full-window views - View Outputs,
+    the system prompt editor, History and Archives - are fixed to the window
+    too, and measure what is pinned at its edges: below a bar along the top
+    (check_view_outputs_is_a_gallery), and beside a rail down a side, moving
+    when it moves. A launcher or a panel pinned to a side is not a rail.
+    """
+    from minipaint_neo.clipboard import config as clip_config
+    from minipaint_neo.clipboard import outputs
+
+    folder = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-rail-"))
+    box = """sel => { const n = document.querySelector(sel); if (!n) { return null; }
+        const b = n.getBoundingClientRect();
+        return { left: Math.round(b.left), right: Math.round(b.right), top: Math.round(b.top),
+                 width: Math.round(b.width), height: Math.round(b.height),
+                 wide: document.documentElement.clientWidth, tall: window.innerHeight }; }"""
+    rail = "#tabs > .tab-nav"
+    panel = "#minipaint_clipboard_outputs_panel"
+    try:
+        _seed_outputs(folder, 12)
+        open_clipboard(page)
+        page.evaluate("""css => { const s = document.createElement('style'); s.id = 'rail-stand-in'; s.textContent = css;
+            document.head.appendChild(s); document.documentElement.setAttribute('data-mc-theme', 'on');
+            document.documentElement.setAttribute('data-forge-assistant-rail', 'left'); }""", RAIL_STAND_IN_CSS)
+        page.wait_for_timeout(400)
+        bar = page.evaluate(box, rail)
+        r.check("(the stand-in is the theme's rail: Forge's tab bar fixed down the left, 48 px, the window's height)",
+                bar["left"] == 0 and bar["width"] == 48 and bar["height"] == bar["tall"], str(bar))
+        tab = page.evaluate(box, "#minipaint_clipboard_root")
+        r.check("the Clipboard tab itself stands beside the rail", tab["left"] >= bar["right"], str(tab))
+
+        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.wait_for_function("() => window.minipaintClipboard.debug().outputsOpen", timeout=5000)
+        page.wait_for_timeout(500)
+        left = page.evaluate(box, panel)
+        r.check("View Outputs starts beside a rail on the left, not under it, and ends at the window's right edge",
+                abs(left["left"] - bar["right"]) <= 1 and abs(left["right"] - left["wide"]) <= 1 and left["top"] == 0
+                and abs(left["height"] - left["tall"]) <= 1, str(left))
+        reach = page.evaluate("""railRight => {
+            const cells = Array.from(document.querySelectorAll('.minipaint-clip-output-cell')).map((c) => c.getBoundingClientRect());
+            const middle = document.elementFromPoint(24, Math.round(window.innerHeight / 2));
+            return { cells: cells.length, clear: cells.every((c) => c.left >= railRight),
+                     rail: !!(middle && middle.closest('#tabs > .tab-nav')) }; }""", bar["right"])
+        r.check("the gallery's tiles are all beside it", reach["cells"] > 0 and reach["clear"], str(reach))
+        r.check("and the rail is still the thing under a press on it, so every tab stays one press away", reach["rail"], str(reach))
+        columns = page.evaluate("() => window.minipaintClipboard.outputsState().columns")
+
+        page.evaluate("() => document.documentElement.setAttribute('data-forge-assistant-rail', 'right')")
+        page.wait_for_timeout(500)
+        bar = page.evaluate(box, rail)
+        right = page.evaluate(box, panel)
+        said = page.evaluate("""() => ['--minipaint-clip-top', '--minipaint-clip-left', '--minipaint-clip-right']
+            .map((n) => document.documentElement.style.getPropertyValue(n))""")
+        r.check("moved to the right, the rail takes the view with it: beside it on that side, from the window's left edge",
+                bar["right"] == bar["wide"] and right["left"] == 0 and abs(right["right"] - bar["left"]) <= 1,
+                str((bar, right, said)))
+        clear = page.evaluate("""railLeft => Array.from(document.querySelectorAll('.minipaint-clip-output-cell'))
+            .every((c) => c.getBoundingClientRect().right <= railLeft + 1)""", bar["left"])
+        r.check("its tiles laid out again beside it, none under the rail", clear)
+
+        page.evaluate("() => document.documentElement.removeAttribute('data-forge-assistant-rail')")
+        page.wait_for_timeout(500)
+        whole = page.evaluate(box, panel)
+        r.check("with the tab bar back along the top of a page that has none pinned, the view has the whole width again",
+                whole["left"] == 0 and abs(whole["right"] - whole["wide"]) <= 1, str(whole))
+        r.check("and the gallery shares the wider row out again",
+                page.evaluate("() => window.minipaintClipboard.outputsState().columns") >= columns)
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+
+        # The other views fixed to the window, beside a rail on the left.
+        page.evaluate("() => document.documentElement.setAttribute('data-forge-assistant-rail', 'left')")
+        page.wait_for_timeout(400)
+        for name, opener, closer, selector in (
+                ("the system prompt editor", "openPromptEditor", "closePromptEditor", "#minipaint_clipboard_enhance_panel"),
+                ("History", "openPromptHistory", "closePromptHistory", ".minipaint-clip-prompts"),
+                ("Archives", "openArchives", "closeArchives", ".minipaint-clip-archives")):
+            page.evaluate(f"() => window.minipaintClipboard.{opener}()")
+            page.wait_for_timeout(500)
+            seen = page.evaluate(box, selector)
+            r.check(f"{name} stands beside the rail too, inside the window",
+                    bool(seen) and abs(seen["left"] - 48) <= 1 and abs(seen["right"] - seen["wide"]) <= 1, str(seen))
+            page.evaluate(f"() => window.minipaintClipboard.{closer}()")
+            page.wait_for_timeout(200)
+        page.evaluate("() => document.documentElement.removeAttribute('data-forge-assistant-rail')")
+
+        # Not rails: a launcher pinned to the left edge, and a panel down the right.
+        page.evaluate("""() => {
+            const launcher = document.createElement('div'); launcher.id = 'a-launcher';
+            launcher.style.cssText = 'position:fixed;left:0;top:45%;width:44px;height:44px;z-index:1200;background:#345';
+            const side = document.createElement('div'); side.id = 'a-side-panel';
+            side.style.cssText = 'position:fixed;right:0;top:0;bottom:0;width:400px;z-index:1200;background:#543;pointer-events:none';
+            document.body.appendChild(launcher); document.body.appendChild(side); }""")
+        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.wait_for_timeout(500)
+        plain = page.evaluate(box, panel)
+        r.check("a launcher pinned to an edge, or a wide panel down a side, is no rail: the view keeps the window's width",
+                plain["left"] == 0 and abs(plain["right"] - plain["wide"]) <= 1, str(plain))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+    finally:
+        page.evaluate("""() => {
+            for (const id of ['rail-stand-in', 'a-launcher', 'a-side-panel']) { const n = document.getElementById(id); if (n) { n.remove(); } }
+            document.documentElement.removeAttribute('data-mc-theme');
+            document.documentElement.removeAttribute('data-forge-assistant-rail');
+            for (const name of ['--minipaint-clip-top', '--minipaint-clip-left', '--minipaint-clip-right']) {
+                document.documentElement.style.removeProperty(name); }
+            try { window.minipaintClipboard.closeOutputs(); } catch (e) {} }""")
+        outputs.reset_for_tests()
+        clip_config.update(outputs_folder="")
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 #: A request id of the shape the protocol accepts, so the ledger, the history
@@ -6140,6 +6369,7 @@ def run() -> Results:
                     ("check_the_toolbar_flyouts_are_the_one_door", lambda: check_the_toolbar_flyouts_are_the_one_door(r, page)),
                     ("check_view_outputs_is_a_gallery", lambda: check_view_outputs_is_a_gallery(r, page)),
                     ("check_view_outputs_has_a_gallery", lambda: check_view_outputs_has_a_gallery(r, page)),
+                    ("check_the_views_stand_beside_a_side_tab_bar", lambda: check_the_views_stand_beside_a_side_tab_bar(r, page)),
                     ("check_the_player_is_the_pages", lambda: check_the_player_is_the_pages(r, page)),
                     ("check_the_players_full_screen_is_its_own", lambda: check_the_players_full_screen_is_its_own(r, page)),
                     ("check_an_output_loads_its_recipe", lambda: check_an_output_loads_its_recipe(r, page)),

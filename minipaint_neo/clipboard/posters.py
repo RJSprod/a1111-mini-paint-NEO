@@ -4,9 +4,11 @@ View Outputs' gallery is a grid of every video in WanGP's output folder, and
 asked for: "The gallery should work much like the clipboard archives and load
 as I slide into video." An archive's tile is a thumbnail the server made once
 and the browser keeps for a year, asked for only when it is in view. A video
-has no thumbnail to read, so this makes one: the frame at one second (the
-middle of a clip shorter than two), at most ``POSTER_SIDE`` on its longest
-side, as a WebP of a few tens of kilobytes.
+has no thumbnail to read, so this makes one: its FIRST frame, at most
+``POSTER_SIDE`` on its longest side, as a WebP of a few tens of kilobytes.
+Asked for: "I would like each video to use its first frame as a thumbnail,
+and those should load only when in view, and from cache when previously
+view[ed]." (It was the frame at one second until 2026-11-04.)
 
 WHY ON THE SERVER. The filmstrip used to ask the browser for its posters: a
 ``<video preload="metadata" src="…#t=1">`` per tile, which is a range request
@@ -18,11 +20,16 @@ has to this origin, while the one video that is meant to play waits behind
 them. Made here once, a poster is one small image the browser keeps.
 
 HOW. With PyAV, which Forge Neo installs (``av`` in its requirements): the file
-is opened, the nearest keyframe before the wanted time is sought, and frames
-are decoded up to it - a few frames, never the clip - and scaled by the
-decoder's own scaler. OpenCV (also Forge Neo's) is the fallback. With neither,
-the route says so (``OUTPUT_POSTER_UNAVAILABLE``) and the page draws its
-posters the old way. A picture output is made smaller with Pillow.
+is opened and its first frame decoded - one frame, no seek, never the clip -
+and scaled by the decoder's own scaler. OpenCV (also Forge Neo's) is the
+fallback. A picture output is made smaller with Pillow.
+
+AND WHEN THE SERVER CANNOT. With no decoder at all (``OUTPUT_POSTER_UNAVAILABLE``)
+or a file its decoder will not read (``OUTPUT_POSTER_UNREADABLE``), the page
+takes the first frame itself, from the browser's own decoder - the one that
+plays the video, so a video that plays has a poster - and gives it back here
+(``store``): it is checked, made small and kept exactly as one made here
+would be, so the next look, from any browser, is a cache read.
 
 WHAT IS KEPT. In this process's memory (``POSTER_CACHE_SIZE``), on disk in this
 extension's data folder under a budget of its own (``POSTER_DISK_BUDGET``, the
@@ -62,9 +69,8 @@ _LOG_PREFIX = "MiniPaint Clipboard:"
 POSTER_SIDE = 480
 #: What a poster is encoded at.
 POSTER_QUALITY = 80
-#: Where in a clip its poster is taken: past a first frame that is often a
-#: fade or the source picture itself, and never past the middle of a short one.
-POSTER_AT_SECONDS = 1.0
+#: Where in a clip its poster is taken: its first frame, as asked for.
+POSTER_AT_SECONDS = 0.0
 #: How many frames past the keyframe are decoded looking for that moment. A
 #: generated clip has a keyframe every second or two; a file with none is not
 #: decoded to its end for one picture.
@@ -72,7 +78,13 @@ POSTER_DECODE_LIMIT = 240
 #: Made posters kept in this process, for a gallery scrolled back and forth.
 POSTER_CACHE_SIZE = 1024
 #: The disk cache, in the extension's data directory and never in WanGP's.
-POSTER_DIR_NAME = "clipboard-output-posters"
+#: Named for what it holds: the one before it held the frame at one second
+#: under the same names, and is removed the first time this one is opened.
+POSTER_DIR_NAME = "clipboard-output-first-frames"
+FORMER_DIR_NAMES = ("clipboard-output-posters",)
+#: What a poster given by a page may weigh, as sent. A WebP or JPEG of a
+#: frame at the poster's side is tens of kilobytes; this is room, not a goal.
+UPLOAD_MAX_BYTES = 2 * 1024 * 1024
 #: What that directory may weigh before the least recently used go: about
 #: twenty thousand posters, a whole output folder's worth.
 POSTER_DISK_BUDGET = 512 * 1024 * 1024
@@ -141,6 +153,8 @@ def _fit(width: int, height: int, side: int) -> typing.Tuple[int, int]:
 
 
 def _moment(duration: typing.Optional[float]) -> float:
+    if POSTER_AT_SECONDS <= 0:
+        return 0.0
     if duration and duration > 0:
         return min(POSTER_AT_SECONDS, duration / 2.0)
     return POSTER_AT_SECONDS
@@ -257,17 +271,42 @@ class Posters:
         #: How many posters were decoded, for the checks: the one number that
         #: says whether the caches above it are doing their job.
         self.made = 0
+        #: How many a page gave, for the checks.
+        self.stored = 0
+        self._former_swept = False
+        #: The decoders and failures already said in the console, once each.
+        self._said: typing.Set[str] = set()
 
     # -- the disk -------------------------------------------------------
 
     def directory(self) -> typing.Optional[pathlib.Path]:
         try:
-            folder = config.config_dir() / POSTER_DIR_NAME
+            base = config.config_dir()
+            folder = base / POSTER_DIR_NAME
             folder.mkdir(parents=True, exist_ok=True)
+            if not self._former_swept:
+                self._former_swept = True
+                self._sweep_former(base)
             return folder
         except (OSError, ValueError) as error:
             self._off(f"could not be opened ({type(error).__name__})")
             return None
+
+    @staticmethod
+    def _sweep_former(base: pathlib.Path) -> None:
+        """The folders an earlier build kept its posters in: ours alone, made
+        of names this module wrote, and of a frame no longer asked for."""
+        for name in FORMER_DIR_NAMES:
+            former = base / name
+            try:
+                if not former.is_dir() or former.is_symlink():
+                    continue
+                for entry in os.scandir(former):
+                    if POSTER_NAME_RE.match(entry.name) and entry.is_file(follow_symlinks=False):
+                        os.unlink(entry.path)
+                former.rmdir()
+            except OSError:
+                continue
 
     def _off(self, why: str) -> None:
         if self._complaint:
@@ -460,8 +499,10 @@ class Posters:
                 except IntegrationError as error:
                     if error.code == errors.OUTPUT_POSTER_UNAVAILABLE:
                         raise
+                    self._say_unreadable(video, error.detail or error.code)
                     raise IntegrationError(errors.OUTPUT_POSTER_UNREADABLE, error.detail or error.code)
                 except Exception as error:
+                    self._say_unreadable(video, type(error).__name__)
                     raise IntegrationError(errors.OUTPUT_POSTER_UNREADABLE, f"did not decode: {type(error).__name__}")
             buffer = io.BytesIO()
             try:
@@ -492,6 +533,66 @@ class Posters:
                 mine.set()
 
 
+    def _say_unreadable(self, video: bool, why: str) -> None:
+        """Once per decoder and reason, in Forge's console: which decoder could
+        not read an output, and how - never which file. The page draws that
+        poster from the video itself and gives it back (``store``)."""
+        who = (decoder() or "no decoder") if video else "Pillow"
+        said = f"{who}:{why}"[:120]
+        with self._lock:
+            if said in self._said or len(self._said) > 32:
+                return
+            self._said.add(said)
+        scrub.console(f"an output poster could not be read by {who} ({why}); the browser takes that "
+                      f"one's first frame itself and gives it back here.", _LOG_PREFIX)
+
+    def store(self, file_id: str, info: os.stat_result, data: bytes,
+              duration: float = 0.0, side: int = POSTER_SIDE) -> bool:
+        """A poster a page made from the video's first frame, kept as one made
+        here is. Checked to be a picture, made small and encoded again here, so
+        nothing kept is the page's bytes. Returns False when a poster for this
+        version is already kept, which is left as it was.
+
+        Raises ``IntegrationError(OUTPUT_POSTER_INVALID)`` for anything that is
+        not a picture of a sane size.
+        """
+        from PIL import Image
+
+        side = max(32, min(1024, int(side)))
+        key = (str(file_id).lower(), int(info.st_mtime_ns), int(info.st_size), side)
+        if self._cached(key) is not None:
+            return False
+        if not data or len(data) > UPLOAD_MAX_BYTES:
+            raise IntegrationError(errors.OUTPUT_POSTER_INVALID, f"{len(data or b'')} bytes")
+        try:
+            with Image.open(io.BytesIO(data)) as opened:
+                if opened.format not in ("WEBP", "JPEG", "PNG"):
+                    raise IntegrationError(errors.OUTPUT_POSTER_INVALID, str(opened.format))
+                if opened.size[0] < 1 or opened.size[1] < 1 or max(opened.size) > 4096:
+                    raise IntegrationError(errors.OUTPUT_POSTER_INVALID, f"{opened.size}")
+                opened.load()
+                image = opened.convert("RGB")
+        except IntegrationError:
+            raise
+        except Exception as error:
+            raise IntegrationError(errors.OUTPUT_POSTER_INVALID, f"did not decode: {type(error).__name__}")
+        image.thumbnail(_fit(image.width, image.height, side))
+        buffer = io.BytesIO()
+        try:
+            image.save(buffer, format="WEBP", quality=POSTER_QUALITY, method=0)
+            made = (buffer.getvalue(), "image/webp", int(round(max(0.0, min(86400.0, float(duration or 0.0))) * 1000)))
+        except Exception:
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            made = (buffer.getvalue(), "image/png", int(round(max(0.0, min(86400.0, float(duration or 0.0))) * 1000)))
+        with self._lock:
+            self.stored += 1
+            self._failed.pop(key, None)
+        self._remember(key, made)
+        self._disk_write(key, made)
+        return True
+
+
 _posters: typing.Optional[Posters] = None
 _posters_lock = threading.Lock()
 
@@ -518,6 +619,7 @@ __all__ = [
     "POSTER_DIR_NAME",
     "POSTER_DISK_BUDGET",
     "POSTER_SIDE",
+    "UPLOAD_MAX_BYTES",
     "Posters",
     "decoder",
     "posters",

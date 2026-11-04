@@ -650,9 +650,8 @@ def _clip(path: pathlib.Path, seconds: float = 2.0, size=(320, 180), rate: int =
 def poster_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
     """A poster for every output: one frame, made once, kept three times.
 
-    What has to be true: the route answers a small picture of the video - a
-    frame of it, not the first, scaled to the poster's side - by the output's
-    opaque id; says how long the clip is; answers ``immutable`` only for the
+    What has to be true: the route answers a small picture of the video - its
+    first frame, scaled to the poster's side - by the output's opaque id; says how long the clip is; answers ``immutable`` only for the
     file's current version; makes it once (memory, then disk, then a decode);
     is off the event loop; and says plainly when this Forge has no decoder at
     all (501, so the page draws its posters itself) or this file gave no frame
@@ -711,10 +710,12 @@ def poster_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
                 and 0 < len(answer.content) < 40000, f"{answer.status_code} {len(answer.content)}")
         frame = Image.open(io.BytesIO(answer.content)).convert("RGB")
         r.check("scaled to fit the poster's side, its shape kept", frame.size == (480, 270), str(frame.size))
-        red = frame.getpixel((frame.width // 2, frame.height // 2))[0]
-        # Frame 12 of a clip at 12 a second is one second in: red 96. The
-        # first frame is 0; a codec moves a flat colour a little either way.
-        r.check("taken past the first frame, at one second", 70 <= red <= 125, str(red))
+        red, _green, blue = frame.getpixel((frame.width // 2, frame.height // 2))
+        # Asked for: "I would like each video to use its first frame as a
+        # thumbnail". Frame 0 is red 0 and blue 120; frame 12, the one second
+        # the poster used to be taken at, is red 96. A codec moves a flat
+        # colour a little either way.
+        r.check("it is the video's first frame", red <= 30 and 100 <= blue <= 140, str((red, blue)))
         r.check("and it says how long the clip is, for the tile",
                 abs(float(answer.headers.get("x-minipaint-duration", "0")) - 2.0) < 0.2,
                 str(answer.headers.get("x-minipaint-duration")))
@@ -765,6 +766,83 @@ def poster_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
         posters.reset_for_tests()
     gone = client.get("/minipaint-clipboard/output/deadbeefdeadbeef/poster")
     r.check("an id that is no output is a 404", gone.status_code == 404, str(gone.status_code))
+    poster_upload_checks(r, client, folder, listed, broken)
+
+
+def poster_upload_checks(r: Results, client, folder: pathlib.Path, listed: dict, broken: pathlib.Path) -> None:
+    """A first frame the browser took itself, given back to be kept.
+
+    The server could not make this poster - no decoder at all here, or one
+    that will not read the file - and the browser, which plays the video, can.
+    What it gives back is kept as a poster made here is: checked, made small,
+    encoded again, under the file's current version only, and answered from
+    then on whatever the server can decode.
+    """
+    import io
+
+    from PIL import Image
+
+    from minipaint_neo.clipboard import posters
+
+    item = listed["broken.mp4"]
+    address = f"/minipaint-clipboard/output/{item['id']}/poster"
+    frame = io.BytesIO()
+    Image.new("RGB", (1280, 720), (12, 200, 40)).save(frame, format="JPEG", quality=90)
+    posters.reset_for_tests("")
+    try:
+        r.check("(with no decoder here, the server cannot make this one itself)",
+                client.get(address + f"?v={item['v']}").status_code == 501)
+        stale = client.put(address + "?v=1-2", content=frame.getvalue(), headers={"Content-Type": "image/jpeg"})
+        r.check("a frame given for a version of the file that is not the one on disk is refused, 409",
+                stale.status_code == 409 and stale.json().get("code") == "OUTPUT_POSTER_STALE", stale.text[:120])
+        junk = client.put(address + f"?v={item['v']}", content=b"not a picture" * 10, headers={"Content-Type": "image/jpeg"})
+        r.check("and one that is not a picture, 415, keeping nothing",
+                junk.status_code == 415 and junk.json().get("code") == "OUTPUT_POSTER_INVALID"
+                and client.get(address + f"?v={item['v']}").status_code == 501, junk.text[:120])
+        huge = client.put(address + f"?v={item['v']}", content=b"0" * (posters.UPLOAD_MAX_BYTES + 1),
+                          headers={"Content-Type": "image/jpeg"})
+        r.check("and one larger than a poster could be, 413, unread", huge.status_code == 413, str(huge.status_code))
+        given = client.put(address + f"?v={item['v']}&duration=3.5", content=frame.getvalue(),
+                           headers={"Content-Type": "image/jpeg"})
+        r.check("a first frame the browser took is kept", given.status_code == 200 and given.json() == {"ok": True, "kept": True},
+                given.text[:120])
+        back = client.get(address + f"?v={item['v']}")
+        kept = Image.open(io.BytesIO(back.content))
+        r.check("and answered from then on, by a server that still cannot decode it, as immutable",
+                back.status_code == 200 and back.headers.get("cache-control") == routes.IMMUTABLE_CACHE, str(back.status_code))
+        r.check("made small and encoded again here, so nothing kept is the page's own bytes",
+                back.headers["content-type"] == "image/webp" and kept.size == (posters.POSTER_SIDE, 270), str(kept.size))
+        r.check("with the clip's length it was given", back.headers.get("x-minipaint-duration") == "3.500",
+                str(back.headers.get("x-minipaint-duration")))
+        again = client.put(address + f"?v={item['v']}", content=frame.getvalue(), headers={"Content-Type": "image/jpeg"})
+        r.check("given again, the one kept is left as it is", again.json() == {"ok": True, "kept": False}, again.text[:80])
+        posters.reset_for_tests("")
+        r.check("and it is on disk: after a restart it is still the answer",
+                client.get(address + f"?v={item['v']}").status_code == 200)
+        r.check("no answer names the file or its folder",
+                "broken" not in given.text + stale.text + junk.text and str(folder) not in given.text + stale.text + junk.text)
+    finally:
+        posters.reset_for_tests()
+
+
+def poster_folder_checks(r: Results) -> None:
+    """The cache an earlier build kept - frames at one second - is let go of
+    the first time the cache of first frames is opened, and only what that
+    build wrote there."""
+    from minipaint_neo.clipboard import posters
+
+    base = config.config_dir()
+    former = base / posters.FORMER_DIR_NAMES[0]
+    former.mkdir(parents=True, exist_ok=True)
+    (former / ("wf" + "a" * 16 + "-1-2-480-1000.webp")).write_bytes(b"an old poster")
+    stranger = base / "not-a-poster-folder"
+    stranger.mkdir(exist_ok=True)
+    (stranger / "keep.txt").write_text("mine")
+    posters.reset_for_tests()
+    folder = posters.posters().directory()
+    r.check("the cache of first frames is a folder of its own", folder is not None and folder.name == posters.POSTER_DIR_NAME)
+    r.check("and the one-second posters of the build before are gone, folder and all", not former.exists())
+    r.check("while nothing else in the data folder is touched", (stranger / "keep.txt").read_text() == "mine")
 
 
 def run() -> Results:
@@ -799,6 +877,7 @@ def run() -> Results:
             settings_route_checks(r, folders["settings"], clock)
             whole_listing_checks(r, clock, folders["whole"])
             poster_checks(r, folders["posters"], clock)
+            poster_folder_checks(r)
         finally:
             outputs.use_clock(None)
             outbox.use_clock(None)

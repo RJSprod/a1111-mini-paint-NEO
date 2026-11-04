@@ -2528,8 +2528,16 @@
        video played from View Outputs covered the way out of the tab. The
        browser measures the header and publishes the number, because it
        belongs to a theme this extension does not ship and cannot name; 0 is
-       the honest answer when there is nothing pinned up there. */
-    inset: var(--minipaint-clip-top, 0px) 0 0 0;
+       the honest answer when there is nothing pinned up there. And beside a
+       tab bar pinned down a side - the Forge Assistant's Transpose View -
+       measured the same way, never under it. */
+    inset: var(--minipaint-clip-top, 0px) var(--minipaint-clip-right, 0px) 0 var(--minipaint-clip-left, 0px);
+    /* Its size is the insets', never a width or a height of its own: Gradio
+       gives every block `width: 100%`, and a fixed box with a width keeps it
+       and drops `right`, so beside a rail - or under a bar, for the height -
+       it ran off the window's far edge by the bar's width. */
+    width: auto;
+    height: auto;
     z-index: 40;
     margin: 0;
     max-width: none;
@@ -2623,8 +2631,16 @@
        video played from View Outputs covered the way out of the tab. The
        browser measures the header and publishes the number, because it
        belongs to a theme this extension does not ship and cannot name; 0 is
-       the honest answer when there is nothing pinned up there. */
-    inset: var(--minipaint-clip-top, 0px) 0 0 0;
+       the honest answer when there is nothing pinned up there. And beside a
+       tab bar pinned down a side - the Forge Assistant's Transpose View -
+       measured the same way, never under it. */
+    inset: var(--minipaint-clip-top, 0px) var(--minipaint-clip-right, 0px) 0 var(--minipaint-clip-left, 0px);
+    /* Its size is the insets', never a width or a height of its own: Gradio
+       gives every block `width: 100%`, and a fixed box with a width keeps it
+       and drops `right`, so beside a rail - or under a bar, for the height -
+       it ran off the window's far edge by the bar's width. */
+    width: auto;
+    height: auto;
     z-index: 40;
     margin: 0;
     max-width: none;
@@ -3149,7 +3165,7 @@
 }
 
 /* A poster that has not arrived is nothing, not a broken picture. */
-#minipaint_clipboard_root .minipaint-clip-output-cell-poster:not([src]) { visibility: hidden; }
+#minipaint_clipboard_root img.minipaint-clip-output-cell-poster:not([src]) { visibility: hidden; }
 
 /* The clip's length, on the poster. */
 #minipaint_clipboard_root .minipaint-clip-output-cell-time {
@@ -3356,7 +3372,13 @@
 
 #minipaint_clipboard_root .minipaint-clip-prompts {
     position: fixed;
-    inset: var(--minipaint-clip-top, 0px) 0 0 0;
+    inset: var(--minipaint-clip-top, 0px) var(--minipaint-clip-right, 0px) 0 var(--minipaint-clip-left, 0px);
+    /* Its size is the insets', never a width or a height of its own: Gradio
+       gives every block `width: 100%`, and a fixed box with a width keeps it
+       and drops `right`, so beside a rail - or under a bar, for the height -
+       it ran off the window's far edge by the bar's width. */
+    width: auto;
+    height: auto;
     z-index: var(--minipaint-dialog-layer, 2000);
     display: flex;
     align-items: flex-start;
@@ -3565,7 +3587,13 @@
 /* The Archives screen: the History dialog's shape, on the same layer. */
 #minipaint_clipboard_root .minipaint-clip-archives {
     position: fixed;
-    inset: var(--minipaint-clip-top, 0px) 0 0 0;
+    inset: var(--minipaint-clip-top, 0px) var(--minipaint-clip-right, 0px) 0 var(--minipaint-clip-left, 0px);
+    /* Its size is the insets', never a width or a height of its own: Gradio
+       gives every block `width: 100%`, and a fixed box with a width keeps it
+       and drops `right`, so beside a rail - or under a bar, for the height -
+       it ran off the window's far edge by the bar's width. */
+    width: auto;
+    height: auto;
     z-index: var(--minipaint-dialog-layer, 2000);
     display: flex;
     align-items: flex-start;

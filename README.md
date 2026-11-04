@@ -580,8 +580,10 @@ time over HTTP/2, so a fling or the scrubber on its edge asks for nothing on the
 **A tap** selects a video and plays it right there in its tile, muted and on loop (a tap on it
 again pauses it); **a double tap** - or a right click, a long press or Enter - opens it in the
 slideshow, and Escape comes back. Only one video ever plays: the tile's preview and the
-slideshow's player each let go of their file when the other takes over, and both pause while
-another of Forge's tabs is on screen. A slider on the bar
+slideshow's player each let go of their file when the other takes over, and both let go while
+another of Forge's tabs is on screen or the page is hidden (the slideshow coming back where it
+was). No live connection: nothing is held open or polled - the listing and each poster are one
+request with a deadline. A slider on the bar
 counts **videos per row**, as the Clipboard grid's counts pictures, and Fit / Fill puts the
 whole frame in each tile or fills it. The **order** - newest, oldest, name either way, largest,
 smallest - is one choice on the bar, and **Shuffle** puts the list in a new random order in

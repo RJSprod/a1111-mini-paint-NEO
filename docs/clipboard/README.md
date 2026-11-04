@@ -755,10 +755,17 @@ file system)." It is the view View Outputs opens on until the bar's switch says 
 * **Only one video plays**, ever: the gallery's preview is let go of - its source taken off,
   so it fetches nothing more - when its tile scrolls out of the drawn rows, when another is
   selected, when the slideshow opens (whose own player is let go of the same way when the
-  gallery comes back), when the view closes and while the page is hidden. With the view left
-  open and another of Forge's tabs on screen, the gallery's video and the slideshow's are
-  paused - a video in a tab nobody can see goes on playing otherwise, with its sound - and
-  play again when the Clipboard tab is back.
+  gallery comes back), when the view closes, and **away** - another of Forge's tabs on screen
+  with the view left open, or the page hidden. Away, both let go of their file rather than
+  pausing: a video in a box nobody can see goes on playing otherwise, with its sound, and a
+  paused one can keep its download open, half read, for as long as the page lives. Back on the
+  Clipboard tab the tile's video starts again from its first frame and the slideshow's comes
+  back at the moment it left, playing if it was.
+* **No live connection** - asked for in so many words. The view holds nothing open: no
+  stream, no socket and no polling timer. The listing and each poster are one request each,
+  with a deadline, answered and done; nothing is asked for again until you scroll, sort or
+  press ↻; a video is fetched only while it is the one playing, in its tile or on the stage,
+  and let go of as above.
 * **Easy to scroll**: the gallery has the picture grid's **scrubber** on its right-hand edge -
   drag it, or press anywhere on it, and while it is held a bubble says which video of how many
   is at the top and its date (its name or size under those orders) - and the wheel, a finger,

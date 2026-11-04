@@ -841,4 +841,8 @@ against a copy of the Model Chain theme's rail rules (`RAIL_STAND_IN_CSS` in
 `tests/browser_clipboard.py`), never the theme itself: if a view sits under the
 rail, the root's `--minipaint-clip-left` / `-right` say what was measured. The
 order, the shuffle and the search are the page's own, over the one listing;
-nothing about them is ever written on the host or in WanGP's folder.
+nothing about them is ever written on the host or in WanGP's folder. It holds
+nothing open (the user's "no live connection", again): the listing and each poster
+are one request with a deadline, and away - another tab on screen, the page hidden
+- both of its videos let go of their files rather than pause, because a paused
+<video> can keep its download half read and open for as long as the page lives.

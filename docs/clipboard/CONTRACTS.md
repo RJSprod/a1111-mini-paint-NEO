@@ -793,19 +793,24 @@ through so the server can reconcile roles without a call into the child.
          recipe: the output's own id when Load can restore something (its kept recipe, else its Queue Send History
          record), "" when neither; v: "<mtime ms>-<size>", the version the poster's address carries
     GET  /minipaint-clipboard/outputs?all=1      (the gallery's: every output in one answer, off the event loop)
-      -> {ok, whole: true, total, truncated, reason, status, prefix: "/minipaint-clipboard/output/",
+      -> {ok, whole: true, posters: "pyav+ffmpeg+opencv" (the readers here, in order; "" for none), total, truncated,
+          reason, status, prefix: "/minipaint-clipboard/output/",
           items: [{id, name, kind, size, at, v, source, exact?, prompt?, written?, model?, recipe?}]}
          newest first; an item leaves out what it does not have (a folder video: no exact, prompt, written, model
-         or recipe); an item's file is prefix + id and its poster prefix + id + "/poster?v=" + v; past
+         or recipe); an item's file is prefix + id and its poster prefix + id + "/poster?r=first&v=" + v; past
          OUTPUTS_WHOLE_LIMIT (100000) the answer stops and truncated says how many it left out
-    GET  /minipaint-clipboard/output/{file_id}/poster?v=<version>   (a plain def: it may decode a video)
-      -> one frame of the video at one second (the middle of a shorter clip), at most POSTER_SIDE (480) on its
-         longest side, as image/webp (image/png where WebP cannot be written); a picture output made small.
+    GET  /minipaint-clipboard/output/{file_id}/poster?r=first&v=<version>   (a plain def: it may decode a video)
+      -> the video's FIRST frame, read on the server by the first of PyAV, ffmpeg (WanGP's imageio-ffmpeg binary in
+         its environment, else Forge's, else the PATH's) and OpenCV that can, at most POSTER_SIDE (480) on its
+         longest side, as image/webp (image/png where WebP cannot be written); a picture output made small. The
+         page never fetches a video to draw a poster. r names what a poster is a frame of, so a
+         browser's copy of a poster made to another recipe (the frame at one second, before 2026-11-04) is
+         never answered for it; the server reads no r.
          X-Minipaint-Duration: the clip's length in seconds, when known. Cache-Control immutable only when v is
          the file's current version, else REVALIDATED_CACHE. 404 CLIPBOARD_ASSET_UNKNOWN for an id that is no
          output; 422 OUTPUT_POSTER_UNREADABLE for a file that gave no frame (not tried again for 10 minutes at
-         that version); 501 OUTPUT_POSTER_UNAVAILABLE when this process has neither PyAV nor OpenCV - the page
-         then draws its video posters itself - the page then offers no Load
+         that version); 501 OUTPUT_POSTER_UNAVAILABLE when this process has no reader at all. Either marks the
+         tile; the page fetches no video instead - the page then offers no Load
     GET  /minipaint-clipboard/prompts
       -> {ok, entries: prompts.view(), max: 10}
     POST /minipaint-clipboard/prompts   {action: "load", id}
@@ -953,15 +958,18 @@ def gallery(refresh=True) -> [files()' items + {source: "request"}, and {id: "wf
 def path_of(file_id) -> Path | None                                                   # the only place an id becomes a path
 # files() and gallery() items also carry mtime, the file's own time, which its version is made of
 
-# posters.py: View Outputs' posters, made once and kept three times
-POSTER_SIDE = 480; POSTER_AT_SECONDS = 1.0; POSTER_DIR_NAME = "clipboard-output-posters"; POSTER_DISK_BUDGET = 512 MiB
-MAKING_AT_ONCE = 3; FAILED_SECONDS = 600
+# posters.py: View Outputs' posters - each video's first frame - made once and kept three times
+POSTER_SIDE = 480; POSTER_AT_SECONDS = 0.0 (the first frame); POSTER_DIR_NAME = "clipboard-output-first-frames"
+FORMER_DIR_NAMES = ("clipboard-output-posters",)   # the one-second posters' folder, removed the first time; POSTER_DISK_BUDGET = 512 MiB
+MAKING_AT_ONCE = 4; FFMPEG_SECONDS = 20; FAILED_SECONDS = 600
 def version_of(stat) -> "<mtime ms>-<size>"                                            # the version a poster URL carries
-def decoder() -> "pyav" | "opencv" | ""                                               # asked once per process
+def decoders() -> ["pyav", "ffmpeg", "opencv"]                                        # the readers here, each file tried in this order; asked once
+def decoder() -> "pyav+ffmpeg+opencv" | ""                                            # the same, as one word for the listing and the journal
+def ffmpeg_program() -> str                                                           # WanGP's imageio-ffmpeg binary (runtime.prefix), Forge's, the PATH's, or ""
 posters().poster(file_id, path, stat, side=POSTER_SIDE) -> (bytes, mime, duration_seconds)
                                                                                       # memory, then disk (<id>-<mtime_ns>-<size>-<side>-<duration ms>.webp),
                                                                                       # then a decode; one maker per poster; raises OUTPUT_POSTER_UNAVAILABLE / _UNREADABLE
-posters().sweep(budget) -> {ok, kept, removed, bytes}; reset_for_tests(name=None)     # name "" is a process with no video decoder
+posters().sweep(budget) -> {ok, kept, removed, bytes}; reset_for_tests(name=None, ffmpeg=None)   # name "" is no reader; "pyav+ffmpeg" those, in order
 def forget_all() -> int; def use_clock(clock); def reset_for_tests()
 # An entry: {entry_id, job_id, request_id, opened_at, closed_at, floor, exact, model, recipe | None, files: [{file_id, path, name, size, at}]}
 # recipe (history.recipe_of_job): {prompt (as typed), written (an enhancement's, or ""), first_asset_id, last_asset_id, reference_asset_ids,

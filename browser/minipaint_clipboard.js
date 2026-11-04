@@ -227,7 +227,7 @@ window.minipaintClipboard = (function () {
             player: null, controls: null, sending: false, swiped: 0,
             //: The tab is away (another Forge tab on screen), and whether that
             //: paused the stage, so its return plays it again.
-            away: false, stageAway: false,
+            away: false, stageAway: null,
             //: The server said it has no decoder: posters are the page's.
             posterless: false,
             visibilityWatch: null,
@@ -2534,6 +2534,14 @@ window.minipaintClipboard = (function () {
     //: starts. Set on the root element rather than on a panel, because both
     //: panels read it and a theme that moves its header moves both at once.
     const TOP_INSET_PROPERTY = "--minipaint-clip-top";
+    //: And for a tab bar pinned down one side of the window instead: the
+    //: Forge Assistant's Transpose View puts the tab bar on a rail down the
+    //: left or the right (the Model Chain theme draws it, 48 px). Asked for:
+    //: "the gallery is not respecting my latest move tab bar to side of screen
+    //: instead of top ... It should not overlap, but appear below when top, or
+    //: beside when tab bar on side."
+    const LEFT_INSET_PROPERTY = "--minipaint-clip-left";
+    const RIGHT_INSET_PROPERTY = "--minipaint-clip-right";
 
     /**
      * How much of the top of the window the WebUI's own header is using.
@@ -2588,7 +2596,7 @@ window.minipaintClipboard = (function () {
                 // A panel of ours is pinned to the top as well. Measuring one
                 // of those would push the next one that opened further down,
                 // and the one after that further still.
-                if (node.closest && (node.closest("." + EDITOR_OPEN_CLASS) || node.closest("." + PROMPTS_CLASS))) { continue; }
+                if (ownPinnedBox(node)) { continue; }
                 let style;
                 try { style = window.getComputedStyle(node); } catch (e) { continue; }
                 if (!style || (style.position !== "fixed" && style.position !== "sticky")) { continue; }
@@ -2607,13 +2615,79 @@ window.minipaintClipboard = (function () {
 
     /** Publish the inset for the stylesheet. Never fatal: a panel that cannot
      *  be told where the header is still opens, at the top of the window. */
+    //: How far in from a side a rail may START and still be the rail, and
+    //: where along that band the window is asked what is there. A rail is a
+    //: bar, so it is thin - the theme's is 48 px - and as tall as most of the
+    //: window: the Forge Assistant's panel, its launcher or a drawer pinned
+    //: to a side is none of these, and would only push the view about.
+    const RAIL_SLACK_PX = 32;
+    const RAIL_PROBES_X = [1, 8, 16, 24, 32];
+    const RAIL_PROBES_Y = [0.5, 0.3, 0.7];
+    const RAIL_MAX_PX = 160;
+
+    /** Our own full-window boxes, which are pinned too and are never the
+     *  page's bars. */
+    function ownPinnedBox(node) {
+        return !!(node.closest && (node.closest("." + EDITOR_OPEN_CLASS) || node.closest("." + PROMPTS_CLASS)
+                                   || node.closest("." + ARCHIVES_CLASS) || node.closest("." + VIEWER_CLASS)));
+    }
+
+    /**
+     * A bar pinned down the left or the right of the window: how far in from
+     * that side it reaches, or 0. The header's rule turned on its side - an
+     * element really there, fixed or sticky, starting within the band at that
+     * edge - with the shape of a rail besides: thin, and most of the window
+     * tall.
+     */
+    function railInset(side) {
+        if (typeof document.elementsFromPoint !== "function") { return 0; }
+        const wide = document.documentElement.clientWidth || window.innerWidth;
+        const tall = window.innerHeight;
+        const limit = Math.min(RAIL_MAX_PX, Math.round(wide / 3));
+        const seen = new Set();
+        let reach = 0;
+        for (let i = 0; i < RAIL_PROBES_X.length; i += 1) {
+            const x = side === "left" ? RAIL_PROBES_X[i] : wide - RAIL_PROBES_X[i];
+            for (let j = 0; j < RAIL_PROBES_Y.length; j += 1) {
+                let found;
+                try {
+                    found = document.elementsFromPoint(x, Math.round(tall * RAIL_PROBES_Y[j])) || [];
+                } catch (e) { return 0; }
+                for (let k = 0; k < found.length; k += 1) {
+                    const node = found[k];
+                    if (!node || seen.has(node) || node === document.body || node === document.documentElement) { continue; }
+                    seen.add(node);
+                    if (ownPinnedBox(node)) { continue; }
+                    let style;
+                    try { style = window.getComputedStyle(node); } catch (e) { continue; }
+                    if (!style || (style.position !== "fixed" && style.position !== "sticky")) { continue; }
+                    const box = node.getBoundingClientRect();
+                    if (box.width > limit || box.height < tall * 0.5) { continue; }
+                    if (side === "left" && box.left <= RAIL_SLACK_PX) { reach = Math.max(reach, box.right); }
+                    if (side === "right" && box.right >= wide - RAIL_SLACK_PX) { reach = Math.max(reach, wide - box.left); }
+                }
+            }
+        }
+        return Math.max(0, Math.min(limit + RAIL_SLACK_PX, Math.round(reach)));
+    }
+
+    /** Publish the insets for the stylesheet: the bar along the top, and a
+     *  rail down either side. Never fatal: a panel that cannot be told where
+     *  they are still opens, over the whole window. Written only when changed,
+     *  because the root's own style is what the watch below ignores. */
     function applyHeaderInset() {
         try {
-            document.documentElement.style.setProperty(TOP_INSET_PROPERTY, headerInset() + "px");
+            const root = document.documentElement.style;
+            const wanted = [[TOP_INSET_PROPERTY, headerInset()], [LEFT_INSET_PROPERTY, railInset("left")],
+                            [RIGHT_INSET_PROPERTY, railInset("right")]];
+            for (const one of wanted) {
+                const value = one[1] + "px";
+                if (root.getPropertyValue(one[0]) !== value) { root.setProperty(one[0], value); }
+            }
         } catch (e) { /* a page that will not take a custom property still opens */ }
     }
 
-    function headerPanelOpen() { return outputsOpen() || editorOpen() || promptHistoryOpen(); }
+    function headerPanelOpen() { return outputsOpen() || editorOpen() || promptHistoryOpen() || archivesOpen(); }
 
     /** Measure again, once a frame at most, while a panel is open. */
     function scheduleHeaderInset() {
@@ -3672,12 +3746,11 @@ window.minipaintClipboard = (function () {
     }
 
     function posterUrl(item) {
-        return OUTPUTS_FILE_PREFIX + encodeURIComponent(item.id) + "/poster" + (item.v ? "?v=" + encodeURIComponent(item.v) : "");
+        return OUTPUTS_FILE_PREFIX + encodeURIComponent(item.id) + "/poster?r=" + POSTER_RECIPE
+            + (item.v ? "&v=" + encodeURIComponent(item.v) : "");
     }
 
-    /** Whether this output's poster is drawn in the page, the old way: a
-     *  video, on a Forge that said it has no decoder to make one. */
-    function posterInPage(item) { return !!S.outputs.posterless && !!item && item.kind === "video"; }
+
 
     function outputDate(item, withTime) {
         if (!item || !item.at) { return ""; }
@@ -4259,23 +4332,12 @@ window.minipaintClipboard = (function () {
         pin(cell, OUTPUT_CELL_GEOMETRY);
         const box = el("span", "minipaint-clip-output-cell-box");
         pin(box, OUTPUT_BOX_GEOMETRY);
-        let poster;
-        if (posterInPage(item)) {
-            // No decoder on the server: the frame at one second, drawn by the
-            // browser, attached only when this tile's turn comes.
-            poster = document.createElement("video");
-            poster.className = "minipaint-clip-output-cell-poster";
-            poster.muted = true;
-            poster.playsInline = true;
-            poster.preload = "metadata";
-            poster.dataset.src = item.url + "#t=1";
-        } else {
-            poster = document.createElement("img");
-            poster.className = "minipaint-clip-output-cell-poster";
-            poster.alt = "";
-            poster.decoding = "async";
-            poster.draggable = false;
-        }
+        // A picture: the poster's, when it arrives.
+        const poster = document.createElement("img");
+        poster.className = "minipaint-clip-output-cell-poster";
+        poster.alt = "";
+        poster.decoding = "async";
+        poster.draggable = false;
         pin(poster, OUTPUT_MEDIA_GEOMETRY);
         box.appendChild(poster);
         const time = el("span", "minipaint-clip-output-cell-time", "");
@@ -4638,24 +4700,59 @@ window.minipaintClipboard = (function () {
     }
 
     /* -- the posters, in view first ------------------------------------------ */
+    //
+    // Asked for: "I would like each video to use its first frame as a
+    // thumbnail, and those should load only when in view, and from cache when
+    // previously view[ed]." A tile's poster is its video's FIRST frame, read
+    // on the server (posters.py) and kept there, in the browser's cache (its
+    // address carries the file's version and is answered immutable) and in
+    // this page; it is asked for only for the tiles in view, and the row just
+    // past them each way so a scroll lands on drawn tiles.
+    //
+    // NEVER THE VIDEO. "It should not require the video to be sent to the
+    // browser to get the first frame. I need this to be fast. On a remote
+    // connection to my host." A poster is one small picture; the page never
+    // opens a video to draw a tile, and a poster the server cannot make is a
+    // marked tile, never a video fetched instead.
+    //
+    // HOW MANY AT ONCE. Over HTTP/1.1 a page has six connections to this
+    // origin and three posters at a time leave the rest to everything else.
+    // Over HTTP/2 - the auto-TLS extension's - every request shares one
+    // connection, and on a remote connection what a screen of posters costs
+    // is round trips, not connections: more are asked for together there.
 
+    //: The address's mark for what a poster is: a poster made to another
+    //: recipe (the frame at one second, before 2026-11-04) is another address,
+    //: so the browser's year-long copy of the old one is never shown again.
+    const POSTER_RECIPE = "first";
+    //: Posters asked for together over HTTP/2.
+    const POSTER_CONCURRENCY_H2 = 8;
+
+    /** How many posters may be out at once on this page's connection: what
+     *  the page itself arrived over, as the browser reports it. */
+    function posterConcurrency() {
+        let protocol = "";
+        try {
+            const entries = performance.getEntriesByType("navigation");
+            if (entries && entries[0] && entries[0].nextHopProtocol) { protocol = String(entries[0].nextHopProtocol); }
+        } catch (e) { protocol = ""; }
+        return /^h[23]/.test(protocol) ? POSTER_CONCURRENCY_H2 : POSTER_CONCURRENCY;
+    }
+
+    /** Whether a tile's poster is still to be asked for: not drawn, not out,
+     *  not one the server said it cannot make. */
     function needsPoster(id) {
         const O = S.outputs;
         const G = O.gallery;
         if (G.inflight.has(id)) { return false; }
         const item = O.byId.get(id);
         if (!item) { return false; }
-        if (posterInPage(item)) {
-            const cell = G.rendered.get(id);
-            const poster = cell ? cell.querySelector("video.minipaint-clip-output-cell-poster") : null;
-            return !!poster && !poster.getAttribute("src");
-        }
         const held = G.posters.get(id);
         return !held || held.v !== item.v || (!held.url && held.state !== "failed");
     }
 
-    /** What to ask for, in order: the tiles in view in reading order, then
-     *  the rows below the view, then above it, nearest first. */
+    /** What to ask for, in order: the tiles in view in reading order, then the
+     *  row just below the view and the row just above it. */
     function wantedPosters() {
         const O = S.outputs;
         const rows = outputGridRows();
@@ -4669,10 +4766,8 @@ window.minipaintClipboard = (function () {
             }
         };
         for (let row = rows.first; row <= rows.last; row += 1) { take(row, visible); }
-        for (let step = 1; step <= rows.screenRows; step += 1) {
-            if (rows.last + step < O.gallery.layout.rows) { take(rows.last + step, ahead); }
-            if (rows.first - step >= 0) { take(rows.first - step, ahead); }
-        }
+        if (rows.last + 1 < O.gallery.layout.rows) { take(rows.last + 1, ahead); }
+        if (rows.first - 1 >= 0) { take(rows.first - 1, ahead); }
         return { visible: visible, ahead: ahead };
     }
 
@@ -4706,15 +4801,16 @@ window.minipaintClipboard = (function () {
             return;
         }
         const order = want.visible.concat(want.ahead).filter(needsPoster);
-        while (G.inflight.size < POSTER_CONCURRENCY && order.length) { startPoster(order.shift()); }
+        const most = posterConcurrency();
+        while (G.inflight.size < most && order.length) { startPoster(order.shift()); }
     }
 
     function paintPoster(cell, item) {
         const G = S.outputs.gallery;
         const held = G.posters.get(item.id);
-        const poster = cell.querySelector(".minipaint-clip-output-cell-poster");
         const time = cell.querySelector(".minipaint-clip-output-cell-time");
-        if (!poster || posterInPage(item)) { return; }
+        const poster = cell.querySelector(".minipaint-clip-output-cell-poster");
+        if (!poster) { return; }
         if (held && held.v === item.v && held.url) {
             G.posters.delete(item.id);
             G.posters.set(item.id, held);
@@ -4731,12 +4827,42 @@ window.minipaintClipboard = (function () {
         }
     }
 
+    /** A poster arrived for an output: its tile, its strip tile, its preview's
+     *  poster and the line under the grid are told. */
+    function posterArrived(id) {
+        const O = S.outputs;
+        const G = O.gallery;
+        const item = O.byId.get(id);
+        const held = G.posters.get(id);
+        if (!item || !held) { return; }
+        const cell = G.rendered.get(id);
+        if (cell) { paintPoster(cell, item); }
+        if (G.preview && G.previewId === id && !G.preview.poster && held.url) { G.preview.poster = held.url; }
+        if (O.strip) {
+            const tile = O.strip.querySelector('[data-output="' + id + '"]');
+            const thumb = tile ? tile.querySelector(".minipaint-clip-output-thumb") : null;
+            if (thumb && held.url && thumb.tagName === "IMG") {
+                thumb.dataset.src = held.url;
+                if (thumb.getAttribute("src")) { thumb.src = held.url; }
+            }
+        }
+        if (O.chosen === id) { drawOutputDetail(); }
+    }
+
+    /** Said once each in the page's journal: why the server made no poster. */
+    function saidOnce(key, text) {
+        const O = S.outputs;
+        if (!O.said) { O.said = new Set(); }
+        if (O.said.has(key)) { return; }
+        O.said.add(key);
+        note(text);
+    }
+
     function startPoster(id) {
         const O = S.outputs;
         const G = O.gallery;
         const item = O.byId.get(id);
         if (!item) { return; }
-        if (posterInPage(item)) { startPosterInPage(item); return; }
         let controller = null;
         try { controller = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { controller = null; }
         const job = { controller: controller, timedOut: false, dropped: false, timer: 0, v: item.v };
@@ -4768,34 +4894,28 @@ window.minipaintClipboard = (function () {
             G.posters.set(id, { url: URL.createObjectURL(blob), state: "done", tries: 0, v: job.v, duration: duration });
             G.stats.done += 1;
             keepPosters();
-            const cell = G.rendered.get(id);
-            if (cell) { paintPoster(cell, current); }
-            if (G.preview && G.previewId === id && !G.preview.poster) { G.preview.poster = G.posters.get(id).url; }
-            if (O.chosen === id) { drawOutputDetail(); }
+            posterArrived(id);
         }).catch(function (error) {
             if (job.dropped) { return; }
             const status = error && error.status;
-            if (status === 501) {
-                // No decoder on this Forge: the page draws its posters itself
-                // from here on, and asks the server for none.
-                goPosterless();
-                return;
-            }
             let held = G.posters.get(id);
             if (!held || held.v !== job.v) { held = { url: "", state: "idle", tries: 0, v: job.v, duration: 0 }; }
             held.tries = (held.tries || 0) + 1;
-            const final = (status >= 400 && status < 500) || held.tries >= POSTER_TRIES;
-            held.state = final ? "failed" : "idle";
-            G.posters.set(id, held);
+            // The server will not make this one - it said so, or failed twice:
+            // the tile is marked. Never a video fetched to draw it instead.
+            const final = (status >= 400 && status < 500) || status === 501 || held.tries >= POSTER_TRIES;
             if (final) {
+                held.state = "failed";
                 G.stats.failed += 1;
-                const cell = G.rendered.get(id);
-                if (cell && O.byId.get(id)) { paintPoster(cell, O.byId.get(id)); }
+                saidOnce("poster-" + (status || "none"), "outputs: the server made no poster for an output ("
+                         + (status ? "HTTP " + status : (job.timedOut ? "no answer in time" : "no answer"))
+                         + "); its tile is marked");
+            } else {
+                held.state = "idle";
             }
-            if (job.timedOut) {
-                note("outputs: a poster took longer than " + (POSTER_TIMEOUT_MS / 1000) + "s"
-                     + (final ? "; its tile is marked" : "; it will be asked for again"));
-            }
+            G.posters.set(id, held);
+            const cell = G.rendered.get(id);
+            if (cell && O.byId.get(id)) { paintPoster(cell, O.byId.get(id)); }
         }).then(function () {
             clearTimeout(job.timer);
             if (G.inflight.get(id) === job) { G.inflight.delete(id); }
@@ -4803,39 +4923,11 @@ window.minipaintClipboard = (function () {
         });
     }
 
-    /** A poster drawn by the browser, the way the strip always drew them:
-     *  the tile's own <video>, given its address at its turn. */
-    function startPosterInPage(item) {
-        const G = S.outputs.gallery;
-        const cell = G.rendered.get(item.id);
-        const poster = cell ? cell.querySelector("video.minipaint-clip-output-cell-poster") : null;
-        if (!poster) { return; }
-        const job = { controller: null, timedOut: false, dropped: false, timer: 0, v: item.v, media: poster };
-        const done = function () {
-            clearTimeout(job.timer);
-            poster.removeEventListener("loadeddata", done);
-            poster.removeEventListener("error", done);
-            if (G.inflight.get(item.id) === job) { G.inflight.delete(item.id); }
-            if (!job.dropped) { G.stats.done += 1; pumpPosters(true); }
-        };
-        job.timer = setTimeout(function () { job.timedOut = true; done(); }, POSTER_TIMEOUT_MS);
-        poster.addEventListener("loadeddata", done);
-        poster.addEventListener("error", done);
-        G.inflight.set(item.id, job);
-        G.startedAt = Date.now();
-        G.stats.started += 1;
-        poster.src = poster.dataset.src;
-    }
-
     function dropPoster(id, job) {
         const G = S.outputs.gallery;
         job.dropped = true;
         clearTimeout(job.timer);
         if (job.controller) { try { job.controller.abort(); } catch (e) { /* settled */ } }
-        if (job.media && !job.media.isConnected && job.media.getAttribute("src")) {
-            job.media.removeAttribute("src");
-            try { job.media.load(); } catch (e) { /* torn down */ }
-        }
         if (G.inflight.get(id) === job) { G.inflight.delete(id); }
         G.stats.dropped += 1;
     }
@@ -4846,31 +4938,16 @@ window.minipaintClipboard = (function () {
         if (G.pumpTimer) { clearTimeout(G.pumpTimer); G.pumpTimer = 0; }
     }
 
-    /** Only so many object URLs: the oldest not on screen go first. */
+    /** Only so many posters held: the oldest not on screen go first. */
     function keepPosters() {
         const G = S.outputs.gallery;
         if (G.posters.size <= POSTER_KEEP) { return; }
         for (const entry of Array.from(G.posters)) {
             if (G.posters.size <= POSTER_KEEP) { break; }
             if (G.rendered.has(entry[0]) || entry[0] === G.previewId || !entry[1].url) { continue; }
-            try { URL.revokeObjectURL(entry[1].url); } catch (e) { /* gone already */ }
+            if (entry[1].url) { try { URL.revokeObjectURL(entry[1].url); } catch (e) { /* gone already */ } }
             G.posters.delete(entry[0]);
         }
-    }
-
-    /** The server has no decoder: every video tile drawn again with a
-     *  poster of the page's own. Said once, in the journal. */
-    function goPosterless() {
-        const O = S.outputs;
-        const G = O.gallery;
-        if (O.posterless) { return; }
-        O.posterless = true;
-        note("outputs: the server has no video decoder; posters are drawn in the page");
-        stopPosters();
-        for (const cell of G.rendered.values()) { releaseOutputCell(cell); if (cell.parentNode) { cell.parentNode.removeChild(cell); } }
-        G.rendered = new Map();
-        renderOutputGrid();
-        pumpPosters(true);
     }
 
     /* -- the gallery's scrubber --------------------------------------------- */
@@ -5082,32 +5159,20 @@ window.minipaintClipboard = (function () {
         tile.type = "button";
         tile.dataset.output = item.id;
         tile.title = item.name + (guessedOutput(item) ? " — matched to a request by when it was written" : "");
-        let media;
-        if (posterInPage(item)) {
-            // No poster from the server: the frame at one second, asked for
-            // with a media fragment, by the browser. The address goes in
-            // `data-src` and not in `src`: see watchTiles.
-            media = el("video", "minipaint-clip-output-thumb");
-            media.preload = "metadata";
-            media.muted = true;
-            media.playsInline = true;
-            media.dataset.src = item.url + "#t=1";
-        } else {
-            // The poster the gallery shows, from the server's cache or the
-            // browser's: one small picture, never the video. The gallery's
-            // own copy, when it has one, is used as it is.
-            media = el("img", "minipaint-clip-output-thumb");
-            media.alt = "";
-            media.draggable = false;
-            const held = S.outputs.gallery.posters.get(item.id);
-            media.dataset.src = held && held.url && held.v === item.v ? held.url : posterUrl(item);
-            // A poster the server could not make is a marked tile, never the
-            // browser's broken-picture glyph.
-            media.addEventListener("error", function () {
-                if (media.getAttribute("src")) { tile.classList.add("minipaint-clip-output-tile-missing"); }
-            });
-            media.addEventListener("load", function () { tile.classList.remove("minipaint-clip-output-tile-missing"); });
-        }
+        // The poster the gallery shows, from the server's cache or the
+        // browser's: one small picture, never the video. The gallery's own
+        // copy, when it has one, is used as it is.
+        const held = S.outputs.gallery.posters.get(item.id);
+        const media = el("img", "minipaint-clip-output-thumb");
+        media.alt = "";
+        media.draggable = false;
+        media.dataset.src = held && held.url && held.v === item.v ? held.url : posterUrl(item);
+        // A poster the server could not make is a marked tile, never the
+        // browser's broken-picture glyph.
+        media.addEventListener("error", function () {
+            if (media.getAttribute("src")) { tile.classList.add("minipaint-clip-output-tile-missing"); }
+        });
+        media.addEventListener("load", function () { tile.classList.remove("minipaint-clip-output-tile-missing"); });
         tile.appendChild(media);
         if (guessedOutput(item)) { tile.appendChild(el("span", "minipaint-clip-output-guess", "~")); }
         return tile;
@@ -5270,6 +5335,11 @@ window.minipaintClipboard = (function () {
         for (const item of O.all) { O.byId.set(item.id, item); }
         O.message = (answer && answer.status) || "";
         O.truncated = Number(answer && answer.truncated) || 0;
+        if (answer && typeof answer.posters === "string") {
+            O.posterless = !answer.posters;
+            saidOnce("decoder-" + answer.posters, "outputs: first frames read on the server by "
+                     + (answer.posters || "nothing: it has no PyAV, ffmpeg or OpenCV"));
+        }
         // Posters of a version no longer listed are let go: the file changed.
         for (const entry of Array.from(O.gallery.posters)) {
             const item = O.byId.get(entry[0]);
@@ -5418,46 +5488,55 @@ window.minipaintClipboard = (function () {
     }
 
     /**
-     * Another of Forge's tabs on screen, with the view still open: the
-     * Clipboard tab's panel is not displayed and neither is this one, but a
-     * <video> in a box that is not displayed goes on playing - with sound, on
-     * the stage. Both are paused while the tab is away; the preview plays
-     * again when it is back, and so does the stage if this paused it.
+     * Away: another of Forge's tabs on screen with the view still open, or
+     * the page hidden. A <video> in a box nobody can see goes on playing -
+     * with sound, on the stage - and a paused one can keep its download open,
+     * half read, for as long as the page lives: the user's word for this
+     * extension is "no live connection". So away, both let go of their file:
+     * the tile's preview, which starts again from its first frame on the
+     * return, and the stage's player, which comes back at the moment it left,
+     * playing if it was.
      */
-    function onOutputsShown() {
+    function syncOutputsAway() {
         const O = S.outputs;
         const panel = O.dom ? O.dom.panel : null;
         if (!panel || !outputsOpen()) { return; }
-        const shown = panel.offsetWidth > 0 && panel.offsetHeight > 0;
-        if (shown === !O.away) { return; }
-        O.away = !shown;
+        const away = !!document.hidden || !(panel.offsetWidth > 0 && panel.offsetHeight > 0);
+        if (away === !!O.away) { return; }
+        O.away = away;
         const stage = O.player;
-        if (!shown) {
-            const preview = O.gallery.preview;
-            if (preview && !preview.paused) { try { preview.pause(); } catch (e) { /* torn down */ } }
-            O.stageAway = !!stage && !stage.paused;
-            if (O.stageAway) { try { stage.pause(); } catch (e) { /* torn down */ } }
-            note("outputs: paused while the tab is away");
+        if (away) {
+            releasePreview();
+            if (stage && stage.getAttribute("src") && !O.stageAway) {
+                O.stageAway = { id: O.chosen, time: stage.currentTime || 0, playing: !stage.paused && !stage.ended };
+                try {
+                    stage.pause();
+                    stage.removeAttribute("src");
+                    stage.load();
+                } catch (e) { /* torn down */ }
+            }
+            note("outputs: let go of every video while " + (document.hidden ? "the page is hidden" : "another tab is on screen"));
             return;
         }
         startPreview();
-        if (O.stageAway && stage && stage.isConnected && O.view === "slideshow") {
-            const started = stage.play();
-            if (started && typeof started.catch === "function") { started.catch(function () { /* refused */ }); }
+        const left = O.stageAway;
+        O.stageAway = null;
+        const item = left ? O.byId.get(left.id) : null;
+        if (left && item && stage && stage.isConnected && O.view === "slideshow" && O.chosen === left.id) {
+            stage.addEventListener("loadedmetadata", function () {
+                try { stage.currentTime = left.time; } catch (e) { /* not seekable yet */ }
+                if (left.playing) {
+                    const started = stage.play();
+                    if (started && typeof started.catch === "function") { started.catch(function () { /* refused */ }); }
+                }
+            }, { once: true });
+            stage.src = item.url;
         }
-        O.stageAway = false;
     }
 
-    /** The page hidden: the preview stops, and starts again on return. */
-    function onOutputsVisibility() {
-        if (!outputsOpen()) { return; }
-        if (document.hidden) {
-            const video = S.outputs.gallery.preview;
-            if (video && !video.paused) { try { video.pause(); } catch (e) { /* torn down */ } }
-        } else {
-            startPreview();
-        }
-    }
+    function onOutputsShown() { syncOutputsAway(); }
+
+    function onOutputsVisibility() { syncOutputsAway(); }
 
     /**
      * Open the view over the whole window.
@@ -5504,7 +5583,7 @@ window.minipaintClipboard = (function () {
         const panel = outputsPanel();
         const O = S.outputs;
         O.away = false;
-        O.stageAway = false;
+        O.stageAway = null;
         releasePreview();
         stopPosters();
         endOutputScrub();
@@ -5542,6 +5621,7 @@ window.minipaintClipboard = (function () {
                  started: G.stats.started, dropped: G.stats.dropped, done: G.stats.done, failed: G.stats.failed,
                  asked: G.stats.order.slice(-200),
                  posterless: !!O.posterless,
+                 concurrency: posterConcurrency(),
                  preview: G.previewId, playing: !!(preview && preview.isConnected && !preview.paused),
                  previewMuted: !!(preview && preview.muted), previewLoop: !!(preview && preview.loop),
                  videos: Array.from(document.querySelectorAll("#" + OUTPUTS_PANEL_ID + " video")).filter(function (video) {

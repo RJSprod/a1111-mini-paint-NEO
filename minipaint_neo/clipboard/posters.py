@@ -4,9 +4,11 @@ View Outputs' gallery is a grid of every video in WanGP's output folder, and
 asked for: "The gallery should work much like the clipboard archives and load
 as I slide into video." An archive's tile is a thumbnail the server made once
 and the browser keeps for a year, asked for only when it is in view. A video
-has no thumbnail to read, so this makes one: the frame at one second (the
-middle of a clip shorter than two), at most ``POSTER_SIDE`` on its longest
-side, as a WebP of a few tens of kilobytes.
+has no thumbnail to read, so this makes one: its FIRST frame, at most
+``POSTER_SIDE`` on its longest side, as a WebP of a few tens of kilobytes.
+Asked for: "I would like each video to use its first frame as a thumbnail,
+and those should load only when in view, and from cache when previously
+view[ed]." (It was the frame at one second until 2026-11-04.)
 
 WHY ON THE SERVER. The filmstrip used to ask the browser for its posters: a
 ``<video preload="metadata" src="…#t=1">`` per tile, which is a range request
@@ -17,12 +19,24 @@ twenty multi-megabyte reads on every screen, against the six connections a page
 has to this origin, while the one video that is meant to play waits behind
 them. Made here once, a poster is one small image the browser keeps.
 
-HOW. With PyAV, which Forge Neo installs (``av`` in its requirements): the file
-is opened, the nearest keyframe before the wanted time is sought, and frames
-are decoded up to it - a few frames, never the clip - and scaled by the
-decoder's own scaler. OpenCV (also Forge Neo's) is the fallback. With neither,
-the route says so (``OUTPUT_POSTER_UNAVAILABLE``) and the page draws its
-posters the old way. A picture output is made smaller with Pillow.
+HOW. On the server, always: the page never fetches a video to draw its poster,
+because on a remote connection to the host that is the video's first
+megabytes for every tile ("It should not require the video to be sent to the
+browser to get the first frame. I need this to be fast."). The first frame is
+read by the first of these that can, file by file:
+
+* PyAV, which Forge Neo installs (``av`` in its requirements): the file opened
+  and its first frame decoded - one frame, no seek, slice threads only, so the
+  frame comes out of the first packet rather than after one per thread;
+* ffmpeg, the program: the one WanGP wrote the file with (``imageio-ffmpeg``'s
+  binary in WanGP's own environment, which Mini Paint's WanGP settings name),
+  else Forge's own ``imageio-ffmpeg``, else one on the PATH - a file WanGP's
+  ffmpeg wrote is a file it reads, whatever codec it was told to use;
+* OpenCV (also Forge Neo's).
+
+A picture output is made smaller with Pillow. A video none of them reads is
+answered ``OUTPUT_POSTER_UNREADABLE`` and its tile is marked; Forge's console
+says once, per reader and reason, which could not and how - never which file.
 
 WHAT IS KEPT. In this process's memory (``POSTER_CACHE_SIZE``), on disk in this
 extension's data folder under a budget of its own (``POSTER_DISK_BUDGET``, the
@@ -40,10 +54,13 @@ browser: the route takes the output's opaque id, as the file route does.
 from __future__ import annotations
 
 import collections
+import glob
 import io
 import os
 import pathlib
 import re
+import shutil
+import subprocess
 import threading
 import time
 import typing
@@ -62,9 +79,8 @@ _LOG_PREFIX = "MiniPaint Clipboard:"
 POSTER_SIDE = 480
 #: What a poster is encoded at.
 POSTER_QUALITY = 80
-#: Where in a clip its poster is taken: past a first frame that is often a
-#: fade or the source picture itself, and never past the middle of a short one.
-POSTER_AT_SECONDS = 1.0
+#: Where in a clip its poster is taken: its first frame, as asked for.
+POSTER_AT_SECONDS = 0.0
 #: How many frames past the keyframe are decoded looking for that moment. A
 #: generated clip has a keyframe every second or two; a file with none is not
 #: decoded to its end for one picture.
@@ -72,7 +88,10 @@ POSTER_DECODE_LIMIT = 240
 #: Made posters kept in this process, for a gallery scrolled back and forth.
 POSTER_CACHE_SIZE = 1024
 #: The disk cache, in the extension's data directory and never in WanGP's.
-POSTER_DIR_NAME = "clipboard-output-posters"
+#: Named for what it holds: the one before it held the frame at one second
+#: under the same names, and is removed the first time this one is opened.
+POSTER_DIR_NAME = "clipboard-output-first-frames"
+FORMER_DIR_NAMES = ("clipboard-output-posters",)
 #: What that directory may weigh before the least recently used go: about
 #: twenty thousand posters, a whole output folder's worth.
 POSTER_DISK_BUDGET = 512 * 1024 * 1024
@@ -86,7 +105,9 @@ POSTER_MIME = {"webp": "image/webp", "png": "image/png"}
 MAKING_WAIT_SECONDS = 30.0
 #: Posters made at once. Each is a decoder; a fling across the gallery that
 #: started forty of them would take every core from the video being watched.
-MAKING_AT_ONCE = 3
+MAKING_AT_ONCE = 4
+#: How long ffmpeg, the program, may take over one first frame.
+FFMPEG_SECONDS = 20.0
 #: How long a file that would not decode is not tried again. A video WanGP is
 #: still writing has no index yet; once it is finished it has a new size and
 #: so a new version, which is tried at once.
@@ -105,28 +126,86 @@ def version_of(info: os.stat_result) -> str:
     return f"{int(round(float(info.st_mtime) * 1000))}-{int(info.st_size)}"
 
 
-def decoder() -> str:
-    """Which video decoder this process has: "pyav", "opencv" or ""."""
-    found = _decoder.get("name")
+def _importable(name: str) -> bool:
+    try:
+        __import__(name)
+        return True
+    except Exception:
+        return False
+
+
+def _site_packages(prefix: str) -> typing.List[str]:
+    """An environment's site-packages, Windows' layout or everyone else's."""
+    return (glob.glob(os.path.join(prefix, "Lib", "site-packages"))
+            + glob.glob(os.path.join(prefix, "lib", "python*", "site-packages")))
+
+
+def _wangp_prefix() -> str:
+    """WanGP's own environment, as Mini Paint's WanGP settings name it."""
+    try:
+        from ..wangp import config as wangp_config
+
+        found = wangp_config.load()
+        runtime = getattr(found, "runtime", None)
+        prefix = runtime.get("prefix") if isinstance(runtime, dict) else ""
+        return str(prefix or "").strip()
+    except Exception:
+        return ""
+
+
+def ffmpeg_program() -> str:
+    """ffmpeg, the program, or "": WanGP's (``imageio-ffmpeg``'s binary in its
+    environment - the one that wrote the file), Forge's own ``imageio-ffmpeg``,
+    then one on the PATH. Looked for once a process; the seam can name one."""
+    found = _decoder.get("ffmpeg")
     if found is not None:
         return found
-    name = ""
+    candidates: typing.List[str] = []
+    prefix = _wangp_prefix()
+    if prefix and os.path.isdir(prefix):
+        for packages in _site_packages(prefix):
+            candidates.extend(sorted(glob.glob(os.path.join(packages, "imageio_ffmpeg", "binaries", "ffmpeg*")),
+                                     reverse=True))
     try:
-        import av  # noqa: F401
+        import imageio_ffmpeg  # type: ignore
 
-        name = "pyav"
+        candidates.append(str(imageio_ffmpeg.get_ffmpeg_exe() or ""))
     except Exception:
-        try:
-            import cv2  # noqa: F401
+        pass
+    candidates.append(shutil.which("ffmpeg") or "")
+    program = ""
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and not candidate.lower().endswith((".txt", ".md", ".json")):
+            program = candidate
+            break
+    _decoder["ffmpeg"] = program
+    return program
 
-            name = "opencv"
-        except Exception:
-            name = ""
-    _decoder["name"] = name
-    return name
+
+def decoders() -> typing.List[str]:
+    """The readers of a video's first frame this process has, in the order
+    each file is tried with: "pyav", "ffmpeg", "opencv"."""
+    found = _decoder.get("names")
+    if found is not None:
+        return list(found)
+    names = []
+    if _importable("av"):
+        names.append("pyav")
+    if ffmpeg_program():
+        names.append("ffmpeg")
+    if _importable("cv2"):
+        names.append("opencv")
+    _decoder["names"] = names
+    return list(names)
 
 
-_decoder: typing.Dict[str, typing.Optional[str]] = {"name": None}
+def decoder() -> str:
+    """The readers, as one word for the listing and the journal: "pyav+ffmpeg",
+    or "" for none."""
+    return "+".join(decoders())
+
+
+_decoder: typing.Dict[str, typing.Any] = {"names": None, "ffmpeg": None}
 
 
 def _fit(width: int, height: int, side: int) -> typing.Tuple[int, int]:
@@ -141,6 +220,8 @@ def _fit(width: int, height: int, side: int) -> typing.Tuple[int, int]:
 
 
 def _moment(duration: typing.Optional[float]) -> float:
+    if POSTER_AT_SECONDS <= 0:
+        return 0.0
     if duration and duration > 0:
         return min(POSTER_AT_SECONDS, duration / 2.0)
     return POSTER_AT_SECONDS
@@ -154,8 +235,11 @@ def _frame_pyav(path: pathlib.Path, side: int) -> typing.Tuple[typing.Any, float
         stream = next((one for one in container.streams if one.type == "video"), None)
         if stream is None:
             raise IntegrationError(errors.OUTPUT_POSTER_UNREADABLE, "no video stream")
+        # Slice threads, never frame threads: a frame-threaded decoder hands
+        # the first frame back only once it has a packet in hand for every
+        # thread, which for one frame is that many decoded for nothing.
         try:
-            stream.thread_type = "AUTO"
+            stream.thread_type = "SLICE"
         except Exception:
             pass
         duration = 0.0
@@ -188,6 +272,44 @@ def _frame_pyav(path: pathlib.Path, side: int) -> typing.Tuple[typing.Any, float
         return image, duration
 
 
+_DURATION = re.compile(rb"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
+
+
+def _frame_ffmpeg(path: pathlib.Path, side: int) -> typing.Tuple[typing.Any, float]:
+    """The first frame by ffmpeg, the program: one frame out as a BMP on a
+    pipe - nothing to compress, nothing on disk - and the clip's length off
+    what it says about the input."""
+    from PIL import Image
+
+    program = ffmpeg_program()
+    if not program:
+        raise IntegrationError(errors.OUTPUT_POSTER_UNREADABLE, "no ffmpeg")
+    command = [program, "-hide_banner", "-nostdin", "-i", str(path), "-map", "0:v:0", "-frames:v", "1",
+               "-f", "image2pipe", "-vcodec", "bmp", "pipe:1"]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        done = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=FFMPEG_SECONDS, creationflags=flags, check=False)
+    except subprocess.TimeoutExpired:
+        raise IntegrationError(errors.OUTPUT_POSTER_UNREADABLE, "ffmpeg took too long")
+    except OSError as error:
+        raise IntegrationError(errors.OUTPUT_POSTER_UNREADABLE, f"ffmpeg would not start: {type(error).__name__}")
+    if done.returncode != 0 or not done.stdout:
+        raise IntegrationError(errors.OUTPUT_POSTER_UNREADABLE, f"ffmpeg exit {done.returncode}")
+    with Image.open(io.BytesIO(done.stdout)) as opened:
+        image = opened.convert("RGB")
+    image.thumbnail(_fit(image.width, image.height, side))
+    duration = 0.0
+    match = _DURATION.search(done.stderr or b"")
+    if match:
+        duration = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
+    return image, duration
+
+
+#: Each reader, by its name in ``decoders``.
+_READERS = {}
+
+
 def _frame_opencv(path: pathlib.Path, side: int) -> typing.Tuple[typing.Any, float]:
     import cv2
     from PIL import Image
@@ -216,6 +338,27 @@ def _frame_opencv(path: pathlib.Path, side: int) -> typing.Tuple[typing.Any, flo
             capture.release()
         except Exception:
             pass
+
+
+_READERS.update(pyav=_frame_pyav, ffmpeg=_frame_ffmpeg, opencv=_frame_opencv)
+
+
+def _first_frame(path: pathlib.Path, side: int, said: typing.Callable[[str, str], None]) -> typing.Tuple[typing.Any, float]:
+    """The first reader that gives a frame, file by file: a codec PyAV lacks
+    is often one WanGP's own ffmpeg wrote. Each that cannot is said once."""
+    names = decoders()
+    if not names:
+        raise IntegrationError(errors.OUTPUT_POSTER_UNAVAILABLE, "no decoder")
+    last = ""
+    for name in names:
+        try:
+            return _READERS[name](path, side)
+        except IntegrationError as error:
+            last = error.detail or error.code
+        except Exception as error:
+            last = type(error).__name__
+        said(name, last)
+    raise IntegrationError(errors.OUTPUT_POSTER_UNREADABLE, last or "no frame")
 
 
 def _picture(path: pathlib.Path, side: int) -> typing.Any:
@@ -257,17 +400,40 @@ class Posters:
         #: How many posters were decoded, for the checks: the one number that
         #: says whether the caches above it are doing their job.
         self.made = 0
+        self._former_swept = False
+        #: The decoders and failures already said in the console, once each.
+        self._said: typing.Set[str] = set()
 
     # -- the disk -------------------------------------------------------
 
     def directory(self) -> typing.Optional[pathlib.Path]:
         try:
-            folder = config.config_dir() / POSTER_DIR_NAME
+            base = config.config_dir()
+            folder = base / POSTER_DIR_NAME
             folder.mkdir(parents=True, exist_ok=True)
+            if not self._former_swept:
+                self._former_swept = True
+                self._sweep_former(base)
             return folder
         except (OSError, ValueError) as error:
             self._off(f"could not be opened ({type(error).__name__})")
             return None
+
+    @staticmethod
+    def _sweep_former(base: pathlib.Path) -> None:
+        """The folders an earlier build kept its posters in: ours alone, made
+        of names this module wrote, and of a frame no longer asked for."""
+        for name in FORMER_DIR_NAMES:
+            former = base / name
+            try:
+                if not former.is_dir() or former.is_symlink():
+                    continue
+                for entry in os.scandir(former):
+                    if POSTER_NAME_RE.match(entry.name) and entry.is_file(follow_symlinks=False):
+                        os.unlink(entry.path)
+                former.rmdir()
+            except OSError:
+                continue
 
     def _off(self, why: str) -> None:
         if self._complaint:
@@ -448,20 +614,23 @@ class Posters:
               mine: typing.Optional[threading.Event]) -> typing.Tuple[bytes, str, float]:
         try:
             video = path.name.lower().endswith(VIDEO_SUFFIXES)
-            if video and not decoder():
+            if video and not decoders():
                 raise IntegrationError(errors.OUTPUT_POSTER_UNAVAILABLE, "no decoder")
             with self._gate:
                 try:
                     if video:
-                        maker = _frame_pyav if decoder() == "pyav" else _frame_opencv
-                        image, duration = maker(path, side)
+                        image, duration = _first_frame(path, side, self._say_unreadable)
                     else:
                         image, duration = _picture(path, side), 0.0
                 except IntegrationError as error:
                     if error.code == errors.OUTPUT_POSTER_UNAVAILABLE:
                         raise
+                    if not video:
+                        self._say_unreadable("Pillow", error.detail or error.code)
                     raise IntegrationError(errors.OUTPUT_POSTER_UNREADABLE, error.detail or error.code)
                 except Exception as error:
+                    if not video:
+                        self._say_unreadable("Pillow", type(error).__name__)
                     raise IntegrationError(errors.OUTPUT_POSTER_UNREADABLE, f"did not decode: {type(error).__name__}")
             buffer = io.BytesIO()
             try:
@@ -492,6 +661,18 @@ class Posters:
                 mine.set()
 
 
+    def _say_unreadable(self, who: str, why: str) -> None:
+        """Once per reader and reason, in Forge's console: which reader could
+        not read an output's first frame, and how - never which file. A file
+        the next reader reads is a poster all the same."""
+        said = f"{who}:{why}"[:120]
+        with self._lock:
+            if said in self._said or len(self._said) > 32:
+                return
+            self._said.add(said)
+        scrub.console(f"an output's first frame could not be read by {who} ({why}).", _LOG_PREFIX)
+
+
 _posters: typing.Optional[Posters] = None
 _posters_lock = threading.Lock()
 
@@ -504,13 +685,15 @@ def posters() -> Posters:
         return _posters
 
 
-def reset_for_tests(name: typing.Optional[str] = None) -> None:
-    """A fresh cache, and the decoder asked again - or, with ``name``, told:
-    "" is a process with no video decoder at all."""
+def reset_for_tests(name: typing.Optional[str] = None, ffmpeg: typing.Optional[str] = None) -> None:
+    """A fresh cache, and the readers asked again - or, with ``name``, told:
+    "" is a process with no video reader at all, "pyav+ffmpeg" those two in
+    that order. ``ffmpeg`` names the program, or "" for none."""
     global _posters
     with _posters_lock:
         _posters = None
-    _decoder["name"] = name
+    _decoder["names"] = None if name is None else [one for one in name.split("+") if one]
+    _decoder["ffmpeg"] = ffmpeg
 
 
 __all__ = [
@@ -520,6 +703,8 @@ __all__ = [
     "POSTER_SIDE",
     "Posters",
     "decoder",
+    "decoders",
+    "ffmpeg_program",
     "posters",
     "reset_for_tests",
     "version_of",

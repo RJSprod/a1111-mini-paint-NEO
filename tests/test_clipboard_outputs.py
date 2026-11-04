@@ -650,9 +650,8 @@ def _clip(path: pathlib.Path, seconds: float = 2.0, size=(320, 180), rate: int =
 def poster_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
     """A poster for every output: one frame, made once, kept three times.
 
-    What has to be true: the route answers a small picture of the video - a
-    frame of it, not the first, scaled to the poster's side - by the output's
-    opaque id; says how long the clip is; answers ``immutable`` only for the
+    What has to be true: the route answers a small picture of the video - its
+    first frame, scaled to the poster's side - by the output's opaque id; says how long the clip is; answers ``immutable`` only for the
     file's current version; makes it once (memory, then disk, then a decode);
     is off the event loop; and says plainly when this Forge has no decoder at
     all (501, so the page draws its posters itself) or this file gave no frame
@@ -711,10 +710,12 @@ def poster_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
                 and 0 < len(answer.content) < 40000, f"{answer.status_code} {len(answer.content)}")
         frame = Image.open(io.BytesIO(answer.content)).convert("RGB")
         r.check("scaled to fit the poster's side, its shape kept", frame.size == (480, 270), str(frame.size))
-        red = frame.getpixel((frame.width // 2, frame.height // 2))[0]
-        # Frame 12 of a clip at 12 a second is one second in: red 96. The
-        # first frame is 0; a codec moves a flat colour a little either way.
-        r.check("taken past the first frame, at one second", 70 <= red <= 125, str(red))
+        red, _green, blue = frame.getpixel((frame.width // 2, frame.height // 2))
+        # Asked for: "I would like each video to use its first frame as a
+        # thumbnail". Frame 0 is red 0 and blue 120; frame 12, the one second
+        # the poster used to be taken at, is red 96. A codec moves a flat
+        # colour a little either way.
+        r.check("it is the video's first frame", red <= 30 and 100 <= blue <= 140, str((red, blue)))
         r.check("and it says how long the clip is, for the tile",
                 abs(float(answer.headers.get("x-minipaint-duration", "0")) - 2.0) < 0.2,
                 str(answer.headers.get("x-minipaint-duration")))
@@ -765,6 +766,126 @@ def poster_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
         posters.reset_for_tests()
     gone = client.get("/minipaint-clipboard/output/deadbeefdeadbeef/poster")
     r.check("an id that is no output is a 404", gone.status_code == 404, str(gone.status_code))
+    poster_reader_checks(r, client, folder)
+
+
+def poster_reader_checks(r: Results, client, folder: pathlib.Path) -> None:
+    """The first frame is read on the server, always, by the first reader that
+    can: PyAV, then ffmpeg - the one WanGP wrote the file with - then OpenCV.
+
+    Asked for: "It should not require the video to be sent to the browser to
+    get the first frame. I need this to be fast. On a remote connection to my
+    host." So a file PyAV will not read is not the browser's to read: it is
+    WanGP's own ffmpeg's, found in WanGP's environment, which wrote it.
+    """
+    import contextlib
+    import io
+    import shutil
+
+    from PIL import Image
+
+    from minipaint_neo.clipboard import posters
+    from minipaint_neo.wangp import config as wangp_config
+
+    system = shutil.which("ffmpeg")
+    if not system or not _clip(folder / "second.mp4", seconds=1.5, size=(960, 540)):
+        r.check("(no ffmpeg or no PyAV here, so the readers past PyAV are not checked)", True)
+        return
+    clock_at = (folder / "real.mp4").stat().st_mtime + 60
+
+    def version(step):
+        """A new version of the file - its time moved on - so each step below
+        is a poster made, not one the steps before left in the cache."""
+        os.utime(folder / "second.mp4", (clock_at + step, clock_at + step))
+        outputs.forget_listing_for_tests()
+        item = {one["name"]: one for one in routes.outputs_page(whole=True)["items"]}["second.mp4"]
+        return f"/minipaint-clipboard/output/{item['id']}/poster?r=first&v={item['v']}"
+
+    address = version(0)
+
+    # WanGP's environment, as Mini Paint's WanGP settings name it, holding
+    # imageio-ffmpeg's binary the way pip lays it out.
+    prefix = folder.parent / "wangp-env"
+    binaries = prefix / "lib" / "python3.11" / "site-packages" / "imageio_ffmpeg" / "binaries"
+    binaries.mkdir(parents=True, exist_ok=True)
+    theirs = binaries / "ffmpeg-linux-x86_64-v7.0.2"
+    try:
+        os.symlink(system, theirs)
+    except (OSError, NotImplementedError):
+        shutil.copy2(system, theirs)
+    original_load = wangp_config.load
+    original_pyav = posters._READERS["pyav"]
+    wangp_config.load = lambda: wangp_config.Config(runtime={"prefix": str(prefix)})
+    try:
+        posters.reset_for_tests()
+        r.check("WanGP's own ffmpeg - imageio-ffmpeg's binary in WanGP's environment - is the one found first",
+                posters.ffmpeg_program() == str(theirs), posters.ffmpeg_program().replace(str(folder.parent), "<scratch>"))
+        r.check("and it is a reader beside PyAV, in the order each file is tried with",
+                posters.decoders()[:2] == ["pyav", "ffmpeg"], str(posters.decoders()))
+
+        posters.reset_for_tests("ffmpeg", ffmpeg=str(theirs))
+        alone = client.get(address)
+        frame = Image.open(io.BytesIO(alone.content)).convert("RGB") if alone.status_code == 200 else None
+        red, _green, blue = frame.getpixel((frame.width // 2, frame.height // 2)) if frame else (255, 0, 0)
+        r.check("ffmpeg alone reads the first frame, at the poster's side",
+                alone.status_code == 200 and frame.size == (480, 270) and red <= 30 and 100 <= blue <= 140,
+                f"{alone.status_code} {frame.size if frame else ''} {(red, blue)}")
+        r.check("and says how long the clip is", abs(float(alone.headers.get("x-minipaint-duration", "0")) - 1.5) < 0.2,
+                str(alone.headers.get("x-minipaint-duration")))
+
+        # A codec PyAV lacks, stood in for: the same file, the next reader.
+        def refuse(path, side):
+            raise RuntimeError("a codec this build lacks")
+
+        posters._READERS["pyav"] = refuse
+        posters.reset_for_tests("pyav+ffmpeg", ffmpeg=str(theirs))
+        address = version(1)
+        heard = io.StringIO()
+        with contextlib.redirect_stdout(heard):
+            fell = client.get(address)
+            again = client.get(address)
+            # Another version, which PyAV refuses for the same reason: read,
+            # and not said again.
+            other = client.get(version(3))
+        r.check("a file PyAV will not read is read by the next reader, WanGP's ffmpeg, on the server",
+                fell.status_code == 200 and fell.headers["content-type"] == "image/webp", str(fell.status_code))
+        r.check("and served from the cache after, with no second read", again.content == fell.content
+                and other.status_code == 200 and posters.posters().made == 2, str(posters.posters().made))
+        said = heard.getvalue()
+        r.check("Forge's console says once which reader could not, and how - and never which file",
+                said.count("could not be read by pyav (RuntimeError)") == 1 and "second" not in said
+                and str(folder) not in said, said.strip()[:200])
+
+        posters.reset_for_tests("pyav", ffmpeg="")
+        posters._READERS["pyav"] = refuse
+        with contextlib.redirect_stdout(io.StringIO()):
+            last = client.get(version(2))
+        r.check("with no reader left, 422: its tile is marked, and no video went anywhere",
+                last.status_code == 422 and last.json().get("code") == "OUTPUT_POSTER_UNREADABLE", str(last.status_code))
+    finally:
+        wangp_config.load = original_load
+        posters._READERS["pyav"] = original_pyav
+        posters.reset_for_tests()
+
+
+def poster_folder_checks(r: Results) -> None:
+    """The cache an earlier build kept - frames at one second - is let go of
+    the first time the cache of first frames is opened, and only what that
+    build wrote there."""
+    from minipaint_neo.clipboard import posters
+
+    base = config.config_dir()
+    former = base / posters.FORMER_DIR_NAMES[0]
+    former.mkdir(parents=True, exist_ok=True)
+    (former / ("wf" + "a" * 16 + "-1-2-480-1000.webp")).write_bytes(b"an old poster")
+    stranger = base / "not-a-poster-folder"
+    stranger.mkdir(exist_ok=True)
+    (stranger / "keep.txt").write_text("mine")
+    posters.reset_for_tests()
+    folder = posters.posters().directory()
+    r.check("the cache of first frames is a folder of its own", folder is not None and folder.name == posters.POSTER_DIR_NAME)
+    r.check("and the one-second posters of the build before are gone, folder and all", not former.exists())
+    r.check("while nothing else in the data folder is touched", (stranger / "keep.txt").read_text() == "mine")
 
 
 def run() -> Results:
@@ -799,6 +920,7 @@ def run() -> Results:
             settings_route_checks(r, folders["settings"], clock)
             whole_listing_checks(r, clock, folders["whole"])
             poster_checks(r, folders["posters"], clock)
+            poster_folder_checks(r)
         finally:
             outputs.use_clock(None)
             outbox.use_clock(None)

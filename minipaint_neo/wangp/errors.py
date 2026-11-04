@@ -234,7 +234,7 @@ MESSAGES: dict[str, str] = {
     CLIPBOARD_NOT_CONFIGURED: "Clipboard has no storage folder yet; choose one in the Clipboard tab.",
     CLIPBOARD_ASSET_UNKNOWN: "That image is no longer in the Clipboard folder; press Refresh.",
     OUTPUT_NO_SETTINGS: "WanGP reads settings only from an MP4, MKV or MOV video or a picture it made; this file has none it can load.",
-    OUTPUT_POSTER_UNAVAILABLE: "This Forge has no video decoder (PyAV or OpenCV), so the gallery draws its posters in the browser.",
+    OUTPUT_POSTER_UNAVAILABLE: "This Forge has no way to read a video's first frame (PyAV, ffmpeg or OpenCV), so View Outputs shows no posters.",
     OUTPUT_POSTER_UNREADABLE: "No frame could be read from that output; WanGP may still be writing it.",
     CLIPBOARD_ASSET_OUTSIDE_ROOT: "That image is not inside the Clipboard folder, so it was not used.",
     QUEUE_BUSY: "WanGP is still taking the previous queue request; try again in a moment.",

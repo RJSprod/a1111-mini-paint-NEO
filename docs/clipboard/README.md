@@ -709,7 +709,8 @@ not; a job in flight when WanGP restarts is marked unconfirmed (`WANGP_RESTARTED
 
 Under the queue, one button opens **every video in WanGP's output folder** - the ones this tab
 asked for and the ones made in WanGP itself, each once - over the whole window and below the
-tab bar, never under it, in one of two views of one list: the **gallery**, a grid of all of
+tab bar, never under it - or beside it, when the tab bar runs down a side (*Beside a tab bar
+on a side*, below) - in one of two views of one list: the **gallery**, a grid of all of
 them, and the **slideshow**, one at a time on a large stage with the filmstrip under it. The
 bar along the top switches between them and holds the order, Shuffle, a search, and Close;
 **Close** or Escape puts it away.
@@ -727,9 +728,9 @@ file system)." It is the view View Outputs opens on until the bar's switch says 
 
 * **Listed whole, drawn in view first** - an archive's way. One answer carries every output
   (`/minipaint-clipboard/outputs?all=1`); every one gets a tile, only the rows near the view
-  are in the document, and each tile's **poster** - one frame of the video, made on the
-  server (below) - is asked for in view first, in reading order, three at a time, each with a
-  twenty-second deadline. A request for a tile that has left the view is dropped, nothing new
+  are in the document, and each tile's **poster** - the video's first frame (below) - is
+  asked for only for the tiles in view, in reading order, and the row just past them each
+  way so a scroll lands on drawn tiles, three at a time, each with a twenty-second deadline. A request for a tile that has left the view is dropped, nothing new
   starts until a scroll settles, and nothing is asked for while the gallery is flung past or
   the scrubber is held, so the posters of what you scrolled over are never fetched. Opening
   the view again draws at once what was read last time and asks for nothing until the folder
@@ -754,10 +755,17 @@ file system)." It is the view View Outputs opens on until the bar's switch says 
 * **Only one video plays**, ever: the gallery's preview is let go of - its source taken off,
   so it fetches nothing more - when its tile scrolls out of the drawn rows, when another is
   selected, when the slideshow opens (whose own player is let go of the same way when the
-  gallery comes back), when the view closes and while the page is hidden. With the view left
-  open and another of Forge's tabs on screen, the gallery's video and the slideshow's are
-  paused - a video in a tab nobody can see goes on playing otherwise, with its sound - and
-  play again when the Clipboard tab is back.
+  gallery comes back), when the view closes, and **away** - another of Forge's tabs on screen
+  with the view left open, or the page hidden. Away, both let go of their file rather than
+  pausing: a video in a box nobody can see goes on playing otherwise, with its sound, and a
+  paused one can keep its download open, half read, for as long as the page lives. Back on the
+  Clipboard tab the tile's video starts again from its first frame and the slideshow's comes
+  back at the moment it left, playing if it was.
+* **No live connection** - asked for in so many words. The view holds nothing open: no
+  stream, no socket and no polling timer. The listing and each poster are one request each,
+  with a deadline, answered and done; nothing is asked for again until you scroll, sort or
+  press ↻; a video is fetched only while it is the one playing, in its tile or on the stage,
+  and let go of as above.
 * **Easy to scroll**: the gallery has the picture grid's **scrubber** on its right-hand edge -
   drag it, or press anywhere on it, and while it is held a bubble says which video of how many
   is at the top and its date (its name or size under those orders) - and the wheel, a finger,
@@ -777,21 +785,62 @@ file system)." It is the view View Outputs opens on until the bar's switch says 
 * **Search** narrows both views to the outputs whose name, prompt (as typed or as written) or
   model holds every word typed; Escape in the box empties it. **↻** reads the folder again.
 
-**Its posters.** A video's poster is the frame at one second - the middle of a clip shorter
-than two - at most 480 px on its longest side, as a WebP of a few tens of kilobytes, made by
-`posters.py` with PyAV, which Forge Neo installs (`av` in its requirements; OpenCV, also Forge
-Neo's, is the fallback): the nearest keyframe before that moment is sought and a few frames
-decoded, never the clip. A picture's is the picture made small. It is made once and kept three
-times, as an archive's thumbnail is: in the server's memory, on its disk in this extension's
-data folder (`clipboard-output-posters/`, 512 MiB, least recently used out, never beside a
-video), and in the browser, because its address carries the file's version
-(`/output/<id>/poster?v=<mtime ms>-<size>`) and is answered `immutable` for a year; the page
-also keeps the last six hundred it drew. The clip's length rides along as a header and is put
-on the tile. A file that gave no frame - one WanGP is still writing - is answered
-`OUTPUT_POSTER_UNREADABLE` and its tile is marked; once WanGP finishes it, it is a new version
-and is asked for again. A Forge with no decoder at all answers `OUTPUT_POSTER_UNAVAILABLE`
-once, and the gallery then draws its video posters the slideshow's old way, a `<video>` per
-tile at `#t=1`, still only for the tiles in view.
+**Its posters.** Asked for on 2026-11-04: "I would like each video to use its first frame as
+a thumbnail, and those should load only when in view, and from cache when previously view[ed]",
+and then: "It should not require the video to be sent to the browser to get the first frame. I
+need this to be fast. On a remote connection to my host." A video's poster is its **first
+frame** (it was the frame at one second until then), at most 480 px on its longest side, as a
+WebP of a few tens of kilobytes, read **on the server, always** - the page never fetches a
+video to draw a tile - by the first of these that can, file by file:
+
+* **PyAV**, which Forge Neo installs (`av` in its requirements): one frame decoded, no seek,
+  slice threads only so the frame comes out of the first packet - about 20-30 ms for a 720p
+  H.264 clip;
+* **ffmpeg, the program**: the one WanGP wrote the file with - `imageio-ffmpeg`'s binary in
+  WanGP's own environment, found from Mini Paint's WanGP settings (`runtime.prefix`) - else
+  Forge's own `imageio-ffmpeg`, else one on the PATH: a file WanGP's ffmpeg wrote is a file it
+  reads, whatever codec it was told to use (about 110 ms; one frame out on a pipe as a BMP);
+* **OpenCV** (also Forge Neo's).
+
+A picture's poster is the picture made small. It is made once and kept three times, as an
+archive's thumbnail is: in the server's memory, on its disk in this extension's data folder
+(`clipboard-output-first-frames/`, 512 MiB, least recently used out, never beside a video; the
+one-second posters' `clipboard-output-posters/` is removed the first time), and in the browser,
+because its address carries the file's version and what it is a frame of
+(`/output/<id>/poster?r=first&v=<mtime ms>-<size>`) and is answered `immutable` for a year; the
+page also keeps the last six hundred it drew. The clip's length rides along as a header and is
+put on the tile. **Over HTTP/2** - the auto-TLS extension's, one connection for every request -
+eight posters are asked for together, because on a remote connection a screen of posters
+costs round trips; over HTTP/1.1 three, leaving the page's other connections alone.
+
+A video none of the readers can read is answered `OUTPUT_POSTER_UNREADABLE` (one WanGP is
+still writing, say) and its tile is marked with ▶; once the file changes it is asked for
+again. A Forge with no reader at all answers `OUTPUT_POSTER_UNAVAILABLE`, and every tile is
+marked. Forge's console says once, per reader and reason, which could not read a first frame
+and how - never which file - and the page journal says which readers the server has
+(`outputs: first frames read on the server by pyav+ffmpeg+opencv`) and why a tile is marked.
+
+### Beside a tab bar on a side
+
+Asked for on 2026-11-04: "the gallery is not respecting my latest move tab bar to side of
+screen instead of top, I need the entire clipboard views including gallery to resize
+responsively to respect the tab bar rather on top or sides. It should not overlap, but appear
+below when top, or beside when tab bar on side." The Forge Assistant's *Transpose View* puts the
+tab bar on a rail down the left or the right of the window (the Model Chain theme draws it,
+48 px, and pads the page beside it, which the Clipboard tab itself sits in). The tab's views
+that are fixed to the window - View Outputs, the system prompt editor, History and Archives -
+measure what the page has pinned at its edges, as they always measured a bar along the top:
+an element really there, fixed or sticky, starting at the edge, and for a side a **rail's
+shape** - thin (160 px at most) and most of the window tall, so the Forge Assistant's
+launcher or a panel at a side is not taken for one. They stand below a bar along the top and
+beside a rail down a side, and follow it when it moves: the page's own attributes changing
+(the rail's side is written on the root), a resize and a scroll each measure again while a
+view is open, and the gallery shares its row out again for the width it has. Each view's size
+is its insets alone - `width` and `height` auto - because Gradio gives every block
+`width: 100%`, and a fixed box with a width keeps it and drops `right`: beside a rail on the
+left the view ran off the window's right edge by the rail's width, and under a bar along the
+top off its bottom edge by the bar's height. The full-screen picture viewer takes the whole
+screen on purpose and is left as it is, and so is Mini Paint's own canvas focus mode.
 
 ### The slideshow
 
@@ -1261,7 +1310,7 @@ it was ignored" case.
 | the pictures | the storage folder you chose, and only there; an archive's stay in the archive, which is never written to |
 | thumbnails | in memory, and on disk in `…/clipboard-thumbnails/` (64 MiB, least recently used out) - never in the storage folder |
 | an archive's thumbnails | in memory, and on disk in `…/clipboard-archive-thumbnails/` (1 GiB, least recently used out) - never in the archive |
-| View Outputs' posters | in memory, and on disk in `…/clipboard-output-posters/` (512 MiB, least recently used out; each named by the output's id, the file's time and size, the side and the clip's length) - never in WanGP's folder |
+| View Outputs' posters - each video's first frame | in memory, and on disk in `…/clipboard-output-first-frames/` (512 MiB, least recently used out; each named by the output's id, the file's time and size, the side and the clip's length) - never in WanGP's folder |
 | View Outputs' view, order, videos per row and fit | the browser (`localStorage`, `minipaint-outputs:v1`); the shuffle's number per browser tab (`sessionStorage`, `minipaint-outputs:shuffle`) - nothing about an order is kept on the host |
 | images staged through the public API | `…/runtime/staging/<32 hex>.png`, swept after 30 minutes |
 | a gallery picture frozen for the popup | the same staging folder and sweep; released by Cancel, or when a server-run job has adopted it |
@@ -1310,8 +1359,8 @@ tab's own; the tab, the toast and the log say the same thing about the same fail
 | `ARCHIVE_FILE_UNKNOWN` | that picture is no longer in the archive. Refresh. |
 | `ARCHIVE_FILE_OUTSIDE` | the reference names something that is not a picture file directly inside the archive (a separator, a link, a dot file, another kind of file). Not used. |
 | `ARCHIVE_READ_ONLY` | Rename or Delete was asked of an archive picture. Archives are never written to. |
-| `OUTPUT_POSTER_UNREADABLE` | no frame could be read from that output - WanGP may still be writing it, or it is not the video its name says. Its tile is marked; it is tried again once the file changes. |
-| `OUTPUT_POSTER_UNAVAILABLE` | this Forge has neither PyAV nor OpenCV, so no video poster can be made on the server; the gallery draws them in the browser instead. |
+| `OUTPUT_POSTER_UNREADABLE` | none of the server's readers (PyAV, then ffmpeg, then OpenCV) read a frame from that output - WanGP may still be writing it. Its tile is marked; once the file changes it is asked for again. |
+| `OUTPUT_POSTER_UNAVAILABLE` | this Forge has no way to read a video's first frame - no PyAV, no ffmpeg (WanGP's, Forge's or on the PATH) and no OpenCV - so the gallery's tiles are marked; no video is ever sent to the browser instead. |
 | `INTERCEPT_IMAGE_EXPIRED` | the picture the popup froze is no longer there - cancelled, swept, or already taken by a server-run job. Press the gallery button again; nothing was queued. |
 | `INTERCEPT_NO_IMAGE_ROLE` | the WanGP page's current model reads no role the picture could fill, so the request was refused rather than sent without it. |
 | `REQUEST_INVALID` | the request is not one the API carries: a bad id, a wrong kind, a start mode that is not `auto` or `never`, an unreadable shape. |

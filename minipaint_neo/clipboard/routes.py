@@ -629,9 +629,14 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE, whole: bool
             if facts["recipe"]:
                 one["recipe"] = facts["recipe"]
             items.append(one)
+        from . import posters as posters_module
+
         return {
             "ok": True,
             "whole": True,
+            # Which readers make the posters here, in the order each file is
+            # tried with ("pyav+ffmpeg+opencv"; "" for none), for the journal.
+            "posters": posters_module.decoder(),
             "total": total,
             "truncated": max(0, total - len(shown)),
             "reason": reason,

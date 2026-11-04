@@ -568,6 +568,205 @@ def settings_route_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> No
     r.check("a video deleted since is a 404", gone.status_code == 404, str(gone.status_code))
 
 
+def whole_listing_checks(r: Results, clock: _Clock, folder: pathlib.Path) -> None:
+    """The gallery's one listing: every output, as an archive is listed.
+
+    Asked for: "The gallery should work much like the clipboard archives and
+    load as I slide into video." So the gallery is not paged: one answer
+    carries every output, newest first, and the page draws all of them and
+    asks for a poster only in view. What a folder video does not have is left
+    out of its item rather than sent as empty strings, because a folder of
+    twenty thousand videos is otherwise mostly empty strings; and each item
+    carries the version its poster's address is cached against.
+    """
+    outputs.reset_for_tests()
+    config.update(outputs_folder=str(folder))
+    clock.now += 10
+    mine = _wrote(folder, "mine.mp4", clock.now + 1)
+    outputs.remember("7" * 16, [str(mine)], request_id="r7", model="A video model",
+                     recipe={"prompt": "a cat in the rain", "model_label": "A video model"})
+    for index in range(75):
+        _wrote(folder, f"folder{index:03d}.mp4", clock.now - 1000 - index)
+
+    whole = routes.outputs_page(whole=True)
+    r.check("the whole listing is one answer with every output in it, where a page holds sixty",
+            whole["whole"] is True and whole["total"] == 76 and len(whole["items"]) == 76 and "page" not in whole,
+            str({key: whole.get(key) for key in ("total", "whole", "page")}))
+    r.check("newest first, as the pages were", whole["items"][0]["name"] == "mine.mp4"
+            and whole["items"][1]["name"] == "folder000.mp4" and whole["items"][-1]["name"] == "folder074.mp4",
+            str([item["name"] for item in whole["items"][:3]]))
+    r.check("and nothing was left out", whole["truncated"] == 0)
+    folder_item = whole["items"][1]
+    r.check("a folder video's item carries only what it has: no prompt, model or recipe, not even empty",
+            set(folder_item) == {"id", "name", "kind", "size", "at", "v", "source"}, str(sorted(folder_item)))
+    request_item = whole["items"][0]
+    r.check("a request's item keeps what it has: its model, its recipe, whether WanGP named the file",
+            request_item.get("model") == "A video model" and request_item.get("recipe") == request_item["id"]
+            and request_item.get("prompt") == "a cat in the rain" and "written" not in request_item
+            and request_item.get("exact") is True and request_item["source"] == "request", str(request_item))
+    info = mine.stat()
+    r.check("every item carries its file's version - its time and size - for the poster's address",
+            request_item["v"] == f"{int(round(info.st_mtime * 1000))}-{info.st_size}", request_item["v"])
+    r.check("the address every item's file and poster are under is said once, by id and nothing else",
+            whole["prefix"] == "/minipaint-clipboard/output/" and str(folder) not in json.dumps(whole))
+    paged = routes.outputs_page()
+    r.check("the paged answer is still there for a page loaded before, sixty at a time, with the version too",
+            paged["pages"] == 2 and len(paged["items"]) == 60 and all(item.get("v") for item in paged["items"]),
+            str({key: paged.get(key) for key in ("pages", "size")}))
+    original = routes.OUTPUTS_WHOLE_LIMIT
+    routes.OUTPUTS_WHOLE_LIMIT = 50
+    try:
+        capped = routes.outputs_page(whole=True)
+    finally:
+        routes.OUTPUTS_WHOLE_LIMIT = original
+    r.check("past its limit the listing stops and says how many it left out",
+            len(capped["items"]) == 50 and capped["truncated"] == 26, str((len(capped["items"]), capped["truncated"])))
+
+
+def _clip(path: pathlib.Path, seconds: float = 2.0, size=(320, 180), rate: int = 12) -> bool:
+    """A real video, written with PyAV (Forge Neo's own decoder): a coloured
+    frame a step brighter every frame, so the poster's moment is knowable. False
+    where PyAV is not installed."""
+    try:
+        import av
+        import numpy
+    except ImportError:
+        return False
+    with av.open(str(path), "w") as container:
+        stream = container.add_stream("mpeg4", rate=rate)
+        stream.width, stream.height = size
+        stream.pix_fmt = "yuv420p"
+        for index in range(int(seconds * rate)):
+            frame = numpy.zeros((size[1], size[0], 3), dtype=numpy.uint8)
+            frame[:, :, 0] = min(255, index * 8)
+            frame[:, :, 2] = 120
+            for packet in stream.encode(av.VideoFrame.from_ndarray(frame, format="rgb24")):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return True
+
+
+def poster_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
+    """A poster for every output: one frame, made once, kept three times.
+
+    What has to be true: the route answers a small picture of the video - a
+    frame of it, not the first, scaled to the poster's side - by the output's
+    opaque id; says how long the clip is; answers ``immutable`` only for the
+    file's current version; makes it once (memory, then disk, then a decode);
+    is off the event loop; and says plainly when this Forge has no decoder at
+    all (501, so the page draws its posters itself) or this file gave no frame
+    (422, so its tile is marked).
+    """
+    import inspect
+    import io
+
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from minipaint_neo.clipboard import posters
+
+    outputs.reset_for_tests()
+    posters.reset_for_tests()
+    config.update(outputs_folder=str(folder))
+    clock.now += 10
+    real = folder / "real.mp4"
+    # Twice the poster's side, so the poster has to be made smaller.
+    have_av = _clip(real, seconds=2.0, size=(960, 540))
+    if have_av:
+        os.utime(real, (clock.now + 2, clock.now + 2))
+    broken = _wrote(folder, "broken.mp4", clock.now + 1, b"not a video at all" * 20)
+    still = folder / "still.png"
+    from PIL import Image
+
+    Image.new("RGB", (1200, 600), (10, 200, 30)).save(still)
+    outputs.remember("8" * 16, [str(still)], request_id="r8")
+
+    app = FastAPI()
+    routes.install(app)
+    client = TestClient(app)
+    listed = {item["name"]: item for item in routes.outputs_page(whole=True)["items"]}
+
+    def poster(name, version=None):
+        item = listed[name]
+        wanted = item["v"] if version is None else version
+        return client.get(f"/minipaint-clipboard/output/{item['id']}/poster" + (f"?v={wanted}" if wanted else ""))
+
+    r.check("making a poster is not a coroutine, so a decode never stops the server",
+            not inspect.iscoroutinefunction(routes._output_poster))
+
+    picture = poster("still.png")
+    r.check("a picture's poster is the picture made small, a WebP at the poster's side",
+            picture.status_code == 200 and picture.headers["content-type"] == "image/webp"
+            and Image.open(io.BytesIO(picture.content)).size == (posters.POSTER_SIDE, posters.POSTER_SIDE // 2),
+            f"{picture.status_code} {picture.headers.get('content-type')}")
+
+    if not have_av:
+        r.check("(PyAV is not installed here, so a real video's poster is not decoded)", True)
+    else:
+        made = posters.posters().made
+        answer = poster("real.mp4")
+        r.check("a video's poster is a frame of it, a small WebP, by the output's id",
+                answer.status_code == 200 and answer.headers["content-type"] == "image/webp"
+                and 0 < len(answer.content) < 40000, f"{answer.status_code} {len(answer.content)}")
+        frame = Image.open(io.BytesIO(answer.content)).convert("RGB")
+        r.check("scaled to fit the poster's side, its shape kept", frame.size == (480, 270), str(frame.size))
+        red = frame.getpixel((frame.width // 2, frame.height // 2))[0]
+        # Frame 12 of a clip at 12 a second is one second in: red 96. The
+        # first frame is 0; a codec moves a flat colour a little either way.
+        r.check("taken past the first frame, at one second", 70 <= red <= 125, str(red))
+        r.check("and it says how long the clip is, for the tile",
+                abs(float(answer.headers.get("x-minipaint-duration", "0")) - 2.0) < 0.2,
+                str(answer.headers.get("x-minipaint-duration")))
+        r.check("the current version earns the immutable header, so the browser keeps it for a year",
+                answer.headers.get("cache-control") == routes.IMMUTABLE_CACHE, str(answer.headers.get("cache-control")))
+        r.check("one decode", posters.posters().made == made + 1)
+        again = poster("real.mp4")
+        r.check("asked again, it is the same poster from memory, decoded no second time",
+                again.content == answer.content and posters.posters().made == made + 1)
+        posters.reset_for_tests()
+        from_disk = poster("real.mp4")
+        r.check("and after a restart from the disk cache, still decoded no second time",
+                from_disk.content == answer.content and posters.posters().made == 0
+                and abs(float(from_disk.headers.get("x-minipaint-duration", "0")) - 2.0) < 0.2,
+                f"made {posters.posters().made}, {from_disk.headers.get('x-minipaint-duration')}")
+        cached = list((config.config_dir() / posters.POSTER_DIR_NAME).iterdir())
+        r.check("the disk cache is in this extension's data folder and names no file of WanGP's",
+                cached and all("real" not in path.name for path in cached), str([path.name for path in cached]))
+        r.check("a made-up version is answered, but never as immutable",
+                poster("real.mp4", version="1-2").headers.get("cache-control") == routes.REVALIDATED_CACHE)
+        r.check("and so is no version at all",
+                poster("real.mp4", version="").headers.get("cache-control") == routes.REVALIDATED_CACHE)
+        # The file changed: a new version, and a poster made from the new file.
+        _clip(real, seconds=1.0)
+        os.utime(real, (clock.now + 30, clock.now + 30))
+        listed = {item["name"]: item for item in routes.outputs_page(whole=True)["items"]}
+        changed = poster("real.mp4")
+        r.check("a file that changed is a new version, and its poster is made again from the new file",
+                changed.status_code == 200 and abs(float(changed.headers.get("x-minipaint-duration", "0")) - 1.0) < 0.2,
+                str(changed.headers.get("x-minipaint-duration")))
+
+    unreadable = poster("broken.mp4")
+    if have_av:
+        r.check("a file that gives no frame is 422 OUTPUT_POSTER_UNREADABLE, so its tile is marked and nothing else",
+                unreadable.status_code == 422 and unreadable.json().get("code") == "OUTPUT_POSTER_UNREADABLE",
+                f"{unreadable.status_code} {unreadable.text[:120]}")
+        r.check("and the refusal names no file", "broken" not in unreadable.text and str(folder) not in unreadable.text)
+
+    posters.reset_for_tests("")
+    try:
+        none = poster("broken.mp4")
+        r.check("a Forge with no video decoder at all says so once, 501, so the page draws its posters itself",
+                none.status_code == 501 and none.json().get("code") == "OUTPUT_POSTER_UNAVAILABLE",
+                f"{none.status_code} {none.text[:120]}")
+        r.check("while a picture's poster is still made, needing no video decoder",
+                poster("still.png").status_code == 200)
+    finally:
+        posters.reset_for_tests()
+    gone = client.get("/minipaint-clipboard/output/deadbeefdeadbeef/poster")
+    r.check("an id that is no output is a 404", gone.status_code == 404, str(gone.status_code))
+
+
 def run() -> Results:
     r = Results("clipboard outputs")
     with tempfile.TemporaryDirectory(prefix="minipaint-outputs-") as scratch:
@@ -585,7 +784,7 @@ def run() -> Results:
         try:
             folder_checks(r, base)
             folders = {}
-            for name in ("exact", "window", "restart", "page", "route", "recipe", "folder", "settings"):
+            for name in ("exact", "window", "restart", "page", "route", "recipe", "folder", "settings", "whole", "posters"):
                 folders[name] = base / name
                 folders[name].mkdir()
             exact_checks(r, clock, folders["exact"])
@@ -598,6 +797,8 @@ def run() -> Results:
             range_checks(r)
             route_checks(r, folders["route"], clock)
             settings_route_checks(r, folders["settings"], clock)
+            whole_listing_checks(r, clock, folders["whole"])
+            poster_checks(r, folders["posters"], clock)
         finally:
             outputs.use_clock(None)
             outbox.use_clock(None)

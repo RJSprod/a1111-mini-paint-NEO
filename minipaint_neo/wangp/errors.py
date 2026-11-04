@@ -75,6 +75,12 @@ CLIPBOARD_ASSET_OUTSIDE_ROOT = "CLIPBOARD_ASSET_OUTSIDE_ROOT"
 #: View Outputs' Send to WanGP asked of a file WanGP's settings loader does not
 #: read (a .webm, an .m4v): there is nothing in it to load.
 OUTPUT_NO_SETTINGS = "OUTPUT_NO_SETTINGS"
+#: View Outputs' poster for a video asked of a Forge with no video decoder at
+#: all (neither PyAV nor OpenCV): the gallery draws its posters in the page.
+OUTPUT_POSTER_UNAVAILABLE = "OUTPUT_POSTER_UNAVAILABLE"
+#: ... and of a file that gave no frame: one WanGP is still writing, or one
+#: that is not the video its name says.
+OUTPUT_POSTER_UNREADABLE = "OUTPUT_POSTER_UNREADABLE"
 QUEUE_BUSY = "QUEUE_BUSY"
 QUEUE_REQUEST_REFUSED = "QUEUE_REQUEST_REFUSED"
 ADMISSION_UNCONFIRMED = "ADMISSION_UNCONFIRMED"
@@ -228,6 +234,8 @@ MESSAGES: dict[str, str] = {
     CLIPBOARD_NOT_CONFIGURED: "Clipboard has no storage folder yet; choose one in the Clipboard tab.",
     CLIPBOARD_ASSET_UNKNOWN: "That image is no longer in the Clipboard folder; press Refresh.",
     OUTPUT_NO_SETTINGS: "WanGP reads settings only from an MP4, MKV or MOV video or a picture it made; this file has none it can load.",
+    OUTPUT_POSTER_UNAVAILABLE: "This Forge has no video decoder (PyAV or OpenCV), so the gallery draws its posters in the browser.",
+    OUTPUT_POSTER_UNREADABLE: "No frame could be read from that output; WanGP may still be writing it.",
     CLIPBOARD_ASSET_OUTSIDE_ROOT: "That image is not inside the Clipboard folder, so it was not used.",
     QUEUE_BUSY: "WanGP is still taking the previous queue request; try again in a moment.",
     QUEUE_REQUEST_REFUSED: "WanGP did not take the queue request.",

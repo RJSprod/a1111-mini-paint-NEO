@@ -707,14 +707,103 @@ not; a job in flight when WanGP restarts is marked unconfirmed (`WANGP_RESTARTED
 
 ## View Outputs
 
-Under the queue, one button opens a gallery of **every video in WanGP's output folder** - the
-ones this tab asked for and the ones made in WanGP itself, each once, newest first - over the
-whole window and below the tab bar, never under it: a large playback area with the filmstrip
-of everything else under it. Tap a tile to play it; tap the picture itself to hide the video controls and tap again
-to bring them back. It pages at 60 - the storage folder's grid used to, and is listed whole
-now - and **Close** or Escape
-puts it away. Scrubbing works - the file is served with byte ranges, so the player can ask
-for the middle of a video rather than only playing it from the start.
+Under the queue, one button opens **every video in WanGP's output folder** - the ones this tab
+asked for and the ones made in WanGP itself, each once - over the whole window and below the
+tab bar, never under it, in one of two views of one list: the **gallery**, a grid of all of
+them, and the **slideshow**, one at a time on a large stage with the filmstrip under it. The
+bar along the top switches between them and holds the order, Shuffle, a search, and Close;
+**Close** or Escape puts it away.
+
+### The gallery
+
+Asked for on 2026-11-03: "In addition to slideshow, I want a gallery view of the videos. The
+gallery should work much like the clipboard archives and load as I slide into video. Tap to
+select with automatically and silently play that video on loop. Double tap in gallery open to
+slide show playback view of that item. Slider controls the same so I can choose how many
+gallery thumbs of those videos are in column grid. Only one video play back at a time on loop.
+Should be very easy to scroll the gallery and change its sort. Also should have a random
+shuffle function for the gallery (which should be only within our app and not impact windows
+file system)." It is the view View Outputs opens on until the bar's switch says otherwise.
+
+* **Listed whole, drawn in view first** - an archive's way. One answer carries every output
+  (`/minipaint-clipboard/outputs?all=1`); every one gets a tile, only the rows near the view
+  are in the document, and each tile's **poster** - one frame of the video, made on the
+  server (below) - is asked for in view first, in reading order, three at a time, each with a
+  twenty-second deadline. A request for a tile that has left the view is dropped, nothing new
+  starts until a scroll settles, and nothing is asked for while the gallery is flung past or
+  the scrubber is held, so the posters of what you scrolled over are never fetched. Opening
+  the view again draws at once what was read last time and asks for nothing until the folder
+  has answered; it then lands on the selected video wherever it now is, or at the top.
+* **A tap selects a video and plays it in its tile** - muted and on loop, inline, from one
+  `<video>` the gallery moves to whichever tile is selected. A tap on the playing tile pauses
+  it there; another plays it. Under the grid a line says what it is - its name, the model, the
+  date, the size and the length - with **Slideshow**, **Load** and **Send to WanGP** (below)
+  beside it, so nothing needs the slideshow to be opened.
+* **A double tap opens it in the slideshow** (or a double click, a right click - a long press
+  on a phone - or Enter). Escape comes back to the gallery on whatever the slideshow ended on,
+  playing in its tile, and Escape from the gallery closes the view. Tiles say
+  `touch-action: manipulation`, so a phone neither zooms on the double tap nor holds every tap
+  back waiting for one.
+* **Videos per row** is a slider on the bar, the Clipboard grid's: it counts videos per row,
+  the row is shared out to the pixel, and it offers the counts whose tiles come out between
+  96 and 480 px at the gallery's width (480 is the poster's side). A browser starts at the
+  count nearest 220 px; a count you choose is kept for that browser, and the video at the top
+  of the view stays at the top when it changes. Beside it, **Fit / Fill** puts each whole
+  frame in its tile (the default, nothing cropped, as the picture grid does) or fills the tile
+  and crops the picture to it.
+* **Only one video plays**, ever: the gallery's preview is let go of - its source taken off,
+  so it fetches nothing more - when its tile scrolls out of the drawn rows, when another is
+  selected, when the slideshow opens (whose own player is let go of the same way when the
+  gallery comes back), when the view closes and while the page is hidden. With the view left
+  open and another of Forge's tabs on screen, the gallery's video and the slideshow's are
+  paused - a video in a tab nobody can see goes on playing otherwise, with its sound - and
+  play again when the Clipboard tab is back.
+* **Easy to scroll**: the gallery has the picture grid's **scrubber** on its right-hand edge -
+  drag it, or press anywhere on it, and while it is held a bubble says which video of how many
+  is at the top and its date (its name or size under those orders) - and the wheel, a finger,
+  Page Up/Down and Home/End move it as a scroll box's do. The arrow keys move the selection (a
+  row at a time up and down), which plays as it goes; K pauses and plays it.
+* **The order** is a choice on the bar - Newest, Oldest, Name A-Z, Name Z-A, Largest,
+  Smallest, Shuffled - kept for the browser, applied at once in the page (the whole list is
+  already there), and a new order starts from the top. The slideshow steps through the same
+  list in the same order.
+* **Shuffle** (the crossed arrows) puts the list in a new random order and says *shuffled
+  here, nothing on disk moved*. It is this page's order and nothing else: no request but reads
+  is made for it, and no file in WanGP's folder is renamed, moved or touched. The order is
+  kept for the browser tab, so closing and opening the view, or reloading the page, keeps the
+  same shuffle until Shuffle is pressed again; another tab shuffles on its own. Each output's
+  place in a shuffle comes from the shuffle's number and its own id, so a search narrows a
+  shuffled list without reordering it, and a new video takes a place of its own.
+* **Search** narrows both views to the outputs whose name, prompt (as typed or as written) or
+  model holds every word typed; Escape in the box empties it. **↻** reads the folder again.
+
+**Its posters.** A video's poster is the frame at one second - the middle of a clip shorter
+than two - at most 480 px on its longest side, as a WebP of a few tens of kilobytes, made by
+`posters.py` with PyAV, which Forge Neo installs (`av` in its requirements; OpenCV, also Forge
+Neo's, is the fallback): the nearest keyframe before that moment is sought and a few frames
+decoded, never the clip. A picture's is the picture made small. It is made once and kept three
+times, as an archive's thumbnail is: in the server's memory, on its disk in this extension's
+data folder (`clipboard-output-posters/`, 512 MiB, least recently used out, never beside a
+video), and in the browser, because its address carries the file's version
+(`/output/<id>/poster?v=<mtime ms>-<size>`) and is answered `immutable` for a year; the page
+also keeps the last six hundred it drew. The clip's length rides along as a header and is put
+on the tile. A file that gave no frame - one WanGP is still writing - is answered
+`OUTPUT_POSTER_UNREADABLE` and its tile is marked; once WanGP finishes it, it is a new version
+and is asked for again. A Forge with no decoder at all answers `OUTPUT_POSTER_UNAVAILABLE`
+once, and the gallery then draws its video posters the slideshow's old way, a `<video>` per
+tile at `#t=1`, still only for the tiles in view.
+
+### The slideshow
+
+A large stage with the video on its own controls, its name, model and prompt under it with
+**Load**, and the filmstrip of the list under that. Tap a tile to play it; ‹ and › on the bar,
+↑/↓ or Page Up/Down, and a sideways swipe on the stage step through the list, in the gallery's
+order, and the bar says where the stage is (*9 of 150*). The strip holds the sixty round the
+stage and is drawn again round it as the stage nears either end, so a list of twenty thousand
+is never twenty thousand buttons; its posters are the gallery's, asked for as the strip
+scrolls to them. Scrubbing works - the file is served with byte ranges, so the player can ask
+for the middle of a video rather than only playing it from the start. Escape leaves full
+screen first, then goes back to the gallery.
 
 **It survives a restart.** The gallery is not read out of the queue, which forgets a job
 minutes after it finishes; it is its own document (`clipboard-outputs.json`), written as
@@ -752,9 +841,12 @@ in the folder pointing elsewhere is not WanGP's and is not listed.
 **Where it looks.** `<WanGP root>/outputs` and everything under it, unless the
 `outputs_folder` setting names somewhere else. Videos (`.mp4`, `.webm`, `.mkv`, `.mov`,
 `.m4v`) play; pictures (`.png`, `.jpg`, `.webp`, `.gif`) are shown. A file the user has
-since deleted stops being listed rather than becoming a broken tile. Filmstrip posters are
-the frame at one second, asked for with a media fragment — nothing is thumbnailed on the
-server and there is no second copy of anything on disk.
+since deleted stops being listed rather than becoming a broken tile. The posters are made on
+the server, once each, and kept in this extension's data folder (*Its posters*, above); the
+videos themselves are never copied, moved or written beside. Until 2026-11-03 the filmstrip
+asked the browser for one frame of each file with a media fragment and nothing was
+thumbnailed on the server; a grid of the whole folder made that twenty decoders and twenty
+multi-megabyte reads on every screen, so it is the fallback for a Forge without a decoder.
 
 Nothing here names a path to the browser: every output is fetched by an opaque id, exactly
 as a library thumbnail is.
@@ -782,8 +874,9 @@ server through the hidden box Queue Send History's own Load writes (`output:<id>
 **Send to WanGP.** Asked for on 2026-10-31: "the ability to send a video from this view to
 wan2gp to load its settings! Using this option should be a new send button in the playback
 controls bar. Sending should open wan2gp tab to the newly loaded settings!" The player's bar
-has it beside full screen, for an MP4, MKV or MOV - the videos WanGP writes its settings into;
-a WebM or an M4V has none it can load and no button. A press:
+has it beside full screen, and the gallery's line under the grid has it for the selected video,
+for an MP4, MKV or MOV - the videos WanGP writes its settings into; a WebM or an M4V has none it
+can load and no button. A press:
 
 1. asks the server for a note naming the video (`POST /minipaint-clipboard/output/{id}/settings`):
    a reference handoff in the WanGP handoff folder, `<id>.ref.json` holding the path and a time,
@@ -1168,6 +1261,8 @@ it was ignored" case.
 | the pictures | the storage folder you chose, and only there; an archive's stay in the archive, which is never written to |
 | thumbnails | in memory, and on disk in `…/clipboard-thumbnails/` (64 MiB, least recently used out) - never in the storage folder |
 | an archive's thumbnails | in memory, and on disk in `…/clipboard-archive-thumbnails/` (1 GiB, least recently used out) - never in the archive |
+| View Outputs' posters | in memory, and on disk in `…/clipboard-output-posters/` (512 MiB, least recently used out; each named by the output's id, the file's time and size, the side and the clip's length) - never in WanGP's folder |
+| View Outputs' view, order, videos per row and fit | the browser (`localStorage`, `minipaint-outputs:v1`); the shuffle's number per browser tab (`sessionStorage`, `minipaint-outputs:shuffle`) - nothing about an order is kept on the host |
 | images staged through the public API | `…/runtime/staging/<32 hex>.png`, swept after 30 minutes |
 | a gallery picture frozen for the popup | the same staging folder and sweep; released by Cancel, or when a server-run job has adopted it |
 | images prepared for one queue request | `…/runtime/handoff/<32 hex>.png`, released when the request ends |
@@ -1215,6 +1310,8 @@ tab's own; the tab, the toast and the log say the same thing about the same fail
 | `ARCHIVE_FILE_UNKNOWN` | that picture is no longer in the archive. Refresh. |
 | `ARCHIVE_FILE_OUTSIDE` | the reference names something that is not a picture file directly inside the archive (a separator, a link, a dot file, another kind of file). Not used. |
 | `ARCHIVE_READ_ONLY` | Rename or Delete was asked of an archive picture. Archives are never written to. |
+| `OUTPUT_POSTER_UNREADABLE` | no frame could be read from that output - WanGP may still be writing it, or it is not the video its name says. Its tile is marked; it is tried again once the file changes. |
+| `OUTPUT_POSTER_UNAVAILABLE` | this Forge has neither PyAV nor OpenCV, so no video poster can be made on the server; the gallery draws them in the browser instead. |
 | `INTERCEPT_IMAGE_EXPIRED` | the picture the popup froze is no longer there - cancelled, swept, or already taken by a server-run job. Press the gallery button again; nothing was queued. |
 | `INTERCEPT_NO_IMAGE_ROLE` | the WanGP page's current model reads no role the picture could fill, so the request was refused rather than sent without it. |
 | `REQUEST_INVALID` | the request is not one the API carries: a bad id, a wrong kind, a start mode that is not `auto` or `never`, an unreadable shape. |

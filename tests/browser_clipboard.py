@@ -1858,7 +1858,7 @@ def _ffmpeg():
     return shutil.which("ffmpeg")
 
 
-def _real_clip(path):
+def _real_clip(path, frames=None):
     """A real video the browser decodes: numbered frames, VP8 in WebM.
 
     VP8 because the Chromium that Playwright drives has no H.264 - an MP4 of
@@ -1873,8 +1873,9 @@ def _real_clip(path):
     binary = _ffmpeg()
     if not binary:
         raise RuntimeError("no ffmpeg to make a clip with")
+    count = frames or CLIP_FRAMES
     frames = []
-    for index in range(CLIP_FRAMES):
+    for index in range(count):
         picture = Image.new("RGB", (160, 90), (index * 5 % 255, 80, 200 - index * 3))
         ImageDraw.Draw(picture).text((10, 35), f"frame {index}", fill=(255, 255, 255))
         buffer = io.BytesIO()
@@ -1890,13 +1891,14 @@ def _real_clip(path):
 
 
 def check_view_outputs_is_a_gallery(r: Results, page) -> None:
-    """What WanGP made, over the whole window: a stage and a strip.
+    """What WanGP made, over the whole window: the slideshow's stage and strip.
 
     What has to be true: the panel has no shape on the tab, the button
     fills the window with it, the stage is the biggest thing in it, every
-    output has a tile in the strip, choosing one puts it in the stage,
-    tapping the stage hides and shows the controls, and it pages at 60 like
-    the grid does.
+    output has a tile in the strip, choosing one puts it in the stage, and
+    the strip holds the part of the whole list round the stage - sixty, the
+    size a page of it once was - and follows the stage through the list.
+    The gallery view beside it has check_view_outputs_has_a_gallery.
     """
     folder = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-gallery-"))
     try:
@@ -1915,7 +1917,7 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
                     const r = b.getBoundingClientRect();
                     return r.width > 8 && r.height > 8; }"""))
 
-        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.evaluate("() => window.minipaintClipboard.openOutputs('slideshow')")
         page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
         time.sleep(0.5)
         shape = page.evaluate("""() => {
@@ -1941,21 +1943,30 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
         kinds = page.evaluate("""() => { const p = document.getElementById('minipaint_clipboard_outputs_panel');
             return { stage: p.querySelector('.minipaint-clip-output-stage-media').tagName,
                      thumb: p.querySelector('.minipaint-clip-output-thumb').tagName }; }""")
-        r.check("a video is played in a video element, in the stage and in the strip",
-                kinds["stage"] == "VIDEO" and kinds["thumb"] == "VIDEO", str(kinds))
+        # The strip's poster used to be a <video> of the file at #t=1 - a
+        # range request and a decoder per tile. It is the server's poster now
+        # (posters.py), one small picture the browser keeps.
+        r.check("a video is played in a video element on the stage, and the strip shows its poster, a picture",
+                kinds["stage"] == "VIDEO" and kinds["thumb"] == "IMG", str(kinds))
         # The address is attached when the tile comes near the strip's window,
         # so this waits for the first one rather than reading it the instant
-        # the panel is drawn. What it asserts has not changed: the poster is
-        # one frame of the file itself, and nothing makes a thumbnail anywhere.
+        # the panel is drawn.
         page.wait_for_function(
             """() => { const t = document.querySelector('.minipaint-clip-output-thumb');
                 return !!t && !!t.getAttribute('src'); }""", timeout=8000)
-        r.check("and the strip's poster is asked for as one frame, so no thumbnail has to be made anywhere",
+        r.check("and the strip's poster is the server's poster of the file, never the video itself",
                 page.evaluate("""() => { const t = document.querySelector('.minipaint-clip-output-thumb');
-                    return (t.getAttribute('src') || '').indexOf('#t=') > 0; }"""))
+                    return /\\/minipaint-clipboard\\/output\\/[^/]+\\/poster/.test(t.getAttribute('src') || ''); }"""))
         r.check("the address waits in data-src until then, so a tile off the end of the strip fetches nothing",
                 page.evaluate("""() => { const t = document.querySelector('.minipaint-clip-output-thumb');
-                    return (t.dataset.src || '').indexOf('#t=') > 0; }"""))
+                    return (t.dataset.src || '').indexOf('/poster') > 0; }"""))
+        # These seeded files are not videos, so the server has no poster for
+        # them: the tile says so rather than drawing a broken picture.
+        page.wait_for_function("() => document.querySelectorAll('.minipaint-clip-output-tile-missing').length > 0",
+                               timeout=8000)
+        r.check("a poster the server could not make marks its tile, with no broken picture drawn",
+                page.evaluate("""() => { const t = document.querySelector('.minipaint-clip-output-tile-missing');
+                    return getComputedStyle(t.querySelector('.minipaint-clip-output-thumb')).visibility === 'hidden'; }"""))
 
         first = page.evaluate("() => window.minipaintClipboard.debug().outputs.chosen")
         page.evaluate("""() => { const tiles = document.querySelectorAll('.minipaint-clip-output-tile');
@@ -2004,7 +2015,7 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
                 if "/minipaint-clipboard/output/" in request.url:
                     asked.add(request.url.split("?")[0].split("#")[0])
             page.on("request", note)
-            page.evaluate("() => window.minipaintClipboard.openOutputs()")
+            page.evaluate("() => window.minipaintClipboard.openOutputs('slideshow')")
             page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 20", timeout=8000)
             page.wait_for_function(
                 """() => { const t = document.querySelector('.minipaint-clip-output-thumb');
@@ -2020,18 +2031,24 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
                     0 < len(asked) < 30, f"{len(asked)} of {tiles} requested")
         # Back to the three this check started with, for what follows.
         _seed_outputs(folder, 3)
-        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.evaluate("() => window.minipaintClipboard.openOutputs('slideshow')")
         page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
         time.sleep(0.3)
 
         page.keyboard.press("Escape")
         time.sleep(0.4)
-        r.check("Escape closes it", page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is False)
-        r.check("and the player lets go of the file, rather than going on downloading it behind a closed view",
+        r.check("Escape in the slideshow steps back to the gallery",
+                page.evaluate("() => window.minipaintClipboard.outputsState().view") == "gallery"
+                and page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is True)
+        r.check("and the player lets go of the file, rather than going on downloading it behind the gallery",
                 page.evaluate("""() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
                     return !v || !v.getAttribute('src'); }"""))
+        page.keyboard.press("Escape")
+        time.sleep(0.4)
+        r.check("and a second Escape, from the gallery, closes the view",
+                page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is False)
 
-        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.evaluate("() => window.minipaintClipboard.openOutputs('slideshow')")
         page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
         time.sleep(0.3)
         page.evaluate("""() => { const b = Array.from(document.querySelectorAll('.minipaint-clip-output-close'))[0];
@@ -2042,7 +2059,7 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
         # A picture is not played, it is shown - and this one is a real PNG,
         # so the tile below is one the browser actually decoded.
         _seed_outputs(folder / "shots", 1, kind="png")
-        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.evaluate("() => window.minipaintClipboard.openOutputs('slideshow')")
         page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
         time.sleep(0.5)
         drawn = page.evaluate("""() => { const p = document.getElementById('minipaint_clipboard_outputs_panel');
@@ -2053,20 +2070,30 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
         page.evaluate("() => window.minipaintClipboard.closeOutputs()")
         time.sleep(0.3)
 
-        # And the pager, at the same 60 the picture grid uses.
+        # Not paged: the whole list, and a strip of the sixty round the stage
+        # that follows it - where the view used to page at sixty.
         _seed_outputs(folder / "many", 63)
-        page.evaluate("() => window.minipaintClipboard.openOutputs()")
-        page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=15000)
+        before = page.evaluate("() => window.minipaintClipboard.debug().outputs.drawn")
+        page.evaluate("() => window.minipaintClipboard.openOutputs('slideshow')")
+        page.wait_for_function("n => window.minipaintClipboard.debug().outputs.drawn > n", arg=before, timeout=15000)
         time.sleep(0.6)
-        paged = page.evaluate("() => window.minipaintClipboard.debug().outputs")
-        r.check("a page of the gallery is 60, the same as the grid's, and it says how many there are",
-                paged["items"] == 60 and paged["pages"] == 2, str(paged))
-        page.evaluate("""() => { const b = Array.from(document.querySelectorAll('.minipaint-clip-output-page'));
-            b[b.length - 1].click(); }""")
-        page.wait_for_function("() => window.minipaintClipboard.debug().outputs.page === 1", timeout=8000)
-        time.sleep(0.4)
-        paged = page.evaluate("() => window.minipaintClipboard.debug().outputs")
-        r.check("and the next page holds the rest", paged["items"] == 3 and paged["page"] == 1, str(paged))
+        whole = page.evaluate("() => window.minipaintClipboard.outputsState()")
+        r.check("the view holds every output, not a page of them, and the strip the sixty round the stage",
+                whole["total"] == 63 and whole["shown"] == 63 and whole["strip"] == 60 and whole["stripStart"] == 0,
+                str({key: whole[key] for key in ("total", "shown", "strip", "stripStart")}))
+        r.check("the bar says where the stage is in the whole list",
+                page.evaluate("() => document.querySelector('.minipaint-clip-output-count').textContent.trim()") == "1 of 63")
+        page.evaluate("""() => { const b = document.querySelector('.minipaint-clip-output-tool[data-control="next"]');
+            for (let i = 0; i < 62; i += 1) { b.click(); } }""")
+        time.sleep(0.6)
+        moved = page.evaluate("() => window.minipaintClipboard.outputsState()")
+        r.check("stepping to the end of the list moves the strip with the stage, so the last output is in it",
+                moved["chosen"] == moved["order"][62] and moved["stripStart"] == 3 and moved["strip"] == 60
+                and page.evaluate("""id => !!document.querySelector('.minipaint-clip-output-strip [data-output="' + id + '"].minipaint-clip-output-chosen')""",
+                                  moved["chosen"]),
+                str({key: moved[key] for key in ("stripStart", "strip")}))
+        r.check("and Next stops there, said by its button",
+                page.evaluate("() => document.querySelector('.minipaint-clip-output-tool[data-control=\"next\"]').disabled") is True)
         page.evaluate("() => window.minipaintClipboard.closeOutputs()")
         time.sleep(0.3)
 
@@ -2085,7 +2112,7 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
             bar.style.cssText = 'position:fixed;top:0;left:0;right:0;height:64px;z-index:9999;background:#123';
             document.body.appendChild(bar);
         }""")
-        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.evaluate("() => window.minipaintClipboard.openOutputs('slideshow')")
         page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
         time.sleep(0.5)
         placed = page.evaluate("""() => {
@@ -2138,7 +2165,7 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
             const b = bar.getBoundingClientRect();
             return { top: Math.round(p.top), mediaTop: media ? Math.round(media.getBoundingClientRect().top) : -1,
                      barTop: Math.round(b.top), barBottom: Math.round(b.bottom), scrolled: Math.round(window.scrollY) }; }"""
-        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.evaluate("() => window.minipaintClipboard.openOutputs('slideshow')")
         page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
         time.sleep(0.5)
         resting = page.evaluate(measure)
@@ -2164,7 +2191,7 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
         # A bar that comes AFTER the view opened: the Forge Assistant's focus
         # mode keeps the workspace's tab bar along the top of the window, and
         # shows it, hides it or lets it peek, saying which on the body.
-        page.evaluate("() => window.minipaintClipboard.openOutputs()")
+        page.evaluate("() => window.minipaintClipboard.openOutputs('slideshow')")
         page.wait_for_function("() => window.minipaintClipboard.debug().outputs.items > 0", timeout=8000)
         time.sleep(0.4)
         page.evaluate("""() => {
@@ -2192,6 +2219,460 @@ def check_view_outputs_is_a_gallery(r: Results, page) -> None:
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def _seed_gallery(folder, count):
+    """``count`` real videos in WanGP's output folder, made in WanGP and so
+    listed from the folder alone: three clips of different lengths copied
+    round, an hour apart from ``clip000`` (the newest) down."""
+    from minipaint_neo.clipboard import config as clip_config
+    from minipaint_neo.clipboard import outputs, posters
+
+    folder.mkdir(parents=True, exist_ok=True)
+    made = folder.parent / (folder.name + "-bases")
+    made.mkdir(parents=True, exist_ok=True)
+    bases = [_real_clip(made / f"base{index}.webm", frames) for index, frames in enumerate((48, 24, 72))]
+    now = time.time()
+    for index in range(count):
+        path = folder / f"clip{index:03d}.webm"
+        shutil.copyfile(bases[index % 3], path)
+        os.utime(path, (now - index * 3600, now - index * 3600))
+    outputs.reset_for_tests()
+    posters.reset_for_tests()
+    clip_config.update(outputs_folder=str(folder))
+    outputs.forget_listing_for_tests()
+    return made
+
+
+def _gallery_state(page):
+    return page.evaluate("() => window.minipaintClipboard.outputsState()")
+
+
+def _open_gallery_fresh(page):
+    before = page.evaluate("() => window.minipaintClipboard.debug().outputs.drawn")
+    page.evaluate("() => window.minipaintClipboard.openOutputs()")
+    page.wait_for_function("n => window.minipaintClipboard.debug().outputs.drawn > n", arg=before, timeout=15000)
+    page.wait_for_function("""() => { const s = window.minipaintClipboard.outputsState();
+        return s.view !== 'gallery' || (s.columns > 0 && s.rendered > 0); }""", timeout=8000)
+
+
+def _cell(index):
+    return f".minipaint-clip-output-track .minipaint-clip-output-cell:nth-child({index + 1})"
+
+
+def _until(page, expression, arg=None, timeout=10000) -> bool:
+    """Wait for ``expression`` in the page; False when it never came true."""
+    try:
+        page.wait_for_function(expression, arg=arg, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def check_view_outputs_has_a_gallery(r: Results, page) -> None:
+    """View Outputs' gallery, as asked for, point by point.
+
+    "In addition to slideshow, I want a gallery view of the videos. The
+    gallery should work much like the clipboard archives and load as I slide
+    into video. Tap to select with automatically and silently play that video
+    on loop. Double tap in gallery open to slide show playback view of that
+    item. Slider controls the same so I can choose how many gallery thumbs of
+    those videos are in column grid. Only one video play back at a time on
+    loop. Should be very easy to scroll the gallery and change its sort. Also
+    should have a random shuffle function for the gallery (which should be
+    only within our app and not impact windows file system)."
+
+    Real clips - the browser plays them and the server decodes their posters
+    - a hundred and fifty of them, so the grid holds more than it shows.
+    """
+    from minipaint_neo.clipboard import config as clip_config
+    from minipaint_neo.clipboard import outputs, posters
+
+    if not _ffmpeg():
+        r.check("a real clip can be made for the gallery's checks", False, "no ffmpeg found")
+        return
+    try:
+        import av  # noqa: F401
+        decoder = True
+    except ImportError:
+        decoder = False
+    folder = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-gallery-view-")) / "outputs"
+    bases = None
+    asked = []
+
+    def heard(request):
+        if "/minipaint-clipboard/" in request.url:
+            asked.append((request.method, request.url))
+
+    try:
+        bases = _seed_gallery(folder, 150)
+        on_disk = sorted((path.name, path.stat().st_mtime_ns, path.stat().st_size) for path in folder.iterdir())
+        page.evaluate("""() => { try { localStorage.removeItem('minipaint-outputs:v1');
+                                       sessionStorage.removeItem('minipaint-outputs:shuffle'); } catch (e) {} }""")
+        page.on("request", heard)
+        _open_gallery_fresh(page)
+        page.wait_for_function("""() => { const s = window.minipaintClipboard.outputsState();
+            return s.visible.length > 0 && s.inflight.length === 0 && s.done + s.failed >= s.visible.length; }""",
+                               timeout=20000)
+        time.sleep(0.4)
+        state = _gallery_state(page)
+
+        # -- 1. a gallery view, in addition to the slideshow --------------
+        shape = page.evaluate("""() => {
+            const panel = document.getElementById('minipaint_clipboard_outputs_panel');
+            const box = (sel) => { const n = panel.querySelector(sel); if (!n) { return null; }
+                const r = n.getBoundingClientRect(); return { w: r.width, h: r.height, shown: !n.hidden && r.height > 0 }; };
+            return { grid: box('.minipaint-clip-output-grid'), show: box('.minipaint-clip-output-show'),
+                     views: Array.from(panel.querySelectorAll('.minipaint-clip-output-view'))
+                        .map((b) => [b.textContent.trim(), b.getAttribute('aria-pressed')]),
+                     vh: window.innerHeight, vw: window.innerWidth }; }""")
+        r.check("View Outputs opens on the gallery, a grid that takes most of the window",
+                state["view"] == "gallery" and shape["grid"] and shape["grid"]["h"] >= shape["vh"] * 0.6
+                and shape["grid"]["w"] >= shape["vw"] * 0.9, str(shape))
+        r.check("with the slideshow beside it, one press away on the bar, and nothing of it drawn meanwhile",
+                shape["views"] == [["Gallery", "true"], ["Slideshow", "false"]]
+                and (shape["show"] is None or not shape["show"]["shown"]), str(shape))
+
+        # -- 2. like an archive: the whole list, drawn in view first ---------
+        r.check("every output is listed, as an archive's pictures are, not a page of them",
+                state["total"] == 150 and state["shown"] == 150, str((state["total"], state["shown"])))
+        r.check("but only the rows near the view are in the document",
+                0 < state["rendered"] < 150
+                and page.evaluate("() => document.querySelectorAll('.minipaint-clip-output-cell').length") == state["rendered"],
+                str(state["rendered"]))
+        poster_asks = [url for method, url in asked if "/poster" in url]
+        r.check("and only their posters were asked for, not the folder's",
+                0 < len(poster_asks) < 60, f"{len(poster_asks)} posters asked of 150")
+        wire = [url.split("/output/")[1].split("/")[0] for _method, url in asked if "/poster" in url]
+        r.check("the ones in view first, in reading order", wire[:len(state["visible"])] == state["visible"],
+                str((wire[:6], state["visible"][:6])))
+        r.check("no video is fetched to draw a tile: a tile is its poster",
+                not any("/output/" in url and "/poster" not in url and "/settings" not in url for _m, url in asked),
+                str([url for _m, url in asked if "/output/" in url and "/poster" not in url][:3]))
+        if decoder:
+            drawn = page.evaluate("""() => Array.from(document.querySelectorAll('.minipaint-clip-output-cell-poster'))
+                .slice(0, 6).map((img) => ({ tag: img.tagName, src: (img.getAttribute('src') || '').slice(0, 5),
+                                              w: img.naturalWidth || 0 }))""")
+            r.check("each tile in view shows its poster, a picture the browser decoded",
+                    all(one["tag"] == "IMG" and one["src"] == "blob:" and one["w"] > 0 for one in drawn), str(drawn))
+            r.check("and the clip's length on it",
+                    page.evaluate("""() => { const t = document.querySelector('.minipaint-clip-output-cell-time');
+                        return t && !t.hidden ? t.textContent.trim() : ''; }""") == "0:02")
+        r.check("nothing plays until a tile is tapped", state["videos"] == 0 and not state["preview"], str(state["videos"]))
+
+        # -- 3. a tap selects it, and it plays there, silently, on loop -------
+        first = state["order"][2]
+        page.click(_cell(2))
+        _until(page, "id => { const s = window.minipaintClipboard.outputsState(); return s.preview === id && s.playing; }",
+               arg=first)
+        tapped = page.evaluate("""id => {
+            const cell = document.querySelector('.minipaint-clip-output-cell[data-output="' + id + '"]');
+            const video = cell ? cell.querySelector('video.minipaint-clip-output-cell-preview') : null;
+            return { selected: !!cell && cell.classList.contains('minipaint-clip-output-cell-selected'),
+                     inside: !!video, muted: !!video && video.muted, loop: !!video && video.loop,
+                     playing: !!video && !video.paused, time: video ? video.currentTime : 0,
+                     detail: document.querySelector('.minipaint-clip-output-detail').textContent }; }""", first)
+        r.check("a tap selects the tile and plays its video right there in it",
+                tapped["selected"] and tapped["inside"] and tapped["playing"], str(tapped))
+        r.check("silently, and on loop", tapped["muted"] and tapped["loop"], str(tapped))
+        r.check("and the line under the grid says which it is, with the slideshow a press away",
+                "clip002.webm" in tapped["detail"] and "Slideshow" in tapped["detail"], tapped["detail"][:120])
+        page.wait_for_timeout(2600)
+        r.check("a two-second clip is still playing past its end, because it loops",
+                page.evaluate("() => window.minipaintClipboard.outputsState().playing") is True)
+
+        # -- 6. one video at a time ------------------------------------------
+        second = state["order"][5]
+        page.wait_for_timeout(450)
+        page.click(_cell(5))
+        page.wait_for_function("id => { const s = window.minipaintClipboard.outputsState(); return s.preview === id && s.playing; }",
+                               arg=second, timeout=10000)
+        one = page.evaluate("""ids => ({
+            first: !!document.querySelector('.minipaint-clip-output-cell[data-output="' + ids[0] + '"] video'),
+            second: !!document.querySelector('.minipaint-clip-output-cell[data-output="' + ids[1] + '"] video'),
+            videos: window.minipaintClipboard.outputsState().videos })""", [first, second])
+        r.check("tapping another moves the playing to it: the first tile holds no video any more, and one plays",
+                not one["first"] and one["second"] and one["videos"] == 1, str(one))
+        page.wait_for_timeout(450)
+        page.click(_cell(5))
+        page.wait_for_timeout(300)
+        r.check("a tap on the playing tile pauses it there",
+                page.evaluate("() => window.minipaintClipboard.outputsState().playing") is False)
+        page.wait_for_timeout(450)
+        page.click(_cell(5))
+        page.wait_for_function("() => window.minipaintClipboard.outputsState().playing", timeout=5000)
+        r.check("and another plays it again", True)
+
+        # Another of Forge's tabs, with the view still open: nothing plays in
+        # a tab nobody can see, and coming back plays it again.
+        tab = """name => { const b = Array.from(document.querySelectorAll('#tabs > .tab-nav > button'))
+            .find((one) => one.textContent.trim() === name); if (b) { b.click(); } return !!b; }"""
+        page.evaluate(tab, "Mini Paint")
+        page.wait_for_timeout(700)
+        away = page.evaluate("""() => { const v = document.querySelector('video.minipaint-clip-output-cell-preview');
+            return { paused: !v || v.paused, state: window.minipaintClipboard.outputsState().playing }; }""")
+        r.check("on another of Forge's tabs, the gallery's video is paused", away == {"paused": True, "state": False}, str(away))
+        page.evaluate(tab, "Clipboard")
+        page.wait_for_function("id => { const s = window.minipaintClipboard.outputsState(); return s.preview === id && s.playing; }",
+                               arg=second, timeout=8000)
+        r.check("and back on the Clipboard tab it plays again", True)
+
+        # -- 4. a double tap opens it in the slideshow ------------------------
+        page.wait_for_timeout(450)
+        page.dblclick(_cell(8))
+        target = state["order"][8]
+        _until(page, """() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
+            return window.minipaintClipboard.outputsState().view === 'slideshow' && !!v && !v.paused; }""")
+        show = _gallery_state(page)
+        stage = page.evaluate("""() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
+            return { src: v ? v.getAttribute('src') || '' : '', grid: document.querySelector('.minipaint-clip-output-gallery').hidden }; }""")
+        r.check("a double tap opens that output in the slideshow, playing on the stage",
+                show["chosen"] == target and stage["src"].endswith("/" + target) and stage["grid"] is True,
+                str((show["chosen"], target, stage)))
+        r.check("and the gallery's preview has let go of its file: still one video playing",
+                show["preview"] == "" and show["videos"] == 1, str((show["preview"], show["videos"])))
+        r.check("the slideshow steps through the gallery's own list, in its order",
+                page.evaluate("() => document.querySelector('.minipaint-clip-output-count').textContent.trim()") == "9 of 150")
+        # The slideshow's player, which has sound, pauses on another tab too.
+        page.evaluate(tab, "Mini Paint")
+        page.wait_for_timeout(700)
+        r.check("on another of Forge's tabs, the slideshow's video is paused as well",
+                page.evaluate("""() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
+                    return !!v && v.paused; }""") is True)
+        page.evaluate(tab, "Clipboard")
+        r.check("and back on the Clipboard tab it plays again",
+                _until(page, """() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
+                    return !!v && !v.paused; }""", timeout=8000))
+        page.keyboard.press("Escape")
+        came = _until(page, "id => { const s = window.minipaintClipboard.outputsState(); return s.view === 'gallery' && s.preview === id && s.playing; }",
+                      arg=target)
+        back = page.evaluate("""() => ({ stage: !!document.querySelector('.minipaint-clip-output-stage-media'),
+                                          videos: window.minipaintClipboard.outputsState().videos })""")
+        r.check("Escape comes back to the gallery on that output, playing in its tile, and the stage let go",
+                came and back == {"stage": False, "videos": 1}, str(back))
+        if not came:
+            page.evaluate("() => window.minipaintClipboard.setOutputsView('gallery', false)")
+        page.wait_for_timeout(450)
+        page.dblclick(_cell(8))
+        if not _until(page, "() => window.minipaintClipboard.outputsState().view === 'slideshow'", timeout=5000):
+            page.evaluate("id => window.minipaintClipboard.openSlideshowOn(id)", target)
+        page.keyboard.press("PageDown")
+        page.wait_for_timeout(300)
+        r.check("in the slideshow, Page Down is the next output", _gallery_state(page)["chosen"] == state["order"][9])
+        page.keyboard.press("Escape")
+        page.wait_for_function("() => window.minipaintClipboard.outputsState().view === 'gallery'", timeout=5000)
+        r.check("and the gallery comes back on the output the slideshow ended on",
+                _gallery_state(page)["chosen"] == state["order"][9])
+        page.click(".minipaint-clip-output-cell-selected")
+        page.wait_for_timeout(450)
+        page.click(".minipaint-clip-output-cell-selected", button="right")
+        page.wait_for_function("() => window.minipaintClipboard.outputsState().view === 'slideshow'", timeout=5000)
+        r.check("a right click - a long press on a phone - opens the slideshow too", True)
+        page.keyboard.press("Escape")
+        page.wait_for_function("() => window.minipaintClipboard.outputsState().view === 'gallery'", timeout=5000)
+
+        # -- 5. the slider counts the videos per row ----------------------------
+        state = _gallery_state(page)
+        low = state["range"]["min"]
+        wanted = min(state["range"]["max"], max(low, 3))
+        page.evaluate("""n => { const s = document.querySelector('.minipaint-clip-output-perrow-input');
+            s.value = String(n); s.dispatchEvent(new Event('input', { bubbles: true })); }""", wanted)
+        page.wait_for_timeout(300)
+        row = page.evaluate("""() => {
+            const grid = document.querySelector('.minipaint-clip-output-grid');
+            const style = getComputedStyle(grid);
+            const room = grid.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+            const cells = Array.from(document.querySelectorAll('.minipaint-clip-output-cell'));
+            const widths = cells.map((c) => c.getBoundingClientRect().width);
+            const firstRow = cells.filter((c) => Math.abs(c.getBoundingClientRect().top - cells[0].getBoundingClientRect().top) < 1);
+            const last = firstRow[firstRow.length - 1].getBoundingClientRect();
+            return { columns: window.minipaintClipboard.outputsState().columns, row: firstRow.length,
+                     spread: Math.max(...widths) - Math.min(...widths), room: room,
+                     reach: last.right - grid.getBoundingClientRect().left - parseFloat(style.paddingLeft),
+                     count: document.querySelector('.minipaint-clip-output-perrow-count').textContent }; }""")
+        r.check("the slider says how many videos are in a row, and that is how many there are",
+                row["columns"] == wanted and row["row"] == wanted and row["count"] == f"{wanted} per row", str(row))
+        r.check("every tile is the same width, and the row is filled to its edge",
+                row["spread"] < 0.5 and abs(row["reach"] - row["room"]) <= 2.5, str(row))
+        r.check("its limits keep a tile between 96 and 480 px at this width",
+                (row["room"] - (state["range"]["max"] - 1) * 8) / state["range"]["max"] >= 96
+                and (row["room"] - (low - 1) * 8) / low <= 480, str(state["range"]))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        _open_gallery_fresh(page)
+        r.check("and the count is kept for this browser", _gallery_state(page)["columns"] == wanted)
+
+        # -- 7. easy to scroll ----------------------------------------------------
+        r.check("the gallery has a scrubber on its edge, as the picture grid does",
+                _gallery_state(page)["scrubber"] is True)
+        page.evaluate("() => { document.querySelector('.minipaint-clip-output-grid').scrollTop = 0; }")
+        page.wait_for_timeout(400)
+        bar = page.evaluate("""() => { const r = document.querySelector('.minipaint-clip-output-scrubber').getBoundingClientRect();
+            return { x: r.left + r.width / 2, top: r.top, h: r.height }; }""")
+        asked.clear()
+        page.mouse.move(bar["x"], bar["top"] + 10)
+        page.mouse.down()
+        # Slowly, a step a tenth of a second: never still for the 300 ms that
+        # counts as a rest, and slow enough that a gallery asking on the way
+        # would ask (it starts what is in view at least every 200 ms).
+        for step in range(1, 9):
+            page.mouse.move(bar["x"], bar["top"] + 10 + (bar["h"] * 0.5 - 10) * step / 8)
+            page.wait_for_timeout(100)
+        held = _gallery_state(page)
+        during = [url for _m, url in asked if "/poster" in url]
+        bubble = page.evaluate("""() => { const b = document.querySelector('.minipaint-clip-output-scrubber .minipaint-clip-scrubber-bubble');
+            return b && !b.hidden ? b.textContent : ''; }""")
+        page.mouse.up()
+        page.wait_for_timeout(700)
+        rested = _gallery_state(page)
+        scrolled = page.evaluate("""() => { const g = document.querySelector('.minipaint-clip-output-grid');
+            return { top: g.scrollTop, max: g.scrollHeight - g.clientHeight }; }""")
+        r.check("dragging the scrubber halfway takes the gallery about halfway through the list",
+                0.3 * scrolled["max"] <= scrolled["top"] <= 0.7 * scrolled["max"], str(scrolled))
+        r.check("while held, a bubble says where in the list the view is, and its date",
+                held["scrubbing"] is True and " of 150" in bubble, bubble)
+        r.check("nothing is asked for on the way while it is held",
+                not during, f"{len(during)} posters asked during the drag")
+        r.check("and once let go, only the screen it stopped on and what is about to be",
+                set(url.split("/output/")[1].split("/")[0] for _m, url in asked if "/poster" in url)
+                <= set(rested["order"][max(0, (rested["rows"]["first"] - 5) * rested["columns"]):(rested["rows"]["last"] + 6) * rested["columns"]])
+                and len([1 for _m, url in asked if "/poster" in url]) > 0,
+                str(len(asked)))
+
+        # -- 7. and change its sort --------------------------------------------------
+        newest = _gallery_state(page)["order"]
+        r.check("newest first to begin with", newest[:3] == state["order"][:3])
+        page.select_option(".minipaint-clip-output-sort", "oldest")
+        page.wait_for_timeout(300)
+        oldest = _gallery_state(page)
+        r.check("the order is a choice on the bar: oldest first is the list turned round, from the top",
+                oldest["sort"] == "oldest" and oldest["order"][:5] == list(reversed(state["order"]))[:5]
+                and page.evaluate("() => document.querySelector('.minipaint-clip-output-grid').scrollTop") == 0,
+                str(oldest["order"][:3]))
+        page.select_option(".minipaint-clip-output-sort", "name_desc")
+        page.wait_for_timeout(300)
+        names = page.evaluate("""() => Array.from(document.querySelectorAll('.minipaint-clip-output-cell-name'))
+            .slice(0, 3).map((n) => n.textContent)""")
+        r.check("and by name, the other way", names == ["clip149.webm", "clip148.webm", "clip147.webm"], str(names))
+        page.select_option(".minipaint-clip-output-sort", "largest")
+        page.wait_for_timeout(300)
+        sizes = {item["id"]: item["size"] for item in outputs.gallery(refresh=False)}
+        largest = [sizes.get(one, 0) for one in _gallery_state(page)["order"][:150]]
+        r.check("and by size", largest == sorted(largest, reverse=True) and largest[0] > largest[-1], str(largest[:3]))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        _open_gallery_fresh(page)
+        r.check("the order is kept for this browser", _gallery_state(page)["sort"] == "largest")
+
+        # -- 8. a shuffle, in this page only ------------------------------------------
+        def writes():
+            return [(method, url) for method, url in asked if method != "GET"]
+
+        before = len(writes())
+        page.click(".minipaint-clip-output-tool[data-control='shuffle']")
+        page.wait_for_timeout(300)
+        shuffled = _gallery_state(page)
+        sent = writes()[before:]
+        r.check("Shuffle puts every output in a random order",
+                shuffled["sort"] == "shuffle" and sorted(shuffled["order"]) == sorted(state["order"])
+                and shuffled["order"] != state["order"] and shuffled["order"] != list(reversed(state["order"])),
+                str(shuffled["order"][:3]))
+        r.check("and the bar says it is this page's order, with nothing on disk moved",
+                "nothing on disk moved" in page.evaluate("() => document.querySelector('.minipaint-clip-output-status').textContent"))
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        _open_gallery_fresh(page)
+        r.check("closed and opened again, it is the same shuffle", _gallery_state(page)["order"] == shuffled["order"])
+        # And a reload of the page: the shuffle is the browser tab's, not this
+        # page load's.
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        page.reload(wait_until="load")
+        page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
+        time.sleep(2)
+        open_clipboard(page)
+        _open_gallery_fresh(page)
+        reloaded = _gallery_state(page)
+        r.check("and after a reload of the page, still the same shuffle",
+                reloaded["sort"] == "shuffle" and reloaded["order"] == shuffled["order"], str(reloaded["order"][:3]))
+        before = len(writes())
+        page.click(".minipaint-clip-output-tool[data-control='shuffle']")
+        page.wait_for_timeout(300)
+        again = _gallery_state(page)["order"]
+        sent += writes()[before:]
+        r.check("and Shuffle again is a new one", again != shuffled["order"] and sorted(again) == sorted(shuffled["order"]))
+        r.check("nothing was sent to the server to shuffle, either time: no request but reads", not sent, str(sent[:3]))
+        r.check("and no file in WanGP's folder was renamed, moved or touched",
+                sorted((path.name, path.stat().st_mtime_ns, path.stat().st_size) for path in folder.iterdir()) == on_disk)
+
+        # -- around it: a search, and the keys -----------------------------------------
+        page.fill(".minipaint-clip-output-find", "clip01")
+        page.wait_for_function("() => window.minipaintClipboard.outputsState().shown === 10", timeout=5000)
+        found = page.evaluate("""() => Array.from(document.querySelectorAll('.minipaint-clip-output-cell-name')).map((n) => n.textContent)""")
+        r.check("a search narrows the gallery to the outputs it names, in the same order",
+                sorted(found) == [f"clip01{n}.webm" for n in range(10)], str(found))
+        page.focus(".minipaint-clip-output-find")
+        page.keyboard.press("Escape")
+        page.wait_for_function("() => window.minipaintClipboard.outputsState().shown === 150", timeout=5000)
+        r.check("Escape in the search box empties it, and leaves the view open",
+                page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is True)
+        page.select_option(".minipaint-clip-output-sort", "newest")
+        page.wait_for_timeout(300)
+        page.wait_for_timeout(450)
+        page.click(_cell(0))
+        page.wait_for_timeout(300)
+        page.keyboard.press("ArrowRight")
+        page.wait_for_timeout(200)
+        keyed = _gallery_state(page)
+        r.check("the arrow keys move the selection, and what is selected plays",
+                keyed["chosen"] == state["order"][1] and keyed["preview"] == state["order"][1], keyed["chosen"])
+        page.keyboard.press("ArrowDown")
+        page.wait_for_timeout(200)
+        r.check("down a row is the next row's", _gallery_state(page)["chosen"] == state["order"][1 + keyed["columns"]])
+        page.keyboard.press("Enter")
+        page.wait_for_function("() => window.minipaintClipboard.outputsState().view === 'slideshow'", timeout=5000)
+        r.check("and Enter opens it in the slideshow", _gallery_state(page)["chosen"] == state["order"][1 + keyed["columns"]])
+        page.keyboard.press("Escape")
+        page.wait_for_function("() => window.minipaintClipboard.outputsState().view === 'gallery'", timeout=5000)
+
+        # -- one video, whatever else happens -----------------------------------------
+        page.evaluate("() => window.minipaintClipboard.setOutputsView('slideshow', true)")
+        page.wait_for_timeout(500)
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        page.wait_for_timeout(300)
+        closed = page.evaluate("""() => Array.from(document.querySelectorAll('#minipaint_clipboard_outputs_panel video'))
+            .filter((v) => v.getAttribute('src')).length""")
+        r.check("closing the view lets go of every video it held", closed == 0, str(closed))
+        _open_gallery_fresh(page)
+        r.check("the slideshow chosen on the bar is the view it opens on next time",
+                _gallery_state(page)["view"] == "slideshow")
+        page.evaluate("() => window.minipaintClipboard.setOutputsView('gallery', true)")
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+
+        # -- a Forge without a decoder --------------------------------------------------
+        # New versions of every file, so no poster is in the browser's cache
+        # or the page's, and the server is asked - and says it has no decoder.
+        posters.reset_for_tests("")
+        later = time.time() + 5
+        for path in folder.iterdir():
+            os.utime(path, (later, later))
+        outputs.forget_listing_for_tests()
+        page.evaluate("() => { const s = window.minipaintClipboard; s.closeOutputs(); }")
+        page.reload(wait_until="load")
+        page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
+        time.sleep(2)
+        open_clipboard(page)
+        _open_gallery_fresh(page)
+        page.wait_for_function("() => window.minipaintClipboard.outputsState().posterless", timeout=10000)
+        page.wait_for_function("""() => { const v = document.querySelector('video.minipaint-clip-output-cell-poster');
+            return !!v && (v.getAttribute('src') || '').indexOf('#t=1') > 0 && v.readyState >= 2; }""", timeout=15000)
+        r.check("on a Forge with no video decoder the gallery draws its posters itself, a frame of each video",
+                True)
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+    finally:
+        page.remove_listener("request", heard)
+        page.evaluate("""() => { try { window.minipaintClipboard.closeOutputs();
+            localStorage.removeItem('minipaint-outputs:v1'); sessionStorage.removeItem('minipaint-outputs:shuffle'); } catch (e) {} }""")
+        outputs.reset_for_tests()
+        posters.reset_for_tests()
+        clip_config.update(outputs_folder="")
+        shutil.rmtree(folder.parent, ignore_errors=True)
+
+
 #: A request id of the shape the protocol accepts, so the ledger, the history
 #: and the join between them all take it.
 PLAYER_REQUEST = "ab" * 16
@@ -2201,14 +2682,16 @@ SETTINGS_REQUEST = "aa" * 16
 
 
 def _open_outputs_fresh(page):
-    """Open View Outputs and wait for THIS opening's draw.
+    """Open View Outputs on the slideshow and wait for THIS opening's draw.
 
     Closing the view leaves its last draw on the panel, so "there are items"
     is already true before the new answer arrives - which is how a check once
     read the previous check's outputs and reported that none had a recipe.
+    The slideshow, because these checks are about its stage and player; the
+    gallery opens by default and has a check of its own.
     """
     before = page.evaluate("() => window.minipaintClipboard.debug().outputs.drawn")
-    page.evaluate("() => window.minipaintClipboard.openOutputs()")
+    page.evaluate("() => window.minipaintClipboard.openOutputs('slideshow')")
     page.wait_for_function("n => window.minipaintClipboard.debug().outputs.drawn > n", arg=before, timeout=8000)
 
 
@@ -5656,6 +6139,7 @@ def run() -> Results:
                      lambda: check_wangp_settings_is_a_choice_in_the_menu(r, page)),
                     ("check_the_toolbar_flyouts_are_the_one_door", lambda: check_the_toolbar_flyouts_are_the_one_door(r, page)),
                     ("check_view_outputs_is_a_gallery", lambda: check_view_outputs_is_a_gallery(r, page)),
+                    ("check_view_outputs_has_a_gallery", lambda: check_view_outputs_has_a_gallery(r, page)),
                     ("check_the_player_is_the_pages", lambda: check_the_player_is_the_pages(r, page)),
                     ("check_the_players_full_screen_is_its_own", lambda: check_the_players_full_screen_is_its_own(r, page)),
                     ("check_an_output_loads_its_recipe", lambda: check_an_output_loads_its_recipe(r, page)),

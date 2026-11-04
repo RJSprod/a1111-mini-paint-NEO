@@ -566,9 +566,27 @@ takes an override that is kept across sessions, and restores the default.
 in one press; jobs already being sent finish, and nothing in WanGP's own queue is touched.
 
 **View Outputs** (under the queue). Every video in WanGP's output folder - its subfolders
-included, the ones this tab asked for and the ones made in WanGP itself, each once, newest
-first - over the whole window, below the tab bar and never under it: the output in a stage
-with its own controls under it, a filmstrip of everything else, sixty to a page. A video only the
+included, the ones this tab asked for and the ones made in WanGP itself, each once - over the
+whole window, below the tab bar and never under it, as a **gallery** or a **slideshow**, one
+list in one order between them, switched on the bar along the top. The **gallery** (where it
+opens until the bar says otherwise) is the whole folder as a grid, drawn the way an archive
+is: every video a tile, only the rows near the view in the page, and each tile's poster - one
+frame, made once on the server with Forge Neo's PyAV and kept by the browser for a year -
+asked for in view first, so a fling or the scrubber on its edge asks for nothing on the way.
+**A tap** selects a video and plays it right there in its tile, muted and on loop (a tap on it
+again pauses it); **a double tap** - or a right click, a long press or Enter - opens it in the
+slideshow, and Escape comes back. Only one video ever plays: the tile's preview and the
+slideshow's player each let go of their file when the other takes over, and both pause while
+another of Forge's tabs is on screen. A slider on the bar
+counts **videos per row**, as the Clipboard grid's counts pictures, and Fit / Fill puts the
+whole frame in each tile or fills it. The **order** - newest, oldest, name either way, largest,
+smallest - is one choice on the bar, and **Shuffle** puts the list in a new random order in
+this page only: no file is renamed, moved or touched, the bar says so, and the shuffle is kept
+for the browser tab until it is pressed again. A **search** narrows both views by name, prompt
+or model, and the order, the view, the count per row and the fit are remembered. Under the
+grid a line says what the selected video is, with Slideshow, Load and Send to WanGP beside it.
+The **slideshow** is the output in a stage with its own controls under it and a filmstrip of
+the sixty round it, stepped through with ‹ ›, ↑ ↓ or a sideways swipe, in the gallery's order. A video only the
 folder knows has no request behind it, so it has no recipe to Load (below) and is never
 marked as a match; it is listed by an id that names nothing, and the folder is read from its
 directory entries and a stat of each, nothing opened, so a file deleted meanwhile is gone at the
@@ -587,8 +605,9 @@ view closes and the WanGP tab opens only once WanGP says it loaded them; a video
 nothing in, a file that has gone, or a WanGP that is not open yet stays here and says why. It
 is offered for MP4, MKV and MOV, the videos WanGP writes its settings into, and for any of them,
 whoever asked for it. It needs bridge 1.17.0. Loop, mute and speed are remembered. On a
-keyboard: Space or K plays, ← and → step a frame (with Shift, a second), L loops, M mutes,
-F is full screen, and Escape leaves full screen and then the view. Under the picture: its
+keyboard: Space or K plays, ← and → step a frame (with Shift, a second), ↑ and ↓ (or Page Up
+and Page Down) are the previous and the next output, L loops, M mutes, F is full screen, and
+Escape leaves full screen, then the slideshow for the gallery, then the view. Under the picture: its
 name, the model that made it (LTX 2.3 or 2.5, MiniMax H3), and the prompt as it was typed,
 with the one an enhancement wrote for WanGP under it on hover. **Load**, beside them, puts
 the recipe that made the output back into the request - the prompt as it was typed and each

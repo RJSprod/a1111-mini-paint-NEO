@@ -788,10 +788,24 @@ through so the server can reconcile roles without a call into the child.
 
     GET  /minipaint-clipboard/outputs?page&size
       -> {ok, total, page, pages, size, reason: ""|"empty"|"unconfigured", status,
-          items: [{id, name, kind: "video"|"image", size, at, exact, prompt, written, model, recipe, url}]}
+          items: [{id, name, kind: "video"|"image", size, at, exact, source, prompt, written, model, recipe, url, v}]}
          prompt: as typed; written: what an enhancement wrote from it ("" when none); model: the model's label;
          recipe: the output's own id when Load can restore something (its kept recipe, else its Queue Send History
-         record), "" when neither - the page then offers no Load
+         record), "" when neither; v: "<mtime ms>-<size>", the version the poster's address carries
+    GET  /minipaint-clipboard/outputs?all=1      (the gallery's: every output in one answer, off the event loop)
+      -> {ok, whole: true, total, truncated, reason, status, prefix: "/minipaint-clipboard/output/",
+          items: [{id, name, kind, size, at, v, source, exact?, prompt?, written?, model?, recipe?}]}
+         newest first; an item leaves out what it does not have (a folder video: no exact, prompt, written, model
+         or recipe); an item's file is prefix + id and its poster prefix + id + "/poster?v=" + v; past
+         OUTPUTS_WHOLE_LIMIT (100000) the answer stops and truncated says how many it left out
+    GET  /minipaint-clipboard/output/{file_id}/poster?v=<version>   (a plain def: it may decode a video)
+      -> one frame of the video at one second (the middle of a shorter clip), at most POSTER_SIDE (480) on its
+         longest side, as image/webp (image/png where WebP cannot be written); a picture output made small.
+         X-Minipaint-Duration: the clip's length in seconds, when known. Cache-Control immutable only when v is
+         the file's current version, else REVALIDATED_CACHE. 404 CLIPBOARD_ASSET_UNKNOWN for an id that is no
+         output; 422 OUTPUT_POSTER_UNREADABLE for a file that gave no frame (not tried again for 10 minutes at
+         that version); 501 OUTPUT_POSTER_UNAVAILABLE when this process has neither PyAV nor OpenCV - the page
+         then draws its video posters itself - the page then offers no Load
     GET  /minipaint-clipboard/prompts
       -> {ok, entries: prompts.view(), max: 10}
     POST /minipaint-clipboard/prompts   {action: "load", id}
@@ -914,8 +928,10 @@ LIBRARY_ROUTE; SETTINGS_ROUTE; QUEUE_ROUTE; READINESS_ROUTE; ENHANCE_SETTINGS_RO
 IMMUTABLE_CACHE; REVALIDATED_CACHE; RANGE_CHUNK = 4 MiB
 def library_listing(sort="", refresh=False) -> dict; def apply_settings(changes) -> dict    # the whole storage folder, [id, name, bytes, v, w, h] each
 AUTO_NONE_SENTENCE; def auto_sentence(roles) -> "Auto now sends the picture as First Frame and Reference."
-def outputs_page(page=0, size=PAGE_SIZE) -> dict                                      # the gallery; syncs the ledger first; prompt, written and model from each
-                                                                                      # entry's recipe, else joined on from its Queue Send History record
+def outputs_page(page=0, size=PAGE_SIZE, whole=False) -> dict                         # the gallery; syncs the ledger first; prompt, written and model from each
+                                                                                      # entry's recipe, else joined on from its Queue Send History record;
+                                                                                      # whole: every output, compact (OUTPUTS_WHOLE_LIMIT)
+OUTPUT_POSTER_ROUTE = OUTPUT_FILE_ROUTE + "/poster"                                     # _output_poster, a plain def
 def prompts_action(method, body) -> (answer, status)                                  # History's route as a function: GET the list; POST {action: "load", id}
 def output_url(file_id) -> str; def _byte_range(header, size) -> (start, end) | None  # single-range only; anything else is answered whole
 def clamp_size(value) -> int; def page_of(value, pages) -> int                        # zero-based; the pager shows page + 1
@@ -935,6 +951,17 @@ def gallery(refresh=True) -> [files()' items + {source: "request"}, and {id: "wf
                                                                                       # what View Outputs lists: the ledger's files and every other video under the folder,
                                                                                       # each once, newest first; a walk stops at FOLDER_SCAN_MAX files; a link is not listed
 def path_of(file_id) -> Path | None                                                   # the only place an id becomes a path
+# files() and gallery() items also carry mtime, the file's own time, which its version is made of
+
+# posters.py: View Outputs' posters, made once and kept three times
+POSTER_SIDE = 480; POSTER_AT_SECONDS = 1.0; POSTER_DIR_NAME = "clipboard-output-posters"; POSTER_DISK_BUDGET = 512 MiB
+MAKING_AT_ONCE = 3; FAILED_SECONDS = 600
+def version_of(stat) -> "<mtime ms>-<size>"                                            # the version a poster URL carries
+def decoder() -> "pyav" | "opencv" | ""                                               # asked once per process
+posters().poster(file_id, path, stat, side=POSTER_SIDE) -> (bytes, mime, duration_seconds)
+                                                                                      # memory, then disk (<id>-<mtime_ns>-<size>-<side>-<duration ms>.webp),
+                                                                                      # then a decode; one maker per poster; raises OUTPUT_POSTER_UNAVAILABLE / _UNREADABLE
+posters().sweep(budget) -> {ok, kept, removed, bytes}; reset_for_tests(name=None)     # name "" is a process with no video decoder
 def forget_all() -> int; def use_clock(clock); def reset_for_tests()
 # An entry: {entry_id, job_id, request_id, opened_at, closed_at, floor, exact, model, recipe | None, files: [{file_id, path, name, size, at}]}
 # recipe (history.recipe_of_job): {prompt (as typed), written (an enhancement's, or ""), first_asset_id, last_asset_id, reference_asset_ids,
@@ -1140,7 +1167,11 @@ ends, cancel everything, retry, tracking, the routes and the tab's panel),
 `tests/test_clipboard_outputs.py` (the ledger and the gallery's two routes:
 the exact half against WanGP's own paths, the window half against a folder
 whose files appear while a job runs, a claim a shutdown left open finished at
-the next sync, exclusive claiming, the 60-page, and the byte route's ranges),
+the next sync, exclusive claiming, the 60-page, the whole listing the gallery reads, the
+byte route's ranges, and the poster route against a real video PyAV wrote: a frame past the
+first at the poster's side, the clip's length, made once through memory, disk and a restart,
+immutable only for the current version, a changed file made again, 422 for a file with no
+frame and 501 for a process with no decoder),
 `tests/test_clipboard_prompts.py` (History: what goes in and what does not, ten
 and a resend moving up, the typed words of an enhanced press and of a retry,
 Load touching nothing but the prompt, the route, the journal; and the recipe

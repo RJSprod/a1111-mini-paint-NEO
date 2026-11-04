@@ -63,6 +63,8 @@ OUTPUTS_ROUTE = ROUTE_PREFIX + "/outputs"
 OUTPUT_FILE_ROUTE = ROUTE_PREFIX + "/output/{file_id}"
 #: A reference handoff for one output, for View Outputs' Send to WanGP.
 OUTPUT_SETTINGS_ROUTE = OUTPUT_FILE_ROUTE + "/settings"
+#: One output's poster, for View Outputs' gallery (``posters``).
+OUTPUT_POSTER_ROUTE = OUTPUT_FILE_ROUTE + "/poster"
 #: The gallery's Send to WanGP popup: everything it asks, over one POST, and
 #: the small copy of the picture it froze.
 INTERCEPT_ROUTE = ROUTE_PREFIX + "/intercept"
@@ -538,9 +540,23 @@ async def _queue(request: typing.Any) -> typing.Any:
     return _json(dict({"ok": True}, **answer))
 
 
-def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
+#: How many outputs one whole listing answers with - the folder walk's own
+#: bound (``outputs.FOLDER_SCAN_MAX``) and the ledger's beside it. Past it
+#: the answer says how many it left out.
+OUTPUTS_WHOLE_LIMIT = 100_000
+
+
+def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE, whole: bool = False) -> dict:
     """One page of what WanGP made, newest first: every video in its output
     folder, and what it made for this tab's requests (``outputs.gallery``).
+
+    ``whole`` answers every output in one listing, as an archive is listed:
+    the gallery draws all of them and asks for a tile's poster only when the
+    tile is in view, so it pages nothing, and sorts and shuffles in the page.
+    The answer then has no page; ``truncated`` says how many were left out
+    past ``OUTPUTS_WHOLE_LIMIT``, and an item leaves out what it does not
+    have - a folder video has no prompt, no model and no recipe - because a
+    folder of twenty thousand videos is otherwise mostly empty strings.
 
     The same shape and the same page size as the picture index, because it
     is the same pager drawing it: a gallery that counted its pages
@@ -557,11 +573,17 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
     button that would do nothing.
     """
     listed = outputs.gallery()
-    wanted = clamp_size(size)
     total = len(listed)
-    pages = max(1, -(-total // wanted))
-    index = page_of(page, pages)
-    shown = listed[index * wanted:(index + 1) * wanted]
+    if whole:
+        wanted = total
+        pages = 1
+        index = 0
+        shown = listed[:OUTPUTS_WHOLE_LIMIT]
+    else:
+        wanted = clamp_size(size)
+        pages = max(1, -(-total // wanted))
+        index = page_of(page, pages)
+        shown = listed[index * wanted:(index + 1) * wanted]
     records: typing.Dict[str, dict] = {}
     if shown:
         wanted_ids = {item["request_id"] for item in shown if item["request_id"] and not item.get("recipe")}
@@ -593,6 +615,32 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
     else:
         reason = ""
         status = f"{total} output{'s' if total != 1 else ''} in WanGP's output folder, newest first."
+    if whole:
+        items = []
+        for item in shown:
+            facts = told(item)
+            one = {"id": item["id"], "name": item["name"], "kind": item["kind"], "size": item["size"],
+                   "at": item["at"], "v": _output_version(item), "source": item.get("source") or "request"}
+            if item["exact"]:
+                one["exact"] = True
+            for key, limit in (("prompt", 400), ("written", 400), ("model", 120)):
+                if facts[key]:
+                    one[key] = str(facts[key])[:limit]
+            if facts["recipe"]:
+                one["recipe"] = facts["recipe"]
+            items.append(one)
+        return {
+            "ok": True,
+            "whole": True,
+            "total": total,
+            "truncated": max(0, total - len(shown)),
+            "reason": reason,
+            "status": status,
+            # Every item's own address is this and its id; its poster's is that
+            # and "/poster?v=<v>". Said once rather than on every item.
+            "prefix": OUTPUT_FILE_ROUTE.replace("{file_id}", ""),
+            "items": items,
+        }
     return {
         "ok": True,
         "total": total,
@@ -625,10 +673,20 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE) -> dict:
                 "model": str(facts["model"])[:120],
                 "recipe": facts["recipe"],
                 "url": output_url(item["id"]),
+                "v": _output_version(item),
             }
             for item, facts in ((item, told(item)) for item in shown)
         ],
     }
+
+
+def _output_version(item: typing.Mapping[str, typing.Any]) -> str:
+    """The version an output's poster URL carries (``posters.version_of``),
+    from the time and size the listing read."""
+    mtime = item.get("mtime")
+    if mtime is None:
+        mtime = item.get("at") or 0
+    return f"{int(round(float(mtime) * 1000))}-{int(item.get('size') or 0)}"
 
 
 def output_url(file_id: str) -> str:
@@ -641,8 +699,16 @@ async def _outputs(request: typing.Any) -> typing.Any:
     if not _signed_in(request):
         return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
     params = request.query_params
+    whole = str(params.get("all", "") or "") in ("1", "true", "yes")
     try:
-        answer = outputs_page(page=params.get("page", 0), size=params.get("size", PAGE_SIZE))
+        if whole:
+            # Not on the event loop: a whole folder's listing is a walk of it
+            # and a stat of every file, which on a slow disk is a second.
+            from starlette.concurrency import run_in_threadpool
+
+            answer = await run_in_threadpool(outputs_page, 0, PAGE_SIZE, True)
+        else:
+            answer = outputs_page(page=params.get("page", 0), size=params.get("size", PAGE_SIZE))
     except Exception as error:
         scrub.console(f"the outputs index could not be read ({type(error).__name__}).", _LOG_PREFIX)
         return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
@@ -773,6 +839,51 @@ def _output_settings(request: typing.Any) -> typing.Any:
         scrub.console(f"a settings reference could not be written ({type(error).__name__}).", _LOG_PREFIX)
         return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
     return _json({"ok": True, "handoff_id": handoff_id})
+
+
+def _output_poster(request: typing.Any) -> typing.Any:
+    """One output's poster: a frame of the video, small (``posters``).
+
+    By the output's opaque id, like the file itself. ``?v=<version>`` is the
+    version the listing gave; only the file's current one earns the
+    ``immutable`` header, as a library thumbnail's does. The clip's length,
+    when the decoder knew it, rides along as ``X-Minipaint-Duration`` in
+    seconds, which the gallery puts on the tile.
+
+    Not ``async``: making a poster is a decode, tens of milliseconds a video,
+    and the event loop is every other request there is.
+    """
+    from starlette.responses import Response
+
+    from . import posters
+
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    file_id = request.path_params.get("file_id", "")
+    path = outputs.path_of(file_id)
+    if path is None:
+        return _json({"ok": False, "code": errors.CLIPBOARD_ASSET_UNKNOWN, "message": "That output is no longer there."}, 404)
+    try:
+        info = path.stat()
+    except OSError:
+        return _json({"ok": False, "code": errors.CLIPBOARD_ASSET_UNKNOWN, "message": "That output is no longer there."}, 404)
+    try:
+        data, mime, duration = posters.posters().poster(file_id, path, info)
+    except IntegrationError as error:
+        # No decoder at all is the server's to say once: the page stops asking
+        # and draws its posters itself. A file that gave no frame is that
+        # file's, and its tile is marked.
+        status = 501 if error.code == errors.OUTPUT_POSTER_UNAVAILABLE else 422
+        return _json(error.as_dict(), status)
+    except Exception as error:
+        scrub.console(f"an output poster could not be made ({type(error).__name__}).", _LOG_PREFIX)
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    wanted = str(request.query_params.get("v", "") or "")
+    fresh = bool(wanted) and wanted == posters.version_of(info)
+    headers = {"Cache-Control": IMMUTABLE_CACHE if fresh else REVALIDATED_CACHE}
+    if duration > 0:
+        headers["X-Minipaint-Duration"] = f"{duration:.3f}"
+    return Response(content=data, media_type=mime, headers=headers)
 
 
 async def _enhance_settings(request: typing.Any) -> typing.Any:
@@ -1250,6 +1361,7 @@ def install(app: typing.Any) -> None:
             Route(OUTPUTS_ROUTE, endpoint=_outputs, methods=["GET"]),
             Route(OUTPUT_FILE_ROUTE, endpoint=_output_file, methods=["GET", "HEAD"]),
             Route(OUTPUT_SETTINGS_ROUTE, endpoint=_output_settings, methods=["POST"]),
+            Route(OUTPUT_POSTER_ROUTE, endpoint=_output_poster, methods=["GET"]),
             Route(IMPORT_ROUTE, endpoint=_import, methods=["POST"]),
             Route(SEND_ROUTE, endpoint=_send, methods=["POST"]),
             Route(INTERCEPT_ROUTE, endpoint=_intercept, methods=["POST"]),

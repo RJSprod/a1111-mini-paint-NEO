@@ -2890,19 +2890,15 @@
     font-size: var(--text-sm, 0.85em);
 }
 
-#minipaint_clipboard_root .minipaint-clip-output-pager {
-    flex: 0 0 auto;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
+/* Where the stage is in the list, between the slideshow's ‹ and ›. */
 #minipaint_clipboard_root .minipaint-clip-output-count {
+    min-width: 4.5em;
+    text-align: center;
     font-size: var(--text-sm, 0.85em);
+    font-variant-numeric: tabular-nums;
     color: var(--body-text-color-subdued, inherit);
 }
 
-#minipaint_clipboard_root .minipaint-clip-output-page,
 #minipaint_clipboard_root .minipaint-clip-output-close {
     border: 1px solid var(--border-color-primary, #888);
     background: var(--button-secondary-background-fill, transparent);
@@ -2913,7 +2909,6 @@
     font: inherit;
 }
 
-#minipaint_clipboard_root .minipaint-clip-output-page[disabled] { opacity: 0.45; cursor: default; }
 
 /* The filmstrip. One row, scrolled sideways, at a height that leaves the
    stage the rest - the point of this view is the picture, not the strip. */
@@ -2964,6 +2959,351 @@
     padding: 0 4px;
     font-size: 11px;
     line-height: 1.4;
+}
+
+/* ------------------------------------------------------------------------
+   View Outputs' two views: the gallery and the slideshow.
+
+   The bar runs along the top for both: the view, the order, the shuffle,
+   the search, then the gallery's row and fit or the slideshow's steps, a
+   re-read, what is shown, Close. Under it one of two sections takes the rest
+   of the panel; the other is hidden and holds no media. Every colour is the
+   theme's; every size a finger needs is pinned by the bundle as well.
+   ---------------------------------------------------------------------- */
+#minipaint_clipboard_root .minipaint-clip-outputs-panel [hidden] { display: none !important; }
+
+#minipaint_clipboard_root .minipaint-clip-output-gallery,
+#minipaint_clipboard_root .minipaint-clip-output-show {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-views {
+    flex: 0 0 auto;
+    display: inline-flex;
+    border: 1px solid var(--border-color-primary, #888);
+    border-radius: 999px;
+    overflow: hidden;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-view {
+    min-height: 36px;
+    padding: 4px 14px;
+    border: 0;
+    background: var(--button-secondary-background-fill, transparent);
+    color: var(--button-secondary-text-color, var(--body-text-color, inherit));
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-view + .minipaint-clip-output-view {
+    border-left: 1px solid var(--border-color-primary, #888);
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-view-on {
+    background: var(--button-primary-background-fill, var(--color-accent, #ff7c00));
+    color: var(--button-primary-text-color, CanvasText);
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-sort,
+#minipaint_clipboard_root .minipaint-clip-output-find {
+    min-height: 36px;
+    box-sizing: border-box;
+    padding: 4px 10px;
+    border: 1px solid var(--border-color-primary, #888);
+    border-radius: var(--radius-sm, 6px);
+    background: var(--input-background-fill, var(--background-fill-primary, transparent));
+    color: var(--body-text-color, inherit);
+    font: inherit;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-sort { flex: 0 0 auto; cursor: pointer; }
+
+/* The search gives way first when the bar is narrow. */
+#minipaint_clipboard_root .minipaint-clip-output-find {
+    flex: 1 1 120px;
+    min-width: 80px;
+    max-width: 280px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-tool {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border-color-primary, #888);
+    border-radius: 999px;
+    background: var(--button-secondary-background-fill, transparent);
+    color: var(--button-secondary-text-color, var(--body-text-color, inherit));
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-tool svg { width: 20px; height: 20px; display: block; }
+#minipaint_clipboard_root .minipaint-clip-output-tool[aria-pressed="true"] {
+    border-color: var(--color-accent, #ff7c00);
+    color: var(--color-accent, #ff7c00);
+}
+#minipaint_clipboard_root .minipaint-clip-output-tool[disabled] { opacity: 0.4; cursor: default; }
+#minipaint_clipboard_root .minipaint-clip-output-tool[aria-busy="true"] svg { animation: minipaint-clip-spin 0.9s linear infinite; }
+@keyframes minipaint-clip-spin { to { transform: rotate(360deg); } }
+
+#minipaint_clipboard_root .minipaint-clip-output-perrow {
+    flex: 0 1 200px;
+    min-width: 120px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--body-text-color-subdued, inherit);
+    font-size: var(--text-sm, 0.85em);
+    white-space: nowrap;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-perrow-input {
+    flex: 1 1 auto;
+    min-width: 60px;
+    height: 36px;
+    margin: 0;
+    accent-color: var(--color-accent, #ff7c00);
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-steps {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* The gallery: a scroll box over one track as tall as the whole list, the
+   tiles near the view placed in it by the script, and the scrubber over its
+   right-hand padding. The browser's own bar is not drawn: it would take
+   width from the row as it came and went, and the scrubber is the bar. */
+#minipaint_clipboard_root .minipaint-clip-output-mount {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-grid {
+    position: absolute;
+    inset: 0;
+    box-sizing: border-box;
+    padding: 8px 20px 8px 8px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    border-radius: var(--block-radius, 8px);
+    background: var(--block-background-fill, transparent);
+    outline: none;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-grid::-webkit-scrollbar { display: none; width: 0; height: 0; }
+
+#minipaint_clipboard_root .minipaint-clip-output-track { position: relative; width: 100%; }
+
+#minipaint_clipboard_root .minipaint-clip-output-cell {
+    border: 2px solid transparent;
+    border-radius: var(--block-radius, 8px);
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.12));
+    color: var(--body-text-color, inherit);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-cell:hover,
+#minipaint_clipboard_root .minipaint-clip-output-cell:focus-visible {
+    border-color: var(--border-color-primary, rgba(127, 127, 127, 0.6));
+    outline: none;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-cell.minipaint-clip-output-cell-selected {
+    border-color: var(--color-accent, #ff7c00);
+    box-shadow: 0 0 0 1px var(--color-accent, #ff7c00);
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-cell-box {
+    border-radius: calc(var(--block-radius, 8px) - 2px) calc(var(--block-radius, 8px) - 2px) 0 0;
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.12));
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-cell-poster,
+#minipaint_clipboard_root .minipaint-clip-output-cell-preview {
+    object-fit: contain;
+    display: block;
+}
+
+/* Fill: the tiles filled and the picture cropped to them - the tidier grid,
+   for a folder of one shape. Fit, the default, crops nothing. */
+#minipaint_clipboard_root .minipaint-clip-outputs-panel[data-fit="fill"] .minipaint-clip-output-cell-poster,
+#minipaint_clipboard_root .minipaint-clip-outputs-panel[data-fit="fill"] .minipaint-clip-output-cell-preview {
+    object-fit: cover;
+}
+
+/* A poster that has not arrived is nothing, not a broken picture. */
+#minipaint_clipboard_root .minipaint-clip-output-cell-poster:not([src]) { visibility: hidden; }
+
+/* The clip's length, on the poster. */
+#minipaint_clipboard_root .minipaint-clip-output-cell-time {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    padding: 0 5px;
+    border-radius: 3px;
+    background: var(--background-fill-primary, rgba(0, 0, 0, 0.6));
+    color: var(--body-text-color, inherit);
+    font-size: 11px;
+    line-height: 1.5;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-cell .minipaint-clip-output-guess { pointer-events: none; }
+
+#minipaint_clipboard_root .minipaint-clip-output-cell-name {
+    padding: 4px 6px 0;
+    font-size: var(--text-sm, 0.85em);
+    line-height: 1.3;
+    color: var(--body-text-color-subdued, inherit);
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-cell-selected .minipaint-clip-output-cell-name {
+    color: var(--body-text-color, inherit);
+}
+
+/* A poster the server could not make: the tile says so, and still plays. */
+#minipaint_clipboard_root .minipaint-clip-output-cell-missing .minipaint-clip-output-cell-box::after {
+    content: "\25B6";
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--body-text-color-subdued, inherit);
+    font-size: 1.6em;
+    opacity: 0.6;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-cell-playing.minipaint-clip-output-cell-missing .minipaint-clip-output-cell-box::after { content: none; }
+
+#minipaint_clipboard_root .minipaint-clip-output-tile-missing .minipaint-clip-output-thumb { visibility: hidden; }
+#minipaint_clipboard_root .minipaint-clip-output-tile-missing::after {
+    content: "\25B6";
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--body-text-color-subdued, inherit);
+    opacity: 0.6;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-mount > .minipaint-clip-output-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+}
+
+/* The selected output, under the grid: what it is and what to do with it. */
+#minipaint_clipboard_root .minipaint-clip-output-detail {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    min-height: 40px;
+    color: var(--body-text-color, inherit);
+    font-size: var(--text-sm, 0.85em);
+    overflow: hidden;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-detail .minipaint-clip-output-name {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 40%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-facts,
+#minipaint_clipboard_root .minipaint-clip-output-hint {
+    flex: 0 0 auto;
+    color: var(--body-text-color-subdued, inherit);
+    white-space: nowrap;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-hint { flex: 1 1 auto; min-width: 0; white-space: normal; }
+
+#minipaint_clipboard_root .minipaint-clip-output-detail .minipaint-clip-output-prompt { flex: 1 1 160px; }
+
+#minipaint_clipboard_root .minipaint-clip-output-actions {
+    flex: 0 0 auto;
+    margin-left: auto;
+    display: inline-flex;
+    gap: 6px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-actions .minipaint-clip-output-load { margin-left: 0; }
+
+#minipaint_clipboard_root .minipaint-clip-output-open,
+#minipaint_clipboard_root .minipaint-clip-output-send {
+    min-height: 36px;
+    padding: 4px 14px;
+    border: 1px solid var(--border-color-primary, #888);
+    border-radius: 999px;
+    background: var(--button-secondary-background-fill, transparent);
+    color: var(--button-secondary-text-color, var(--body-text-color, inherit));
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-open {
+    border-color: var(--button-primary-border-color, var(--color-accent, #ff7c00));
+    background: var(--button-primary-background-fill, var(--color-accent, #ff7c00));
+    color: var(--button-primary-text-color, CanvasText);
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-send[disabled] { opacity: 0.5; cursor: progress; }
+
+/* A sideways swipe on the stage is the next or the previous output. */
+#minipaint_clipboard_root .minipaint-clip-output-stage-media { touch-action: pan-y pinch-zoom; }
+
+/* A phone: the bar in three short rows - the view, the order, the shuffle
+   and Close; the search with the fit and a re-read; then the row's slider
+   (or the slideshow's steps) - with what is shown in small under them. */
+@media (max-width: 640px) {
+    #minipaint_clipboard_root .minipaint-clip-outputs-panel.minipaint-clip-fullscreen { padding: 8px; gap: 6px; }
+    #minipaint_clipboard_root .minipaint-clip-output-bar { gap: 6px 8px; }
+    #minipaint_clipboard_root .minipaint-clip-output-views { order: 1; }
+    #minipaint_clipboard_root .minipaint-clip-output-sort { order: 2; flex: 1 1 auto; min-width: 0; }
+    #minipaint_clipboard_root .minipaint-clip-output-tool[data-control="shuffle"] { order: 3; }
+    #minipaint_clipboard_root .minipaint-clip-output-close { order: 4; }
+    #minipaint_clipboard_root .minipaint-clip-output-find { order: 5; flex: 1 1 140px; max-width: none; }
+    #minipaint_clipboard_root .minipaint-clip-output-tool[data-control="fit"] { order: 6; }
+    #minipaint_clipboard_root .minipaint-clip-output-tool[data-control="refresh"] { order: 7; }
+    #minipaint_clipboard_root .minipaint-clip-output-perrow { order: 8; flex: 1 1 100%; }
+    #minipaint_clipboard_root .minipaint-clip-output-steps { order: 8; flex: 1 1 100%; justify-content: center; }
+    #minipaint_clipboard_root .minipaint-clip-output-status { order: 9; flex: 1 1 100%; font-size: 11px; }
+    #minipaint_clipboard_root .minipaint-clip-output-grid { padding: 6px 18px 6px 6px; }
+    #minipaint_clipboard_root .minipaint-clip-output-detail .minipaint-clip-output-name { max-width: 100%; }
+    /* The stage's caption wraps, so Load is never pushed off its edge. */
+    #minipaint_clipboard_root .minipaint-clip-output-caption { flex-wrap: wrap; row-gap: 4px; }
+    #minipaint_clipboard_root .minipaint-clip-output-caption .minipaint-clip-output-name {
+        flex: 1 1 100%; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
 }
 
 #minipaint_clipboard_root .minipaint-clip-outputs-open { margin-top: 4px; }

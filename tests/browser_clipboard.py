@@ -2250,18 +2250,28 @@ class _HeldPosters:
     def __init__(self, page):
         self.page = page
         self.held = []
+        self.holding = True
         self.page.route("**/minipaint-clipboard/output/*/poster*", self._hold)
 
     def _hold(self, route):
-        self.held.append(route)
+        if self.holding:
+            self.held.append(route)
+        else:
+            route.continue_()
 
     def release(self):
-        for route in self.held:
+        # Let every later request through first, then answer the held ones,
+        # then unroute: a route still held at unroute dies as a cancelled
+        # future (CLAUDE.md, the route trap), and the page asks for more as
+        # the first answers land.
+        self.holding = False
+        while self.held:
+            route = self.held.pop(0)
             try:
                 route.continue_()
             except Exception:
                 pass
-        self.held = []
+        self.page.wait_for_timeout(300)
         self.page.unroute("**/minipaint-clipboard/output/*/poster*")
 
 
@@ -2462,8 +2472,31 @@ def check_view_outputs_has_a_gallery(r: Results, page) -> None:
         page.evaluate(tab, "Mini Paint")
         page.wait_for_timeout(700)
         away = page.evaluate("""() => { const v = document.querySelector('video.minipaint-clip-output-cell-preview');
-            return { paused: !v || v.paused, state: window.minipaintClipboard.outputsState().playing }; }""")
-        r.check("on another of Forge's tabs, the gallery's video is paused", away == {"paused": True, "state": False}, str(away))
+            return { held: !!v && !!v.getAttribute('src'), state: window.minipaintClipboard.outputsState().playing }; }""")
+        r.check("on another of Forge's tabs, the gallery's video lets go of its file - not paused holding it",
+                away == {"held": False, "state": False}, str(away))
+
+        # No live connection: away, nothing of the view's is still out, and
+        # nothing is asked for while it waits - no stream, no polling.
+        quiet = {"started": 0, "open": set()}
+
+        def started(request):
+            if "/minipaint-clipboard/" in request.url:
+                quiet["started"] += 1
+                quiet["open"].add(request)
+
+        def ended(request):
+            quiet["open"].discard(request)
+
+        page.on("request", started)
+        page.on("requestfinished", ended)
+        page.on("requestfailed", ended)
+        page.wait_for_timeout(3000)
+        page.remove_listener("request", started)
+        page.remove_listener("requestfinished", ended)
+        page.remove_listener("requestfailed", ended)
+        r.check("no live connection: in three seconds away, the view asks for nothing and holds nothing open",
+                quiet["started"] == 0 and not quiet["open"], f"{quiet['started']} asked, {len(quiet['open'])} open")
         page.evaluate(tab, "Clipboard")
         page.wait_for_function("id => { const s = window.minipaintClipboard.outputsState(); return s.preview === id && s.playing; }",
                                arg=second, timeout=8000)
@@ -2485,16 +2518,30 @@ def check_view_outputs_has_a_gallery(r: Results, page) -> None:
                 show["preview"] == "" and show["videos"] == 1, str((show["preview"], show["videos"])))
         r.check("the slideshow steps through the gallery's own list, in its order",
                 page.evaluate("() => document.querySelector('.minipaint-clip-output-count').textContent.trim()") == "9 of 150")
-        # The slideshow's player, which has sound, pauses on another tab too.
+        # The slideshow's player, which has sound, lets go on another tab too,
+        # and comes back where it was: paused at a known moment, it comes back
+        # paused there; playing, it comes back playing.
+        page.evaluate("""() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
+            v.pause(); v.currentTime = 1.0; }""")
+        page.wait_for_timeout(400)
         page.evaluate(tab, "Mini Paint")
         page.wait_for_timeout(700)
-        r.check("on another of Forge's tabs, the slideshow's video is paused as well",
+        r.check("on another of Forge's tabs, the slideshow's video lets go of its file as well",
                 page.evaluate("""() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
-                    return !!v && v.paused; }""") is True)
+                    return !!v && v.paused && !v.getAttribute('src'); }""") is True)
         page.evaluate(tab, "Clipboard")
-        r.check("and back on the Clipboard tab it plays again",
+        came = _until(page, """() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
+            return !!v && !!v.getAttribute('src') && v.readyState >= 1 && Math.abs(v.currentTime - 1.0) < 0.05; }""", timeout=8000)
+        r.check("and back on the Clipboard tab it is where it was, paused as it was left",
+                came and page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').paused") is True)
+        page.evaluate("() => document.querySelector('.minipaint-clip-output-stage-media').play()")
+        page.wait_for_timeout(300)
+        page.evaluate(tab, "Mini Paint")
+        page.wait_for_timeout(500)
+        page.evaluate(tab, "Clipboard")
+        r.check("and left playing, it plays again on the return",
                 _until(page, """() => { const v = document.querySelector('.minipaint-clip-output-stage-media');
-                    return !!v && !v.paused; }""", timeout=8000))
+                    return !!v && !!v.getAttribute('src') && !v.paused; }""", timeout=8000))
         page.keyboard.press("Escape")
         came = _until(page, "id => { const s = window.minipaintClipboard.outputsState(); return s.view === 'gallery' && s.preview === id && s.playing; }",
                       arg=target)
@@ -2880,7 +2927,7 @@ def check_the_views_stand_beside_a_side_tab_bar(r: Results, page) -> None:
         # Not rails: a launcher pinned to the left edge, and a panel down the right.
         page.evaluate("""() => {
             const launcher = document.createElement('div'); launcher.id = 'a-launcher';
-            launcher.style.cssText = 'position:fixed;left:0;top:45%;width:44px;height:44px;z-index:1200;background:#345';
+            launcher.style.cssText = 'position:fixed;left:0;top:calc(50% - 22px);width:44px;height:44px;z-index:1200;background:#345';
             const side = document.createElement('div'); side.id = 'a-side-panel';
             side.style.cssText = 'position:fixed;right:0;top:0;bottom:0;width:400px;z-index:1200;background:#543;pointer-events:none';
             document.body.appendChild(launcher); document.body.appendChild(side); }""")

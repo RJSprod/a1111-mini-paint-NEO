@@ -227,7 +227,7 @@ window.minipaintClipboard = (function () {
             player: null, controls: null, sending: false, swiped: 0,
             //: The tab is away (another Forge tab on screen), and whether that
             //: paused the stage, so its return plays it again.
-            away: false, stageAway: false,
+            away: false, stageAway: null,
             //: The server said it has no decoder: posters are the page's.
             posterless: false,
             visibilityWatch: null,
@@ -5488,46 +5488,55 @@ window.minipaintClipboard = (function () {
     }
 
     /**
-     * Another of Forge's tabs on screen, with the view still open: the
-     * Clipboard tab's panel is not displayed and neither is this one, but a
-     * <video> in a box that is not displayed goes on playing - with sound, on
-     * the stage. Both are paused while the tab is away; the preview plays
-     * again when it is back, and so does the stage if this paused it.
+     * Away: another of Forge's tabs on screen with the view still open, or
+     * the page hidden. A <video> in a box nobody can see goes on playing -
+     * with sound, on the stage - and a paused one can keep its download open,
+     * half read, for as long as the page lives: the user's word for this
+     * extension is "no live connection". So away, both let go of their file:
+     * the tile's preview, which starts again from its first frame on the
+     * return, and the stage's player, which comes back at the moment it left,
+     * playing if it was.
      */
-    function onOutputsShown() {
+    function syncOutputsAway() {
         const O = S.outputs;
         const panel = O.dom ? O.dom.panel : null;
         if (!panel || !outputsOpen()) { return; }
-        const shown = panel.offsetWidth > 0 && panel.offsetHeight > 0;
-        if (shown === !O.away) { return; }
-        O.away = !shown;
+        const away = !!document.hidden || !(panel.offsetWidth > 0 && panel.offsetHeight > 0);
+        if (away === !!O.away) { return; }
+        O.away = away;
         const stage = O.player;
-        if (!shown) {
-            const preview = O.gallery.preview;
-            if (preview && !preview.paused) { try { preview.pause(); } catch (e) { /* torn down */ } }
-            O.stageAway = !!stage && !stage.paused;
-            if (O.stageAway) { try { stage.pause(); } catch (e) { /* torn down */ } }
-            note("outputs: paused while the tab is away");
+        if (away) {
+            releasePreview();
+            if (stage && stage.getAttribute("src") && !O.stageAway) {
+                O.stageAway = { id: O.chosen, time: stage.currentTime || 0, playing: !stage.paused && !stage.ended };
+                try {
+                    stage.pause();
+                    stage.removeAttribute("src");
+                    stage.load();
+                } catch (e) { /* torn down */ }
+            }
+            note("outputs: let go of every video while " + (document.hidden ? "the page is hidden" : "another tab is on screen"));
             return;
         }
         startPreview();
-        if (O.stageAway && stage && stage.isConnected && O.view === "slideshow") {
-            const started = stage.play();
-            if (started && typeof started.catch === "function") { started.catch(function () { /* refused */ }); }
+        const left = O.stageAway;
+        O.stageAway = null;
+        const item = left ? O.byId.get(left.id) : null;
+        if (left && item && stage && stage.isConnected && O.view === "slideshow" && O.chosen === left.id) {
+            stage.addEventListener("loadedmetadata", function () {
+                try { stage.currentTime = left.time; } catch (e) { /* not seekable yet */ }
+                if (left.playing) {
+                    const started = stage.play();
+                    if (started && typeof started.catch === "function") { started.catch(function () { /* refused */ }); }
+                }
+            }, { once: true });
+            stage.src = item.url;
         }
-        O.stageAway = false;
     }
 
-    /** The page hidden: the preview stops, and starts again on return. */
-    function onOutputsVisibility() {
-        if (!outputsOpen()) { return; }
-        if (document.hidden) {
-            const video = S.outputs.gallery.preview;
-            if (video && !video.paused) { try { video.pause(); } catch (e) { /* torn down */ } }
-        } else {
-            startPreview();
-        }
-    }
+    function onOutputsShown() { syncOutputsAway(); }
+
+    function onOutputsVisibility() { syncOutputsAway(); }
 
     /**
      * Open the view over the whole window.
@@ -5574,7 +5583,7 @@ window.minipaintClipboard = (function () {
         const panel = outputsPanel();
         const O = S.outputs;
         O.away = false;
-        O.stageAway = false;
+        O.stageAway = null;
         releasePreview();
         stopPosters();
         endOutputScrub();

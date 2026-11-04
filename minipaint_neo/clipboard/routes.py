@@ -634,8 +634,8 @@ def outputs_page(page: typing.Any = 0, size: typing.Any = PAGE_SIZE, whole: bool
         return {
             "ok": True,
             "whole": True,
-            # Which decoder makes the posters here ("pyav", "opencv", or "" -
-            # the page then takes each first frame itself), for the journal.
+            # Which readers make the posters here, in the order each file is
+            # tried with ("pyav+ffmpeg+opencv"; "" for none), for the journal.
             "posters": posters_module.decoder(),
             "total": total,
             "truncated": max(0, total - len(shown)),
@@ -889,66 +889,6 @@ def _output_poster(request: typing.Any) -> typing.Any:
     if duration > 0:
         headers["X-Minipaint-Duration"] = f"{duration:.3f}"
     return Response(content=data, media_type=mime, headers=headers)
-
-
-async def _output_poster_put(request: typing.Any) -> typing.Any:
-    """A poster the page made itself, from the video's first frame, given back.
-
-    The server could not make it - no decoder here, or one that will not read
-    this file - and the browser, which plays the video, could. Kept as a poster
-    made here is (``posters.store``): checked to be a picture, made small and
-    encoded again, under the file's CURRENT version only (``?v=``; a page with
-    an older listing is answered 409 and keeps its own copy). A poster already
-    kept for this version is left as it is.
-
-    The body is read here, bounded; the rest runs in the thread pool.
-    """
-    from starlette.concurrency import run_in_threadpool
-
-    from . import posters
-
-    if not _signed_in(request):
-        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
-    try:
-        declared = int(request.headers.get("content-length") or 0)
-    except ValueError:
-        declared = 0
-    if declared > posters.UPLOAD_MAX_BYTES:
-        return _json({"ok": False, "code": errors.OUTPUT_POSTER_INVALID, "message": errors.message(errors.OUTPUT_POSTER_INVALID)}, 413)
-    body = bytearray()
-    async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > posters.UPLOAD_MAX_BYTES:
-            return _json({"ok": False, "code": errors.OUTPUT_POSTER_INVALID, "message": errors.message(errors.OUTPUT_POSTER_INVALID)}, 413)
-    file_id = request.path_params.get("file_id", "")
-    wanted = str(request.query_params.get("v", "") or "")
-    try:
-        duration = float(request.query_params.get("duration", "0") or 0)
-    except ValueError:
-        duration = 0.0
-
-    def keep() -> typing.Tuple[dict, int]:
-        path = outputs.path_of(file_id)
-        if path is None:
-            return {"ok": False, "code": errors.CLIPBOARD_ASSET_UNKNOWN, "message": "That output is no longer there."}, 404
-        try:
-            info = path.stat()
-        except OSError:
-            return {"ok": False, "code": errors.CLIPBOARD_ASSET_UNKNOWN, "message": "That output is no longer there."}, 404
-        if wanted != posters.version_of(info):
-            return {"ok": False, "code": errors.OUTPUT_POSTER_STALE, "message": errors.message(errors.OUTPUT_POSTER_STALE)}, 409
-        try:
-            kept = posters.posters().store(file_id, info, bytes(body), duration)
-        except IntegrationError as error:
-            return error.as_dict(), 415
-        return {"ok": True, "kept": bool(kept)}, 200
-
-    try:
-        answer, status = await run_in_threadpool(keep)
-    except Exception as error:
-        scrub.console(f"an output poster given by a page could not be kept ({type(error).__name__}).", _LOG_PREFIX)
-        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
-    return _json(answer, status)
 
 
 async def _enhance_settings(request: typing.Any) -> typing.Any:
@@ -1427,8 +1367,6 @@ def install(app: typing.Any) -> None:
             Route(OUTPUT_FILE_ROUTE, endpoint=_output_file, methods=["GET", "HEAD"]),
             Route(OUTPUT_SETTINGS_ROUTE, endpoint=_output_settings, methods=["POST"]),
             Route(OUTPUT_POSTER_ROUTE, endpoint=_output_poster, methods=["GET"]),
-            # The same address, PUT: a first frame the page made itself.
-            Route(OUTPUT_POSTER_ROUTE, endpoint=_output_poster_put, methods=["PUT"]),
             Route(IMPORT_ROUTE, endpoint=_import, methods=["POST"]),
             Route(SEND_ROUTE, endpoint=_send, methods=["POST"]),
             Route(INTERCEPT_ROUTE, endpoint=_intercept, methods=["POST"]),

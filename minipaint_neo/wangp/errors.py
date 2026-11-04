@@ -81,10 +81,6 @@ OUTPUT_POSTER_UNAVAILABLE = "OUTPUT_POSTER_UNAVAILABLE"
 #: ... and of a file that gave no frame: one WanGP is still writing, or one
 #: that is not the video its name says.
 OUTPUT_POSTER_UNREADABLE = "OUTPUT_POSTER_UNREADABLE"
-#: ... and a poster a page gave back that is not a picture this takes, or is
-#: for a version of the file that is no longer the one on disk.
-OUTPUT_POSTER_INVALID = "OUTPUT_POSTER_INVALID"
-OUTPUT_POSTER_STALE = "OUTPUT_POSTER_STALE"
 QUEUE_BUSY = "QUEUE_BUSY"
 QUEUE_REQUEST_REFUSED = "QUEUE_REQUEST_REFUSED"
 ADMISSION_UNCONFIRMED = "ADMISSION_UNCONFIRMED"
@@ -238,10 +234,8 @@ MESSAGES: dict[str, str] = {
     CLIPBOARD_NOT_CONFIGURED: "Clipboard has no storage folder yet; choose one in the Clipboard tab.",
     CLIPBOARD_ASSET_UNKNOWN: "That image is no longer in the Clipboard folder; press Refresh.",
     OUTPUT_NO_SETTINGS: "WanGP reads settings only from an MP4, MKV or MOV video or a picture it made; this file has none it can load.",
-    OUTPUT_POSTER_UNAVAILABLE: "This Forge has no video decoder (PyAV or OpenCV), so the gallery draws its posters in the browser.",
+    OUTPUT_POSTER_UNAVAILABLE: "This Forge has no way to read a video's first frame (PyAV, ffmpeg or OpenCV), so View Outputs shows no posters.",
     OUTPUT_POSTER_UNREADABLE: "No frame could be read from that output; WanGP may still be writing it.",
-    OUTPUT_POSTER_INVALID: "That poster was not a picture of a size View Outputs keeps.",
-    OUTPUT_POSTER_STALE: "That output has changed since its poster was made; it is made again from the new file.",
     CLIPBOARD_ASSET_OUTSIDE_ROOT: "That image is not inside the Clipboard folder, so it was not used.",
     QUEUE_BUSY: "WanGP is still taking the previous queue request; try again in a moment.",
     QUEUE_REQUEST_REFUSED: "WanGP did not take the queue request.",

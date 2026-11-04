@@ -317,6 +317,16 @@ tallest block. The Clipboard's request column, held to the window since
 `browser/minipaint_clipboard.js`); any other column given a window needs the
 same, and a check that reads only "is it scrollable" passes without it.
 
+**A Gradio block is `width: 100%`, and a fixed box with a width drops `right`.**
+The Clipboard's full-window views are Gradio blocks made `position: fixed` with
+`inset` from what the page pins at its edges. Gradio's own rule gives every block
+`width: 100%`, and a fixed box with a width keeps it and ignores `right`; its
+height likewise: beside the Forge Assistant's side tab bar (Transpose View) View
+Outputs ran off the window's right edge by the bar's width, and under a bar along
+the top it had always run off the bottom by the bar's height - which "reaches the
+bottom" (`>= vh - 2`) passed. The four views say `width: auto; height: auto` with
+their insets, and their checks ask for the far edges exactly.
+
 **Never observe the box you resize.** The same sizer watched the column and
 wrote a custom property on the column, which is a ResizeObserver loop waiting
 for a layout that oscillates. It watches only boxes it never sizes, and writes
@@ -809,16 +819,26 @@ read from the wheel, never on the user's machine: if WanGP still pins too much,
 WanGP's own console line *Switching to partial pinning* (or its absence) and the
 `reserved RAM:` line in the `runtime` column of `logs/wangp-log.txt` are the
 first things to look at.
-View Outputs' gallery (2026-11-03) draws every output as a tile with a poster
-made on the server by `minipaint_neo/clipboard/posters.py` with PyAV - Forge
-Neo's own `av` (17.1.0 in its requirements, the version `tests/requirements.txt`
-pins) - and OpenCV as the fallback. It has been checked with PyAV 17.1.0 on
-VP8 WebM, MPEG-4 Part 2 and H.264 MP4 and on 5,000 outputs in Chromium, never
-against the user's own WanGP folder or in LibreWolf: if the tiles show the ▶
-placeholder instead of pictures, a poster's own answer
-(`/minipaint-clipboard/output/<id>/poster`, its code) and the posters folder in
-the extension's data (`clipboard-output-posters/`) are the first things to look
-at; a gallery drawing `<video>` posters says the server had no decoder
-(`OUTPUT_POSTER_UNAVAILABLE`, and the page journal's `outputs:` line). The
+View Outputs' gallery (2026-11-03) draws every output as a tile whose poster is
+its video's first frame (since 2026-11-04; the frame at one second before), read
+on the server only - the user's word: "It should not require the video to be sent
+to the browser to get the first frame. I need this to be fast. On a remote
+connection to my host." - by `minipaint_neo/clipboard/posters.py` with PyAV
+(Forge Neo's own `av`, 17.1.0 in its requirements, the version
+`tests/requirements.txt` pins), else ffmpeg - WanGP's `imageio-ffmpeg` binary in
+its environment (`runtime.prefix`), Forge's, or the PATH's - else OpenCV, file by
+file. The user's first run (2026-11-04) showed no thumbnails while playback
+worked; why the server made none there was never seen. If tiles still show ▶,
+Forge's console line *an output's first frame could not be read by ...* (once per
+reader and reason) and the page journal's `outputs:` lines (which readers the
+server has, why a tile is marked) are the first things to look at, then a
+poster's own answer (`/minipaint-clipboard/output/<id>/poster?r=first`, its code)
+and the folder `clipboard-output-first-frames/` in the extension's data. Checked
+with PyAV 17.1.0 and the system ffmpeg on VP8 WebM, MPEG-4 Part 2 and H.264 MP4 and
+on 5,000 outputs in Chromium, never against the user's own WanGP folder, WanGP's
+own ffmpeg or in LibreWolf. The views' place beside a side tab bar has been checked
+against a copy of the Model Chain theme's rail rules (`RAIL_STAND_IN_CSS` in
+`tests/browser_clipboard.py`), never the theme itself: if a view sits under the
+rail, the root's `--minipaint-clip-left` / `-right` say what was measured. The
 order, the shuffle and the search are the page's own, over the one listing;
 nothing about them is ever written on the host or in WanGP's folder.

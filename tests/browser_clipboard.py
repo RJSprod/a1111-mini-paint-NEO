@@ -2242,6 +2242,33 @@ def _seed_gallery(folder, count):
     return made
 
 
+class _HeldPosters:
+    """Every poster request held at the browser until ``release``: the requests
+    out together are what the page asked for together, whatever the server's
+    speed. Answered in Playwright calls only (see CLAUDE.md, the route trap)."""
+
+    def __init__(self, page):
+        self.page = page
+        self.held = []
+        self.page.route("**/minipaint-clipboard/output/*/poster*", self._hold)
+
+    def _hold(self, route):
+        self.held.append(route)
+
+    def release(self):
+        for route in self.held:
+            try:
+                route.continue_()
+            except Exception:
+                pass
+        self.held = []
+        self.page.unroute("**/minipaint-clipboard/output/*/poster*")
+
+
+def _hold_posters(page):
+    return _HeldPosters(page)
+
+
 def _gallery_state(page):
     return page.evaluate("() => window.minipaintClipboard.outputsState()")
 
@@ -2254,9 +2281,7 @@ def _open_gallery_fresh(page):
         return s.view !== 'gallery' || (s.columns > 0 && s.rendered > 0); }""", timeout=8000)
 
 
-#: Read the middle pixel of what a tile's poster shows - a picture or a canvas -
-#: through the canvas read-back the page started with, which a check may have
-#: replaced to stand in for a browser that guards it.
+#: Read a pixel of what a tile's poster shows.
 POSTER_PIXEL_JS = """id => {
     const cell = document.querySelector('.minipaint-clip-output-cell[data-output="' + id + '"]');
     const poster = cell ? cell.querySelector('.minipaint-clip-output-cell-poster') : null;
@@ -2265,8 +2290,7 @@ POSTER_PIXEL_JS = """id => {
     if (!w || !h) { return null; }
     const c = document.createElement('canvas'); c.width = w; c.height = h;
     const x = c.getContext('2d'); x.drawImage(poster, 0, 0);
-    const read = window.__realGetImageData || CanvasRenderingContext2D.prototype.getImageData;
-    const d = read.call(x, Math.floor(w * 0.8), Math.floor(h * 0.8), 1, 1).data;
+    const d = x.getImageData(Math.floor(w * 0.8), Math.floor(h * 0.8), 1, 1).data;
     return { tag: poster.tagName, rgb: [d[0], d[1], d[2]], src: (poster.getAttribute('src') || '').slice(0, 5) };
 }"""
 
@@ -2673,79 +2697,56 @@ def check_view_outputs_has_a_gallery(r: Results, page) -> None:
         page.evaluate("() => window.minipaintClipboard.setOutputsView('gallery', true)")
         page.evaluate("() => window.minipaintClipboard.closeOutputs()")
 
-        # -- a Forge that cannot make a poster ------------------------------------------
-        # New versions of every file, so no poster is in the browser's cache
-        # or the page's, and the server is asked - and says it has no decoder.
-        # The browser plays these videos, so it takes each first frame itself.
-        posters.reset_for_tests("")
+        # -- more posters at once over HTTP/2 -------------------------------------------
+        # A remote connection costs round trips, not connections, once every
+        # request shares one HTTP/2 connection. This page arrived over HTTP/1.1,
+        # so it asks three at a time; standing in a page that arrived over h2,
+        # it asks eight.
+        r.check("over HTTP/1.1 three posters are asked for at a time, leaving the page's other connections alone",
+                _gallery_state(page)["concurrency"] == 3)
 
-        def new_versions(ahead):
+        def bump(ahead):
             later = time.time() + ahead
             for path in folder.iterdir():
                 os.utime(path, (later, later))
             outputs.forget_listing_for_tests()
 
-        new_versions(5)
-        page.evaluate("() => { const s = window.minipaintClipboard; s.closeOutputs(); }")
-        page.reload(wait_until="load")
-        page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
-        time.sleep(2)
-        open_clipboard(page)
-        page.evaluate("() => window.minipaintClipboard.setOutputsSort('newest')")
-        _open_gallery_fresh(page)
-        took = _until(page, """() => { const s = window.minipaintClipboard.outputsState();
-            return s.posterless && s.visible.length > 0 && s.captured >= s.visible.length && s.inflight.length === 0; }""",
-                      timeout=30000)
-        taken = _gallery_state(page)
-        r.check("on a Forge with no video decoder the browser takes every tile's first frame itself, in view only",
-                took and taken["captured"] == len(taken["visible"]) and taken["captures"] <= len(taken["visible"]) + 2,
-                str({key: taken[key] for key in ("captures", "captured", "failed")}))
-        pixel = page.evaluate(POSTER_PIXEL_JS, taken["visible"][0])
-        r.check("each one the video's first frame, as a picture in its tile", _first_frame(pixel) and pixel["tag"] == "IMG",
-                str(pixel))
-        page.wait_for_function("n => window.minipaintClipboard.outputsState().given >= n", arg=len(taken["visible"]),
-                               timeout=15000)
-        r.check("and given to the server, which keeps them as its own posters",
-                posters.posters().stored >= len(taken["visible"]), str(posters.posters().stored))
+        bump(5)
         page.evaluate("() => window.minipaintClipboard.closeOutputs()")
-        page.reload(wait_until="load")
-        page.wait_for_selector("#tabs .tab-nav button", timeout=30000)
-        time.sleep(2)
-        open_clipboard(page)
-        _open_gallery_fresh(page)
-        cached = _until(page, """() => { const s = window.minipaintClipboard.outputsState();
-            return s.visible.length > 0 && s.posters >= s.visible.length && s.inflight.length === 0; }""", timeout=15000)
-        again = _gallery_state(page)
-        r.check("so the next look, from a fresh page, is the server's cache: no frame taken again",
-                cached and again["captures"] == 0, str({key: again[key] for key in ("captures", "posters", "done")}))
+        page.evaluate("""() => { window.__realEntries = performance.getEntriesByType.bind(performance);
+            performance.getEntriesByType = (kind) => kind === 'navigation' ? [{ nextHopProtocol: 'h2' }] : window.__realEntries(kind); }""")
+        server = _hold_posters(page)
+        try:
+            _open_gallery_fresh(page)
+            together = _until(page, "() => window.minipaintClipboard.outputsState().inflight.length >= 8", timeout=8000)
+            out = _gallery_state(page)
+        finally:
+            server.release()
+        r.check("over HTTP/2 eight are asked for together, on the one connection every request shares",
+                together and out["concurrency"] == 8 and len(out["inflight"]) == 8, str((out["concurrency"], len(out["inflight"]))))
+        page.evaluate("() => { performance.getEntriesByType = window.__realEntries; delete window.__realEntries; }")
+        _until(page, "() => window.minipaintClipboard.outputsState().inflight.length === 0", timeout=10000)
         page.evaluate("() => window.minipaintClipboard.closeOutputs()")
 
-        # A browser that guards what a page reads back from a canvas (LibreWolf,
-        # Firefox's fingerprinting defence): what it reads is not what it drew.
-        new_versions(10)
-        page.evaluate("""() => {
-            window.__realGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-            CanvasRenderingContext2D.prototype.getImageData = function () {
-                const data = window.__realGetImageData.apply(this, arguments);
-                for (let i = 0; i < data.data.length; i += 4) { data.data[i] = (data.data[i] + 1 + (i % 7)) % 256; }
-                return data;
-            };
-        }""")
-        stored = posters.posters().stored
+        # -- a Forge that cannot read a first frame ---------------------------------------
+        # New versions of every file, so no poster is in the browser's cache or
+        # the page's, and a server that has no reader at all. The tiles are
+        # marked - and no video is fetched to draw one: "It should not require
+        # the video to be sent to the browser to get the first frame."
+        posters.reset_for_tests("")
+        bump(10)
+        asked.clear()
         _open_gallery_fresh(page)
-        guarded = _until(page, """() => { const s = window.minipaintClipboard.outputsState();
-            return s.visible.length > 0 && s.captured >= s.visible.length && s.inflight.length === 0; }""", timeout=30000)
-        shown = _gallery_state(page)
-        pixel = page.evaluate(POSTER_PIXEL_JS, shown["visible"][0])
-        r.check("such a browser still shows every first frame - drawn on a canvas in the tile",
-                guarded and _first_frame(pixel) and pixel["tag"] == "CANVAS"
-                and all(tag == "CANVAS" for tag in shown["drawnAs"][:len(shown["visible"])]), str(pixel))
-        page.wait_for_timeout(800)
-        r.check("and gives none to the server, where a scrambled one would be every other browser's poster",
-                _gallery_state(page)["guarded"] >= len(shown["visible"]) and posters.posters().stored == stored,
-                f"stored {posters.posters().stored - stored} more")
-        page.evaluate("""() => { if (window.__realGetImageData) {
-            CanvasRenderingContext2D.prototype.getImageData = window.__realGetImageData; delete window.__realGetImageData; } }""")
+        marked = _until(page, """() => { const s = window.minipaintClipboard.outputsState();
+            return s.posterless && s.visible.length > 0 && s.inflight.length === 0
+                && document.querySelectorAll('.minipaint-clip-output-cell-missing').length >= s.visible.length; }""",
+                        timeout=15000)
+        r.check("on a Forge with no way to read a first frame, every tile in view is marked",
+                marked, str({key: _gallery_state(page)[key] for key in ("failed", "posterless")}))
+        r.check("and not one video is fetched to draw a poster instead: only the posters' own small answers",
+                not any("/output/" in url and "/poster" not in url for _m, url in asked)
+                and any("/poster" in url for _m, url in asked),
+                str([url for _m, url in asked if "/output/" in url and "/poster" not in url][:2]))
         page.evaluate("() => window.minipaintClipboard.closeOutputs()")
     finally:
         page.remove_listener("request", heard)

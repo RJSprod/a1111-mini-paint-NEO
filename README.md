@@ -567,12 +567,16 @@ in one press; jobs already being sent finish, and nothing in WanGP's own queue i
 
 **View Outputs** (under the queue). Every video in WanGP's output folder - its subfolders
 included, the ones this tab asked for and the ones made in WanGP itself, each once - over the
-whole window, below the tab bar and never under it, as a **gallery** or a **slideshow**, one
+whole window, below the tab bar and never under it, or beside it when the Forge Assistant's
+Transpose View runs the tab bar down a side (as do the system prompt editor, History and
+Archives), as a **gallery** or a **slideshow**, one
 list in one order between them, switched on the bar along the top. The **gallery** (where it
 opens until the bar says otherwise) is the whole folder as a grid, drawn the way an archive
-is: every video a tile, only the rows near the view in the page, and each tile's poster - one
-frame, made once on the server with Forge Neo's PyAV and kept by the browser for a year -
-asked for in view first, so a fling or the scrubber on its edge asks for nothing on the way.
+is: every video a tile, only the rows near the view in the page, and each tile's poster - the
+video's **first frame**, read once on the server - by Forge Neo's PyAV, else by WanGP's own
+ffmpeg, else OpenCV; the page never fetches a video to draw a tile - and kept there and by the
+browser for a year, asked for only for the tiles in view (and the row either side), eight at a
+time over HTTP/2, so a fling or the scrubber on its edge asks for nothing on the way.
 **A tap** selects a video and plays it right there in its tile, muted and on loop (a tap on it
 again pauses it); **a double tap** - or a right click, a long press or Enter - opens it in the
 slideshow, and Escape comes back. Only one video ever plays: the tile's preview and the

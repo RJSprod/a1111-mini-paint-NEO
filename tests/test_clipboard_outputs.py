@@ -766,62 +766,105 @@ def poster_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
         posters.reset_for_tests()
     gone = client.get("/minipaint-clipboard/output/deadbeefdeadbeef/poster")
     r.check("an id that is no output is a 404", gone.status_code == 404, str(gone.status_code))
-    poster_upload_checks(r, client, folder, listed, broken)
+    poster_reader_checks(r, client, folder)
 
 
-def poster_upload_checks(r: Results, client, folder: pathlib.Path, listed: dict, broken: pathlib.Path) -> None:
-    """A first frame the browser took itself, given back to be kept.
+def poster_reader_checks(r: Results, client, folder: pathlib.Path) -> None:
+    """The first frame is read on the server, always, by the first reader that
+    can: PyAV, then ffmpeg - the one WanGP wrote the file with - then OpenCV.
 
-    The server could not make this poster - no decoder at all here, or one
-    that will not read the file - and the browser, which plays the video, can.
-    What it gives back is kept as a poster made here is: checked, made small,
-    encoded again, under the file's current version only, and answered from
-    then on whatever the server can decode.
+    Asked for: "It should not require the video to be sent to the browser to
+    get the first frame. I need this to be fast. On a remote connection to my
+    host." So a file PyAV will not read is not the browser's to read: it is
+    WanGP's own ffmpeg's, found in WanGP's environment, which wrote it.
     """
+    import contextlib
     import io
+    import shutil
 
     from PIL import Image
 
     from minipaint_neo.clipboard import posters
+    from minipaint_neo.wangp import config as wangp_config
 
-    item = listed["broken.mp4"]
-    address = f"/minipaint-clipboard/output/{item['id']}/poster"
-    frame = io.BytesIO()
-    Image.new("RGB", (1280, 720), (12, 200, 40)).save(frame, format="JPEG", quality=90)
-    posters.reset_for_tests("")
+    system = shutil.which("ffmpeg")
+    if not system or not _clip(folder / "second.mp4", seconds=1.5, size=(960, 540)):
+        r.check("(no ffmpeg or no PyAV here, so the readers past PyAV are not checked)", True)
+        return
+    clock_at = (folder / "real.mp4").stat().st_mtime + 60
+
+    def version(step):
+        """A new version of the file - its time moved on - so each step below
+        is a poster made, not one the steps before left in the cache."""
+        os.utime(folder / "second.mp4", (clock_at + step, clock_at + step))
+        outputs.forget_listing_for_tests()
+        item = {one["name"]: one for one in routes.outputs_page(whole=True)["items"]}["second.mp4"]
+        return f"/minipaint-clipboard/output/{item['id']}/poster?r=first&v={item['v']}"
+
+    address = version(0)
+
+    # WanGP's environment, as Mini Paint's WanGP settings name it, holding
+    # imageio-ffmpeg's binary the way pip lays it out.
+    prefix = folder.parent / "wangp-env"
+    binaries = prefix / "lib" / "python3.11" / "site-packages" / "imageio_ffmpeg" / "binaries"
+    binaries.mkdir(parents=True, exist_ok=True)
+    theirs = binaries / "ffmpeg-linux-x86_64-v7.0.2"
     try:
-        r.check("(with no decoder here, the server cannot make this one itself)",
-                client.get(address + f"?v={item['v']}").status_code == 501)
-        stale = client.put(address + "?v=1-2", content=frame.getvalue(), headers={"Content-Type": "image/jpeg"})
-        r.check("a frame given for a version of the file that is not the one on disk is refused, 409",
-                stale.status_code == 409 and stale.json().get("code") == "OUTPUT_POSTER_STALE", stale.text[:120])
-        junk = client.put(address + f"?v={item['v']}", content=b"not a picture" * 10, headers={"Content-Type": "image/jpeg"})
-        r.check("and one that is not a picture, 415, keeping nothing",
-                junk.status_code == 415 and junk.json().get("code") == "OUTPUT_POSTER_INVALID"
-                and client.get(address + f"?v={item['v']}").status_code == 501, junk.text[:120])
-        huge = client.put(address + f"?v={item['v']}", content=b"0" * (posters.UPLOAD_MAX_BYTES + 1),
-                          headers={"Content-Type": "image/jpeg"})
-        r.check("and one larger than a poster could be, 413, unread", huge.status_code == 413, str(huge.status_code))
-        given = client.put(address + f"?v={item['v']}&duration=3.5", content=frame.getvalue(),
-                           headers={"Content-Type": "image/jpeg"})
-        r.check("a first frame the browser took is kept", given.status_code == 200 and given.json() == {"ok": True, "kept": True},
-                given.text[:120])
-        back = client.get(address + f"?v={item['v']}")
-        kept = Image.open(io.BytesIO(back.content))
-        r.check("and answered from then on, by a server that still cannot decode it, as immutable",
-                back.status_code == 200 and back.headers.get("cache-control") == routes.IMMUTABLE_CACHE, str(back.status_code))
-        r.check("made small and encoded again here, so nothing kept is the page's own bytes",
-                back.headers["content-type"] == "image/webp" and kept.size == (posters.POSTER_SIDE, 270), str(kept.size))
-        r.check("with the clip's length it was given", back.headers.get("x-minipaint-duration") == "3.500",
-                str(back.headers.get("x-minipaint-duration")))
-        again = client.put(address + f"?v={item['v']}", content=frame.getvalue(), headers={"Content-Type": "image/jpeg"})
-        r.check("given again, the one kept is left as it is", again.json() == {"ok": True, "kept": False}, again.text[:80])
-        posters.reset_for_tests("")
-        r.check("and it is on disk: after a restart it is still the answer",
-                client.get(address + f"?v={item['v']}").status_code == 200)
-        r.check("no answer names the file or its folder",
-                "broken" not in given.text + stale.text + junk.text and str(folder) not in given.text + stale.text + junk.text)
+        os.symlink(system, theirs)
+    except (OSError, NotImplementedError):
+        shutil.copy2(system, theirs)
+    original_load = wangp_config.load
+    original_pyav = posters._READERS["pyav"]
+    wangp_config.load = lambda: wangp_config.Config(runtime={"prefix": str(prefix)})
+    try:
+        posters.reset_for_tests()
+        r.check("WanGP's own ffmpeg - imageio-ffmpeg's binary in WanGP's environment - is the one found first",
+                posters.ffmpeg_program() == str(theirs), posters.ffmpeg_program().replace(str(folder.parent), "<scratch>"))
+        r.check("and it is a reader beside PyAV, in the order each file is tried with",
+                posters.decoders()[:2] == ["pyav", "ffmpeg"], str(posters.decoders()))
+
+        posters.reset_for_tests("ffmpeg", ffmpeg=str(theirs))
+        alone = client.get(address)
+        frame = Image.open(io.BytesIO(alone.content)).convert("RGB") if alone.status_code == 200 else None
+        red, _green, blue = frame.getpixel((frame.width // 2, frame.height // 2)) if frame else (255, 0, 0)
+        r.check("ffmpeg alone reads the first frame, at the poster's side",
+                alone.status_code == 200 and frame.size == (480, 270) and red <= 30 and 100 <= blue <= 140,
+                f"{alone.status_code} {frame.size if frame else ''} {(red, blue)}")
+        r.check("and says how long the clip is", abs(float(alone.headers.get("x-minipaint-duration", "0")) - 1.5) < 0.2,
+                str(alone.headers.get("x-minipaint-duration")))
+
+        # A codec PyAV lacks, stood in for: the same file, the next reader.
+        def refuse(path, side):
+            raise RuntimeError("a codec this build lacks")
+
+        posters._READERS["pyav"] = refuse
+        posters.reset_for_tests("pyav+ffmpeg", ffmpeg=str(theirs))
+        address = version(1)
+        heard = io.StringIO()
+        with contextlib.redirect_stdout(heard):
+            fell = client.get(address)
+            again = client.get(address)
+            # Another version, which PyAV refuses for the same reason: read,
+            # and not said again.
+            other = client.get(version(3))
+        r.check("a file PyAV will not read is read by the next reader, WanGP's ffmpeg, on the server",
+                fell.status_code == 200 and fell.headers["content-type"] == "image/webp", str(fell.status_code))
+        r.check("and served from the cache after, with no second read", again.content == fell.content
+                and other.status_code == 200 and posters.posters().made == 2, str(posters.posters().made))
+        said = heard.getvalue()
+        r.check("Forge's console says once which reader could not, and how - and never which file",
+                said.count("could not be read by pyav (RuntimeError)") == 1 and "second" not in said
+                and str(folder) not in said, said.strip()[:200])
+
+        posters.reset_for_tests("pyav", ffmpeg="")
+        posters._READERS["pyav"] = refuse
+        with contextlib.redirect_stdout(io.StringIO()):
+            last = client.get(version(2))
+        r.check("with no reader left, 422: its tile is marked, and no video went anywhere",
+                last.status_code == 422 and last.json().get("code") == "OUTPUT_POSTER_UNREADABLE", str(last.status_code))
     finally:
+        wangp_config.load = original_load
+        posters._READERS["pyav"] = original_pyav
         posters.reset_for_tests()
 
 

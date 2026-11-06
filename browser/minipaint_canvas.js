@@ -3186,7 +3186,10 @@ window.minipaintCanvas = (function () {
         txt2img: "tab_txt2img", img2img: "tab_img2img", inpaint: "tab_img2img",
         extras: "tab_extras", stitch_txt2img: "tab_txt2img", stitch_img2img: "tab_img2img",
         // No helper of the host's opens it, so its panel is the only way in.
-        pnginfo: "tab_pnginfo"
+        pnginfo: "tab_pnginfo",
+        // Nor this one: Settings -> WanGP, opened from the WanGP tab's error
+        // surface (minipaint_wangp.js, openSettings).
+        settings: "tab_settings"
     };
 
     /**

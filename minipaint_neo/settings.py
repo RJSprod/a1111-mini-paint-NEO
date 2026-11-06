@@ -16,6 +16,11 @@ from modules import shared
 from . import scrub
 
 SECTION = ("minipaint_canvas", "miniPaint / Canvas")
+#: WanGP's own section, beside this one (2026-11-06: "give wan2gp its own
+#: settings menu option as well, for integration management"). Its management
+#: panel is registered by ``minipaint_neo.wangp.settings`` under the same pair;
+#: the two WanGP options below are this module's and live there too.
+WANGP_SECTION = ("minipaint_wangp", "WanGP")
 
 USE_OLD_UI = "minipaint_use_old_ui"
 CANVAS_FIT = "minipaint_canvas_fit"
@@ -323,7 +328,7 @@ def on_ui_settings() -> None:
             "WanGP tab: what the WanGP page is dressed in",
             gr.Radio,
             {"choices": WANGP_LOOK_CHOICES},
-            section=SECTION,
+            section=WANGP_SECTION,
             category_id=category,
         ).info(
             "the bridge plugin inside WanGP dresses its page over whichever theme WanGP's own settings "
@@ -341,7 +346,7 @@ def on_ui_settings() -> None:
             "WanGP: RAM it may pin for its models (% of system RAM)",
             gr.Slider,
             {"minimum": 0, "maximum": WANGP_RESERVED_RAM_MAX, "step": 1},
-            section=SECTION,
+            section=WANGP_SECTION,
             category_id=category,
         ).info(
             "WanGP page-locks (\"Reserved RAM\") the models it streams through the card, up to this "
@@ -349,7 +354,7 @@ def on_ui_settings() -> None:
             "can have while a model is loaded. WanGP's own cap is 40% on Windows and 50% elsewhere, and "
             "0 leaves it at that. Above the cap WanGP pins what fits and streams the rest from ordinary "
             "memory - slower for that part, not a failure. Takes effect the next time WanGP starts "
-            "(Restart WanGP in its tab)"
+            "(Restart WanGP now, in this section)"
         ),
     )
 

@@ -495,11 +495,12 @@ design, and what it replaced, is `docs/wangp/THEME_HIJACK_2026-09-28.txt`.
 
 SD-Neo-ModelSwitchRefiner's assistant has a focus mode that gives one workspace the whole
 window. On the WanGP tab the workspace *is* the WanGP page, so under focus the tab is the
-frame and nothing else: the panel's padding and border go, *Integration management* is not
-displayed, and the frame is given the panel's whole height - nothing under it. Nothing is
+frame and nothing else: the panel's padding and border go, and the frame is given the
+panel's whole height - nothing under it. (Out of focus too, since 2026-11-06: Integration
+management is Settings → WanGP, and nothing is under the frame.) Nothing is
 reloaded or repainted and the iframe is not moved (a moved iframe reloads its document);
 three presses on the assistant's header or launcher turn focus on, and leaving it puts the
-accordion back. The contract is the one class that extension writes on the tab's
+tab bar back. The contract is the one class that extension writes on the tab's
 panel, `forge-assistant-focus-root`; `style.css` and `browser/minipaint_wangp.js` read it,
 and `tests/browser_intercept.py` measures the result in a real browser against a copy of
 that extension's own rule.
@@ -591,7 +592,7 @@ saved settings are current with the page.
 
 ## Restart WanGP now: the emergency option
 
-*Integration management* has a **Restart WanGP now** button that is always there, beside
+Settings → *WanGP* has a **Restart WanGP now** button that is always there, beside
 Reinitialize. It is for the moment WanGP is wedged, holding the card, or not answering: it
 does more than the ordinary stop and says what it did.
 
@@ -679,7 +680,7 @@ The ones worth knowing by sight:
 
 ## Diagnostics
 
-*Integration management → Diagnostics → Copy diagnostic report* in the WanGP tab builds one
+Settings → *WanGP* → *Diagnostics* → **Copy diagnostic report** builds one
 block of text for a bug report. It is a whitelist, not a dump: Forge and Gradio versions,
 the extension's commit, the protocol number, the shipped and installed bridge versions, the
 setup fields with paths reduced to their last component, the GPU UUID and whether that card
@@ -701,11 +702,17 @@ attach: they were scrubbed as they were written, not as they were read.
 
 ## Reinitialize
 
-There is exactly one entry on the Settings page — *Settings → miniPaint / Canvas → WanGP
-integration* — and it is a paragraph with a link, not a switch. Forge's settings system
-stores values, and a checkbox meaning "reinitialize" would be a checkbox that gets saved.
-The real button lives in the WanGP tab, under *Integration management*, so there is one
-place that knows what the running process was started from.
+Settings → *WanGP* is integration management's own section (2026-11-06; the accordion that
+sat under the frame in the WanGP tab until then). Its one registered entry is not a switch:
+Forge's settings system stores values, and a checkbox meaning "reinitialize" would be a
+checkbox that gets saved. The entry stores nothing (`do_not_save`); Forge calls its
+component inside the section, and that component builds the notice and the panel - the
+Reinitialize button and its confirmation, the emergency restart, the diagnostics and the
+console - with their events, none of which names a component of the WanGP tab (a restart or
+a reinitialisation has the tab repaint itself through its own hidden Refresh, pressed by the
+browser). Setup stays in the WanGP tab, so there is one place that knows what the running
+process was started from; the error card's *Reinitialize the integration* opens Settings →
+WanGP with the confirmation showing.
 
 Reinitialize stops the child this extension started, invalidates every browser session and
 receiver list, copies the active setup into the backup, marks the active setup incomplete,

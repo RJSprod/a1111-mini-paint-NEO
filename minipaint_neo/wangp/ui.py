@@ -1420,7 +1420,12 @@ def create_ui() -> None:
         with gr.Column(visible=view["view"] == VIEW_IFRAME, elem_id=IFRAME_ROOT_ID) as shell["iframe_root"]:
             shell["iframe"] = gr.HTML(iframe_html() if view["view"] == VIEW_IFRAME else "")
 
-        manage = _build_management()
+        # Nothing under the frame. Integration management - Reinitialize, the
+        # emergency restart, the diagnostic report and the console - lived in
+        # an accordion here, below the frame, until the user asked for the tab
+        # to be the frame alone once WanGP is loaded and for the management to
+        # be a Settings page of its own (2026-11-06): it is built there now, by
+        # minipaint_neo.wangp.settings through build_settings_panel below.
 
     # -- what every handler paints -----------------------------------------
     # One list, one order, one description of "the tab looks like this now".
@@ -1529,13 +1534,17 @@ def create_ui() -> None:
     recheck_btn.click(fn=show, inputs=[shell["channel"]], outputs=painted)
     shell["restart"].click(fn=restart, inputs=[], outputs=painted)
 
-    # The console lives with the diagnostics, but it is the wizard that
-    # fills it, so the wizard is handed the box to write into.
-    _wire_wizard(wizard, shell, painted, show, manage["console"])
-    # The management panel's paints all follow an ended process - a restart,
-    # a reinitialisation - so each is a fresh iframe load, never a string
-    # Gradio would apply as no change over the old process's page.
-    _wire_management(manage, shell["error_reinit"], painted, repaint, error_restart=shell["restart"])
+    # The wizard writes what it did into a console of its own, in the setup
+    # view, where somebody running the checks is looking. The whole console,
+    # with Refresh and Clear, is on Settings -> WanGP with the rest of the
+    # management.
+    _wire_wizard(wizard, shell, painted, show, wizard["console"])
+    # The error surface's Reinitialize opens Settings -> WanGP with the
+    # confirmation showing: the confirmation and the button that acts on it
+    # live there now, and an event here that named a component of that page
+    # would be an outputs list naming another tab's component (CLAUDE.md, the
+    # silent total failure). One browser step, chained to nothing.
+    shell["error_reinit"].click(fn=None, js=OPEN_SETTINGS_JS)
 
 
 # --------------------------------------------------------------- wizard ----
@@ -1647,6 +1656,13 @@ def _build_wizard() -> dict:
             "Restore the previous working integration", elem_id="wangp_setup_restore"
         )
         parts["finish_status"] = gr.Markdown("")
+        # What the checks just did, from both sides, where the person running
+        # them is looking. The same journal as Settings -> WanGP's console.
+        with gr.Accordion("Console", open=False, elem_id="wangp_setup_console_root"):
+            parts["console"] = _copyable_textbox(
+                label="Console", lines=12, placeholder="Run the checks to see what they did.",
+                elem_id="wangp_setup_console",
+            )
 
     return parts
 
@@ -2092,59 +2108,98 @@ def _wire_wizard(parts: dict, shell: dict, painted, show, console) -> None:
 # ---------------------------------------------------------- management -----
 
 
-def _build_management() -> dict:
-    """The panel section 10's Settings entry points at.
+#: Settings -> WanGP, as the browser opens it: Forge's Settings tab, this
+#: integration's section, and (``reinitialize``) its confirmation showing.
+OPEN_SETTINGS_JS = (
+    "() => { const wangp = window.minipaintWanGP; "
+    "if (wangp && typeof wangp.openSettings === 'function') { wangp.openSettings('reinitialize'); } }"
+)
 
-    It is outside the four containers because it has to be reachable in all of
-    them: the tab is where Reinitialize lives, and an error surface is not the
-    only place someone decides to use it.
+#: After a restart or a reinitialisation pressed on Settings -> WanGP, the
+#: WanGP tab paints what is true now, through its own hidden Refresh - the
+#: tab's components are not this page's to name in an outputs list.
+REPAINT_TAB_JS = (
+    "() => { const wangp = window.minipaintWanGP; "
+    "if (wangp && typeof wangp.repaintTab === 'function') { wangp.repaintTab('settings'); } }"
+)
+
+#: The id of the panel on the Settings page, and of its section there.
+MANAGE_ROOT_ID = "wangp_manage_root"
+
+
+def build_settings_panel(value: str = "", elem_id: str = "", **_ignored: typing.Any):
+    """Settings -> WanGP: integration management, built where Forge builds a setting.
+
+    Forge builds each option on its Settings page by calling the option's
+    ``component`` inside that page's section, so what is built here - and every
+    event wired here - belongs to the Settings page. ``value`` is the notice the
+    option holds (``minipaint_neo.wangp.settings.NOTICE_HTML``); the component
+    returned is that notice, an HTML block Forge passes to Apply and stores
+    nothing for (``do_not_save``).
+
+    Nothing here names a component of the WanGP tab. What a restart or a
+    reinitialisation changes there is repainted by the tab itself, through its
+    hidden Refresh, pressed by the browser after the press here has answered
+    (``REPAINT_TAB_JS``).
     """
+    with gr.Column(elem_id=MANAGE_ROOT_ID, elem_classes=["minipaint-wangp-manage"]):
+        notice = gr.HTML(value, elem_id=elem_id or None, elem_classes=["settings-info"])
+        parts = _build_management()
+    _wire_management(parts)
+    return notice
+
+
+def _build_management() -> dict:
+    """The parts of Settings -> WanGP below its notice. No events yet."""
     parts: typing.Dict[str, typing.Any] = {}
-    with gr.Accordion("Integration management", open=False, elem_id="wangp_manage_root") as parts["accordion"]:
-        parts["reinit"] = gr.Button("Reinitialize the WanGP integration", elem_id="wangp_reinitialize")
-        with gr.Column(visible=False, elem_id="wangp_reinitialize_confirm") as parts["confirm"]:
-            gr.Markdown(REINITIALIZE_NOTICE)
-            with gr.Row():
-                parts["confirm_yes"] = gr.Button(
-                    "Yes, reinitialize", variant="stop", elem_id="wangp_reinitialize_yes"
-                )
-                parts["confirm_no"] = gr.Button("Keep it as it is", elem_id="wangp_reinitialize_no")
-        parts["status"] = gr.Markdown("")
-
-        gr.Markdown("#### WanGP process")
-        gr.Markdown(RESTART_NOTICE)
-        parts["restart_now"] = gr.Button("Restart WanGP now", variant="stop", elem_id="wangp_restart_now")
-        parts["restart_report"] = gr.Markdown("", elem_id="wangp_restart_report")
-
-        gr.Markdown("#### Diagnostics")
-        parts["diagnostics"] = _copyable_textbox()
-        parts["collect"] = gr.Button("Copy diagnostic report", elem_id="wangp_diagnostics_collect")
-
-        # The console. Everything the integration just did, from whichever
-        # side did it - this process, the WanGP child, and the browser. It is
-        # the only place the handshake is visible at all: that conversation
-        # happens between two windows and touches no server.
-        gr.Markdown("#### Console")
-        parts["console"] = _copyable_textbox(
-            label="Console", lines=18, placeholder="Press Refresh, or run the checks above."
-        )
-        # Where the same lines live once this box has scrolled past them, and
-        # why both are safe to paste. Said here rather than in the docs because
-        # this is the screen somebody is looking at when they need the file.
-        gr.Markdown(
-            "The last few hundred steps. The same lines, without the limit, are in "
-            "`logs/wangp-log.txt` inside this extension's folder. Prompts, filenames "
-            "and paths are removed from both as they are written, so either can go "
-            "into a bug report as it is. **Clear it** empties this box only; the file "
-            "keeps the run."
-        )
+    gr.Markdown("#### Integration")
+    parts["reinit"] = gr.Button("Reinitialize the WanGP integration", elem_id="wangp_reinitialize")
+    with gr.Column(visible=False, elem_id="wangp_reinitialize_confirm") as parts["confirm"]:
+        gr.Markdown(REINITIALIZE_NOTICE)
         with gr.Row():
-            parts["console_refresh"] = gr.Button("Refresh the console", elem_id="wangp_console_refresh")
-            parts["console_clear"] = gr.Button("Clear it", elem_id="wangp_console_clear")
+            parts["confirm_yes"] = gr.Button(
+                "Yes, reinitialize", variant="stop", elem_id="wangp_reinitialize_yes"
+            )
+            parts["confirm_no"] = gr.Button("Keep it as it is", elem_id="wangp_reinitialize_no")
+    parts["status"] = gr.Markdown("")
+
+    gr.Markdown("#### WanGP process")
+    gr.Markdown(RESTART_NOTICE)
+    parts["restart_now"] = gr.Button("Restart WanGP now", variant="stop", elem_id="wangp_restart_now")
+    # The last restart's report, whichever button ran it - this page's or the
+    # WanGP tab's error surface - read again whenever the page is loaded.
+    parts["restart_report"] = gr.Markdown(_last_report_markdown, elem_id="wangp_restart_report")
+
+    gr.Markdown("#### Diagnostics")
+    parts["diagnostics"] = _copyable_textbox()
+    parts["collect"] = gr.Button("Copy diagnostic report", elem_id="wangp_diagnostics_collect")
+
+    # The console. Everything the integration just did, from whichever side
+    # did it - this process, the WanGP child, and the browser. It is the only
+    # place the handshake is visible at all: that conversation happens between
+    # two windows and touches no server.
+    gr.Markdown("#### Console")
+    parts["console"] = _copyable_textbox(
+        label="Console", lines=18, placeholder="Press Refresh the console."
+    )
+    # Where the same lines live once this box has scrolled past them, and why
+    # both are safe to paste. Said here rather than in the docs because this
+    # is the screen somebody is looking at when they need the file.
+    gr.Markdown(
+        "The last few hundred steps. The same lines, without the limit, are in "
+        "`logs/wangp-log.txt` inside this extension's folder. Prompts, filenames "
+        "and paths are removed from both as they are written, so either can go "
+        "into a bug report as it is. **Clear it** empties this box only; the file "
+        "keeps the run."
+    )
+    with gr.Row():
+        parts["console_refresh"] = gr.Button("Refresh the console", elem_id="wangp_console_refresh")
+        parts["console_clear"] = gr.Button("Clear it", elem_id="wangp_console_clear")
     return parts
 
 
-def _copyable_textbox(label: str = "Diagnostic report", lines: int = 12, placeholder: str = ""):
+def _copyable_textbox(label: str = "Diagnostic report", lines: int = 12, placeholder: str = "",
+                      elem_id: str = ""):
     """A textbox with the host's own copy button where the host has one.
 
     ``show_copy_button`` is the affordance section 48 asks for and it needs no
@@ -2157,7 +2212,7 @@ def _copyable_textbox(label: str = "Diagnostic report", lines: int = 12, placeho
         max_lines=max(lines, 40),
         interactive=False,
         placeholder=placeholder,
-        elem_id="wangp_" + label.split()[0].lower(),
+        elem_id=elem_id or ("wangp_" + label.split()[0].lower()),
     )
     try:
         return gr.Textbox("", show_copy_button=True, **common)
@@ -2170,28 +2225,35 @@ def _copyable_textbox(label: str = "Diagnostic report", lines: int = 12, placeho
 _last_restart: typing.Dict[str, typing.Any] = {"report": None}
 
 
-def _wire_management(parts: dict, error_reinit_btn, painted, show, error_restart=None) -> None:
+def _last_report_markdown() -> str:
+    """The last restart's report as Settings -> WanGP shows it, or nothing."""
+    report = _last_restart.get("report")
+    return restart_report_markdown(report) if report else ""
+
+
+def _wire_management(parts: dict) -> None:
+    """Settings -> WanGP's events. Every output is a component of this panel.
+
+    A restart or a reinitialisation ends the process the WanGP tab's frame was
+    showing, so each is followed by one browser step that has the tab paint
+    what is true now (``REPAINT_TAB_JS``, the tab's own hidden Refresh, which
+    loads the frame afresh). The step is chained with ``then``, which runs
+    after a failed press too - harmless here: a repaint shows what is true.
+    """
+
     def ask():
-        return gr.update(visible=True), gr.update(open=True), ""
+        return gr.update(visible=True), ""
 
     def restart_now():
         report = restart_wangp()
         _last_restart["report"] = report
-        return (restart_report_markdown(report), gr.update(open=True)) + show()
+        return restart_report_markdown(report)
 
-    parts["restart_now"].click(fn=restart_now, inputs=[], outputs=[parts["restart_report"], parts["accordion"]] + painted)
-    if error_restart is not None:
-        # After the error surface's Restart has run (its own click handler
-        # writes the report), show it in the panel as well.
-        error_restart.click(
-            fn=lambda: restart_report_markdown(_last_restart["report"] or {"ok": False, "steps": ["no restart has run yet"]}),
-            inputs=[], outputs=[parts["restart_report"]],
-        )
+    parts["restart_now"].click(
+        fn=restart_now, inputs=[], outputs=[parts["restart_report"]]
+    ).then(fn=None, js=REPAINT_TAB_JS)
 
-    parts["reinit"].click(fn=ask, inputs=[], outputs=[parts["confirm"], parts["accordion"], parts["status"]])
-    error_reinit_btn.click(
-        fn=ask, inputs=[], outputs=[parts["confirm"], parts["accordion"], parts["status"]]
-    )
+    parts["reinit"].click(fn=ask, inputs=[], outputs=[parts["confirm"], parts["status"]])
     parts["confirm_no"].click(
         fn=lambda: (gr.update(visible=False), ""), inputs=[], outputs=[parts["confirm"], parts["status"]]
     )
@@ -2200,11 +2262,11 @@ def _wire_management(parts: dict, error_reinit_btn, painted, show, error_restart
         result = reinitialize()
         lines = "\n".join(f"- {step}" for step in result["steps"])
         text = ("**Reinitialized.**\n\n" if result["ok"] else "**Partly done.**\n\n") + lines
-        return (gr.update(visible=False), text) + show()
+        return gr.update(visible=False), text
 
     parts["confirm_yes"].click(
-        fn=confirmed, inputs=[], outputs=[parts["confirm"], parts["status"]] + painted
-    )
+        fn=confirmed, inputs=[], outputs=[parts["confirm"], parts["status"]]
+    ).then(fn=None, js=REPAINT_TAB_JS)
 
     def collect():
         probe_result = None

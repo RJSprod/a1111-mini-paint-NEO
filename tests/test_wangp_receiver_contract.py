@@ -672,6 +672,40 @@ def component_of(page: dict, elem_id: str):
     return None
 
 
+def within(page: dict, elem_id: str) -> set:
+    """The elem_ids of every component inside the one carrying ``elem_id``,
+    read off the page's own layout tree - which tab or section a component
+    is drawn in, as the browser will draw it."""
+    container = component_of(page, elem_id)
+    if container is None:
+        return set()
+    by_id = {component["id"]: component for component in page["components"]}
+
+    def find(node):
+        if node.get("id") == container["id"]:
+            return node
+        for child in node.get("children") or []:
+            found = find(child)
+            if found is not None:
+                return found
+        return None
+
+    found: set = set()
+
+    def walk(node):
+        for child in node.get("children") or []:
+            component = by_id.get(child.get("id"))
+            if component is not None and component.get("props"):
+                found.add(component["props"].get("elem_id"))
+            walk(child)
+
+    root = find(page.get("layout") or {})
+    if root is not None:
+        walk(root)
+    found.discard(None)
+    return found
+
+
 def dangling(page: dict) -> list:
     known = {component["id"] for component in page["components"]}
     return [dependency for dependency in page["dependencies"]
@@ -720,6 +754,16 @@ def tab_checks(r: Results) -> None:
 
             script_callbacks.callbacks["after_component"][:] = [host.on_after_component]
             host.reset_capture()
+            # Settings -> WanGP is registered the way Forge registers every
+            # option, and the host page draws its Settings page from the
+            # registered options the way Forge draws it (forge_like).
+            from modules import shared
+
+            from minipaint_neo import settings as minipaint_settings
+            from minipaint_neo.wangp import settings as wangp_settings
+
+            minipaint_settings.on_ui_settings()
+            wangp_settings.on_ui_settings()
             demo, _refs = forge_like.build_host(lambda: router.on_ui_tabs() + wangp_ui.on_ui_tabs())
             page = config_of(demo)
             ids = elem_ids(page)
@@ -746,11 +790,59 @@ def tab_checks(r: Results) -> None:
                          wangp_ui.OPEN_ELEM_ID, wangp_ui.REFRESH_ELEM_ID):
                 r.check(f"the browser half's {seam} is there", seam in ids)
 
-            r.check("Integration management holds the emergency restart and its report",
-                    {"wangp_manage_root", "wangp_restart_now", "wangp_restart_report", "wangp_reinitialize", "wangp_diagnostics_collect"} <= ids)
+            # 2026-11-06: "I dont want integration management to appear below
+            # the wan2gp frame when the frame is fully loaded in view, the
+            # whole tab should now be the frame, and the integration
+            # managements should be a webui settings menu options".
+            in_tab = within(page, "tab_wangp")
+            in_settings = within(page, "settings_" + wangp_settings.SECTION[0])
+            management = {"wangp_manage_root", "wangp_restart_now", "wangp_restart_report",
+                          "wangp_reinitialize", "wangp_reinitialize_yes", "wangp_diagnostics_collect",
+                          "wangp_diagnostic", "wangp_console", "wangp_console_refresh", "wangp_console_clear"}
+            r.check("the WanGP tab holds no integration management: once WanGP is loaded the tab is the frame",
+                    not (management & in_tab), str(sorted(management & in_tab)))
+            r.check("Settings has a section of its own for WanGP, named WanGP",
+                    wangp_settings.SECTION == ("minipaint_wangp", "WanGP") == minipaint_settings.WANGP_SECTION
+                    and component_of(page, "settings_minipaint_wangp") is not None
+                    and component_of(page, "settings_minipaint_wangp")["props"].get("label") == "WanGP",
+                    str(component_of(page, "settings_minipaint_wangp")))
+            r.check("and Settings -> WanGP holds all of it: Reinitialize, the emergency restart and its report, "
+                    "the diagnostic report and the console", management <= in_settings,
+                    str(sorted(management - in_settings)))
+            r.check("beside the WanGP look and the RAM cap, which moved there from miniPaint / Canvas",
+                    {"setting_" + minipaint_settings.WANGP_LOOK, "setting_" + minipaint_settings.WANGP_RESERVED_RAM}
+                    <= in_settings, str(sorted(in_settings)[:40]))
+            r.check("the setup wizard keeps a console of its own in the tab, which its checks write to",
+                    "wangp_setup_console" in in_tab
+                    and button_fills_box(page, "wangp_setup_validate", "wangp_setup_console")[0],
+                    str(button_fills_box(page, "wangp_setup_validate", "wangp_setup_console")))
             restart_now = component_of(page, "wangp_restart_now")
-            r.check("and the emergency restart is a stop-coloured button, always on the page",
+            r.check("and the emergency restart is a stop-coloured button, always on that page",
                     restart_now["props"].get("variant") == "stop" and restart_now["props"].get("visible") is not False)
+            tab_ids = {component["id"] for component in page["components"]
+                       if component["props"].get("elem_id") in in_tab}
+            settings_ids = {component["id"] for component in page["components"]
+                            if component["props"].get("elem_id") in in_settings}
+            crossing = [d for d in page["dependencies"]
+                        if any(t[0] in settings_ids for t in d.get("targets") or [])
+                        and set(d["outputs"]) & tab_ids]
+            r.check("no event of Settings -> WanGP names a component of the WanGP tab among its outputs "
+                    "(another tab's component in an outputs list is the silent total failure)",
+                    not crossing, str(crossing[:1]))
+            repaint = [d for d in page["dependencies"] if d.get("js") and "repaintTab" in d["js"]]
+            r.check("a restart and a reinitialisation there have the tab repaint itself, through the browser",
+                    len(repaint) == 2 and all(not d.get("backend_fn") for d in repaint), str(len(repaint)))
+            error_reinit = component_of(page, "wangp_error_reinitialize")
+            opens = [d for d in page["dependencies"]
+                     if any(t[0] == error_reinit["id"] for t in d.get("targets") or [])]
+            r.check("the error surface's Reinitialize opens Settings -> WanGP with its confirmation, in the browser alone",
+                    len(opens) == 1 and not opens[0].get("backend_fn") and "openSettings('reinitialize')" in (opens[0].get("js") or "")
+                    and not opens[0]["outputs"], str(opens))
+            notice = component_of(page, "setting_" + wangp_settings.MANAGE_KEY)
+            r.check("the option itself is the notice, stored nowhere",
+                    notice is not None and "Reinitialize only forgets" in str(notice["props"].get("value"))
+                    and getattr(shared.opts.data_labels[wangp_settings.MANAGE_KEY], "do_not_save", False) is True,
+                    str(notice and notice["props"].get("value"))[:200])
             r.check("only the setup container is showing before setup",
                     component_of(page, wangp_ui.SETUP_ROOT_ID)["props"].get("visible", True) is True
                     and all(component_of(page, other)["props"].get("visible") is False
@@ -866,13 +958,12 @@ def tab_checks(r: Results) -> None:
             focus = focus[:focus.find("/* -- the panel is parked")]
             r.check("under the assistant's focus mode the panel is keyed on that extension's class, by id and by the bundle's mark",
                     focus.startswith("#tab_wangp.forge-assistant-focus-root,\n.minipaint-wangp-tab.forge-assistant-focus-root {")
-                    and focus.count(".minipaint-wangp-tab.forge-assistant-focus-root") == 3, focus[:200])
+                    and focus.count(".minipaint-wangp-tab.forge-assistant-focus-root") == 2, focus[:200])
             root_rule = focus[:focus.find("}") + 1]
             r.check("and loses its padding and border, over that extension's own rule",
                     "padding: 0 !important" in root_rule and "border: 0 !important" in root_rule, root_rule)
-            r.check("the Integration management accordion is not displayed there",
-                    "#tab_wangp.forge-assistant-focus-root #wangp_manage_root" in focus
-                    and "display: none !important" in focus[focus.find("#wangp_manage_root"):], focus)
+            r.check("and nothing there hides an accordion: the tab has none to hide, being the frame alone",
+                    "#wangp_manage_root" not in tab, focus)
             r.check("and the browser's own notice is laid over the frame rather than below the fold, against the panel and not the window",
                     "#tab_wangp.forge-assistant-focus-root .minipaint-wangp-recovery" in focus
                     and "position: absolute" in focus[focus.find(".minipaint-wangp-recovery"):]
@@ -887,14 +978,14 @@ def tab_checks(r: Results) -> None:
             # written from one that is called.
             fit = _fit()
             if fit and "error" not in fit:
-                r.check("the frame is measured to the bottom of the window, less the panel below it",
-                        fit["belowChrome"] == 900 - 120 - 40 - 4, str(fit))
+                r.check("the frame is measured to the bottom of the window: the tab is the frame alone",
+                        fit["belowChrome"] == 900 - 120 - 4, str(fit))
                 r.check("and in focus mode, where the chrome is out of the layout, that is nearly the whole window",
-                        fit["focused"] == 900 - 40 - 4 and fit["wrote"] == "856px", str(fit))
-                r.check("opening the panel takes the room from the frame rather than from the page",
-                        fit["panelOpen"] == 900 - 240 - 4, str(fit))
+                        fit["focused"] == 900 - 4 and fit["wrote"] == "896px", str(fit))
+                r.check("Settings -> WanGP's panel, which has the accordion's id, takes nothing from the frame",
+                        fit["panelOpen"] == 900 - 4, str(fit))
                 r.check("a tab that is not on screen is left alone rather than sized against zero",
-                        fit["offscreen"] == 0 and fit["keptAfterOffscreen"] == "856px", str(fit))
+                        fit["offscreen"] == 0 and fit["keptAfterOffscreen"] == "896px", str(fit))
                 r.check("and a window with almost no room floors it at the same number the markup does",
                         fit["floored"] == 480, str(fit))
                 # Two halves of the same rule, and both were nearly got wrong.
@@ -902,27 +993,27 @@ def tab_checks(r: Results) -> None:
                 # property is written, is a resize observer that never settles.
                 r.check("nothing is written when the answer has not changed",
                         fit["rewroteWhenUnchanged"] is False, str(fit))
-                r.check("and the element this sizes is never the element it watches",
-                        "wangp_manage_root" in fit["observed"]
+                r.check("and the element this sizes is never the element it watches, nor a panel on another page",
+                        "wangp_manage_root" not in fit["observed"] and "tab_wangp" in fit["observed"]
                         and "wangp_root" not in fit["observed"], str(fit["observed"]))
                 # The panel is parked at the top of the viewport while another
                 # tab is selected (see the stylesheet), so the column's top
                 # is not where it will be on screen: fitted for that place.
                 r.check("a parked panel, laid out at the top of the viewport, is fitted for where its tab will show it",
-                        fit["parked"] == 900 - (100 + 12) - 40 - 4 and fit["parkedWrote"] == "744px", str(fit))
+                        fit["parked"] == 900 - (100 + 12) - 4 and fit["parkedWrote"] == "784px", str(fit))
                 r.check("and left alone when there is no tab strip to measure from", fit["parkedNoStrip"] == 0, str(fit))
                 r.check("shown again it is measured where it is, and the panel's width is kept for the next park",
-                        fit["shownAgain"] == 900 - 120 - 40 - 4 and fit["keptWidth"] == "1200px", str(fit))
+                        fit["shownAgain"] == 900 - 120 - 4 and fit["keptWidth"] == "1200px", str(fit))
                 # The assistant's focus mode: the frame is the panel's whole
                 # height - nothing under it, the accordion not measured even
                 # when it still measures, and the panel's bottom rather than
                 # the window's, which is taller on a phone.
                 r.check("under the assistant's focus mode the frame is the panel's whole height, with nothing under it",
                         fit["fullPage"] == 900 and fit["fullPageWrote"] == "900px", str(fit))
-                r.check("whatever the accordion still measures and however tall the window is",
+                r.check("however tall the window is, and whatever a panel on another page measures",
                         fit["fullPageUnstyled"] == 900, str(fit))
-                r.check("and the room under the frame is back when the class comes off",
-                        fit["afterFocus"] == 900 - 120 - 40 - 4, str(fit))
+                r.check("and the frame is the window under the chrome again when the class comes off",
+                        fit["afterFocus"] == 900 - 120 - 4, str(fit))
 
             # ---- the wizard offers the last setup back ----
             # After a Reinitialize the config keeps the folder and environment
@@ -1003,7 +1094,7 @@ def reserved_ram_checks(r: Results) -> None:
     info = labels.get(settings.WANGP_RESERVED_RAM)
     r.check("the cap is one slider on the Settings page, from 0 to the ceiling by whole percents",
             info is not None and info.component_args == {"minimum": 0, "maximum": settings.WANGP_RESERVED_RAM_MAX, "step": 1}
-            and info.default == settings.WANGP_RESERVED_RAM_DEFAULT and info.section == settings.SECTION,
+            and info.default == settings.WANGP_RESERVED_RAM_DEFAULT and info.section == settings.WANGP_SECTION,
             str(info and info.__dict__))
     r.check("the slider's ceiling is above mmgp's own cap and below everything",
             40 < settings.WANGP_RESERVED_RAM_MAX < 100, settings.WANGP_RESERVED_RAM_MAX)
@@ -1044,7 +1135,7 @@ def look_checks(r: Results) -> None:
     info = labels.get(settings.WANGP_LOOK)
     r.check("the look is one Settings entry with the three choices, matching this page first",
             info is not None and info.component_args == {"choices": settings.WANGP_LOOK_CHOICES}
-            and info.default == settings.WANGP_LOOK_HOST and info.section == settings.SECTION
+            and info.default == settings.WANGP_LOOK_HOST and info.section == settings.WANGP_SECTION
             and settings.WANGP_LOOK_CHOICES == [settings.WANGP_LOOK_HOST, settings.WANGP_LOOK_BRIDGE, settings.WANGP_LOOK_OFF], str(info and info.__dict__))
     r.check("and says it needs a Reload UI, which is when the tab's view is painted again",
             info is not None and info.reload_ui is True)
@@ -1841,15 +1932,18 @@ const column = el("wangp_root");
 const holder = el("wangp_iframe_root");
 const frame = el("wangp_iframe");
 frame.classList.contains = function (c) { return c === "minipaint-wangp-frame"; };
+// Settings -> WanGP's panel, on the Settings page: the same id the accordion
+// under the frame had, and nowhere in the WanGP column. Never measured.
 const manage = el("wangp_manage_root");
 manage.box = {top: 0, left: 0, width: 1200, height: 40};
-holder.parentElement = column; manage.parentElement = column;
+const settingsPage = el("tab_settings");
+holder.parentElement = column; manage.parentElement = settingsPage;
 frame.parentElement = holder;
 holder.children = [frame];
 holder.querySelector = function (sel) {
     return sel === ".minipaint-wangp-frame" ? frame : null;
 };
-column.children = [holder, manage];
+column.children = [holder];
 // Forge's tab strip and the WanGP tab's panel above the column. The panel is
 // parked - laid out at the top of the viewport - while another tab is
 // selected, and the sizer must then fit the frame for where the panel WILL
@@ -1899,14 +1993,14 @@ console.log = function () {};
 new Function("window", "document", "fetch", fs.readFileSync(process.argv[2], "utf8"))(window, document, global.fetch);
 const api = window.minipaintWanGP;
 const out = {exposed: typeof api.fitFrame === "function", observed: global.__observed || []};
-// Below a theme's header and Forge's tab bar, with a 40px panel under it.
+// Below a theme's header and Forge's tab bar, with nothing under the frame.
 column.box = {top: 120, left: 0, width: 1200, height: 700};
 out.belowChrome = api.fitFrame();
 // Focus mode: the chrome is out of the layout, so the column starts at the top.
 column.box = {top: 0, left: 0, width: 1200, height: 900};
 out.focused = api.fitFrame();
 out.wrote = column.style.props["--minipaint-wangp-frame"];
-// The management panel opened. The frame gives up the room.
+// Settings -> WanGP's panel grown on its own page: the frame gives up nothing.
 manage.box = {top: 0, left: 0, width: 1200, height: 240};
 out.panelOpen = api.fitFrame();
 manage.box = {top: 0, left: 0, width: 1200, height: 40};

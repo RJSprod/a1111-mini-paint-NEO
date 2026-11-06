@@ -85,7 +85,15 @@ def run() -> Results:
     r.check("old-ui default is the new UI", shared.opts.data[settings.USE_OLD_UI] is False)
     r.check("old-ui needs a reload", labels[settings.USE_OLD_UI].reload_ui is True)
     r.check("section is miniPaint / Canvas", labels[settings.USE_OLD_UI].section == ("minipaint_canvas", "miniPaint / Canvas"))
-    r.check("every option is in that section", all(i.section == settings.SECTION for i in labels.values()))
+    # WanGP's own options are in WanGP's own section since 2026-11-06 ("give
+    # wan2gp its own settings menu option"); every other one is in this one.
+    wangp_keys = {settings.WANGP_LOOK, settings.WANGP_RESERVED_RAM}
+    r.check("every option is in that section but WanGP's, which are in WanGP's",
+            all(info.section == (settings.WANGP_SECTION if key in wangp_keys else settings.SECTION)
+                for key, info in labels.items()),
+            str({key: info.section for key, info in labels.items()}))
+    r.check("and WanGP's section is its own, named WanGP",
+            settings.WANGP_SECTION == ("minipaint_wangp", "WanGP") != settings.SECTION)
     r.check("use_old_ui reads False", settings.use_old_ui() is False)
     r.check("unknown category is not claimed", settings._category("no-such-category") is None)
     r.check("get falls back", settings.get("no_such_option", "fallback") == "fallback")

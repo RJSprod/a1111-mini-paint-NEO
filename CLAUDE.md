@@ -592,9 +592,15 @@ The assistant's focus mode puts it on the workspace's tab panel (with
 `forge-assistant-focused` on the body and `forge-assistant-focus-path` on the
 panel's ancestors) and its stylesheet makes that panel fixed over the whole
 window with eight pixels of padding, `!important` throughout. The WanGP tab
-reads the same class: `style.css` takes the panel's padding and border off,
-does not display `#wangp_manage_root` and lays the recovery notice over the
-frame, and `fitFrame()` gives the frame the panel's whole height. So under
+reads the same class: `style.css` takes the panel's padding and border off
+and lays the recovery notice over the frame, and `fitFrame()` gives the frame
+the panel's whole height. (The Integration management accordion that rule
+also hid is Settings -> WanGP since 2026-11-06 - built by
+`minipaint_neo.wangp.settings` through `ui.build_settings_panel`, where Forge
+calls an option's component inside its section - so the tab is the frame
+alone in or out of focus, and `fitFrame()` measures nothing under the frame:
+the Settings panel keeps the accordion's id, and measuring it would take a
+Settings page's height off a frame on another tab.) So under
 focus the WanGP tab is the frame alone. Since 2026-09-29 (bridge 1.11.0) the
 class also reaches *into* the frame: the tab's panel observer hears it and
 sends `LAYOUT_STATE {compact}`, and the bridge hides WanGP's own title, tab

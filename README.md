@@ -419,7 +419,7 @@ story, including what the freeze it was built for turned out to need instead.
 **One WanGP, and an emergency stop.** The extension runs one WanGP per machine, not just
 per Forge: a second Forge server started against the same install finds the first one's
 lock and refuses to start another (`WANGP_ALREADY_MANAGED`) rather than putting a second
-process on the same card. *Integration management* also has **Restart WanGP now**, the
+process on the same card. Settings → *WanGP* also has **Restart WanGP now**, the
 emergency option: it ends every process of the WanGP this extension started — the whole
 process tree, a generation in progress included — waits until each one is gone, reads the
 chosen GPU before and after so the report can say how much memory came back, invalidates
@@ -428,7 +428,7 @@ touches a WanGP you started yourself or any other process on the card.
 
 **What the WanGP page wears.** The bridge plugin carries a stylesheet that dresses the
 WanGP page over whichever theme WanGP's own settings picked — a hijack, since WanGP's plugin
-API can add a script but not a theme — and Settings → *miniPaint / Canvas* → **WanGP tab:
+API can add a script but not a theme — and Settings → *WanGP* → **WanGP tab:
 what the WanGP page is dressed in** says where its colours come from: *Match this page's
 theme* (the default: this page's text, page colour and accent, read by the tab, with the
 surfaces between them derived a shade apart the way Lobe lays a black page out, so Lobe's
@@ -441,23 +441,35 @@ detail, and `docs/wangp/THEME_HIJACK_2026-09-28.txt` the design.
 **How much RAM WanGP may pin.** WanGP's offload library page-locks the models it streams
 through the card, up to 40% of the machine's RAM on Windows unless told otherwise — RAM nothing
 else can have while a model is loaded. The managed WanGP is started with that cap at 25%, and
-Settings → *miniPaint / Canvas* → **WanGP: RAM it may pin for its models (% of system RAM)**
+Settings → *WanGP* → **WanGP: RAM it may pin for its models (% of system RAM)**
 moves it (0 leaves WanGP's own cap). Above the cap WanGP pins what fits and streams the rest
 from ordinary memory — slower for that part, not a failure. A change takes effect the next
 time WanGP starts. `docs/wangp/README.md` says why.
 
 **Focus mode.** With the Forge Assistant's focus mode on (SD-Neo-ModelSwitchRefiner; three
-presses on its header or launcher), the WanGP tab is the frame alone — the whole window, no
-*Integration management*, nothing reloaded and nothing moved — and the WanGP page inside it is
+presses on its header or launcher), the WanGP tab is the frame alone — the whole window,
+nothing reloaded and nothing moved — and the WanGP page inside it is
 its generator form alone: WanGP's title, its tab strip (Media Generator … About), the model row
 and the model's description are hidden, so the frame starts at the Lora preset row and the
 galleries (bridge 1.11.0). Leaving focus puts it all back. Under focus you are creating, not
 choosing a model; to change model or open another WanGP tab, leave focus first.
 
-**Reinitialize.** Settings → *miniPaint / Canvas* has one WanGP entry, and it is a
-paragraph with a link rather than a switch — the wizard's fields are not duplicated there,
-and there is no checkbox that would mean "reinitialize" forever. The button itself is in
-the tab, under *Integration management*, next to *Copy diagnostic report*. It stops the
+**Settings → WanGP: integration management.** Once WanGP is loaded the WanGP tab is the
+frame and nothing else, down to the window's bottom: the *Integration management* accordion
+that sat under it moved to a section of its own on Forge's Settings page, **WanGP**, beside
+*miniPaint / Canvas* (2026-11-06, at the user's word: "the whole tab should now be the frame,
+and the integration managements should be a webui settings menu options"). It holds
+**Reinitialize** with its confirmation, **Restart WanGP now** and its report, **Copy
+diagnostic report**, the **Console** with Refresh and Clear, and the two WanGP options that
+were under *miniPaint / Canvas* (the look and the RAM cap; their stored values are kept). A
+restart or a reinitialisation pressed there has the WanGP tab paint what is true now. Setup
+stays in the tab — it is what the tab shows until the integration is set up, with a console
+of its own under the checks — and the error card's *Reinitialize the integration* opens
+Settings → WanGP with the confirmation showing. Nothing in the section is a switch: the
+wizard's fields are not duplicated there, and there is no checkbox that would mean
+"reinitialize" forever.
+
+**Reinitialize** (Settings → WanGP). It stops the
 WanGP this extension started, forgets which install, environment and GPU it was pointed at,
 and brings the tab back to the wizard. It uninstalls nothing and deletes no models, LoRAs,
 presets, outputs or other plugins.

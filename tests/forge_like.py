@@ -173,6 +173,41 @@ def output_panel(tabname: str, refs: dict, gallery_value=None) -> None:
             ToolButton("📐", elem_id=f"{tabname}_send_to_extras")
 
 
+def setting_component(opts, key: str, info):
+    """One option drawn as Forge draws it (``create_setting_component`` in its
+    ``modules/ui_settings.py``): the option's own component when it names one,
+    else the component its default's type gets, called with the label, the
+    stored value and ``setting_<key>``, inside the section being built."""
+    value = opts.data[key] if key in opts.data else info.default
+    args = info.component_args() if callable(info.component_args) else info.component_args
+    component = info.component
+    if component is None:
+        component = {bool: gr.Checkbox, int: gr.Number, float: gr.Number}.get(type(info.default), gr.Textbox)
+    return component(label=info.label, value=value, elem_id=f"setting_{key}", **(args or {}))
+
+
+def settings_sections(opts) -> None:
+    """Forge's Settings page in its own shape: ``#settings``, one tab a
+    section (``settings_<section>``, its column ``column_settings_<section>``),
+    each registered option drawn in its section in the order it was
+    registered - which is what makes an option whose component builds a whole
+    panel (Settings -> WanGP) part of the Settings page, events and all."""
+    sections: dict = {}
+    for key, info in list(getattr(opts, "data_labels", {}).items()):
+        section = tuple(info.section or (None, None))
+        if section[0] is None:
+            continue
+        sections.setdefault(section, []).append((key, info))
+    if not sections:
+        return
+    with gr.Tabs(elem_id="settings"):
+        for (section_id, label), items in sections.items():
+            with gr.TabItem(label, elem_id=f"settings_{section_id}"):
+                with gr.Column(elem_id=f"column_settings_{section_id}"):
+                    for key, info in items:
+                        setting_component(opts, key, info)
+
+
 def build_host(extension_tabs_fn, extra_head: str = "", hidden_tabs=(), gallery_value=None):
     """Build the whole page the way ``modules/ui.py`` does. Returns (demo, refs).
 
@@ -230,8 +265,11 @@ def build_host(extension_tabs_fn, extra_head: str = "", hidden_tabs=(), gallery_
     ]
     interfaces += extension_tabs_fn() or []
 
+    from modules import shared  # the stub
+
     with gr.Blocks(analytics_enabled=False) as settings:
         gr.Textbox(label="Settings", elem_id="settings_box")
+        settings_sections(shared.opts)
     interfaces += [(settings, "Settings", "settings")]
     with gr.Blocks(analytics_enabled=False) as extensions:
         gr.Textbox(label="Extensions", elem_id="extensions_box")

@@ -86,6 +86,12 @@ def build_page(library: pathlib.Path):
         return (router.on_ui_tabs() or []) + (clip_ui.on_ui_tabs() or []) + (wangp_ui.on_ui_tabs() or [])
 
     shared.opts.data[settings.USE_OLD_UI] = False
+    # Settings -> WanGP, registered as Forge registers every option, so the
+    # page's Settings tab draws it (forge_like.settings_sections).
+    from minipaint_neo.wangp import settings as wangp_settings
+
+    settings.on_ui_settings()
+    wangp_settings.on_ui_settings()
     script_callbacks.callbacks["after_component"][:] = [host.on_after_component]
     host.reset_capture()
     result = Image.new("RGB", (96, 64), (40, 160, 90))
@@ -489,6 +495,48 @@ FRAME_PROBES_AWAY_JS = """() => {
 TAB_STATE_JS = "() => window.minipaintWanGP ? window.minipaintWanGP.state().tab : null"
 
 
+SETTINGS_STATE_JS = """() => {
+    const shown = (node) => !!node && node.getClientRects().length > 0;
+    const confirm = document.getElementById("wangp_reinitialize_confirm");
+    return {
+        inTab: !!document.querySelector("#tab_wangp #wangp_manage_root"),
+        panel: !!document.querySelector("#settings_minipaint_wangp #wangp_manage_root"),
+        settingsShown: shown(document.getElementById("tab_settings")),
+        sectionShown: shown(document.getElementById("settings_minipaint_wangp")),
+        restartShown: shown(document.getElementById("wangp_restart_now")),
+        confirmShown: shown(confirm),
+    };
+}"""
+
+
+def check_settings_holds_the_wangp_management(r: Results, page) -> None:
+    """Settings -> WanGP, in the browser: the user's word (2026-11-06) that
+    the WanGP tab is the frame alone and integration management "should be a
+    webui settings menu options". The tab holds none of it; Settings has a
+    WanGP section with all of it; the error surface's way in
+    (minipaintWanGP.openSettings('reinitialize')) opens that section with the
+    confirmation showing - Forge's Settings tab, the section's own button, the
+    section's Reinitialize - and Keep it as it is puts the confirmation away;
+    and the tab can be asked to repaint itself, which is what a restart or a
+    reinitialisation pressed there does after it."""
+    first = page.evaluate(SETTINGS_STATE_JS)
+    r.check("the WanGP tab holds no integration management, and Settings -> WanGP holds the panel",
+            first["inTab"] is False and first["panel"] is True, str(first))
+    opened = page.evaluate("() => window.minipaintWanGP.openSettings('reinitialize')")
+    time.sleep(1.5)
+    found = page.evaluate(SETTINGS_STATE_JS)
+    r.check("openSettings('reinitialize') shows Forge's Settings at the WanGP section, its confirmation showing",
+            opened is True and found["settingsShown"] and found["sectionShown"] and found["restartShown"]
+            and found["confirmShown"], str(found))
+    page.locator("#wangp_reinitialize_no").click()
+    time.sleep(1.0)
+    kept = page.evaluate(SETTINGS_STATE_JS)
+    r.check("and Keep it as it is puts the confirmation away", kept["confirmShown"] is False, str(kept))
+    asked = page.evaluate("() => window.minipaintWanGP.repaintTab('a check')")
+    r.check("the tab can be asked to repaint itself, through its own hidden Refresh", asked is True, str(asked))
+    open_txt2img(page)
+
+
 def check_the_wangp_panel_is_parked_not_hidden(r: Results, page) -> None:
     """The WanGP tab's panel while another tab is selected: a rendered box,
     invisible, still receiving animation frames - never display: none.
@@ -627,7 +675,9 @@ FOCUS_ENTER_JS = """([css, markup, keepBar]) => {
 FOCUS_MEASURE_JS = """() => {
     const panel = document.getElementById("tab_wangp");
     const frame = document.getElementById("wangp_iframe");
-    const manage = document.getElementById("wangp_manage_root");
+    // Integration management is Settings -> WanGP since 2026-11-06: none
+    // of it is in the tab, focused or not.
+    const manage = panel.querySelector("#wangp_manage_root");
     const column = document.getElementById("wangp_root");
     const box = frame ? frame.getBoundingClientRect() : {top: -1, left: -1, width: 0, height: 0};
     const ps = getComputedStyle(panel);
@@ -665,8 +715,9 @@ FOCUS_RESTORE_JS = """() => {
 
 def check_focus_mode_makes_the_frame_the_window(r: Results, page) -> None:
     """Under the sibling assistant's focus mode the WanGP tab is the frame
-    alone: the whole window, no padding, no Integration management, nothing
-    to scroll to - and the room under the frame is back when focus ends.
+    alone: the whole window, no padding, nothing to scroll to - and out of
+    focus the frame is the tab, down to the window's bottom, with no
+    Integration management under it (Settings -> WanGP since 2026-11-06).
 
     Measured in a browser because this is the stylesheet's rule and the
     sizer's arithmetic together, against the other extension's own rule for
@@ -691,16 +742,18 @@ def check_focus_mode_makes_the_frame_the_window(r: Results, page) -> None:
     r.check("with the panel fixed over the page and stripped of the padding and border that extension gives it",
             full["position"] == "fixed" and full["padding"] == "0px" and full["border"] == "0px"
             and full["tabs"] == "none", str(full))
-    r.check("nothing to scroll to, and the Integration management accordion not displayed",
-            full["overflowY"] <= 0 and full["overflowX"] <= 0 and full["manage"] == "none", str(full))
+    r.check("nothing to scroll to, and no Integration management in the tab at all",
+            full["overflowY"] <= 0 and full["overflowX"] <= 0 and full["manage"] == "missing", str(full))
     r.check("the frame's height written by the sizer for the panel's box, not guessed by the stylesheet",
             full["wrote"] == f"{full['viewport'][1]}px", str(full))
     page.evaluate(FOCUS_LEAVE_JS)
     time.sleep(1.2)
     back = page.evaluate(FOCUS_MEASURE_JS)
-    r.check("and when the class comes off the accordion is back, the tab bar too, and the frame leaves them room",
-            back["manage"] != "none" and back["tabs"] != "none" and back["position"] != "fixed"
-            and 480 <= back["height"] < back["viewport"][1] - 20 and back["top"] > 0, str(back))
+    r.check("and when the class comes off the tab bar is back and the frame fills the tab to the window's bottom, "
+            "with nothing under it",
+            back["manage"] == "missing" and back["tabs"] != "none" and back["position"] != "fixed"
+            and 480 <= back["height"] < back["viewport"][1] - 20 and back["top"] > 0
+            and abs(back["top"] + back["height"] - (back["viewport"][1] - 4)) <= 1, str(back))
 
     # With the tab bar kept along the top - that extension's default since
     # 2026-10-22 - the panel starts under the bar and the frame is the rest of
@@ -713,7 +766,7 @@ def check_focus_mode_makes_the_frame_the_window(r: Results, page) -> None:
             kept["tabs"] != "none" and 0 < kept["bar"] < 120 and kept["top"] == kept["bar"] and kept["left"] == 0
             and kept["width"] == kept["viewport"][0] and kept["height"] == kept["viewport"][1] - kept["bar"], str(kept))
     r.check("with nothing to scroll to, and the frame's height written by the sizer for the box under the bar",
-            kept["overflowY"] <= 0 and kept["overflowX"] <= 0 and kept["manage"] == "none"
+            kept["overflowY"] <= 0 and kept["overflowX"] <= 0 and kept["manage"] == "missing"
             and kept["wrote"] == f"{kept['viewport'][1] - kept['bar']}px", str(kept))
     page.evaluate(FOCUS_LEAVE_JS)
     time.sleep(0.8)
@@ -1587,6 +1640,7 @@ def run() -> Results:
                 check_the_popup_is_blocked_when_the_clipboard_is(r, page)
                 check_the_menu_offers_the_destinations(r, page)
                 check_the_wangp_panel_is_parked_not_hidden(r, page)
+                check_settings_holds_the_wangp_management(r, page)
                 check_focus_mode_makes_the_frame_the_window(r, page)
                 check_the_page_palette_is_sampled(r, page)
                 check_the_page_typeface_reaches_wangp(r, page)

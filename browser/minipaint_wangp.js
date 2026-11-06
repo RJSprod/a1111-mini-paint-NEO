@@ -304,9 +304,6 @@ window.minipaintWanGP = (function () {
     /* The tab's own elements. The tab builds these once and only changes what
      * is visible, so finding them is a lookup, never a watch. */
     const IFRAME_ROOT_ID = "wangp_iframe_root";
-    //: The Integration management panel, which the tab's height has to leave
-    //: room for. Read only, and only to measure.
-    const MANAGE_ROOT_ID = "wangp_manage_root";
     const IFRAME_ID = "wangp_iframe";
     //: The tab's panel - Forge's `#tab_wangp` - is found from the root, never
     //: by id, and marked with this so the stylesheet parks it whatever a
@@ -4741,6 +4738,61 @@ window.minipaintWanGP = (function () {
         return true;
     }
 
+    //: Settings -> WanGP: the section minipaint_neo/wangp/settings.py
+    //: registers (its id, as Forge's settings page names a section's panel),
+    //: and the Reinitialize button on it.
+    const SETTINGS_SECTION_ID = "settings_minipaint_wangp";
+    const SETTINGS_SECTION_LABEL = "WanGP";
+    const SETTINGS_REINITIALIZE_ID = "wangp_reinitialize";
+
+    /**
+     * Forge's Settings tab at Settings -> WanGP, where integration management
+     * lives since 2026-11-06 ("the integration managements should be a webui
+     * settings menu options"). Through the Canvas's one tab switcher, then
+     * the section's own button in Forge's list of sections (found by the
+     * panel it controls, else by its name), then - for ``reinitialize``, the
+     * error surface's button - the section's Reinitialize, whose own event
+     * shows the confirmation. Nothing is pressed that would act: the
+     * confirmation is still the user's.
+     */
+    function openSettings(part) {
+        const canvas = window.minipaintCanvas;
+        if (!canvas || typeof canvas.switchTo !== "function") { return false; }
+        const shown = canvas.switchTo("settings");
+        if (shown && shown.ok === false) { return false; }
+        const scope = app();
+        if (!scope.querySelector) { return false; }
+        let section = scope.querySelector('#settings > .tab-nav > button[aria-controls="' + SETTINGS_SECTION_ID + '"]');
+        if (!section) {
+            const all = scope.querySelectorAll("#settings > .tab-nav > button, #settings > div > button");
+            for (let i = 0; i < all.length; i += 1) {
+                if ((all[i].textContent || "").trim() === SETTINGS_SECTION_LABEL) { section = all[i]; break; }
+            }
+        }
+        if (section && !(section.classList && section.classList.contains("selected"))) { section.click(); }
+        if (part === "reinitialize") { pressHidden(SETTINGS_REINITIALIZE_ID); }
+        const panel = scope.querySelector("#" + SETTINGS_SECTION_ID);
+        if (panel && typeof panel.scrollIntoView === "function") {
+            try { panel.scrollIntoView({ block: "start" }); } catch (error) { /* a scroll is a courtesy */ }
+        }
+        say("settings: opened Settings -> WanGP" + (part ? " (" + part + ")" : ""));
+        return true;
+    }
+
+    /**
+     * The WanGP tab paints what is true now - its own hidden Refresh, which
+     * loads the frame afresh. Settings -> WanGP presses it after a restart or
+     * a reinitialisation, which end the process the frame was showing: that
+     * page's events may not name the tab's components (CLAUDE.md), so the
+     * tab is asked, through the browser, the way its boot and its runtime
+     * frames already ask it.
+     */
+    function repaintTab(why) {
+        const pressed = pressHidden(REFRESH_ELEM_ID);
+        if (pressed) { say("repaint: " + (why || "asked") + "; the tab paints what is true now"); }
+        return pressed;
+    }
+
     /**
      * Bind to the tab's iframe as soon as there is one, and not before.
      *
@@ -4883,7 +4935,9 @@ window.minipaintWanGP = (function () {
     const FRAME_PROPERTY = "--minipaint-wangp-frame";
 
     /** Give the frame the room between the top of the tab and the bottom of
-     * the window, less what the management panel below it is using.
+     * the window. Nothing is under the frame: the management panel that was
+     * (Integration management) is Settings -> WanGP since 2026-11-06, and the
+     * tab is the frame alone - "the whole tab should now be the frame".
      *
      * Writes only when the answer has changed. That is not an optimisation:
      * what this writes changes the size of the boxes an observer below is
@@ -4919,12 +4973,9 @@ window.minipaintWanGP = (function () {
 
         // Under the assistant's focus mode (the stylesheet's rule of the
         // same name) the tab's panel is the window and the frame is all of
-        // it: nothing is left under the frame, and the management panel -
-        // which that rule takes out of the layout - is not measured either,
-        // so the frame is the whole panel even on a page whose stylesheet
-        // has not applied. The bottom is the panel's own rather than the
-        // window's: on a phone the two disagree while the browser's bar is
-        // showing, and the panel is the box the frame has to fill.
+        // it, nothing left under it. The bottom is the panel's own rather
+        // than the window's: on a phone the two disagree while the browser's
+        // bar is showing, and the panel is the box the frame has to fill.
         const focused = parked() ? null : focusedPanel();
         let room;
         if (focused) {
@@ -4932,16 +4983,12 @@ window.minipaintWanGP = (function () {
             try { bottom = focused.getBoundingClientRect().bottom || bottom; } catch (error) { /* the window's, then */ }
             room = Math.max(FRAME_MIN_HEIGHT, Math.floor(bottom - top));
         } else {
-            let below = 0;
-            const panel = managePanel();
-            if (panel) {
-                try {
-                    below = panel.getBoundingClientRect().height || 0;
-                } catch (error) { below = 0; }
-            }
+            // The window's bottom, and nothing measured under the frame: the
+            // management panel on Settings -> WanGP has the same id as the
+            // accordion that was here, and measuring it would take a Settings
+            // page's height off a frame on another tab.
             room = Math.max(FRAME_MIN_HEIGHT,
-                            Math.round(window.innerHeight - top - below
-                                       - FRAME_BOTTOM_ROOM));
+                            Math.round(window.innerHeight - top - FRAME_BOTTOM_ROOM));
         }
         const wanted = room + "px";
         try {
@@ -4951,11 +4998,6 @@ window.minipaintWanGP = (function () {
             return 0;
         }
         return room;
-    }
-
-    function managePanel() {
-        const scope = app();
-        return scope.querySelector ? scope.querySelector("#" + MANAGE_ROOT_ID) : null;
     }
 
     function watchFrameSize() {
@@ -4969,20 +5011,17 @@ window.minipaintWanGP = (function () {
         };
         try {
             window.addEventListener("resize", later);
-            // Two boxes, and NEITHER of them is one this sizes. Watching the
-            // column would be watching the element whose custom property this
-            // writes, which is how a resize observer becomes a loop.
-            //
-            // The panel, because opening Integration management is the one
-            // thing that changes how much room is left without changing the
-            // window. Its parent, because focus mode moves the whole column
-            // without a resize event and without changing anything this wrote.
+            // One box, and NOT one this sizes. Watching the column would be
+            // watching the element whose custom property this writes, which
+            // is how a resize observer becomes a loop. Its parent, because
+            // focus mode moves the whole column without a resize event and
+            // without changing anything this wrote. (The management panel
+            // was watched too while it sat under the frame; it is Settings ->
+            // WanGP now, and nothing it does changes the frame's room.)
             if (typeof ResizeObserver === "function") {
                 const holder = rootElement();
                 const column = holder && holder.closest ? holder.closest("#wangp_root") : null;
                 const observer = new ResizeObserver(later);
-                const panel = managePanel();
-                if (panel) { observer.observe(panel); }
                 if (column && column.parentElement) { observer.observe(column.parentElement); }
             }
         } catch (error) { /* the stylesheet's fallback is the whole degradation */ }
@@ -5020,6 +5059,8 @@ window.minipaintWanGP = (function () {
         frameTimer: frameTimerNote,
         reportFrames: reportFrames,
         switchToWanGP: switchToWanGP,
+        openSettings: openSettings,
+        repaintTab: repaintTab,
         theme: theme,
         layout: layout,
         samplePalette: samplePalette,

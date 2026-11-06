@@ -384,10 +384,10 @@ rgb(...)` once per change, never once per send.
 
 **Focus mode** (SD-Neo-ModelSwitchRefiner's assistant): the class it puts on the tab's
 panel, `forge-assistant-focus-root`, is the contract. Under it the stylesheet makes the
-frame the whole window (the panel's padding and border off, `#wangp_manage_root` not
-displayed, the browser's recovery notice laid over the frame) and `fitFrame()` gives the
-frame the panel's whole height - nothing under it and the accordion not measured, the
-panel's bottom rather than the window's. Nothing is moved in the DOM and nothing is
+frame the whole window (the panel's padding and border off, the browser's recovery notice
+laid over the frame) and `fitFrame()` gives the frame the panel's whole height - nothing
+under it, the panel's bottom rather than the window's. (No accordion: Integration management
+is Settings -> WanGP since 2026-11-06, and the tab is the frame alone in or out of focus.) Nothing is moved in the DOM and nothing is
 repainted; leaving focus is the class coming off. Since 2026-10-22 that extension keeps the
 workspace's own tab bar along the window's top by default, and the panel starts at the
 bar's bottom edge (`--forge-assistant-focus-top` on the body) rather than at the window's

@@ -622,7 +622,12 @@ first, as that box saves it, and a video of another model switches WanGP to that
 view closes and the WanGP tab opens only once WanGP says it loaded them; a video WanGP finds
 nothing in, a file that has gone, or a WanGP that is not open yet stays here and says why. It
 is offered for MP4, MKV and MOV, the videos WanGP writes its settings into, and for any of them,
-whoever asked for it. It needs bridge 1.17.0. Loop, mute and speed are remembered. On a
+whoever asked for it. It needs bridge 1.17.0. **Delete from disk** (a bin, the bar's last
+button) deletes the video's file from WanGP's outputs folder - after a dialog that names the
+file and says it cannot be undone, Cancel with the focus, Escape or a press beside it to keep
+it. The player lets go of the file first (on Windows a file still open cannot be removed), the
+next video takes its place, and a file another program still has open is said so, with the
+video given back. Loop, mute and speed are remembered. On a
 keyboard: Space or K plays, ← and → step a frame (with Shift, a second), ↑ and ↓ (or Page Up
 and Page Down) are the previous and the next output, L loops, M mutes, F is full screen, and
 Escape leaves full screen, then the slideshow for the gallery, then the view. Under the picture: its

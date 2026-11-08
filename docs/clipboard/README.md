@@ -942,6 +942,37 @@ WanGP page not open in this browser yet stays in the view and says which; a seco
 one is going - on this video or another - is the same press. It needs bridge 1.17.0, and an
 older bridge is never asked: the toast says to reinstall it.
 
+**Delete from disk.** Asked for on 2026-11-08: "I need the ability to delete from disk in clip
+board view output videos. Add a delete button with confirmation dialogue to the video playback
+controls". A bin is the player bar's last button (after full screen, so Send to WanGP keeps its
+place beside it). A press asks first, in a dialog drawn inside the stage - in full screen the
+stage is all the browser draws - over the whole window on the dialog layer: *Delete this video
+from disk?*, the file's name and that it cannot be undone, Cancel with the focus. The dialog has
+the keys while it is up (a listener on the window's capture phase, and the view's own key
+handler stands back): Escape and Cancel keep the video, a press beside the dialog is Cancel, Tab
+goes between its two buttons, and Space presses the button it is on rather than playing the
+video. Delete:
+
+1. lets go of the file: the stage's video paused, its source taken away and loaded again without
+   one, which ends the player's reading - on Windows a file a player still holds cannot be
+   removed - without leaving full screen;
+2. asks `POST /minipaint-clipboard/output/{id}/delete` with `{delete: true}` as JSON, with a
+   deadline (15 s). The server deletes only a regular file - no link - that is a video or a
+   picture and that View Outputs lists (`outputs.delete`), with its records: the ledger's line
+   for the file (the entry stays, for the job's other files and its recipe), the folder listing's
+   (reused for three seconds, which would list it again) and its posters. A body that is not JSON,
+   or an Origin that is not this Forge's, deletes nothing: a page on another site cannot press it
+   with the visitor's cookie. A file another program still has open (`OUTPUT_IN_USE`) is asked
+   once more by itself after 0.7 s, since the player has only just let go;
+3. on success, takes the video out of the listing on the page (its tile and its poster with it,
+   and kept out of a listing read before the delete that lands after it, by its version too) and
+   shows the next video in the order on screen in its place, or the one before when it was the
+   last, or the gallery when it was the only one. A refusal keeps the dialog open with the
+   server's sentence, and Cancel then gives the stage its video back.
+
+Nothing about it reaches a log but the id's first eight characters: `outputs: … deleted from disk`
+in the page journal, `output … deleted from disk.` in Forge's console.
+
 ## Queue Send History
 
 Every request **confirmed started or queued** from this tab is a record: when, on which
@@ -1306,7 +1337,7 @@ it was ignored" case.
 | Queue Send History | `…/clipboard-history.json` |
 | History: the last ten prompts sent from here, as typed, with when, the model and whether it was enhanced | `…/clipboard-prompts.json` (ten; the same words sent again move up) |
 | the Send to WanGP popup's own history: prompt, roles, inherit, enhance, a small preview per recipe | `…/clipboard-intercept-history.json` (100 unpinned, pinned kept) |
-| View Outputs: which files WanGP made for which request, where each one is, and that request's recipe for Load (the typed and the written prompt, library picture ids, the model) | `…/clipboard-outputs.json` (paths only; the videos are never moved or copied) |
+| View Outputs: which files WanGP made for which request, where each one is, and that request's recipe for Load (the typed and the written prompt, library picture ids, the model) | `…/clipboard-outputs.json` (paths only; the videos are never moved or copied, and deleted only by the player's Delete from disk, after its dialog) |
 | the pictures | the storage folder you chose, and only there; an archive's stay in the archive, which is never written to |
 | thumbnails | in memory, and on disk in `…/clipboard-thumbnails/` (64 MiB, least recently used out) - never in the storage folder |
 | an archive's thumbnails | in memory, and on disk in `…/clipboard-archive-thumbnails/` (1 GiB, least recently used out) - never in the archive |
@@ -1359,6 +1390,8 @@ tab's own; the tab, the toast and the log say the same thing about the same fail
 | `ARCHIVE_FILE_UNKNOWN` | that picture is no longer in the archive. Refresh. |
 | `ARCHIVE_FILE_OUTSIDE` | the reference names something that is not a picture file directly inside the archive (a separator, a link, a dot file, another kind of file). Not used. |
 | `ARCHIVE_READ_ONLY` | Rename or Delete was asked of an archive picture. Archives are never written to. |
+| `OUTPUT_IN_USE` | View Outputs' Delete from disk of a file another program still has open - WanGP writing it, a player reading it. Windows cannot remove such a file; nothing was deleted. Asked once more by itself a moment later; try again after that. |
+| `OUTPUT_NOT_DELETABLE` | Delete from disk of a file that is not a video or a picture of the outputs, or that the system would not remove for another reason (the reason's type is in Forge's console). Nothing was deleted. |
 | `OUTPUT_POSTER_UNREADABLE` | none of the server's readers (PyAV, then ffmpeg, then OpenCV) read a frame from that output - WanGP may still be writing it. Its tile is marked; once the file changes it is asked for again. |
 | `OUTPUT_POSTER_UNAVAILABLE` | this Forge has no way to read a video's first frame - no PyAV, no ffmpeg (WanGP's, Forge's or on the PATH) and no OpenCV - so the gallery's tiles are marked; no video is ever sent to the browser instead. |
 | `INTERCEPT_IMAGE_EXPIRED` | the picture the popup froze is no longer there - cancelled, swept, or already taken by a server-run job. Press the gallery button again; nothing was queued. |

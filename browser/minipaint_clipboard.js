@@ -2896,6 +2896,8 @@ window.minipaintClipboard = (function () {
         full: "M5 5h5v2H7v3H5zM14 5h5v5h-2V7h-3zM5 14h2v3h3v2H5zM17 14h2v5h-5v-2h3z",
         // Sliders: a video's settings, sent to WanGP to be loaded there.
         settings: "M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z",
+        // A bin: the video deleted from disk, once confirmed.
+        trash: "M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6zM19 4h-3.5l-1-1h-5l-1 1H5v2h14z",
         exit: "M8 5h2v5H5V8h3zM14 5h2v3h3v2h-5zM5 14h5v5H8v-3H5zM14 14h5v2h-3v3h-2z"
     };
 
@@ -3195,9 +3197,16 @@ window.minipaintClipboard = (function () {
         });
         send.classList.add("minipaint-clip-player-send");
         send.hidden = !settingsReadable(item);
-        for (const button of [restart, back, play, forward, loop, sound, speed, send, full]) { row.appendChild(button); }
+        // Delete from disk, last in the row and asked again in a dialog
+        // first: "I need the ability to delete from disk in clip board view
+        // output videos. Add a delete button with confirmation dialogue to the
+        // video playback controls".
+        const remove = playerButton("trash", "Delete from disk", function () { confirmDelete(item); });
+        remove.classList.add("minipaint-clip-player-delete");
+        for (const button of [restart, back, play, forward, loop, sound, speed, send, full, remove]) { row.appendChild(button); }
         root.appendChild(row);
-        Object.assign(controls, { play: play, loop: loop, sound: sound, speed: speed, full: full, send: send });
+        Object.assign(controls, { play: play, loop: loop, sound: sound, speed: speed, full: full, send: send,
+                                  remove: remove });
 
         video.addEventListener("play", function () { drawPlay(controls); startClock(controls); });
         video.addEventListener("pause", function () { drawPlay(controls); stopClockFor(video); drawTime(controls); });
@@ -3471,6 +3480,207 @@ window.minipaintClipboard = (function () {
             S.outputs.sending = false;
             if (button) { button.disabled = false; button.removeAttribute("aria-busy"); }
         });
+    }
+
+    /* -- Delete from disk ------------------------------------------------ */
+    //
+    // One output's file removed from WanGP's outputs folder, after a dialog
+    // that says so (`POST /minipaint-clipboard/output/<id>/delete`, the server's
+    // `outputs.delete`). The dialog is drawn inside the stage, because in full
+    // screen the stage is all the browser draws; it takes the keys while it is
+    // up (`confirmKey`, on the window's capture phase, and `outputsKey` stands
+    // back), so Space presses the button it is on rather than playing the
+    // video. The player lets go of the file before the request -- on Windows a
+    // file a player still has open cannot be removed -- and the request has a
+    // deadline, like every other here.
+
+    const OUTPUT_DELETE_TIMEOUT_MS = 15000;
+    //: A file the server said is still held, asked once more after this long:
+    //: the player has only just let go, and the server's read of it may not have
+    //: ended yet.
+    const OUTPUT_DELETE_RETRY_MS = 700;
+
+    function confirmDelete(item) {
+        const O = S.outputs;
+        if (!item || O.confirm || O.deleting || !O.stage) { return false; }
+        const video = O.player;
+        const layer = el("div", "minipaint-clip-confirm");
+        const dialog = el("div", "minipaint-clip-confirm-dialog");
+        dialog.setAttribute("role", "alertdialog");
+        dialog.setAttribute("aria-modal", "true");
+        const title = el("p", "minipaint-clip-confirm-title", "Delete this video from disk?");
+        title.id = "minipaint-clip-confirm-title";
+        const text = el("p", "minipaint-clip-confirm-text",
+                        (item.name || "This video") + " is removed from WanGP's outputs folder. This cannot be undone.");
+        text.id = "minipaint-clip-confirm-text";
+        dialog.setAttribute("aria-labelledby", title.id);
+        dialog.setAttribute("aria-describedby", text.id);
+        const message = el("p", "minipaint-clip-confirm-message");
+        message.setAttribute("role", "status");
+        message.hidden = true;
+        const buttons = el("div", "minipaint-clip-confirm-buttons");
+        const cancel = el("button", "minipaint-clip-confirm-cancel", "Cancel");
+        cancel.type = "button";
+        const remove = el("button", "minipaint-clip-confirm-delete", "Delete");
+        remove.type = "button";
+        buttons.appendChild(cancel);
+        buttons.appendChild(remove);
+        for (const part of [title, text, message, buttons]) { dialog.appendChild(part); }
+        layer.appendChild(dialog);
+        const playing = !!(video && !video.paused);
+        if (playing) { try { video.pause(); } catch (e) { /* torn down */ } }
+        O.confirm = { item: item, layer: layer, cancel: cancel, remove: remove, message: message,
+                      playing: playing, restore: false };
+        cancel.addEventListener("click", function (event) { event.stopPropagation(); closeConfirm(true); });
+        remove.addEventListener("click", function (event) { event.stopPropagation(); deleteOutput(item); });
+        // The backdrop is no way to delete; a press on it is Cancel.
+        layer.addEventListener("click", function (event) {
+            event.stopPropagation();
+            if (event.target === layer && !O.deleting) { closeConfirm(true); }
+        });
+        window.addEventListener("keydown", confirmKey, true);
+        O.stage.appendChild(layer);
+        // Cancel has the focus: Enter at the dialog keeps the video.
+        cancel.focus({ preventScroll: true });
+        note("outputs: delete of " + String(item.id).slice(0, 8) + " asked");
+        return true;
+    }
+
+    function confirmKey(event) {
+        const confirm = S.outputs.confirm;
+        if (!confirm) { return; }
+        if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!S.outputs.deleting) { closeConfirm(true); }
+            return;
+        }
+        if (event.key === "Tab") {
+            // Between the dialog's two buttons, and nowhere else.
+            event.preventDefault();
+            event.stopPropagation();
+            (document.activeElement === confirm.cancel ? confirm.remove : confirm.cancel).focus({ preventScroll: true });
+        }
+    }
+
+    /** The dialog put away. `restore`: back to the video as it was -- after a
+     *  Cancel, played again if it was playing, or shown again when a refused
+     *  delete had let go of its file. */
+    function closeConfirm(restore) {
+        const O = S.outputs;
+        const confirm = O.confirm;
+        if (!confirm) { return; }
+        O.confirm = null;
+        window.removeEventListener("keydown", confirmKey, true);
+        if (confirm.layer.parentNode) { confirm.layer.parentNode.removeChild(confirm.layer); }
+        if (!restore) { return; }
+        if (confirm.restore && O.chosen === confirm.item.id && O.view === "slideshow") {
+            showOutput(confirm.item);
+            return;
+        }
+        const button = O.controls && O.controls.remove;
+        if (button) { button.focus({ preventScroll: true }); }
+        if (confirm.playing && O.player) { O.player.play().catch(function () { /* not allowed now */ }); }
+    }
+
+    /** The press of the dialog's Delete. */
+    function deleteOutput(item) {
+        const O = S.outputs;
+        const confirm = O.confirm;
+        if (!item || O.deleting || !confirm) { return Promise.resolve(false); }
+        O.deleting = true;
+        confirm.cancel.disabled = true;
+        confirm.remove.disabled = true;
+        confirm.remove.setAttribute("aria-busy", "true");
+        confirm.message.hidden = false;
+        confirm.message.textContent = "Deleting\u2026";
+        // Let go of the file: paused, its source taken away and loaded again
+        // without one, which ends the player's reading of it. Not `stopPlayer`,
+        // which leaves full screen as well.
+        const video = O.player;
+        stopClock();
+        if (video) {
+            try { video.pause(); video.removeAttribute("src"); video.load(); } catch (e) { /* torn down */ }
+        }
+        confirm.restore = true;
+        const id8 = String(item.id).slice(0, 8);
+        const ask = function () {
+            const controller = typeof AbortController === "function" ? new AbortController() : null;
+            const limit = setTimeout(function () { if (controller) { controller.abort(); } }, OUTPUT_DELETE_TIMEOUT_MS);
+            return fetch(OUTPUTS_FILE_PREFIX + encodeURIComponent(item.id) + "/delete", {
+                method: "POST", credentials: "same-origin", cache: "no-store",
+                headers: { "Content-Type": "application/json" }, body: JSON.stringify({ delete: true }),
+                signal: controller ? controller.signal : undefined
+            }).then(function (response) {
+                clearTimeout(limit);
+                return response.json().catch(function () { return { ok: false, message: "HTTP " + response.status }; });
+            }, function (error) {
+                clearTimeout(limit);
+                throw error;
+            });
+        };
+        return ask().then(function (answer) {
+            if (answer && answer.code === "OUTPUT_IN_USE") {
+                return new Promise(function (resolve) { setTimeout(resolve, OUTPUT_DELETE_RETRY_MS); }).then(ask);
+            }
+            return answer;
+        }).then(function (answer) {
+            if (!answer || answer.ok !== true) {
+                const refusal = new Error((answer && answer.message) || "the server did not delete it.");
+                refusal.code = (answer && answer.code) || "";
+                throw refusal;
+            }
+            note("outputs: " + id8 + " deleted from disk");
+            O.deleting = false;
+            closeConfirm(false);
+            const next = forgetOutput(item);
+            if (O.view === "slideshow") {
+                if (next) { showOutput(next); } else { setOutputsView("gallery", false); }
+            }
+            return true;
+        }).catch(function (error) {
+            const aborted = error && error.name === "AbortError";
+            note("outputs: delete of " + id8 + " refused (" + (aborted ? "timed out" : ((error && error.code) || "no answer")) + ")");
+            O.deleting = false;
+            if (O.confirm !== confirm) { return false; }
+            confirm.message.textContent = "Not deleted: " + (aborted ? "the server did not answer in time."
+                : ((error && error.message) || "something went wrong."));
+            confirm.cancel.disabled = false;
+            confirm.remove.disabled = false;
+            confirm.remove.removeAttribute("aria-busy");
+            confirm.cancel.focus({ preventScroll: true });
+            return false;
+        });
+    }
+
+    /** A deleted output taken out of the listing on the page, its poster and
+     *  its tile with it, and kept out of a listing read before the delete
+     *  that lands after it (by its version too: a new file at the same place
+     *  is a new video). Answers the neighbour to show in its place: the next
+     *  in the order on screen, or the one before when it was the last. */
+    function forgetOutput(item) {
+        const O = S.outputs;
+        const id = item.id;
+        let next = null;
+        if (O.position && O.position.has(id)) {
+            const at = O.position.get(id);
+            next = O.items[at + 1] || O.items[at - 1] || null;
+        }
+        if (!O.deleted) { O.deleted = new Map(); }
+        O.deleted.set(id, item.v);
+        O.all = (O.all || []).filter(function (one) { return one.id !== id; });
+        if (O.byId) { O.byId.delete(id); }
+        const poster = O.gallery.posters.get(id);
+        if (poster && poster.url) { try { URL.revokeObjectURL(poster.url); } catch (e) { /* gone already */ } }
+        O.gallery.posters.delete(id);
+        const cell = O.gallery.rendered.get(id);
+        if (cell) {
+            releaseOutputCell(cell);
+            if (cell.parentNode) { cell.parentNode.removeChild(cell); }
+            O.gallery.rendered.delete(id);
+        }
+        rearrangeOutputs(false);
+        return next && next.id !== id ? next : null;
     }
 
     function loadRecipe(item) {
@@ -5249,6 +5459,8 @@ window.minipaintClipboard = (function () {
         const O = S.outputs;
         const stage = O.stage;
         if (!stage || !item) { return; }
+        // The delete dialog lives in the stage, which is drawn again here.
+        if (O.confirm) { closeConfirm(false); }
         O.chosen = item.id;
         stopPlayer();
         stage.innerHTML = "";
@@ -5331,6 +5543,9 @@ window.minipaintClipboard = (function () {
         O.page = 0;
         O.pages = 1;
         O.all = takeListing(answer);
+        if (O.deleted && O.deleted.size) {
+            O.all = O.all.filter(function (item) { return O.deleted.get(item.id) !== item.v; });
+        }
         O.byId = new Map();
         for (const item of O.all) { O.byId.set(item.id, item); }
         O.message = (answer && answer.status) || "";
@@ -5437,6 +5652,8 @@ window.minipaintClipboard = (function () {
     /** The keys the view answers to, heard first (captured) while it is open. */
     function outputsKey(event) {
         const O = S.outputs;
+        // The delete dialog has the keys while it is up (`confirmKey`).
+        if (O.confirm) { return; }
         const target = event.target;
         const typing = !!target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ""))
             && !(target.classList && target.classList.contains("minipaint-clip-player-scrub"));
@@ -5582,6 +5799,7 @@ window.minipaintClipboard = (function () {
     function closeOutputs() {
         const panel = outputsPanel();
         const O = S.outputs;
+        if (O.confirm) { closeConfirm(false); }
         O.away = false;
         O.stageAway = null;
         releasePreview();

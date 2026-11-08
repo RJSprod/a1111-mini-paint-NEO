@@ -888,6 +888,143 @@ def poster_folder_checks(r: Results) -> None:
     r.check("while nothing else in the data folder is touched", (stranger / "keep.txt").read_text() == "mine")
 
 
+def delete_route_checks(r: Results, folder: pathlib.Path, clock: _Clock) -> None:
+    """View Outputs' Delete: one output's file removed from disk.
+
+    Asked for: "I need the ability to delete from disk in clip board view
+    output videos. Add a delete button with confirmation dialogue to the video
+    playback controls". The page sends ``{"delete": true}`` as JSON for an
+    output's id; the file goes, and with it the ledger's line for it (its entry
+    stays, for the job's other files), the folder listing's and its posters.
+    Nothing less than that press deletes anything, and no answer names a file.
+    """
+    import os
+
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from minipaint_neo.clipboard import posters as clip_posters
+
+    outputs.reset_for_tests()
+    config.update(outputs_folder=str(folder))
+    clock.now += 10
+    claimed = _wrote(folder, "claimed here.mp4", clock.now + 1)
+    sibling = _wrote(folder, "same job.mp4", clock.now + 2)
+    walked = _wrote(folder, "walked.webm", clock.now + 3)
+    outputs.remember("8" * 16, [str(claimed), str(sibling)], request_id="r8", recipe={"prompt": "kept"})
+    listed = {item["name"]: item for item in outputs.gallery(refresh=False)}
+    app = FastAPI()
+    routes.install(app)
+    client = TestClient(app)
+
+    def route(output_id):
+        return routes.OUTPUT_DELETE_ROUTE.replace("{file_id}", output_id)
+
+    def press(output_id, **kwargs):
+        kwargs.setdefault("json", {"delete": True})
+        return client.post(route(output_id), **kwargs)
+
+    first = press(listed["claimed here.mp4"]["id"])
+    r.check("Delete is behind the sign-in gate like every other route of this tab",
+            first.status_code in (200, 401), str(first.status_code))
+    if first.status_code == 401:
+        return
+    answers = [first]
+    names = {item["name"] for item in outputs.gallery(refresh=False)}
+    r.check("a press deletes the file from disk and answers so",
+            first.json().get("ok") is True and not claimed.exists(), first.text[:200])
+    r.check("it is no longer listed, and the job's other file still is",
+            "claimed here.mp4" not in names and "same job.mp4" in names, str(sorted(names)))
+    kept = outputs.entry_for_file(listed["same job.mp4"]["id"])
+    r.check("the job's entry stays, with its recipe, for the file it still has",
+            bool(kept) and (kept.get("recipe") or {}).get("prompt") == "kept", str(kept))
+
+    # A folder video, with a poster on disk: both go, and the folder listing,
+    # reused for a few seconds, does not bring it back.
+    posters = clip_posters.posters()
+    directory = posters.directory()
+    poster_file = None
+    if directory is not None:
+        os.makedirs(str(directory), exist_ok=True)
+        poster_file = pathlib.Path(directory) / f"{listed['walked.webm']['id']}-1-2-320-0.webp"
+        poster_file.write_bytes(b"poster")
+        posters.forget()
+    walked_id = listed["walked.webm"]["id"]
+    second = press(walked_id)
+    answers.append(second)
+    r.check("a video only the folder knows is deleted too", second.status_code == 200 and not walked.exists(),
+            second.text[:200])
+    r.check("and the listing reused for a moment does not list it again",
+            "walked.webm" not in {item["name"] for item in outputs.gallery(refresh=False)})
+    r.check("its posters on disk go with it", poster_file is None or not poster_file.exists())
+
+    again = press(walked_id)
+    answers.append(again)
+    r.check("a second press of a deleted output is a 404", again.status_code == 404
+            and again.json().get("code") == "CLIPBOARD_ASSET_UNKNOWN", again.text[:200])
+
+    sibling_id = listed["same job.mp4"]["id"]
+    refusals = {
+        "a GET": client.get(route(sibling_id)),
+        "a form's body": client.post(route(sibling_id), data={"delete": "true"}),
+        "a JSON body that does not say so": client.post(route(sibling_id), json={"delete": "yes"}),
+        # A form on another site can send this exact text as text/plain, which
+        # needs no preflight: the body is not enough, the type has to be JSON.
+        "a form's text/plain JSON": client.post(route(sibling_id), content=b'{"delete": true}',
+                                                 headers={"Content-Type": "text/plain"}),
+        "another site's page": press(sibling_id, headers={"Origin": "https://elsewhere.example"}),
+    }
+    answers.extend(refusals.values())
+    for what, answer in refusals.items():
+        r.check(f"{what} deletes nothing", answer.status_code in (400, 403, 405, 415) and sibling.exists(),
+                f"{answer.status_code} {answer.text[:120]}")
+
+    # A file another program holds open: on Windows it cannot be removed, and
+    # that is a sentence, not a failure.
+    real_unlink = os.unlink
+
+    def held(path, *args, **kwargs):
+        raise PermissionError(13, "in use")
+
+    os.unlink = held
+    try:
+        busy = press(sibling_id)
+    finally:
+        os.unlink = real_unlink
+    answers.append(busy)
+    r.check("a file still open elsewhere is 409 OUTPUT_IN_USE, and stays listed",
+            busy.status_code == 409 and busy.json().get("code") == "OUTPUT_IN_USE" and sibling.exists()
+            and "same job.mp4" in {item["name"] for item in outputs.gallery(refresh=False)}, busy.text[:200])
+    r.check("no answer names a folder or a file",
+            not any(str(folder) in answer.text or "same job" in answer.text or "claimed" in answer.text
+                    or "walked" in answer.text for answer in answers))
+
+    # A file WanGP reported that is not a video or a picture is not deleted here.
+    notes = _wrote(folder, "notes.json", clock.now + 4)
+    outputs.remember("a" * 16, [str(notes)], request_id="ra")
+    noted = next((one for one in outputs.files(refresh=False) if one["name"] == "notes.json"), None)
+    other_kind = press(noted["id"]) if noted else None
+    r.check("a file that is not a video or a picture is 409 OUTPUT_NOT_DELETABLE, and stays",
+            other_kind is not None and other_kind.status_code == 409
+            and other_kind.json().get("code") == "OUTPUT_NOT_DELETABLE" and notes.exists(),
+            other_kind.text[:200] if other_kind is not None else "not listed")
+
+    # A ledger line pointing at a link is no output to delete.
+    target = _wrote(folder, "behind a link.mp4", clock.now + 5)
+    link = folder / "a link.mp4"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        link = None
+    if link is not None:
+        outputs.remember("9" * 16, [str(link)], request_id="r9")
+        linked = next((one for one in outputs.files(refresh=False) if one["name"] == "a link.mp4"), None)
+        refused = press(linked["id"]) if linked else None
+        r.check("a link is not deleted, nor what it points at",
+                refused is not None and refused.status_code == 404 and link.is_symlink() and target.exists(),
+                refused.text[:200] if refused is not None else "not listed")
+
+
 def run() -> Results:
     r = Results("clipboard outputs")
     with tempfile.TemporaryDirectory(prefix="minipaint-outputs-") as scratch:
@@ -905,7 +1042,8 @@ def run() -> Results:
         try:
             folder_checks(r, base)
             folders = {}
-            for name in ("exact", "window", "restart", "page", "route", "recipe", "folder", "settings", "whole", "posters"):
+            for name in ("exact", "window", "restart", "page", "route", "recipe", "folder", "settings", "whole", "posters",
+                         "delete"):
                 folders[name] = base / name
                 folders[name].mkdir()
             exact_checks(r, clock, folders["exact"])
@@ -918,6 +1056,7 @@ def run() -> Results:
             range_checks(r)
             route_checks(r, folders["route"], clock)
             settings_route_checks(r, folders["settings"], clock)
+            delete_route_checks(r, folders["delete"], clock)
             whole_listing_checks(r, clock, folders["whole"])
             poster_checks(r, folders["posters"], clock)
             poster_folder_checks(r)

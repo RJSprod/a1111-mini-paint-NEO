@@ -3365,6 +3365,88 @@
     margin-top: -4px;
 }
 
+/* View Outputs' Delete: a dialog asking first, drawn inside the stage --
+   which is all the browser draws in full screen -- over the whole window, on
+   the dialog layer. Its Delete in the theme's error colour; Cancel the
+   ordinary button. Colours only from the theme's own variables. */
+#minipaint_clipboard_root .minipaint-clip-confirm {
+    position: fixed;
+    inset: 0;
+    width: auto;
+    height: auto;
+    z-index: var(--minipaint-dialog-layer, 2000);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: 12px;
+    background: transparent;
+}
+
+#minipaint_clipboard_root .minipaint-clip-confirm [hidden] {
+    display: none !important;
+}
+
+#minipaint_clipboard_root .minipaint-clip-confirm-dialog {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: min(420px, 100%);
+    box-sizing: border-box;
+    padding: 14px 16px;
+    border-radius: var(--block-radius, 8px);
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    border-left: 4px solid var(--error-text-color, #ef4444);
+    background: var(--background-fill-primary, rgba(32, 32, 32, 0.98));
+    color: var(--body-text-color, inherit);
+    box-shadow: var(--shadow-drop-lg, 0 8px 24px rgba(0, 0, 0, 0.35));
+    font-size: 14px;
+    line-height: 1.4;
+}
+
+#minipaint_clipboard_root .minipaint-clip-confirm-title {
+    margin: 0;
+    font-weight: 600;
+}
+
+#minipaint_clipboard_root .minipaint-clip-confirm-text,
+#minipaint_clipboard_root .minipaint-clip-confirm-message {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+#minipaint_clipboard_root .minipaint-clip-confirm-message {
+    color: var(--body-text-color-subdued, inherit);
+}
+
+#minipaint_clipboard_root .minipaint-clip-confirm-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-confirm-buttons button {
+    min-height: 40px;
+    padding: 0 16px;
+    border-radius: var(--block-radius, 6px);
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    background: var(--button-secondary-background-fill, transparent);
+    color: var(--button-secondary-text-color, inherit);
+    font: inherit;
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-confirm-buttons .minipaint-clip-confirm-delete {
+    border-color: var(--error-text-color, #ef4444);
+    color: var(--error-text-color, #ef4444);
+}
+
+#minipaint_clipboard_root .minipaint-clip-confirm-buttons button:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
 #minipaint_clipboard_root .minipaint-clip-prompts {
     position: fixed;
     inset: var(--minipaint-clip-top, 0px) var(--minipaint-clip-right, 0px) 0 var(--minipaint-clip-left, 0px);

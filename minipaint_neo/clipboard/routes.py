@@ -65,6 +65,8 @@ OUTPUT_FILE_ROUTE = ROUTE_PREFIX + "/output/{file_id}"
 OUTPUT_SETTINGS_ROUTE = OUTPUT_FILE_ROUTE + "/settings"
 #: One output's poster, for View Outputs' gallery (``posters``).
 OUTPUT_POSTER_ROUTE = OUTPUT_FILE_ROUTE + "/poster"
+#: View Outputs' Delete: one output's file removed from disk (``outputs.delete``).
+OUTPUT_DELETE_ROUTE = OUTPUT_FILE_ROUTE + "/delete"
 #: The gallery's Send to WanGP popup: everything it asks, over one POST, and
 #: the small copy of the picture it froze.
 INTERCEPT_ROUTE = ROUTE_PREFIX + "/intercept"
@@ -846,6 +848,53 @@ def _output_settings(request: typing.Any) -> typing.Any:
     return _json({"ok": True, "handoff_id": handoff_id})
 
 
+async def _output_delete(request: typing.Any) -> typing.Any:
+    """View Outputs' Delete: one output's file removed from disk, after the
+    player's confirmation (``outputs.delete``).
+
+    A press of the page's own button sends ``{"delete": true}`` as JSON from
+    this Forge's own page, and nothing less is taken: a form on another site
+    cannot send a JSON body without a preflight this route never answers, and
+    a request that says where it came from must say this Forge
+    (``proxy.origin_allowed``), so a cookie alone deletes nothing. The file is
+    removed off the event loop, in the threadpool: it is a disk write, and on
+    a slow disk the rest of the page should not wait on it.
+    """
+    from ..wangp import proxy
+    from ..wangp.errors import IntegrationError
+
+    if not _signed_in(request):
+        return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
+    origin = request.headers.get("origin", "")
+    netloc = str(getattr(getattr(request, "url", None), "netloc", "") or request.headers.get("host", ""))
+    if origin and not proxy.origin_allowed(origin, netloc, proxy.public_scheme(request),
+                                           bool(proxy.declared_scheme(request))):
+        return _json({"ok": False, "code": errors.REQUEST_INVALID,
+                      "message": "Delete is pressed on this Forge's own page."}, 403)
+    if not request.headers.get("content-type", "").lower().startswith("application/json"):
+        return _json({"ok": False, "code": errors.REQUEST_INVALID, "message": "Delete asks for a JSON body."}, 415)
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict) or body.get("delete") is not True:
+        return _json({"ok": False, "code": errors.REQUEST_INVALID, "message": "Delete asks for {\"delete\": true}."}, 400)
+    try:
+        from starlette.concurrency import run_in_threadpool
+
+        answer = await run_in_threadpool(outputs.delete, request.path_params.get("file_id", ""))
+    except IntegrationError as error:
+        # The code's own sentence, never the detail -- but an output gone is
+        # this route's to say, as Send to WanGP's says it.
+        if error.code == errors.CLIPBOARD_ASSET_UNKNOWN:
+            return _json({"ok": False, "code": error.code, "message": "That output is no longer there."}, 404)
+        return _json(error.as_dict(), 409)
+    except Exception as error:
+        scrub.console(f"an output could not be deleted ({type(error).__name__}).", _LOG_PREFIX)
+        return _json({"ok": False, "code": errors.INTERNAL_ERROR, "message": errors.message(errors.INTERNAL_ERROR)}, 500)
+    return _json({"ok": True, "id": answer["id"], "message": "Deleted from disk."})
+
+
 def _output_poster(request: typing.Any) -> typing.Any:
     """One output's poster: a frame of the video, small (``posters``).
 
@@ -1367,6 +1416,7 @@ def install(app: typing.Any) -> None:
             Route(OUTPUT_FILE_ROUTE, endpoint=_output_file, methods=["GET", "HEAD"]),
             Route(OUTPUT_SETTINGS_ROUTE, endpoint=_output_settings, methods=["POST"]),
             Route(OUTPUT_POSTER_ROUTE, endpoint=_output_poster, methods=["GET"]),
+            Route(OUTPUT_DELETE_ROUTE, endpoint=_output_delete, methods=["POST"]),
             Route(IMPORT_ROUTE, endpoint=_import, methods=["POST"]),
             Route(SEND_ROUTE, endpoint=_send, methods=["POST"]),
             Route(INTERCEPT_ROUTE, endpoint=_intercept, methods=["POST"]),

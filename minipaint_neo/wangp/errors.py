@@ -81,6 +81,12 @@ OUTPUT_POSTER_UNAVAILABLE = "OUTPUT_POSTER_UNAVAILABLE"
 #: ... and of a file that gave no frame: one WanGP is still writing, or one
 #: that is not the video its name says.
 OUTPUT_POSTER_UNREADABLE = "OUTPUT_POSTER_UNREADABLE"
+#: View Outputs' Delete of a file another program still holds open -- WanGP
+#: writing it, a player reading it: on Windows a file in use cannot be removed.
+OUTPUT_IN_USE = "OUTPUT_IN_USE"
+#: ... and of a file that is not one of the outputs' videos or pictures, or that
+#: the system would not remove for another reason.
+OUTPUT_NOT_DELETABLE = "OUTPUT_NOT_DELETABLE"
 QUEUE_BUSY = "QUEUE_BUSY"
 QUEUE_REQUEST_REFUSED = "QUEUE_REQUEST_REFUSED"
 ADMISSION_UNCONFIRMED = "ADMISSION_UNCONFIRMED"
@@ -236,6 +242,8 @@ MESSAGES: dict[str, str] = {
     OUTPUT_NO_SETTINGS: "WanGP reads settings only from an MP4, MKV or MOV video or a picture it made; this file has none it can load.",
     OUTPUT_POSTER_UNAVAILABLE: "This Forge has no way to read a video's first frame (PyAV, ffmpeg or OpenCV), so View Outputs shows no posters.",
     OUTPUT_POSTER_UNREADABLE: "No frame could be read from that output; WanGP may still be writing it.",
+    OUTPUT_IN_USE: "That file is still open in another program (WanGP, or a player), so it was not deleted; try again in a moment.",
+    OUTPUT_NOT_DELETABLE: "That file could not be deleted from disk.",
     CLIPBOARD_ASSET_OUTSIDE_ROOT: "That image is not inside the Clipboard folder, so it was not used.",
     QUEUE_BUSY: "WanGP is still taking the previous queue request; try again in a moment.",
     QUEUE_REQUEST_REFUSED: "WanGP did not take the queue request.",

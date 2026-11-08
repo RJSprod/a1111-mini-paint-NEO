@@ -3413,6 +3413,179 @@ def check_an_output_sends_its_settings_to_wangp(r: Results, page) -> None:
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def check_an_output_is_deleted_from_disk_after_asking(r: Results, page) -> None:
+    """Asked for: "I need the ability to delete from disk in clip board view
+    output videos. Add a delete button with confirmation dialogue to the video
+    playback controls".
+
+    The bin is the player bar's last button. A press asks first, in a dialog
+    drawn inside the stage, Cancel with the focus; Escape and Cancel keep the
+    video and the view as they were, and the dialog keeps the keys -- Space
+    is the button's, Tab goes between its two buttons. Delete removes the file
+    from disk through the real route and shows the next video in its place; a
+    refusal keeps the dialog open, says why, and on Cancel gives the stage its
+    video back.
+    """
+    from minipaint_neo.clipboard import config as clip_config
+
+    folder = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-delete-"))
+    bin_button = ".minipaint-clip-player [data-control='trash']"
+    dialog = ".minipaint-clip-confirm-dialog"
+
+    def state():
+        return page.evaluate("""() => { const s = window.minipaintClipboard.outputsState();
+            const d = document.querySelector('.minipaint-clip-confirm-dialog');
+            const active = document.activeElement;
+            const v = document.querySelector('.minipaint-clip-output-stage-media');
+            return { view: s.view, chosen: s.chosen, total: s.total, open: s.open,
+                     dialog: !!d && d.getClientRects().length > 0, role: d ? d.getAttribute('role') : null,
+                     words: d ? d.textContent : '',
+                     focus: active ? active.className : '',
+                     message: (document.querySelector('.minipaint-clip-confirm-message') || {}).textContent || '',
+                     video: !!v && v.tagName === 'VIDEO' && !!v.getAttribute('src') }; }""")
+
+    try:
+        made = _seed_outputs(folder, 3, kind="mp4", request_id="delete-me", job_id="d" * 16)
+        clip_config.update(outputs_folder=str(folder))
+        target = folder / "clip001.mp4"
+        _open_outputs_on(page, "clip001.mp4")
+        page.wait_for_selector(bin_button, state="attached", timeout=8000)
+        button = page.evaluate("""s => { const b = document.querySelector(s); const box = b.getBoundingClientRect();
+            return { label: b.getAttribute('aria-label'), last: !b.nextElementSibling, width: box.width,
+                     hidden: b.hidden }; }""", bin_button)
+        r.check("the player's bar ends with Delete from disk, as wide as its other buttons",
+                button["label"] == "Delete from disk" and button["last"] and not button["hidden"]
+                and button["width"] >= 43.5, str(button))
+        chosen = state()["chosen"]
+
+        page.click(bin_button)
+        page.wait_for_selector(dialog, state="visible", timeout=4000)
+        asked = state()
+        r.check("a press asks first, naming the file, with Cancel to hand",
+                asked["dialog"] and asked["role"] == "alertdialog" and "clip001.mp4" in asked["words"]
+                and "cannot be undone" in asked["words"] and "minipaint-clip-confirm-cancel" in asked["focus"], str(asked))
+        page.keyboard.press("Tab")
+        tabbed = state()["focus"]
+        page.keyboard.press("Tab")
+        back = state()["focus"]
+        r.check("Tab goes between the dialog's two buttons and nowhere else",
+                "minipaint-clip-confirm-delete" in tabbed and "minipaint-clip-confirm-cancel" in back, f"{tabbed} / {back}")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+        escaped = state()
+        r.check("Escape puts the dialog away and nothing else: the slideshow, the video and the file stay",
+                not escaped["dialog"] and escaped["view"] == "slideshow" and escaped["chosen"] == chosen
+                and target.exists(), str(escaped))
+
+        page.click(bin_button)
+        page.wait_for_selector(dialog, state="visible", timeout=4000)
+        page.keyboard.press("Space")
+        page.wait_for_timeout(200)
+        spaced = state()
+        r.check("Space presses the button it is on -- Cancel -- and does not play the video under it",
+                not spaced["dialog"] and target.exists() and page.evaluate(
+                    "() => document.querySelector('.minipaint-clip-output-stage-media').paused"), str(spaced))
+
+        # Refused: the dialog stays and says why; Cancel gives the stage its video back.
+        page.route("**/minipaint-clipboard/output/*/delete", lambda route: route.fulfill(
+            status=409, content_type="application/json",
+            body='{"ok": false, "code": "OUTPUT_NOT_DELETABLE", "message": "That file could not be deleted from disk."}'))
+        page.click(bin_button)
+        page.wait_for_selector(dialog, state="visible", timeout=4000)
+        page.click(".minipaint-clip-confirm-delete")
+        page.wait_for_function("() => (document.querySelector('.minipaint-clip-confirm-message') || {}).textContent"
+                               " && document.querySelector('.minipaint-clip-confirm-message').textContent.indexOf('Not deleted') === 0",
+                               timeout=8000)
+        refused = state()
+        r.check("a refusal keeps the dialog, says why in the server's words, and deletes nothing",
+                refused["dialog"] and "could not be deleted" in refused["message"] and target.exists(), str(refused))
+        page.click(".minipaint-clip-confirm-cancel")
+        page.wait_for_timeout(300)
+        restored = state()
+        r.check("and Cancel then gives the stage its video back",
+                not restored["dialog"] and restored["chosen"] == chosen and restored["video"], str(restored))
+        page.unroute("**/minipaint-clipboard/output/*/delete")
+
+        before = state()["total"]
+        # Where the player stood when the request left: on Windows a file a
+        # player still holds cannot be removed, so it lets go first.
+        page.evaluate("""() => { const original = window.fetch; window.__deleteFetch = original;
+            window.fetch = function (url) {
+                if (String(url).indexOf('/delete') >= 0) {
+                    const v = document.querySelector('.minipaint-clip-output-stage-media');
+                    window.__srcAtDelete = v ? v.getAttribute('src') : 'no player';
+                }
+                return original.apply(this, arguments);
+            }; }""")
+        # And a listing read before the delete that lands after it: answered by
+        # the server while the file was there, handed to the page once it is not.
+        held = []
+        page.route("**/minipaint-clipboard/outputs*", lambda route: held.append(route))
+        page.evaluate("() => { window.minipaintClipboard.askOutputs(); }")
+        for _ in range(50):
+            if held:
+                break
+            page.wait_for_timeout(100)
+        stale = held[0].fetch() if held else None
+        page.click(bin_button)
+        page.wait_for_selector(dialog, state="visible", timeout=4000)
+        page.click(".minipaint-clip-confirm-delete")
+        page.wait_for_function("() => !document.querySelector('.minipaint-clip-confirm-dialog')", timeout=15000)
+        page.wait_for_timeout(300)
+        r.check("the player had let go of the file when the request left",
+                page.evaluate("() => window.__srcAtDelete") is None, str(page.evaluate("() => window.__srcAtDelete")))
+        if held and stale is not None:
+            held[0].fulfill(response=stale)
+            page.wait_for_timeout(500)
+        page.unroute("**/minipaint-clipboard/outputs*")
+        r.check("a listing read before the delete that lands after it does not bring the video back",
+                stale is not None and page.evaluate("() => window.minipaintClipboard.outputsState().total") == before - 1,
+                str(page.evaluate("() => window.minipaintClipboard.outputsState().total")))
+        page.evaluate("() => { window.fetch = window.__deleteFetch; delete window.__deleteFetch; delete window.__srcAtDelete; }")
+        done = state()
+        r.check("Delete removes the file from disk", not target.exists(), str(sorted(p.name for p in folder.iterdir())))
+        r.check("and the slideshow shows the next video in its place, one fewer listed",
+                done["view"] == "slideshow" and done["chosen"] and done["chosen"] != chosen
+                and done["total"] == before - 1 and done["video"], str(done))
+        page.evaluate("() => window.minipaintClipboard.askOutputs()")
+        page.wait_for_timeout(600)
+        r.check("a listing read afterwards does not bring it back",
+                page.evaluate("() => window.minipaintClipboard.outputsState().total") == before - 1)
+        others = [pathlib.Path(path) for path in made if pathlib.Path(path) != target]
+        r.check("and the other videos are where they were", len(others) == 2 and all(path.exists() for path in others))
+
+        # The view closed from elsewhere with the dialog up takes the dialog
+        # with it, and the keys are the view's again when it opens.
+        page.click(bin_button)
+        page.wait_for_selector(dialog, state="visible", timeout=4000)
+        page.evaluate("() => window.minipaintClipboard.closeOutputs()")
+        page.evaluate("""() => { window.__pageEscapes = 0;
+            window.__countEscape = (e) => { if (e.key === 'Escape') { window.__pageEscapes += 1; } };
+            document.addEventListener('keydown', window.__countEscape); }""")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(100)
+        escapes = page.evaluate("""() => { document.removeEventListener('keydown', window.__countEscape);
+            const n = window.__pageEscapes; delete window.__pageEscapes; delete window.__countEscape; return n; }""")
+        r.check("and the page's Escape is the page's again: the dialog took its keys with it",
+                escapes == 1 and page.evaluate("() => !document.querySelector('.minipaint-clip-confirm')"), str(escapes))
+        _open_outputs_on(page, others[0].name)
+        page.wait_for_selector(bin_button, state="attached", timeout=8000)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        reopened = state()
+        r.check("closing the view with the dialog up puts the dialog away, and its keys work again after",
+                not reopened["dialog"] and reopened["view"] == "gallery", str(reopened))
+    finally:
+        for pattern in ("**/minipaint-clipboard/output/*/delete", "**/minipaint-clipboard/outputs*"):
+            try:
+                page.unroute(pattern)
+            except Exception:
+                pass
+        page.evaluate("""() => { if (window.__deleteFetch) { window.fetch = window.__deleteFetch; delete window.__deleteFetch; }
+            if (window.minipaintClipboard.debug().outputsOpen) { window.minipaintClipboard.closeOutputs(); } }""")
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def check_an_output_loads_its_recipe(r: Results, page) -> None:
     """Asked for: "a way to Load from the view outputs ... load the prompt and
     images if available so i can generate again".
@@ -6422,6 +6595,7 @@ def run() -> Results:
                     ("check_the_players_full_screen_is_its_own", lambda: check_the_players_full_screen_is_its_own(r, page)),
                     ("check_an_output_loads_its_recipe", lambda: check_an_output_loads_its_recipe(r, page)),
                     ("check_an_output_sends_its_settings_to_wangp", lambda: check_an_output_sends_its_settings_to_wangp(r, page)),
+                    ("check_an_output_is_deleted_from_disk_after_asking", lambda: check_an_output_is_deleted_from_disk_after_asking(r, page)),
                     ("check_the_tab_fills_the_window", lambda: check_the_tab_fills_the_window(r, page)),
                     ("check_a_thumbnail_is_fetched_once", lambda: check_a_thumbnail_is_fetched_once(r, page)),
                     ("check_the_row_is_filled_per_row", lambda: check_the_row_is_filled_per_row(r, page, browser)),

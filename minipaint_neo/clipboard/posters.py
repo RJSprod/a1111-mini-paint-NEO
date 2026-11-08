@@ -579,6 +579,38 @@ class Posters:
             self._failed.clear()
             self._disk = None
 
+    def forget_output(self, file_id: str) -> int:
+        """Everything made from one output, in memory and on disk, gone with
+        it: View Outputs' Delete (``outputs.delete``). A poster's name carries
+        its file's identity, so none could be served for another file anyway;
+        this is so that a deleted video leaves nothing of itself behind.
+        Answers how many poster files were removed."""
+        wanted = str(file_id or "").lower()
+        if not wanted:
+            return 0
+        with self._lock:
+            for key in [key for key in self._memory if key[0] == wanted]:
+                del self._memory[key]
+            for key in [key for key in self._failed if key[0] == wanted]:
+                del self._failed[key]
+        folder = self.directory()
+        removed = 0
+        for key, name in list(self._index().items()):
+            if key[0] != wanted:
+                continue
+            if folder is not None:
+                try:
+                    os.unlink(os.path.join(str(folder), name))
+                    removed += 1
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    continue
+            with self._lock:
+                if self._disk is not None:
+                    self._disk.pop(key, None)
+        return removed
+
     # -- the one way in ---------------------------------------------------
 
     def poster(self, file_id: str, path: pathlib.Path, info: os.stat_result,

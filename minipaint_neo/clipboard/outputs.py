@@ -686,6 +686,87 @@ def path_of(file_id: typing.Any) -> typing.Optional[pathlib.Path]:
     return None
 
 
+def delete(file_id: typing.Any) -> dict:
+    """Delete one output's file from disk: View Outputs' Delete. Asked for, "I
+    need the ability to delete from disk in clip board view output videos".
+
+    Only a file the listing offers: found by its id (``path_of``, the one place
+    a path is resolved), still a regular file and not a link, a video or a
+    picture by its name, and -- for a folder video -- still inside the output
+    folder (``_folder_path``). Its records go with it: the ledger's line for
+    the file (its entry stays, holding the request's recipe for any other file
+    of the job, and a job still in the outbox would otherwise be claimed
+    again), the folder listing (reused for ``FOLDER_LISTING_SECONDS``, which
+    would list it once more), and its posters.
+
+    Raises ``IntegrationError``: ``CLIPBOARD_ASSET_UNKNOWN`` for an id whose
+    file is no longer there, ``OUTPUT_IN_USE`` for one another program still
+    holds open -- on Windows such a file cannot be removed, and that is said as
+    a sentence, not as a failure of this extension -- and
+    ``OUTPUT_NOT_DELETABLE`` for a file that is not an output's video or
+    picture, or that the system would not remove for another reason.
+    """
+    from ..wangp import errors
+    from ..wangp.errors import IntegrationError
+
+    wanted = str(file_id or "")
+    path = path_of(wanted)
+    if path is None:
+        raise IntegrationError(errors.CLIPBOARD_ASSET_UNKNOWN, "That output is no longer there.")
+    try:
+        regular = not path.is_symlink() and path.is_file()
+    except OSError:
+        regular = False
+    if not regular:
+        raise IntegrationError(errors.CLIPBOARD_ASSET_UNKNOWN, "That output is no longer there.")
+    if not path.name.lower().endswith(MEDIA_SUFFIXES):
+        raise IntegrationError(errors.OUTPUT_NOT_DELETABLE, "not a video or a picture")
+    try:
+        os.unlink(str(path))
+    except FileNotFoundError:
+        _forget_file(wanted, path)
+        raise IntegrationError(errors.CLIPBOARD_ASSET_UNKNOWN, "That output is no longer there.")
+    except PermissionError:
+        raise IntegrationError(errors.OUTPUT_IN_USE, "held open")
+    except OSError as error:
+        raise IntegrationError(errors.OUTPUT_NOT_DELETABLE, type(error).__name__)
+    _forget_file(wanted, path)
+    try:
+        from . import posters
+
+        posters.posters().forget_output(wanted)
+    except Exception as error:
+        scrub.console(f"a deleted output's posters stay until the cache is swept ({type(error).__name__}).",
+                      _LOG_PREFIX)
+    # The id, never a name.
+    scrub.console(f"output {wanted[:8]} deleted from disk.", _LOG_PREFIX)
+    return {"id": wanted}
+
+
+def _forget_file(file_id: str, path: pathlib.Path) -> None:
+    """The ledger's line for a file, and the folder listing's, gone: by its id,
+    and by its place too, since one video can be both a ledger file and a
+    folder video found by walking."""
+    where = _key(path)
+    with _lock:
+        entries = _load()
+        changed = False
+        for entry in entries:
+            kept = [one for one in entry["files"]
+                    if one["file_id"] != file_id and _key(one["path"]) != where]
+            if len(kept) != len(entry["files"]):
+                entry["files"] = kept
+                changed = True
+        if changed:
+            _save(entries)
+        listed = [one for one in _folder["files"] if one["id"] != file_id and _key(one["path"]) != where]
+        if len(listed) != len(_folder["files"]):
+            _folder["files"] = listed
+        index = _folder["index"]
+        for key in [key for key, found in index.items() if key == file_id or _key(found) == where]:
+            del index[key]
+
+
 def forget_all() -> int:
     """Empty the document. The files themselves are never touched."""
     with _lock:
@@ -717,6 +798,7 @@ __all__ = [
     "MEDIA_SUFFIXES",
     "SCHEMA",
     "VIDEO_SUFFIXES",
+    "delete",
     "entry_for_file",
     "files",
     "folder",

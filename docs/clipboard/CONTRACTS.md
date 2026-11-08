@@ -822,6 +822,12 @@ through so the server can reconcile roles without a call into the child.
       -> {ok, handoff_id}: a reference note naming that output for the bridge's settings load (bridge 1.17.0);
          404 CLIPBOARD_ASSET_UNKNOWN for an id that is no output, 409 OUTPUT_NO_SETTINGS for a file WanGP reads no
          settings from (not in protocol.SETTINGS_FILE_SUFFIXES), 500 INTERNAL_ERROR if the note could not be written
+    POST /minipaint-clipboard/output/{file_id}/delete   {delete: true}, as application/json   (the removal in the threadpool)
+      -> {ok, id, message}: the file deleted from disk (outputs.delete) - its ledger line, the folder listing's and its
+         posters with it; 404 CLIPBOARD_ASSET_UNKNOWN for an id that is no output (or a link), 409 OUTPUT_IN_USE for a
+         file another program holds open, 409 OUTPUT_NOT_DELETABLE for one that is not a video or a picture or would not
+         go; 415 for a body that is not JSON (a form can send text/plain without a preflight), 400 for one that does not
+         say {delete: true}, 403 for an Origin that is not this Forge's (proxy.origin_allowed). No answer names a file.
 
 `Accept-Ranges: bytes` is on every answer and **206 is the point of the
 route**: a `<video>` served without ranges plays but cannot seek, so the
@@ -956,6 +962,11 @@ def gallery(refresh=True) -> [files()' items + {source: "request"}, and {id: "wf
                                                                                       # what View Outputs lists: the ledger's files and every other video under the folder,
                                                                                       # each once, newest first; a walk stops at FOLDER_SCAN_MAX files; a link is not listed
 def path_of(file_id) -> Path | None                                                   # the only place an id becomes a path
+def delete(file_id) -> {id}                                                           # View Outputs' Delete: the file removed from disk, only a regular file
+                                                                                      # (no link) that is a video or a picture; its ledger line goes (the entry stays,
+                                                                                      # for the job's other files and its recipe), the folder listing's and its posters
+                                                                                      # (posters().forget_output) with it. IntegrationError CLIPBOARD_ASSET_UNKNOWN,
+                                                                                      # OUTPUT_IN_USE (PermissionError: held open on Windows), OUTPUT_NOT_DELETABLE
 # files() and gallery() items also carry mtime, the file's own time, which its version is made of
 
 # posters.py: View Outputs' posters - each video's first frame - made once and kept three times

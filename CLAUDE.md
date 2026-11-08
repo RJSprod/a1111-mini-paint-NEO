@@ -842,7 +842,12 @@ poster's own answer (`/minipaint-clipboard/output/<id>/poster?r=first`, its code
 and the folder `clipboard-output-first-frames/` in the extension's data. Checked
 with PyAV 17.1.0 and the system ffmpeg on VP8 WebM, MPEG-4 Part 2 and H.264 MP4 and
 on 5,000 outputs in Chromium, never against the user's own WanGP folder, WanGP's
-own ffmpeg or in LibreWolf. The views' place beside a side tab bar has been checked
+own ffmpeg or in LibreWolf. View Outputs' **Delete from disk** (2026-11-08,
+`outputs.delete`, the bar's bin and its dialog) has been checked in Chromium on Linux against
+the real route, never on Windows, where a file still open cannot be removed: if a delete says
+*That file is still open in another program*, the page has already let go of its video and
+asked once more, so WanGP (writing or reading it) or another player is what holds it, and
+Forge's console has the line `output … deleted from disk.` only for a delete that happened. The views' place beside a side tab bar has been checked
 against a copy of the Model Chain theme's rail rules (`RAIL_STAND_IN_CSS` in
 `tests/browser_clipboard.py`), never the theme itself: if a view sits under the
 rail, the root's `--minipaint-clip-left` / `-right` say what was measured. The

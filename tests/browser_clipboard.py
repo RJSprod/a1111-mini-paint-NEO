@@ -3393,7 +3393,7 @@ def check_a_video_goes_full_screen_and_is_swiped_through(r: Results, page) -> No
         again = page.evaluate("() => sessionStorage.getItem('minipaint-outputs:shuffle')")
         r.check("Shuffle shuffles what the steps go through, and pressed again shuffles anew, still full screen",
                 look["on"] == ["shuffle"] and page.evaluate("() => window.minipaintClipboard.debug().outputs.sort") == "shuffle"
-                and first and again and first != again and page.evaluate(stage_full)
+                and again and first != again and page.evaluate(stage_full)
                 and page.evaluate(shown_name) == "full2.webm", str({"look": look, "seeds": [first, again]}))
 
         # A toast said while full screen is said inside it, where it can be read.

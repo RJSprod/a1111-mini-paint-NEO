@@ -3271,6 +3271,178 @@ def check_the_players_full_screen_is_its_own(r: Results, page) -> None:
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def check_a_video_goes_full_screen_and_is_swiped_through(r: Results, page) -> None:
+    """Asked for: "the ability to make the videos and view output full screen.
+    Right now, they don't full screen. They just show up within view. But I
+    want to be able to full screen the video and the view outputs and swipe
+    between them so I can go to the next one, including our new shuffle
+    function", with the order "newest to oldest by timestamp, date created",
+    the oldest first, or "a complete shuffle", and "when a video ends, it
+    should loop".
+
+    Four real clips a minute apart. Every gallery tile has a full-screen button
+    in its corner; a press puts that video full screen - the stage, really -
+    with arrows and a bar of where it is and the order drawn over it; a drag
+    of the mouse sideways (a remote desktop's touch) and an arrow each step to
+    the next in the order and stay full screen, which every step used to end;
+    Oldest and Shuffle reorder what the steps go through, Shuffle again
+    shuffles anew, and the gallery's own order follows; the video loops; a
+    toast is said inside the full screen; and leaving full screen comes back
+    to the gallery on the video it ended on.
+    """
+    from minipaint_neo.clipboard import config as clip_config
+    from minipaint_neo.clipboard import outputs
+
+    binary = _ffmpeg()
+    if not binary:
+        r.check("real clips can be made for the full-screen view's checks", False, "no ffmpeg found")
+        return
+    folder = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-full-view-"))
+    stage_full = "() => { const n = document.fullscreenElement; return !!n && n.classList.contains('minipaint-clip-output-stage'); }"
+    shown_name = """() => { const c = document.querySelector('.minipaint-clip-output-stage .minipaint-clip-output-name');
+        return c ? c.textContent : ''; }"""
+    chrome = """() => { const stage = document.querySelector('.minipaint-clip-output-stage');
+        const bar = stage && stage.querySelector('.minipaint-clip-output-chrome-bar');
+        const next = stage && stage.querySelector('.minipaint-clip-output-chrome-next');
+        const b = bar && bar.getBoundingClientRect(), n = next && next.getBoundingClientRect();
+        return { bar: !!b && b.width > 0 && b.height > 0, next: !!n && n.width > 0 && n.right <= innerWidth + 1,
+                 where: stage ? (stage.querySelector('.minipaint-clip-output-chrome-where') || {}).textContent : '',
+                 on: stage ? Array.from(stage.querySelectorAll('.minipaint-clip-output-chrome-order'))
+                     .filter(e => e.getAttribute('aria-checked') === 'true').map(e => e.dataset.order) : [] }; }"""
+    try:
+        outputs.reset_for_tests()
+        folder.mkdir(parents=True, exist_ok=True)
+        clip_config.update(outputs_folder=str(folder))
+        made = []
+        base = time.time() - 3600
+        for index in range(4):
+            path = folder / f"full{index}.webm"
+            try:
+                _real_clip(path)
+            except Exception as error:
+                r.check("the clips for the full-screen view's checks were made", False, f"{type(error).__name__}: {error}")
+                return
+            os.utime(path, (base + 60 * index, base + 60 * index))
+            made.append(str(path))
+        outputs.remember("9" * 16, made, request_id=PLAYER_REQUEST, model="A video model")
+        newest = ["full3.webm", "full2.webm", "full1.webm", "full0.webm"]
+        before = page.evaluate("() => window.minipaintClipboard.debug().outputs.drawn")
+        page.evaluate("() => window.minipaintClipboard.openOutputs('gallery')")
+        page.wait_for_function("n => window.minipaintClipboard.debug().outputs.drawn > n", arg=before, timeout=8000)
+        page.evaluate("() => window.minipaintClipboard.setOutputsSort('newest')")
+        page.wait_for_selector(".minipaint-clip-output-cell[aria-label='full2.webm'] .minipaint-clip-output-expand",
+                               state="visible", timeout=8000)
+        corner = page.evaluate("""() => { const cells = Array.from(document.querySelectorAll('.minipaint-clip-output-cell'));
+            return cells.map(c => { const e = c.querySelector('.minipaint-clip-output-expand');
+                if (!e) { return null; } const t = c.getBoundingClientRect(), b = e.getBoundingClientRect();
+                return { top: b.top - t.top, right: t.right - b.right, size: b.width, svg: !!e.querySelector('svg') }; }); }""")
+        r.check("every video tile in the gallery has a full-screen button in its corner, drawn",
+                len(corner) >= 4 and all(c and 0 <= c["top"] <= 12 and 0 <= c["right"] <= 12 and 16 <= c["size"] <= 28 and c["svg"]
+                                         for c in corner), str(corner[:4]))
+        page.click(".minipaint-clip-output-cell[aria-label='full2.webm'] .minipaint-clip-output-expand")
+        page.wait_for_timeout(600)
+        look = page.evaluate(chrome)
+        r.check("a press on it puts that video full screen, with where it is, the order and the arrows drawn over it",
+                page.evaluate(stage_full) and page.evaluate(shown_name) == "full2.webm"
+                and look["bar"] and look["next"] and look["where"] == "2 of 4" and look["on"] == ["newest"], str(look))
+        r.check("and it loops, the player's Loop on until it is turned off",
+                page.evaluate("() => document.querySelector('.minipaint-clip-output-stage video').loop") is True)
+        size = page.viewport_size or {"width": 1400, "height": 950}
+        cx, cy = size["width"] / 2, size["height"] / 2 - 60
+        page.mouse.move(cx + 150, cy)
+        page.mouse.down()
+        page.mouse.move(cx - 150, cy, steps=8)
+        page.mouse.up()
+        page.wait_for_timeout(600)
+        r.check("a sideways drag of the mouse - a remote desktop's swipe - is the next video, still full screen",
+                page.evaluate(shown_name) == "full1.webm" and page.evaluate(stage_full)
+                and page.evaluate(chrome)["where"] == "3 of 4", str(page.evaluate(chrome)))
+        r.check("and the press it ends with is no tap: the next video plays",
+                page.evaluate("() => { const v = document.querySelector('.minipaint-clip-output-stage video'); return !!v && !v.paused; }"))
+        page.click(".minipaint-clip-output-stage .minipaint-clip-output-chrome-next")
+        page.wait_for_timeout(500)
+        r.check("the arrow steps too, and full screen lasts from one video to the next",
+                page.evaluate(shown_name) == "full0.webm" and page.evaluate(stage_full)
+                and page.evaluate(chrome)["where"] == "4 of 4", str(page.evaluate(chrome)))
+        disabled = page.evaluate("() => document.querySelector('.minipaint-clip-output-chrome-next').disabled")
+        page.mouse.move(cx - 150, cy)
+        page.mouse.down()
+        page.mouse.move(cx + 150, cy, steps=8)
+        page.mouse.up()
+        page.wait_for_timeout(500)
+        r.check("at the end the next arrow is off, and a drag the other way goes back",
+                disabled is True and page.evaluate(shown_name) == "full1.webm", page.evaluate(shown_name))
+
+        page.click(".minipaint-clip-output-stage .minipaint-clip-output-chrome-order[data-order='oldest']")
+        page.wait_for_timeout(400)
+        look = page.evaluate(chrome)
+        r.check("Oldest reorders what the steps go through, the video on screen kept, and the gallery's order follows",
+                look["on"] == ["oldest"] and look["where"] == "2 of 4" and page.evaluate(shown_name) == "full1.webm"
+                and page.evaluate("() => window.minipaintClipboard.debug().outputs.sort") == "oldest"
+                and page.evaluate("() => document.querySelector('.minipaint-clip-output-sort').value") == "oldest", str(look))
+        page.click(".minipaint-clip-output-stage .minipaint-clip-output-chrome-next")
+        page.wait_for_timeout(400)
+        r.check("so the next is the next newer one, still full screen",
+                page.evaluate(shown_name) == "full2.webm" and page.evaluate(stage_full), page.evaluate(shown_name))
+        page.click(".minipaint-clip-output-stage .minipaint-clip-output-chrome-order[data-order='shuffle']")
+        page.wait_for_timeout(400)
+        first = page.evaluate("() => sessionStorage.getItem('minipaint-outputs:shuffle')")
+        look = page.evaluate(chrome)
+        page.click(".minipaint-clip-output-stage .minipaint-clip-output-chrome-order[data-order='shuffle']")
+        page.wait_for_timeout(400)
+        again = page.evaluate("() => sessionStorage.getItem('minipaint-outputs:shuffle')")
+        r.check("Shuffle shuffles what the steps go through, and pressed again shuffles anew, still full screen",
+                look["on"] == ["shuffle"] and page.evaluate("() => window.minipaintClipboard.debug().outputs.sort") == "shuffle"
+                and first and again and first != again and page.evaluate(stage_full)
+                and page.evaluate(shown_name) == "full2.webm", str({"look": look, "seeds": [first, again]}))
+
+        # A toast said while full screen is said inside it, where it can be read.
+        page.evaluate("() => { window.minipaintClipboard.select(''); window.minipaintClipboard.autoQueue('', false); }")
+        page.wait_for_timeout(300)
+        told = page.evaluate("""() => { const stage = document.querySelector('.minipaint-clip-output-stage');
+            const t = Array.from(stage.children).find(e => e.classList.contains('minipaint-clip-toast'));
+            const b = t && t.getBoundingClientRect();
+            return { text: t && !t.hidden ? t.textContent : '', shown: !!b && b.width > 0 }; }""")
+        r.check("a toast said while full screen is said inside the full screen",
+                told["shown"] and "Select an image first." in told["text"], str(told))
+
+        # Leaving full screen the browser's way (its Escape is the browser's
+        # own, which a synthetic key in headless Chromium does not reach).
+        landed = page.evaluate("() => window.minipaintClipboard.debug().outputs.chosen")
+        page.evaluate("() => document.exitFullscreen()")
+        page.wait_for_timeout(700)
+        state = page.evaluate("() => window.minipaintClipboard.debug().outputs")
+        r.check("leaving full screen comes back to the gallery, on the video it ended on",
+                not page.evaluate(stage_full) and state["view"] == "gallery" and state["chosen"] == landed
+                and page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is True, str(state))
+
+        # From the slideshow, the player's own button: full screen, stepped, and left in the slideshow.
+        page.evaluate("() => window.minipaintClipboard.setOutputsSort('newest')")
+        page.evaluate("() => window.minipaintClipboard.setOutputsView('slideshow')")
+        page.wait_for_selector(".minipaint-clip-player [data-control='full']", state="visible", timeout=8000)
+        page.click(".minipaint-clip-player [data-control='full']")
+        page.wait_for_timeout(500)
+        page.keyboard.press("PageDown")
+        page.wait_for_timeout(500)
+        stepped = page.evaluate(stage_full)
+        page.evaluate("() => document.exitFullscreen()")
+        page.wait_for_timeout(500)
+        r.check("the slideshow's own Full screen lasts through a step too, and leaving it stays in the slideshow",
+                stepped is True and page.evaluate("() => window.minipaintClipboard.debug().outputs.view") == "slideshow",
+                str(stepped))
+    finally:
+        page.evaluate("""() => {
+            if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); }
+            window.minipaintClipboard.setOutputsSort('newest');
+            window.minipaintClipboard.setOutputsView('gallery');
+            sessionStorage.removeItem('minipaint-outputs:shuffle');
+            window.minipaintClipboard.closeOutputs();
+        }""")
+        page.wait_for_timeout(300)
+        outputs.reset_for_tests()
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def check_an_output_sends_its_settings_to_wangp(r: Results, page) -> None:
     """Asked for: "the ability to send a video from this view to wan2gp to
     load its settings! Using this option should be a new send button in the
@@ -3318,21 +3490,25 @@ def check_an_output_sends_its_settings_to_wangp(r: Results, page) -> None:
 
         def button():
             return page.evaluate("""s => { const b = document.querySelector(s);
-                return b ? { hidden: b.hidden, label: b.getAttribute('aria-label') || '', disabled: b.disabled,
+                return b ? { hidden: b.hidden && getComputedStyle(b).display === 'none' && b.getClientRects().length === 0,
+                             label: b.getAttribute('aria-label') || '', disabled: b.disabled,
                              busy: b.getAttribute('aria-busy') === 'true',
-                             beforeFull: !!b.nextElementSibling && b.nextElementSibling.dataset.control === 'full' } : null; }""", send)
+                             beforeFull: !!b.nextElementSibling && b.nextElementSibling.dataset.control === 'prompt'
+                                         && !!b.nextElementSibling.nextElementSibling
+                                         && b.nextElementSibling.nextElementSibling.dataset.control === 'full' } : null; }""", send)
 
         for name in ("plain.webm", "plain.m4v"):
             _open_outputs_on(page, name)
             page.wait_for_selector(".minipaint-clip-player", state="attached", timeout=8000)
             shown = button()
-            r.check(f"a {name.rsplit('.', 1)[1].upper()}, which WanGP keeps no settings in, has no Send to WanGP in its bar",
+            r.check(f"a {name.rsplit('.', 1)[1].upper()}, which WanGP keeps no settings in, has no Send to WanGP in its bar - "
+                    "hidden, and not drawn",
                     shown is not None and shown["hidden"] is True, str(shown))
 
         _open_outputs_on(page, "clip000.mp4")
         page.wait_for_selector(send, state="attached", timeout=8000)
         shown = button()
-        r.check("an MP4 in the stage has a Send to WanGP button in the player's bar, beside full screen",
+        r.check("an MP4 in the stage has a Send to WanGP button in the player's bar, beside Send prompt & LoRAs and full screen",
                 shown is not None and shown["hidden"] is False and "Send to WanGP" in shown["label"] and shown["beforeFull"], str(shown))
 
         page.click(send)
@@ -3408,6 +3584,126 @@ def check_an_output_sends_its_settings_to_wangp(r: Results, page) -> None:
         page.evaluate("""() => {
             window.minipaintWanGP = window.__settingsSaved;
             for (const k of ['__settingsSaved', '__settingsCalls', '__switches', '__settingsAnswer', '__release']) { delete window[k]; }
+            if (window.minipaintClipboard.debug().outputsOpen) { window.minipaintClipboard.closeOutputs(); }
+        }""")
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def check_an_output_sends_its_prompt_and_loras_to_wangp(r: Results, page) -> None:
+    """Asked for: "the ability from the view outputs to be able to just send
+    the prompt and not the whole video, image, reference, first image. I just
+    want to send the prompt and the LoRa over ... Make this a separate action
+    than sending the whole thing", and "I just want the prompt and the LoRAs
+    to override whatever is in wan2GP."
+
+    Its own button in the player's bar, between Send to WanGP and full screen,
+    and in the gallery's line under the grid, for the videos WanGP keeps its
+    settings in. A press asks the server for the same note Send to WanGP
+    does and hands its id to the WanGP tab's ``loadPromptAndLoras`` - never
+    ``loadSettings`` - stood in for here; once WanGP says it put them there
+    the view closes on the WanGP tab, unless a LoRA is missing from WanGP's
+    folder for its model, when the view stays and says how many. An older
+    bridge's refusal says to reinstall it.
+    """
+    from minipaint_neo.clipboard import config as clip_config
+    from minipaint_neo.wangp import protocol as wangp_protocol
+
+    folder = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-words-"))
+    words = ".minipaint-clip-player [data-control='prompt']"
+    try:
+        _seed_outputs(folder, 2, kind="mp4", request_id=SETTINGS_REQUEST, job_id="c" * 16)
+        (folder / "plain.webm").write_bytes(b"not really a video" * 8)
+        clip_config.update(outputs_folder=str(folder))
+        page.evaluate("""() => {
+            window.__wordsSaved = window.minipaintWanGP;
+            window.__wordsCalls = [];
+            window.__wholeCalls = [];
+            window.__switches = 0;
+            window.__wordsAnswer = { ok: true, loaded: true, model_type: 't2v', switched: false, message: '',
+                                     only: 'prompt_loras', loras: 2, missing_loras: 0 };
+            window.minipaintWanGP = Object.assign({}, window.__wordsSaved || {}, {
+                loadSettings: function (id) { window.__wholeCalls.push(id); return Promise.resolve({ ok: true, loaded: true }); },
+                loadPromptAndLoras: function (id) {
+                    window.__wordsCalls.push(id);
+                    return Promise.resolve(window.__wordsAnswer);
+                },
+                switchToWanGP: function () { window.__switches += 1; return true; }
+            });
+        }""")
+
+        def toast():
+            return page.evaluate("() => { const t = document.querySelector('.minipaint-clip-toast'); return t && !t.hidden ? t.textContent : ''; }")
+
+        def shown(selector):
+            return page.evaluate("""s => { const b = document.querySelector(s);
+                return b ? { hidden: b.hidden && getComputedStyle(b).display === 'none',
+                             label: b.getAttribute('aria-label') || b.textContent || '' } : null; }""", selector)
+
+        _open_outputs_on(page, "plain.webm")
+        page.wait_for_selector(".minipaint-clip-player", state="attached", timeout=8000)
+        r.check("a WebM, which WanGP keeps no settings in, has no Send prompt & LoRAs in its bar, hidden and not drawn",
+                (shown(words) or {}).get("hidden") is True, str(shown(words)))
+
+        _open_outputs_on(page, "clip000.mp4")
+        page.wait_for_selector(words, state="attached", timeout=8000)
+        button = shown(words)
+        r.check("an MP4 in the stage has a Send prompt & LoRAs button of its own in the player's bar",
+                button is not None and button["hidden"] is False and "Send prompt & LoRAs" in button["label"], str(button))
+        page.click(words)
+        page.wait_for_function("() => window.__switches >= 1", timeout=15000)
+        page.wait_for_timeout(300)
+        calls = page.evaluate("() => window.__wordsCalls.slice()")
+        r.check("a press hands the WanGP tab a note's id for the prompt and LoRAs, and never asks for the whole load",
+                len(calls) == 1 and wangp_protocol.valid_handoff_id(calls[0]) and page.evaluate("() => window.__wholeCalls.length") == 0,
+                str(calls))
+        r.check("once WanGP says they are there, the view closes on the WanGP tab and says what went, everything else as it was",
+                page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is False
+                and page.evaluate("() => window.__switches") == 1
+                and "Sent its prompt and 2 LoRAs to WanGP; everything else is as WanGP had it." in toast(), toast())
+
+        page.evaluate("""() => { window.__wordsAnswer = { ok: true, loaded: true, model_type: 't2v', switched: false, message: '',
+                                                           only: 'prompt_loras', loras: 3, missing_loras: 1 }; }""")
+        _open_outputs_on(page, "clip000.mp4")
+        page.wait_for_selector(words, state="attached", timeout=8000)
+        page.click(words)
+        page.wait_for_function("() => window.__wordsCalls.length >= 2 && !document.querySelector(\"" + words + "\").disabled",
+                               timeout=15000)
+        r.check("a LoRA missing from WanGP's folder for its model keeps the view open and says so",
+                page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is True
+                and page.evaluate("() => window.__switches") == 1
+                and "1 of them is not in WanGP's LoRA folder for t2v" in toast(), toast())
+
+        page.evaluate("""() => { window.__wordsAnswer = { ok: false, code: 'BRIDGE_COMPONENT_INCOMPATIBLE',
+                                                           message: 'This WanGP bridge needs to be reinstalled or updated.' }; }""")
+        page.click(words)
+        page.wait_for_function("() => window.__wordsCalls.length >= 3 && !document.querySelector(\"" + words + "\").disabled",
+                               timeout=15000)
+        r.check("an older bridge's refusal leaves the view open and says to reinstall it, at 1.18.0",
+                page.evaluate("() => window.minipaintClipboard.debug().outputsOpen") is True
+                and "older than 1.18.0" in toast() and "Settings → WanGP" in toast(), toast())
+
+        # The gallery's line under the grid has it too.
+        page.evaluate("() => window.minipaintClipboard.setOutputsView('gallery')")
+        page.evaluate("""() => { window.__wordsAnswer = { ok: true, loaded: true, model_type: 't2v', switched: false, message: '',
+                                                           only: 'prompt_loras', loras: 0, missing_loras: 0 }; }""")
+        page.evaluate("""() => {
+            const tile = [...document.querySelectorAll('.minipaint-clip-output-tile')]
+                .find((t) => (t.title || '').indexOf('clip001.mp4') === 0);
+            if (tile) { tile.click(); }
+        }""")
+        page.wait_for_selector(".minipaint-clip-output-detail .minipaint-clip-output-words", state="visible", timeout=8000)
+        line = shown(".minipaint-clip-output-detail .minipaint-clip-output-words")
+        page.click(".minipaint-clip-output-detail .minipaint-clip-output-words")
+        page.wait_for_function("() => window.__switches >= 2", timeout=15000)
+        page.wait_for_timeout(300)
+        r.check("the gallery's line under the grid offers Prompt & LoRAs for the selected video, which sends the same way",
+                line is not None and "Prompt & LoRAs" in line["label"] and page.evaluate("() => window.__wordsCalls.length") == 4
+                and page.evaluate("() => window.__wholeCalls.length") == 0
+                and "Sent its prompt and no LoRAs to WanGP" in toast(), str(line) + toast())
+    finally:
+        page.evaluate("""() => {
+            window.minipaintWanGP = window.__wordsSaved;
+            for (const k of ['__wordsSaved', '__wordsCalls', '__wholeCalls', '__switches', '__wordsAnswer']) { delete window[k]; }
             if (window.minipaintClipboard.debug().outputsOpen) { window.minipaintClipboard.closeOutputs(); }
         }""")
         shutil.rmtree(folder, ignore_errors=True)
@@ -6431,14 +6727,26 @@ def check_the_viewer_browses_the_folder(r: Results, page, library) -> None:
 
 def check_a_tile_opens_full_screen(r: Results, page) -> None:
     """Asked for: "a tiny button to the upper right of a large sized thumb,
-    that lets me expand to full screen and double tap to exit"."""
+    that lets me expand to full screen and double tap to exit" - and then
+    "let's make it always there for all pictures, regardless of size"."""
     open_clipboard(page)
     page.evaluate("() => window.minipaintClipboard.refreshAll()")
     time.sleep(1.0)
-    set_tile_size(page, 96)
-    small = page.evaluate("""() => { const e = document.querySelector('#minipaint_clipboard_root .minipaint-clip-expand');
-        return e ? getComputedStyle(e).display : 'none-found'; }""")
-    r.check("a small tile has no full-screen button", small == "none", small)
+    set_tile_size(page, 70)
+    small = page.evaluate("""() => {
+        const tile = document.querySelector('#minipaint_clipboard_root .minipaint-clip-item');
+        const e = tile && tile.querySelector('.minipaint-clip-expand');
+        if (!e) { return { found: false }; }
+        const t = tile.getBoundingClientRect(), b = e.getBoundingClientRect();
+        const square = tile.querySelector('.minipaint-clip-thumb').getBoundingClientRect();
+        const glyph = e.querySelector('svg').getBoundingClientRect();
+        return { found: true, display: getComputedStyle(e).display, size: b.width, thumb: square.width,
+                 top: b.top - t.top, right: t.right - b.right, glyph: glyph.width,
+                 inside: glyph.left >= b.left - 0.5 && glyph.right <= b.right + 0.5 }; }""")
+    r.check("a small tile has a full-screen button too, smaller, in its corner, its glyph inside it",
+            small.get("found") and small["display"] == "flex" and 16 <= small["size"] < 26
+            and small["size"] <= small["thumb"] / 4 + 1 and 0 <= small["top"] <= 12 and 0 <= small["right"] <= 12
+            and small["glyph"] > 0 and small["inside"], str(small))
     set_tile_size(page, 200)
     corner = page.evaluate("""() => {
         const tile = document.querySelector('#minipaint_clipboard_root .minipaint-clip-item');
@@ -6448,7 +6756,7 @@ def check_a_tile_opens_full_screen(r: Results, page) -> None:
                  text: e.textContent, svg: !!e.querySelector('svg') }; }""")
     r.check("a large tile has one, small, in its upper right corner, drawn rather than written",
             corner["display"] == "flex" and 0 <= corner["top"] <= 12 and 0 <= corner["right"] <= 12
-            and corner["size"] <= 32 and corner["text"] == "" and corner["svg"], str(corner))
+            and 24 <= corner["size"] <= 32 and corner["text"] == "" and corner["svg"], str(corner))
     page.evaluate("""() => {
         window.__fullRequests = [];
         new PerformanceObserver(list => { for (const e of list.getEntries()) {
@@ -6482,6 +6790,16 @@ def check_a_tile_opens_full_screen(r: Results, page) -> None:
     page.wait_for_timeout(500)
     state = _viewer(page)
     r.check("a double tap closes it and gives the screen back", not state["open"] and state["full"] == "nothing", str(state))
+    # A small tile's button opens it the same way (after the count of whole
+    # pictures above, which a first open here would have cached).
+    set_tile_size(page, 70)
+    page.locator("#minipaint_clipboard_root .minipaint-clip-item").nth(1).locator(".minipaint-clip-expand").click()
+    page.wait_for_timeout(500)
+    state = _viewer(page)
+    r.check("and a small tile's button opens the view as a large tile's does",
+            state["open"] and state["full"] == "viewer", str(state))
+    page.evaluate("() => window.minipaintClipboard.closeViewer()")
+    page.wait_for_timeout(300)
 
     # Over the page's own full screen - the Forge Assistant's focus mode.
     page.evaluate("""() => {
@@ -6511,6 +6829,209 @@ def check_a_tile_opens_full_screen(r: Results, page) -> None:
         }""")
         page.wait_for_timeout(300)
         page.evaluate("() => window.minipaintClipboard.closeViewer()")
+        set_tile_size(page, 144)
+
+
+def check_the_viewer_zooms_and_sends_with_auto(r: Results, page, library) -> None:
+    """The full-screen picture zooms, and a right click there is Auto.
+
+    Asked for: "the ability to zoom in, zoom out of the picture once I'm in
+    full screen gallery using the scroll wheel, or pinch to zoom", and "when
+    I'm in full screen gallery view of a picture ... right click, which is
+    long press on a remote desktop session ... quickly initiate an auto when
+    I'm looking at a picture that's full screen". The wheel zooms about the
+    pointer, two fingers (real touch events, through the DevTools protocol)
+    zoom about their middle, a drag of a zoomed picture moves it and steps
+    nowhere, a double tap fits it again before it closes, a step fits it,
+    and + and 0 zoom and fit; a right click is one Auto press for the picture
+    on screen - not the one the view opened on - unless it comes as the view
+    opens, and what came of it is said inside the view.
+    """
+    from PIL import Image
+    from minipaint_neo.clipboard import history as clip_history
+    from minipaint_neo.clipboard import outbox as clip_outbox
+
+    target = library / "zoom-target.png"
+    picture = Image.new("RGB", (1600, 1000))
+    picture.putdata([(x * 255 // 1600, y * 255 // 1000, 120) for y in range(1000) for x in range(1600)])
+    picture.save(target)
+    os.utime(target, (time.time() + 5000, time.time() + 5000))
+
+    def settle_jobs():
+        for job in clip_outbox.jobs():
+            if job["state"] == "pending":
+                clip_outbox.cancel(job["job_id"])
+            elif job["state"] in ("failed", "cancelled", "unconfirmed") and not job.get("dismissed"):
+                try:
+                    clip_outbox.dismiss(job["job_id"])
+                except Exception:
+                    pass
+
+    picture_box = """() => { const p = document.querySelector('#minipaint_clipboard_root .minipaint-clip-viewer-picture');
+        const b = p.getBoundingClientRect(); return { left: b.left, top: b.top, width: b.width, height: b.height }; }"""
+    presses = []
+
+    def pressed(request):
+        if request.method == "POST" and "/minipaint-clipboard/queue" in request.url:
+            try:
+                presses.append(json.loads(request.post_data or "{}"))
+            except ValueError:
+                presses.append({})
+
+    open_clipboard(page)
+    show_page(page, {"sort": "newest", "refresh": True})
+    set_tile_size(page, 200)
+    page.on("request", pressed)
+    cdp = None
+    try:
+        tile = page.locator("#minipaint_clipboard_root .minipaint-clip-item[data-name='zoom-target.png']")
+        page.wait_for_function("() => !!document.querySelector(\"#minipaint_clipboard_root .minipaint-clip-item[data-name='zoom-target.png']\")",
+                               timeout=10000)
+        tile.locator(".minipaint-clip-expand").click()
+        page.wait_for_function("() => { const v = window.minipaintClipboard.viewerState(); return v.open && v.loaded === '1'; }",
+                               timeout=10000)
+        page.wait_for_timeout(200)
+        size = page.viewport_size or {"width": 1400, "height": 950}
+        before = page.evaluate(picture_box)
+        x, y = before["left"] + before["width"] / 3, size["height"] / 2
+        fraction = (x - before["left"]) / before["width"]
+        page.mouse.move(x, y)
+        page.mouse.wheel(0, -400)
+        page.wait_for_timeout(200)
+        state = page.evaluate(VIEWER_JS)
+        after = page.evaluate(picture_box)
+        r.check("the wheel zooms the full-screen picture in, about the pointer",
+                state["zoom"]["s"] > 1.5 and abs((x - after["left"]) / after["width"] - fraction) < 0.01
+                and after["width"] > before["width"] * 1.5, str({"zoom": state["zoom"], "before": before, "after": after}))
+        current = state["current"]
+        page.mouse.move(size["width"] / 2, size["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(size["width"] / 2 - 150, size["height"] / 2, steps=6)
+        page.mouse.up()
+        page.wait_for_timeout(150)
+        dragged = page.evaluate(VIEWER_JS)
+        r.check("zoomed in, a drag moves the picture and steps nowhere",
+                dragged["current"] == current and abs(dragged["zoom"]["x"] - (state["zoom"]["x"] - 150)) < 1
+                and dragged["open"], str({"was": state["zoom"], "now": dragged["zoom"]}))
+        page.mouse.move(size["width"] / 2 - 300, size["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(size["width"] / 2 + 4000, size["height"] / 2, steps=4)
+        page.mouse.up()
+        page.wait_for_timeout(150)
+        held = page.evaluate(picture_box)
+        r.check("and never so far that the picture leaves the view's edge uncovered",
+                held["left"] <= 0.5 and held["left"] + held["width"] >= size["width"] - 0.5, str(held))
+        page.mouse.dblclick(size["width"] / 2, size["height"] / 2)
+        page.wait_for_timeout(300)
+        fitted = page.evaluate(VIEWER_JS)
+        r.check("a double tap while zoomed fits the picture again and leaves the view open",
+                fitted["open"] and fitted["zoom"]["s"] == 1 and fitted["zoom"]["x"] == 0, str(fitted["zoom"]))
+        page.mouse.wheel(0, -300)
+        page.wait_for_timeout(100)
+        page.mouse.wheel(0, 5000)
+        page.wait_for_timeout(150)
+        r.check("the wheel the other way zooms back out to the fitted picture, and no further",
+                page.evaluate(VIEWER_JS)["zoom"]["s"] == 1
+                and page.evaluate("() => document.querySelector('#minipaint_clipboard_root .minipaint-clip-viewer-picture').style.transform") == "",
+                str(page.evaluate(VIEWER_JS)["zoom"]))
+        page.keyboard.press("+")
+        page.wait_for_timeout(100)
+        plus = page.evaluate(VIEWER_JS)["zoom"]["s"]
+        page.keyboard.press("0")
+        page.wait_for_timeout(100)
+        r.check("+ zooms and 0 fits again", abs(plus - 1.25) < 0.001 and page.evaluate(VIEWER_JS)["zoom"]["s"] == 1, str(plus))
+
+        cdp = page.context.new_cdp_session(page)
+        cx, cy = size["width"] / 2, size["height"] / 2
+
+        def touch(kind, points):
+            cdp.send("Input.dispatchTouchEvent", {"type": kind, "touchPoints": [
+                {"x": px, "y": py, "id": i, "radiusX": 2, "radiusY": 2, "force": 1} for i, (px, py) in enumerate(points)]})
+
+        touch("touchStart", [(cx - 60, cy), (cx + 60, cy)])
+        for step in range(1, 9):
+            touch("touchMove", [(cx - 60 - step * 20, cy), (cx + 60 + step * 20, cy)])
+            page.wait_for_timeout(16)
+        touch("touchEnd", [])
+        page.wait_for_timeout(250)
+        pinched = page.evaluate(VIEWER_JS)
+        r.check("two fingers spreading from 120 px apart to 440 zoom in by that much, and step nowhere",
+                pinched["open"] and pinched["current"] == current and abs(pinched["zoom"]["s"] - 440 / 120) < 0.05,
+                str(pinched["zoom"]))
+        touch("touchStart", [(cx - 220, cy), (cx + 220, cy)])
+        for step in range(1, 9):
+            touch("touchMove", [(cx - 220 + step * 20, cy), (cx + 220 - step * 20, cy)])
+            page.wait_for_timeout(16)
+        touch("touchEnd", [])
+        page.wait_for_timeout(250)
+        r.check("and closing them zooms back out", page.evaluate(VIEWER_JS)["zoom"]["s"] < pinched["zoom"]["s"] / 1.5,
+                str(page.evaluate(VIEWER_JS)["zoom"]))
+        page.mouse.wheel(0, -400)
+        page.wait_for_timeout(100)
+        page.keyboard.press("ArrowRight")
+        page.wait_for_timeout(200)
+        stepped = page.evaluate(VIEWER_JS)
+        r.check("a step to the next picture fits it again",
+                stepped["current"] != current and stepped["zoom"]["s"] == 1, str(stepped["zoom"]))
+
+        # Auto, from a right click in the view.
+        settle_jobs()
+        draft = clip_history.load_draft()
+        for key in ("first_asset_id", "last_asset_id"):
+            draft[key] = ""
+        draft["reference_asset_ids"] = []
+        clip_history.save_draft(draft)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
+        tile.locator(".minipaint-clip-expand").click()
+        page.wait_for_timeout(100)
+        del presses[:]
+        page.mouse.click(cx, cy, button="right")
+        page.wait_for_timeout(500)
+        r.check("a right click as the view opens is the press that opened it, and sends nothing",
+                not [body for body in presses if body.get("action") == "auto"], str(presses))
+        page.keyboard.press("ArrowRight")
+        page.wait_for_timeout(700)
+        on_screen = page.evaluate(VIEWER_JS)["current"]
+        jobs = len(clip_outbox.jobs())
+        page.evaluate("() => { window.__menuShown = null; window.addEventListener('contextmenu', e => { window.__menuShown = !e.defaultPrevented; }, { once: true }); }")
+        page.mouse.click(cx, cy, button="right")
+        for _ in range(60):
+            if len(clip_outbox.jobs()) > jobs:
+                break
+            page.wait_for_timeout(100)
+        page.wait_for_timeout(400)
+        sent = [body for body in presses if body.get("action") == "auto"]
+        job = clip_outbox.jobs()[-1] if len(clip_outbox.jobs()) > jobs else {}
+        images = (job.get("request") or {}).get("images") or {}
+        r.check("a right click on the view is one Auto press, for the picture on screen, and the browser's menu does not open",
+                len(sent) == 1 and sent[0].get("picture") == on_screen and on_screen != tile.get_attribute("data-asset")
+                and page.evaluate("() => window.__menuShown") is False, str({"sent": sent, "on_screen": on_screen}))
+        r.check("which the server stores as a job with that picture in Auto's roles",
+                images.get("start") == {"kind": "clipboard_asset", "id": on_screen}
+                and images.get("references") == [{"kind": "clipboard_asset", "id": on_screen}], json.dumps(job.get("request"))[:240])
+        told = page.evaluate("""() => { const v = document.querySelector('#minipaint_clipboard_root .minipaint-clip-viewer');
+            const t = v && Array.from(v.children).find(e => e.classList.contains('minipaint-clip-toast'));
+            const b = t && t.getBoundingClientRect();
+            return { text: t && !t.hidden ? t.textContent : '', shown: !!b && b.width > 0 && b.height > 0,
+                     auto: v.dataset.auto, open: !v.hidden, selected: window.minipaintClipboard.debug().selected }; }""")
+        r.check("the view stays open, says what went where inside itself, and the picture is the selection",
+                told["open"] and told["shown"] and told["text"].startswith("Auto: ") and " as First Frame and Reference." in told["text"]
+                and told["auto"] == "sent" and told["selected"] == on_screen, str(told))
+    finally:
+        page.remove_listener("request", pressed)
+        if cdp is not None:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+        page.evaluate("() => window.minipaintClipboard.closeViewer()")
+        page.wait_for_timeout(300)
+        settle_jobs()
+        try:
+            target.unlink()
+        except OSError:
+            pass
         set_tile_size(page, 144)
 
 
@@ -6594,13 +7115,19 @@ def run() -> Results:
                     ("check_the_player_is_the_pages", lambda: check_the_player_is_the_pages(r, page)),
                     ("check_the_players_full_screen_is_its_own", lambda: check_the_players_full_screen_is_its_own(r, page)),
                     ("check_an_output_loads_its_recipe", lambda: check_an_output_loads_its_recipe(r, page)),
+                    ("check_a_video_goes_full_screen_and_is_swiped_through",
+                     lambda: check_a_video_goes_full_screen_and_is_swiped_through(r, page)),
                     ("check_an_output_sends_its_settings_to_wangp", lambda: check_an_output_sends_its_settings_to_wangp(r, page)),
+                    ("check_an_output_sends_its_prompt_and_loras_to_wangp",
+                     lambda: check_an_output_sends_its_prompt_and_loras_to_wangp(r, page)),
                     ("check_an_output_is_deleted_from_disk_after_asking", lambda: check_an_output_is_deleted_from_disk_after_asking(r, page)),
                     ("check_the_tab_fills_the_window", lambda: check_the_tab_fills_the_window(r, page)),
                     ("check_a_thumbnail_is_fetched_once", lambda: check_a_thumbnail_is_fetched_once(r, page)),
                     ("check_the_row_is_filled_per_row", lambda: check_the_row_is_filled_per_row(r, page, browser)),
                     ("check_a_tile_opens_full_screen", lambda: check_a_tile_opens_full_screen(r, page)),
                     ("check_the_viewer_browses_the_folder", lambda: check_the_viewer_browses_the_folder(r, page, library)),
+                    ("check_the_viewer_zooms_and_sends_with_auto",
+                     lambda: check_the_viewer_zooms_and_sends_with_auto(r, page, library)),
                     ("check_a_picture_sends_to_png_info", lambda: check_a_picture_sends_to_png_info(r, page, library)),
                     ("check_an_archive_loads_what_is_in_view_first", lambda: check_an_archive_loads_what_is_in_view_first(r, page)),
                     ("select_first", lambda: r.check("a picture can be selected", select_first(page),

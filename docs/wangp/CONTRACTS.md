@@ -304,6 +304,13 @@ resolves - never rejects - with `{ok, loaded, model_type, switched, message}` or
 failure's `{ok: false, code, message}`; a bridge whose READY did not say
 `capabilities.settings_load` is never asked. *Bridge 1.17.0* below has all of it.
 
+`loadPromptAndLoras(handoffId)` (bridge 1.18.0) is its lighter sibling, for View Outputs'
+Send prompt & LoRAs: the same note and the same save first, then `SETTINGS_REQUEST` with
+`only: "prompt_loras"`, and only the file's prompt and LoRAs are put on the page. It resolves
+with `{ok, loaded, model_type, switched, message, only, loras, missing_loras}`; a bridge whose
+READY did not say `capabilities.prompt_loras` is never asked, because an older one reads the
+handoff id alone and would load everything. *Bridge 1.18.0* below has it.
+
 Protocol 6 adds `flushForm({timeoutMs, settleMs, callTimeoutMs})`: ask WanGP to
 commit this page's live settings form so a job composed later — on the server,
 with this page shut — runs at what was on screen. It writes one hidden trigger
@@ -931,6 +938,58 @@ check names the model, never the prompt. And the tracker fails a task WanGP's
 loader skipped at its next look, `WANGP_VALIDATION_REFUSED` with WanGP's reason
 (`admission.refusal_reason`, from `gen["queue_errors"]`), rather than after the
 minute's grace as a task that never arrived.
+
+## Bridge 1.18.0: a file's prompt and LoRAs alone
+
+**What it is for.** View Outputs' **Send prompt & LoRAs**: "just the prompt and the LoRa sent to
+wan2gp ... It should just override it." The video's prompt and LoRAs, with their multipliers,
+replace the page's - every LoRA, so a video with none leaves the page with none - and nothing
+else on the page changes: not its model, not a setting, not a picture.
+
+**The request.** The settings load's own (`SETTINGS_REQUEST`, the same reference handoff, the
+same `PROTOCOL` 5) with one more key, `only`, set to `SETTINGS_ONLY_PROMPT_LORAS`
+(`"prompt_loras"`). `normalize_settings_request` (in both copies of the shared block) reads it:
+absent, `None` or empty is the whole load it always was, with nothing added to the request;
+`"prompt_loras"` is kept; anything else is `REQUEST_INVALID`, never a whole load. The parent sends
+it only to a bridge whose READY said `capabilities.prompt_loras`: a 1.17.0 bridge reads the
+handoff id alone and would load everything, so `loadPromptAndLoras` refuses with
+`BRIDGE_COMPONENT_INCOMPATIBLE`, its sentence saying to reinstall, without saving the form or
+asking. The page script in the frame passes `only` on as it came when it is a non-empty string
+and leaves it out otherwise; the plugin decides what it means.
+
+**The capability.** `prompt_loras` is true when the build handed over WanGP's
+`get_settings_from_file`, `get_model_settings` and `set_model_settings`, and the
+`refresh_form_trigger` component (`Compatibility.prompt_loras_loadable`). `get_default_settings`
+and `check_loras_exist` are asked for too and used where they are handed over.
+
+**What the plugin does** (`MiniPaintBridge._prompt_and_loras`), read against Wan2GP's `wgp.py` on
+its main branch on 2026-11-19, never run against a real WanGP:
+
+1. the note and its file proved as for the whole load (`handoff.resolve_reference`);
+2. `get_settings_from_file(state, path, True, False, True, skip_validate_settings=True)` - the
+   first step of WanGP's own Load Settings, with no defaults merged in, the LoRAs resolved for
+   the page's model where the file's model is one WanGP calls compatible with it
+   (`switch_type_if_compatible`); a file it reads nothing from (or with neither a prompt nor
+   LoRAs) answers `loaded: false` with WanGP's reason when it kept one, and writes nothing;
+3. the page's own model (`page_model`) and its saved settings (`get_model_settings` - the form on
+   screen, which the parent has just asked WanGP to save; `get_default_settings` for a model with
+   none yet, or nothing), with `prompt`, `activated_loras` and `loras_multipliers` replaced by the
+   file's (`loras_multipliers` emptied when there are no LoRAs), written back with
+   `set_model_settings`;
+4. `refresh_form_trigger` written with the time, which WanGP's own chain answers with
+   `fill_inputs` - the form filled again from the saved settings, with no save first - and, on the
+   Media Generator's form, the main tabs put on it, as for the whole load. `model_choice_target`
+   is never written: the model is not switched.
+
+**The answer.** `{loaded, model_type, switched: false, only: "prompt_loras", loras,
+missing_loras}`: `loras` counts the LoRAs that went in and `missing_loras` the ones WanGP's own
+`check_loras_exist(page_model, [lora])` - nothing downloaded - says the model's LoRA folder does
+not have (a LoRA with a known address is not missing; WanGP fetches it when it generates).
+`normalize_settings_result` reads `only` only in the vocabulary, `loras` and `missing_loras` only
+as whole numbers from 0 to `SETTINGS_LORAS_MAX` (999), both 0 for a whole load or nothing loaded,
+the missing never more than went in, and `switched` false whenever `only` is set. WanGP's console
+line says how many LoRAs went on which model and how many are missing, never the prompt, a LoRA
+or the file.
 
 ## Bridge 1.17.0: a file's settings loaded into the page; the save keyed to the page; a queue that joins
 

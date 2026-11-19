@@ -833,6 +833,8 @@ class MiniPaintBridge:
         request, code = protocol.normalize_settings_request(raw)
         if code:
             raise compatibility.BridgeError(code, "the settings request did not normalise")
+        if request.get("only") == protocol.SETTINGS_ONLY_PROMPT_LORAS:
+            return self._prompt_and_loras(request, live)
         loader = self.compat.host.read_global("load_settings_from_file")
         if not callable(loader) or not self.compat.settings_loadable():
             raise compatibility.BridgeError(
@@ -868,6 +870,94 @@ class MiniPaintBridge:
                 and self.compat.component(compatibility.MAIN_TABS) is not None):
             writes[compatibility.MAIN_TABS] = {"selected": compatibility.MEDIA_TAB_ID}
         return {"loaded": True, "model_type": model[:120], "switched": switched}, writes
+
+    def _prompt_and_loras(
+        self,
+        request: typing.Mapping[str, typing.Any],
+        live: typing.Mapping[str, typing.Any],
+    ) -> typing.Tuple[dict, typing.Dict[str, typing.Any]]:
+        """Bridge 1.18.0: a file's prompt and LoRAs alone, over the form as the
+        page shows it, for View Outputs' Send prompt & LoRAs.
+
+        Asked for: "the ability from the view outputs to be able to just send
+        the prompt and not the whole video, image, reference, first image. I
+        just want to send the prompt and the LoRa over ... It should just
+        override it." So: WanGP's own reader of a file's settings
+        (``get_settings_from_file``, the first step of its Load Settings box,
+        with no defaults merged in and the LoRAs resolved for the page's model
+        where the file's model is one WanGP calls compatible), then the page's
+        own model's saved settings - the form on screen, which the parent has
+        just asked WanGP to save - with ``prompt``, ``activated_loras`` and
+        ``loras_multipliers`` replaced by the file's, stored back with
+        ``set_model_settings``, and the form filled again from them through
+        ``refresh_form_trigger``, the way WanGP's own box fills it for a file
+        of the page's model. The LoRAs replace the page's, all of them, and
+        a file with none leaves the page with none. Nothing else changes: not
+        the model, not a picture, not a setting.
+
+        A LoRA this model's folder does not have is still sent - it is what
+        was asked for - and counted (``missing_loras``, from WanGP's own
+        ``check_loras_exist`` with nothing downloaded) so the page can say so;
+        WanGP itself refuses to generate with one, in its own words.
+        """
+        if not self.compat.prompt_loras_loadable():
+            raise compatibility.BridgeError(
+                compatibility.BRIDGE_COMPONENT_INCOMPATIBLE,
+                "this WanGP handed over no get_settings_from_file, get_model_settings, set_model_settings or refresh_form_trigger",
+            )
+        state = live.get(compatibility.SESSION_STATE)
+        if not isinstance(state, dict):
+            raise compatibility.BridgeError(compatibility.BRIDGE_COMPONENT_INCOMPATIBLE, "this page's state was not handed over")
+        target = handoff.resolve_reference(request["handoff_id"], self.environ)
+        host = self.compat.host
+        model = self.compat.page_model(live)[0]
+        if not model:
+            raise compatibility.BridgeError(compatibility.BRIDGE_COMPONENT_INCOMPATIBLE, "this page's model could not be read")
+        try:
+            read = host.read_global("get_settings_from_file")(state, str(target), True, False, True,
+                                                              skip_validate_settings=True)
+        except Exception as error:
+            raise compatibility.BridgeError(compatibility.INTERNAL_ERROR, f"WanGP's reader failed: {type(error).__name__}")
+        configs = read[0] if isinstance(read, (list, tuple)) and read else None
+        if not isinstance(configs, dict) or ("prompt" not in configs and "activated_loras" not in configs):
+            reason = str(state.get("_last_settings_file_error") or "")
+            return {"loaded": False, "model_type": "", "switched": False, "only": protocol.SETTINGS_ONLY_PROMPT_LORAS,
+                    "message": ("WanGP found no prompt or LoRAs it could load in that file"
+                                + (f": {reason[:120]}" if reason else ""))}, {}
+        prompt = configs.get("prompt")
+        prompt = prompt if isinstance(prompt, str) else ""
+        loras = configs.get("activated_loras")
+        loras = [str(item) for item in loras if isinstance(item, str) and item] if isinstance(loras, (list, tuple)) else []
+        multipliers = configs.get("loras_multipliers")
+        multipliers = multipliers if isinstance(multipliers, str) else ""
+        try:
+            current = host.read_global("get_model_settings")(state, model)
+            if not isinstance(current, dict):
+                defaults = host.read_global("get_default_settings")
+                current = defaults(model) if callable(defaults) else None
+            settings = dict(current) if isinstance(current, dict) else {}
+            settings["prompt"] = prompt
+            settings["activated_loras"] = list(loras)
+            settings["loras_multipliers"] = multipliers if loras else ""
+            host.read_global("set_model_settings")(state, model, settings)
+        except Exception as error:
+            raise compatibility.BridgeError(compatibility.INTERNAL_ERROR, f"WanGP's saved settings could not be written: {type(error).__name__}")
+        missing = 0
+        check = host.read_global("check_loras_exist")
+        if callable(check):
+            for lora in loras:
+                try:
+                    if check(model, [lora]):
+                        missing += 1
+                except Exception:
+                    # A check that cannot be made is no reason to doubt the LoRA.
+                    continue
+        writes: typing.Dict[str, typing.Any] = {compatibility.REFRESH_FORM_TRIGGER: str(time.time())}
+        if (str(state.get("active_form", "add") or "add") == "add"
+                and self.compat.component(compatibility.MAIN_TABS) is not None):
+            writes[compatibility.MAIN_TABS] = {"selected": compatibility.MEDIA_TAB_ID}
+        return {"loaded": True, "model_type": model[:120], "switched": False, "only": protocol.SETTINGS_ONLY_PROMPT_LORAS,
+                "loras": len(loras), "missing_loras": missing}, writes
 
     def _settle(
         self,
@@ -1405,6 +1495,11 @@ def _summary(operation: typing.Any, ack: typing.Mapping[str, typing.Any], second
         # The model, never the file: its name and where it is are the user's.
         if not ack.get("loaded"):
             return f"settings: nothing WanGP could load in that file, in {took}"
+        if ack.get("only") == protocol.SETTINGS_ONLY_PROMPT_LORAS:
+            # How many LoRAs, never which, and never the prompt.
+            missing = f", {ack.get('missing_loras')} not in this model's LoRA folder" if ack.get("missing_loras") else ""
+            return (f"settings: prompt and {ack.get('loras', 0)} LoRA(s) put on {ack.get('model_type') or '?'}"
+                    f"{missing}, in {took}")
         how = "switching WanGP to it" if ack.get("switched") else "the page's own model"
         return f"settings: loaded for {ack.get('model_type') or '?'} ({how}), in {took}"
     if operation == "receive":

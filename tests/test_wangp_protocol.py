@@ -1645,8 +1645,11 @@ const B = {
     // A 1.16.0 bridge: everything but the settings load.
     : MODE === "settingsLegacy" ? { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true,
                                     prompt_edit: true, layout_studio: true }
+    // A 1.17.0 bridge: the whole load, and not the prompt and LoRAs alone.
+    : MODE === "promptLorasLegacy" ? { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true,
+                                       prompt_edit: true, layout_studio: true, settings_load: true }
     : { queue: true, start: true, track: true, ping: true, form_watch: true, session: true, layout_compact: true, prompt_edit: true,
-        settings_load: true },
+        settings_load: true, prompt_loras: true },
   hellos: [], presses: 0, looks: 0, pings: 0, busyMs: 0, channel: "", navigations: 0, reloadMs: 500,
   // Every SETTINGS_REQUEST (bridge 1.17.0) with how many saves had been
   // pressed and made when it arrived; what the bridge answers one with (null
@@ -2128,6 +2131,52 @@ const scenarios = {
     const box = settleSend(api.loadSettings("0123456789abcdef0123456789abcdef"));
     await advance(3000);
     return { answer: box.answer, asks: B.settingsAsks.length, pressed: B.presses - pressesBefore };
+  },
+  // A file's prompt and LoRAs alone, for View Outputs' Send prompt & LoRAs
+  // (bridge 1.18.0): the same request with ``only``, the same save first.
+  promptLoras: async function () {
+    B.counting = true;
+    const id = "0123456789abcdef0123456789abcdef";
+    const answerAfter = async function (promise, ms) { const box = settleSend(promise); await advance(ms); return box.answer; };
+    const early = await answerOf(api.loadPromptAndLoras(id));
+    await bootOnScreen();
+    await advance(1000);
+    const fetchesBefore = FETCHES.length;
+    const openedBefore = OPENED.length;
+    const notAnId = await answerOf(api.loadPromptAndLoras("../" + id));
+    const pressesBefore = B.presses;
+    const commitsBefore = B.commits;
+    B.settingsAnswer = { ok: true, loaded: true, model_type: "t2v", switched: true, only: "prompt_loras", loras: 3, missing_loras: 1 };
+    const loaded = await answerAfter(api.loadPromptAndLoras(id), 3000);
+    const first = B.settingsAsks[0] || {};
+    const savedFirst = { pressed: (first.presses || 0) - pressesBefore, made: (first.commits || 0) - commitsBefore };
+    B.settingsAnswer = { ok: true, loaded: true, model_type: "t2v", only: "prompt_loras", loras: 2, missing_loras: 9 };
+    const tooMany = await answerAfter(api.loadPromptAndLoras(id), 3000);
+    B.settingsAnswer = { ok: true, loaded: true, model_type: "t2v", only: "prompt_loras", loras: "3", missing_loras: true };
+    const notCounts = await answerAfter(api.loadPromptAndLoras(id), 3000);
+    B.settingsAnswer = { ok: true, loaded: false, only: "prompt_loras", message: "WanGP found no prompt or LoRAs it could load in that file" };
+    const nothing = await answerAfter(api.loadPromptAndLoras(id), 3000);
+    B.settingsAnswer = null;
+    B.settingsRefusal = "HANDOFF_NOT_FOUND";
+    const refused = await answerAfter(api.loadPromptAndLoras(id), 3000);
+    B.settingsRefusal = "";
+    // The whole load still asks without ``only``.
+    const whole = await answerAfter(api.loadSettings(id), 3000);
+    const fetched = FETCHES.slice(fetchesBefore).filter((url) => url !== "/minipaint-wangp/client-log");
+    return { early, notAnId, loaded, savedFirst, tooMany, notCounts, nothing, refused, whole,
+             asks: B.settingsAsks.map((asked) => asked.payload), said: linesWith("settings:"),
+             fetched, opened: OPENED.slice(openedBefore), pending: api.state().pending };
+  },
+  promptLorasLegacy: async function () {
+    await bootOnScreen();
+    await advance(1000);
+    const pressesBefore = B.presses;
+    const box = settleSend(api.loadPromptAndLoras("0123456789abcdef0123456789abcdef"));
+    await advance(3000);
+    const whole = settleSend(api.loadSettings("0123456789abcdef0123456789abcdef"));
+    await advance(3000);
+    return { answer: box.answer, asks: B.settingsAsks.map((asked) => asked.payload), pressed: B.presses - pressesBefore,
+             whole: whole.answer };
   },
   themeHost: themeScenario, themeBridge: themeScenario, themeOff: themeScenario,
   themeGradient: themeScenario, themeLight: themeScenario, themeUnknownLook: themeScenario,
@@ -3045,14 +3094,16 @@ def settings_load_checks(r: Results) -> None:
                           {"handoff_id": 7}, {"path": "/srv/a.mp4"})))
     r.check("an answer is loaded only in as many words, with a model only in the model grammar",
             protocol.normalize_settings_result({"ok": True, "loaded": True, "model_type": "ltx2_22B_distilled", "switched": True})
-            == {"ok": True, "loaded": True, "model_type": "ltx2_22B_distilled", "switched": True, "code": "", "message": ""}
+            == {"ok": True, "loaded": True, "model_type": "ltx2_22B_distilled", "switched": True, "code": "", "message": "",
+                "only": "", "loras": 0, "missing_loras": 0}
             and protocol.normalize_settings_result({"ok": True, "loaded": "yes"})["loaded"] is False
             and protocol.normalize_settings_result({"ok": True, "loaded": True, "model_type": "<b>x</b>"})["model_type"] == "")
     r.check("switched only beside loaded: a file that loaded nothing switches nothing",
             protocol.normalize_settings_result({"ok": True, "loaded": False, "switched": True})["switched"] is False)
     r.check("a refusal keeps a code in the code grammar and a message cut to a line",
             protocol.normalize_settings_result({"ok": False, "code": "HANDOFF_NOT_FOUND", "message": "x" * 500})
-            == {"ok": False, "loaded": False, "model_type": "", "switched": False, "code": "HANDOFF_NOT_FOUND", "message": "x" * 200}
+            == {"ok": False, "loaded": False, "model_type": "", "switched": False, "code": "HANDOFF_NOT_FOUND", "message": "x" * 200,
+                "only": "", "loras": 0, "missing_loras": 0}
             and protocol.normalize_settings_result({"ok": False, "code": "not a code"})["code"] == ""
             and protocol.normalize_settings_result(None)["ok"] is False)
     r.check("a reference may name only what WanGP's loader reads settings from: its three video containers and the"
@@ -3080,7 +3131,8 @@ def settings_load_checks(r: Results) -> None:
             (live.get("savedFirst") or {}).get("pressed") == 1 and (live.get("savedFirst") or {}).get("made") == 1,
             str(live.get("savedFirst")))
     r.check("a load of another model's file answers loaded, the model, and that WanGP is switching to it",
-            live.get("loaded") == {"ok": True, "loaded": True, "model_type": "ltx2_22B_distilled", "switched": True, "message": ""},
+            live.get("loaded") == {"ok": True, "loaded": True, "model_type": "ltx2_22B_distilled", "switched": True, "message": "",
+                                   "only": "", "loras": 0, "missing_loras": 0},
             str(live.get("loaded")))
     r.check("and one of the page's own model, that nothing is switching",
             (live.get("same") or {}).get("loaded") is True and (live.get("same") or {}).get("switched") is False
@@ -3111,6 +3163,88 @@ def settings_load_checks(r: Results) -> None:
             "error" not in legacy and legacy.get("asks") == 0 and legacy.get("pressed") == 0
             and (legacy.get("answer") or {}).get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE"
             and "reinstalled" in (legacy.get("answer") or {}).get("message", ""), str(legacy)[:400])
+
+
+def prompt_loras_checks(r: Results) -> None:
+    """A file's prompt and LoRAs alone put on WanGP's page (bridge 1.18.0).
+
+    For View Outputs' Send prompt & LoRAs: "just the prompt and the LoRa
+    sent to wan2gp ... It should just override it." The same request as the
+    whole load with ``only`` set; the normalisers both sides apply to it, and
+    the tab's half on the virtual clock - ``loadPromptAndLoras()`` asks with
+    the handoff id and ``only``, saves WanGP's form first, reads the counts
+    by the normaliser's rules, and never asks a 1.17.0 bridge, which reads
+    the handoff id alone and would load everything. The plugin's half is in
+    tests/test_wangp_queue.py.
+    """
+    hid = "0123456789abcdef0123456789abcdef"
+    r.check("the prompt-and-LoRAs load is the settings request with only set: asked for, it is kept",
+            protocol.SETTINGS_ONLY_PROMPT_LORAS == "prompt_loras"
+            and protocol.normalize_settings_request({"handoff_id": hid, "only": "prompt_loras"})
+            == ({"handoff_id": hid, "only": "prompt_loras"}, ""))
+    r.check("left out, empty or None, it is the whole load it always was, with nothing added",
+            all(protocol.normalize_settings_request(v) == ({"handoff_id": hid}, "")
+                for v in ({"handoff_id": hid}, {"handoff_id": hid, "only": ""}, {"handoff_id": hid, "only": None})))
+    r.check("any other value of only is REQUEST_INVALID, never a whole load",
+            all(protocol.normalize_settings_request({"handoff_id": hid, "only": v}) == ({}, "REQUEST_INVALID")
+                for v in ("prompt", "PROMPT_LORAS", "loras", 1, True, ["prompt_loras"], {"x": 1})))
+    norm = protocol.normalize_settings_result
+    r.check("an answer says what was done, how many LoRAs went in and how many the model's folder lacks",
+            norm({"ok": True, "loaded": True, "model_type": "t2v", "only": "prompt_loras", "loras": 3, "missing_loras": 1})
+            == {"ok": True, "loaded": True, "model_type": "t2v", "switched": False, "code": "", "message": "",
+                "only": "prompt_loras", "loras": 3, "missing_loras": 1})
+    r.check("a prompt-and-LoRAs load switches no model, whatever the answer says",
+            norm({"ok": True, "loaded": True, "only": "prompt_loras", "switched": True})["switched"] is False)
+    r.check("counts are whole numbers in range, the missing never more than went in, and none for a whole load or nothing loaded",
+            norm({"ok": True, "loaded": True, "only": "prompt_loras", "loras": 2, "missing_loras": 9})["missing_loras"] == 2
+            and norm({"ok": True, "loaded": True, "only": "prompt_loras", "loras": 5000})["loras"] == protocol.SETTINGS_LORAS_MAX
+            and norm({"ok": True, "loaded": True, "only": "prompt_loras", "loras": -4})["loras"] == 0
+            and norm({"ok": True, "loaded": True, "only": "prompt_loras", "loras": True, "missing_loras": 1})["loras"] == 0
+            and norm({"ok": True, "loaded": True, "only": "prompt_loras", "loras": "3"})["loras"] == 0
+            and norm({"ok": True, "loaded": True, "loras": 3, "missing_loras": 1})["loras"] == 0
+            and norm({"ok": True, "loaded": False, "only": "prompt_loras", "loras": 3})["loras"] == 0
+            and norm({"ok": True, "loaded": True, "only": "something else", "loras": 3})["only"] == "")
+
+    answers = _run_live(("promptLoras", "promptLorasLegacy"))
+    if answers is None:
+        r.check("node is available for the prompt-and-LoRAs checks (skipped)", True)
+        return
+    live = answers.get("promptLoras") or {}
+    r.check("the prompt-and-LoRAs scenario ran", "error" not in live and not live.get("thrown") and "loaded" in live, str(live)[:300])
+    r.check("before the WanGP page has answered, nothing is asked: IFRAME_NOT_READY; not a handoff id, REQUEST_INVALID",
+            (live.get("early") or {}).get("code") == "IFRAME_NOT_READY" and (live.get("notAnId") or {}).get("code") == "REQUEST_INVALID",
+            str({k: live.get(k) for k in ("early", "notAnId")}))
+    asks = live.get("asks") or []
+    r.check("the page is asked with the handoff id and only, and a whole load still with the id alone",
+            asks[:1] == [{"handoff_id": hid, "only": "prompt_loras"}] and asks[-1:] == [{"handoff_id": hid}], str(asks))
+    r.check("WanGP's form is saved first, a save pressed and made before the load is asked",
+            (live.get("savedFirst") or {}).get("pressed") == 1 and (live.get("savedFirst") or {}).get("made") == 1,
+            str(live.get("savedFirst")))
+    r.check("the answer says loaded, the page's model, the LoRAs that went in and the ones missing, and nothing switching",
+            live.get("loaded") == {"ok": True, "loaded": True, "model_type": "t2v", "switched": False, "message": "",
+                                   "only": "prompt_loras", "loras": 3, "missing_loras": 1}, str(live.get("loaded")))
+    r.check("the missing are never more than went in, and counts that are not whole numbers are none",
+            (live.get("tooMany") or {}).get("missing_loras") == 2
+            and (live.get("notCounts") or {}).get("loras") == 0 and (live.get("notCounts") or {}).get("missing_loras") == 0,
+            str({k: live.get(k) for k in ("tooMany", "notCounts")}))
+    r.check("a file with nothing to put there answers ok and not loaded, with WanGP's sentence; a refusal keeps its code",
+            (live.get("nothing") or {}).get("ok") is True and (live.get("nothing") or {}).get("loaded") is False
+            and "no prompt or LoRAs" in (live.get("nothing") or {}).get("message", "")
+            and (live.get("refused") or {}).get("code") == "HANDOFF_NOT_FOUND", str({k: live.get(k) for k in ("nothing", "refused")}))
+    r.check("the journal says how many LoRAs went on which model, and never the handoff",
+            any("a prompt and 3 LoRA(s) put on t2v, 1 not in its LoRA folder" in line for line in live.get("said") or [])
+            and not any(hid in line for line in live.get("said") or []), str(live.get("said"))[:300])
+    r.check("no live connection: it opens no stream, makes no request of its own and leaves nothing waiting",
+            live.get("opened") == [] and live.get("fetched") == [] and live.get("pending") == 0,
+            str({k: live.get(k) for k in ("opened", "fetched", "pending")}))
+    legacy = answers.get("promptLorasLegacy") or {}
+    r.check("a 1.17.0 bridge - which would load everything - is never asked for a prompt and LoRAs, nor its form saved,"
+            " and the answer says to reinstall it",
+            "error" not in legacy and (legacy.get("asks") or [])[:1] == [{"handoff_id": hid}] and len(legacy.get("asks") or []) == 1
+            and legacy.get("pressed") == 1
+            and (legacy.get("answer") or {}).get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE"
+            and "reinstalled" in (legacy.get("answer") or {}).get("message", "")
+            and (legacy.get("whole") or {}).get("loaded") is True, str(legacy)[:400])
 
 
 def bridge_js_config() -> dict:
@@ -3531,8 +3665,32 @@ async function prompt() {
   process.exit(0);
 }
 
+// Bridge 1.17.0 and 1.18.0: a settings load passes the handoff id - and,
+// for the prompt and LoRAs alone, ``only`` - to the plugin, under its key.
+async function settings() {
+  send("WANGP_BRIDGE_HELLO", { watch_form: true }, channel, "hello1");
+  await wait(20);
+  window.__minipaintBridge.deliver(JSON.stringify({ op: "hello", request_id: "hello1", channel_id: channel, ok: true, ready: true }));
+  await wait(10);
+  const sentBox = () => { try { return JSON.parse(box.value); } catch (e) { return null; } };
+  const id = "0123456789abcdef0123456789abcdef";
+  const out = {};
+  for (const [name, payload] of [["whole", { handoff_id: id }], ["words", { handoff_id: id, only: "prompt_loras" }],
+                                 ["empty", { handoff_id: id, only: "" }], ["odd", { handoff_id: id, only: 7 }]]) {
+    const before = clicks;
+    send("WANGP_SETTINGS_REQUEST", payload, channel, "s-" + name);
+    await wait(30);
+    out[name] = { clicked: clicks - before, box: sentBox() };
+    window.__minipaintBridge.deliver(JSON.stringify({ op: "settings", request_id: "s-" + name, channel_id: channel, ok: true, loaded: true }));
+    await wait(10);
+  }
+  console.log(JSON.stringify(out));
+  process.exit(0);
+}
+
 async function main() {
   if (MODE === "prompt") { return prompt(); }
+  if (MODE === "settings") { return settings(); }
   send("WANGP_BRIDGE_HELLO", MODE === "unasked" ? {} : { watch_form: true }, channel, "hello1");
   await wait(20);
   const clicksAfterHello = clicks;
@@ -3921,7 +4079,7 @@ def bridge_liveness_checks(r: Results) -> None:
         root = pathlib.Path(scratch)
         (root / "bridge.js").write_text(bridge_js.document_script(""), encoding="utf-8")
         (root / "harness.js").write_text(_BRIDGE_LIVE_HARNESS, encoding="utf-8")
-        for mode in ("watch", "unasked", "prompt"):
+        for mode in ("watch", "unasked", "prompt", "settings"):
             try:
                 run = subprocess.run([node, str(root / "harness.js"), str(root / "bridge.js"), mode],
                                      capture_output=True, text=True, timeout=30, check=False)
@@ -3991,6 +4149,19 @@ def bridge_liveness_checks(r: Results) -> None:
             (edited.get("tooLong") or {}).get("clicked") == 0
             and (((edited.get("tooLong") or {}).get("answer") or {}).get("payload") or {}).get("code") == "PROMPT_TOO_LONG", repr(edited.get("tooLong")))
     r.check("every prompt answer goes to the channel that asked", edited.get("stranger") is True, repr(edited)[:200])
+
+    # Bridge 1.17.0 and 1.18.0: a settings load, whole or the prompt and LoRAs.
+    loads = results.get("settings", {})
+    box_of = lambda name: ((loads.get(name) or {}).get("box") or {})  # noqa: E731
+    r.check("a whole load goes to the plugin with the handoff id alone, as it always did",
+            "error" not in loads and (loads.get("whole") or {}).get("clicked") == 1
+            and box_of("whole").get("op") == "settings" and box_of("whole").get("settings") == {"handoff_id": "0123456789abcdef0123456789abcdef"},
+            repr(loads)[:400])
+    r.check("a prompt-and-LoRAs load carries only to the plugin, which decides what it means",
+            box_of("words").get("settings") == {"handoff_id": "0123456789abcdef0123456789abcdef", "only": "prompt_loras"}, repr(box_of("words")))
+    r.check("an empty only adds nothing, and one that is not text is not passed on",
+            box_of("empty").get("settings") == {"handoff_id": "0123456789abcdef0123456789abcdef"}
+            and box_of("odd").get("settings") == {"handoff_id": "0123456789abcdef0123456789abcdef"}, repr(loads)[:400])
 
 
 def page_head_checks(r: Results) -> None:
@@ -6289,6 +6460,7 @@ def run() -> Results:
     layout_checks(r)
     prompt_checks(r)
     settings_load_checks(r)
+    prompt_loras_checks(r)
     heartbeat_checks(r)
     panel_checks(r)
     session_checks(r)

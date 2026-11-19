@@ -103,9 +103,12 @@ window.minipaintClipboard = (function () {
     //: equal. Why the script states them at all is above pin().
     const TILE_FRAME = 12;
     const TILE_CAPTION = 32;
-    //: The smallest tile that shows its full-screen button: below it the
-    //: button would cover too much of the picture it opens.
-    const EXPAND_MIN_THUMB = 120;
+    //: The full-screen button is on every tile, whatever its size: "make it
+    //: always there for all pictures, regardless of size". Below this size
+    //: it is drawn smaller (expandSize), so it never covers the picture it
+    //: opens: a fifth of the square at most, never below a finger's
+    //: smallest target on a phone's densest row.
+    const EXPAND_FULL_THUMB = 120;
     const IMPORT_ROUTE = "/minipaint-clipboard/import";
     const SEND_ROUTE = "/minipaint-clipboard/send";
     const BOXES = {
@@ -427,14 +430,24 @@ window.minipaintClipboard = (function () {
 
     /** A short notice over the browser, gone by itself. */
     function toast(text, failure) {
-        const container = byId(BROWSER_ID) || root();
+        // Said inside a full-screen view while one is open: anything outside
+        // it is under the full screen, where nobody can read it.
+        const container = toastHost() || byId(BROWSER_ID) || root();
         if (!container) { return; }
-        let element = container.querySelector(".minipaint-clip-toast");
+        let element = Array.from(container.querySelectorAll(".minipaint-clip-toast")).find(function (one) {
+            return one.parentElement === container;
+        });
         if (!element) {
             element = document.createElement("div");
             element.className = "minipaint-clip-toast";
             element.setAttribute("role", "alert");
             container.appendChild(element);
+        }
+        const host = root();
+        if (host) {
+            for (const other of Array.from(host.querySelectorAll(".minipaint-clip-toast"))) {
+                if (other !== element) { other.hidden = true; }
+            }
         }
         if (S.toastTimer) { clearTimeout(S.toastTimer); S.toastTimer = null; }
         if (!text) { element.hidden = true; return; }
@@ -442,6 +455,13 @@ window.minipaintClipboard = (function () {
         element.classList.toggle("minipaint-clip-toast-failure", !!failure);
         element.hidden = false;
         S.toastTimer = setTimeout(function () { element.hidden = true; S.toastTimer = null; }, 4500);
+    }
+
+    /** The full-screen view a toast is said in, while one is open; else null. */
+    function toastHost() {
+        if (S.viewer && S.viewer.root && !S.viewer.root.hidden && S.viewer.root.isConnected) { return S.viewer.root; }
+        if (S.outputs && S.outputs.stage && inFullscreen()) { return S.outputs.stage; }
+        return null;
     }
 
     /**
@@ -950,9 +970,12 @@ window.minipaintClipboard = (function () {
             moved = true;
         }
         grid.dataset.perRow = String(count);
-        // The full-screen button, on tiles large enough to hold it.
-        const expand = thumb >= EXPAND_MIN_THUMB ? "1" : "0";
-        if (grid.dataset.expand !== expand) { grid.dataset.expand = expand; }
+        // The full-screen button, on every tile, sized to the tile.
+        const expand = expandSize(thumb);
+        for (const name of Object.keys(expand)) {
+            const value = expand[name] + "px";
+            if (grid.style.getPropertyValue(name) !== value) { grid.style.setProperty(name, value, "important"); }
+        }
         syncSlider(count, range);
         // A new share of the row is a new place for every tile.
         if (moved) { onGridResize(); scheduleScrubber(); }
@@ -1381,21 +1404,23 @@ window.minipaintClipboard = (function () {
     };
 
     //: The full-screen button: a small square in the tile's top right corner,
-    //: over the picture. Whether it is shown is the stylesheet's (keyed on
-    //: the grid's data-expand), so its display is the one thing not here.
+    //: over the picture, on every tile. Its size, inset and padding are the
+    //: grid's three variables (expandSize writes them, marked important like
+    //: the thumb's), so a slider that makes the tiles small makes it small.
+    //: Its display is the stylesheet's, the one thing not here.
     const EXPAND_GEOMETRY = {
         "position": "absolute",
-        "top": "6px",
-        "right": "6px",
+        "top": "var(--minipaint-clip-expand-inset, 6px)",
+        "right": "var(--minipaint-clip-expand-inset, 6px)",
         "left": "auto",
         "bottom": "auto",
         "box-sizing": "border-box",
-        "width": "26px",
-        "height": "26px",
+        "width": "var(--minipaint-clip-expand-size, 26px)",
+        "height": "var(--minipaint-clip-expand-size, 26px)",
         "min-width": "0",
         "min-height": "0",
         "margin": "0",
-        "padding": "4px",
+        "padding": "var(--minipaint-clip-expand-pad, 4px)",
         "border-width": "1px",
         "border-style": "solid",
         "align-items": "center",
@@ -2164,13 +2189,30 @@ window.minipaintClipboard = (function () {
         pumpThumbs(true);
     }
 
+    /**
+     * The full-screen button's size for a square of ``thumb`` px: 26 from
+     * EXPAND_FULL_THUMB up, as it always was; below it a fifth of the square,
+     * never under 16, its inset and padding coming down with it.
+     */
+    function expandSize(thumb) {
+        const side = Number(thumb) || 0;
+        const size = side >= EXPAND_FULL_THUMB ? 26 : Math.max(16, Math.min(26, Math.round(side / 5)));
+        const inset = size >= 26 ? 6 : Math.max(2, Math.round(size / 6));
+        const pad = size >= 26 ? 4 : size >= 20 ? 3 : 2;
+        return { "--minipaint-clip-expand-size": size, "--minipaint-clip-expand-inset": inset,
+                 "--minipaint-clip-expand-pad": pad };
+    }
+
     /** The full-screen button's glyph: four corners, drawn, never a character. */
     function expandGlyph() {
         const ns = "http://www.w3.org/2000/svg";
         const svg = document.createElementNS(ns, "svg");
         svg.setAttribute("viewBox", "0 0 24 24");
-        svg.setAttribute("width", "16");
-        svg.setAttribute("height", "16");
+        // The button's whole inside, whatever size the tile has made it.
+        svg.setAttribute("width", "100%");
+        svg.setAttribute("height", "100%");
+        pin(svg, { "display": "block", "width": "100%", "height": "100%", "min-width": "0", "min-height": "0",
+                   "flex": "1 1 auto", "margin": "0" });
         svg.setAttribute("aria-hidden", "true");
         svg.setAttribute("focusable", "false");
         const path = document.createElementNS(ns, "path");
@@ -2819,10 +2861,14 @@ window.minipaintClipboard = (function () {
      * downloading it after the view is closed, and these are the largest
      * files this extension ever touches.
      */
-    function stopPlayer() {
+    function stopPlayer(keepFullscreen) {
         const video = S.outputs.player;
         stopClock();
-        leaveFullscreen();
+        // A step to the next output keeps the stage full screen: the stage
+        // is what is full screen, and only its contents change. Everything
+        // else that stops the player - the gallery, Close, a hidden page -
+        // leaves it.
+        if (!keepFullscreen) { leaveFullscreen(); }
         if (!video) { return; }
         try {
             video.pause();
@@ -2896,6 +2942,8 @@ window.minipaintClipboard = (function () {
         full: "M5 5h5v2H7v3H5zM14 5h5v5h-2V7h-3zM5 14h2v3h3v2H5zM17 14h2v5h-5v-2h3z",
         // Sliders: a video's settings, sent to WanGP to be loaded there.
         settings: "M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z",
+        // Lines with a pen: a video's prompt and LoRAs alone, sent to WanGP.
+        prompt: "M3 10h11v2H3v-2zm0-2h11V6H3v2zm0 6h7v-2H3v2zm15.01-3.13.71-.71a1 1 0 0 1 1.41 0l.71.71a1 1 0 0 1 0 1.41l-.71.71-2.12-2.12zm-.71.71-5.3 5.3V21h2.12l5.3-5.3-2.12-2.12z",
         // A bin: the video deleted from disk, once confirmed.
         trash: "M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6zM19 4h-3.5l-1-1h-5l-1 1H5v2h14z",
         exit: "M8 5h2v5H5V8h3zM14 5h2v3h3v2h-5zM5 14h5v5H8v-3H5zM14 14h5v2h-3v3h-2z"
@@ -2942,6 +2990,17 @@ window.minipaintClipboard = (function () {
             onPress(button);
         });
         return button;
+    }
+
+    /**
+     * A control shown or not. ``hidden`` alone is not enough: the control's
+     * display is pinned inline (CONTROL_GEOMETRY), and an inline declaration
+     * marked important outranks the stylesheet's ``[hidden]`` rule, so a
+     * hidden Send to WanGP still showed - and answered - on a WebM.
+     */
+    function showControl(button, shown) {
+        button.hidden = !shown;
+        pin(button, { "display": shown ? CONTROL_GEOMETRY.display : "none" });
     }
 
     function setIcon(button, name, label) {
@@ -3188,7 +3247,7 @@ window.minipaintClipboard = (function () {
         const full = playerButton("full", "Full screen", function () { toggleFullscreen(controls); });
         const canFullscreen = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled
                                  || video.webkitEnterFullscreen);
-        full.hidden = !canFullscreen;
+        showControl(full, canFullscreen);
         // Send to WanGP: this video's settings loaded in WanGP, which then
         // shows them. Only where WanGP's loader reads a video's settings; a
         // .webm or an .m4v carries none it can load, and offers no button.
@@ -3196,17 +3255,26 @@ window.minipaintClipboard = (function () {
             sendSettings(item, button);
         });
         send.classList.add("minipaint-clip-player-send");
-        send.hidden = !settingsReadable(item);
+        showControl(send, settingsReadable(item));
+        // Send prompt & LoRAs: the same video's prompt and LoRAs alone, over
+        // the rest of WanGP's form as it stands - "a separate action than
+        // sending the whole thing".
+        const words = playerButton("prompt", "Send prompt & LoRAs to WanGP: only this video's prompt and LoRAs, "
+                                   + "over everything else WanGP shows", function (button) {
+            sendPromptAndLoras(item, button);
+        });
+        words.classList.add("minipaint-clip-player-words");
+        showControl(words, settingsReadable(item));
         // Delete from disk, last in the row and asked again in a dialog
         // first: "I need the ability to delete from disk in clip board view
         // output videos. Add a delete button with confirmation dialogue to the
         // video playback controls".
         const remove = playerButton("trash", "Delete from disk", function () { confirmDelete(item); });
         remove.classList.add("minipaint-clip-player-delete");
-        for (const button of [restart, back, play, forward, loop, sound, speed, send, full, remove]) { row.appendChild(button); }
+        for (const button of [restart, back, play, forward, loop, sound, speed, send, words, full, remove]) { row.appendChild(button); }
         root.appendChild(row);
         Object.assign(controls, { play: play, loop: loop, sound: sound, speed: speed, full: full, send: send,
-                                  remove: remove });
+                                  words: words, remove: remove });
 
         video.addEventListener("play", function () { drawPlay(controls); startClock(controls); });
         video.addEventListener("pause", function () { drawPlay(controls); stopClockFor(video); drawTime(controls); });
@@ -3431,17 +3499,45 @@ window.minipaintClipboard = (function () {
      * one is going is the same press.
      */
     function sendSettings(item, button) {
+        return sendOutputToWanGP(item, button, false);
+    }
+
+    /**
+     * Send prompt & LoRAs: one video's prompt and LoRAs alone, over the rest
+     * of WanGP's form as it stands.
+     *
+     * Asked for: "the ability from the view outputs to be able to just send
+     * the prompt and not the whole video, image, reference, first image. I
+     * just want to send the prompt and the LoRa over ... Make this a separate
+     * action than sending the whole thing", and "I just want the prompt and
+     * the LoRAs to override whatever is in wan2GP." The same two bounded
+     * steps as Send to WanGP - the note naming the video, then the WanGP
+     * tab's page - with ``minipaintWanGP.loadPromptAndLoras`` in place of the
+     * whole load: WanGP's model, its other settings and its pictures stay as
+     * they are, and the video's prompt and LoRAs replace the page's. The view
+     * closes on the WanGP tab as Send to WanGP's does - unless a LoRA the
+     * video used is not in WanGP's LoRA folder for the model on its page,
+     * which WanGP would refuse to generate with: then the view stays and says
+     * how many.
+     */
+    function sendPromptAndLoras(item, button) {
+        return sendOutputToWanGP(item, button, true);
+    }
+
+    function sendOutputToWanGP(item, button, wordsOnly) {
         if (!item || S.outputs.sending) { return Promise.resolve(false); }
         const wangp = window.minipaintWanGP;
-        if (!wangp || typeof wangp.loadSettings !== "function") {
-            toast("The WanGP tab is not on this page, so there is nowhere to send the settings.", true);
+        const call = wangp && (wordsOnly ? wangp.loadPromptAndLoras : wangp.loadSettings);
+        const what = wordsOnly ? "its prompt and LoRAs" : "its settings";
+        if (typeof call !== "function") {
+            toast("The WanGP tab is not on this page, so there is nowhere to send " + what + ".", true);
             return Promise.resolve(false);
         }
         S.outputs.sending = true;
         if (button) { button.disabled = true; button.setAttribute("aria-busy", "true"); }
         const controller = typeof AbortController === "function" ? new AbortController() : null;
         const limit = setTimeout(function () { if (controller) { controller.abort(); } }, OUTPUT_SETTINGS_TIMEOUT_MS);
-        note("outputs: settings of " + String(item.id).slice(0, 8) + " to WanGP");
+        note("outputs: " + (wordsOnly ? "prompt and LoRAs" : "settings") + " of " + String(item.id).slice(0, 8) + " to WanGP");
         return fetch(OUTPUTS_FILE_PREFIX + encodeURIComponent(item.id) + "/settings", {
             method: "POST", credentials: "same-origin", cache: "no-store",
             signal: controller ? controller.signal : undefined
@@ -3452,17 +3548,40 @@ window.minipaintClipboard = (function () {
             if (!answer || answer.ok !== true || typeof answer.handoff_id !== "string") {
                 throw new Error((answer && answer.message) || "the server would not name that video");
             }
-            return wangp.loadSettings(answer.handoff_id);
+            return call.call(wangp, answer.handoff_id);
         }).then(function (result) {
+            const Its = wordsOnly ? "Its prompt and LoRAs" : "Its settings";
             if (!result || result.ok !== true) {
-                const why = (result && SETTINGS_REFUSALS[result.code]) || (result && result.message) || "WanGP did not answer.";
-                toast("Its settings were not sent: " + why, true);
-                note("outputs: settings not loaded (" + ((result && result.code) || "no answer") + ")");
+                const why = (result && wordsOnly && result.code === "BRIDGE_COMPONENT_INCOMPATIBLE"
+                    ? "the Mini Paint bridge in WanGP is older than 1.18.0. Reinstall it from Settings → WanGP." : "")
+                    || (result && SETTINGS_REFUSALS[result.code]) || (result && result.message) || "WanGP did not answer.";
+                toast(Its + " were not sent: " + why, true);
+                note("outputs: " + (wordsOnly ? "prompt and LoRAs" : "settings") + " not loaded ("
+                     + ((result && result.code) || "no answer") + ")");
                 return false;
             }
             if (!result.loaded) {
-                toast(result.message || "WanGP found no settings it could load in that video.", true);
+                toast(result.message || (wordsOnly ? "WanGP found no prompt or LoRAs it could load in that video."
+                    : "WanGP found no settings it could load in that video."), true);
                 return false;
+            }
+            if (wordsOnly) {
+                const count = result.loras || 0;
+                const lead = "Sent its prompt and " + (count ? count + (count === 1 ? " LoRA" : " LoRAs") : "no LoRAs")
+                    + " to WanGP";
+                if (result.missing_loras) {
+                    // Stay, and say it where it was pressed: WanGP will not
+                    // generate with a LoRA its folder does not have.
+                    toast(lead + ", but " + result.missing_loras + " of them " + (result.missing_loras === 1 ? "is" : "are")
+                          + " not in WanGP's LoRA folder for " + (result.model_type || "its model")
+                          + ": WanGP will not generate until " + (result.missing_loras === 1 ? "it is" : "they are")
+                          + " there or taken off.", true);
+                    return true;
+                }
+                closeOutputs();
+                if (typeof wangp.switchToWanGP === "function") { wangp.switchToWanGP(); }
+                toast(lead + "; everything else is as WanGP had it.");
+                return true;
             }
             closeOutputs();
             if (typeof wangp.switchToWanGP === "function") { wangp.switchToWanGP(); }
@@ -3472,9 +3591,10 @@ window.minipaintClipboard = (function () {
         }).catch(function (error) {
             clearTimeout(limit);
             const aborted = error && error.name === "AbortError";
-            toast("Its settings were not sent: " + (aborted ? "the server did not answer in time."
-                : ((error && error.message) || "something went wrong.")), true);
-            note("outputs: settings send failed (" + (aborted ? "timed out" : ((error && error.message) || error)) + ")");
+            toast((wordsOnly ? "Its prompt and LoRAs" : "Its settings") + " were not sent: "
+                  + (aborted ? "the server did not answer in time." : ((error && error.message) || "something went wrong.")), true);
+            note("outputs: " + (wordsOnly ? "prompt and LoRAs" : "settings") + " send failed ("
+                 + (aborted ? "timed out" : ((error && error.message) || error)) + ")");
             return false;
         }).finally(function () {
             S.outputs.sending = false;
@@ -4307,6 +4427,7 @@ window.minipaintClipboard = (function () {
             drawOutputDetail();
         } else if (O.position.has(O.chosen)) {
             drawStrip();
+            drawStageChrome();
             drawOutputsStatus();
         } else if (O.items.length) {
             showOutput(O.items[0]);
@@ -4429,6 +4550,28 @@ window.minipaintClipboard = (function () {
         "margin": "0",
         "padding": "0",
         "overflow": "hidden"
+    };
+    //: The full-screen button in a tile's corner: the picture tiles' button,
+    //: at the size of their smallest, which a 96 px tile still holds.
+    const OUTPUT_EXPAND_GEOMETRY = {
+        "position": "absolute",
+        "top": "5px",
+        "right": "5px",
+        "left": "auto",
+        "bottom": "auto",
+        "box-sizing": "border-box",
+        "width": "24px",
+        "height": "24px",
+        "min-width": "0",
+        "min-height": "0",
+        "margin": "0",
+        "padding": "3px",
+        "border-width": "1px",
+        "border-style": "solid",
+        "display": "flex",
+        "align-items": "center",
+        "justify-content": "center",
+        "z-index": "2"
     };
     const OUTPUT_MEDIA_GEOMETRY = {
         "position": "absolute",
@@ -4554,6 +4697,16 @@ window.minipaintClipboard = (function () {
         time.hidden = true;
         box.appendChild(time);
         if (guessedOutput(item)) { box.appendChild(el("span", "minipaint-clip-output-guess", "~")); }
+        // Full screen, in the corner of every tile, as every picture has: a
+        // span, because a button inside the tile's own button is not a thing
+        // a page may have. Told apart in onOutputCellClick.
+        const expand = el("span", "minipaint-clip-output-expand");
+        expand.setAttribute("role", "button");
+        expand.setAttribute("aria-label", "Full screen");
+        expand.title = "Full screen: swipe or use the arrows for the next video";
+        pin(expand, OUTPUT_EXPAND_GEOMETRY);
+        expand.appendChild(expandGlyph());
+        box.appendChild(expand);
         cell.appendChild(box);
         const name = el("span", "minipaint-clip-output-cell-name", item.name);
         pin(name, OUTPUT_NAME_GEOMETRY);
@@ -4836,6 +4989,12 @@ window.minipaintClipboard = (function () {
         const cell = event.target && event.target.closest ? event.target.closest(".minipaint-clip-output-cell") : null;
         if (!cell) { return; }
         event.stopPropagation();
+        if (event.target.closest(".minipaint-clip-output-expand")) {
+            event.preventDefault();
+            S.outputs.gallery.lastTap = null;
+            openOutputFullscreen(cell.dataset.output, true);
+            return;
+        }
         const G = S.outputs.gallery;
         const id = cell.dataset.output;
         const now = Date.now();
@@ -4905,6 +5064,11 @@ window.minipaintClipboard = (function () {
             send.title = "Load this video's settings in WanGP, and open the WanGP tab on them";
             send.addEventListener("click", function (event) { event.stopPropagation(); sendSettings(item, send); });
             actions.appendChild(send);
+            const words = el("button", "minipaint-clip-output-words", "Prompt & LoRAs");
+            words.type = "button";
+            words.title = "Send only this video's prompt and LoRAs to WanGP, over everything else it shows, and open the WanGP tab";
+            words.addEventListener("click", function (event) { event.stopPropagation(); sendPromptAndLoras(item, words); });
+            actions.appendChild(words);
         }
         detail.appendChild(actions);
     }
@@ -5429,11 +5593,23 @@ window.minipaintClipboard = (function () {
      */
     function watchStageSwipe(stage) {
         let start = null;
+        // A drag of the mouse too: a remote desktop's touches arrive as one
+        // ("swipe between them" from a phone driving the host). Its left
+        // button only, and never on the controls drawn over the stage.
         stage.addEventListener("pointerdown", function (event) {
-            if (event.pointerType === "mouse" || !event.isPrimary) { start = null; return; }
-            if (event.target && event.target.closest && event.target.closest(".minipaint-clip-player")) { start = null; return; }
+            if (!event.isPrimary || (event.pointerType === "mouse" && event.button !== 0)) { start = null; return; }
+            if (event.target && event.target.closest
+                && event.target.closest(".minipaint-clip-player, .minipaint-clip-output-chrome, .minipaint-clip-output-caption, "
+                                        + ".minipaint-clip-confirm")) { start = null; return; }
             start = { x: event.clientX, y: event.clientY, at: Date.now() };
+            // No native drag of the picture or a selection under a mouse drag.
+            if (event.pointerType === "mouse") { event.preventDefault(); }
         });
+        if (!stage.dataset.watchFull) {
+            stage.dataset.watchFull = "1";
+            document.addEventListener("fullscreenchange", onStageFullscreen);
+            document.addEventListener("webkitfullscreenchange", onStageFullscreen);
+        }
         stage.addEventListener("pointerup", function (event) {
             if (!start) { return; }
             const dx = event.clientX - start.x;
@@ -5462,7 +5638,7 @@ window.minipaintClipboard = (function () {
         // The delete dialog lives in the stage, which is drawn again here.
         if (O.confirm) { closeConfirm(false); }
         O.chosen = item.id;
-        stopPlayer();
+        stopPlayer(true);
         stage.innerHTML = "";
         O.player = null;
         let media;
@@ -5527,8 +5703,167 @@ window.minipaintClipboard = (function () {
         }
         caption.appendChild(loadButton(item));
         stage.appendChild(caption);
+        stage.appendChild(buildStageChrome());
+        drawStageChrome();
         drawStrip();
         drawOutputsStatus();
+    }
+
+    /* -- full screen, swiped through ---------------------------------------- */
+    //
+    // Asked for: "the ability to make the videos and view output full screen.
+    // Right now, they don't full screen ... I want to be able to full screen
+    // the video and the view outputs and swipe between them so I can go to
+    // the next one, including our new shuffle function", with the order
+    // "in order ... from newest to oldest by timestamp, date created", the
+    // oldest first, or "a complete shuffle", and "when a video ends, it
+    // should loop".
+    //
+    // The stage is what goes full screen - from the player's own button, from
+    // the button in every gallery tile's corner, or F - and a step through
+    // the list changes what is in it and nothing else, so full screen lasts
+    // from one video to the next (it used to end at every step: the player's
+    // stop left it). In full screen the stage draws its own way through the
+    // list over the video: an arrow at each side, and a bar along the top
+    // with where it is and the order - Newest, Oldest, Shuffle, the same
+    // order the gallery and the slideshow show, kept the same way; Shuffle
+    // pressed again shuffles anew. A sideways swipe steps, with a finger or
+    // - for a remote desktop, whose touches arrive as a mouse - a drag of the
+    // mouse; the player's controls keep theirs. A video loops as the player's
+    // Loop says, which is on until it is turned off. Leaving full screen
+    // opened from a gallery tile goes back to the gallery on the video it
+    // ended on, as the picture view lands on its picture.
+
+    //: The orders full screen offers, by the gallery's own sort names.
+    const STAGE_ORDERS = [["newest", "Newest"], ["oldest", "Oldest"], ["shuffle", "Shuffle"]];
+
+    /** The way through the list, drawn over the video in full screen only. */
+    function buildStageChrome() {
+        const chrome = el("div", "minipaint-clip-output-chrome");
+        const previous = el("button", "minipaint-clip-output-chrome-nav minipaint-clip-output-chrome-prev");
+        previous.type = "button";
+        previous.dataset.stage = "prev";
+        previous.setAttribute("aria-label", "Previous video");
+        previous.title = "Previous (↑ or Page Up, or swipe right)";
+        previous.appendChild(chevron(true));
+        const next = el("button", "minipaint-clip-output-chrome-nav minipaint-clip-output-chrome-next");
+        next.type = "button";
+        next.dataset.stage = "next";
+        next.setAttribute("aria-label", "Next video");
+        next.title = "Next (↓ or Page Down, or swipe left)";
+        next.appendChild(chevron(false));
+        const bar = el("div", "minipaint-clip-output-chrome-bar");
+        const where = el("span", "minipaint-clip-output-chrome-where", "");
+        where.setAttribute("aria-live", "polite");
+        const orders = el("span", "minipaint-clip-output-chrome-orders");
+        orders.setAttribute("role", "radiogroup");
+        orders.setAttribute("aria-label", "Order");
+        for (const pair of STAGE_ORDERS) {
+            const choice = el("button", "minipaint-clip-output-chrome-order", pair[1]);
+            choice.type = "button";
+            choice.dataset.stage = "order";
+            choice.dataset.order = pair[0];
+            choice.setAttribute("role", "radio");
+            choice.title = pair[0] === "shuffle" ? "A random order, in this page only; pressed again, a new one"
+                : pair[0] === "newest" ? "Newest first, by when each was made" : "Oldest first, by when each was made";
+            orders.appendChild(choice);
+        }
+        bar.appendChild(where);
+        bar.appendChild(orders);
+        chrome.appendChild(previous);
+        chrome.appendChild(next);
+        chrome.appendChild(bar);
+        chrome.addEventListener("click", onStageChromeClick);
+        return chrome;
+    }
+
+    /** Where the stage is in the list, and which order it is in. */
+    function drawStageChrome() {
+        const O = S.outputs;
+        const stage = O.stage;
+        const chrome = stage && stage.querySelector(".minipaint-clip-output-chrome");
+        if (!chrome) { return; }
+        const count = O.items.length;
+        const at = O.position.has(O.chosen) ? O.position.get(O.chosen) : -1;
+        const words = function (value) { try { return Number(value).toLocaleString(); } catch (e) { return String(value); } };
+        chrome.querySelector(".minipaint-clip-output-chrome-where").textContent = count && at >= 0 ? words(at + 1) + " of " + words(count) : "";
+        chrome.querySelector(".minipaint-clip-output-chrome-prev").disabled = !(count && at > 0);
+        chrome.querySelector(".minipaint-clip-output-chrome-next").disabled = !(count && at >= 0 && at < count - 1);
+        for (const choice of Array.from(chrome.querySelectorAll(".minipaint-clip-output-chrome-order"))) {
+            const on = choice.dataset.order === O.sort;
+            choice.setAttribute("aria-checked", on ? "true" : "false");
+            choice.classList.toggle("minipaint-clip-output-chrome-order-on", on);
+        }
+    }
+
+    function onStageChromeClick(event) {
+        const control = event.target && event.target.closest ? event.target.closest("[data-stage]") : null;
+        if (!control) { return; }
+        event.preventDefault();
+        event.stopPropagation();
+        const what = control.dataset.stage;
+        if (what === "prev") { stepOutput(-1); }
+        else if (what === "next") { stepOutput(1); }
+        else if (what === "order") { setStageOrder(control.dataset.order); }
+    }
+
+    /** An order chosen in full screen: the gallery's own, kept the same way;
+     *  Shuffle again is a new shuffle. The stage stays on what it shows. */
+    function setStageOrder(order) {
+        const O = S.outputs;
+        if (order === "shuffle") {
+            if (O.sort === "shuffle") { shuffleOutputs(); } else { setOutputsSort("shuffle"); }
+        } else if (order === "newest" || order === "oldest") {
+            setOutputsSort(order);
+        }
+        drawStageChrome();
+        return O.sort;
+    }
+
+    /**
+     * A video full screen from wherever it was asked: the slideshow on it and
+     * its stage full screen, inside the press so the browser takes the
+     * request as the user's own. From the gallery, leaving full screen comes
+     * back to the gallery on the video it ended on.
+     */
+    function openOutputFullscreen(id, fromGallery) {
+        const O = S.outputs;
+        if (!O.byId.has(id)) { return false; }
+        if (!openSlideshowOn(id)) { return false; }
+        const stage = O.stage;
+        const enter = stage && (stage.requestFullscreen || stage.webkitRequestFullscreen);
+        O.fullFrom = fromGallery ? "gallery" : "";
+        if (!enter || !(document.fullscreenEnabled || document.webkitFullscreenEnabled)) {
+            // No full screen to be had (an iPhone's browser): the slideshow is
+            // what there is, and the iOS player's own full screen from its bar.
+            O.fullFrom = "";
+            return true;
+        }
+        try {
+            const asked = enter.call(stage);
+            if (asked && typeof asked.then === "function") {
+                asked.then(null, function () { O.fullFrom = ""; note("outputs: full screen refused by the browser"); });
+            }
+        } catch (e) {
+            O.fullFrom = "";
+        }
+        note("outputs: full screen on " + String(id).slice(0, 8));
+        return true;
+    }
+
+    /** The stage came out of full screen, or went into it. */
+    function onStageFullscreen() {
+        const O = S.outputs;
+        const stage = O.stage;
+        if (!stage) { return; }
+        const on = inFullscreen();
+        stage.classList.toggle("minipaint-clip-output-fullscreen", on);
+        if (on) { drawStageChrome(); return; }
+        if (O.fullFrom === "gallery" && outputsOpen() && O.view === "slideshow") {
+            O.fullFrom = "";
+            setOutputsView("gallery", false);
+        }
+        O.fullFrom = "";
     }
 
     /* -- reading the listing --------------------------------------------- */
@@ -5699,6 +6034,9 @@ window.minipaintClipboard = (function () {
         else if (key === "End") { if (O.items.length) { selectOutput(O.items[O.items.length - 1].id, true); } }
         else if (key === "Enter") { if (O.chosen && O.position.has(O.chosen)) { openSlideshowOn(O.chosen); } else { return; } }
         else if (key === "k" || key === "K") { togglePreview(); }
+        else if (key === "f" || key === "F") {
+            if (O.chosen && O.position.has(O.chosen)) { openOutputFullscreen(O.chosen, true); } else { return; }
+        }
         else { return; }
         event.preventDefault();
         event.stopPropagation();
@@ -7098,6 +7436,43 @@ window.minipaintClipboard = (function () {
     const VIEWER_ORDER_KEY = "minipaint-clipboard:viewer-order";
     const VIEWER_ORDERS = [["date", "Date"], ["random", "Random"]];
 
+    //
+    // ZOOM. Asked for: "the ability to zoom in, zoom out of the picture once
+    // I'm in full screen gallery using the scroll wheel, or pinch to zoom,
+    // whichever one I'm supported on". The picture keeps its fitted layout
+    // box and is drawn through a transform (translate, then scale, from its
+    // top left corner): the wheel - and a touchpad's pinch, which browsers
+    // send as a wheel with Ctrl held - zooms about the pointer, two fingers
+    // zoom about their middle and move it with them, + and - zoom about the
+    // middle and 0 fits again. Zoomed in, one finger or the mouse moves the
+    // picture instead of stepping to the next, the picture never leaves an
+    // edge of the view uncovered that it could cover, and a double tap fits
+    // it again rather than closing. A step, a close and the whole picture
+    // arriving in place of its thumbnail each fit it again.
+    const ZOOM_MIN = 1;
+    const ZOOM_MAX = 8;
+    //: A wheel's notch (100 px of delta) zooms by about a sixth; a touchpad's
+    //: pinch (Ctrl held, a few px a frame) at ten times the rate per pixel.
+    const ZOOM_WHEEL_RATE = 0.0018;
+    const ZOOM_PINCH_RATE = 0.012;
+    const ZOOM_KEY_STEP = 1.25;
+    //: A press that moved this far is a drag (a pan or a pinch), never a tap.
+    const DRAG_PX = 6;
+
+    //
+    // AUTO FROM THE VIEW. Asked for: "the ability to tap auto somehow, make it
+    // like a hidden setting ... right click, which is long press on a remote
+    // desktop session ... quickly initiate an auto when I'm looking at a
+    // picture that's full screen". A right click on the view - a long press
+    // on a phone, a remote desktop's long press, the menu key - is the
+    // toolbar's Auto for the picture on screen: Auto Options' roles, the
+    // composer's prompt and its Enhance switch as they stand, one press to the
+    // queue, and what came of it said inside the view (a toast outside it
+    // would be under the full screen). A right click within VIEWER_MENU_GRACE_MS
+    // of the view opening is the one that opened it, never a second press,
+    // and one picture is sent once a press however many menu events it makes.
+    const VIEWER_MENU_GRACE_MS = 700;
+
     function viewerOpen() { return !!(S.viewer && S.viewer.root && !S.viewer.root.hidden); }
 
     /** An arrow, drawn: a chevron pointing left or right. */
@@ -7128,7 +7503,8 @@ window.minipaintClipboard = (function () {
         layer.hidden = true;
         layer.setAttribute("role", "dialog");
         layer.setAttribute("aria-modal", "true");
-        layer.setAttribute("aria-label", "Full screen picture. Arrows step through the folder; double-tap to close.");
+        layer.setAttribute("aria-label", "Full screen picture. Arrows step through the folder; the wheel or a pinch zooms; "
+                           + "a right click or a long press sends it with Auto; double-tap to close.");
         layer.tabIndex = -1;
         const picture = document.createElement("img");
         picture.className = VIEWER_CLASS + "-picture";
@@ -7169,11 +7545,17 @@ window.minipaintClipboard = (function () {
         layer.appendChild(bar);
         layer.appendChild(hint);
         layer.addEventListener("pointerdown", onViewerDown);
+        layer.addEventListener("pointermove", onViewerMove);
         layer.addEventListener("pointerup", onViewerTap);
+        layer.addEventListener("pointercancel", onViewerCancel);
         layer.addEventListener("click", onViewerClick);
         layer.addEventListener("dblclick", function (event) { event.preventDefault(); });
-        // The page's own menu is not this view's; a right click here does nothing.
-        layer.addEventListener("contextmenu", function (event) { event.preventDefault(); });
+        // Not passive: the wheel is the view's zoom, never the page's scroll
+        // or (with Ctrl, a touchpad's pinch) the browser's own zoom.
+        layer.addEventListener("wheel", onViewerWheel, { passive: false });
+        // The page's own menu is not this view's: a right click here is Auto.
+        layer.addEventListener("contextmenu", onViewerMenu);
+        picture.addEventListener("load", function () { refitViewer(S.viewer); });
         host.appendChild(layer);
         S.viewer = { root: layer, picture: picture, hint: hint, lastTap: null, full: null, hintTimer: 0,
                      fullscreen: false, key: null, change: null, url: "",
@@ -7181,7 +7563,12 @@ window.minipaintClipboard = (function () {
                      // The folder: its date order, the order in use, where
                      // the view is in it, and what it shows.
                      dated: null, list: null, at: -1, current: null, order: viewerOrder(),
-                     reading: null, ahead: [] };
+                     reading: null, ahead: [],
+                     // The zoom (scale, then the picture's offset in px), the
+                     // presses down on the view, a pinch or a pan under way,
+                     // when the view opened and the last picture sent by Auto.
+                     zoom: { s: 1, x: 0, y: 0 }, pointers: new Map(), pinch: null, pan: null,
+                     openedAt: 0, autoSent: null };
         return S.viewer;
     }
 
@@ -7278,6 +7665,7 @@ window.minipaintClipboard = (function () {
     /** Show one picture: the whole one if it is here, its thumbnail until it is. */
     function showInViewer(view, item, small) {
         view.current = item;
+        fitViewer(view);
         const full = viewerFullUrl(item);
         view.url = full;
         const ready = view.ahead.find(function (held) { return held.url === full && held.image.complete && held.image.naturalWidth; });
@@ -7352,6 +7740,11 @@ window.minipaintClipboard = (function () {
         const small = shown && shown.getAttribute("src") ? shown.getAttribute("src") : "";
         view.ahead = [];
         view.order = viewerOrder();
+        view.openedAt = Date.now();
+        view.autoSent = null;
+        view.pointers.clear();
+        view.down = null;
+        delete view.root.dataset.auto;
         showInViewer(view, item, small);
         const was = viewerOpen();
         view.root.hidden = false;
@@ -7417,6 +7810,8 @@ window.minipaintClipboard = (function () {
         view.fullscreen = false;
         view.full = null;
         view.ahead = [];
+        fitViewer(view);
+        view.pointers.clear();
         view.root.hidden = true;
         delete view.root.dataset.fill;
         view.picture.removeAttribute("src");
@@ -7450,9 +7845,16 @@ window.minipaintClipboard = (function () {
         if (!viewerOpen()) { return; }
         const key = event.key;
         let handled = true;
+        const middle = function (scale) {
+            const outer = S.viewer.root.getBoundingClientRect();
+            zoomAbout(S.viewer, scale, outer.left + outer.width / 2, outer.top + outer.height / 2);
+        };
         if (key === "Escape") { closeViewer(); }
         else if (key === "ArrowRight" || key === "ArrowDown" || key === "PageDown") { stepViewer(1); }
         else if (key === "ArrowLeft" || key === "ArrowUp" || key === "PageUp") { stepViewer(-1); }
+        else if (key === "+" || key === "=") { middle(S.viewer.zoom.s * ZOOM_KEY_STEP); }
+        else if (key === "-" || key === "_") { middle(S.viewer.zoom.s / ZOOM_KEY_STEP); }
+        else if (key === "0") { fitViewer(S.viewer); }
         else { handled = false; }
         if (handled) { event.stopPropagation(); event.preventDefault(); }
     }
@@ -7471,20 +7873,81 @@ window.minipaintClipboard = (function () {
     function onViewerDown(event) {
         const view = S.viewer;
         if (!view) { return; }
-        view.down = { x: event.clientX, y: event.clientY, id: event.pointerId };
+        if (event.button !== undefined && event.button > 0) { return; }
+        if (event.target && event.target.closest && event.target.closest("[data-viewer]")) { return; }
+        view.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        if (view.pointers.size === 2) {
+            // A second finger: a pinch, and neither finger a tap or a swipe.
+            view.down = null;
+            view.pan = null;
+            view.lastTap = null;
+            view.pinch = pinchStart(view);
+            return;
+        }
+        if (view.pointers.size > 2) { return; }
+        view.down = { x: event.clientX, y: event.clientY, id: event.pointerId, moved: false };
+        if (zoomed(view)) {
+            view.pan = { id: event.pointerId, x: event.clientX, y: event.clientY, zx: view.zoom.x, zy: view.zoom.y };
+            try { view.root.setPointerCapture(event.pointerId); } catch (e) { /* the view is the window anyway */ }
+        }
+    }
+
+    /** A press moving: a pinch zooms and moves, a drag of a zoomed picture moves it. */
+    function onViewerMove(event) {
+        const view = S.viewer;
+        if (!view || !view.pointers.has(event.pointerId)) { return; }
+        view.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        const down = view.down;
+        if (down && down.id === event.pointerId
+            && Math.hypot(event.clientX - down.x, event.clientY - down.y) >= DRAG_PX) { down.moved = true; }
+        if (view.pinch && view.pointers.size >= 2) {
+            pinchMove(view);
+            event.preventDefault();
+            return;
+        }
+        const pan = view.pan;
+        if (pan && pan.id === event.pointerId) {
+            setZoom(view, view.zoom.s, pan.zx + event.clientX - pan.x, pan.zy + event.clientY - pan.y);
+            event.preventDefault();
+        }
+    }
+
+    function onViewerCancel(event) {
+        const view = S.viewer;
+        if (!view) { return; }
+        view.pointers.delete(event.pointerId);
+        if (view.pointers.size < 2) { view.pinch = null; }
+        if (view.pan && view.pan.id === event.pointerId) { view.pan = null; }
+        if (view.down && view.down.id === event.pointerId) { view.down = null; }
     }
 
     /**
      * A swipe steps; two taps (or clicks) in one place, close together,
-     * close. A press on the view's own controls is theirs, never a tap.
+     * close - or, zoomed in, fit the picture again. A press on the view's own
+     * controls is theirs, never a tap; a pinch, or a drag that moved a
+     * zoomed picture, is neither a tap nor a swipe.
      */
     function onViewerTap(event) {
         const view = S.viewer;
         if (!view || (event.button !== undefined && event.button > 0)) { return; }
+        const wasPinch = !!view.pinch || view.pointers.size > 1;
+        view.pointers.delete(event.pointerId);
+        if (view.pointers.size < 2) { view.pinch = null; }
+        if (wasPinch) {
+            // The fingers lift one at a time: the last one up is no tap either.
+            view.down = null;
+            view.lastTap = null;
+            view.pinchEnded = Date.now();
+            return;
+        }
         const down = view.down;
         view.down = null;
+        const pan = view.pan;
+        view.pan = null;
         if (event.target && event.target.closest && event.target.closest("[data-viewer]")) { view.lastTap = null; return; }
-        if (down && down.id === event.pointerId) {
+        if (view.pinchEnded && Date.now() - view.pinchEnded < DOUBLE_TAP_MS) { return; }
+        if (pan && down && down.moved) { view.lastTap = null; return; }
+        if (down && down.id === event.pointerId && !pan) {
             const dx = event.clientX - down.x;
             const dy = event.clientY - down.y;
             if (Math.abs(dx) >= SWIPE_PX && Math.abs(dx) > Math.abs(dy) * 1.5) {
@@ -7500,10 +7963,170 @@ window.minipaintClipboard = (function () {
             && Math.abs(event.clientX - last.x) <= DOUBLE_TAP_PX && Math.abs(event.clientY - last.y) <= DOUBLE_TAP_PX) {
             view.lastTap = null;
             event.preventDefault();
-            closeViewer();
+            if (zoomed(view)) { fitViewer(view); } else { closeViewer(); }
             return;
         }
         view.lastTap = { at: now, x: event.clientX, y: event.clientY };
+    }
+
+    /* -- zoom ------------------------------------------------------------ */
+
+    function zoomed(view) { return !!view && view.zoom.s > ZOOM_MIN + 0.001; }
+
+    /** The picture's fitted box, in the view's own coordinates. */
+    function pictureBox(view) {
+        const picture = view.picture;
+        const outer = view.root.getBoundingClientRect();
+        return { left: picture.offsetLeft, top: picture.offsetTop,
+                 width: picture.offsetWidth, height: picture.offsetHeight,
+                 viewLeft: outer.left, viewTop: outer.top,
+                 viewWidth: view.root.clientWidth, viewHeight: view.root.clientHeight };
+    }
+
+    /**
+     * One axis of the picture's offset, held: a picture smaller than the view
+     * on that axis is centred, a larger one covers it edge to edge.
+     */
+    function clampAxis(offset, start, length, room) {
+        if (length <= room) { return (room - length) / 2 - start; }
+        return Math.min(-start, Math.max(room - length - start, offset));
+    }
+
+    /** Draw a zoom: scale ``s`` and offsets ``x``, ``y``, held inside the view. */
+    function setZoom(view, s, x, y) {
+        const scale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Number(s) || 1));
+        if (scale <= ZOOM_MIN + 0.001) {
+            view.zoom = { s: 1, x: 0, y: 0 };
+        } else {
+            const box = pictureBox(view);
+            view.zoom = { s: scale,
+                          x: clampAxis(x, box.left, box.width * scale, box.viewWidth),
+                          y: clampAxis(y, box.top, box.height * scale, box.viewHeight) };
+        }
+        drawZoom(view);
+    }
+
+    function drawZoom(view) {
+        const z = view.zoom;
+        if (z.s <= ZOOM_MIN + 0.001) {
+            view.picture.style.removeProperty("transform");
+            view.picture.style.removeProperty("transform-origin");
+            delete view.root.dataset.zoomed;
+            return;
+        }
+        view.picture.style.setProperty("transform-origin", "0 0", "important");
+        view.picture.style.setProperty("transform", "translate(" + z.x + "px, " + z.y + "px) scale(" + z.s + ")", "important");
+        view.root.dataset.zoomed = "1";
+    }
+
+    /** Zoom to ``s`` keeping the picture's point under (cx, cy) - window px - where it is. */
+    function zoomAbout(view, s, cx, cy) {
+        const box = pictureBox(view);
+        const z = view.zoom;
+        const scale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, s));
+        const px = cx - box.viewLeft - box.left;
+        const py = cy - box.viewTop - box.top;
+        // The picture's own point under the pointer, then where the offset
+        // has to be for it to stay there at the new scale.
+        const ux = (px - z.x) / z.s;
+        const uy = (py - z.y) / z.s;
+        setZoom(view, scale, px - ux * scale, py - uy * scale);
+    }
+
+    function fitViewer(view) {
+        if (!view) { return; }
+        view.pan = null;
+        view.pinch = null;
+        view.zoom = { s: 1, x: 0, y: 0 };
+        drawZoom(view);
+    }
+
+    /**
+     * The picture's box changed under a zoom (the whole picture took its
+     * thumbnail's place, the window turned): the same middle, the same scale.
+     */
+    function refitViewer(view) {
+        if (!view || !zoomed(view)) { return; }
+        setZoom(view, view.zoom.s, view.zoom.x, view.zoom.y);
+    }
+
+    function onViewerWheel(event) {
+        const view = S.viewer;
+        if (!view || !viewerOpen()) { return; }
+        event.preventDefault();
+        let delta = Number(event.deltaY) || 0;
+        // Lines and pages, as a wheel without pixel deltas reports them.
+        if (event.deltaMode === 1) { delta *= 16; } else if (event.deltaMode === 2) { delta *= view.root.clientHeight || 800; }
+        if (!delta) { return; }
+        const rate = event.ctrlKey ? ZOOM_PINCH_RATE : ZOOM_WHEEL_RATE;
+        zoomAbout(view, view.zoom.s * Math.exp(-delta * rate), event.clientX, event.clientY);
+    }
+
+    function pinchStart(view) {
+        const points = Array.from(view.pointers.values()).slice(0, 2);
+        return { distance: Math.max(1, Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y)),
+                 mx: (points[0].x + points[1].x) / 2, my: (points[0].y + points[1].y) / 2,
+                 s: view.zoom.s, x: view.zoom.x, y: view.zoom.y };
+    }
+
+    /** Two fingers: the scale their spread says, about their middle, moved as it moves. */
+    function pinchMove(view) {
+        const start = view.pinch;
+        const points = Array.from(view.pointers.values()).slice(0, 2);
+        const distance = Math.max(1, Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y));
+        const mx = (points[0].x + points[1].x) / 2;
+        const my = (points[0].y + points[1].y) / 2;
+        const scale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, start.s * distance / start.distance));
+        const box = pictureBox(view);
+        // The picture's point under the fingers' first middle stays under
+        // their middle now.
+        const ux = (start.mx - box.viewLeft - box.left - start.x) / start.s;
+        const uy = (start.my - box.viewTop - box.top - start.y) / start.s;
+        setZoom(view, scale, mx - box.viewLeft - box.left - ux * scale, my - box.viewTop - box.top - uy * scale);
+    }
+
+    /* -- Auto from the view ---------------------------------------------- */
+
+    /** The composer's Enhance switch as it stands, or undefined without one. */
+    function enhanceSwitch() {
+        const host = byId("minipaint_clipboard_enhance_toggle");
+        const box = host ? (host.matches && host.matches("input") ? host : host.querySelector("input[type=checkbox]")) : null;
+        return box ? !!box.checked : undefined;
+    }
+
+    /** A right click on the view, however it was made: Auto, for the picture on screen. */
+    function onViewerMenu(event) {
+        event.preventDefault();
+        const view = S.viewer;
+        if (!view || !viewerOpen() || !view.current || !view.current.id) { return; }
+        if (event.target && event.target.closest && event.target.closest("[data-viewer]")) { return; }
+        // The press that opened the view, still being answered.
+        if (Date.now() - view.openedAt < VIEWER_MENU_GRACE_MS) { return; }
+        // A finger held still after a pinch or a drag is not a deliberate press.
+        if (view.pinch || view.pointers.size > 1 || (view.down && view.down.moved)) { return; }
+        const id = view.current.id;
+        const sent = view.autoSent;
+        if (sent && sent.id === id && Date.now() - sent.at < VIEWER_MENU_GRACE_MS) { return; }
+        view.autoSent = { id: id, at: Date.now() };
+        viewerAuto(view);
+    }
+
+    /** Auto for the picture the view shows: selected, then the toolbar's own press. */
+    function viewerAuto(view) {
+        const item = view.current;
+        if (!item || !item.id) { return Promise.resolve(null); }
+        if (S.selected !== item.id) { select(item.id); }
+        view.root.dataset.auto = "sending";
+        toast("Auto: sending " + (item.name || "this picture") + "…", false);
+        note("viewer: Auto by a right click");
+        return autoQueue(undefined, enhanceSwitch(), item.id).then(function (answer) {
+            view.root.dataset.auto = answer && answer.ok !== false ? "sent" : "refused";
+            return answer;
+        }, function () {
+            view.root.dataset.auto = "refused";
+            toast("Forge is not answering; nothing was queued.", true);
+            return null;
+        });
     }
 
     /** What the view is showing, for the checks. */
@@ -7511,6 +8134,7 @@ window.minipaintClipboard = (function () {
         const view = S.viewer;
         if (!view) { return { open: false }; }
         return { open: viewerOpen(), current: view.current ? view.current.id : "", at: view.at,
+                 zoom: { s: view.zoom.s, x: view.zoom.x, y: view.zoom.y }, auto: view.root.dataset.auto || "",
                  count: view.list ? view.list.length : 0, order: view.order,
                  list: view.list ? view.list.map(function (item) { return item.id; }) : [],
                  ahead: view.ahead.map(function (held) { return held.url; }), loaded: view.root.dataset.loaded || "" };
@@ -8832,8 +9456,10 @@ window.minipaintClipboard = (function () {
      * queue's status line, because on a phone the composer is a screen away
      * from the toolbar.
      */
-    function autoQueue(prompt, enhanceOn) {
-        const picture = S.selected;
+    function autoQueue(prompt, enhanceOn, asset) {
+        // The selected picture, or the one the full-screen view names: a
+        // right click there is Auto for the picture on screen.
+        const picture = typeof asset === "string" && asset ? asset : S.selected;
         if (!picture) { toast("Select an image first.", true); return Promise.resolve(null); }
         let model = null;
         try { model = JSON.parse(modelJson() || "null"); } catch (e) { model = null; }

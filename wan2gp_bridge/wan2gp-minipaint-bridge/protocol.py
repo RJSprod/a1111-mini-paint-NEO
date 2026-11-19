@@ -95,6 +95,16 @@ PROMPT_RESULT = "WANGP_PROMPT_RESULT"
 #: ``settings_load``; an older one drops a type it does not know.
 SETTINGS_REQUEST = "WANGP_SETTINGS_REQUEST"
 SETTINGS_RESULT = "WANGP_SETTINGS_RESULT"
+#: Bridge 1.18.0: the same request with ``only`` set to this loads the file's
+#: prompt and its LoRAs (with their multipliers) and nothing else, over the
+#: rest of the form as the page shows it - the model is not switched and no
+#: picture is loaded - for View Outputs' Send prompt & LoRAs. Sent only to a
+#: bridge whose READY said ``prompt_loras``: an older one reads ``handoff_id``
+#: alone and would load everything.
+SETTINGS_ONLY_PROMPT_LORAS = "prompt_loras"
+SETTINGS_ONLY = ("", SETTINGS_ONLY_PROMPT_LORAS)
+#: The most LoRAs a prompt-and-LoRAs answer counts.
+SETTINGS_LORAS_MAX = 999
 
 #: What the parent page may send into the iframe.
 TO_BRIDGE = frozenset({HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH,
@@ -504,15 +514,23 @@ def normalize_prompt_edit(payload: typing.Any) -> typing.Tuple[dict, str]:
 def normalize_settings_request(payload: typing.Any) -> typing.Tuple[dict, str]:
     """A SETTINGS_REQUEST payload as the bridge takes it: ``(request, code)``.
 
-    One key, ``handoff_id``, a reference handoff's id - 32 lowercase hex - or
-    ``REQUEST_INVALID``. Nothing else is read: a path, a name or a model in the
-    payload is not a way to choose what is loaded.
+    ``handoff_id``, a reference handoff's id - 32 lowercase hex - or
+    ``REQUEST_INVALID``; and ``only`` (bridge 1.18.0), absent or empty for the
+    whole of the file's settings or ``SETTINGS_ONLY_PROMPT_LORAS`` for its
+    prompt and LoRAs, anything else ``REQUEST_INVALID``. Nothing else is
+    read: a path, a name or a model in the payload is not a way to choose
+    what is loaded. ``only`` is in the answer only when it was asked for.
     """
     source = payload if isinstance(payload, dict) else {}
     handoff_id = source.get("handoff_id")
     if not valid_handoff_id(handoff_id):
         return {}, QUEUE_CODE_REQUEST_INVALID
-    return {"handoff_id": handoff_id}, ""
+    only = source.get("only")
+    if only is None:
+        only = ""
+    if not isinstance(only, str) or only not in SETTINGS_ONLY:
+        return {}, QUEUE_CODE_REQUEST_INVALID
+    return ({"handoff_id": handoff_id, "only": only} if only else {"handoff_id": handoff_id}), ""
 
 
 def normalize_settings_result(payload: typing.Any) -> dict:
@@ -527,13 +545,29 @@ def normalize_settings_result(payload: typing.Any) -> dict:
     loaded = source.get("loaded") is True
     model = source.get("model_type")
     code = source.get("code")
+    only = source.get("only")
+    only = only if isinstance(only, str) and only in SETTINGS_ONLY else ""
+
+    def count(value: typing.Any) -> int:
+        # A whole number of LoRAs, 0 for anything else (a bool is not one).
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return max(0, min(SETTINGS_LORAS_MAX, value))
+
+    loras = count(source.get("loras")) if loaded and only else 0
     return {
         "ok": source.get("ok") is True,
         "loaded": loaded,
         "model_type": model if isinstance(model, str) and MODEL_TYPE_RE.match(model) else "",
-        "switched": loaded and source.get("switched") is True,
+        "switched": loaded and not only and source.get("switched") is True,
         "code": code if isinstance(code, str) and CODE_RE.match(code) else "",
         "message": str(source.get("message") or "")[:200],
+        # Bridge 1.18.0, a prompt-and-LoRAs load only: what was asked for,
+        # how many LoRAs went in, and how many of them this model's LoRA
+        # folder does not have (never more than went in).
+        "only": only,
+        "loras": loras,
+        "missing_loras": min(loras, count(source.get("missing_loras"))) if loras else 0,
     }
 
 

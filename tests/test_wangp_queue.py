@@ -973,6 +973,192 @@ def settings_load_checks(r: Results, root: str) -> None:
                 not any(folder in json.dumps(ack) or ".mp4" in json.dumps(ack) for ack in answers), str(answers)[:300])
 
 
+class _SettingsWgp:
+    """The four WanGP functions a prompt-and-LoRAs load reads with, as v19 has
+    them (wgp.py): ``get_settings_from_file(state, path, allow_json,
+    merge_with_defaults, switch_type_if_compatible, ...)`` answering
+    ``(configs, any_image_or_video, any_audio)`` - None for a file it reads
+    nothing from - ``get_model_settings`` and ``set_model_settings`` over the
+    page's ``state["all_settings"]``, and ``check_loras_exist(model, loras)``
+    answering an error sentence for a LoRA the model's folder lacks and ""
+    otherwise. ``reads`` records each read's arguments; ``fail`` raises."""
+
+    def __init__(self, carried, present):
+        self.carried = carried
+        self.present = set(present)
+        self.reads = []
+        self.checked = []
+        self.fail = False
+
+    def get_settings_from_file(self, state, file_path, allow_json, merge_with_defaults, switch_type_if_compatible, **kwargs):
+        self.reads.append((str(file_path), allow_json, merge_with_defaults, switch_type_if_compatible, kwargs))
+        if self.fail:
+            raise ValueError(f"cannot parse {file_path}")
+        configs = self.carried.get(pathlib.Path(str(file_path)).name)
+        if configs is None:
+            state["_last_settings_file_error"] = None
+            return None, False, False
+        return dict(configs), True, False
+
+    @staticmethod
+    def get_model_settings(state, model_type):
+        return (state.get("all_settings") or {}).get(model_type)
+
+    @staticmethod
+    def set_model_settings(state, model_type, settings):
+        state.setdefault("all_settings", {})[model_type] = settings
+
+    def check_loras_exist(self, model_type, loras):
+        self.checked.append((model_type, list(loras)))
+        missing = [lora for lora in loras if lora not in self.present]
+        return f"The following Loras files are missing or invalid: {missing}." if missing else ""
+
+
+def prompt_loras_checks(r: Results, root: str) -> None:
+    """Bridge 1.18.0: a file's prompt and LoRAs alone put on the page, for View
+    Outputs' Send prompt & LoRAs - "just the prompt and the LoRa sent to
+    wan2gp ... It should just override it". Read by WanGP's own reader from
+    the file the reference note names, written over the page's own model's
+    saved settings - the form on screen - with nothing else in them changed,
+    and the form filled again through the refresh trigger: no model switch,
+    no picture, and a count of the LoRAs the model's folder lacks."""
+    plugin, compatibility, _admission, _ui = _modules()
+    K = compatibility
+    ref = lambda n: f"{n:032x}"  # noqa: E731
+    with tempfile.TemporaryDirectory(prefix="minipaint-wangp-prompt-loras-") as folder:
+        outputs = pathlib.Path(folder)
+        for name in ("same.mp4", "other.mkv", "plain.mov", "blank.mov"):
+            (outputs / name).write_bytes(b"\x00" * 16)
+        carried = {
+            "same.mp4": {"model_type": "video", "prompt": "a red fox at dawn",
+                         "activated_loras": ["fox.safetensors", "dawn.safetensors", "gone.safetensors"],
+                         "loras_multipliers": "1.0 0.6 0.8", "image_start": ["a picture"], "resolution": "832x480",
+                         "num_inference_steps": 4, "seed": 7},
+            "other.mkv": {"model_type": "ltx2_22B_distilled", "prompt": "a lighthouse", "activated_loras": ["fox.safetensors"],
+                          "loras_multipliers": "0.5"},
+            "plain.mov": {"model_type": "video", "prompt": "no loras here", "activated_loras": [], "loras_multipliers": ""},
+        }
+        wangp = _SettingsWgp(carried, present={"fox.safetensors", "dawn.safetensors"})
+        bridge, wgp = _bridge({"video": VIDEO_MODEL}, root, names=SETTINGS_NAMES)
+        for name in ("get_settings_from_file", "get_model_settings", "set_model_settings", "check_loras_exist"):
+            setattr(wgp, name, getattr(wangp, name))
+        hello, _ = _call(bridge, _page(K), "hello")
+        r.check("a build that hands over WanGP's reader, its saved settings both ways and the refresh trigger offers the prompt and LoRAs",
+                hello.get("capabilities", {}).get("prompt_loras") is True
+                and {"get_settings_from_file", "get_model_settings", "set_model_settings", "check_loras_exist"} <= set(wgp.asked_globals),
+                str(hello.get("capabilities")))
+
+        on_screen = {"prompt": "the page's own prompt", "activated_loras": ["mine.safetensors"], "loras_multipliers": "1.2",
+                     "resolution": "1280x720", "num_inference_steps": 30, "seed": -1, "image_start": ["the page's own picture"],
+                     "client_id": "run-1"}
+        state = {"model_type": "video", "gen": {"queue": []}, "all_settings": {"video": dict(on_screen), "t2v": {"prompt": "untouched"}}}
+        page = _page(K, **{K.SESSION_STATE: state})
+        _note(root, ref(1), outputs / "same.mp4")
+        ack, writes = _load(bridge, page, {"handoff_id": ref(1), "only": "prompt_loras"})
+        saved = state["all_settings"]["video"]
+        r.check("the file is read by WanGP's own reader, from the path its note names, with no defaults merged in",
+                ack.get("ok") is True and ack.get("loaded") is True and wangp.reads[-1][0] == str(outputs / "same.mp4")
+                and wangp.reads[-1][2] is False, str(ack) + str(wangp.reads[-1:]))
+        r.check("its prompt and its LoRAs, multipliers and all, replace the page's - all of them",
+                saved.get("prompt") == "a red fox at dawn"
+                and saved.get("activated_loras") == ["fox.safetensors", "dawn.safetensors", "gone.safetensors"]
+                and saved.get("loras_multipliers") == "1.0 0.6 0.8", str(saved))
+        r.check("and nothing else on the page changes: not its pictures, its resolution, its steps, its seed or its run",
+                {k: v for k, v in saved.items() if k not in ("prompt", "activated_loras", "loras_multipliers")}
+                == {k: v for k, v in on_screen.items() if k not in ("prompt", "activated_loras", "loras_multipliers")}
+                and state["all_settings"]["t2v"] == {"prompt": "untouched"}, str(saved))
+        r.check("the form is filled again through refresh_form_trigger, the model never switched",
+                isinstance(writes.get(K.REFRESH_FORM_TRIGGER), str) and writes.get(K.REFRESH_FORM_TRIGGER)
+                and K.MODEL_CHOICE_TARGET not in writes and ack.get("switched") is False and ack.get("model_type") == "video"
+                and writes.get(K.MAIN_TABS) == {"selected": "media_gen"}, str(sorted(writes)) + str(ack))
+        r.check("the answer counts the LoRAs that went in and the one the model's folder lacks, asked of WanGP for the page's model",
+                ack.get("only") == "prompt_loras" and ack.get("loras") == 3 and ack.get("missing_loras") == 1
+                and all(model == "video" for model, _ in wangp.checked), str(ack) + str(wangp.checked[-3:]))
+
+        other_state = {"model_type": "video", "gen": {"queue": []}, "all_settings": {"video": dict(on_screen)}}
+        _note(root, ref(2), outputs / "other.mkv")
+        ack, writes = _load(bridge, _page(K, **{K.SESSION_STATE: other_state}), {"handoff_id": ref(2), "only": "prompt_loras"})
+        r.check("a file made with another model still lands on the page's own model, which is not switched",
+                ack.get("loaded") is True and ack.get("model_type") == "video" and K.MODEL_CHOICE_TARGET not in writes
+                and other_state["all_settings"]["video"]["prompt"] == "a lighthouse"
+                and "ltx2_22B_distilled" not in other_state["all_settings"]
+                and other_state["all_settings"]["video"]["resolution"] == "1280x720", str(ack) + str(other_state["all_settings"]))
+        r.check("WanGP's reader is asked to resolve its LoRAs for the page's model where it calls the two compatible",
+                wangp.reads[-1][3] is True, str(wangp.reads[-1:]))
+
+        plain_state = {"model_type": "video", "gen": {"queue": []}, "all_settings": {"video": dict(on_screen)}}
+        _note(root, ref(3), outputs / "plain.mov")
+        ack, writes = _load(bridge, _page(K, **{K.SESSION_STATE: plain_state}), {"handoff_id": ref(3), "only": "prompt_loras"})
+        r.check("a file with no LoRAs leaves the page with none: they are overridden too",
+                ack.get("loaded") is True and ack.get("loras") == 0 and ack.get("missing_loras") == 0
+                and plain_state["all_settings"]["video"]["activated_loras"] == []
+                and plain_state["all_settings"]["video"]["loras_multipliers"] == "", str(plain_state["all_settings"]["video"]))
+
+        fresh_state = {"model_type": "video", "gen": {"queue": []}}
+        ack, writes = _load(bridge, _page(K, **{K.SESSION_STATE: fresh_state}), {"handoff_id": ref(1), "only": "prompt_loras"})
+        r.check("a page with no saved settings yet gets the prompt and LoRAs alone, nothing invented",
+                ack.get("loaded") is True and fresh_state["all_settings"]["video"] == {
+                    "prompt": "a red fox at dawn", "activated_loras": ["fox.safetensors", "dawn.safetensors", "gone.safetensors"],
+                    "loras_multipliers": "1.0 0.6 0.8"}, str(fresh_state.get("all_settings")))
+
+        blank_state = {"model_type": "video", "gen": {"queue": []}, "all_settings": {"video": dict(on_screen)}}
+        _note(root, ref(4), outputs / "blank.mov")
+        ack, writes = _load(bridge, _page(K, **{K.SESSION_STATE: blank_state}), {"handoff_id": ref(4), "only": "prompt_loras"})
+        r.check("a file WanGP reads nothing from answers ok and not loaded, and writes nothing",
+                ack.get("ok") is True and ack.get("loaded") is False and writes == {} and "no prompt or LoRAs" in ack.get("message", "")
+                and blank_state["all_settings"]["video"] == on_screen, str(ack) + str(writes))
+
+        reads = len(wangp.reads)
+        loaded_before = len(wgp.asked_globals)
+        ack, writes = _load(bridge, _page(K), {"handoff_id": ref(1), "only": "prompt"})
+        r.check("an only the bridge does not know is REQUEST_INVALID, never a whole load",
+                ack.get("ok") is False and ack.get("code") == "REQUEST_INVALID" and not writes and len(wangp.reads) == reads,
+                str(ack.get("code")) + str(loaded_before))
+
+        wangp.fail = True
+        ack, writes = _load(bridge, _page(K, **{K.SESSION_STATE: {"model_type": "video", "gen": {"queue": []}}}),
+                            {"handoff_id": ref(1), "only": "prompt_loras"})
+        r.check("a reader that raises is INTERNAL_ERROR, writing nothing", ack.get("code") == "INTERNAL_ERROR" and not writes, str(ack))
+        wangp.fail = False
+
+        ack, writes = _load(bridge, _page(K, **{K.SESSION_STATE: None}), {"handoff_id": ref(1), "only": "prompt_loras"})
+        r.check("a page whose state was not handed over is refused", ack.get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE" and not writes,
+                str(ack.get("code")))
+
+        # A 1.17.0-shaped build: the whole loader, but not the functions the prompt and LoRAs need.
+        bare, bare_wgp = _bridge({"video": VIDEO_MODEL}, root, names=SETTINGS_NAMES)
+        bare_wgp.load_settings_from_file = lambda state, path: (LOADED_AT, {"__type__": "update"}, None)
+        hello, _ = _call(bare, _page(K), "hello")
+        ack, writes = _load(bare, _page(K), {"handoff_id": ref(1), "only": "prompt_loras"})
+        r.check("a build without WanGP's reader does not offer the prompt and LoRAs, and refuses one rather than load everything",
+                hello.get("capabilities", {}).get("prompt_loras") is False and hello.get("capabilities", {}).get("settings_load") is True
+                and ack.get("code") == "BRIDGE_COMPONENT_INCOMPATIBLE" and not writes, str(hello.get("capabilities")) + str(ack.get("code")))
+        triggerless, triggerless_wgp = _bridge({"video": VIDEO_MODEL}, root,
+                                               names=tuple(n for n in SETTINGS_NAMES if n != "refresh_form_trigger"))
+        for name in ("get_settings_from_file", "get_model_settings", "set_model_settings"):
+            setattr(triggerless_wgp, name, getattr(wangp, name))
+        hello, _ = _call(triggerless, _page(K), "hello")
+        r.check("nor does one without the refresh trigger that fills the form",
+                hello.get("capabilities", {}).get("prompt_loras") is False, str(hello.get("capabilities")))
+
+        # WanGP's console: how many LoRAs, on which model - never the prompt, a LoRA or the file.
+        line = plugin._summary("settings", {"loaded": True, "only": "prompt_loras", "model_type": "video", "loras": 3,
+                                            "missing_loras": 1}, 0.012)
+        r.check("the console line says how many LoRAs went on which model and how many are missing, and nothing else",
+                line.startswith("settings: prompt and 3 LoRA(s) put on video, 1 not in this model's LoRA folder")
+                and "fox" not in line and ".mp4" not in line, line)
+        printed = []
+        original = plugin._note
+        plugin._note = printed.append
+        try:
+            _load(bridge, _page(K, **{K.SESSION_STATE: {"model_type": "video", "gen": {"queue": []}}}),
+                  {"handoff_id": ref(1), "only": "prompt_loras"})
+        finally:
+            plugin._note = original
+        r.check("and the line actually printed carries no prompt, LoRA or file name",
+                len(printed) == 1 and not any(word in printed[0] for word in ("fox", "dawn", "same.mp4", folder)), str(printed))
+
+
 def _can_symlink(base) -> bool:
     probe = pathlib.Path(base) / "probe-link"
     try:
@@ -998,6 +1184,7 @@ def run() -> Results:
         restore_checks(r, root)
         prompt_edit_checks(r, root)
         settings_load_checks(r, root)
+        prompt_loras_checks(r, root)
     return r
 
 

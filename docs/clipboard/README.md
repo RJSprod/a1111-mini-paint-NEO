@@ -387,12 +387,47 @@ Two, on every tile, in the storage folder and in an archive, and neither is a se
 
 ## Full screen
 
-A right click, or the small button in the upper right corner of a tile large enough to hold
-it - 120 px and larger (drawn, never a character a theme could swap) - selects the tile and
-opens its picture over everything: the browser's **own full screen** where it grants one, the
-window where it does not (some phone browsers). Only whole pictures are loaded here: the one on
-screen, and the one either side of it, ahead; the tile's thumbnail stands in until each
-arrives. **A double tap** - or a double click, or Escape - closes it.
+A right click, or the small button in the upper right corner of **every** tile (drawn, never a
+character a theme could swap) - selects the tile and opens its picture over everything: the
+browser's **own full screen** where it grants one, the window where it does not (some phone
+browsers). Asked for on 2026-11-19: "let's make it always there for all pictures, regardless of
+size". Until then it was only on tiles of 120 px and larger; now a tile smaller than that has it
+smaller (`expandSize`: a fifth of the square, never under 16 px, its inset and padding coming
+down with it), written as three variables on the grid (`--minipaint-clip-expand-size`, `-inset`,
+`-pad`) that the button's pinned geometry reads, so a theme cannot resize it either. Only whole
+pictures are loaded here: the one on screen, and the one either side of it, ahead; the tile's
+thumbnail stands in until each arrives. **A double tap** - or a double click, or Escape -
+closes it.
+
+**It zooms.** Asked for on 2026-11-19: "the ability to zoom in, zoom out of the picture once I'm
+in full screen gallery using the scroll wheel, or pinch to zoom, whichever one I'm supported on".
+The picture keeps its fitted box and is drawn through a transform (translate, then scale, from
+its top left corner), up to 8x: the **wheel** zooms about the pointer (a notch about a sixth), a
+**touchpad's pinch** - which browsers send as a wheel with Ctrl held - the same way at its own
+rate, **two fingers** on a touch screen about their middle and moving it with them, and **+**,
+**-** and **0** zoom about the middle and fit again. The wheel is the view's (its listener is
+not passive), never the page's scroll or the browser's zoom. Zoomed in, one finger or the mouse
+**moves the picture** instead of stepping to the next, and it is held so that it never leaves an
+edge of the view uncovered that it could cover (a picture smaller than the view on one axis is
+centred on it); a pinch and a drag are never a tap or a swipe, and **a double tap fits the
+picture again** - a second closes the view. A step, a close and the whole picture arriving in
+its thumbnail's place each fit it again.
+
+**A right click is Auto.** Asked for on 2026-11-19: "when I'm in full screen gallery view of a
+picture, I need the ability to tap auto somehow, make it like a hidden setting ... right click,
+which is long press on a remote desktop session ... quickly initiate an auto when I'm looking at
+a picture that's full screen". A right click on the view - a long press on a phone, a remote
+desktop's long press, the menu key - is the toolbar's **Auto** for the picture on screen (not
+the one the view opened on, once it has stepped): it becomes the selection and goes to the
+queue route as Auto's press (`autoQueue`, given the picture), in Auto Options' roles, with the
+composer's prompt and its Enhance switch as they stand, one press at a time behind any other
+Auto. The view stays open: an accent ring shows while the press is on its way
+(`data-auto="sending"`), and the toast - Auto's own sentence, *Auto: cat.png as First Frame and
+Reference.*, or a refusal - is said **inside the view**, because anything outside it is under
+the full screen (`toastHost`). A right click within 0.7 s of the view opening is the press that
+opened it (a right click on a tile opens the view) and sends nothing, a press on the view's own
+arrows or bar is theirs, a finger held still after a pinch or a drag sends nothing, and one
+picture is sent once a press however many menu events a platform makes of it.
 
 **It steps through the whole folder.** Asked for: "make full screen image view capable of
 browser the folder in either random or date sorted order. Exiting the view should land that
@@ -847,12 +882,56 @@ screen on purpose and is left as it is, and so is Mini Paint's own canvas focus 
 A large stage with the video on its own controls, its name, model and prompt under it with
 **Load**, and the filmstrip of the list under that. Tap a tile to play it; ‹ and › on the bar,
 ↑/↓ or Page Up/Down, and a sideways swipe on the stage step through the list, in the gallery's
-order, and the bar says where the stage is (*9 of 150*). The strip holds the sixty round the
+order, and the bar says where the stage is (*9 of 150*). The swipe is a finger's or, since
+2026-11-19, a drag of the mouse's left button: a remote desktop's touches arrive as a mouse, and
+a drag that only a finger could make was no swipe there. A press on the player's controls, the
+caption or the delete dialog is never one, and the press a swipe ends with is not the tap that
+plays and pauses. The strip holds the sixty round the
 stage and is drawn again round it as the stage nears either end, so a list of twenty thousand
 is never twenty thousand buttons; its posters are the gallery's, asked for as the strip
 scrolls to them. Scrubbing works - the file is served with byte ranges, so the player can ask
 for the middle of a video rather than only playing it from the start. Escape leaves full
 screen first, then goes back to the gallery.
+
+### Full screen, swiped through
+
+Asked for on 2026-11-19: "the ability to make the videos and view output full screen. Right now,
+they don't full screen. They just show up within view. But I want to be able to full screen the
+video and the view outputs and swipe between them so I can go to the next one, including our
+new shuffle function", the order "in order ... from newest to oldest by timestamp, date
+created", the oldest first, "and also just a complete shuffle", and "when a video ends, it
+should loop".
+
+**Full screen never lasted a step.** The stage has had its own full screen since the player was
+built, but every step to another output - a swipe, ‹ ›, the strip, a key - stopped the player
+the way Close stops it, and that stop left full screen: the next video always came back in the
+view. A step now keeps it (`stopPlayer(true)` from `showOutput`), because the stage is what is
+full screen and only what is in it changes; the gallery, Close and a hidden page still leave it.
+
+**Where it starts.** The stage goes full screen from the player's own **Full screen** (F), and
+from the **gallery**: every tile has the picture tiles' full-screen button in its corner (a span,
+since a button cannot be inside the tile's button; 24 px, pinned), and F with a tile selected
+does the same. That opens the slideshow on the video and asks for the stage's full screen inside
+the press, so the browser takes it as the user's own (`openOutputFullscreen`); where the browser
+grants none the slideshow is what there is.
+
+**What it draws.** In full screen only (`minipaint-clip-output-fullscreen` on the stage, and
+`:fullscreen`), over the video: an arrow at each side, and a bar along the top with *N of TOTAL*
+and the order - **Newest**, newest to oldest by when each file was made (the time the listing
+dates it by: when WanGP wrote it, or when this tab claimed it for a request, the same moment),
+**Oldest**, and **Shuffle**. They are the gallery's own sorts, so choosing one in full screen
+reorders the gallery and the slideshow too and is remembered the same way, the stage staying on
+what it shows; **Shuffle** pressed again is a new shuffle, as the bar's Shuffle is. A sort chosen
+on the bar that is none of the three (name, size) leaves none of them marked. A sideways swipe
+or a drag of the mouse, the arrows, and ↑/↓ or Page Up/Down step through that order; the arrows
+stop at either end. A toast said while the stage is full screen is said inside it.
+
+**It loops.** A video loops as the player's Loop says - on until it is turned off, and
+remembered - so a clip plays round and round in full screen until it is stepped away from.
+
+**Leaving it.** Escape (the browser's), the player's button or F: opened from a gallery tile, the
+view goes back to the gallery on the video it ended on, the way the picture view lands the grid
+on its picture; opened in the slideshow, it stays in the slideshow.
 
 **It survives a restart.** The gallery is not read out of the queue, which forgets a job
 minutes after it finishes; it is its own document (`clipboard-outputs.json`), written as
@@ -942,10 +1021,38 @@ WanGP page not open in this browser yet stays in the view and says which; a seco
 one is going - on this video or another - is the same press. It needs bridge 1.17.0, and an
 older bridge is never asked: the toast says to reinstall it.
 
+Until 2026-11-19 a WebM's or an M4V's button was marked hidden and drawn anyway: the player's
+controls have their size pinned inline, `display` included, and an inline declaration marked
+important outranks the stylesheet's `[hidden]` rule, so it showed and answered with the
+server's refusal. A control is shown or not through `showControl` now, which pins its display
+too.
+
+**Send prompt & LoRAs.** Asked for on 2026-11-19: "the ability from the view outputs to be able to
+just send the prompt and not the whole video, image, reference, first image. I just want to send
+the prompt and the LoRa over, and that would be it ... Make this a separate action than sending
+the whole thing", and "I just want the prompt and the LoRAs to override whatever is in wan2GP.
+It should just override it." Its own button in the player's bar, between Send to WanGP and full
+screen (lines and a pen), and **Prompt & LoRAs** in the gallery's line under the grid, for the
+same videos. The same two bounded steps - the note naming the video, then the WanGP tab - with
+`minipaintWanGP.loadPromptAndLoras` in place of `loadSettings`: WanGP's form is saved first, and
+the bridge (1.18.0) reads the video's settings with WanGP's own reader and writes **only its
+prompt, its LoRAs and their multipliers** over the page's own model's saved settings - every
+LoRA replaced, so a video with none leaves the page with none - and fills the form again from
+them. The model is never switched, no picture is loaded, and every other setting stays as WanGP
+shows it. A video made with another model still lands on the model WanGP is on, its LoRAs
+resolved for that model where WanGP calls the two compatible.
+
+The view closes on the WanGP tab with *Sent its prompt and 2 LoRAs to WanGP; everything else is
+as WanGP had it.* - unless a LoRA the video used is not in WanGP's LoRA folder for the model on
+its page (WanGP's own `check_loras_exist`, asked of each, nothing downloaded): then the view
+stays and says how many, because WanGP will not generate until it is there or taken off. A
+refusal stays and says why, and an older bridge - which reads the note's id alone and would load
+everything - is never asked: the toast says to reinstall the bridge from Settings → WanGP.
+
 **Delete from disk.** Asked for on 2026-11-08: "I need the ability to delete from disk in clip
 board view output videos. Add a delete button with confirmation dialogue to the video playback
-controls". A bin is the player bar's last button (after full screen, so Send to WanGP keeps its
-place beside it). A press asks first, in a dialog drawn inside the stage - in full screen the
+controls". A bin is the player bar's last button (after full screen, so the two sends keep
+their places). A press asks first, in a dialog drawn inside the stage - in full screen the
 stage is all the browser draws - over the whole window on the dialog layer: *Delete this video
 from disk?*, the file's name and that it cannot be undone, Cancel with the focus. The dialog has
 the keys while it is up (a listener on the window's capture phase, and the view's own key

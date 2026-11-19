@@ -238,6 +238,15 @@ journal lines are captured through a `console.debug` hook rather than the log
 route, because that route only ever carries the last two dozen lines and a long
 scenario pushes out the line being asserted.
 
+**A pinned control ignores `hidden`.** The Clipboard pins its geometry inline and
+`!important` (`pin`), `display` included, and an inline declaration marked important
+outranks every stylesheet rule - the `[hidden] { display: none !important }` rules
+too. So a control given `hidden` stayed drawn and pressable: View Outputs' Send to
+WanGP showed on every WebM from 1.17.0 until 2026-11-19, and its check passed because
+it read the attribute. A pinned control is shown or not through `showControl`, which
+pins `display` as well, and a check of "not there" asks the computed display and the
+client rects, never the attribute.
+
 **`loading="lazy"` does nothing for a `<video>`, and `#t=1` is not metadata.**
 The outputs strip built one `<video preload="metadata" src="...#t=1">` per item
 for a page of sixty: to paint that frame the browser fetches the header,
@@ -787,7 +796,14 @@ the settings on WanGP's screen*, WanGP's console's `flush:` lines say whether th
 if a second job is reported as never reaching WanGP's queue, its `queue` lines and a
 `QUEUE_BUSY` in Forge's journal are the first things to look at; and if Send to WanGP opens
 the WanGP tab without the video's settings, WanGP's console's `settings:` line says what the
-bridge loaded and for which model. The
+bridge loaded and for which model. Bridge 1.18.0 adds the prompt and LoRAs alone (View
+Outputs' Send prompt & LoRAs: WanGP's `get_settings_from_file`, the page model's saved
+settings with `prompt`, `activated_loras` and `loras_multipliers` replaced, and
+`refresh_form_trigger`), read against Wan2GP's `wgp.py` on its main branch on 2026-11-19 and
+run only against a stand-in: if the prompt arrives without its LoRAs, or WanGP's form shows the
+old ones, WanGP's console's `settings: prompt and N LoRA(s) put on ...` line (or its absence)
+is the first thing to look at, then whether WanGP's own Load Settings shows that video's LoRAs.
+The
 prompt box has been checked against a fake of the bridge's event and a stand-in
 of WanGP's page, never against the user's own WanGP: if a typed prompt does not
 reach WanGP's box, the WanGP console's `prompt: written` line (or its absence)

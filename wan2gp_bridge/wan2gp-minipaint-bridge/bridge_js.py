@@ -999,7 +999,13 @@ __MINIPAINT_FRAME_WRAPPER__
         post(CONFIG.types.settingsResult, message.request_id, { ok: false, code: "REQUEST_INVALID", detail: "not a handoff id" });
         return;
       }
-      submit({ op: "settings", request_id: message.request_id, channel_id: channelId, settings: { handoff_id: reference } });
+      // Bridge 1.18.0: ``only`` asks for the file's prompt and LoRAs alone.
+      // Passed on as it came - the plugin refuses a value it does not know -
+      // and left out when the parent did not ask, so a whole load is the
+      // request it always was.
+      var settings = { handoff_id: reference };
+      if (typeof message.payload.only === "string" && message.payload.only) { settings.only = message.payload.only; }
+      submit({ op: "settings", request_id: message.request_id, channel_id: channelId, settings: settings });
       return;
     }
 

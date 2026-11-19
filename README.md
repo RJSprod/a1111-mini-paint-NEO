@@ -602,9 +602,20 @@ smallest - is one choice on the bar, and **Shuffle** puts the list in a new rand
 this page only: no file is renamed, moved or touched, the bar says so, and the shuffle is kept
 for the browser tab until it is pressed again. A **search** narrows both views by name, prompt
 or model, and the order, the view, the count per row and the fit are remembered. Under the
-grid a line says what the selected video is, with Slideshow, Load and Send to WanGP beside it.
+grid a line says what the selected video is, with Slideshow, Load, Send to WanGP and Prompt &
+LoRAs beside it. Every tile has a **full-screen button** in its corner (F does the same for the
+selected one), which puts that video full screen at once (below).
 The **slideshow** is the output in a stage with its own controls under it and a filmstrip of
-the sixty round it, stepped through with ‹ ›, ↑ ↓ or a sideways swipe, in the gallery's order. A video only the
+the sixty round it, stepped through with ‹ ›, ↑ ↓ or a sideways swipe - a finger's, or a drag
+of the mouse, which is what a remote desktop's swipe arrives as - in the gallery's order.
+**Full screen, swiped through.** The stage goes full screen from a tile's corner button, the
+player's own Full screen or F, and **stays full screen from one video to the next**: a sideways
+swipe or drag, the arrows drawn at its sides, or ↑ ↓ step through the list, with a bar along the
+top saying where you are and choosing the order - **Newest** (newest to oldest by when each
+file was made), **Oldest**, or **Shuffle** (pressed again, a new shuffle) - the same order the
+gallery and the slideshow use, kept the same way. A video loops, as the player's Loop says (on
+until turned off). Leaving full screen opened from a gallery tile comes back to the gallery on
+the video it ended on. A video only the
 folder knows has no request behind it, so it has no recipe to Load (below) and is never
 marked as a match; it is listed by an id that names nothing, and the folder is read from its
 directory entries and a stat of each, nothing opened, so a file deleted meanwhile is gone at the
@@ -614,15 +625,24 @@ every browser and phone - play and pause (or press the picture), a timeline to s
 **loop** (on by default; Android's own player has none), **mute**, **speed** from ¼× to 2×
 and **full screen**, which keeps these controls - and which is the stage's own, so it stacks on
 a page that is already full screen (the Forge Assistant's focus mode makes the whole page full
-screen) and comes off again leaving that one where it was. **Send to WanGP**, beside full screen
-(an icon of sliders), loads the video's settings in WanGP and opens the WanGP tab on them: the
+screen) and comes off again leaving that one where it was. **Send to WanGP** (an icon of
+sliders), loads the video's settings in WanGP and opens the WanGP tab on them: the
 model, the prompt, every setting and the source pictures the video carries, read by WanGP's own
 loader exactly as its *Load Settings From Media File* box reads them - WanGP's form is saved
 first, as that box saves it, and a video of another model switches WanGP to that model. The
 view closes and the WanGP tab opens only once WanGP says it loaded them; a video WanGP finds
 nothing in, a file that has gone, or a WanGP that is not open yet stays here and says why. It
 is offered for MP4, MKV and MOV, the videos WanGP writes its settings into, and for any of them,
-whoever asked for it. It needs bridge 1.17.0. **Delete from disk** (a bin, the bar's last
+whoever asked for it. It needs bridge 1.17.0. **Send prompt & LoRAs** (an icon of lines and
+a pen, beside it) is the separate, lighter send: only the video's **prompt and its LoRAs** (with
+their multipliers) go to WanGP and **replace** whatever its page has - every LoRA, so a video
+with none leaves WanGP with none - while the model, every other setting and every picture stay
+exactly as WanGP shows them, nothing switched. WanGP's form is saved first, the prompt and LoRAs
+put over it and the form filled again, through WanGP's own functions. The view closes on the
+WanGP tab, unless a LoRA the video used is not in WanGP's LoRA folder for the model on its page:
+then it stays and says how many, because WanGP will not generate until it is there or taken
+off. It needs bridge **1.18.0** (reinstall the bridge from Settings → WanGP); an older bridge,
+which would load everything, is never asked. **Delete from disk** (a bin, the bar's last
 button) deletes the video's file from WanGP's outputs folder - after a dialog that names the
 file and says it cannot be undone, Cancel with the focus, Escape or a press beside it to keep
 it. The player lets go of the file first (on Windows a file still open cannot be removed), the
@@ -630,7 +650,9 @@ next video takes its place, and a file another program still has open is said so
 video given back. Loop, mute and speed are remembered. On a
 keyboard: Space or K plays, ← and → step a frame (with Shift, a second), ↑ and ↓ (or Page Up
 and Page Down) are the previous and the next output, L loops, M mutes, F is full screen, and
-Escape leaves full screen, then the slideshow for the gallery, then the view. Under the picture: its
+Escape leaves full screen, then the slideshow for the gallery, then the view. A button a video
+cannot use - Send to WanGP and Send prompt & LoRAs on a WebM - is not drawn at all (until
+2026-11-19 it was marked hidden and drawn anyway, its size being pinned inline). Under the picture: its
 name, the model that made it (LTX 2.3 or 2.5, MiniMax H3), and the prompt as it was typed,
 with the one an enhancement wrote for WanGP under it on hover. **Load**, beside them, puts
 the recipe that made the output back into the request - the prompt as it was typed and each
@@ -716,9 +738,19 @@ to **PNG Info**, selected, whether or not it was selected before - in the storag
 in an archive alike, always. A **right click** (a long press on a phone) opens it **full
 screen**.
 
-**Full screen.** A right click, or the small button in the upper right corner of a tile large
-enough to hold it (120 px and larger), opens its picture over everything - the browser's own
-full screen where it grants it, the window where it does not. From there it **steps through
+**Full screen.** A right click, or the small button in the upper right corner of **every**
+tile (smaller on a small tile, a fifth of it at most and never under 16 px), opens its picture
+over everything - the browser's own full screen where it grants it, the window where it does
+not. **It zooms**: the mouse wheel zooms in and out about the pointer, a touchpad's pinch the
+same way, two fingers on a touch screen about their middle, + and - about the middle, and 0
+fits it again; zoomed in, a drag (finger or mouse) moves the picture, never past an edge it
+could cover, instead of stepping, and a double tap fits it again before a second closes the
+view. A step to another picture fits it again. **A right click there is Auto** - a long press on
+a phone or a remote desktop, or the menu key: the picture on screen goes to WanGP exactly as the
+toolbar's Auto sends the selected one (Menu → Auto Options' roles, the composer's prompt and
+Enhance switch as they stand) and becomes the selection; a ring shows while it goes, and what
+came of it is said inside the full screen. A right click as the view opens is the one that
+opened it and sends nothing. From there it **steps through
 the whole folder** the grid shows - every picture in the storage folder, not just its page,
 or the whole archive - with ← and →, a swipe, or the arrows at its sides. The bar at its top
 says where you are and switches the order: **Date**, newest to oldest, or **Random**, a

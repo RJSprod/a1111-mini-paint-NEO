@@ -2858,6 +2858,112 @@
     align-items: center;
 }
 
+/* Full screen, swiped through: an arrow at each side and a bar along the
+   top with where the stage is and the order, drawn over the video only while
+   the stage is full screen. The picture viewer's look. */
+#minipaint_clipboard_root .minipaint-clip-output-stage:fullscreen,
+#minipaint_clipboard_root .minipaint-clip-output-stage.minipaint-clip-output-fullscreen {
+    position: relative;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-chrome {
+    display: none;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-stage:fullscreen > .minipaint-clip-output-chrome,
+#minipaint_clipboard_root .minipaint-clip-output-stage.minipaint-clip-output-fullscreen > .minipaint-clip-output-chrome {
+    display: contents;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-chrome-nav {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: 48px;
+    height: 72px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--border-color-primary, rgba(127, 127, 127, 0.35));
+    border-radius: var(--radius-sm, 6px);
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.35));
+    color: var(--body-text-color, inherit);
+    opacity: 0.7;
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-chrome-nav:hover { opacity: 1; }
+#minipaint_clipboard_root .minipaint-clip-output-chrome-nav:disabled { opacity: 0.2; cursor: default; }
+#minipaint_clipboard_root .minipaint-clip-output-chrome-prev { left: 12px; }
+#minipaint_clipboard_root .minipaint-clip-output-chrome-next { right: 12px; }
+
+#minipaint_clipboard_root .minipaint-clip-output-chrome-bar {
+    position: absolute;
+    left: 50%;
+    top: 12px;
+    transform: translateX(-50%);
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 6px 4px 12px;
+    border-radius: 999px;
+    background: var(--background-fill-secondary, rgba(127, 127, 127, 0.35));
+    color: var(--body-text-color, inherit);
+    font-size: 13px;
+    white-space: nowrap;
+    opacity: 0.85;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-chrome-orders {
+    display: inline-flex;
+    gap: 2px;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-chrome-order {
+    min-width: 0;
+    margin: 0;
+    padding: 3px 10px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-chrome-order-on {
+    border-color: var(--color-accent, rgba(127, 127, 127, 0.6));
+    background: var(--background-fill-primary, transparent);
+}
+
+/* A toast said while the stage is full screen is said inside it. */
+#minipaint_clipboard_root .minipaint-clip-output-stage > .minipaint-clip-toast {
+    z-index: 4;
+}
+
+/* The full-screen button in a gallery tile's corner: the picture tiles'
+   button. Its place and size are the script's (pinned). */
+#minipaint_clipboard_root .minipaint-clip-output-expand {
+    border-color: var(--border-color-primary, rgba(127, 127, 127, 0.4));
+    border-radius: var(--radius-sm, 6px);
+    background: var(--background-fill-primary, rgba(127, 127, 127, 0.5));
+    color: var(--body-text-color, inherit);
+    opacity: 0.8;
+    cursor: zoom-in;
+    touch-action: manipulation;
+}
+
+#minipaint_clipboard_root .minipaint-clip-output-expand:hover {
+    opacity: 1;
+    border-color: var(--color-accent, #ff7c00);
+}
+
 /* Load: the recipe back into the request. Last in the caption, and never
    squeezed out by a long prompt beside it. */
 #minipaint_clipboard_root .minipaint-clip-output-load {
@@ -3269,7 +3375,8 @@
 #minipaint_clipboard_root .minipaint-clip-output-actions .minipaint-clip-output-load { margin-left: 0; }
 
 #minipaint_clipboard_root .minipaint-clip-output-open,
-#minipaint_clipboard_root .minipaint-clip-output-send {
+#minipaint_clipboard_root .minipaint-clip-output-send,
+#minipaint_clipboard_root .minipaint-clip-output-words {
     min-height: 36px;
     padding: 4px 14px;
     border: 1px solid var(--border-color-primary, #888);
@@ -3287,7 +3394,8 @@
     color: var(--button-primary-text-color, CanvasText);
 }
 
-#minipaint_clipboard_root .minipaint-clip-output-send[disabled] { opacity: 0.5; cursor: progress; }
+#minipaint_clipboard_root .minipaint-clip-output-send[disabled],
+#minipaint_clipboard_root .minipaint-clip-output-words[disabled] { opacity: 0.5; cursor: progress; }
 
 /* A sideways swipe on the stage is the next or the previous output. */
 #minipaint_clipboard_root .minipaint-clip-output-stage-media { touch-action: pan-y pinch-zoom; }
@@ -3637,9 +3745,10 @@
    tiles, placed by the script in rows it works out; a tile whose thumbnail
    has not been asked for yet is its empty square and nothing else.
    --------------------------------------------------------------------------- */
-/* The full-screen button in a tile's corner, over the picture. Its place and
-   size are the script's (pinned); whether it shows is this file's, because
-   it is only for tiles large enough to hold it. */
+/* The full-screen button in a tile's corner, over the picture, on every
+   tile. Its place and size are the script's (pinned, from the grid's
+   --minipaint-clip-expand-* variables, smaller on a small tile); its look is
+   this file's. */
 #minipaint_clipboard_root .minipaint-clip-expand {
     display: flex;
     border-color: var(--border-color-primary, rgba(127, 127, 127, 0.4));
@@ -3655,10 +3764,6 @@
 #minipaint_clipboard_root .minipaint-clip-item:focus-visible .minipaint-clip-expand {
     opacity: 1;
     border-color: var(--color-accent, #ff7c00);
-}
-
-#minipaint_clipboard_root .minipaint-clip-grid[data-expand="0"] .minipaint-clip-expand {
-    display: none !important;
 }
 
 /* The Archives screen: the History dialog's shape, on the same layer. */
@@ -3872,6 +3977,26 @@
     object-fit: contain;
     margin: auto;
     pointer-events: none;
+}
+
+/* Zoomed in (the wheel, a pinch, + and -): the picture is drawn through a
+   transform the script writes inline, and a drag moves it. */
+#minipaint_clipboard_root .minipaint-clip-viewer[data-zoomed="1"] {
+    cursor: grab;
+}
+
+#minipaint_clipboard_root .minipaint-clip-viewer[data-zoomed="1"]:active {
+    cursor: grabbing;
+}
+
+/* Auto from the view (a right click, a long press): a ring while the press
+   is on its way; what came of it is the toast, said inside the view. */
+#minipaint_clipboard_root .minipaint-clip-viewer[data-auto="sending"] {
+    box-shadow: inset 0 0 0 3px var(--color-accent, #ff7c00);
+}
+
+#minipaint_clipboard_root .minipaint-clip-viewer > .minipaint-clip-toast {
+    z-index: 3;
 }
 
 /* The thumbnail stands in while the whole picture arrives. */

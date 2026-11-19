@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover - depends on how WanGP imports plugins
     import protocol  # type: ignore[no-redef]
 
 
-BRIDGE_VERSION = "1.17.0"
+BRIDGE_VERSION = "1.18.0"
 
 #: The early filter, and only the early filter. Section 14.2: a version string
 #: alone never proves compatibility - functional resolution does - but a build
@@ -406,6 +406,13 @@ GLOBALS: typing.Tuple[str, ...] = (
     # Bridge 1.17.0: WanGP's own loader of a file's settings - a video's, a
     # picture's - into a page's state, which its Load Settings box calls.
     "load_settings_from_file",
+    # Bridge 1.18.0, a file's prompt and LoRAs alone: the reader that loader
+    # starts with (the file's settings, its LoRAs resolved for a model), the
+    # page's saved settings per model, which WanGP's form is filled from,
+    # and WanGP's own check that a LoRA's file is there - asked of each LoRA
+    # without downloading anything, for a count the page says.
+    "get_settings_from_file", "get_model_settings", "set_model_settings", "get_default_settings",
+    "check_loras_exist",
 )
 
 #: The exact Wan2GP revision the protocol-6 control plane was proven against.
@@ -1218,6 +1225,15 @@ class Compatibility:
         return (callable(self.host.read_global("load_settings_from_file"))
                 and self.resolution.component(REFRESH_FORM_TRIGGER) is not None
                 and self.resolution.component(MODEL_CHOICE_TARGET) is not None)
+
+    def prompt_loras_loadable(self) -> bool:
+        """Bridge 1.18.0: whether this build can put a file's prompt and LoRAs
+        alone into a page - WanGP's reader of a file's settings, its saved
+        settings per model both ways, and the trigger that fills the form
+        again from them."""
+        return (all(callable(self.host.read_global(name))
+                    for name in ("get_settings_from_file", "get_model_settings", "set_model_settings"))
+                and self.resolution.component(REFRESH_FORM_TRIGGER) is not None)
 
     def queue_missing(self) -> typing.List[str]:
         """The queue-critical components this build did not hand over."""
@@ -2539,6 +2555,10 @@ class Compatibility:
                 # to WanGP. It needs the loader and both of the triggers the
                 # loader's answer is written to.
                 "settings_load": bool(ready and self.settings_loadable()),
+                # Bridge 1.18.0: SETTINGS_REQUEST with ``only`` set to
+                # ``prompt_loras``. A file's prompt and LoRAs over the form as
+                # the page shows it, for View Outputs' Send prompt & LoRAs.
+                "prompt_loras": bool(ready and self.prompt_loras_loadable()),
             },
             # Live, and process-wide: true while any page's generation runs,
             # false when none does, None when this build cannot say.

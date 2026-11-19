@@ -205,7 +205,13 @@ The settings load (bridge 1.17.0) needs the global `load_settings_from_file`
 and two more of the form's variables, `refresh_form_trigger` and
 `model_choice_target`; `main_tabs` is used where it is handed over. A build
 that lacks one says `capabilities.settings_load: false` and refuses the load
-with `BRIDGE_COMPONENT_INCOMPATIBLE`. The same release keys the form's save on
+with `BRIDGE_COMPONENT_INCOMPATIBLE`. Its lighter sibling, a file's prompt and
+LoRAs alone over the rest of the form (bridge 1.18.0, `only: "prompt_loras"`),
+needs the globals `get_settings_from_file`, `get_model_settings` and
+`set_model_settings` and the `refresh_form_trigger` variable, uses
+`get_default_settings` and `check_loras_exist` where they are handed over, and
+says `capabilities.prompt_loras: false` and refuses with the same code where
+they are not. The same release keys the form's save on
 the page's own model (`get_state_model_type`), because WanGP never writes the
 `gen["model_type"]` earlier bridges read and every save they asked for was
 `unavailable`; and submits unattended work the way WanGP's own API does

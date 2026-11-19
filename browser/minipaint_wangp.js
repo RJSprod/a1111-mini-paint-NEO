@@ -87,6 +87,10 @@ window.minipaintWanGP = (function () {
     // Clipboard's View Outputs. See loadSettings().
     const SETTINGS_REQUEST = "WANGP_SETTINGS_REQUEST";
     const SETTINGS_RESULT = "WANGP_SETTINGS_RESULT";
+    // Bridge 1.18.0: the same request for a file's prompt and LoRAs alone.
+    // See loadPromptAndLoras().
+    const SETTINGS_ONLY_PROMPT_LORAS = "prompt_loras";
+    const SETTINGS_LORAS_MAX = 999;
 
     const TO_BRIDGE = [HELLO, GET_RECEIVERS, RECEIVE_IMAGE, FOCUS_RECEIVER, THEME_STATE, QUEUE_REQUEST, QUEUE_CONFIRM, QUEUE_TRACK, FORM_FLUSH, PING, LAYOUT_STATE,
                        PROMPT_REQUEST, SETTINGS_REQUEST];
@@ -1583,6 +1587,7 @@ window.minipaintWanGP = (function () {
         S.layoutStudio = S.layout && !!(payload.capabilities && payload.capabilities.layout_studio === true);
         S.promptEdit = declared && !!(payload.capabilities && payload.capabilities.prompt_edit === true);
         S.settingsLoad = declared && !!(payload.capabilities && payload.capabilities.settings_load === true);
+        S.promptLoras = declared && !!(payload.capabilities && payload.capabilities.prompt_loras === true);
         noteSession(payload.session, "ready");
         // A session this page has saved nothing from yet: whatever WanGP has
         // recorded may be from before, so no send may take it as current -
@@ -1908,12 +1913,22 @@ window.minipaintWanGP = (function () {
             return;
         }
         const loaded = payload.loaded === true;
+        const only = payload.only === SETTINGS_ONLY_PROMPT_LORAS ? SETTINGS_ONLY_PROMPT_LORAS : "";
+        const count = function (value) {
+            return typeof value === "number" && Number.isInteger(value) ? Math.max(0, Math.min(SETTINGS_LORAS_MAX, value)) : 0;
+        };
+        const loras = loaded && only ? count(payload.loras) : 0;
         settle(requestId, {
             ok: true,
             loaded: loaded,
             model_type: MODEL_TYPE_RE.test(String(payload.model_type || "")) ? String(payload.model_type) : "",
-            switched: loaded && payload.switched === true,
-            message: text(payload.message, 200)
+            switched: loaded && !only && payload.switched === true,
+            message: text(payload.message, 200),
+            // Bridge 1.18.0, a prompt-and-LoRAs load: what was done, how many
+            // LoRAs went in, how many of those this model's folder lacks.
+            only: only,
+            loras: loras,
+            missing_loras: loras ? Math.min(loras, count(payload.missing_loras)) : 0
         });
     }
 
@@ -3298,6 +3313,48 @@ window.minipaintWanGP = (function () {
         if (answer && answer.ok) {
             say("settings: " + (answer.loaded ? "loaded for " + (answer.model_type || "the page's model")
                 + (answer.switched ? " (WanGP is switching to it)" : "") : "nothing WanGP could load in that file"));
+        }
+        return answer;
+    }
+
+    /**
+     * A file's prompt and LoRAs alone put on WanGP's page (bridge 1.18.0), for
+     * View Outputs' Send prompt & LoRAs: "just the prompt and the LoRa sent to
+     * wan2gp ... It should just override it." The prompt and the LoRAs (with
+     * their multipliers) replace the page's; the model, every other setting
+     * and every picture stay as the page shows them. ``handoffId`` is the
+     * same reference handoff Send to WanGP uses, and the page's form is saved
+     * first for the same reason: the bridge writes over what WanGP recorded,
+     * which must be what is on screen.
+     *
+     * Resolves - never rejects - with `{ok, loaded, model_type, only, loras,
+     * missing_loras, message}`, `missing_loras` counting the LoRAs this
+     * model's LoRA folder does not have, or a failure's `{ok: false, code,
+     * message}`. A bridge that did not offer `prompt_loras` (older than
+     * 1.18.0) is never asked - it reads the handoff id alone and would load
+     * everything: BRIDGE_COMPONENT_INCOMPATIBLE, whose sentence says to
+     * reinstall it.
+     */
+    async function loadPromptAndLoras(handoffId) {
+        const reference = String(handoffId || "");
+        if (!HEX32.test(reference)) { return failure(REQUEST_INVALID, "not a handoff id"); }
+        if (!ensure() || !S.ready || !S.bridgeSession) {
+            rearm();
+            return failure(IFRAME_NOT_READY, "no bridge session in this page");
+        }
+        if (!S.promptLoras) {
+            return failure(BRIDGE_COMPONENT_INCOMPATIBLE, "this bridge does not load a prompt and LoRAs alone (older than 1.18.0)");
+        }
+        try {
+            await flushForm({ reason: "before loading a prompt and LoRAs", timeoutMs: SEND_POLL_BUDGET_MS, callTimeoutMs: SEND_SAVE_BUDGET_MS });
+        } catch (e) { /* the load goes ahead, over what WanGP last recorded */ }
+        const answer = await ask(SETTINGS_REQUEST, { handoff_id: reference, only: SETTINGS_ONLY_PROMPT_LORAS },
+                                 SETTINGS_TIMEOUT_MS, SETTINGS_RESULT);
+        if (answer && answer.ok) {
+            say("settings: " + (answer.loaded
+                ? "a prompt and " + answer.loras + " LoRA(s) put on " + (answer.model_type || "the page's model")
+                  + (answer.missing_loras ? ", " + answer.missing_loras + " not in its LoRA folder" : "")
+                : "no prompt or LoRAs WanGP could load in that file"));
         }
         return answer;
     }
@@ -5080,6 +5137,7 @@ window.minipaintWanGP = (function () {
         prompt: prompt,
         setPrompt: setPrompt,
         loadSettings: loadSettings,
+        loadPromptAndLoras: loadPromptAndLoras,
         trackQueue: trackQueue,
         flushForm: flushForm,
         // Save WanGP's form just before a send; see saveForSend. What the

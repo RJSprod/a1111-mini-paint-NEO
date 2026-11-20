@@ -689,10 +689,33 @@ the page up. So a send is finished, as far as this page is concerned, the
 moment the server has the job: *Sent to WanGP. It is in Queue Send History.*
 The job runs on the server whether the page is open or not, and what became of
 it is what the list says the next time it is read. A picture another page or a
-finished WanGP job put in the library shows up the same way.
+finished WanGP job put in the library shows up the same way. Since 2026-11-20
+the list is also read when you come back to this tab or to the page, and twice
+in the seconds after a press (one bounded request each, `followPress`): until
+then a card drawn at the last press could still say a job was waiting an hour
+after WanGP had made it, and the user's log has two *Cancel everything* presses
+that found nothing on the server to cancel.
 
-Under the button, every job the server holds, newest first, as it was when the
-list was read: its state (*Enhancing*,
+**It is what has not reached WanGP's queue (2026-11-20).** At the user's word:
+"i actually want the generation request to be queued in wan2gp. like, how in
+wan2gp if i request a video while it is generating it goes into its queue. The
+clipboard queue was not intended to replace that, only give me a visual if we
+somehow failed to add to wan2gp queue". Every job the server runs goes into
+WanGP's own queue as soon as it is ready - while WanGP generates, and while
+other jobs from here already wait there - in the order pressed (bridge 1.19.0;
+`docs/wangp/SERVER_EXECUTION.md` §3). So a card here is a job on its way, held
+on the way (WanGP starting, its card lent to the Voice Box, a prompt still being
+written for it or for the job pressed before it), or refused before it got
+there, with *Retry* and *Dismiss*. The moment WanGP's queue holds a job's task -
+the bridge's own record, never an answer that WanGP merely accepted it - the
+card goes, whatever happens to it there: WanGP's queue shows it, cancels it and
+reports its errors, as for anything queued in WanGP itself. Behind a bridge
+older than 1.19.0 the jobs still go one at a time, and a job held behind
+another for that reason says so and that reinstalling the bridge from
+Settings → WanGP sends them all at once.
+
+Under the button, every job the server holds that this is still true of,
+newest first, as it was when the list was read: its state (*Enhancing*,
 *Waiting*, *Sending*, *Generating*, *Queued*, *Refused*, *Unconfirmed*, *Cancelled*), when
 it was pressed, the prompt typed for it (or *Prompt: Use WanGP*; both prompts once it has
 been enhanced), which fields it supplies, how it ended, and - on two lines of their own -
@@ -1591,9 +1614,10 @@ What the contract promises:
 * **Ids, never paths.** A handle is a kind and a 32-lowercase-hex id; `stageImage` is how
   bytes become one. `GET /minipaint-interop/contract` says the version, the ceilings, the
   kinds, the start modes and where the outbox is.
-* **One line, server-owned.** `enqueue()` submits a job; the server sends one job at a time
-  across every page in submission order; this page runs only its own jobs, against the WanGP
-  page in this document. `enqueue()` resolves when the job has ended, or after `timeoutMs`
+* **One line, server-owned.** `enqueue()` submits a job; the server hands each job to WanGP's
+  own queue as soon as it is ready, across every page in submission order (behind a bridge
+  older than 1.19.0, one job at a time, the next once the one ahead has finished); this page
+  runs only its own jobs, against the WanGP page in this document. `enqueue()` resolves when the job has ended, or after `timeoutMs`
   (five minutes by default) with `pending` and the job id; `{wait: false}` returns the job
   id at once.
 * **Idempotent by id.** Pass your own `request_id` (32 lowercase hex) to make a retry safe;

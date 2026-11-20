@@ -320,6 +320,9 @@ ENHANCING, PENDING, SENDING, QUEUED, STARTED, FAILED, UNCONFIRMED, CANCELLED; LE
 ADMITTED, WAITING_TURN, ENHANCED, ENSURING_WANGP, COMPOSING, WAITING_FOR_CARD,
 SUBMITTING_WANGP, GENERATION_WAITING, GENERATION_RUNNING, COMPLETED, EXECUTION_UNKNOWN
 SERVER_ACTIVE; SERVER_TERMINAL; SERVER_SUBMITTED   # SERVER_SUBMITTED is what a restart may never simply resume
+IN_WANGP = (GENERATION_WAITING, GENERATION_RUNNING)  # a job WanGP has; everything else in SERVER_ACTIVE is on its way there
+# A job's `reached_wangp` (sticky, from the bridge's record: queued, running or done - never merely accepted) says WanGP's
+# own queue has held its task; from then on the Clipboard's queue no longer lists it (`ui.job_is_over`, 2026-11-20).
 TERMINAL = LEGACY_TERMINAL + (COMPLETED, EXECUTION_UNKNOWN); POSITIVE = (QUEUED, STARTED, COMPLETED)
 STAGE_TEXT                                          # what each stage says to a screen when the job has nothing more specific
 WANGP_ACCEPTED, WANGP_WAITING, WANGP_GENERATING, WANGP_FINISHED, WANGP_UNKNOWN; WANGP_STATES      # a queued job's place inside WanGP
@@ -358,7 +361,9 @@ def transition(job_id, state, expect_revision=None, stage=None, **fields) -> Job
     # revision somebody has moved past does nothing and answers None. The only persistence
     # primitive is a whole-document overwrite, so a stage that held a job across four
     # minutes of model loading would otherwise undo a cancel that landed during it.
-def next_executable(now=None) -> Job | None        # one at a time; anything in flight before anything new
+def next_executable(now=None) -> Job | None        # anything in flight before anything new; one at a time behind a bridge older than 1.19.0
+def next_to_hand_over() -> Job | None             # the first job, in press order, WanGP's queue does not have (bridge 1.19.0: every job at once)
+def in_wangp_jobs() -> [Job]                       # every job in IN_WANGP, oldest first: what one look at the ledger follows
 def server_jobs(states=None) -> [Job]; def submitted_jobs() -> [Job]
 def record_snapshot(job_id, snapshot, expect_revision=None) -> Job | None   # frozen once; never re-composed
 def record_execution(job_id, record, state=None, expect_revision=None, child_instance="") -> Job | None

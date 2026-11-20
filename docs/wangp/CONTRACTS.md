@@ -699,7 +699,9 @@ The rules, each held by a check:
   starts WanGP and none is handed to it (the executor's `LENT_GATED`), and `outbox.claim`
   hands no page a job (`WAIT_LENT_MS`). The job WanGP is running is followed to its end and
   never aborted. `WAITING_FOR_CARD`'s 60-second "submit anyway" does not reach a held job,
-  and a job given back starts that courtesy clock again.
+  and a job given back starts that courtesy clock again (behind a bridge older than 1.19.0;
+  from 1.19.0 there is no courtesy wait, and jobs of Forge's already in WanGP's queue when the
+  lease starts wait there behind the hold, as anything queued in the WanGP tab does).
 * **One lease at a time.** A second request by the same owner returns (and renews) the live
   lease; anybody else is refused and told whose the card is.
 * **Renew or lose it.** `state` renews; a lease not renewed for twenty seconds expires. The
@@ -938,6 +940,40 @@ check names the model, never the prompt. And the tracker fails a task WanGP's
 loader skipped at its next look, `WANGP_VALIDATION_REFUSED` with WanGP's reason
 (`admission.refusal_reason`, from `gen["queue_errors"]`), rather than after the
 minute's grace as a task that never arrived.
+
+## Bridge 1.19.0: every job of Forge's in WanGP's queue at once
+
+**What it is for.** The Clipboard hands WanGP each job the moment it is ready, the way WanGP's own
+Add to Queue does during a run, instead of one at a time (the user's word, 2026-11-20: "The
+clipboard queue was not intended to replace that, only give me a visual if we somehow failed to
+add to wan2gp queue"; `SERVER_EXECUTION.md` §3 has the whole of it). Nothing in how a task is
+submitted changed - 1.17.0's inline slot and `load_inline_queue` already join a running
+generation. What changed is which files a finished task is credited with.
+
+**The contract.**
+
+* The control hello carries `capabilities.queue_many: true`. Forge reads it once per WanGP
+  process (`executor._takes_many`, keyed on the runtime's instance) and hands such a WanGP every
+  job at once, in press order; a hello without it - every bridge before 1.19.0 - reads `false`
+  (`normalize_control_hello`, in both copies of the shared block), and Forge keeps to one job at
+  a time, start to finish, with the minute's courtesy wait in `WAITING_FOR_CARD`.
+* A finished task's `generated_files` are the files WanGP's gallery (`OUTPUT_KEYS`) gained while
+  **that task ran**: from the first tracker pass that finds it at position 0 of a running loop
+  (`gen["in_progress"]`), excluding every path the gallery listed at that pass, and with each
+  file's mtime no older than that pass less a second. While the task waits, every pass moves
+  both the time and the list, so a task WanGP runs entirely between two passes is still not
+  credited with what it waited behind. Before 1.19.0 the floor was the task's submission and
+  nothing was excluded: right while one of Forge's tasks is in WanGP's queue at a time, and
+  wrong - the third of three claimed all three videos - once several are.
+* Forge's `reached_wangp` on a job is set from the record only at `queued`, `running` or `done`;
+  the Clipboard's Queue stops listing a job from then on.
+
+**Where to look first if it misbehaves.** Each `execute <id>: finished with N file(s)` line in
+WanGP's console: a task credited with more than its own file means the gallery list was
+replaced while it ran (a WanGP that rebuilds `file_list` rather than appending to it), and one
+with none, that WanGP added its file after it removed the task from the queue. Checked against
+a stand-in of WanGP's queue and gallery (`tests/test_wangp_control.py`, `many_queued_checks`),
+never against the user's WanGP.
 
 ## Bridge 1.18.0: a file's prompt and LoRAs alone
 

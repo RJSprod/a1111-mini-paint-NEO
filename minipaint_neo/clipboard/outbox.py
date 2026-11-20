@@ -139,6 +139,12 @@ SERVER_TERMINAL = (COMPLETED, FAILED, CANCELLED, EXECUTION_UNKNOWN)
 #: a second generation. Recovery reconciles these against the child's ledger
 #: and never resubmits one on its own.
 SERVER_SUBMITTED = (SUBMITTING_WANGP, GENERATION_WAITING, GENERATION_RUNNING)
+#: The stages of a job WanGP has: handed to its queue and followed from there.
+#: Everything else in SERVER_ACTIVE is a job on its way to WanGP, which is all
+#: the Clipboard's own queue is for (2026-11-20, the user's word: "The
+#: clipboard queue was not intended to replace that, only give me a visual if
+#: we somehow failed to add to wan2gp queue").
+IN_WANGP = (GENERATION_WAITING, GENERATION_RUNNING)
 #: The server-executed stages of a job that wants WanGP's card next: nothing
 #: left to write for it, and either not handed to WanGP yet or waiting in
 #: WanGP's own queue. What the card lease (``minipaint_neo.wangp.turns``)
@@ -159,7 +165,7 @@ EXECUTORS = (EXECUTOR_BROWSER, EXECUTOR_SERVER)
 
 #: What a stage says to a screen when the job has nothing more specific.
 STAGE_TEXT = {
-    ADMITTED: "Queued on the server. You can close this page.",
+    ADMITTED: "Waiting to go into WanGP's queue. You can close this page.",
     WAITING_TURN: "Waiting its turn.",
     ENHANCING: "Writing the enhanced prompt.",
     ENHANCED: "The enhanced prompt is ready.",
@@ -724,6 +730,10 @@ def _normalize(raw: typing.Any) -> typing.Optional[dict]:
         #: settings" on. Frozen at the press: a job does not change what it
         #: composes from because a checkbox moved after it was queued.
         "inherit_settings": bool(raw.get("inherit_settings")),
+        #: Whether WanGP's own queue has ever held this job's task (from the
+        #: bridge's record, ``record_execution``): from then on it is WanGP's,
+        #: and the Clipboard's queue no longer lists it.
+        "reached_wangp": bool(raw.get("reached_wangp")),
     }
 
 
@@ -791,6 +801,11 @@ def public(job: typing.Mapping[str, typing.Any]) -> dict:
         # owner was looking at when they pressed.
         "settings_flush": job.get("settings_flush", ""),
         "inherit_settings": bool(job.get("inherit_settings")),
+        # Whether WanGP's own queue has ever held this job's task - seen
+        # waiting in it, generating at its head, or finished out of it. From
+        # then on the job is WanGP's, and the Clipboard's queue, which is
+        # for what has not got there, stops listing it (``ui.job_is_over``).
+        "reached_wangp": bool(job.get("reached_wangp")),
     }
 
 
@@ -2027,16 +2042,16 @@ def transition(
 
 
 def next_executable(now: typing.Optional[float] = None) -> typing.Optional[dict]:
-    """The one server-executed job to work on next, or None.
+    """The server-executed job to work on next, or None.
 
     Press order among our own jobs, which is the queue-order contract - and
     it says nothing about what the user has queued in the WanGP tab, which
-    interleaves by whoever reaches the shared queue first. One job at a time:
-    a second would be a second thing competing for the same card, and the
-    card is the resource the whole design is arranged around.
-
-    A job already past submission is returned too, because its stage is
-    "follow this to the end" rather than "start it".
+    interleaves by whoever reaches the shared queue first. Anything already
+    in flight comes first, and a job already past submission is returned
+    too, because its stage is "follow this to the end" rather than "start
+    it". Behind a bridge older than 1.19.0 that is one job at a time, start
+    to finish; from 1.19.0 the executor follows every job WanGP has and
+    works on ``next_to_hand_over``'s instead (``executor.step``).
     """
     moment = _now() if now is None else float(now)
     with _lock:
@@ -2051,6 +2066,30 @@ def next_executable(now: typing.Optional[float] = None) -> typing.Optional[dict]
         # this queue must never do.
         active = next((job for job in server if job["state"] not in (ADMITTED, WAITING_TURN)), None)
         return public(active if active is not None else server[0])
+
+
+def next_to_hand_over() -> typing.Optional[dict]:
+    """The first server-executed job, in press order, that WanGP does not have.
+
+    What goes into WanGP's queue next when its bridge takes every job at
+    once (1.19.0), whatever of ours is already in it: handed over in the
+    order they were pressed, so WanGP's queue holds them in that order, and
+    the one behind a job whose prompt is still being written waits for it -
+    never the other way round. None when every active job is already in
+    WanGP's queue.
+    """
+    with _lock:
+        listed = _load()
+    for job in listed:
+        if (job.get("executor") == EXECUTOR_SERVER and job["state"] in SERVER_ACTIVE
+                and job["state"] not in IN_WANGP):
+            return public(job)
+    return None
+
+
+def in_wangp_jobs() -> typing.List[dict]:
+    """Every server-executed job WanGP has in its queue, oldest first."""
+    return server_jobs(IN_WANGP)
 
 
 def server_jobs(states: typing.Optional[typing.Sequence[str]] = None) -> typing.List[dict]:
@@ -2092,6 +2131,11 @@ def record_execution(
     """
     normalised = protocol.normalize_execution_record(record)
     fields: typing.Dict[str, typing.Any] = {"execution": normalised}
+    if normalised["state"] in (protocol.EXEC_QUEUED, protocol.EXEC_RUNNING, protocol.EXEC_DONE):
+        # Sticky: WanGP's queue has held the task. "Accepted" is not this -
+        # the child recorded it and asked WanGP to load it, and a task WanGP
+        # skips is accepted and then never queued.
+        fields["reached_wangp"] = True
     if child_instance:
         fields["child_instance"] = child_instance
     if normalised["generated_files"]:
@@ -2353,7 +2397,8 @@ __all__ = [
     "WANGP_STATES", "WANGP_UNKNOWN", "WANGP_WAITING", "adopt", "attempt", "cancel", "cancel_all",
     "dismiss", "failed_state",
     "chosen_executor", "claim", "counts", "fail", "get", "input_ids", "jobs", "mark_recorded",
-    "next_executable", "on_wangp_restart", "pending_count", "public", "record_execution",
+    "next_executable", "next_to_hand_over", "in_wangp_jobs", "IN_WANGP",
+    "on_wangp_restart", "pending_count", "public", "record_execution",
     "record_snapshot", "recover", "refresh", "report", "reset_for_tests", "retry", "sanitize_result",
     "sanitize_track", "server_jobs", "submit", "submitted_jobs", "summary_of", "track",
     "transition", "unattended_enabled", "unrecorded", "use_clock", "use_executor", "use_running",

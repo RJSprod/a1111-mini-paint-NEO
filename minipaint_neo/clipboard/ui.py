@@ -232,7 +232,9 @@ OUTBOX_LABELS = {
     # The server-executed stages. Each names what the job is waiting for
     # rather than where it is in a handshake, because that is the only thing
     # somebody who walked away and came back can usefully be told.
-    outbox.ADMITTED: "Queued", outbox.WAITING_TURN: "Waiting", outbox.ENHANCED: "Enhanced",
+    # A job admitted here is not queued anywhere yet: "Queued" read as WanGP's
+    # queue, which it had not reached (2026-11-20).
+    outbox.ADMITTED: "Waiting", outbox.WAITING_TURN: "Waiting", outbox.ENHANCED: "Enhanced",
     outbox.ENSURING_WANGP: "Starting WanGP", outbox.COMPOSING: "Reading settings",
     outbox.WAITING_FOR_CARD: "Waiting for the card", outbox.SUBMITTING_WANGP: "Submitting",
     outbox.GENERATION_WAITING: "In WanGP's queue", outbox.GENERATION_RUNNING: "Generating",
@@ -516,11 +518,25 @@ def job_is_over(job: typing.Mapping[str, typing.Any]) -> bool:
     This hides the card; it does not delete the record. The record lives
     its grace out behind the view, because a page waiting on this job and a
     caller of the public API both still have to be able to ask.
+
+    AND A SERVER JOB WANGP'S QUEUE HAS HELD IS WANGP'S (2026-11-20).
+
+    At the user's word: "i actually want the generation request to be queued
+    in wan2gp ... The clipboard queue was not intended to replace that, only
+    give me a visual if we somehow failed to add to wan2gp queue". So this
+    list is what has not reached WanGP's queue: a job on its way, held on
+    the way (WanGP starting, its card lent), or refused before it got there.
+    Once WanGP's queue has held the task (``reached_wangp``, set from the
+    bridge's own record, never from an answer that WanGP merely accepted
+    it), the card goes whatever happens to it there: WanGP's queue shows it,
+    cancels it and reports its errors, as for anything queued in WanGP.
     """
     if job.get("dismissed"):
         return True
     state = job.get("state")
     if state == outbox.COMPLETED:
+        return True
+    if job.get("executor") == outbox.EXECUTOR_SERVER and job.get("reached_wangp"):
         return True
     if state in (outbox.QUEUED, outbox.STARTED):
         return (job.get("wangp") or {}).get("state") == outbox.WANGP_FINISHED
@@ -540,6 +556,13 @@ def outbox_view(jobs: typing.Sequence[dict], page: str) -> typing.List[dict]:
     Every sentence is still composed here, where the rest of this tab's
     wording lives; what crosses to the browser is content rather than nodes.
     """
+    from . import executor
+
+    # A job held behind another of ours only because the bridge in WanGP is
+    # older than 1.19.0 says so, and what fixes it: otherwise the wait looks
+    # like the stuck queue it replaced. Read, never asked, from a route.
+    held_by_older_bridge = executor.bridge_takes_many() is False and any(
+        one.get("executor") == outbox.EXECUTOR_SERVER and one.get("state") in outbox.SERVER_SUBMITTED for one in jobs)
     view = []
     for job in [one for one in reversed(list(jobs)) if not job_is_over(one)][:OUTBOX_SHOWN]:
         state = job.get("state", outbox.PENDING)
@@ -629,12 +652,20 @@ def outbox_view(jobs: typing.Sequence[dict], page: str) -> typing.List[dict]:
             "mine": bool(mine),
             "prompt": excerpt,
             "fields": fields,
-            "outcome": job_sentence(job),
+            "outcome": (OLDER_BRIDGE_WAIT if held_by_older_bridge and server and state == outbox.ADMITTED
+                        else job_sentence(job)),
             "badges": badges,
             "lines": lines,
             "actions": actions,
         })
     return view
+
+
+#: What a job says while it waits behind another of ours only because the
+#: bridge in WanGP is older than 1.19.0 and takes one at a time.
+OLDER_BRIDGE_WAIT = ("Waiting for the request ahead of it to finish: the Mini Paint bridge in WanGP is older "
+                     "than 1.19.0, so requests go into WanGP's queue one at a time. Reinstall it from "
+                     "Settings → WanGP to send them all at once.")
 
 
 def _page_of(value: typing.Any) -> str:

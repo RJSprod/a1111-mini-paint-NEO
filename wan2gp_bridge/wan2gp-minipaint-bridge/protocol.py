@@ -1349,9 +1349,15 @@ def normalize_control_hello(raw: typing.Any) -> dict:
         # Bridge 1.13.0, the model check: ``capabilities.model`` says the bridge
         # answers CONTROL_MODEL; an older one leaves it out, which reads False.
         # Bridge 1.16.0, the check at the press: ``capabilities.validate``.
+        # Bridge 1.19.0: ``capabilities.queue_many`` - a finished task is
+        # credited with the files WanGP made while it ran, so Forge may leave
+        # every job of its own in WanGP's queue at once; an older bridge
+        # credits everything made since the task was sent, and Forge hands it
+        # one job at a time.
         "capabilities": {"hold": isinstance(raw.get("capabilities"), dict) and raw["capabilities"].get("hold") is True,
                          "model": isinstance(raw.get("capabilities"), dict) and raw["capabilities"].get("model") is True,
-                         "validate": isinstance(raw.get("capabilities"), dict) and raw["capabilities"].get("validate") is True},
+                         "validate": isinstance(raw.get("capabilities"), dict) and raw["capabilities"].get("validate") is True,
+                         "queue_many": isinstance(raw.get("capabilities"), dict) and raw["capabilities"].get("queue_many") is True},
         **_activity(raw),
         "hold": raw.get("hold") if raw.get("hold") in HOLD_STATES else "",
     }

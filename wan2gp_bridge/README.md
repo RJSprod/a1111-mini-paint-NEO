@@ -219,6 +219,13 @@ the page's own model (`get_state_model_type`), because WanGP never writes the
 into an empty inline slot (`QUEUE_BUSY` otherwise, before anything is
 recorded), admitted with the service's `load_inline_queue`, which joins a
 running generation at once; a WanGP without it keeps the queue command.
+Bridge 1.19.0 credits a finished unattended task with the files WanGP's
+gallery gained while that task ran - from the first look that finds it at the
+head of a running loop, and nothing the gallery listed then - rather than with
+everything made since it was sent, and says so in its hello
+(`capabilities.queue_many`): with it, Forge hands WanGP every Clipboard job the
+moment it is ready instead of one at a time, and several of Forge's tasks can
+wait in WanGP's queue without taking each other's videos.
 
 Adding a new receiver - a control image, a positioned reference - is three
 declarations and no new machinery: a row in `compatibility.COMPONENTS`, a row

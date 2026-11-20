@@ -36,7 +36,7 @@ and obtain a durable admission. After that it is an observer.
   ───────            ─────────────────────              ────────────────────────
   compose a          outbox.submit  ── durable ack ──▶  (nothing yet)
   request,             │
-  get an ack           │  executor.step(), one job at a time
+  get an ack           │  executor.step(): the next job WanGP's queue does not have, in press order
   ──────────────▶      ├─ ENHANCING      mc_llm_api feed
                        ├─ ENHANCED       B22 handover
                        ├─ ENSURING_WANGP runtime.start() ──────▶ child starts
@@ -48,12 +48,16 @@ and obtain a durable admission. After that it is an observer.
                        │                                        gen["inline_queue"]
                        │                                        service.load_inline_queue()
                        └─ WANGP_*        control.status() ────▶ ledger + queue
+                                         (every job WanGP has,     (each task's files: what
+                                          in one question)          WanGP made while it ran)
   ◀── events ─────   events.publish()
 
                      every step first: turns.drive() ──────▶ hold.py (the card lease)
 ```
 
-Nothing on the left is required for anything on the right to finish.
+Nothing on the left is required for anything on the right to finish. Since 2026-11-20 (bridge
+1.19.0) the left hands WanGP every job the moment it is ready rather than one at a time: §3,
+*Every job into WanGP's queue at once*.
 
 ---
 
@@ -79,7 +83,11 @@ for a lease never reaches that handler, so nothing "submits anyway": a lease end
 given back, or expires by itself twenty seconds after its owner stopped renewing it. When the
 card comes back the held job gets its own stage text back through a transition, which starts
 the courtesy clock afresh - a job that sat out a twenty-minute lease must not come back already
-"busy for twenty minutes" and skip the wait it is owed.
+"busy for twenty minutes" and skip the wait it is owed. (From bridge 1.19.0 there is no
+courtesy wait at all - a job goes into WanGP's queue whatever is generating, §3 - so this
+matters only behind an older bridge. Jobs of Forge's already in WanGP's queue when a lease
+starts wait there: the bridge's hold stops WanGP between tasks, exactly as it does for a task
+queued in the WanGP tab by hand.)
 
 The executor is also the thread that drives the lease, because it is the one thread allowed to
 use the control plane: every step begins with `turns.drive()` - hold asked or renewed, a flush
@@ -167,6 +175,54 @@ Three defects in that path are handled explicitly, because they are real:
   `service.start_generation` where WanGP has it. Cancel is unchanged: it ends
   Forge's own jobs and never what WanGP holds in its queue, because the
   user also queues there by hand.
+
+### Every job into WanGP's queue at once (bridge 1.19.0, 2026-11-20)
+
+Until 2026-11-20 the executor kept a rule of **one job at a time**: it followed each job until
+WanGP had *finished* generating it and only then took the next one on, and a job whose turn
+came while anything was generating waited up to a minute more (`CARD_WAIT_MAX_SECONDS`). So
+WanGP's own queue never held more than one of Forge's jobs, and the rest sat in the outbox,
+listed in the Clipboard's Queue as *Queued*. The user's log of 2026-11-18 to 11-20 shows what
+that meant: 145 Auto presses, every one admitted and every one handed to WanGP only when the one
+before it had finished - the last of a run of thirty pressed in three minutes reached WanGP 59
+minutes after its press, and 71 of the 145 waited more than five. Nothing was lost (144
+generated, and WanGP declined one mid-run), but the cards were drawn once at the press and never
+again, so twice the user pressed *Cancel everything* on a queue that was empty on the server.
+Their word: "i actually want the generation request to be queued in wan2gp. like, how in wan2gp
+if i request a video while it is generating it goes into its queue. The clipboard queue was not
+intended to replace that, only give me a visual if we somehow failed to add to wan2gp queue".
+
+The rule was called a correctness one - two jobs advancing at once would be two things competing
+for one card - and the arrival-order table above is why it is not: a task appended to WanGP's
+queue pre-empts nothing, WanGP's one worker runs its queue one task at a time whoever queued it,
+and since bridge 1.17.0 a task submitted while a generation runs joins it (`load_inline_queue`)
+rather than sitting in the inline slot. What *did* depend on one job at a time was the bridge's
+`_outputs`: it credited a finished task with every file WanGP's gallery gained **since the task
+was sent**, so a task that waited behind others of Forge's would have claimed their videos too.
+Bridge 1.19.0 credits it with what the gallery gains **while the task runs** - from the first
+look that finds it at the head of a running loop, and nothing the gallery already listed then,
+however close the clock (WanGP writes the task ahead's video moments before it starts the next);
+while the task waits, each look moves both. Its hello says so, `capabilities.queue_many`.
+
+So, with that bridge, `executor.step` follows every job WanGP has in one status question
+(`_follow`, the oldest 64 at a time; the bridge takes up to 256 ids) and then works on the
+**first job in press order that WanGP's queue does not have yet** (`outbox.next_to_hand_over`),
+with no busy wait in `WAITING_FOR_CARD`. A job still being prepared - its prompt being written,
+WanGP starting, the card lent - holds the ones pressed after it, never one pressed before it,
+so WanGP's queue holds Forge's jobs in press order. The capability is asked once per WanGP
+process (`_takes_many`, keyed on the runtime's instance, since a bridge is loaded only when WanGP
+starts) and read, never asked, by the queue's screen (`bridge_takes_many`). Behind an older
+bridge, or with no WanGP to ask, everything is as it was: one job at a time, the minute's
+courtesy wait included, and the Queue's card for a job held behind another says that the bridge
+is older than 1.19.0 and that reinstalling it sends them all at once.
+
+**The Clipboard's Queue lists what has not reached WanGP's queue.** A job carries
+`reached_wangp`, set the first time the bridge's record says *queued*, *running* or *done* -
+never *accepted*, which a task WanGP's loader then skips also is - and from then on the queue no
+longer lists it, whatever becomes of it in WanGP (`ui.job_is_over`). A job refused on its way,
+including a task that never appeared in WanGP's queue (the bridge's minute's grace), stays with
+*Retry* and *Dismiss*. The page reads the list again when the tab or the page comes back on
+screen and twice after a press (`followPress`, 4 and 15 seconds), each one bounded request.
 
 ---
 

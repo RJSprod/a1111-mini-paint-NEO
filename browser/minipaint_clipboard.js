@@ -169,6 +169,10 @@ window.minipaintClipboard = (function () {
         "waiting_for_card", "submitting_wangp", "wangp_waiting", "wangp_generating",
         "completed", "execution_unknown"];
     const OUTBOX_REFRESH_THROTTLE_MS = 300;
+    //: When the queue is read again after a press (``followPress``): by the
+    //: first a job is in WanGP's queue or says why not, and the second is for
+    //: one that had a prompt to write or a WanGP to wait for first.
+    const PRESS_FOLLOW_MS = [4000, 15000];
 
     //: What still needs the framework's channel, named so the notice can
     //: say which parts of the tab are stale rather than claiming all of it
@@ -9055,6 +9059,7 @@ window.minipaintClipboard = (function () {
         if (parsed.executor === "server" || (parsed.state && SERVER_STATES.indexOf(String(parsed.state)) !== -1)) {
             note("queue: job " + String(parsed.job_id).slice(0, 8) + " admitted by the server" + how + "; it is in the history");
             toast("Sent to WanGP. It is in Queue Send History.");
+            followPress();
             return "server";
         }
         note("queue: job " + String(parsed.job_id).slice(0, 8) + " appended by the server" + how + "; pumping");
@@ -9078,6 +9083,26 @@ window.minipaintClipboard = (function () {
         if (job.state === "failed") { return (job.error && job.error.message) || "The request was not queued."; }
         if (job.state === "cancelled") { return (job.error && job.error.message) || "The request was cancelled."; }
         return "";
+    }
+
+    /**
+     * The queue read again a little after a press, twice and no more.
+     *
+     * The list is only what has not reached WanGP's queue (2026-11-20, the
+     * user's word: "only give me a visual if we somehow failed to add to
+     * wan2gp queue"), and it is drawn from the press's own answer, which
+     * comes back the moment the server has the job - before WanGP does. So a
+     * job that went in leaves the list on the first read, and one that did
+     * not says why on one of them, with its Retry. Each read is one bounded
+     * request; a burst of presses moves the two reads after its last press,
+     * and nothing is held open in between - the way back to the tab and
+     * Refresh read it otherwise.
+     */
+    function followPress() {
+        (S.followTimers || []).forEach(clearTimeout);
+        S.followTimers = PRESS_FOLLOW_MS.map(function (delay) {
+            return setTimeout(function () { askQueue(null); }, delay);
+        });
     }
 
     function refreshOutbox() {
@@ -9869,9 +9894,21 @@ window.minipaintClipboard = (function () {
                     // Whatever the throttle above decided: coming back to
                     // the tab is when a model changed in the WanGP tab shows.
                     refreshReadiness(false);
+                    // And the queue, which is drawn from answers and from
+                    // nothing else: a card left from the last press here
+                    // would otherwise still say "waiting" about a job WanGP
+                    // finished an hour ago (2026-11-20, two Cancel all
+                    // presses on a queue that was empty on the server).
+                    askQueue(null);
                 }
             }, 50);
         });
+    }
+
+    /** The page back on screen with the tab showing: the queue read again,
+     * for the same reason a return to the tab reads it. */
+    function onQueueVisible() {
+        if (document.visibilityState === "visible" && tabVisible()) { askQueue(null); }
     }
 
     function attach() {
@@ -9883,6 +9920,10 @@ window.minipaintClipboard = (function () {
         element.addEventListener("keydown", onKeydown);
         bindDrop(element);
         buildMenu();
+        if (!S.queueVisibility) {
+            S.queueVisibility = onQueueVisible;
+            document.addEventListener("visibilitychange", S.queueVisibility);
+        }
         if (!S.pasteListener) {
             S.pasteListener = onDocumentPaste;
             document.addEventListener("paste", S.pasteListener);
@@ -9957,6 +9998,7 @@ window.minipaintClipboard = (function () {
                                             target: S.readiness.target || "" } : null,
                  retryDelay: S.retryDelay,
                  offline: { server: S.offline.server, queue: S.offline.queue },
+                 queueReading: !!S.queueRead,
                  editorOpen: editorOpen(),
                  outputsOpen: outputsOpen(),
                  promptHistory: { open: promptHistoryOpen(), entries: S.prompts.entries, loading: S.prompts.loading },

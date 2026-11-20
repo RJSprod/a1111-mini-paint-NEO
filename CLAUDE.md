@@ -442,6 +442,30 @@ with the service's `load_inline_queue`, which joins a running generation. Cancel
 is deliberately not part of this: it ends Forge's jobs and never touches WanGP's
 queue, because the user queues there by hand too.
 
+**The Clipboard's queue is not a second WanGP queue (2026-11-20).** The executor
+used to keep "one job at a time": each job followed until WanGP had *finished*
+it before the next was taken on, plus a minute's wait whenever WanGP was busy.
+So WanGP's queue never held more than one of Forge's jobs, the rest sat in the
+outbox listed as *Queued*, and the page drew that list once at the press and
+never again - the user's log had thirty Auto presses reaching WanGP over an
+hour and two *Cancel everything* presses on a queue that was empty on the
+server, reported as requests "stuck in queue ... they dont get reinvoked, and
+there is no retry button". At their word ("The clipboard queue was not intended
+to replace that, only give me a visual if we somehow failed to add to wan2gp
+queue"), every job now goes into WanGP's queue as soon as it is ready, in press
+order (`next_to_hand_over`; one still being prepared holds those pressed after
+it), the queue lists only what has not reached WanGP's queue (`reached_wangp`,
+`ui.job_is_over`), and the page reads it again on the tab's and the page's
+return and twice after a press (`followPress`). **What one-at-a-time was really
+holding up was the bridge's attribution of files**: before 1.19.0 a finished
+task was credited with every file made since it was *sent*, so a task queued
+behind others of Forge's would claim their videos. 1.19.0 credits what WanGP
+made while the task *ran* and says `capabilities.queue_many`; Forge asks once per
+WanGP process (`_takes_many`) and keeps one at a time behind an older bridge.
+Anything else that reads which files a task made has to measure from the task's
+run, never from its submission. `docs/wangp/SERVER_EXECUTION.md` §3 is the whole
+of it.
+
 **Check before you store.** Storing a server job wakes the executor's thread,
 which takes a lone job on at once - composed and handed to WanGP within the
 same moment. Anything that must decide whether a job may exist (the check at
@@ -803,6 +827,13 @@ settings with `prompt`, `activated_loras` and `loras_multipliers` replaced, and
 run only against a stand-in: if the prompt arrives without its LoRAs, or WanGP's form shows the
 old ones, WanGP's console's `settings: prompt and N LoRA(s) put on ...` line (or its absence)
 is the first thing to look at, then whether WanGP's own Load Settings shows that video's LoRAs.
+Bridge 1.19.0 credits a finished task with the files WanGP made while it ran (2026-11-20), so the
+Clipboard hands WanGP every job at once; it has been checked against a stand-in of WanGP's queue
+and gallery, never the user's WanGP. If a video lands on the wrong recipe in View Outputs, or a
+job says it made more than one file, WanGP's console's `execute <id>: finished with N file(s)`
+lines are the first thing to look at (a WanGP that rebuilds its gallery list rather than
+appending to it would break the rule); if jobs still reach WanGP one at a time, the journal's
+`executor` lines and the hello's `capabilities.queue_many` say whether the bridge was reinstalled.
 The
 prompt box has been checked against a fake of the bridge's event and a stand-in
 of WanGP's page, never against the user's own WanGP: if a typed prompt does not

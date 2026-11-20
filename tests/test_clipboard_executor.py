@@ -124,6 +124,10 @@ class FakeChild:
         self.invalid = ""
         self.validations = []
         self.unanswered_validations = 0
+        #: Bridge 1.19.0: whether this child credits each task with its own
+        #: files, so Forge may hand it every job at once. False is a bridge
+        #: from before, which every older check here is written against.
+        self.many = False
 
     def __call__(self, operation, payload):
         if operation == wire.CONTROL_HELLO:
@@ -134,7 +138,8 @@ class FakeChild:
                          "service": self.can_execute_ever, "service_possible": self.can_execute_ever,
                          "code": "" if self.can_execute_ever else wire.SERVICE_UNAVAILABLE,
                          "generation_running": self.busy, "queue_depth": 2 if self.busy else 0,
-                         "instance": self.instance, "capabilities": {"validate": self.can_validate}}
+                         "instance": self.instance,
+                         "capabilities": {"validate": self.can_validate, "queue_many": self.many}}
         if operation == wire.CONTROL_VALIDATE:
             if not self.can_validate:
                 self.unanswered_validations += 1
@@ -439,6 +444,268 @@ def stuck_card_checks(r: Results, clock) -> None:
                 f"{settled['state']} {len(child.submissions)}")
         r.check("and the card never stopped reporting itself busy, which is the whole point",
                 child.busy is True)
+    finally:
+        control.use_transport(None)
+        _restore(monkey)
+
+
+def _press(clock, prompt, **keywords):
+    """One press, a second after the last: the outbox keeps press order by the
+    time each job was stored, so presses at one frozen instant have none."""
+    clock.tick(1.0)
+    return outbox.submit(_request(prompt), PAGE, **keywords)
+
+
+def _ready_child(clock, many):
+    runtime = FakeRuntime()
+    runtime.state = FakeRuntime.READY
+    runtime.instance_id = "child-one"
+    child = FakeChild(clock)
+    child.many = many
+    return runtime, child
+
+
+def many_checks(r: Results, clock) -> None:
+    """Into WanGP's queue at once (bridge 1.19.0): the user's word, 2026-11-20.
+
+    "i actually want the generation request to be queued in wan2gp. like,
+    how in wan2gp if i request a video while it is generating it goes into
+    its queue. The clipboard queue was not intended to replace that." Their
+    log showed thirty Auto presses in three minutes, each handed to WanGP
+    only once the one before it had finished - the last an hour after it was
+    pressed, with WanGP's own queue never holding more than one of them.
+    """
+    _setup(clock)
+    jobs = [_press(clock, f"take {number}") for number in range(3)]
+    runtime, child = _ready_child(clock, many=True)
+    child.busy = True  # WanGP is generating something of the user's own
+    monkey = []
+    _install(monkey, runtime)
+    try:
+        control.use_transport(child)
+        for _ in range(24):
+            executor.step()
+        ids = [job["execution_id"] for job in jobs]
+        r.check("every job pressed while WanGP generates is handed to WanGP's queue at once, "
+                "none waiting for the one ahead of it to finish",
+                len(child.submissions) == 3, str(len(child.submissions)))
+        r.check("in the order they were pressed",
+                [one["execution_id"] for one in child.submissions] == ids,
+                str([one["execution_id"][:8] for one in child.submissions]))
+        r.check("and none waited out WanGP's own run: each is in WanGP's queue",
+                all(outbox.get(job["job_id"])["state"] in outbox.IN_WANGP for job in jobs),
+                str([outbox.get(job["job_id"])["state"] for job in jobs]))
+
+        child.finish(ids[0], ["/wangp/outputs/one.mp4"])
+        child.generating(ids[1])
+        executor.step()
+        r.check("one look follows every job WanGP has: the first done while the second generates "
+                "and the third waits",
+                [outbox.get(job["job_id"])["state"] for job in jobs]
+                == [outbox.COMPLETED, outbox.GENERATION_RUNNING, outbox.GENERATION_WAITING],
+                str([outbox.get(job["job_id"])["state"] for job in jobs]))
+        child.finish(ids[1], ["/wangp/outputs/two.mp4"])
+        child.finish(ids[2], ["/wangp/outputs/three.mp4"])
+        for _ in range(4):
+            executor.step()
+        r.check("each completes with its own file, and the child lets every record go",
+                all(outbox.get(job["job_id"])["state"] == outbox.COMPLETED
+                    and outbox.get(job["job_id"])["generated_count"] == 1 for job in jobs)
+                and sorted(child.forgotten) == sorted(ids), str(child.forgotten))
+        r.check("and nothing was ever submitted twice", len(child.submissions) == 3, str(len(child.submissions)))
+    finally:
+        control.use_transport(None)
+        _restore(monkey)
+
+
+def many_order_checks(r: Results, clock) -> None:
+    """Handed over in press order: a job whose prompt is still being written
+    holds the ones pressed after it, as it would hold its place in any queue."""
+    _setup(clock)
+    written = {"state": enhance.LLM_QUEUED, "prompt": "", "stage": "waiting for the GPU"}
+
+    class FakeApi:
+        API_VERSION = 1
+
+        class Rejected(Exception):
+            pass
+
+        def capabilities(self):
+            return {"api_version": 1, "enabled": True, "configured": True, "vision": True, "model": "/m/q.gguf", "reason": ""}
+
+        def submit_minimax(self, prompt, **keywords):
+            return "c" * 16
+
+        def status(self, llm_id):
+            return dict(written, position=0, elapsed=3.0, image_used="", image_ignored=[], system_override=False, cancelling=False)
+
+        def subscribe(self, llm_id):
+            return iter([{"event": "status", "stage": written["stage"]}])
+
+    enhance.use_api(FakeApi())
+    try:
+        first = _press(clock, "first, plain")
+        enhance.set_enabled(True)
+        middle = _press(clock, "second, enhanced", model={"type": "minimax_h3_fl2va", "architecture": "minimax_h3_fl2va"})
+        enhance.set_enabled(False)
+        last = _press(clock, "third, plain")
+        runtime, child = _ready_child(clock, many=True)
+        monkey = []
+        _install(monkey, runtime)
+        try:
+            control.use_transport(child)
+            for _ in range(16):
+                executor.step()
+            r.check("the first is in WanGP's queue, the second still has its prompt written, and the third "
+                    "waits behind it rather than overtaking it",
+                    [one["execution_id"] for one in child.submissions] == [first["execution_id"]]
+                    and outbox.get(middle["job_id"])["state"] == outbox.ENHANCING
+                    and outbox.get(last["job_id"])["state"] == outbox.ADMITTED,
+                    str([outbox.get(job["job_id"])["state"] for job in (first, middle, last)]))
+            written.update({"state": enhance.LLM_DONE, "prompt": "a rewritten prompt"})
+            for _ in range(16):
+                executor.step()
+            r.check("once the prompt is written both go, still in the order they were pressed",
+                    [one["execution_id"] for one in child.submissions]
+                    == [first["execution_id"], middle["execution_id"], last["execution_id"]],
+                    str([one["execution_id"][:8] for one in child.submissions]))
+        finally:
+            control.use_transport(None)
+            _restore(monkey)
+    finally:
+        enhance.use_api(None)
+        enhance.set_enabled(False)
+
+
+def queue_view_checks(r: Results, clock) -> None:
+    """The Clipboard's queue lists what has not reached WanGP's queue, and only that.
+
+    "The clipboard queue was not intended to replace that, only give me a
+    visual if we somehow failed to add to wan2gp queue" (2026-11-20). So a
+    job WanGP's queue has held leaves the list whatever becomes of it there,
+    a job refused on its way stays with Retry and Dismiss, and a job held
+    behind another only because the bridge is older says so.
+    """
+    from minipaint_neo.clipboard import ui as clipboard_ui
+
+    def listed():
+        return {card["job_id"]: card for card in clipboard_ui.outbox_view(outbox.jobs(), PAGE)}
+
+    _setup(clock)
+    jobs = [_press(clock, f"take {number}") for number in range(3)]
+    r.check("a job admitted here is waiting, not 'Queued': it is in no queue yet",
+            listed()[jobs[0]["job_id"]]["state_label"] == "Waiting"
+            and "WanGP's queue" in listed()[jobs[0]["job_id"]]["outcome"], str(listed()[jobs[0]["job_id"]]))
+    runtime, child = _ready_child(clock, many=True)
+    monkey = []
+    _install(monkey, runtime)
+    try:
+        control.use_transport(child)
+        for _ in range(24):
+            executor.step()
+        ids = [job["execution_id"] for job in jobs]
+        r.check("handed over but not yet seen in WanGP's queue, each is still listed",
+                all(job["job_id"] in listed() for job in jobs) and len(child.submissions) == 3,
+                str(sorted(listed())))
+        for execution_id in ids[:2]:
+            child.records[execution_id] = {"execution_id": execution_id, "state": wire.EXEC_QUEUED,
+                                           "position": 1, "instance": child.instance}
+        child.fail(ids[2], wire.EXECUTION_REFUSED)
+        executor.step()
+        now = listed()
+        r.check("the moment WanGP's queue holds a job, the Clipboard's lets it go",
+                jobs[0]["job_id"] not in now and jobs[1]["job_id"] not in now, str(sorted(now)))
+        refused = now.get(jobs[2]["job_id"]) or {}
+        r.check("while one that never got there stays, with Retry and Dismiss",
+                [action["verb"] for action in refused.get("actions") or []] == ["retry", "dismiss"],
+                str(refused.get("actions")))
+        child.generating(ids[0])
+        child.fail(ids[1], wire.EXECUTION_REFUSED)
+        executor.step()
+        r.check("and one WanGP's queue held does not come back when it fails there: WanGP shows that",
+                outbox.get(jobs[1]["job_id"])["state"] == outbox.FAILED and jobs[1]["job_id"] not in listed(),
+                outbox.get(jobs[1]["job_id"])["state"])
+    finally:
+        control.use_transport(None)
+        _restore(monkey)
+
+    _setup(clock)
+    older = [_press(clock, f"one at a time {number}") for number in range(2)]
+    runtime, child = _ready_child(clock, many=False)
+    monkey = []
+    _install(monkey, runtime)
+    try:
+        control.use_transport(child)
+        for _ in range(16):
+            executor.step()
+        card = listed().get(older[1]["job_id"]) or {}
+        r.check("a job held behind another only because the bridge is older says so, and what fixes it",
+                card.get("outcome") == clipboard_ui.OLDER_BRIDGE_WAIT and "1.19.0" in card.get("outcome", ""),
+                str(card.get("outcome")))
+    finally:
+        control.use_transport(None)
+        _restore(monkey)
+
+
+def one_at_a_time_checks(r: Results, clock) -> None:
+    """Behind a bridge older than 1.19.0, still one job at a time, start to finish.
+
+    That bridge credits a finished task with every file WanGP made since the
+    task was sent - right only while one of ours is in WanGP's queue - so the
+    queue keeps to what it always did until the bridge is reinstalled.
+    """
+    _setup(clock)
+    process_log.begin("b" * 32, "executor one at a time check")
+
+    def written():
+        log = pathlib.Path(str(process_log.path()))
+        return (log.read_text(encoding="utf-8") if log.exists() else "").splitlines()
+
+    already = len(written())
+
+    def journal(words):
+        """This check's lines alone: the journal is one file for the suite."""
+        return [line for line in written()[already:] if words in line]
+
+    jobs = [_press(clock, f"take {number}") for number in range(2)]
+    runtime, child = _ready_child(clock, many=False)
+    monkey = []
+    _install(monkey, runtime)
+
+    try:
+        control.use_transport(child)
+        for _ in range(16):
+            executor.step()
+        r.check("behind an older bridge only the first job is handed over",
+                [one["execution_id"] for one in child.submissions] == [jobs[0]["execution_id"]]
+                and outbox.get(jobs[1]["job_id"])["state"] == outbox.ADMITTED,
+                str([outbox.get(job["job_id"])["state"] for job in jobs]))
+        child.finish(jobs[0]["execution_id"])
+        for _ in range(16):
+            executor.step()
+        r.check("and the second once the first has finished",
+                [one["execution_id"] for one in child.submissions] == [job["execution_id"] for job in jobs],
+                str(len(child.submissions)))
+        child.finish(jobs[1]["execution_id"])
+        for _ in range(4):
+            executor.step()
+
+        # The bridge reinstalled, and WanGP started again with it: asked again
+        # of the new process, not answered from what the last one said.
+        runtime.instance_id = child.instance = "child-two"
+        child.many = True
+        later = [_press(clock, f"after the reinstall {number}") for number in range(2)]
+        for _ in range(16):
+            executor.step()
+        r.check("a WanGP started again with a bridge that can take many is asked again, and gets both at once",
+                [one["execution_id"] for one in child.submissions[2:]] == [job["execution_id"] for job in later]
+                and all(outbox.get(job["job_id"])["state"] in outbox.IN_WANGP for job in later),
+                str([outbox.get(job["job_id"])["state"] for job in later]))
+        r.check("the journal says which, once for each WanGP process: the older bridge and what fixes it, then the new",
+                len(journal("older than 1.19.0: jobs go into its queue one at a time")) == 1
+                and len(journal("reinstall it from Settings -> WanGP")) == 1
+                and len(journal("takes every job at once")) == 1,
+                str(journal("bridge")))
     finally:
         control.use_transport(None)
         _restore(monkey)
@@ -1471,6 +1738,10 @@ def run() -> Results:
     walkaway_checks(r, clock)
     card_checks(r, clock)
     stuck_card_checks(r, clock)
+    many_checks(r, clock)
+    many_order_checks(r, clock)
+    one_at_a_time_checks(r, clock)
+    queue_view_checks(r, clock)
     input_lifetime_checks(r, clock)
     write_discipline_checks(r, clock)
     recovery_checks(r, clock)

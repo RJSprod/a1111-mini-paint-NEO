@@ -1549,6 +1549,67 @@ def check_queue_reads_are_one_at_a_time(r: Results, page) -> None:
         page.wait_for_timeout(300)
 
 
+def check_the_queue_is_read_again_unasked(r: Results, page) -> None:
+    """The queue list is read again whenever it could be stale (2026-11-20).
+
+    It is drawn from answers and from nothing else - no stream, no poll - and
+    it used to be read only when the page loaded, after a press from it and
+    on Refresh. Coming back to the tab read the pictures and not the queue,
+    so a card drawn at the last press still said a job was waiting an hour
+    after WanGP had made it: the user's log has two Cancel all presses that
+    found nothing on the server to cancel. Now the list is only what has not
+    reached WanGP's queue, and it is read twice after a press (one bounded
+    request each), when the tab is shown again and when the page is.
+    """
+    open_clipboard(page)
+    page.wait_for_timeout(300)
+    reads = []
+
+    def answer(route):
+        if route.request.method == "GET":
+            reads.append(route.request.url)
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "jobs": [], "running": False, "counts": {}}))
+            return
+        mark = 9000 + len(reads)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "ok": True, "status": "Queued on the server.",
+            "instruction": {"nonce": "%08x" % mark, "job_id": "%032x" % mark, "executor": "server", "state": "admitted"}}))
+
+    page.route("**/minipaint-clipboard/queue*", answer)
+    try:
+        page.evaluate("() => window.minipaintClipboard.addToQueue('read the queue again', false)")
+        page.wait_for_timeout(300)
+        pressed = len(reads)
+        page.wait_for_timeout(5000)
+        first = len(reads) - pressed
+        page.wait_for_timeout(11500)
+        second = len(reads) - pressed
+        page.wait_for_timeout(2000)
+        r.check("a press is followed by one read of the queue a few seconds later, asked by nobody",
+                first == 1, f"{first} read(s)")
+        r.check("and one more a little after that, and then no more", second == 2 and len(reads) - pressed == 2,
+                f"{second} then {len(reads) - pressed}")
+
+        page.locator("#tabs > .tab-nav > button", has_text="PNG Info").first.click()
+        page.wait_for_timeout(800)
+        before = len(reads)
+        page.locator("#tabs > .tab-nav > button", has_text="Clipboard").first.click()
+        page.wait_for_timeout(1500)
+        r.check("coming back to the Clipboard tab reads the queue again", len(reads) > before,
+                f"{len(reads) - before} read(s)")
+
+        before = len(reads)
+        page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+        page.wait_for_timeout(800)
+        r.check("and so does the page coming back on screen with the tab showing", len(reads) > before,
+                f"{len(reads) - before} read(s)")
+    finally:
+        page.wait_for_timeout(300)
+        page.unroute("**/minipaint-clipboard/queue*")
+        page.wait_for_timeout(300)
+
+
 def check_the_prompt_editor_fills_the_window(r: Results, page) -> None:
     """A system prompt is a page of prose; the composer is a third of a window.
 
@@ -4153,6 +4214,14 @@ def check_a_long_request_column_scrolls_inside_itself(r: Results, page) -> None:
         }""", pixels)
 
     open_clipboard(page)
+    # Coming back to the tab reads the queue again (2026-11-20): measured once
+    # that read has been drawn, never while it is still on the wire - a list
+    # redrawn between the two measurements below is a different column.
+    for _ in range(60):
+        if not page.evaluate("() => window.minipaintClipboard.debug().queueReading"):
+            break
+        page.wait_for_timeout(100)
+    page.wait_for_timeout(400)
     page.evaluate("() => { document.getElementById('minipaint_clipboard_composer').scrollTop = 0; window.scrollTo(0, 0); }")
     r.check("the queue is on the page to make long",
             page.evaluate("() => !!document.querySelector('#minipaint_clipboard_outbox_list .minipaint-clip-outbox')"))
@@ -4270,8 +4339,22 @@ def check_a_long_request_column_scrolls_inside_itself(r: Results, page) -> None:
         }""")
         page.wait_for_timeout(700)
     back = state()
+
+    def pixels(value):
+        try:
+            return float(str(value or "").replace("px", "") or "nan")
+        except ValueError:
+            return float("nan")
+
+    # Within a pixel. ``fitTab`` floors the Prompt box's share so the column
+    # never ends half a pixel past its window, and when the column's other
+    # blocks add up to a fraction of a pixel - a status line of two lines is
+    # 39.19 px - two heights a pixel apart both fit, and which one a fit
+    # lands on depends on the side it comes from (2026-11-20: 177 before the
+    # queue grew, 176 after it shrank, with every other block the same). A
+    # box that did not get its room back is tens of pixels short.
     r.check("a queue that is short again gives the Prompt box back the room it had, and the column what it held before",
-            back["promptMin"] == before["promptMin"]
+            abs(pixels(back["promptMin"]) - pixels(before["promptMin"])) <= 1
             and abs((back["scrollHeight"] - back["clientHeight"]) - (before["scrollHeight"] - before["clientHeight"])) <= 2
             and abs(back["composerBottom"] - (back["view"] - GAP)) <= 4,
             f"before {before} after {back}")
@@ -7101,6 +7184,7 @@ def run() -> Results:
                     ("check_the_section_is_blocked_until_wangp_is_ready", lambda: check_the_section_is_blocked_until_wangp_is_ready(r, page)),
                     ("check_the_queue_section_is_the_browsers", lambda: check_the_queue_section_is_the_browsers(r, page)),
                     ("check_queue_reads_are_one_at_a_time", lambda: check_queue_reads_are_one_at_a_time(r, page)),
+                    ("check_the_queue_is_read_again_unasked", lambda: check_the_queue_is_read_again_unasked(r, page)),
                     ("check_the_prompt_editor_fills_the_window", lambda: check_the_prompt_editor_fills_the_window(r, page)),
                     ("check_the_history_button_opens_the_last_prompts", lambda: check_the_history_button_opens_the_last_prompts(r, page)),
                     ("check_auto_sends_the_selected_picture", lambda: check_auto_sends_the_selected_picture(r, page)),

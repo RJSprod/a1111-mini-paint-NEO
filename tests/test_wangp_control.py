@@ -375,7 +375,7 @@ def _free_port():
         return probe.getsockname()[1]
 
 
-def _executor(gen=None, root=None, forms=None):
+def _executor(gen=None, root=None, forms=None, clock=None):
     """An executor wired to a fake service, with a real durable ledger."""
     _compatibility, _compose, _control, execution, ledger, _protocol = _modules()
     gen = gen if gen is not None else {"queue": [], "in_progress": False}
@@ -384,6 +384,8 @@ def _executor(gen=None, root=None, forms=None):
     scratch = root or tempfile.mkdtemp(prefix="minipaint-control-")
     compat = _compat({"service_for": lambda *_a: service, "get_gen_info": lambda state: state["gen"]})
     book = ledger.Ledger(root=scratch, instance="i" * 32)
+    if clock is not None:
+        return execution.Executor(compat, book, environ={}, clock=clock), service, gen, book
     return execution.Executor(compat, book, environ={}), service, gen, book
 
 
@@ -1605,8 +1607,8 @@ def session_checks(r: Results) -> None:
     bridge.resolve()
     bridge.state_keys = (compatibility.SESSION_STATE,) + tuple(k for k in bridge.state_keys if k != compatibility.SESSION_STATE)
     handshake = bridge.compat.handshake(bridge_session="s", environ=environ)
-    r.check("the handshake offers the session capability, and the bridge is 1.18.0",
-            compatibility.BRIDGE_VERSION == "1.18.0"
+    r.check("the handshake offers the session capability, and the bridge is 1.19.0",
+            compatibility.BRIDGE_VERSION == "1.19.0"
             and handshake["capabilities"].get("session") is True)
     r.check("and, from 1.11.0, says the page may be made compact under focus (LAYOUT_STATE)",
             handshake["capabilities"].get("layout_compact") is True, str(handshake["capabilities"]))
@@ -1616,8 +1618,9 @@ def session_checks(r: Results) -> None:
             handshake["capabilities"].get("theme") is True and handshake["capabilities"].get("theme_palette") is True
             and handshake["capabilities"].get("theme_font") is True, str(handshake["capabilities"]))
     info = json.loads((BRIDGE_DIR / "plugin_info.json").read_text(encoding="utf-8"))
-    r.check("and plugin_info.json says the same version twice, and lists the palette, the typeface, the compact layout, the studio, the hold, the model check, the prompt edit and the settings load among its capabilities",
-            info.get("version") == "1.18.0" and info.get("bridge_version") == "1.18.0"
+    r.check("and plugin_info.json says the same version twice, and lists the palette, the typeface, the compact layout, the studio, the hold, the model check, the prompt edit, the settings load and many queued at once among its capabilities",
+            info.get("version") == "1.19.0" and info.get("bridge_version") == "1.19.0"
+            and "queue_many" in (info.get("capabilities") or [])
             and "prompt_edit" in (info.get("capabilities") or []) and "layout_studio" in (info.get("capabilities") or [])
             and "settings_load" in (info.get("capabilities") or [])
             and "theme_palette" in (info.get("capabilities") or []) and "theme_font" in (info.get("capabilities") or [])
@@ -1921,12 +1924,138 @@ def output_path_checks(r: Results) -> None:
         shutil.rmtree(str(scratch), ignore_errors=True)
 
 
+def many_queued_checks(r: Results) -> None:
+    """Several of Forge's tasks in WanGP's queue at once, each credited with
+    its own video (bridge 1.19.0, ``capabilities.queue_many``).
+
+    The Clipboard now hands WanGP every request the moment it is ready,
+    instead of one at a time, so a task routinely waits in WanGP's queue
+    behind others of Forge's. Credited with "every file made since it was
+    sent", the third of three would claim all three videos - the first two
+    were made after it was sent. What is asserted is the rule that replaced
+    it: a task's files are what WanGP's gallery gains while that task is the
+    one WanGP is running, and nothing the gallery already listed when it
+    started, however close the clock.
+
+    WanGP's run is played by hand here - the queue, ``in_progress``, the
+    gallery and each file's time - with no worker thread and no tracker
+    thread, so every pass of the tracker is one the check made.
+    """
+    _compatibility, _compose, control, execution, _ledger, protocol = _modules()
+    now = {"t": 10_000.0}
+    gen = {"queue": [], "in_progress": False, "file_list": []}
+    runner, service, gen, book = _executor(gen=gen, clock=lambda: now["t"])
+    runner._ensure_tracker = lambda: None
+    worker = object()
+    service.start_generation = lambda: worker
+    service._queue_worker = worker
+    scratch = pathlib.Path(tempfile.mkdtemp(prefix="minipaint-many-"))
+
+    def made(name, at):
+        path = scratch / name
+        path.write_bytes(b"video")
+        os.utime(str(path), (at, at))
+        gen["file_list"].append(str(path))
+        return os.path.abspath(str(path))
+
+    def finished(execution_id):
+        return (book.get(execution_id) or {}).get("generated_files")
+
+    try:
+        made("old.mp4", 9_000.0)
+        a, b, c = "a" * 32, "b" * 32, "c" * 32
+        for execution_id in (a, b, c):
+            _submit(runner, execution_id)
+        r.check("three tasks of Forge's sent at once are all in WanGP's queue, in the order sent",
+                _queued(gen) == [a, b, c], str(_queued(gen)))
+
+        now["t"] = 10_010.0
+        gen["in_progress"] = True
+        runner._tick()
+        now["t"] = 10_100.0
+        video_a = made("a.mp4", 10_100.0)
+        runner._tick()
+        now["t"] = 10_101.0
+        gen["queue"].pop(0)
+        runner._tick()
+        r.check("the first is credited with the video WanGP made while it ran",
+                finished(a) == [video_a], str(finished(a)))
+
+        # A file that turns up in the gallery while the second runs, made
+        # before it started but after it was sent: not its own either.
+        made("loaded.mp4", 10_050.0)
+        now["t"] = 10_200.0
+        video_b = made("b.mp4", 10_200.0)
+        runner._tick()
+        now["t"] = 10_201.0
+        gen["queue"].pop(0)
+        runner._tick()
+        r.check("the second only with its own: not the first's, made moments before it started, "
+                "and not a file made before it started that turned up while it ran",
+                finished(b) == [video_b], str(finished(b)))
+
+        now["t"] = 10_300.0
+        video_c = made("c.mp4", 10_300.0)
+        runner._tick()
+        now["t"] = 10_301.0
+        gen["queue"].pop(0)
+        gen["in_progress"] = False
+        runner._tick()
+        r.check("and the third only with its own, though all three were made after it was sent",
+                finished(c) == [video_c], str(finished(c)))
+        r.check("all three finished, in WanGP's own words",
+                all((book.get(one) or {}).get("state") == protocol.EXEC_DONE for one in (a, b, c)),
+                str([(book.get(one) or {}).get("state") for one in (a, b, c)]))
+
+        # A task never seen running: WanGP between two tasks when the tracker
+        # looked (the one ahead gone, this one at the head, nothing in
+        # progress - a hold, a worker starting again), then the whole run
+        # between two looks, as a quick picture can be. What it waited
+        # behind is still not its own.
+        d, e = "d" * 32, "e" * 32
+        now["t"] = 10_400.0
+        for execution_id in (d, e):
+            _submit(runner, execution_id)
+        gen["in_progress"] = True
+        now["t"] = 10_410.0
+        runner._tick()
+        now["t"] = 10_420.0
+        video_d = made("d.mp4", 10_420.0)
+        gen["queue"].pop(0)
+        gen["in_progress"] = False
+        now["t"] = 10_421.0
+        runner._tick()
+        now["t"] = 10_430.0
+        gen["in_progress"] = True
+        video_e = made("e.mp4", 10_430.0)
+        gen["queue"].pop(0)
+        gen["in_progress"] = False
+        now["t"] = 10_431.0
+        runner._tick()
+        r.check("a task WanGP ran entirely between two looks is credited with its own file, "
+                "not the one it waited behind",
+                finished(d) == [video_d] and finished(e) == [video_e], str((finished(d), finished(e))))
+
+        surface = control.ControlSurface(runner.compat, environ={}, note=lambda _text: None)
+        hello = surface.hello()
+        r.check("its hello says so, and Forge reads it, so Forge hands it every job at once",
+                hello.get("capabilities", {}).get("queue_many") is True
+                and protocol.normalize_control_hello(hello)["capabilities"]["queue_many"] is True,
+                str(hello.get("capabilities")))
+        r.check("while an older bridge's hello, which leaves it out, reads as one job at a time",
+                protocol.normalize_control_hello({"ok": True, "capabilities": {"hold": True, "validate": True}})
+                ["capabilities"]["queue_many"] is False)
+    finally:
+        shutil.rmtree(str(scratch), ignore_errors=True)
+
+
 def run() -> Results:
     r = Results("wangp control")
     identity_checks(r)
     inheritance_checks(r)
     manifest_shape_checks(r)
     output_path_checks(r)
+    many_queued_checks(r)
     ledger_checks(r)
     idempotency_checks(r)
     inline_admission_checks(r)

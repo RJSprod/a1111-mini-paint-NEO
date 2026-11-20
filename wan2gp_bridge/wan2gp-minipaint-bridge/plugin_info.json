@@ -1,8 +1,8 @@
 {
   "name": "wan2gp-minipaint-bridge",
   "display_name": "Mini Paint Bridge",
-  "version": "1.18.0",
-  "bridge_version": "1.18.0",
+  "version": "1.19.0",
+  "bridge_version": "1.19.0",
   "type": "extension",
   "enabled": true,
   "entry": "plugin.py",
@@ -30,6 +30,7 @@
     "prompt_edit",
     "prompt_loras",
     "queue",
+    "queue_many",
     "receiver_query",
     "settings_flush",
     "settings_load",

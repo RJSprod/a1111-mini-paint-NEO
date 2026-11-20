@@ -27,12 +27,19 @@ Four rules it does not bend:
     is an ordinary worker thread and every call it makes into the WanGP child
     has a finite timeout.
 
-*   **One job at a time.** Not a throughput decision - a correctness one.
-    Two jobs advancing at once would be two things competing for one card,
-    and the card is the resource this whole design is arranged around. Press
-    order holds among our own jobs; against work queued in the WanGP tab it
-    interleaves by whoever reaches the shared queue first, and we always
-    yield to a generation already running.
+*   **Into WanGP's queue as soon as it is ready, in press order.** WanGP's
+    own queue is what decides whose turn the card is: its one worker runs
+    one task at a time, whoever queued it, and a task appended to it
+    pre-empts nothing. So from bridge 1.19.0 a job is handed over the moment
+    it is ready - while WanGP is generating, and while other jobs of ours
+    wait in its queue - exactly as WanGP's own Add to Queue would, and the
+    Clipboard's queue only shows what has not got there (the user's word,
+    2026-11-20). Press order holds among our own jobs, because each is handed
+    over only after every job pressed before it; against work queued in the
+    WanGP tab it interleaves by whoever reaches the shared queue first.
+    Behind an older bridge it is still one job at a time, start to finish,
+    because that bridge credits a finished task with every file made since
+    it was sent: right only while one of ours is in WanGP's queue.
 
 *   **It never resubmits across an ambiguity.** A job whose submission exists
     and whose outcome does not is reconciled against the child's ledger by
@@ -43,16 +50,18 @@ Four rules it does not bend:
 
 The stages, in order, and what each waits for:
 
-    ADMITTED         -> the queue's turn
+    ADMITTED         -> every job pressed before it handed to WanGP (behind
+                        a bridge older than 1.19.0, finished)
     ENHANCING        -> ModelSwitchRefiner's own feed (readiness happens
                         inside the run; there is nothing to pre-warm)
     ENHANCED         -> the VRAM handover, if the install needs one
     ENSURING_WANGP   -> the managed child reaching READY, which on a cold
                         start is minutes and is not a browser timeout
     COMPOSING        -> the settings this job runs at, read from the child
-    WAITING_FOR_CARD -> whatever is generating now, ours or the user's
+    WAITING_FOR_CARD -> nothing from bridge 1.19.0; behind an older bridge,
+                        whatever is generating now, for a minute at most
     SUBMITTING_WANGP -> the child recording the task
-    WANGP_*          -> the generation
+    WANGP_*          -> the generation, in WanGP's queue
 
 And one wait that is none of these: WanGP's card lent to another extension
 (``minipaint_neo.wangp.turns``, the card lease). While a lease is live no job
@@ -189,6 +198,7 @@ def reset_for_tests() -> None:
     _seams["enabled"] = False
     _state["last_error"] = ""
     _state.pop("lease_error", None)
+    _state.pop("many", None)
 
 
 def _now() -> float:
@@ -314,11 +324,30 @@ def step() -> bool:
     before, so a job is never submitted a moment before a hold that was
     already owed. Driving the lease returns no work done, so a live lease with
     no job paces itself on the loop's wait rather than spinning.
+
+    Then, when the bridge in WanGP credits each task with its own files
+    (1.19.0, ``capabilities.queue_many``), every job WanGP already has is
+    followed in one question and the step works on the first job, in press
+    order, that is not in WanGP's queue yet - so a job is handed over the
+    moment it is ready, whatever is generating, and WanGP's own queue is what
+    runs them one at a time. A job still being prepared (its prompt being
+    written) holds the ones pressed after it, never one pressed before it.
+    Behind an older bridge, or with no WanGP to ask, the job in flight is
+    followed to its end before the next one moves, as it always was.
     """
     _drive_lease()
     job = outbox.next_executable()
     if job is None:
         return False
+    if _takes_many():
+        _follow(outbox.in_wangp_jobs())
+        job = outbox.next_to_hand_over()
+        if job is None:
+            # Every job of ours is in WanGP's queue: nothing to hand over,
+            # so this step's work was the look, and the next is a pause
+            # away - the cadence a single job's tracking always had.
+            _pause(POLL_SECONDS)
+            return True
     state = job["state"]
     if state in LENT_GATED:
         owner = _lent_to()
@@ -833,6 +862,18 @@ def _stage_waiting_for_card(job: dict) -> bool:
     submitted. A queue that stops for good because a flag somewhere else did
     not clear is worse than one that occasionally queues a job behind a run
     the user can see.
+
+    AND FROM BRIDGE 1.19.0 IT IS NOT MADE AT ALL.
+
+    At the user's word (2026-11-20): "i actually want the generation request
+    to be queued in wan2gp. like, how in wan2gp if i request a video while it
+    is generating it goes into its queue. The clipboard queue was not
+    intended to replace that, only give me a visual if we somehow failed to
+    add to wan2gp queue". A bridge that credits each task with its own files
+    (``capabilities.queue_many``) gets the task at once, whatever is
+    generating, exactly as WanGP's own Add to Queue would; only behind an
+    older bridge, which credits a task with every file made since it was
+    sent, does a job still wait out somebody else's run here.
     """
     from ..wangp import control
 
@@ -840,7 +881,7 @@ def _stage_waiting_for_card(job: dict) -> bool:
         answer = control.hello()
     except IntegrationError as error:
         return bool(outbox.fail(job["job_id"], error.code, error.detail))
-    if answer["generation_running"]:
+    if answer["generation_running"] and not answer["capabilities"].get("queue_many"):
         waited = max(0.0, _now() - float(job.get("updated") or 0.0))
         if waited < CARD_WAIT_MAX_SECONDS:
             depth = answer["queue_depth"]
@@ -903,50 +944,145 @@ def _stage_tracking(job: dict) -> bool:
     Read rather than waited on: the child's own tracker is what watches the
     shared queue, and asking it is one short request. Nothing here blocks on
     a generation, holds a socket open for one, or calls a result() that would
-    take WanGP's generation lock.
+    take WanGP's generation lock. A look that ended the job is followed at
+    once by the next step; any other waits ``POLL_SECONDS`` first.
+    """
+    if not _follow([job]):
+        _pause(POLL_SECONDS)
+    return True
+
+
+#: How many jobs of ours one look at WanGP's ledger names. The bridge takes a
+#: status of up to 256 ids; WanGP runs its queue in order, so the oldest are
+#: the ones that end first, and the rest are looked at as those go.
+FOLLOW_AT_ONCE = 64
+
+
+def _follow(jobs: typing.Sequence[typing.Mapping[str, typing.Any]]) -> bool:
+    """One look at every one of these jobs WanGP has, in one question.
+
+    Returns whether any of them ended. What each answer means is the same
+    for one job as for many: a child that went away, or a different child,
+    cannot say what became of a submission, so the job says so and waits for
+    a person; a terminal record is ours from then on and the child may let
+    its copy go; a completed one hands its files to the durable ledger.
+    Oldest first, so View Outputs' ledger - which never gives one file to two
+    jobs - is handed them in the order WanGP made them.
     """
     from ..wangp import control, runtime
 
-    execution_id = job.get("execution_id") or ""
+    jobs = list(jobs)[:FOLLOW_AT_ONCE]
+    if not jobs:
+        return False
+    ended = False
     current = runtime.current()
     if current.state != runtime.READY:
-        # The child went away with a submission outstanding. Whether that
-        # generation finished is not knowable from here, and a resubmission
-        # would be a second one, so the job says so and waits for a person.
-        return bool(outbox.fail(job["job_id"], errors.EXECUTION_UNKNOWN,
-                                "WanGP stopped while this generation was in flight.",
-                                state=outbox.EXECUTION_UNKNOWN))
-    if job.get("child_instance") and current.instance_id and job["child_instance"] != current.instance_id:
-        return bool(outbox.fail(job["job_id"], errors.EXECUTION_UNKNOWN,
-                                "WanGP restarted while this generation was in flight.",
-                                state=outbox.EXECUTION_UNKNOWN))
+        # The child went away with submissions outstanding. Whether those
+        # generations finished is not knowable from here, and a resubmission
+        # would be a second one, so each job says so and waits for a person.
+        for job in jobs:
+            ended = bool(outbox.fail(job["job_id"], errors.EXECUTION_UNKNOWN,
+                                     "WanGP stopped while this generation was in flight.",
+                                     state=outbox.EXECUTION_UNKNOWN)) or ended
+        return ended
+    asking = []
+    for job in jobs:
+        if job.get("child_instance") and current.instance_id and job["child_instance"] != current.instance_id:
+            ended = bool(outbox.fail(job["job_id"], errors.EXECUTION_UNKNOWN,
+                                     "WanGP restarted while this generation was in flight.",
+                                     state=outbox.EXECUTION_UNKNOWN)) or ended
+            continue
+        asking.append(job)
+    if not asking:
+        return ended
     try:
-        found = control.status([execution_id])
+        found = control.status([job.get("execution_id") or "" for job in asking])
     except IntegrationError as error:
         if error.code in (errors.WANGP_NOT_RUNNING, errors.CONTROL_UNAVAILABLE):
-            _pause(POLL_SECONDS)
-            return True
-        return bool(outbox.fail(job["job_id"], error.code, error.detail))
-    record = found.get(execution_id)
-    if record is None:
-        _pause(POLL_SECONDS)
-        return True
-    moved = outbox.record_execution(job["job_id"], record, expect_revision=job["revision"],
-                                    child_instance=record.get("instance", ""))
-    settled = moved or outbox.get(job["job_id"])
-    if settled is not None and settled["state"] in outbox.SERVER_TERMINAL:
-        # Ours now, durably. The child may let its record go.
-        control.forget([execution_id])
-        if settled["state"] == outbox.COMPLETED:
-            _journal(f"job {job['job_id'][:8]}: completed with {settled.get('generated_count', 0)} file(s)")
-            # Copy the paths somewhere durable while they are still here.
-            # They live on the job, and the job is swept out of the queue
-            # two minutes after this - so a viewer opened any later would
-            # find nothing, and these are the only exact ones there are.
-            _remember_outputs(job, record)
-        return True
-    _pause(POLL_SECONDS)
-    return True
+            return ended
+        for job in asking:
+            ended = bool(outbox.fail(job["job_id"], error.code, error.detail)) or ended
+        return ended
+    for job in asking:
+        execution_id = job.get("execution_id") or ""
+        record = found.get(execution_id)
+        if record is None:
+            continue
+        moved = outbox.record_execution(job["job_id"], record, expect_revision=job["revision"],
+                                        child_instance=record.get("instance", ""))
+        settled = moved or outbox.get(job["job_id"])
+        if settled is not None and settled["state"] in outbox.SERVER_TERMINAL:
+            ended = True
+            # Ours now, durably. The child may let its record go.
+            control.forget([execution_id])
+            if settled["state"] == outbox.COMPLETED:
+                _journal(f"job {job['job_id'][:8]}: completed with {settled.get('generated_count', 0)} file(s)")
+                # Copy the paths somewhere durable while they are still here.
+                # They live on the job, and the job is swept out of the queue
+                # two minutes after this - so a viewer opened any later would
+                # find nothing, and these are the only exact ones there are.
+                _remember_outputs(job, record)
+    return ended
+
+
+def _takes_many() -> bool:
+    """Whether the bridge in WanGP may be handed every job of ours at once.
+
+    Bridge 1.19.0 says so in its hello (``capabilities.queue_many``): it
+    credits a finished task with the files WanGP made while that task ran,
+    so tasks of ours waiting in WanGP's queue together cannot take each
+    other's videos. An older bridge credits everything made since the task
+    was sent, which is only right while one of ours is in WanGP's queue at a
+    time - so behind one, or when the child cannot be asked, the answer is
+    no and the queue keeps to one job at a time, as it always did.
+
+    Asked once per WanGP process - a bridge is loaded when WanGP starts and
+    cannot change under a running one - and asked again of the next one.
+    This thread is the one allowed to ask.
+    """
+    from ..wangp import control, runtime
+
+    try:
+        instance = str(getattr(runtime.current(), "instance_id", "") or "")
+    except Exception:
+        instance = ""
+    known = _state.get("many")
+    if instance and isinstance(known, tuple) and known[0] == instance:
+        return bool(known[1])
+    try:
+        answer = control.hello()
+    except Exception:
+        return False
+    many = bool((answer.get("capabilities") or {}).get("queue_many"))
+    if instance:
+        _state["many"] = (instance, many)
+        # Once per WanGP process: the one line that says, in a log the user
+        # sends, whether the bridge was reinstalled.
+        _journal("WanGP's bridge takes every job at once (1.19.0 or newer): each goes into its queue when ready"
+                 if many else
+                 "WanGP's bridge is older than 1.19.0: jobs go into its queue one at a time; "
+                 "reinstall it from Settings -> WanGP to send them all at once")
+    return many
+
+
+def bridge_takes_many() -> typing.Optional[bool]:
+    """What the WanGP running now said about being handed every job of ours
+    at once (bridge 1.19.0): True, False, or None while it has not been asked.
+
+    Never asks. It is what a screen may read from a route - the queue's card
+    for a job held behind another because the bridge is older - and a route
+    must not make a call into the child.
+    """
+    known = _state.get("many")
+    if not isinstance(known, tuple):
+        return None
+    try:
+        from ..wangp import runtime
+
+        instance = str(getattr(runtime.current(), "instance_id", "") or "")
+    except Exception:
+        return None
+    return bool(known[1]) if instance and known[0] == instance else None
 
 
 # ----------------------------------------------------------------- helpers --
@@ -1147,7 +1283,8 @@ def snapshot() -> dict:
 __all__ = [
     "BACKOFF_MAX", "BACKOFF_START", "CARD_POLL_SECONDS", "IDLE_SECONDS", "MAX_RETRYABLE_ATTEMPTS",
     "CARD_WAIT_MAX_SECONDS", "POLL_SECONDS", "RETRYABLE", "SUBMIT_TIMEOUT", "WANGP_READY_TIMEOUT",
-    "LENT_GATED", "LENT_STAGE_PREFIX",
+    "LENT_GATED", "LENT_STAGE_PREFIX", "FOLLOW_AT_ONCE",
+    "bridge_takes_many",
     "ensure_running", "nudge", "reconcile", "recover", "reset_for_tests", "running", "snapshot", "step",
     "stop", "use_clock", "use_sleep", "use_thread", "wake",
 ]

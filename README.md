@@ -530,9 +530,11 @@ folder first, and the gallery popup has the same Auto beside Generate.
 
 **Press as often as you like.** Every press is a job in a queue the **server** owns, kept
 beside the draft and the history, so a refresh, a closed tab or a second browser loses
-nothing. Jobs are sent one at a time, in the order pressed across every browser, each by
-the page that composed it — so a job uses the WanGP settings its user is looking at — and
-the tab shows them under the button with *Cancel*, *Retry* and *Run from this page*. The
+nothing. With the server running jobs (the default, *Press it and walk away* below) each
+goes into WanGP's own queue as soon as it is ready. A job a page runs itself is sent one at a
+time, in the order pressed across every browser, by the page that composed it — so a job
+uses the WanGP settings its user is looking at — and the tab shows them under the button
+with *Cancel*, *Retry* and *Run from this page*. The
 first job to find WanGP idle **starts the run**, through WanGP's own generate trigger; the
 ones behind it join that run. The decision is made inside WanGP from WanGP's own
 process-wide "is a generation running" flag, never from a guess in the browser, and when
@@ -863,18 +865,28 @@ starts.
 **Press it and walk away.** With *WanGP queue: run queued jobs on the server* on — which is
 the default — Forge runs the job itself. It starts WanGP again if it has stopped since the
 press (a press here needs it running; a public-API job may find it cold from the start),
-waits if you are generating in the WanGP tab (and says so, and never interrupts you), writes
-the enhanced prompt if you asked for one, submits into WanGP's own queue and follows the
-generation to a file. Waiting for a generation already running - yours or an earlier job's -
-is a courtesy of a minute at most; after it the job joins WanGP's queue behind the running
-task at once, the way WanGP's own API admits a task (bridge 1.17.0) -
-before, it sat beside the queue until that run ended, was reported as never having reached
-WanGP, and a third job could take its place. The browser may be hidden, frozen, closed or on a phone that has gone to sleep; come
-back on any device and one sync shows you where it got to. Three things worth knowing: the
-job **is** in the WanGP tab's queue and can be cancelled there; it may wait for the card
-because of your own work; and on Windows a Forge crash loses a generation that was in flight,
-which is reported as "could not be proved" rather than retried. `docs/wangp/SERVER_EXECUTION.md`
-is the whole of it, including what is still an inference waiting for a real install.
+writes the enhanced prompt if you asked for one, and **hands the job to WanGP's own queue as
+soon as it is ready** - while WanGP is generating, yours or an earlier job's, and while other
+jobs from here already wait in it - the way WanGP's own Add to Queue does during a run. Jobs go
+in the order you pressed them (one whose prompt is still being written holds the ones pressed
+after it), WanGP's queue runs them one at a time, and Forge follows each to its file. This needs
+bridge **1.19.0** (reinstall it from Settings → WanGP), which credits a finished job with the
+video WanGP made while that job ran; an older bridge credits it with every video made since it
+was sent, so behind one the Clipboard still hands WanGP one job at a time, the next only once
+the one ahead has finished, and its card says so. (Until 2026-11-20 that was the rule for every
+bridge: thirty Auto presses reached WanGP over an hour, each when the one before had finished.)
+The **Queue** under the button is only what has not reached WanGP's queue: a job on its way, one
+held (WanGP starting, its card lent to the Voice Box), or one that could not get there, with
+*Retry* and *Dismiss*. Once WanGP's queue has a job, its card goes - whatever happens to it
+there is WanGP's to show, cancel and report, as for anything queued in WanGP - and it stays in
+Queue Send History and View Outputs. The list is read again when you come back to the tab or
+to the page, and twice in the seconds after a press, so a job that failed to get there shows
+up without Refresh; nothing is held open in between. The browser may be hidden, frozen,
+closed or on a phone that has gone to sleep; come back on any device and one sync shows you
+where it got to. Two things worth knowing: the job **is** in the WanGP tab's queue and can be
+cancelled there; and on Windows a Forge crash loses a generation that was in flight, which is
+reported as "could not be proved" rather than retried. `docs/wangp/SERVER_EXECUTION.md` is the
+whole of it, including what is still an inference waiting for a real install.
 
 **Settings come from the WanGP page - or, if you choose, from WanGP's saved settings.** Every
 job takes its prompt and pictures from where you sent it. Everything else - LoRAs and their

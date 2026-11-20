@@ -296,8 +296,12 @@ class ControlSurface:
             # The flags an older bridge leaves out, which is how Forge knows
             # not to send it hold, resume or flush (1.12.0), ask it whether
             # a model is set up (1.13.0) or whether WanGP would take a job
-            # (1.16.0) at all.
-            "capabilities": {"hold": True, "model": True, "validate": True},
+            # (1.16.0) at all - and (1.19.0) whether it may hand this WanGP
+            # every job of its own at once: ``queue_many`` says a finished
+            # task is credited with the files WanGP made while it ran, not
+            # with everything made since it was sent, so several of Forge's
+            # tasks can wait in WanGP's queue without taking each other's.
+            "capabilities": {"hold": True, "model": True, "validate": True, "queue_many": True},
             "hold": held.get("hold") or protocol.HOLD_NONE,
             **activity,
         }

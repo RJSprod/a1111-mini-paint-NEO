@@ -251,13 +251,21 @@ class Executor:
                                    message=f"{type(error).__name__}", stage="")
                 raise ExecutionError(protocol.EXECUTION_REFUSED, f"{type(error).__name__}: {error}")
 
+        submitted_at = float(self._clock())
         with self._lock:
             self._watched[execution_id] = {
-                "submitted_at": float(self._clock()),
+                "submitted_at": submitted_at,
                 "seen_queued": False,
                 "retries": 0,
                 "idle_since": 0.0,
                 "priority": bool(request.get("priority")),
+                # Bridge 1.19.0: what this task's files are told apart from.
+                # Everything WanGP's gallery lists now is somebody else's, and
+                # once the task is seen at the head of a running loop only
+                # what appears from then on is its own (see ``_tick``).
+                "since": submitted_at,
+                "before": self._listed(gen),
+                "started": False,
             }
         self._ensure_tracker()
         self._note(
@@ -661,6 +669,9 @@ class Executor:
         in_progress = admission.generating(gen)
         depth = admission.queue_length(gen)
         now = float(self._clock())
+        # What WanGP's gallery lists right now, read once a pass for every
+        # task watched: see "which files are this task's" below.
+        listed = self._listed(gen)
 
         for execution_id, seen in watching.items():
             record = self.ledger.get(execution_id) if self.ledger is not None else None
@@ -673,6 +684,21 @@ class Executor:
             if position is not None:
                 seen["seen_queued"] = True
                 running = position == 0 and bool(in_progress)
+                # WHICH FILES ARE THIS TASK'S (bridge 1.19.0). WanGP runs one
+                # task at a time, so what its gallery gains between the moment
+                # a task is at the head of a running loop and the moment it
+                # leaves the queue is that task's. Counted from the submission
+                # instead, as before 1.19.0, a task queued behind others
+                # claimed every video they made while it waited - right only
+                # while Forge kept one of its jobs in WanGP's queue at a time,
+                # which it no longer does. So while the task waits, the gallery
+                # as it stands is "not this task's" and the clock moves with
+                # it; the first pass that sees it running fixes both, and
+                # nothing after that moves them.
+                if not seen.get("started"):
+                    seen["since"] = now
+                    seen["before"] = listed
+                    seen["started"] = running
                 self.ledger.update(
                     execution_id,
                     state=protocol.EXEC_RUNNING if running else protocol.EXEC_QUEUED,
@@ -714,7 +740,8 @@ class Executor:
                 if admission.refusal_evidence(gen, execution_id):
                     self._declined(execution_id, gen)
                 else:
-                    files = self._outputs(gen, float(seen["submitted_at"]))
+                    files = self._outputs(gen, float(seen.get("since") or seen["submitted_at"]),
+                                          seen.get("before") or ())
                     self.ledger.update(execution_id, state=protocol.EXEC_DONE, stage="",
                                        generated_files=files, position=None, queue_depth=depth)
                     self._note(f"execute {execution_id[:8]}: finished with {len(files)} file(s)")
@@ -754,13 +781,41 @@ class Executor:
         # prompt template can quote the prompt.
         self._note(f"execute {execution_id[:8]}: WanGP declined it")
 
-    def _outputs(self, gen: typing.Any, since: float) -> typing.List[str]:
+    @staticmethod
+    def _gallery(gen: typing.Any) -> typing.Iterator[typing.Tuple[str, typing.List[str]]]:
+        """Each output list WanGP's record holds, by key, as the paths in it."""
+        if not isinstance(gen, dict):
+            return
+        for key in OUTPUT_KEYS:
+            listed = gen.get(key)
+            if not isinstance(listed, (list, tuple)):
+                continue
+            paths = []
+            for item in listed:
+                path = item if isinstance(item, str) else (item.get("path") if isinstance(item, dict) else None)
+                if isinstance(path, str) and path:
+                    paths.append(path)
+            yield key, paths
+
+    def _listed(self, gen: typing.Any) -> typing.FrozenSet[str]:
+        """Every file WanGP's gallery lists right now, absolute: none of them
+        is a task's own that has not started yet. Never fatal."""
+        try:
+            return frozenset(os.path.abspath(path) for _key, paths in self._gallery(gen) for path in paths)
+        except Exception:
+            return frozenset()
+
+    def _outputs(self, gen: typing.Any, since: float,
+                 before: typing.Iterable[str] = ()) -> typing.List[str]:
         """The files this generation produced, as far as the record will say.
 
         Filtered by modification time rather than trusted wholesale: the
         shared list is WanGP's gallery and holds everything the session has
         ever made, so a job's own output is the part of it that appeared
-        after the job was submitted. A build whose record cannot be read
+        after the job started (``since``, see ``_tick``) - and that WanGP's
+        gallery did not already list then (``before``): WanGP writes the
+        task ahead's video moments before it starts the next one, closer than
+        any clock tolerance. A build whose record cannot be read
         returns nothing, and the job is still a success - an empty list with
         the reason beside it is honest, and inventing paths is not.
 
@@ -783,15 +838,10 @@ class Executor:
         """
         if not isinstance(gen, dict):
             return []
+        earlier = frozenset(before or ())
         found: typing.List[str] = []
-        for key in OUTPUT_KEYS:
-            listed = gen.get(key)
-            if not isinstance(listed, (list, tuple)):
-                continue
-            for item in listed:
-                path = item if isinstance(item, str) else (item.get("path") if isinstance(item, dict) else None)
-                if not isinstance(path, str) or not path:
-                    continue
+        for _key, paths in self._gallery(gen):
+            for path in paths:
                 try:
                     if os.path.getmtime(path) + 1.0 < since:
                         continue
@@ -801,6 +851,8 @@ class Executor:
                 # so two spellings of one file collapse instead of both
                 # being reported.
                 resolved = os.path.abspath(path)
+                if resolved in earlier:
+                    continue
                 if resolved not in found:
                     found.append(resolved)
             if found:

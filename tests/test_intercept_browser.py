@@ -632,10 +632,18 @@ async function main() {
         report({ afterCancel: afterCancel, openClosedWithPopup: open.closed, closed: sheets.closed });
     }
     if (MODE === "editorblocked") {
+        // Blocked by the answer itself (readiness not ready): a press on the
+        // prompt, and Enter on it, open nothing.
         popup.open(H1, {});
         await tick(40);
-        root().classList.add("minipaint-intercept-is-blocked");
-        report({ opened: sheets.prompts.length });
+        const blocked = popup.state().blocked;
+        const display = root().querySelector(".minipaint-intercept-prompt");
+        display.click();
+        const enter = new FakeEvent("keydown", { key: "Enter" });
+        enter.target = display;
+        display.dispatchEvent(enter);
+        await tick(10);
+        report({ blocked: blocked, opened: sheets.prompts.length });
     }
     if (MODE === "nosheet") {
         popup.open(H1, { bundles: { sheet: "/s.js" } });
@@ -919,8 +927,8 @@ def run() -> Results:
             cancelled_edit is not None and cancelled_edit.get("openClosedWithPopup") is True
             and "wangp-prompt:popup closed" in (cancelled_edit.get("closed") or []), str(cancelled_edit)[:300])
     blocked_edit = _run("editorblocked")
-    r.check("a popup blocked by the Clipboard's readiness opens no editor",
-            blocked_edit is not None and blocked_edit.get("opened") == 0, str(blocked_edit)[:300])
+    r.check("a popup blocked by the Clipboard's readiness opens no editor, pressed or Enter",
+            blocked_edit is not None and blocked_edit.get("blocked") is True and blocked_edit.get("opened") == 0, str(blocked_edit)[:300])
     missing = _run("nosheet")
     r.check("a page without the editor's bundle fetches it on the press, and says so when it cannot",
             missing is not None and missing.get("loadedSheet") == 1 and "could not be loaded" in (missing.get("message") or ""), str(missing)[:300])

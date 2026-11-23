@@ -743,11 +743,12 @@ def editor_enhance_checks(r: Results) -> None:
         r.check("the popup's own history says it was written in the editor, and so does the press's answer",
                 entry["prewritten"] is True and entry["enhance"] is False and "the prompt written in the editor goes as it is" in answer.get("notes", []),
                 str((entry, answer.get("notes")))[:300])
-        enhance.set_enabled(False)
+        # The switch on, where the entry's own record says the press did not
+        # enhance: a load that set the switch from the entry would turn it off.
+        enhance.set_enabled(True)
         loaded = intercept.recipe(entry["id"], REFERENCE_MODEL, ALL_THREE)
         r.check("loaded back, it is a written prompt again, and the switch is left as it now stands",
-                loaded["prewritten"] is True and loaded["enhance"] is False and enhance.enabled() is False, str(loaded)[:200])
-        enhance.set_enabled(True)
+                loaded["prewritten"] is True and loaded["enhance"] is True and enhance.enabled() is True, str(loaded)[:200])
         sent_through = routes.intercept_action({"action": "submit", "handoff": intercept.stage(_photo((9, 8, 7)), "txt2img"),
                                                 "prompt": "Written already.", "roles": ["reference"], "inherit": False, "enhance": False,
                                                 "page": PAGE, "model": REFERENCE_MODEL, "inputs": ALL_THREE, "prewritten": True, "typed": "typed first"})[0]

@@ -106,12 +106,23 @@ DEFAULT_INTERCEPT_TARGET = INTERCEPT_MINIPAINT
 #: this extension from before the target existed reads the same file.
 DEFAULT_INTERCEPT = False
 #: What the WanGP popup's "Inherit Clipboard inputs" starts as: the last
-#: choice made, on by default.
-DEFAULT_INTERCEPT_INHERIT = True
+#: choice made, off until it is made. On, the composer's own cards fill
+#: every role the popup does not tick; it was on by default until
+#: 2026-11-23, when a gallery picture sent as the reference alone reached
+#: WanGP with the composer's first frame beside it - "make sure that my
+#: options are respected and first image is not passed if I only want to
+#: pass a reference".
+DEFAULT_INTERCEPT_INHERIT = False
+#: Which rule a stored Inherit choice was made under. 2: off until chosen
+#: (2026-11-23). A document without it holds a choice made while Inherit
+#: was on by default - written on every Generate, so the default and a
+#: deliberate tick read the same - and is read as the new default, once.
+INTERCEPT_INHERIT_RULE = 2
 
-#: Where Auto puts a picture: the toolbar's Auto button sends the selected
-#: picture, and the gallery popup's Auto the frozen one, to WanGP in one
-#: press, in every one of these roles the model on the WanGP page reads.
+#: Where Auto puts a picture: the Clipboard tab's Auto button sends the
+#: selected picture to WanGP in one press, in every one of these roles the
+#: model on the WanGP page reads. The gallery popup's Auto took them too until
+#: 2026-11-23, and now sends the roles ticked in the popup.
 #: The generic role ids the enhancer spells (``intercept.ROLE_IDS`` holds
 #: the same three, and a check says so); the menu's Auto Options section
 #: ticks them, several at once, never none.
@@ -363,7 +374,8 @@ class Config:
             "sort": self.sort if self.sort in SORT_MODES else DEFAULT_SORT,
             "thumbnail": clamp_thumbnail(self.thumbnail),
             "outputs_folder": str(self.outputs_folder or ""),
-            "intercept_inherit": self.intercept_inherit is not False,
+            "intercept_inherit": self.intercept_inherit is True,
+            "intercept_inherit_rule": INTERCEPT_INHERIT_RULE,
             "archives": archives_of(self.archives),
             "view": self.view if _ARCHIVE_ID.match(str(self.view or "")) else "",
             "auto_roles": auto_roles_of(self.auto_roles),
@@ -387,7 +399,9 @@ class Config:
             sort=sort if sort in SORT_MODES else DEFAULT_SORT,
             outputs_folder=str(data.get("outputs_folder") or "") if isinstance(data.get("outputs_folder"), str) else "",
             thumbnail=clamp_thumbnail(data.get("thumbnail", THUMBNAIL_DEFAULT)),
-            intercept_inherit=data.get("intercept_inherit", DEFAULT_INTERCEPT_INHERIT) is not False,
+            intercept_inherit=(data.get("intercept_inherit") is True
+                               if data.get("intercept_inherit_rule") == INTERCEPT_INHERIT_RULE
+                               else DEFAULT_INTERCEPT_INHERIT),
             archives=archives_of(data.get("archives")),
             view=str(data.get("view") or "") if _ARCHIVE_ID.match(str(data.get("view") or "")) else "",
             auto_roles=auto_roles_of(data.get("auto_roles")),
@@ -441,6 +455,7 @@ __all__ = [
     "Config",
     "DEFAULT_INTERCEPT",
     "DEFAULT_INTERCEPT_INHERIT",
+    "INTERCEPT_INHERIT_RULE",
     "DEFAULT_INTERCEPT_TARGET",
     "DEFAULT_SORT",
     "INTERCEPT_CLIPBOARD",

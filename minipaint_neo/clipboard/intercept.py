@@ -291,6 +291,10 @@ def reconcile_roles(wanted: typing.Any, caps: typing.Mapping[str, typing.Any]) -
 def auto_roles(caps: typing.Mapping[str, typing.Any], chosen: typing.Any = None) -> typing.Tuple[typing.List[str], typing.List[str]]:
     """Auto's roles against what the model takes: ``(kept, dropped)``.
 
+    The Clipboard tab's Auto, for a picture in the grid. The gallery popup's
+    Auto puts the picture in the roles ticked in the popup instead, since
+    2026-11-23 (``submit``), and never reads these.
+
     ``chosen`` is the Auto Options setting unless a caller names its own. A
     role the model on the WanGP page does not read is dropped - Reference on
     LTX, a frame on Ref2VA - and, unlike ``reconcile_roles``, nothing stands
@@ -664,17 +668,12 @@ def describe(handoff: typing.Any, model: typing.Any = None, inputs: typing.Any =
     availability = enhance.availability(model)
     ready = targets.readiness(model, fresh=bool(fresh))
     caps = capabilities(model, inputs)
-    auto_kept, auto_dropped = auto_roles(caps, current.auto_roles)
     return {
         "ok": True,
         "token": parsed["token"],
         "image": {"width": parsed["width"], "height": parsed["height"], "tab": parsed["tab"]},
         "readiness": ready,
         "capabilities": caps,
-        # Where the popup's Auto would put the picture on this model, for its
-        # tooltip: Auto Options' roles less the ones the model does not read.
-        "auto": {"roles": auto_kept, "dropped": auto_dropped,
-                 "label": config.auto_roles_text(auto_kept) if auto_kept else ""},
         "prompt": draft["prompt_override"],
         "enhance": {"enabled": enhance.enabled(), "state": availability.get("state", "unknown"),
                     "text": availability.get("text", "")},
@@ -729,11 +728,14 @@ def submit(
     answer - and it is recorded on the job, never believed beyond that: see
     ``outbox.submit``.
 
-    ``auto`` is the popup's Auto rather than Generate: the picture goes in
-    the roles the Clipboard's Auto Options names (``auto_roles``) instead of
-    the ones ticked, and when the model reads none of those the press is
-    refused - never sent in a role nobody chose. Everything else is
-    Generate's: the prompt, Enhance and Inherit as they stand.
+    ``auto`` is the popup's Auto rather than Generate, and since 2026-11-23
+    it puts the picture exactly where Generate does: in the roles ticked in
+    this popup, one or several, at the user's word ("when I choose auto and
+    I select only one of the options or multiple of the options, it should
+    just respect whatever I selected within that pop-up"). Auto Options,
+    which chose them here before, are the Clipboard tab's Auto's alone.
+    Everything else is Generate's too - the prompt, Enhance and Inherit as
+    they stand - and what Auto changes is only what the answer says.
     """
     parsed = parse_handoff(handoff)
     if parsed is None:
@@ -742,17 +744,14 @@ def submit(
     if not staged_exists(token):
         return {"ok": False, "code": errors.INTERCEPT_IMAGE_EXPIRED, "message": errors.message(errors.INTERCEPT_IMAGE_EXPIRED)}
     caps = capabilities(model, inputs)
-    if auto:
-        kept, dropped = auto_roles(caps)
-        if not kept:
-            _journal(f"auto refused before storing - the model reads none of {', '.join(dropped)}")
-            return {"ok": False, "code": errors.INTERCEPT_NO_IMAGE_ROLE, "message": auto_refusal(dropped, caps),
-                    "notes": ["choose where Auto puts a picture under Clipboard → Menu → Auto Options"]}
-    else:
-        kept, dropped = reconcile_roles(roles, caps)
+    # The ticked roles, for Auto as for Generate (2026-11-23).
+    kept, dropped = reconcile_roles(roles, caps)
     if not kept:
         return {"ok": False, "code": errors.INTERCEPT_NO_IMAGE_ROLE, "message": errors.message(errors.INTERCEPT_NO_IMAGE_ROLE)}
-    use_draft = inherit is not False
+    # Only an Inherit the press says is on: anything else - off, or a body
+    # that does not say - sends the picture in the ticked roles and nothing
+    # of Clipboard's with it (2026-11-23).
+    use_draft = inherit is True
     wanted = None if enhance_wanted is None else bool(enhance_wanted)
     block = enhance.model_block(model)
     # The shared prompt is Clipboard's the moment Generate is pressed - the
@@ -828,10 +827,7 @@ def submit(
         notes.insert(0, settings["warning"])
         _journal(f"{'auto' if auto else 'generate'}: job {job['job_id'][:8]} - not the settings on WanGP's screen "
                  f"({settings['source'] or 'read at its turn'})")
-    if dropped and auto:
-        notes.append(config.auto_roles_text(dropped) + (" is" if len(dropped) == 1 else " are")
-                     + " not read by the current model, so Auto left " + ("it" if len(dropped) == 1 else "them") + " out")
-    elif dropped:
+    if dropped:
         notes.append(", ".join(ROLE_LABELS[role] for role in dropped) + " is not offered by the current model and was dropped")
     if job.get("narrowed"):
         notes.append(", ".join(ROLE_LABELS[FIELD_ROLES[field]] for field in job["narrowed"] if field in FIELD_ROLES)

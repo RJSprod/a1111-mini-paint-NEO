@@ -526,7 +526,8 @@ of them is refused, never sent the picture somewhere else. Everything else is th
 the prompt as typed and the cards Auto does not fill, each the WanGP page's own where empty -
 and Auto changes none of the cards, so the composer is the template a run of pictures is sent
 from. Presses reach the server in the order made, an archive picture is copied into the storage
-folder first, and the gallery popup has the same Auto beside Generate.
+folder first. The gallery popup's Auto, beside its Generate, is not this one: it sends the
+picture in the roles ticked in the popup.
 
 **Press as often as you like.** Every press is a job in a queue the **server** owns, kept
 beside the draft and the history, so a refresh, a closed tab or a second browser loses
@@ -804,8 +805,8 @@ WanGP page's model reads (first frame, last frame, reference, several at once - 
 and 2.5 a first and a last frame, never a reference), *Inherit Clipboard inputs* for everything the
 popup does not override (off until you turn it on, so only the roles you tick go with the picture),
 a dot saying whether WanGP is idle, generating or not running, and
-Generate - with **Auto** beside it, which sends the picture in the roles the Clipboard's Auto
-Options name instead of the ticked ones. It is blocked by the same answer as the Clipboard's section: until WanGP is ready
+Generate - with **Auto** beside it, the same press: the picture in the roles you tick in the
+popup, one or several, never Auto Options' (those are the Clipboard tab's Auto's). It is blocked by the same answer as the Clipboard's section: until WanGP is ready
 for its page's model, the popup holds the same quiet line and Check again where the prompt,
 the roles, the history and Generate would be. The press itself is finished by the
 page, the way the Clipboard tab's own sends are: no Gradio event, no queue, the picture

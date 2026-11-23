@@ -119,9 +119,10 @@ DEFAULT_INTERCEPT_INHERIT = False
 #: deliberate tick read the same - and is read as the new default, once.
 INTERCEPT_INHERIT_RULE = 2
 
-#: Where Auto puts a picture: the toolbar's Auto button sends the selected
-#: picture, and the gallery popup's Auto the frozen one, to WanGP in one
-#: press, in every one of these roles the model on the WanGP page reads.
+#: Where Auto puts a picture: the Clipboard tab's Auto button sends the
+#: selected picture to WanGP in one press, in every one of these roles the
+#: model on the WanGP page reads. The gallery popup's Auto took them too until
+#: 2026-11-23, and now sends the roles ticked in the popup.
 #: The generic role ids the enhancer spells (``intercept.ROLE_IDS`` holds
 #: the same three, and a check says so); the menu's Auto Options section
 #: ticks them, several at once, never none.

@@ -38,8 +38,9 @@ Auto, on the browser's toolbar beside +First, +Last and +Ref, is those
 presses and Add to Queue in one: the selected picture goes to WanGP in
 every role the menu's Auto Options ticks (First Frame and Reference until
 changed) that the model on the WanGP page reads, with the composer's prompt
-and its other cards, which stay as they were. The gallery's popup has the
-same Auto beside Generate, for the picture it froze.
+and its other cards, which stay as they were. The gallery's popup has an
+Auto beside Generate too, which sends the picture it froze in the roles
+ticked in the popup, never in Auto Options' (since 2026-11-23).
 
 The composer only exists while WanGP can take what it makes. It sends to
 four models - MiniMax H3 FL2VA, MiniMax H3 Ref2VA, LTX 2.3 Distilled and

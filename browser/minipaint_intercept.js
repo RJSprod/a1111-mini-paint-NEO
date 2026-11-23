@@ -12,8 +12,9 @@
  * Generate hands the visible values back to the same route, which builds the
  * request the way the Clipboard composer would and puts it in the same
  * queue; the popup closes the moment the server has stored it. Auto, beside
- * it, is the same press with the roles the Clipboard's Auto Options name in
- * place of the ticked ones - the toolbar Auto's, for the frozen picture.
+ * it, is the same press: the picture in the roles ticked here, one or
+ * several (since 2026-11-23; before then it took the Clipboard's Auto
+ * Options, which are now the Clipboard tab's Auto's alone).
  *
  * THIS FILE KNOWS NO MODEL. It renders the roles it is given, ticks the
  * defaults it is given, and sends the ids it is given. Which roles exist for
@@ -500,9 +501,11 @@ window.minipaintIntercept = (function () {
         const cancelButton = el("button", CLASS + "-cancel", "Cancel");
         cancelButton.type = "button";
         cancelButton.addEventListener("click", function () { cancel(); });
-        // Auto: Generate with the roles Auto Options names instead of the
-        // ticks, so a gallery picture lands where a grid picture's Auto puts
-        // one. The ticks are left as they are for Generate.
+        // Auto: the same press as Generate since 2026-11-23 - the picture in
+        // the roles ticked here, and Inherit as it stands - at the user's word:
+        // "when I choose auto and I select only one of the options or multiple
+        // of the options, it should just respect whatever I selected within
+        // that pop-up".
         const auto = el("button", CLASS + "-auto", "Auto");
         auto.type = "button";
         auto.addEventListener("click", function () { submit(true); });
@@ -577,6 +580,7 @@ window.minipaintIntercept = (function () {
             box.addEventListener("change", function () {
                 S.userRoles = selectedRoles();
                 renderInheritNote();
+                renderStatus();
                 showMessage("");
             });
             label.appendChild(box);
@@ -630,12 +634,23 @@ window.minipaintIntercept = (function () {
         const generate = (S.describe && S.describe.generate) || { enabled: true };
         dom.generate.disabled = !!S.busy || generate.enabled === false;
         dom.generate.title = generate.enabled === false ? String(generate.reason || "WanGP is not running") : "Ctrl+Enter";
-        // Auto is a button exactly when Generate is: the same press, other roles.
-        const auto = (S.describe && S.describe.auto) || {};
+        // Auto is a button exactly when Generate is: the same press, and the
+        // roles it says are the ones ticked here.
+        const ticked = selectedRoles();
         dom.auto.disabled = dom.generate.disabled;
         dom.auto.title = generate.enabled === false ? dom.generate.title
-            : (auto.label === "" ? "The current model reads none of Auto's roles"
-                : "Send the picture as " + String(auto.label || "the Clipboard's Auto Options say")) + " (Clipboard → Menu → Auto Options)";
+            : ticked.length ? "Send the picture as " + roleWords(ticked) + ", as ticked here"
+            : "Tick at least one role for the picture";
+    }
+
+    /** Some role ids as the words the popup shows: "First Frame and Reference". */
+    function roleWords(ids) {
+        const labels = ids.map(function (id) {
+            const role = S.roles.available.filter(function (one) { return (typeof one === "string" ? one : one.id) === id; })[0];
+            return role && typeof role === "object" && role.label ? String(role.label) : String(id);
+        });
+        if (labels.length < 2) { return labels[0] || ""; }
+        return labels.slice(0, -1).join(", ") + " and " + labels[labels.length - 1];
     }
 
     /** Whether the popup's sending half exists: the Clipboard's readiness. */
@@ -959,8 +974,10 @@ window.minipaintIntercept = (function () {
     }
 
     /** What Generate sends: the visible values, the frozen token, the facts.
-     * Auto sends the same and says so; the server reads its roles from Auto
-     * Options, so the ticks travel only for the record. */
+     * Auto sends the same, the ticks included, and says so; since 2026-11-23
+     * the server puts the picture in those ticks for Auto as for Generate.
+     * (Before then it read Auto's roles from Auto Options, and the ticks
+     * travelled only for the record.) */
     function planSubmission(auto) {
         const dom = S.dom;
         const body = Object.assign({
@@ -1023,8 +1040,8 @@ window.minipaintIntercept = (function () {
         // the history, which is read when somebody opens it.
     }
 
-    /** Generate, or with ``auto`` the popup's Auto: the same press, whose
-     * roles are Auto Options' rather than the ticked ones. */
+    /** Generate, or with ``auto`` the popup's Auto: the same press, the
+     * picture in the roles ticked here (since 2026-11-23). */
     function submit(auto) {
         if (!S.open || S.busy) { return Promise.resolve(null); }
         if (blockedView()) {
@@ -1035,7 +1052,8 @@ window.minipaintIntercept = (function () {
         const dom = S.dom;
         const viaAuto = auto === true;
         const body = planSubmission(viaAuto);
-        if (!viaAuto && !body.roles.length && S.roles.available.length) {
+        // Auto needs a tick as much as Generate does: it sends the ticks.
+        if (!body.roles.length && S.roles.available.length) {
             showMessage("Tick at least one role for the picture.", true);
             return Promise.resolve(null);
         }
@@ -1073,8 +1091,8 @@ window.minipaintIntercept = (function () {
                 return answer;
             }
             S.last = { action: viaAuto ? "auto" : "submit", code: "", message: String(answer.status || "") };
-            // The ticks are Generate's: Auto leaves the ones the user chose.
-            if (!viaAuto) { S.userRoles = body.roles.slice(); }
+            // The ticks the press used, Auto's as Generate's: they are the user's.
+            S.userRoles = body.roles.slice();
             mirrorPrompt(body.prompt);
             mirrorEnhance(body.enhance);
             close();

@@ -919,14 +919,13 @@ def get_history(id) -> entry | None; trim(entries) -> entries                # M
 def history_view(model=None, inputs=None) -> [row]; def recipe(entry_id, model=None, inputs=None) -> {prompt, roles, dropped_roles, inherit, enhance, ...}
 def build_request(prompt, roles, token, inherit) -> request                  # history.public_request(draft) with the staged token in every ticked role; inherit=False leaves the composer's cards out
 def describe(handoff, model=None, inputs=None, fresh=False) -> dict           # + readiness: targets.readiness(model, fresh) - the popup is drawn blocked from it
-                                                                             # + auto: {roles, dropped, label} - where its Auto would put the picture on this model
 def save_prompt(prompt) -> dict; def cancel(handoff) -> dict
 def submit(handoff, prompt, roles, inherit, enhance_wanted, page, model=None, inputs=None, settings_flush="", auto=False)
     -> {ok, instruction, status, notes, settings, roles, dropped_roles, auto, history}
                                                                              # inherit: the composer's cards fill the roles not ticked only when it is True;
                                                                              # False or absent sends the picture in the ticked roles and nothing else (2026-11-23)
-                                                                             # auto: the roles are auto_roles(caps), not the ticked ones, and none left is
-                                                                             # INTERCEPT_NO_IMAGE_ROLE with auto_refusal's sentence - never a fallback
+                                                                             # auto: the same press, the picture in the ticked roles (reconcile_roles, as Generate);
+                                                                             # auto_roles and auto_refusal are the Clipboard tab's Auto's alone (2026-11-23)
                                                                              # saves the prompt to the draft, repairs the enhance switch, outbox.submit(..., ORIGIN_GALLERY, ...), records the recipe;
                                                                              # a job the server runs adopts the token at admission, so the popup's cancel afterwards is a no-op;
                                                                              # a refusal by the readiness gate answers {ok: false, code, message, notes, readiness}

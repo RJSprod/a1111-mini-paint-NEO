@@ -139,8 +139,8 @@ Refresh, and every card and history entry that used it says so.
   WanGP from the gallery* below). The choice is saved on the Forge host, so a second
   browser and a Reload UI see the same setting; the old on/off switch is read as Mini
   Paint or Clipboard.
-* **Auto Options ›** — where the toolbar's **Auto** puts the selected picture (and the
-  gallery popup's Auto the picture it froze): **First Frame**, **Last Frame**, **Reference**,
+* **Auto Options ›** — where the toolbar's **Auto** puts the selected picture (not the
+  gallery popup's Auto, which uses the popup's own ticks): **First Frame**, **Last Frame**, **Reference**,
   any of them, several at once, the ones in use ticked. A press flips one and leaves the
   list open for the next; the last one ticked cannot be unticked (*Auto needs at least one
   role, so it is as it was.*). First Frame and Reference until changed. Kept on the Forge host
@@ -579,8 +579,9 @@ picture, tap Auto, and so on.
   enhancement that cannot be made).
 
 Queue Send History and View Outputs keep what Auto sent - the picture in its roles, the
-composer's other cards - so Load brings that request back like any other. The gallery popup
-has the same Auto (see *Send to WanGP from the gallery*).
+composer's other cards - so Load brings that request back like any other. The gallery popup's
+Auto is not this one: it sends the picture in the roles ticked in the popup (see *Send to WanGP
+from the gallery*).
 
 ## Enhanced prompts (ModelSwitchRefiner)
 
@@ -1170,11 +1171,14 @@ What the popup shows, top to bottom:
   *Add to Queue* rule, so it is a button exactly when a press there would be and greyed
   with the reason otherwise; a refused press stores nothing.
 * **Cancel**, **Auto** and **Generate**. Escape cancels; Ctrl+Enter generates. **Auto** is
-  Generate with the roles **Auto Options** names (the toolbar Auto's setting) in place of the
-  ticked ones, so a gallery picture goes where a grid picture's Auto would put it - only the
-  roles the model reads, refused rather than sent elsewhere when it reads none of them - with
-  the prompt, Enhance and Inherit as they stand. The ticks stay for Generate. Its tooltip says
-  where the picture will go on the page's model; it is a button exactly when Generate is.
+  the same press as Generate: the picture in the roles ticked in the popup, one or several,
+  with the prompt, Enhance and Inherit as they stand, and a tick asked for when none is. Its
+  tooltip names the ticked roles; it is a button exactly when Generate is. Until 2026-11-23 it
+  sent the picture in the roles **Auto Options** names (the toolbar Auto's setting) in place of
+  the ticks, so a picture ticked as the reference alone went as the first frame too; at the
+  user's word ("when I choose auto and I select only one of the options or multiple of the
+  options, it should just respect whatever I selected within that pop-up") Auto Options are the
+  toolbar Auto's alone.
 
 **Blocked when the Clipboard is.** The popup asks the same readiness question as the composer
 (WanGP running, its bridge answering, the page on MiniMax H3 FL2VA, Ref2VA, LTX 2.3

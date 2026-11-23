@@ -583,25 +583,35 @@ def check_the_gear_on_forges_prompt(r: Results, page) -> None:
     page.wait_for_timeout(300)
     r.check("Cancel leaves Forge's box as it was",
             page.evaluate("() => document.querySelector('#txt2img_prompt textarea').value") == "a castle at dusk")
-    # Forge lays its token counter over the box's top edge, right; the gear
-    # keeps clear of it.
+    # Forge lays its token counter over the box's top edge, 1em in from its
+    # right (Forge's `.block.token-counter`, with the label hidden as Forge's
+    # prompt hides it); the gear keeps clear of it. Placed where Forge's
+    # rule puts it relative to the box, because this page's box has a label
+    # above it and Forge's does not.
     clear = page.evaluate("""() => {
         const host = document.getElementById('txt2img_prompt');
+        const area = host.querySelector('textarea');
+        const parent = host.parentElement;
+        parent.style.position = 'relative';
         const counter = document.createElement('div');
         counter.id = 'txt2img_token_counter';
         counter.className = 'block token-counter';
-        counter.style.cssText = 'position:absolute; right:1em; top:-0.75em; z-index:100; padding:2px 10px; border:2px solid #999';
         counter.textContent = '0/75';
-        host.parentElement.style.position = 'relative';
-        host.parentElement.insertBefore(counter, host);
+        parent.insertBefore(counter, host);
+        const a = area.getBoundingClientRect(), p = parent.getBoundingClientRect();
+        counter.style.cssText = 'position:absolute; z-index:100; padding:2px 10px; border:2px solid #999; line-height:16px; '
+            + 'top:' + (a.top - p.top - 10) + 'px; right:' + (p.right - a.right + 16) + 'px';
+        const before = (() => { const g = host.querySelector('.minipaint-prompt-gear').getBoundingClientRect(), c = counter.getBoundingClientRect();
+            return !(g.right <= c.left || g.left >= c.right || g.bottom <= c.top || g.top >= c.bottom); })();
         window.minipaintSheet.placeGears();
         const g = host.querySelector('.minipaint-prompt-gear').getBoundingClientRect(), c = counter.getBoundingClientRect();
         const overlap = !(g.right <= c.left || g.left >= c.right || g.bottom <= c.top || g.top >= c.bottom);
         counter.remove();
         window.minipaintSheet.placeGears();
-        return { overlap: overlap, gearTop: g.top, counterBottom: c.bottom };
+        return { before: before, overlap: overlap, gearTop: g.top, counterBottom: c.bottom, inside: g.top >= a.top && g.right <= a.right };
     }""")
-    r.check("and keeps clear of Forge's token counter over the box's top edge", clear["overlap"] is False, str(clear))
+    r.check("a counter where Forge puts it would sit on the gear where the gear first goes", clear["before"] is True, str(clear))
+    r.check("and the gear moves clear of it, still inside the box", clear["overlap"] is False and clear["inside"] is True, str(clear))
     page.evaluate("() => { const a = document.querySelector('#txt2img_prompt textarea'); window.minipaintWriteInput(a, ''); }")
 
 

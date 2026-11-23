@@ -770,10 +770,26 @@ answers with "not a queue action" looks, from the tab, exactly like a press
 that did nothing.
 
     GET  /minipaint-clipboard/enhance-settings?variant&mode
-    POST /minipaint-clipboard/enhance-settings  {action: toggle|override|restore, ...}
+    POST /minipaint-clipboard/enhance-settings  {action: describe|toggle|override|restore, ...}
+      describe {model?, variant?, mode?, fallback?, draft?}
+        -> {ok, enabled, availability: {state, text}, sets: [{id, label}], modes: [{id, label}],
+            view: {variant, mode, text, source: override|default|unavailable, label, line}}
+      override {variant, mode, text} / restore {variant, mode} -> {ok, text, source, view, status}
 
-    POST /minipaint-clipboard/intercept  {action: describe|submit|cancel|draft|history|history_load|history_delete|history_pin,
-                                          handoff?, prompt?, roles?, inherit?, enhance?, page?, model?, inputs?, id?, pinned?, auto?}
+The system prompt editor's whole server (since 2026-11-23, `routes.editor_answer`):
+the editor is the browser's pop-over (`browser/minipaint_sheet.js`) and every
+door opens the same one - the Clipboard tab's button, and the Send to WanGP
+prompt editor, which stacks it. `describe` chooses the set: a `variant` the
+caller names, else the one the `model` is written under
+(`enhance.editor_choice`), else the `fallback` (the set the editor last showed);
+and the mode: a `mode` named, else - for the Clipboard tab's door, which says
+`draft` - whether the composer holds a picture that set's writer reads
+(`ui.draft_has_picture_for`), else without one.
+
+    POST /minipaint-clipboard/intercept  {action: describe|submit|cancel|draft|history|history_load|history_delete|history_pin|
+                                                  enhance_plan|enhance_start|enhance_status|enhance_cancel,
+                                          handoff?, prompt?, roles?, inherit?, enhance?, page?, model?, inputs?, id?, pinned?, auto?,
+                                          prewritten?, typed?, llm_id?}
       -> {ok, ...} per action; a refusal is {ok: false, code, message} with 409 for WANGP_NOT_RUNNING, QUEUE_BUSY
          and INTERCEPT_IMAGE_EXPIRED (the world said no) and 400 for everything else (the caller did)
     GET  /minipaint-clipboard/intercept/image/{token}
@@ -790,6 +806,20 @@ path with the token in the ticked roles. `cancel` lets the picture go;
 popup closes without generating; the `history_*` verbs are the list's own
 buttons. `model` and `inputs` are what the page's WanGP bridge reports, passed
 through so the server can reconcile roles without a call into the child.
+
+The `enhance_*` verbs are the popup's prompt editor's Enhance (2026-11-23):
+`enhance_plan` says, before anything starts, which writer and which of the six
+instruction sets a press with these roles and Inherit would run under and
+which picture it would describe (`{variant, variant_label, prompt_set, mode,
+described, left_out, roles, model, available, availability}`); `enhance_start`
+asks the writer now, for the request Generate would build, and answers with
+its `llm_id` - no job is stored; `enhance_status` reads that id back (`{state,
+stage, position, elapsed, image_used, prompt (done only), message}`), each
+read answered at once; `enhance_cancel` stops it. Only ids started here are
+read or stopped. A `submit` with `prewritten: true` is a prompt the editor's
+Enhance wrote and the user took: it is never enhanced again whatever `enhance`
+says, the switch is left alone, `typed` is what the History keeps, and the
+history entry says `prewritten`.
 
     GET  /minipaint-clipboard/outputs?page&size
       -> {ok, total, page, pages, size, reason: ""|"empty"|"unconfigured", status,
@@ -920,8 +950,11 @@ def history_view(model=None, inputs=None) -> [row]; def recipe(entry_id, model=N
 def build_request(prompt, roles, token, inherit) -> request                  # history.public_request(draft) with the staged token in every ticked role; inherit=False leaves the composer's cards out
 def describe(handoff, model=None, inputs=None, fresh=False) -> dict           # + readiness: targets.readiness(model, fresh) - the popup is drawn blocked from it
 def save_prompt(prompt) -> dict; def cancel(handoff) -> dict
-def submit(handoff, prompt, roles, inherit, enhance_wanted, page, model=None, inputs=None, settings_flush="", auto=False)
+def submit(handoff, prompt, roles, inherit, enhance_wanted, page, model=None, inputs=None, settings_flush="", auto=False,
+           prewritten=False, typed=None)
     -> {ok, instruction, status, notes, settings, roles, dropped_roles, auto, history}
+                                                                             # prewritten: the editor's Enhance wrote the prompt - never enhanced again,
+                                                                             # the switch left alone, typed into the History (outbox.submit(typed_prompt=))
                                                                              # inherit: the composer's cards fill the roles not ticked only when it is True;
                                                                              # False or absent sends the picture in the ticked roles and nothing else (2026-11-23)
                                                                              # auto: the same press, the picture in the ticked roles (reconcile_roles, as Generate);
@@ -929,6 +962,9 @@ def submit(handoff, prompt, roles, inherit, enhance_wanted, page, model=None, in
                                                                              # saves the prompt to the draft, repairs the enhance switch, outbox.submit(..., ORIGIN_GALLERY, ...), records the recipe;
                                                                              # a job the server runs adopts the token at admission, so the popup's cancel afterwards is a no-op;
                                                                              # a refusal by the readiness gate answers {ok: false, code, message, notes, readiness}
+def enhance_plan(handoff, prompt, roles, inherit, model=None, inputs=None) -> dict     # what Enhance would do; starts nothing
+def enhance_start(handoff, prompt, roles, inherit, model=None, inputs=None) -> dict    # enhance.submit() for Generate's request; {llm_id, ...}
+def enhance_status(llm_id) -> dict; def enhance_cancel(llm_id) -> dict                # ids started here only (PREVIEW_KEPT 32, PREVIEW_TTL_SECONDS 3600)
 
 # store.py
 THUMBNAIL_CACHE_SIZE = 512; THUMBNAIL_DIR_NAME = "clipboard-thumbnails"; THUMBNAIL_DISK_BUDGET = 64 MiB; THUMBNAIL_NAME_RE
@@ -1067,20 +1103,17 @@ enhance_toggle])`, `auto.click(js: autoQueue, [prompt, enhance_toggle])` (the
 toolbar's Auto; no backend fn, so no hidden component), `cancel_all.click(js: cancelAll)`,
 `menu_state.change(js: menuStateChanged)`,
 `enhance_toggle.input(toggle_enhance, [enhance_toggle, model] ->
-[enhance_line])`, `model.input(model_changed)`, the selectors' and Reload's
-`system_prompt_selected`, `sp_apply.click(apply_override)`,
-`sp_restore.click(restore_default)`, and `sp_open.click(open_prompt_editor,
-[model, sp_variant, sp_mode] -> [sp_variant, sp_mode, system_prompt,
-sp_state], js: openPromptEditor)`.
+[enhance_line])`, `model.input(model_changed)`, and `sp_open.click(js:
+openPromptEditor)` with no backend fn.
 
-The system prompts have **no accordion and no shape on the tab**: the panel
-carries `minipaint-clip-enhance-panel`, which the stylesheet gives
-`display: none` until the browser puts `minipaint-clip-fullscreen` on it, and
-`sp_open` is the only door. `sp_close.click` is browser-only
-(`closePromptEditor`, no backend fn), because closing is a class the page
-removes. `openPromptEditor`'s `js=` runs before its fn, so the view is already
-open when the fresh variant, mode, box and state land in it; the fn's reload is
-why an unapplied edit does not survive a close and re-open.
+The system prompts have **no Gradio editor at all** since 2026-11-23: `sp_open`
+opens the shared pop-over (`minipaintSheet.systemPrompt`, over
+`/minipaint-clipboard/enhance-settings`), which can be drawn over any tab - the
+gallery's prompt editor stacks it over txt2img - where a panel of this tab,
+inside a tab panel Gradio sets `display: none`, could not. The panel
+`minipaint-clip-enhance-panel` still holds the switch and its line, never
+drawn (`display: none`): the press reads the switch as an input, and the popup
+and the editor mirror into it.
 
 The tab's browser side, `browser/minipaint_clipboard.js`
 (`window.minipaintClipboard`): `attach` (mounts the grid, fetches the library

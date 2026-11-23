@@ -573,18 +573,19 @@ for under exactly the LTX 2.3 system prompt: one set of instructions, one overri
 both. ModelSwitchRefiner keeps each LTX prompt it writes in Prompt Studio's history as a
 **[No settings]** entry, saying which of the two it was for. The job waits in the Queue as
 *Enhancing* with the writer's own progress, and goes to WanGP in press order once its prompt
-exists. One button under the prompt opens a view that fills the window and holds the switch
-and the six system prompts the writers run under (FL2VA, Ref2VA and the LTX set 2.3 and 2.5
-share, each with and without a picture), opened on the pair the next press would use; it
-takes an override that is kept across sessions, and restores the default.
+exists. One button under the prompt opens the **system prompt editor** - the pop-over every
+editor here shares (below) - with the switch and the six system prompts the writers run under
+(FL2VA, Ref2VA and the LTX set 2.3 and 2.5 share, each with and without a picture), opened on
+the pair the next press would use; it takes an override that is kept across sessions,
+restores the default, and asks before an unsaved change is thrown away.
 **Cancel everything** empties the whole line - the writer's requests and the pending jobs -
 in one press; jobs already being sent finish, and nothing in WanGP's own queue is touched.
 
 **View Outputs** (under the queue). Every video in WanGP's output folder - its subfolders
 included, the ones this tab asked for and the ones made in WanGP itself, each once - over the
 whole window, below the tab bar and never under it, or beside it when the Forge Assistant's
-Transpose View runs the tab bar down a side (as do the system prompt editor, History and
-Archives), as a **gallery** or a **slideshow**, one
+Transpose View runs the tab bar down a side (as do History and Archives), as a **gallery** or
+a **slideshow**, one
 list in one order between them, switched on the bar along the top. The **gallery** (where it
 opens until the bar says otherwise) is the whole folder as a grid, drawn the way an archive
 is: every video a tile, only the rows near the view in the page, and each tile's poster - the
@@ -818,6 +819,27 @@ loads one back reconciled against the model the page is on. Every request it mak
 bounded and it holds no stream open, so it costs nothing of the six-connection budget on
 an HTTP/1.1 Forge and nothing at all over the auto-TLS extension's HTTP/2.
 `docs/clipboard/README.md` has the whole of it.
+
+**The prompt is written in a pop-over, not in the popup.** The popup shows its prompt; a tap
+on it (or Enter) opens the **prompt editor** over 90% of the window, the page dimmed round its
+edge, the cursor in the text. **Enhance** there runs the enhancement the press would make -
+the picture in the roles ticked, Inherit as it stands, the writer for the model WanGP is on -
+there and then, and shows what it wrote beside your words (under them on a phone): **Use
+this** puts it in the box, **Roll again** asks once more from the same words, **Back to what I
+typed** undoes it. **System prompt** opens the instructions that enhancement runs under,
+stacked over the editor and a little smaller, on the set the press would use. Done - or
+Escape, or a tap on the dimmed edge - keeps what is in the box; Cancel puts the text back. A
+prompt the enhancer wrote and you took is marked in the popup and **sent as it is**: never
+enhanced a second time at Generate, whatever the switch says, and the switch is left where
+you put it. The enhancement is read back a second at a time while the editor is open and
+stopped when it closes; nothing is held open.
+
+**A gear on Forge's prompt boxes.** txt2img's and img2img's Prompt and Negative prompt get a
+gear in their top right corner (drawn, so a theme's icon swap cannot take it, clear of Forge's
+token counter, with room kept so no word sits under it). It opens the same editor on that
+box - no Enhance or System prompt there, those are WanGP's - and Done writes the text back as
+if typed. A tap into the box itself types, as it always did. Ctrl+Enter in any of these
+editors is the editor's Done, never Forge's Generate behind it.
 
 **Themed.** Every part of the tab is an ordinary Gradio component and every colour is a
 theme variable; there is no fixed white or black anywhere in it, so a night-mode theme
@@ -1185,6 +1207,8 @@ browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid draw
                                  (browser/ is not auto-loaded: each tab fetches its own bundle from /minipaint-assets/js/, cached by content)
 browser/minipaint_intercept.js   the Send to WanGP popup: opened by the gallery button on a frozen picture, drawn from
                                  /minipaint-clipboard/intercept, closed the moment the outbox has the job; fetched only when first needed
+browser/minipaint_sheet.js       the pop-over every editor shares: the prompt editor (the popup's, with Enhance), the system
+                                 prompt editor, and the gear on txt2img's and img2img's prompt boxes; loaded at page load
 wan2gp_bridge/                   the companion plugin, installed into your WanGP
 style.css                        legacy rules, rules scoped to the Canvas root, then to the Clipboard root (theme variables only)
 miniPaint/                       the legacy editor itself

@@ -616,61 +616,97 @@ def tab_checks(r: Results, fake: FakeApi, clock: _Clock, base: pathlib.Path) -> 
     line = tab.toggle_enhance(True, json.dumps(FL2VA_MODEL))
     r.check("the switch turns enhancement on and the line says ready, naming the variant", enhance.enabled() and 'data-state="ready"' in line and "FL2VA" in line and "are on" in line, line)
     r.check("the line follows the page's model", 'data-state="model"' in tab.model_changed(json.dumps(VIDEO_MODEL)) and 'data-state="unknown"' in tab.model_changed(""))
-    box, state = tab.system_prompt_selected("ref2va", "image")
-    r.check("the editor shows a default with its provenance", box["value"] == "DEFAULT ref2va image instructions" and state.startswith("**Default**"))
-    box, state, status = tab.apply_override("ref2va", "image", "MINE for ref2va")
-    r.check("Apply override saves it and says so", box["value"] == "MINE for ref2va" and state.startswith("**Override saved**") and "Override saved" in status and enhance.override("ref2va", "image") == "MINE for ref2va")
-    _box, state, status = tab.apply_override("ref2va", "image", "  ")
-    r.check("a blank override is refused with the sentence", "cannot be blank" in status and state.startswith("**Override saved**"))
-    box, state, status = tab.restore_default("ref2va", "image")
-    r.check("Restore default forgets it and shows the default again", box["value"] == "DEFAULT ref2va image instructions" and state.startswith("**Default**") and enhance.override("ref2va", "image") == "")
+    # -- the system prompt editor: the shared pop-over, over the settings route
+    #
+    # Since 2026-11-23 it is drawn by the browser (minipaint_sheet.js) and
+    # asks the route for everything it shows - the same answers the Gradio
+    # editor it replaced gave, from one place every door shares.
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+    from minipaint_neo.clipboard import routes as clipboard_routes
+
+    settings_app = FastAPI()
+    clipboard_routes.install(settings_app)
+    settings = TestClient(settings_app)
+
+    def editor(**body):
+        return settings.post(clipboard_routes.ENHANCE_SETTINGS_ROUTE, json=dict(body, action="describe")).json()
+
+    shown = editor(variant="ref2va", mode="image")
+    view = shown.get("view") or {}
+    r.check("the editor shows a default with its provenance",
+            shown.get("ok") and view.get("text") == "DEFAULT ref2va image instructions" and view.get("source") == "default"
+            and view.get("line", "").startswith("Default for"), str(view)[:200])
+    r.check("with the switch, the line about the LLM side and the sets and modes it can move to",
+            shown.get("enabled") is True and shown.get("availability", {}).get("state")
+            and [item["id"] for item in shown.get("sets", [])] == list(enhance.PROMPT_SETS)
+            and [item["id"] for item in shown.get("modes", [])] == list(enhance.MODES), json.dumps(shown)[:300])
+    saved = settings.post(clipboard_routes.ENHANCE_SETTINGS_ROUTE,
+                          json={"action": "override", "variant": "ref2va", "mode": "image", "text": "MINE for ref2va"}).json()
+    r.check("Save override saves it and says so",
+            saved.get("ok") and saved["view"]["text"] == "MINE for ref2va" and saved["view"]["line"].startswith("Override saved")
+            and "Override saved" in saved.get("status", "") and enhance.override("ref2va", "image") == "MINE for ref2va", str(saved)[:200])
+    blank = settings.post(clipboard_routes.ENHANCE_SETTINGS_ROUTE,
+                          json={"action": "override", "variant": "ref2va", "mode": "image", "text": "  "})
+    r.check("a blank override is refused with the sentence, and the saved one stands",
+            blank.status_code == 400 and "cannot be blank" in blank.json().get("status", "") and enhance.override("ref2va", "image") == "MINE for ref2va",
+            blank.text[:200])
+    restored = settings.post(clipboard_routes.ENHANCE_SETTINGS_ROUTE, json={"action": "restore", "variant": "ref2va", "mode": "image"}).json()
+    r.check("Restore default forgets it and shows the default again",
+            restored.get("ok") and restored["view"]["text"] == "DEFAULT ref2va image instructions" and restored["view"]["source"] == "default"
+            and enhance.override("ref2va", "image") == "", str(restored)[:200])
 
     # -- the editor opens on the pair a press would actually use
     #
-    # Which of the four sets the writer runs under is a lookup, not a menu:
-    # the variant is whichever H3 model WanGP is on, and the picture half is
-    # whether the composer is holding one that variant reads. Opening on the
-    # pair chosen last means editing one set and finding out at the next
-    # press that another was used.
+    # Which of the sets the writer runs under is a lookup, not a menu: the
+    # variant is whichever model WanGP is on, and the picture half - from the
+    # Clipboard tab's door, which says ``draft`` - is whether the composer is
+    # holding one that variant reads. Opening on the pair chosen last means
+    # editing one set and finding out at the next press that another was used.
+    def opened(model, fallback, draft=True):
+        found = editor(model=model, fallback=fallback, draft=draft).get("view") or {}
+        return found.get("variant"), found.get("mode"), found.get("text")
+
     library = clipboard_store.store()
     history.save_draft(history.normalize_draft({}))
-    variant, mode, box, _state = tab.open_prompt_editor(json.dumps(FL2VA_MODEL), "ref2va", "image")
+    variant, mode, text = opened(FL2VA_MODEL, "ref2va")
     r.check("with WanGP on FL2VA and nothing attached, the editor opens on FL2VA without a picture",
-            _value(variant) == "fl2va" and _value(mode) == "text" and box["value"] == "DEFAULT fl2va text instructions",
-            f"{_value(variant)}/{_value(mode)}")
-    variant, mode, box, _state = tab.open_prompt_editor(json.dumps(REF2VA_MODEL), "fl2va", "text")
-    r.check("and follows WanGP to Ref2VA rather than staying where it was",
-            _value(variant) == "ref2va" and _value(mode) == "text", f"{_value(variant)}/{_value(mode)}")
+            variant == "fl2va" and mode == "text" and text == "DEFAULT fl2va text instructions", f"{variant}/{mode}")
+    variant, mode, _text = opened(REF2VA_MODEL, "fl2va")
+    r.check("and follows WanGP to Ref2VA rather than staying where it was", variant == "ref2va" and mode == "text", f"{variant}/{mode}")
 
     picture = library.import_bytes(_png(), "attached.png", "upload")
     draft = history.load_draft()
     draft["reference_asset_ids"] = [picture.asset_id]
     history.save_draft(draft)
-    variant, mode, box, _state = tab.open_prompt_editor(json.dumps(REF2VA_MODEL), "fl2va", "text")
+    variant, mode, _text = opened(REF2VA_MODEL, "fl2va")
     r.check("a reference attached is a picture Ref2VA reads, so the picture instructions open",
-            _value(variant) == "ref2va" and _value(mode) == "image", f"{_value(variant)}/{_value(mode)}")
-    variant, mode, _box, _state = tab.open_prompt_editor(json.dumps(FL2VA_MODEL), "ref2va", "image")
+            variant == "ref2va" and mode == "image", f"{variant}/{mode}")
+    variant, mode, _text = opened(FL2VA_MODEL, "ref2va")
     r.check("but the same reference is not one FL2VA reads, so that pair opens without a picture",
-            _value(variant) == "fl2va" and _value(mode) == "text", f"{_value(variant)}/{_value(mode)}")
+            variant == "fl2va" and mode == "text", f"{variant}/{mode}")
+    variant, mode, _text = opened(REF2VA_MODEL, "fl2va", draft=False)
+    r.check("and a door that does not say draft - the gallery's, which names its own - is not told the composer's pictures",
+            variant == "ref2va" and mode == "text", f"{variant}/{mode}")
 
     draft = history.load_draft()
     draft["reference_asset_ids"] = []
     draft["first_asset_id"] = picture.asset_id
     history.save_draft(draft)
-    variant, mode, _box, _state = tab.open_prompt_editor(json.dumps(FL2VA_MODEL), "ref2va", "image")
-    r.check("a first frame is one FL2VA reads", _value(variant) == "fl2va" and _value(mode) == "image",
-            f"{_value(variant)}/{_value(mode)}")
+    variant, mode, _text = opened(FL2VA_MODEL, "ref2va")
+    r.check("a first frame is one FL2VA reads", variant == "fl2va" and mode == "image", f"{variant}/{mode}")
 
-    variant, mode, _box, _state = tab.open_prompt_editor("", "ref2va", "text")
-    r.check("a WanGP that has not said its model keeps the variant on screen rather than guessing one",
-            _value(variant) == "ref2va", _value(variant))
-    variant, _mode, _box, _state = tab.open_prompt_editor(json.dumps(VIDEO_MODEL), "ref2va", "text")
-    r.check("and so does a model that is neither variant", _value(variant) == "ref2va", _value(variant))
+    variant, mode, _text = opened(None, "ref2va")
+    r.check("a WanGP that has not said its model keeps the set the editor last showed rather than guessing one",
+            variant == "ref2va", str(variant))
+    variant, _mode, _text = opened(VIDEO_MODEL, "ref2va")
+    r.check("and so does a model that is neither variant", variant == "ref2va", str(variant))
+    named = editor(model=FL2VA_MODEL, variant="ref2va", mode="image").get("view") or {}
+    r.check("while a set the caller names is the set it opens on", named.get("variant") == "ref2va" and named.get("mode") == "image", str(named)[:120])
 
     library.delete(picture.asset_id)
-    _variant, mode, _box, _state = tab.open_prompt_editor(json.dumps(FL2VA_MODEL), "fl2va", "image")
-    r.check("a slot whose file has left the folder is not a picture anybody is going to send",
-            _value(mode) == "text", _value(mode))
+    _variant, mode, _text = opened(FL2VA_MODEL, "fl2va")
+    r.check("a slot whose file has left the folder is not a picture anybody is going to send", mode == "text", str(mode))
     history.save_draft(history.normalize_draft({}))
 
     tab.prompt_changed("typed in the tab")

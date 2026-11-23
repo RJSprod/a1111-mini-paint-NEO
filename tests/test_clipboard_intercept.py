@@ -677,6 +677,102 @@ def enhancer_checks(r: Results, tab) -> None:
         enhance.use_api(None)
 
 
+def editor_enhance_checks(r: Results) -> None:
+    """The prompt editor's Enhance (2026-11-23): the press's own enhancement,
+    asked for now and read back a step at a time - and a prompt it wrote, sent
+    as it is, never enhanced twice, the switch left where the user put it."""
+    from minipaint_neo.clipboard import prompts
+
+    fake = FakeApi()
+    enhance.use_api(fake)
+    intercept.forget_previews()
+    try:
+        outbox.use_running(lambda: True)
+        outbox.use_executor(outbox.EXECUTOR_BROWSER)
+        enhance.set_enabled(True)
+        handoff = intercept.stage(_photo((7, 8, 9)), "txt2img")
+        plan = intercept.enhance_plan(handoff, "", ["reference"], False, REFERENCE_MODEL, ALL_THREE)
+        r.check("asked before Enhance is pressed, the plan names the writer, the set and the picture, and starts nothing",
+                plan.get("ok") and plan["variant"] == "ref2va" and plan["prompt_set"] == "ref2va" and plan["mode"] == "image"
+                and plan["described"] == ["the reference"] and plan["available"] is True and not fake.submissions, str(plan)[:300])
+        words_only = intercept.enhance_plan(handoff, "", ["first_frame"], False, REFERENCE_MODEL, ALL_THREE)
+        r.check("a picture in a role that writer does not read is no picture to it: the words-alone instructions",
+                words_only.get("ok") and words_only["mode"] == "text" and words_only["described"] == [], str(words_only)[:300])
+        count = len(outbox.jobs())
+        started = intercept.enhance_start(handoff, "a fox in snow", ["reference"], False, REFERENCE_MODEL, ALL_THREE)
+        submitted = fake.submissions[-1] if fake.submissions else {}
+        r.check("Enhance asks the writer now, for the press's own request, and stores no job",
+                started.get("ok") and started.get("llm_id") and submitted.get("prompt") == "a fox in snow" and submitted.get("variant") == "ref2va"
+                and submitted.get("images") == ["reference"] and len(outbox.jobs()) == count, str((started, submitted))[:300])
+        running = intercept.enhance_status(started.get("llm_id"))
+        r.check("read back while it runs, it says where it is and holds no prompt yet",
+                running.get("ok") and running["state"] in (enhance.LLM_QUEUED, enhance.LLM_RUNNING) and "prompt" not in running, str(running))
+        fake.finish(started["llm_id"], prompt="A red fox in deep snow, low sun.")
+        done = intercept.enhance_status(started["llm_id"])
+        r.check("and once it is written, the prompt itself, with how long it took",
+                done.get("state") == enhance.LLM_DONE and done.get("prompt") == "A red fox in deep snow, low sun." and done.get("elapsed") > 0, str(done))
+        stranger = "0" * 16
+        r.check("an enhancement this editor did not start is neither read nor stopped",
+                intercept.enhance_status(stranger)["ok"] is False and intercept.enhance_cancel(stranger)["ok"] is False)
+        second = intercept.enhance_start(handoff, "the same idea again", ["reference"], False, REFERENCE_MODEL, ALL_THREE)
+        stopped = intercept.enhance_cancel(second.get("llm_id"))
+        r.check("Stop cancels one still running",
+                stopped.get("ok") and stopped.get("cancelled") is True and fake.jobs[second["llm_id"]]["state"] == "cancelled", str(stopped))
+        blank = intercept.enhance_start(handoff, "   ", ["reference"], False, REFERENCE_MODEL, ALL_THREE)
+        r.check("a blank prompt is not sent to the writer",
+                blank["ok"] is False and blank["code"] == errors.ENHANCE_PROMPT_REQUIRED and len(fake.submissions) == 2, str(blank))
+        unsupported = intercept.enhance_start(handoff, "x", ["first_frame"], False, PLAIN_MODEL, ALL_THREE)
+        r.check("a model no writer writes for is refused with the code, before the writer is asked",
+                unsupported["ok"] is False and unsupported["code"] == errors.ENHANCE_MODEL_UNSUPPORTED and len(fake.submissions) == 2, str(unsupported))
+        expired = intercept.enhance_start("wangp:" + "e" * 32 + ":4x4:txt2img", "x", ["reference"], False, REFERENCE_MODEL, ALL_THREE)
+        r.check("and a picture that has been let go is refused as gone", expired["code"] == errors.INTERCEPT_IMAGE_EXPIRED, str(expired))
+
+        # The prompt the editor wrote, taken and sent.
+        # Enhance ticked on screen too: a written prompt is never enhanced
+        # again, whatever the press says of the switch.
+        answer = intercept.submit(handoff, "A red fox in deep snow, low sun.", ["reference"], False, True, PAGE, REFERENCE_MODEL, ALL_THREE,
+                                  prewritten=True, typed="a fox in snow")
+        job = outbox.get(answer.get("job_id", "")) or {}
+        r.check("a prompt the editor wrote is queued as it is: not enhanced a second time",
+                answer.get("ok") and job.get("enhance_requested") is False and job.get("state") != "enhancing"
+                and (job.get("request") or {}).get("prompt") == "A red fox in deep snow, low sun.", str(answer)[:300])
+        r.check("and the switch the user left on stays on", enhance.enabled() is True)
+        r.check("the composer's History keeps the words typed, not the written prompt",
+                (prompts.entries() or [{}])[0].get("prompt") == "a fox in snow", str((prompts.entries() or [{}])[0])[:200])
+        entry = intercept.load_history()[0]
+        r.check("the popup's own history says it was written in the editor, and so does the press's answer",
+                entry["prewritten"] is True and entry["enhance"] is False and "the prompt written in the editor goes as it is" in answer.get("notes", []),
+                str((entry, answer.get("notes")))[:300])
+        # The switch on, where the entry's own record says the press did not
+        # enhance: a load that set the switch from the entry would turn it off.
+        enhance.set_enabled(True)
+        loaded = intercept.recipe(entry["id"], REFERENCE_MODEL, ALL_THREE)
+        r.check("loaded back, it is a written prompt again, and the switch is left as it now stands",
+                loaded["prewritten"] is True and loaded["enhance"] is True and enhance.enabled() is True, str(loaded)[:200])
+        sent_through = routes.intercept_action({"action": "submit", "handoff": intercept.stage(_photo((9, 8, 7)), "txt2img"),
+                                                "prompt": "Written already.", "roles": ["reference"], "inherit": False, "enhance": False,
+                                                "page": PAGE, "model": REFERENCE_MODEL, "inputs": ALL_THREE, "prewritten": True, "typed": "typed first"})[0]
+        job = outbox.get(sent_through.get("job_id", "")) or {}
+        r.check("the route passes prewritten and typed through to the press",
+                sent_through.get("ok") and job.get("enhance_requested") is False and enhance.enabled() is True
+                and (prompts.entries() or [{}])[0].get("prompt") == "typed first", str(sent_through)[:200])
+        log = pathlib.Path(str(process_log.path()))
+        text = log.read_text(encoding="utf-8") if log.is_file() else ""
+        r.check("the log says what the editor's Enhance did by id and writer, never the words",
+                "enhance in the editor: llm " in text and "a fox in snow" not in text and "A red fox" not in text
+                and "written in the editor" in text, text[-400:])
+        for stored in outbox.jobs():
+            if stored["state"] in ("pending", "enhancing"):
+                try:
+                    outbox.cancel(stored["job_id"])
+                except Exception:
+                    pass
+    finally:
+        intercept.forget_previews()
+        enhance.set_enabled(False)
+        enhance.use_api(None)
+
+
 # ------------------------------------------------------------------ history --
 
 
@@ -916,7 +1012,8 @@ def route_checks(r: Results) -> None:
     r.check("cancel over HTTP releases the picture", cancelled["ok"] and cancelled["released"] is True)
     r.check("an unknown action is refused", client.post(routes.INTERCEPT_ROUTE, json={"action": "explode"}).status_code == 400)
     r.check("every action the popup may send is one the route takes",
-            set(routes.INTERCEPT_ACTIONS) == {"describe", "submit", "cancel", "draft", "history", "history_load", "history_delete", "history_pin"})
+            set(routes.INTERCEPT_ACTIONS) == {"describe", "submit", "cancel", "draft", "history", "history_load", "history_delete", "history_pin",
+                                              "enhance_plan", "enhance_start", "enhance_status", "enhance_cancel"})
     invented = intercept.stage(_photo((14, 15, 16)), "txt2img")
     odd = client.post(routes.INTERCEPT_ROUTE, json={"action": "submit", "handoff": invented, "prompt": "odd word", "roles": ["first_frame"],
                                                     "inherit": False, "enhance": False, "page": PAGE, "inputs": ALL_THREE,
@@ -1008,6 +1105,7 @@ def run() -> Results:
                 inherit_default_checks(r, tab)
                 auto_checks(r, tab)
                 enhancer_checks(r, tab)
+                editor_enhance_checks(r)
                 history_checks(r)
                 settings_history_checks(r)
                 press_settings_checks(r)

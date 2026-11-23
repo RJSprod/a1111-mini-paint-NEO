@@ -611,6 +611,39 @@ def effective_prompt(variant: typing.Any, mode: typing.Any) -> typing.Tuple[str,
     return (text, "default") if text else ("", "unavailable")
 
 
+def prompt_view(variant: typing.Any, mode: typing.Any) -> dict:
+    """One instruction set as the system prompt editor shows it: the set and
+    the mode, the text a press would run under, where that text comes from,
+    and the line under the box that says so. Raises for a variant or a mode
+    that is not one of the six sets."""
+    text, source = effective_prompt(variant, mode)
+    chosen = prompt_set(variant)
+    label = f"{PROMPT_SET_LABELS.get(chosen, chosen)}, {MODE_LABELS.get(mode, mode)}"
+    if source == "override":
+        line = f"Override saved for {label}. Restore default forgets it."
+    elif source == "default":
+        line = f"Default for {label}, as ModelSwitchRefiner ships it. Edit it and save an override to replace it."
+    else:
+        line = (f"No default for {label} could be read: ModelSwitchRefiner is not available in this Forge. "
+                "An override can still be saved.")
+    return {"variant": chosen, "mode": mode, "text": text, "source": source, "label": label, "line": line}
+
+
+def editor_choice(model: typing.Any, variant: typing.Any = "", has_picture: bool = False) -> typing.Tuple[str, str]:
+    """Which instruction set the editor opens on: the one the model WanGP is
+    on is written under, and with or without a picture as the caller says.
+
+    THE SIX SETS ARE NOT A MENU. Opening on whichever pair happened to be
+    selected last means editing one set and finding out at the next press
+    that another was used. A WanGP that has not said its model keeps the
+    ``variant`` the caller names, else FL2VA's: guessing would be worse.
+    """
+    chosen = target_for_model(model_block(model))
+    if chosen not in VARIANTS:
+        chosen = variant if variant in VARIANTS else FL2VA
+    return prompt_set(chosen), (MODE_IMAGE if has_picture else MODE_TEXT)
+
+
 def system_prompts() -> dict:
     """Every default with its structure guide, as the API publishes them -
     MiniMax's two variants and the LTX set LTX 2.3 and 2.5 share, with and
@@ -1030,7 +1063,7 @@ __all__ = [
     "LTX23", "LTX25", "LTX_KIND", "LTX_VARIANTS", "MINIMAX_VARIANTS", "PROMPT_SETS", "PROMPT_SET_LABELS", "PROMPT_SET_OF", "prompt_set",
     "ORIGIN", "REF2VA", "REJECTIONS", "SLOTS", "SLOTS_FOR", "SLOT_FIRST", "SLOT_LABELS", "SLOT_LAST", "SLOT_REFERENCE", "VARIANTS",
     "VARIANT_LABELS", "api", "availability", "cancel", "cancel_all", "capabilities", "clear_override", "default_prompt", "describe",
-    "effective_prompt", "enabled", "follow", "model_block", "override", "overrides", "plan", "preflight", "release_runtime",
+    "editor_choice", "effective_prompt", "enabled", "follow", "model_block", "override", "overrides", "plan", "preflight", "prompt_view", "release_runtime",
     "reset_for_tests", "set_enabled", "set_override", "start_session", "status", "submit", "system_prompts", "target_for_model",
     "use_api", "variant_for_model",
     "FEED_CONTENT_EVENTS", "FEED_TERMINAL_EVENTS", "FEED_WAIT_SECONDS",

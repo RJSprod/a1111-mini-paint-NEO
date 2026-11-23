@@ -586,6 +586,22 @@ sees. Memory profiles do not change this: 1-4 pin (every model, or the
 transformer alone), 3+ and 5 pin nothing, and none of them makes the total
 smaller - a model that is not pinned is still in RAM, pageable.
 
+**Every editor over the page is one sheet, drawn by the browser.** The prompt editor of the
+Send to WanGP popup, the system prompt editor and the gear's editor on Forge's prompt boxes
+are `browser/minipaint_sheet.js` (2026-11-23: "these should look the same ... consistent and
+modularized"), loaded at every page load by the Clipboard tab's build. The system prompt
+editor used to be a Gradio panel of the Clipboard tab given a full-window class, and a panel
+of a tab Gradio has set `display: none` cannot be drawn over another tab at all - which is
+what stacking it over the popup's editor on txt2img needs. So it reads and writes over the
+settings route (`routes.editor_answer`) and the Gradio controls are gone; do not move it back
+into Gradio. Sheets stack on the dialog layer (+10 each, a deeper one a little smaller), each
+announced with `minipaint:overlay` as `sheet:<name>`, and the keyboard is the top sheet's,
+taken on the window's capture phase: **Ctrl+Enter over Forge is Forge's Generate** (its
+`script.js` listens on the document), so a text box in anything over the page has to stop it
+there or a Done presses Generate behind the dialog - the gear's check listens on the document
+and expects nothing. Closing a prompt editor any way but Cancel keeps the text; a system
+prompt with an unsaved change asks.
+
 ## The sibling repositories
 
 `RJSprod/NEO-webui-auto-tls-https` gives Forge its certificate and, since

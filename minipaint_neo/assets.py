@@ -62,6 +62,10 @@ BUNDLES: typing.Mapping[str, str] = {
     # otherwise: a session that keeps the button on Mini Paint never parses
     # it.
     "intercept": "minipaint_intercept.js",
+    # The pop-over every editor shares - the popup's prompt editor, the
+    # system prompt editor - and the gear on Forge's prompt boxes. Loaded at
+    # page load by the Clipboard tab's build, because the gear is on txt2img.
+    "sheet": "minipaint_sheet.js",
 }
 
 #: Where they live: a folder of this repository that Forge does not load on

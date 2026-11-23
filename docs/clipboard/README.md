@@ -605,11 +605,16 @@ its Prompt Studio entry say LTX 2.5; one from before LTX 2.5 writes the very sam
 without that keyword and files it as LTX 2.3's. A ModelSwitchRefiner without the writer
 refuses an LTX press with `ENHANCE_LTX_UNSUPPORTED` rather than sending it to MiniMax.
 
-Under the prompt box, one button: **⤢ Prompt enhancement and system prompts**. It opens a
-view that fills the window; the panel has no shape on the tab itself, so the composer stays
-the composer, and everything this section describes lives in that view - the switch, the
-variant and *Instructions used* selectors, the prompt box with its state line, **Apply
-override**, **Restore default**, **Reload**, and **Close** (Escape closes it too). The switch
+Under the prompt box, one button: **⤢ Prompt enhancement and system prompts**. It opens the
+**system prompt editor**, the pop-over every editor of this extension shares
+(`browser/minipaint_sheet.js`, 2026-11-23): 90% of the window, the page dimmed round its
+edge, the composer left as it was. Everything this section describes lives in it - the
+switch (drawn, so no theme's checkbox styling reaches it), the *Writer* and *Instructions
+used* selectors, the box with its state line, **Save override**, **Restore default**,
+**Reload** and **Close**. Escape, a tap on the dimmed edge and ✕ close it too, and with an
+unsaved change in the box each of them - and a move to another set - asks first: **Save**,
+**Discard** or **Keep editing**. The gallery's Send to WanGP prompt editor opens the very
+same editor, stacked over itself. The switch
 is off by default and does nothing until three things are true, and the view's first line
 says which of them is not: the *SD-Neo-ModelSwitchRefiner* extension is installed in this Forge
 (its external LLM API, `mc_llm_api`, is imported straight from that extension's folder -
@@ -641,16 +646,15 @@ A picture at all needs a language model that can see; one that cannot refuses th
 (`ENHANCE_NO_VISION`), and the line says so beforehand.
 
 **The system prompt.** The writer runs under one of six instruction sets - FL2VA, Ref2VA and
-the one LTX set LTX 2.3 and 2.5 share, each with and without a picture - and the view shows
-them: pick the variant and *Instructions used*, and the box holds the text with its
+the one LTX set LTX 2.3 and 2.5 share, each with and without a picture - and the editor shows
+them: pick the *Writer* and *Instructions used*, and the box holds the text with its
 provenance under it (*Default, as ModelSwitchRefiner ships it* or *Override saved*).
-**Opening the view picks the pair the next press would use**: the set of whichever model the
+**Opening it picks the pair the next press would use**: the set of whichever model the
 WanGP page is on - an H3 variant, or the LTX set for LTX 2.3 or 2.5 - and the picture half
 when the draft holds a picture that model reads - a First or Last Frame for FL2VA, a
 Reference for Ref2VA, a First Frame for LTX - which are the same two questions a press asks.
-A page on none of them leaves the selectors where they were. Each open re-reads the effective prompt, so an edit
-left unapplied is gone the next time the view opens, exactly as *Reload* would leave it.
-Edit it and **Apply override** to replace
+A page on none of them opens on the set the editor last showed. Each open re-reads the
+effective prompt, exactly as *Reload* would. Edit it and **Save override** to replace
 that set for every enhanced press from then on, on every page, after a restart too
 (`clipboard-enhance.json`); **Restore default** forgets the override and shows the default
 again; **Reload** re-reads whichever is current. A blank override is refused, not saved.
@@ -887,7 +891,7 @@ responsively to respect the tab bar rather on top or sides. It should not overla
 below when top, or beside when tab bar on side." The Forge Assistant's *Transpose View* puts the
 tab bar on a rail down the left or the right of the window (the Model Chain theme draws it,
 48 px, and pads the page beside it, which the Clipboard tab itself sits in). The tab's views
-that are fixed to the window - View Outputs, the system prompt editor, History and Archives -
+that are fixed to the window - View Outputs, History and Archives -
 measure what the page has pinned at its edges, as they always measured a bar along the top:
 an element really there, fixed or sticky, starting at the edge, and for a side a **rail's
 shape** - thin (160 px at most) and most of the window tall, so the Forge Assistant's
@@ -1147,8 +1151,9 @@ What the popup shows, top to bottom:
   what you typed); Cancel and Escape release the token at once; a token nobody used is
   swept with the rest of the staging folder after thirty minutes.
 * **The prompt** — the composer's own: the popup opens with what the Clipboard tab's
-  prompt box holds, and what you type is what the composer holds afterwards, whether or
-  not you generate.
+  prompt box holds, and what you write is what the composer holds afterwards, whether or
+  not you generate. It is shown, not typed in: a tap on it (or Enter) opens the **prompt
+  editor** (below).
 * **Enhance** — the same switch as the composer's *Enhanced prompts*, saved the same way.
   The writer gets the system prompt override saved in the tab; the default is used only
   when no override is saved.
@@ -1179,6 +1184,40 @@ What the popup shows, top to bottom:
   user's word ("when I choose auto and I select only one of the options or multiple of the
   options, it should just respect whatever I selected within that pop-up") Auto Options are the
   toolbar Auto's alone.
+
+**The prompt editor** (2026-11-23: "a new pop over for editing the prompt in the send to
+wan2gp pop up ... I should be able to [roll] an enhance right there and see the results, and
+also edit the system prompt used for enhancing using that pop over stacked"). The shared
+pop-over over 90% of the window, the page and the popup dimmed round it, the cursor at the end
+of the text - inside the tap, so a phone raises its keyboard - and sized to what the keyboard
+leaves of the screen. **Done**, Escape, ✕ and a tap on the dimmed edge keep what is in the
+box; **Cancel** puts it back. Ctrl+Enter is Done, never Forge's Generate behind it.
+
+* **Enhance** runs the enhancement Generate would make with Enhance on - the same request (the
+  picture in the roles ticked, the composer's cards only with Inherit), the same writer for the
+  model the readiness check names, the same instructions - there and then, without storing a
+  job (`enhance_plan` says beforehand what it will be, under the box; `enhance_start`,
+  `enhance_status`, `enhance_cancel`). The editor reads where it is a second at a time while it
+  runs and stops asking the moment it is written or the editor closes; closing it while the
+  writer works stops the writer. What it wrote is shown beside your words (under them on a
+  narrow screen): **Use this** puts it in the box, **Roll again** asks once more from the same
+  words, **Back to what I typed** undoes Use this, **Dismiss** puts the result away.
+* **System prompt** opens the system prompt editor over the prompt editor - a little smaller,
+  so the editor shows round it - on the set this press's enhancement runs under; Escape closes
+  the top one only.
+* **A prompt the enhancer wrote and you took goes as it is.** The popup marks it (an accent
+  line), says so beside Enhance, and Generate sends it with `prewritten`: never enhanced a
+  second time whatever the switch says, the switch left where you put it, and the words you
+  typed are what the composer's History keeps. Its history entry says so, and Load brings it
+  back the same way.
+
+**A gear on Forge's prompt boxes.** The same editor opens from a gear in the top right corner
+of txt2img's and img2img's Prompt and Negative prompt - never from a tap into the box, which
+types as it always did. The gear is drawn (no character a theme could swap for an icon), kept
+clear of a scroll bar and of Forge's token counter over the box's top edge, with room kept in
+the box so no word sits under it. There is no Enhance or System prompt there: those are
+WanGP's. Done writes the text back into Forge's box as typing would, so Forge's token counter
+and everything else listening hears it.
 
 **Blocked when the Clipboard is.** The popup asks the same readiness question as the composer
 (WanGP running, its bridge answering, the page on MiniMax H3 FL2VA, Ref2VA, LTX 2.3

@@ -940,13 +940,54 @@ def _output_poster(request: typing.Any) -> typing.Any:
     return Response(content=data, media_type=mime, headers=headers)
 
 
+def editor_answer(body: typing.Mapping[str, typing.Any]) -> dict:
+    """What the system prompt editor draws itself from, in one answer.
+
+    The switch, the line about the LLM side and WanGP's model, the sets and
+    the modes it can be moved to, and the set it is on - with its text, where
+    that text comes from and the line that says so (``enhance.prompt_view``).
+
+    Which set: a ``variant`` the caller names, else the one the ``model`` is
+    written under (``enhance.editor_choice``), else the ``fallback`` - the set
+    the editor last showed, because a WanGP that has not said its model is no
+    reason to jump to another one. Which mode: a ``mode`` the caller names,
+    else - for the Clipboard tab's own door, which says ``draft`` - whether
+    the composer holds a picture that set's writer reads, else without a
+    picture. The gallery's prompt editor names both: it asked the intercept
+    route which set its press would use.
+    """
+    from . import enhance as enhance_module
+    from . import ui as ui_module
+
+    model = body.get("model") if isinstance(body.get("model"), dict) else None
+    variant = body.get("variant") if body.get("variant") in enhance_module.VARIANTS else ""
+    fallback = body.get("fallback") if body.get("fallback") in enhance_module.VARIANTS else ""
+    mode = body.get("mode") if body.get("mode") in enhance_module.MODES else ""
+    chosen = enhance_module.prompt_set(variant) if variant else enhance_module.editor_choice(model, fallback)[0]
+    if not mode:
+        picture = body.get("draft") is True and ui_module.draft_has_picture_for(chosen)
+        mode = enhance_module.MODE_IMAGE if picture else enhance_module.MODE_TEXT
+    availability = enhance_module.availability(model)
+    return {
+        "ok": True,
+        "enabled": enhance_module.enabled(),
+        "availability": {"state": availability.get("state", "unknown"), "text": availability.get("text", "")},
+        "sets": [{"id": item, "label": enhance_module.PROMPT_SET_LABELS[item]} for item in enhance_module.PROMPT_SETS],
+        "modes": [{"id": item, "label": enhance_module.MODE_LABELS[item]} for item in enhance_module.MODES],
+        "view": enhance_module.prompt_view(chosen, mode),
+    }
+
+
 async def _enhance_settings(request: typing.Any) -> typing.Any:
     """The prompt-enhancement settings, over HTTP: describe, toggle, edit.
 
     The describe half has existed since the enhancer did; these are the
     write halves it never had - the switch, an override for one of the four
     instruction sets, and the restore that forgets one. Each is
-    request-and-response and none of them was ever a push.
+    request-and-response and none of them was ever a push. Since 2026-11-23
+    this is the whole of the system prompt editor's server: ``describe``
+    (``editor_answer``) is what it draws itself from, and ``override`` and
+    ``restore`` answer with the set as it now stands (``view``).
     """
     if not _signed_in(request):
         return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
@@ -973,6 +1014,12 @@ async def _enhance_settings(request: typing.Any) -> typing.Any:
     body = body if isinstance(body, dict) else {}
     action = str(body.get("action") or "")
     try:
+        if action == "describe":
+            from starlette.concurrency import run_in_threadpool
+
+            # Off the event loop: the LLM side's capabilities are a call into
+            # another extension, and the draft is a file.
+            return _json(await run_in_threadpool(editor_answer, body))
         if action == "toggle":
             wanted = enhance_module.set_enabled(bool(body.get("enabled")))
             return _json({"ok": True, "enabled": wanted,
@@ -981,12 +1028,14 @@ async def _enhance_settings(request: typing.Any) -> typing.Any:
             enhance_module.set_override(body.get("variant"), body.get("mode"), body.get("text"))
             text, source = enhance_module.effective_prompt(body.get("variant"), body.get("mode"))
             return _json({"ok": True, "text": text, "source": source,
+                          "view": enhance_module.prompt_view(body.get("variant"), body.get("mode")),
                           "status": "Override saved. Every enhanced press from now on uses it, "
                                     "on every page, after a restart too."})
         if action == "restore":
             had = enhance_module.clear_override(body.get("variant"), body.get("mode"))
             text, source = enhance_module.effective_prompt(body.get("variant"), body.get("mode"))
             return _json({"ok": True, "text": text, "source": source,
+                          "view": enhance_module.prompt_view(body.get("variant"), body.get("mode")),
                           "status": "Back to the default." if had else "There was no override; the default is shown."})
     except IntegrationError as error:
         return _refused_here(error)
@@ -1079,7 +1128,8 @@ def _refused_here(error: IntegrationError) -> typing.Any:
 
 #: What the popup may ask of the intercept route, and the arguments each
 #: takes out of the body. One list, read by the route and by the checks.
-INTERCEPT_ACTIONS = ("describe", "submit", "cancel", "draft", "history", "history_load", "history_delete", "history_pin")
+INTERCEPT_ACTIONS = ("describe", "submit", "cancel", "draft", "history", "history_load", "history_delete", "history_pin",
+                     "enhance_plan", "enhance_start", "enhance_status", "enhance_cancel")
 
 
 def intercept_action(body: typing.Mapping[str, typing.Any]) -> typing.Tuple[dict, int]:
@@ -1087,12 +1137,14 @@ def intercept_action(body: typing.Mapping[str, typing.Any]) -> typing.Tuple[dict
 
     Every action is request-and-response. ``describe`` is what the popup
     draws itself from; ``submit`` is Generate, and with ``auto`` the popup's
-    Auto, whose roles come from the Clipboard's Auto Options rather than the
-    ticks; ``cancel`` lets the frozen picture go; ``draft`` keeps an edited
+    Auto, the same press since 2026-11-23 (the picture in the ticked roles);
+    ``cancel`` lets the frozen picture go; ``draft`` keeps an edited
     prompt shared with Clipboard when the popup closes without generating;
-    the ``history_*`` verbs are the list's own buttons. Refusals carry the
-    code's sentence and a 4xx that says whether the caller or the world was
-    wrong.
+    the ``history_*`` verbs are the list's own buttons; the ``enhance_*``
+    verbs are the prompt editor's Enhance - what it would do, start it, read
+    it, stop it - each answered at once (``intercept.enhance_start``).
+    Refusals carry the code's sentence and a 4xx that says whether the
+    caller or the world was wrong.
     """
     from . import intercept
 
@@ -1112,7 +1164,16 @@ def intercept_action(body: typing.Mapping[str, typing.Any]) -> typing.Tuple[dict
                 body.get("page") or "", model, inputs,
                 settings_flush=body.get("settings_flush"),
                 auto=body.get("auto") is True,
+                prewritten=body.get("prewritten") is True,
+                typed=body.get("typed") if isinstance(body.get("typed"), str) else None,
             )
+        elif action in ("enhance_plan", "enhance_start"):
+            start = intercept.enhance_start if action == "enhance_start" else intercept.enhance_plan
+            answer = start(body.get("handoff"), body.get("prompt") or "", body.get("roles"), body.get("inherit"), model, inputs)
+        elif action == "enhance_status":
+            answer = intercept.enhance_status(body.get("llm_id"))
+        elif action == "enhance_cancel":
+            answer = intercept.enhance_cancel(body.get("llm_id"))
         elif action == "cancel":
             answer = intercept.cancel(body.get("handoff"))
         elif action == "draft":
@@ -1448,5 +1509,5 @@ __all__ = ["ARCHIVES_ROUTE", "ARCHIVE_IMAGE_ROUTE", "ARCHIVE_LIST_ROUTE", "AUTO_
            "INTERCEPT_ROUTE", "INTERCEPT_SENTENCES", "LIBRARY_ROUTE", "PAGE_SIZE",
            "PAGE_SIZE_MAX", "PAGE_SIZE_MIN", "REVALIDATED_CACHE", "ROUTE_PREFIX",
            "SEND_ROUTE", "SETTINGS_ROUTE", "QUEUE_ROUTE", "READINESS_ROUTE", "ENHANCE_SETTINGS_ROUTE", "PROMPTS_ROUTE", "REQUEST_MEMORY_SECONDS",
-           "apply_settings", "archive_image_url", "archives_action", "archives_answer", "auto_sentence", "clamp_size", "forget_request", "image_url", "install", "intercept_action", "library_listing",
+           "apply_settings", "archive_image_url", "archives_action", "archives_answer", "auto_sentence", "clamp_size", "editor_answer", "forget_request", "image_url", "install", "intercept_action", "library_listing",
            "menu_facts", "page_of", "prompts_action", "recent_request", "remember_request"]

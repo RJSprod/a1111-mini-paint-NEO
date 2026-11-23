@@ -1611,144 +1611,144 @@ def check_the_queue_is_read_again_unasked(r: Results, page) -> None:
 
 
 def check_the_prompt_editor_fills_the_window(r: Results, page) -> None:
-    """A system prompt is a page of prose; the composer is a third of a window.
+    """The system prompt editor is the pop-over every editor shares.
 
-    So the panel gets a second shape rather than a second home. What has to
-    be true: the press fills the window, the box being edited takes most of
-    it, every control that was in the panel is still in it, and there is one
-    of each - a second editor beside the first is two sets of controls that
-    drift.
+    A system prompt is a page of prose; the composer is a third of a window.
+    Since 2026-11-23 the tab's one button opens the shared pop-over
+    (``minipaint_sheet.js``) rather than a second shape of a Gradio panel:
+    90% of the window with the page dimmed round it, the box most of it, the
+    cursor in the box, every control the panel had, and an unsaved change
+    asked about before it is thrown away. What is IN the box is the server's
+    answer and depends on whether ModelSwitchRefiner is installed beside this
+    one, so nothing here reads it.
     """
+    from minipaint_neo.clipboard import enhance
+
     open_clipboard(page)
     time.sleep(1.0)
-    r.check("the editor is not on the tab at all until it is asked for",
-            page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False)
-    # THE TAB KEEPS ONE BUTTON AND NOTHING ELSE. Not a collapsed section that
-    # still takes a third of the composer to say its own name: the panel has
-    # no shape here, and none of its controls is measurable on the page.
+    r.check("the editor is not on the page at all until it is asked for",
+            page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False
+            and page.evaluate("() => !document.querySelector('.minipaint-sheet-layer')"))
     hidden = page.evaluate("""() => {
         const panel = document.getElementById('minipaint_clipboard_enhance_panel');
-        const names = ['enhance_line', 'enhance_toggle', 'sp_variant', 'sp_mode',
-                       'system_prompt', 'sp_state', 'sp_apply', 'sp_restore', 'sp_reload', 'sp_close'];
-        return {
-            panel: panel ? Math.round(panel.getBoundingClientRect().height) : -1,
-            showing: names.filter(n => {
-                const el = document.getElementById('minipaint_clipboard_' + n);
-                return !!el && el.getBoundingClientRect().height > 0;
-            })
-        };
-    }""")
-    r.check("the enhancement panel takes no room on the tab", hidden["panel"] == 0, str(hidden["panel"]))
-    r.check("and not one of its controls is on the tab either", not hidden["showing"], str(hidden["showing"]))
-    r.check("the button that opens it is, though",
-            page.evaluate("""() => {
-                const b = document.getElementById('minipaint_clipboard_sp_open');
-                return !!b && b.getBoundingClientRect().height > 0;
-            }"""))
+        return panel ? Math.round(panel.getBoundingClientRect().height) : -1; }""")
+    r.check("the enhancement panel the switch lives in takes no room on the tab", hidden == 0, str(hidden))
+    gone = page.evaluate("""() => ['sp_variant', 'sp_mode', 'system_prompt', 'sp_state', 'sp_apply', 'sp_restore', 'sp_reload', 'sp_close']
+        .filter(n => document.getElementById('minipaint_clipboard_' + n))""")
+    r.check("and no Gradio copy of the editor is left on the page", not gone, str(gone))
+    r.check("the button that opens it is there",
+            page.evaluate("""() => { const b = document.getElementById('minipaint_clipboard_sp_open');
+                return !!b && b.getBoundingClientRect().height > 0; }"""))
 
-    pressed = page.evaluate("""() => {
-        const host = document.getElementById('minipaint_clipboard_sp_open');
-        const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
-        if (!b) { return false; }
-        b.click();
-        return true;
-    }""")
-    r.check("the editor has a way in", pressed is True)
-    time.sleep(2.0)
+    def press_open():
+        return page.evaluate("""() => {
+            const host = document.getElementById('minipaint_clipboard_sp_open');
+            const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
+            if (!b) { return false; }
+            b.click();
+            return true; }""")
 
+    overlays = page.evaluate("""() => { window.__sheetOverlays = [];
+        document.addEventListener('minipaint:overlay', e => window.__sheetOverlays.push(e.detail.name + ':' + (e.detail.open ? 'open' : 'closed')));
+        return true; }""")
+    asked = []
+
+    def on_request(request):
+        if "/minipaint-clipboard/enhance-settings" in request.url and request.method == "POST":
+            asked.append(request.post_data or "")
+
+    page.on("request", on_request)
+    r.check("the editor has a way in", overlays and press_open() is True)
+    page.wait_for_timeout(1500)
+    page.remove_listener("request", on_request)
+    first = json.loads(asked[0]) if asked else {}
+    r.check("it asks the server which instructions to open on, saying they are this tab's - the composer's pictures decide",
+            first.get("action") == "describe" and first.get("draft") is True, str(first)[:200])
     shape = page.evaluate("""() => {
-        const panel = document.getElementById('minipaint_clipboard_enhance_panel');
-        const box = panel && panel.querySelector('.minipaint-clip-system-prompt textarea');
-        const p = panel ? panel.getBoundingClientRect() : null;
+        const layer = document.querySelector('.minipaint-sheet-layer');
+        const sheet = layer && layer.querySelector('.minipaint-sheet');
+        const box = sheet && sheet.querySelector('.minipaint-sheet-text');
+        const p = sheet ? sheet.getBoundingClientRect() : null;
         const t = box ? box.getBoundingClientRect() : null;
-        return {
-            open: !!(panel && panel.classList.contains('minipaint-clip-fullscreen')),
-            panelW: p ? Math.round(p.width) : 0, panelH: p ? Math.round(p.height) : 0,
-            boxH: t ? Math.round(t.height) : 0, boxW: t ? Math.round(t.width) : 0,
-            windowW: window.innerWidth, windowH: window.innerHeight,
-            text: box ? String(box.value || '').length : 0
-        };
+        const w = window.innerWidth, h = window.innerHeight;
+        const hit = (x, y) => { const e = document.elementFromPoint(x, y); return e ? e.className : ''; };
+        return { open: window.minipaintClipboard.debug().editorOpen, names: window.minipaintSheet.state().open,
+                 left: p ? p.left : -1, top: p ? p.top : -1, width: p ? p.width : 0, height: p ? p.height : 0,
+                 boxW: t ? t.width : 0, boxH: t ? t.height : 0, w: w, h: h,
+                 edge: hit(8, h / 2), centre: hit(w / 2, h / 2),
+                 focused: !!box && document.activeElement === box,
+                 controls: { toggle: !!sheet.querySelector('[role=switch]'), sets: sheet.querySelectorAll('.minipaint-sheet-set option').length,
+                             modes: sheet.querySelectorAll('.minipaint-sheet-mode option').length,
+                             save: !!sheet.querySelector('.minipaint-sheet-save'), restore: !!sheet.querySelector('.minipaint-sheet-restore'),
+                             reload: !!sheet.querySelector('.minipaint-sheet-reload'), close: !!sheet.querySelector('.minipaint-sheet-close-text') } };
     }""")
-    r.check("the press fills the window", shape["open"] is True
-            and shape["panelW"] >= shape["windowW"] * 0.9 and shape["panelH"] >= shape["windowH"] * 0.9,
-            f"{shape['panelW']}x{shape['panelH']} of {shape['windowW']}x{shape['windowH']}")
-    r.check("with MOSTLY the box being edited, which is what the view is for",
-            shape["boxH"] >= shape["windowH"] * 0.45 and shape["boxW"] >= shape["panelW"] * 0.8,
-            f"box {shape['boxW']}x{shape['boxH']} in {shape['panelW']}x{shape['panelH']}")
-    # What is IN the box is the server's answer, and this page has no
-    # ModelSwitchRefiner to read a default from - the unit suite checks the
-    # loading against a fake one. What has to be true here is that the box is
-    # the thing the view puts you in front of.
-    r.check("the cursor is already in the box, because typing in it is what the view is for",
-            page.evaluate("""() => {
-                const box = document.querySelector('#minipaint_clipboard_system_prompt textarea');
-                return !!box && document.activeElement === box;
-            }"""))
-    page.keyboard.type("edited in the full window")
-    time.sleep(0.4)
-    typed = page.evaluate("""() => {
-        const box = document.querySelector('#minipaint_clipboard_system_prompt textarea');
-        return {value: box ? String(box.value || '') : '', focus: document.activeElement ? (document.activeElement.id
-                || document.activeElement.className || document.activeElement.tagName) : ''};
-    }""")
-    r.check("and it takes what is typed into it", typed["value"] == "edited in the full window", str(typed))
+    r.check("the press opens the shared pop-over, as the system prompt editor",
+            shape["open"] is True and shape["names"] == ["system-prompt"], str(shape)[:300])
+    r.check("90% of the window, in the middle of it",
+            abs(shape["width"] - shape["w"] * 0.9) <= 2 and abs(shape["height"] - shape["h"] * 0.9) <= 2
+            and abs(shape["left"] - shape["w"] * 0.05) <= 2 and abs(shape["top"] - shape["h"] * 0.05) <= 2, str(shape)[:300])
+    r.check("with the page dimmed round its edge, and the sheet over the middle",
+            "minipaint-sheet-backdrop" in shape["edge"] and "minipaint-sheet" in shape["centre"], str((shape["edge"], shape["centre"])))
+    r.check("MOSTLY the box being edited, which is what the view is for",
+            shape["boxH"] >= shape["h"] * 0.45 and shape["boxW"] >= shape["width"] * 0.9, str(shape)[:300])
+    r.check("and the cursor is already in the box", shape["focused"] is True, str(shape)[:300])
+    r.check("every control the panel had: the switch, the writer and the instructions used, save, restore, reload and close",
+            all(shape["controls"].values()) and shape["controls"]["sets"] == 3 and shape["controls"]["modes"] == 2, str(shape["controls"]))
+    r.check("announced to the page as an overlay, so the Forge Assistant gets out of its way",
+            "sheet:system-prompt:open" in page.evaluate("() => window.__sheetOverlays"), str(page.evaluate("() => window.__sheetOverlays")))
 
-    controls = page.evaluate("""() => {
-        const panel = document.getElementById('minipaint_clipboard_enhance_panel');
-        const on = id => {
-            const host = document.getElementById(id);
-            if (!host || !panel.contains(host)) { return false; }
-            return getComputedStyle(host).display !== 'none' && host.getBoundingClientRect().height > 0;
-        };
-        return {
-            toggle: on('minipaint_clipboard_enhance_toggle'),
-            variant: on('minipaint_clipboard_sp_variant'),
-            mode: on('minipaint_clipboard_sp_mode'),
-            prompt: on('minipaint_clipboard_system_prompt'),
-            apply: on('minipaint_clipboard_sp_apply'),
-            restore: on('minipaint_clipboard_sp_restore'),
-            reload: on('minipaint_clipboard_sp_reload'),
-            close: on('minipaint_clipboard_sp_close')
-        };
-    }""")
-    missing = [name for name, there in controls.items() if not there]
-    r.check("every control the panel had is in the view, and Close with them", not missing, str(missing))
-    hint = page.evaluate("""() => {
-        const panel = document.getElementById('minipaint_clipboard_enhance_panel');
-        return panel ? panel.textContent : '';
-    }""")
-    r.check("the paragraph about what the switch does is not in the view either",
-            "Off by default" not in hint and "is refused, not enhanced" not in hint, hint[:140])
+    page.keyboard.press("Control+End")
+    page.keyboard.type(" EDITED-IN-THE-SHEET")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    asked = page.evaluate("() => window.minipaintSheet.top() ? window.minipaintSheet.top().state() : null")
+    r.check("Escape with an unsaved change asks before throwing it away, and stays open",
+            bool(asked) and asked["asking"] is True and asked["dirty"] is True and editor_open(page), str(asked))
+    page.locator(".minipaint-sheet-keep").click()
+    page.wait_for_timeout(200)
+    r.check("Keep editing goes back to the box with the change in it",
+            page.evaluate("() => document.activeElement && document.activeElement.classList.contains('minipaint-sheet-text') && document.activeElement.value.indexOf('EDITED-IN-THE-SHEET') >= 0"))
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(200)
+    page.locator(".minipaint-sheet-discard").click()
+    page.wait_for_timeout(500)
+    r.check("Discard closes it", page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False
+            and page.evaluate("() => !document.querySelector('.minipaint-sheet-layer')"))
+    view = None
+    try:
+        r.check("it opens again", press_open() is True)
+        page.wait_for_timeout(1500)
+        view = page.evaluate("() => window.minipaintSheet.top().state().view")
+        r.check("re-read, rather than keeping the edit it was told to discard",
+                bool(view) and "EDITED-IN-THE-SHEET" not in page.evaluate("() => document.querySelector('.minipaint-sheet-text').value"), str(view)[:200])
+        page.evaluate("() => { const b = document.querySelector('.minipaint-sheet-text'); b.focus(); b.select(); }")
+        page.keyboard.type("Saved from the shared editor.")
+        page.locator(".minipaint-sheet-save").click()
+        page.wait_for_timeout(1200)
+        saved = page.evaluate("() => window.minipaintSheet.top().state()")
+        r.check("Save override writes the set it shows, and says so",
+                bool(view) and enhance.override(view["variant"], view["mode"]) == "Saved from the shared editor."
+                and saved["view"]["source"] == "override" and saved["dirty"] is False, str(saved)[:200])
+        page.locator(".minipaint-sheet-restore").click()
+        page.wait_for_timeout(1200)
+        restored = page.evaluate("() => window.minipaintSheet.top().state()")
+        r.check("and Restore default forgets it", bool(view) and enhance.override(view["variant"], view["mode"]) == ""
+                and restored["view"]["source"] != "override", str(restored)[:200])
+        page.locator(".minipaint-sheet-close-text").click()
+        page.wait_for_timeout(500)
+        r.check("and Close puts it away", page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False)
+        r.check("saying so to the page", "sheet:system-prompt:closed" in page.evaluate("() => window.__sheetOverlays"))
+    finally:
+        if view:
+            try:
+                enhance.clear_override(view["variant"], view["mode"])
+            except Exception:
+                pass
+        page.evaluate("() => window.minipaintSheet && window.minipaintSheet.closeAll()")
 
-    page.evaluate("""() => document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))""")
-    time.sleep(1.0)
-    r.check("Escape puts it away", page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False)
-    r.check("leaving the panel back in the column, with what was typed still in it",
-            page.evaluate("""() => {
-                const panel = document.getElementById('minipaint_clipboard_enhance_panel');
-                const box = document.querySelector('#minipaint_clipboard_system_prompt textarea');
-                return !!panel && getComputedStyle(panel).position !== 'fixed'
-                    && !!box && String(box.value || '').indexOf('edited in the full window') === 0;
-            }"""))
 
-    page.evaluate("""() => {
-        const host = document.getElementById('minipaint_clipboard_sp_open');
-        const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
-        if (b) { b.click(); }
-    }""")
-    time.sleep(1.5)
-    r.check("and opening it again re-reads the instructions rather than keeping an unapplied edit",
-            page.evaluate("""() => {
-                const box = document.querySelector('#minipaint_clipboard_system_prompt textarea');
-                return box ? String(box.value || '').indexOf('edited in the full window') : -1;
-            }""") != 0)
-    page.evaluate("""() => {
-        const host = document.getElementById('minipaint_clipboard_sp_close');
-        const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
-        if (b) { b.click(); }
-    }""")
-    time.sleep(1.5)
-    r.check("and Close puts it away too", page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False)
+def editor_open(page) -> bool:
+    return bool(page.evaluate("() => window.minipaintClipboard.debug().editorOpen"))
 
 
 def check_sorting_is_separate_from_drawing(r: Results, page) -> None:
@@ -2972,8 +2972,9 @@ def check_the_views_stand_beside_a_side_tab_bar(r: Results, page) -> None:
         # The other views fixed to the window, beside a rail on the left.
         page.evaluate("() => document.documentElement.setAttribute('data-forge-assistant-rail', 'left')")
         page.wait_for_timeout(400)
+        # (The system prompt editor is not one of them since 2026-11-23: it is
+        # the shared pop-over, a dialog over the whole window, rail included.)
         for name, opener, closer, selector in (
-                ("the system prompt editor", "openPromptEditor", "closePromptEditor", "#minipaint_clipboard_enhance_panel"),
                 ("History", "openPromptHistory", "closePromptHistory", ".minipaint-clip-prompts"),
                 ("Archives", "openArchives", "closeArchives", ".minipaint-clip-archives")):
             page.evaluate(f"() => window.minipaintClipboard.{opener}()")
@@ -4310,18 +4311,19 @@ def check_a_long_request_column_scrolls_inside_itself(r: Results, page) -> None:
         }""")
         page.wait_for_timeout(1500)
         view = page.evaluate("""() => {
-            const panel = document.getElementById('minipaint_clipboard_enhance_panel');
-            const p = panel.getBoundingClientRect();
-            const inside = (x, y) => { const hit = document.elementFromPoint(x, y); return !!hit && panel.contains(hit); };
+            const layer = document.querySelector('.minipaint-sheet-layer');
+            const sheet = layer ? layer.querySelector('.minipaint-sheet') : null;
+            const p = sheet ? sheet.getBoundingClientRect() : { width: 0, height: 0, left: 0, top: 0 };
+            const inside = (x, y) => { const hit = document.elementFromPoint(x, y); return !!hit && !!layer && layer.contains(hit); };
             const w = window.innerWidth, h = window.innerHeight;
             return { open: window.minipaintClipboard.debug().editorOpen,
                      width: p.width, height: p.height, w: w, h: h,
                      corners: [inside(12, h - 12), inside(w - 24, h - 12), inside(w / 2, h / 2), inside(12, h / 2)],
                      columnScrolled: document.getElementById('minipaint_clipboard_composer').scrollTop };
         }""")
-        r.check("the system prompt editor, opened from a scrolled column, still fills the window",
+        r.check("the system prompt editor, opened from a scrolled column, is still 90% of the window",
                 view["open"] is True and view["columnScrolled"] > 0
-                and view["width"] >= view["w"] * 0.9 and view["height"] >= view["h"] * 0.9, str(view))
+                and abs(view["width"] - view["w"] * 0.9) <= 2 and abs(view["height"] - view["h"] * 0.9) <= 2, str(view))
         r.check("and none of it is cut off by the column it came from",
                 all(view["corners"]), str(view))
         page.evaluate("""() => document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))""")

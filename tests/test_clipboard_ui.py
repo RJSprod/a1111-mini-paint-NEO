@@ -232,8 +232,7 @@ def page_checks(r: Results, base: pathlib.Path):
         "queue", "queue_status", "outbox_list",
         "history_panel", "history_list", "history_close",
         # prompt enhancement, and the whole line's cancel
-        "enhance_panel", "enhance_line", "enhance_toggle", "sp_variant", "sp_mode", "system_prompt", "sp_state", "sp_apply", "sp_restore", "sp_reload",
-        "sp_open", "sp_close",
+        "enhance_panel", "enhance_line", "enhance_toggle", "sp_open",
         # the gallery of what WanGP made
         "outputs_open", "outputs_panel",
         "model", "cancel_all",
@@ -307,23 +306,20 @@ def page_checks(r: Results, base: pathlib.Path):
     # only ever reconciled by a change event and one had been lost.
     r.check("and the prompt and the enhancement switch travel with the press, so what is on screen is what happens",
             click and click[0]["inputs"] == [cid("prompt"), cid("enhance_toggle")], str(click[0]["inputs"] if click else None))
-    # -- the system prompt editor's second shape
+    # -- the system prompt editor: the shared pop-over since 2026-11-23
     opened = targeting("sp_open", "click")
-    r.check("the editor fills the window from the browser AND is loaded by the server in one press",
-            len(opened) == 1 and opened[0]["backend_fn"] and ".openPromptEditor(" in (opened[0].get("js") or ""),
-            str(len(opened)))
-    r.check("it is told the page's WanGP model and what is selected, and it sets both selectors and the box",
-            opened and opened[0]["inputs"] == [cid("model"), cid("sp_variant"), cid("sp_mode")]
-            and opened[0]["outputs"] == [cid("sp_variant"), cid("sp_mode"), cid("system_prompt"), cid("sp_state")],
-            str(opened[0]["outputs"] if opened else None))
-    r.check("and closing it is the browser's alone, because which shape a panel is in is not the server's business",
-            all(not d["backend_fn"] and ".closePromptEditor(" in (d.get("js") or "") for d in targeting("sp_close", "click"))
-            and targeting("sp_close", "click"))
-    # The panel is PROMOTED, not copied: one set of controls, so there is no
-    # second editor to drift from the first.
-    r.check("there is one system prompt box on the page, not one per shape",
-            len([c for c in page["components"]
-                 if str(c["props"].get("elem_id") or "") == "minipaint_clipboard_system_prompt"]) == 1)
+    r.check("the editor is the browser's pop-over, opened by the press alone: no server event, nothing for the queue",
+            len(opened) == 1 and not opened[0]["backend_fn"] and ".openPromptEditor(" in (opened[0].get("js") or "")
+            and not opened[0]["inputs"] and not opened[0]["outputs"], str(opened[:1])[:200])
+    # The Gradio controls of the old full-window shape are gone - there is one
+    # editor, the browser's, which every door of this extension opens.
+    gone = ("sp_variant", "sp_mode", "system_prompt", "sp_state", "sp_apply", "sp_restore", "sp_reload", "sp_close")
+    r.check("no Gradio copy of the editor is left on the page to drift from it",
+            not [c for c in page["components"] if str(c["props"].get("elem_id") or "") in {"minipaint_clipboard_" + name for name in gone}])
+    r.check("while the switch the press reads is still there, in a panel that is never drawn",
+            component_of(page, "minipaint_clipboard_enhance_toggle")["type"] == "checkbox"
+            and "#minipaint_clipboard_root .minipaint-clip-enhance-panel { display: none; }"
+            in (pathlib.Path(__file__).resolve().parent.parent / "style.css").read_text(encoding="utf-8"))
     hints = " ".join(str(c["props"].get("value") or "") for c in page["components"] if c["type"] == "markdown")
     r.check("and the paragraph explaining what the switch does is gone from the page",
             "Off by default" not in hints and "a page on another model is refused" not in hints,

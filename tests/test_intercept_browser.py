@@ -220,7 +220,8 @@ function describeAnswer(body) {
                                      : { label: "Generate", enabled: true, reason: "" },
         auto: { roles: ["first_frame", "reference"], dropped: [], label: "First Frame and Reference" },
         executor: "server",
-        history: MODE === "history" ? HISTORY : []
+        history: MODE === "history" || MODE === "editorhistory" ? HISTORY : [],
+        readiness: MODE === "editorblocked" ? { ready: false, code: "WANGP_NOT_RUNNING", message: "WanGP is not running." } : { ready: true }
     };
 }
 
@@ -276,8 +277,8 @@ global.fetch = function (url, options) {
                     settings: { source: "saved_at_send", sentence: "saved from the WanGP page at send", in_view: true, warning: "" } };
         }
         else if (action === "history_load") {
-            payload = { ok: true, id: body.id, prompt: "loaded prompt", enhance: false, inherit: true, roles: ["reference"], dropped_roles: [], defaulted: false,
-                        capabilities: { roles: ALL, default_roles: ["reference"] } };
+            payload = { ok: true, id: body.id, prompt: "loaded prompt", enhance: MODE === "editorhistory", inherit: true, roles: ["reference"], dropped_roles: [], defaulted: false,
+                        prewritten: MODE === "editorhistory", capabilities: { roles: ALL, default_roles: ["reference"] } };
         }
         else if (action === "history_pin" || action === "history_delete") { payload = { ok: true, history: HISTORY }; }
         else { payload = { ok: true, released: true }; }
@@ -324,6 +325,12 @@ if (MODE === "facts") {
     };
     window.minipaintInterop = { wangp: { capabilities: function () { return window.minipaintWanGP.capabilities(); }, pageId: function () { return "d".repeat(32); } } };
 }
+if (MODE === "editor") {
+    // The Clipboard tab's switch on this page, on: a written prompt's press
+    // must leave it on.
+    const toggleHost = new Node("div"); toggleHost.setAttribute("id", "minipaint_clipboard_enhance_toggle");
+    const toggle = new Node("input"); toggle.type = "checkbox"; toggle.checked = true; toggleHost.appendChild(toggle); body.appendChild(toggleHost);
+}
 if (MODE === "shared") {
     // The Clipboard tab, attached on this page, with its own prompt box and switch.
     const host = new Node("div"); host.setAttribute("id", "minipaint_clipboard_prompt");
@@ -332,6 +339,32 @@ if (MODE === "shared") {
     const toggle = new Node("input"); toggle.type = "checkbox"; toggle.checked = false; toggleHost.appendChild(toggle); body.appendChild(toggleHost);
     window.minipaintClipboard = { debug: function () { return { attached: true }; }, queue: function (text) { window.__queued = text; }, refreshQueue: function () { window.__refreshed = true; } };
     window.minipaintWriteInput = function (element, value) { element.value = String(value); window.__written = String(value); return true; };
+}
+
+/* ------------------------------------------------------ the editor ----- */
+
+//: The shared pop-over (minipaint_sheet.js), stood in for: what the popup
+//: asks it for is recorded, and a check answers for the person - Done with
+//: some text, Cancel, or a stacked system prompt. The sheet itself is
+//: checked in a real browser (browser_intercept.py).
+const sheets = { prompts: [], systems: [], closed: [] };
+function standIn(kind, options) {
+    const sheet = { name: options.name, kind: kind, options: options, spec: {}, closed: false };
+    sheet.close = function (why) {
+        if (sheet.closed) { return false; }
+        sheet.closed = true;
+        sheets.closed.push(options.name + ":" + why);
+        if (typeof sheet.spec.closed === "function") { sheet.spec.closed(why); }
+        return true;
+    };
+    (kind === "prompt" ? sheets.prompts : sheets.systems).push(sheet);
+    return sheet;
+}
+if (MODE !== "nosheet") {
+    window.minipaintSheet = {
+        prompt: function (options) { return standIn("prompt", options); },
+        systemPrompt: function (options) { return standIn("system", options); }
+    };
 }
 
 new Function("window", "document", "fetch", "Event", "CustomEvent",
@@ -343,6 +376,15 @@ function tick(ms) { return new Promise(function (r) { setTimeout(r, ms || 15); }
 function posted(action) { return calls.filter(function (c) { return c.url.indexOf("/minipaint-clipboard/intercept") === 0 && c.body && c.body.action === action; }); }
 function root() { return body.querySelector(".minipaint-intercept"); }
 function roleBoxes() { return root().querySelectorAll(".minipaint-intercept-roles input"); }
+/** The person taps the prompt and types in the editor, then Done. */
+function typePrompt(text, prewritten) {
+    root().querySelector(".minipaint-intercept-prompt").click();
+    const sheet = sheets.prompts[sheets.prompts.length - 1];
+    if (!sheet || sheet.closed) { throw new Error("the prompt editor did not open"); }
+    sheet.options.done(text, { prewritten: prewritten || null, changed: true });
+    sheet.close("done");
+    return sheet;
+}
 function tickRole(id, on) { const box = roleBoxes().filter(function (b) { return b.dataset.role === id; })[0]; box.checked = on !== false; box.dispatchEvent(new FakeEvent("change")); }
 function report(extra) {
     console.log(JSON.stringify(Object.assign({
@@ -367,8 +409,7 @@ async function main() {
         popup.open(H1, { bundles: { wangp: "/w.js", interop: "/i.js" } });
         await tick(40);
         const before = JSON.parse(JSON.stringify(popup.state()));
-        root().querySelector(".minipaint-intercept-prompt").value = "typed in the popup";
-        root().querySelector(".minipaint-intercept-prompt").dispatchEvent(new FakeEvent("input"));
+        typePrompt("typed in the popup");
         tickRole("first_frame", true);
         await popup.generate();
         await tick(20);
@@ -450,15 +491,13 @@ async function main() {
         };
         popup.open(H1, {});
         await tick(40);
-        root().querySelector(".minipaint-intercept-prompt").value = "in view";
-        root().querySelector(".minipaint-intercept-prompt").dispatchEvent(new FakeEvent("input"));
+        typePrompt("in view");
         await popup.generate();
         await tick(20);
         const inView = toastNow();
         popup.open(H2, {});
         await tick(40);
-        root().querySelector(".minipaint-intercept-prompt").value = "warn me";
-        root().querySelector(".minipaint-intercept-prompt").dispatchEvent(new FakeEvent("input"));
+        typePrompt("warn me");
         await popup.generate();
         await tick(20);
         report({ inView: inView, warned: toastNow(), journal: journal.slice() });
@@ -478,8 +517,7 @@ async function main() {
     if (MODE === "cancel") {
         popup.open(H1, {});
         await tick(40);
-        root().querySelector(".minipaint-intercept-prompt").value = "edited then cancelled";
-        root().querySelector(".minipaint-intercept-prompt").dispatchEvent(new FakeEvent("input"));
+        typePrompt("edited then cancelled");
         popup.cancel();
         await tick(30);
         report();
@@ -487,8 +525,7 @@ async function main() {
     if (MODE === "replace") {
         popup.open(H1, {});
         await tick(40);
-        root().querySelector(".minipaint-intercept-prompt").value = "kept across";
-        root().querySelector(".minipaint-intercept-prompt").dispatchEvent(new FakeEvent("input"));
+        typePrompt("kept across");
         popup.open(H2, {});
         await tick(40);
         report();
@@ -504,8 +541,7 @@ async function main() {
         popup.open(H1, {});
         await tick(40);
         const opened = JSON.parse(JSON.stringify(popup.state()));
-        root().querySelector(".minipaint-intercept-prompt").value = "mirrored out";
-        root().querySelector(".minipaint-intercept-prompt").dispatchEvent(new FakeEvent("input"));
+        typePrompt("mirrored out");
         const enhance = root().querySelector(".minipaint-intercept-enhance");
         enhance.checked = true;
         enhance.dispatchEvent(new FakeEvent("change"));
@@ -530,6 +566,95 @@ async function main() {
         document.dispatchEvent(enter);
         await tick(40);
         report({ closedByEscape: closedByEscape });
+    }
+    if (MODE === "editor") {
+        popup.open(H1, {});
+        await tick(40);
+        const display = root().querySelector(".minipaint-intercept-prompt");
+        const shown = { tag: display.tagName, role: display.getAttribute("role"), text: display.textContent };
+        // A tap opens the editor on the prompt as it stands; nothing is typed in the popup.
+        display.click();
+        const sheet = sheets.prompts[0];
+        const opened = sheet ? { name: sheet.options.name, text: sheet.options.text, placeholder: sheet.options.placeholder,
+                                 enhance: Object.keys(sheet.options.enhance || {}).sort(), system: typeof sheet.options.systemPrompt } : null;
+        // Enter on the box opens it too; Ctrl+Enter is still Generate's.
+        sheet.close("done");
+        const enter = new FakeEvent("keydown", { key: "Enter" });
+        enter.target = display;
+        display.dispatchEvent(enter);
+        const byEnter = sheets.prompts.length;
+        // The editor's Enhance asks the popup's own route, as a press would:
+        // the ticks, Inherit, the frozen picture.
+        const again = sheets.prompts[sheets.prompts.length - 1];
+        tickRole("first_frame", true);
+        await again.options.enhance.plan();
+        await again.options.enhance.start("a fox in snow");
+        await again.options.enhance.status("feedfacefeedface");
+        await again.options.enhance.cancel("feedfacefeedface");
+        // System prompt: stacked, on the set the plan named.
+        const system = again.options.systemPrompt({ ok: true, prompt_set: "set-a", mode: "image" });
+        const systemAsked = system ? { name: system.options.name, variant: system.options.variant, mode: system.options.mode } : null;
+        // The switch turned in the stacked editor reaches the popup's own box.
+        system.options.switched(false);
+        const switchAfter = popup.state().enhance;
+        system.options.switched(true);
+        system.close("close");
+        // The enhancer's prompt, taken: Done hands it back as written.
+        again.options.done("A red fox in deep snow, low sun.", { prewritten: { typed: "a fox in snow", written: "A red fox in deep snow, low sun." }, changed: true });
+        again.close("done");
+        await tick(10);
+        const afterDone = JSON.parse(JSON.stringify(popup.state()));
+        const note = root().querySelector(".minipaint-intercept-enhance").parentNode.querySelector(".minipaint-intercept-note").textContent;
+        const marked = root().querySelector(".minipaint-intercept-prompt").classList.contains("minipaint-intercept-prompt-written");
+        // The switch is on: a written prompt still goes as it is.
+        await popup.generate();
+        await tick(20);
+        report({ shown: shown, opened: opened, byEnter: byEnter, systemAsked: systemAsked, switchAfter: switchAfter, afterDone: afterDone,
+                 note: note, marked: marked, sheets: { closed: sheets.closed },
+                 toggleAfter: body.querySelector("#minipaint_clipboard_enhance_toggle input").checked,
+                 enhanceCalls: calls.filter(function (c) { return c.body && /^enhance_/.test(c.body.action || ""); }).map(function (c) { return c.body; }),
+                 toggles: calls.filter(function (c) { return c.url.indexOf("enhance-settings") !== -1; }).map(function (c) { return c.body; }) });
+    }
+    if (MODE === "editorcancel") {
+        popup.open(H1, {});
+        await tick(40);
+        root().querySelector(".minipaint-intercept-prompt").click();
+        const sheet = sheets.prompts[0];
+        sheet.options.cancel && sheet.options.cancel();
+        sheet.close("cancel");
+        await tick(10);
+        const afterCancel = popup.state().prompt;
+        // A popup that closes takes the editor it opened with it.
+        root().querySelector(".minipaint-intercept-prompt").click();
+        const open = sheets.prompts[1];
+        popup.cancel();
+        await tick(20);
+        report({ afterCancel: afterCancel, openClosedWithPopup: open.closed, closed: sheets.closed });
+    }
+    if (MODE === "editorblocked") {
+        popup.open(H1, {});
+        await tick(40);
+        root().classList.add("minipaint-intercept-is-blocked");
+        report({ opened: sheets.prompts.length });
+    }
+    if (MODE === "nosheet") {
+        popup.open(H1, { bundles: { sheet: "/s.js" } });
+        await tick(40);
+        root().querySelector(".minipaint-intercept-prompt").click();
+        await tick(40);
+        report({ loadedSheet: loaded.filter(function (urls) { return urls.indexOf("/s.js") !== -1; }).length });
+    }
+    if (MODE === "editorhistory") {
+        // A prompt the editor wrote, loaded back from the history, goes as it is again.
+        popup.open(H1, {});
+        await tick(40);
+        root().querySelector(".minipaint-intercept-history-toggle").click();
+        root().querySelectorAll("[data-history-action=load]")[0].click();
+        await tick(30);
+        const loadedState = JSON.parse(JSON.stringify(popup.state()));
+        await popup.generate();
+        await tick(20);
+        report({ loadedState: loadedState });
     }
     if (MODE === "history") {
         popup.open(H1, {});
@@ -749,6 +874,62 @@ def run() -> Results:
         r.check("a refusal keeps the popup open with the server's sentence and the first note, and records the code",
                 refused["hidden"] is False and refused["message"].startswith("WanGP is not running.") and "nothing was stored" in refused["message"]
                 and refused["state"]["last"]["code"] == "WANGP_NOT_RUNNING" and refused["state"]["busy"] is False, str(refused["message"]))
+
+    # The prompt is not typed in the popup (2026-11-23): the box shows it, and
+    # a tap opens the shared editor, whose Enhance and System prompt are the
+    # popup's own press and its instructions.
+    edited = _run("editor")
+    r.check("the editor scenario ran", edited is not None and "error" not in edited, str(edited)[:300])
+    if edited and "error" not in edited:
+        shown = edited.get("shown") or {}
+        r.check("the popup's prompt is a box to read and press, not a text field",
+                shown.get("tag") == "DIV" and shown.get("role") == "button" and shown.get("text") == "the server's prompt", str(shown))
+        opened = edited.get("opened") or {}
+        r.check("a tap opens the shared editor on the prompt as it stands, with Enhance and System prompt",
+                opened.get("name") == "wangp-prompt" and opened.get("text") == "the server's prompt"
+                and opened.get("enhance") == ["cancel", "plan", "start", "status"] and opened.get("system") == "function", str(opened))
+        r.check("and Enter on the box opens it too", edited.get("byEnter") == 2, str(edited.get("byEnter")))
+        asked = edited.get("enhanceCalls") or []
+        r.check("Enhance in the editor asks the popup's own route - plan, start, read, stop - in that order",
+                [call.get("action") for call in asked] == ["enhance_plan", "enhance_start", "enhance_status", "enhance_cancel"], str(asked)[:300])
+        r.check("as a press would: the frozen picture, the roles ticked and Inherit as they stand, the words typed",
+                len(asked) == 4 and all(call.get("handoff") == "wangp:" + "a" * 32 + ":64x48:txt2img" and call.get("roles") == ["first_frame", "reference"]
+                                        and call.get("inherit") is False for call in asked[:2])
+                and asked[1].get("prompt") == "a fox in snow" and asked[2].get("llm_id") == "feedfacefeedface"
+                and asked[3].get("llm_id") == "feedfacefeedface", str(asked)[:300])
+        r.check("System prompt opens the instructions the plan named, stacked",
+                edited.get("systemAsked") == {"name": "system-prompt", "variant": "set-a", "mode": "image"}, str(edited.get("systemAsked")))
+        r.check("and the switch turned there is the popup's switch at once", edited.get("switchAfter") is False, str(edited.get("switchAfter")))
+        after = edited.get("afterDone") or {}
+        r.check("Done hands back the enhancer's prompt, taken, with what was typed before it",
+                after.get("prompt") == "A red fox in deep snow, low sun."
+                and after.get("prewritten") == {"typed": "a fox in snow", "written": "A red fox in deep snow, low sun."}, str(after)[:300])
+        r.check("which the popup marks, and says goes as it is",
+                edited.get("marked") is True and edited.get("note") == "written in the editor, so it goes as it is", str(edited.get("note")))
+        sent = edited["submits"][0] if edited.get("submits") else {}
+        r.check("Generate sends it as written: not enhanced again, marked prewritten, with the words typed for the History",
+                sent.get("prompt") == "A red fox in deep snow, low sun." and sent.get("enhance") is False and sent.get("prewritten") is True
+                and sent.get("typed") == "a fox in snow", str(sent)[:300])
+        r.check("and the switch, on, is left on: nothing posted to the setting, and the Clipboard tab's own switch still on",
+                edited.get("toggles") == [] and edited.get("toggleAfter") is True, str((edited.get("toggles"), edited.get("toggleAfter"))))
+    cancelled_edit = _run("editorcancel")
+    r.check("Cancel in the editor leaves the popup's prompt as it was",
+            cancelled_edit is not None and cancelled_edit.get("afterCancel") == "the server's prompt", str(cancelled_edit)[:300])
+    r.check("and a popup that closes closes the editor it opened",
+            cancelled_edit is not None and cancelled_edit.get("openClosedWithPopup") is True
+            and "wangp-prompt:popup closed" in (cancelled_edit.get("closed") or []), str(cancelled_edit)[:300])
+    blocked_edit = _run("editorblocked")
+    r.check("a popup blocked by the Clipboard's readiness opens no editor",
+            blocked_edit is not None and blocked_edit.get("opened") == 0, str(blocked_edit)[:300])
+    missing = _run("nosheet")
+    r.check("a page without the editor's bundle fetches it on the press, and says so when it cannot",
+            missing is not None and missing.get("loadedSheet") == 1 and "could not be loaded" in (missing.get("message") or ""), str(missing)[:300])
+    from_history = _run("editorhistory")
+    loaded_state = (from_history or {}).get("loadedState") or {}
+    sent = (from_history or {}).get("submits") or [{}]
+    r.check("a written prompt loaded back from the history goes as it is again, the switch untouched",
+            loaded_state.get("prewritten") == {"typed": "", "written": "loaded prompt"} and sent[0].get("prewritten") is True
+            and sent[0].get("enhance") is False, str(from_history)[:300])
 
     cancelled = _run("cancel")
     if cancelled and "error" not in cancelled:

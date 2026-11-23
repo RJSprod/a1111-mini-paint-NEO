@@ -528,9 +528,12 @@ def ltx25_checks(r: Results, library) -> None:
     api.asked = []
     r.check("its default is the API's LTX 2.3 pair, asked for by that name",
             enhance.default_prompt("ltx25", "image") == "LTX image instructions" and api.asked == ["ltx23"], str(api.asked))
+    from minipaint_neo.clipboard import routes as clipboard_routes
+
+    offered = clipboard_routes.editor_answer({"model": LTX_25}).get("sets", [])
     r.check("the editor offers three sets, the LTX one named for both models, and no separate LTX 2.5 set",
-            [value for _label, value in clipboard_ui.SP_VARIANT_CHOICES] == ["fl2va", "ref2va", "ltx23"]
-            and "LTX 2.3 and 2.5" in dict((value, label) for label, value in clipboard_ui.SP_VARIANT_CHOICES)["ltx23"])
+            [item["id"] for item in offered] == ["fl2va", "ref2va", "ltx23"]
+            and "LTX 2.3 and 2.5" in dict((item["id"], item["label"]) for item in offered)["ltx23"], str(offered))
     line = enhance.availability(LTX_25)
     r.check("the enhancement line names LTX 2.5 and says whose instructions it is written under",
             line["state"] == "ready" and line["variant"] == "ltx25" and "LTX 2.5 Distilled" in line["text"]
@@ -542,19 +545,18 @@ def ltx25_checks(r: Results, library) -> None:
     import forge_like  # noqa: F401  (Forge's patches, before any Gradio component)
     from minipaint_neo.clipboard import history
 
-    tab = clipboard_ui.ClipboardTab()
     history.save_draft(history.empty_draft())
-    variant, mode, box, _state = tab.open_prompt_editor(json.dumps(LTX_25), "fl2va", "image")
+    view = clipboard_routes.editor_answer({"model": LTX_25, "fallback": "fl2va", "draft": True})["view"]
     r.check("the system prompt editor opens on the LTX set for a page on LTX 2.5, without a picture when none is attached",
-            variant.get("value") == "ltx23" and mode.get("value") == "text" and box.get("value") == "LTX text instructions",
-            f"{variant.get('value')}/{mode.get('value')}")
+            view["variant"] == "ltx23" and view["mode"] == "text" and view["text"] == "LTX text instructions",
+            f"{view['variant']}/{view['mode']}")
     draft = history.load_draft()
     draft["first_asset_id"] = first
     history.save_draft(draft)
-    variant, mode, box, _state = tab.open_prompt_editor(json.dumps(LTX_DISTILLED), "fl2va", "text")
+    view = clipboard_routes.editor_answer({"model": LTX_DISTILLED, "fallback": "fl2va", "draft": True})["view"]
     r.check("and for LTX 2.3, with the picture instructions once a first frame is attached",
-            variant.get("value") == "ltx23" and mode.get("value") == "image" and box.get("value") == "LTX image instructions",
-            f"{variant.get('value')}/{mode.get('value')}")
+            view["variant"] == "ltx23" and view["mode"] == "image" and view["text"] == "LTX image instructions",
+            f"{view['variant']}/{view['mode']}")
     history.save_draft(history.empty_draft())
 
     older = LtxApi()

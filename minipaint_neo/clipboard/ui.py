@@ -112,7 +112,7 @@ def _attach_with_bundles_js() -> str:
 
     return (
         "async () => { "
-        f"await ({assets.tab_loader_js(TAB_ID, ['wangp', 'interop', 'clipboard'])})(); "
+        f"await ({assets.tab_loader_js(TAB_ID, ['wangp', 'interop', 'sheet', 'clipboard'])})(); "
         f"await ({assets.module_js('host')})(); "
         f"if ({_JS}) {_JS}.attach(); "
         "}"
@@ -120,6 +120,25 @@ def _attach_with_bundles_js() -> str:
 
 
 ATTACH_WITH_BUNDLES_JS = _attach_with_bundles_js()
+
+
+def _sheet_js() -> str:
+    """Load the shared pop-over (``minipaint_sheet.js``) and give Forge's
+    prompt boxes their gear. At page load, not on a tab: the gear is on
+    txt2img and img2img, and a Reload UI builds those boxes again, which is
+    why it is asked for every time (the gear goes on a box only once)."""
+    from .. import assets
+
+    url = assets.url_for("sheet")
+    return (
+        "async () => { const w = window.minipaintAssets; "
+        f"const ok = (w && w.load) ? await w.load([{url!r}]) : false; "
+        "if (ok && window.minipaintSheet) { window.minipaintSheet.installGears(); } "
+        "return ok; }"
+    ).replace("'", '"')
+
+
+SHEET_JS = _sheet_js()
 MENU_JS = f"() => {{ if ({_JS}) {_JS}.toggleMenu(); }}"
 #: The toolbar's two flyouts. Each opens the menu straight at one
 #: section, anchored under its own button and with no "Back" row,
@@ -149,14 +168,10 @@ AUTO_JS = f"(prompt, enhanceOn) => {{ if ({_JS}) {_JS}.autoQueue(prompt, enhance
 # of those jobs.
 CANCEL_ALL_JS = f"() => {{ if ({_JS}) {_JS}.cancelAll(); }}"
 MENU_STATE_JS = f"(state) => {{ if ({_JS}) {_JS}.menuStateChanged(state); }}"
-# The editor fills the window before the server has said a word. Gradio runs
-# a click's js with the inputs and hands back what it returns, so the panel
-# is already open by the time the round trip that loads the right
-# instructions into it is on the wire - and it opens whether or not that
-# round trip ever lands.
-OPEN_PROMPT_EDITOR_JS = (f"(model, variant, mode) => {{ if ({_JS}) {{ {_JS}.openPromptEditor(); }} "
-                         "return [model, variant, mode]; }")
-CLOSE_PROMPT_EDITOR_JS = f"() => {{ if ({_JS}) {_JS}.closePromptEditor(); }}"
+# The system prompt editor is the browser's pop-over (``minipaint_sheet.js``):
+# the press is all page, and the instructions it opens on are asked for over
+# HTTP by the pop-over itself, so it opens whether or not Gradio's queue is.
+OPEN_PROMPT_EDITOR_JS = f"() => {{ if ({_JS}) {_JS}.openPromptEditor(); }}"
 #: The gallery of what WanGP made. Browser-only in both directions:
 #: the view is drawn from /minipaint-clipboard/outputs and the press
 #: has nothing for the server to decide.
@@ -254,8 +269,6 @@ WANGP_LABELS = {
 #: The instruction sets the editor offers: MiniMax's two variants and the one
 #: LTX set LTX 2.3 and 2.5 share. Not a choice per model, because there is no
 #: separate LTX 2.5 set to edit.
-SP_VARIANT_CHOICES = [(enhance.PROMPT_SET_LABELS[variant], variant) for variant in enhance.PROMPT_SETS]
-SP_MODE_CHOICES = [(enhance.MODE_LABELS[mode], mode) for mode in enhance.MODES]
 QUEUE_BUTTON_LABEL = "Add to Queue"
 QUEUE_BUTTON_BLOCKED = "WanGP is not running"
 #: The composer's quiet line while its WanGP section is blocked: what the
@@ -696,6 +709,30 @@ def _hex(value: typing.Any) -> str:
     return value if protocol.valid_handoff_id(value) else ""
 
 
+def draft_has_picture_for(variant: typing.Any, library: typing.Any = None) -> bool:
+    """Whether the composer holds a picture this variant's writer would read.
+
+    The same question ``enhance.plan`` asks at the press, asked of the same
+    draft: FL2VA reads the first and last frames, Ref2VA the reference, LTX
+    the first frame, and a slot whose file has left the folder is not a
+    picture anybody is going to send. What the system prompt editor opened
+    from the Clipboard tab decides "with a picture" from.
+    """
+    fields = enhance.SLOTS_FOR.get(str(variant or "")) or {}
+    if not fields:
+        return False
+    if library is None:
+        library = store.store()
+    draft = history.normalize_draft(history.load_draft())
+    for slot, _label, field in SLOTS:
+        if field not in fields:
+            continue
+        ids = draft["reference_asset_ids"] if slot == "ref" else ([draft[SLOT_KEYS[slot]]] if draft[SLOT_KEYS[slot]] else [])
+        if any(_hex(item) and library.get(item) is not None for item in ids):
+            return True
+    return False
+
+
 def _picture(value: typing.Any) -> str:
     """A library asset id or an archive picture's reference - the two
     handles a selection can be - or ""."""
@@ -716,10 +753,15 @@ def _nonce() -> str:
 
 def _intercept_bundle_url() -> str:
     """The URL of the WanGP popup's bundle, or "" when it cannot be named."""
+    return _bundle_url("intercept")
+
+
+def _bundle_url(name: str) -> str:
+    """The URL of one of this extension's bundles, or "" when it cannot be named."""
     try:
         from .. import assets
 
-        return assets.url_for("intercept")
+        return assets.url_for(name)
     except Exception:
         return ""
 
@@ -914,6 +956,10 @@ class ClipboardTab:
             # dead, the picture staged over HTTP instead - knows what to
             # fetch. A URL with the file's digest in it, never a path.
             "intercept_bundle": _intercept_bundle_url(),
+            # And the pop-over's, which the popup's prompt editor and the
+            # system prompt editor are: loaded at page load, named here for a
+            # page that missed that.
+            "sheet_bundle": _bundle_url("sheet"),
             # A value that differs every time, so a callback returning the
             # same settings as last time still reaches the browser. It is
             # what the page watches to know the framework's channel is
@@ -1007,22 +1053,6 @@ class ClipboardTab:
         except Exception as error:
             return enhance_line_html({"state": "blocked", "text": f"The enhancement settings could not be read ({type(error).__name__})."}, False)
 
-    def _system_prompt_view(self, variant, mode) -> typing.Tuple[typing.Any, str]:
-        """The box and the line under it for one of the six instruction sets."""
-        try:
-            text, source = enhance.effective_prompt(variant, mode)
-        except IntegrationError:
-            return gr.update(value=""), "Choose a variant and whether a picture is sent."
-        chosen = enhance.prompt_set(variant)
-        label = f"{enhance.PROMPT_SET_LABELS.get(chosen, chosen)}, {enhance.MODE_LABELS.get(mode, mode)}"
-        if source == "override":
-            line = f"**Override saved** for {label}. Restore default forgets it."
-        elif source == "default":
-            line = f"**Default** for {label}, as ModelSwitchRefiner ships it. Edit and Apply override to replace it."
-        else:
-            line = f"No default for {label} could be read: ModelSwitchRefiner is not available in this Forge. An override can still be saved."
-        return gr.update(value=text), line
-
     def toggle_enhance(self, flag, model):
         wanted = enhance.set_enabled(bool(flag))
         self._journal(f"enhanced prompts {'on' if wanted else 'off'} from the tab")
@@ -1031,73 +1061,6 @@ class ClipboardTab:
     def model_changed(self, model):
         """The browser says which WanGP model the page is on: the line follows."""
         return self._enhance_line(model)
-
-    def _draft_has_picture_for(self, variant: typing.Any) -> bool:
-        """Whether the composer holds a picture this variant would actually read.
-
-        The same question ``enhance.plan`` asks at the press, asked of the
-        same draft: FL2VA reads the first and last frames, Ref2VA reads the
-        reference, and a slot whose file has left the folder is not a picture
-        anybody is going to send.
-        """
-        fields = enhance.SLOTS_FOR.get(str(variant or "")) or {}
-        if not fields:
-            return False
-        draft = history.normalize_draft(history.load_draft())
-        for slot, _label, field in SLOTS:
-            if field not in fields:
-                continue
-            ids = draft["reference_asset_ids"] if slot == "ref" else ([draft[SLOT_KEYS[slot]]] if draft[SLOT_KEYS[slot]] else [])
-            if any(self._asset(item) is not None for item in ids):
-                return True
-        return False
-
-    def open_prompt_editor(self, model, variant, mode):
-        """Open the editor on the instructions a press would actually use.
-
-        THE SIX SETS ARE NOT A MENU. Which one the writer runs under is
-        decided by two things this page already knows: the model WanGP is on
-        - an H3 variant, or LTX 2.3 or 2.5, which share one set - and whether
-        the composer is holding a picture that model's writer reads. Opening
-        on whichever pair happened to be selected last means editing one set
-        and finding out at the next press that another was used - a quiet
-        mistake, of the kind this tab has had enough of.
-
-        A WanGP that has not said its model yet keeps the variant that is on
-        screen: guessing one would be worse than leaving the question where
-        the user can see it. The picture half is always known, because the
-        draft is here.
-        """
-        block = _model_of(model)
-        chosen = enhance.target_for_model(block)
-        if chosen not in enhance.VARIANTS:
-            chosen = variant if variant in enhance.VARIANTS else enhance.FL2VA
-        chosen = enhance.prompt_set(chosen)
-        wanted = enhance.MODE_IMAGE if self._draft_has_picture_for(chosen) else enhance.MODE_TEXT
-        box, line = self._system_prompt_view(chosen, wanted)
-        return gr.update(value=chosen), gr.update(value=wanted), box, line
-
-    def system_prompt_selected(self, variant, mode):
-        box, line = self._system_prompt_view(variant, mode)
-        return box, line
-
-    def apply_override(self, variant, mode, text):
-        try:
-            enhance.set_override(variant, mode, text)
-        except IntegrationError as error:
-            _box, line = self._system_prompt_view(variant, mode)
-            return gr.skip(), line, _status(errors.message(error.code))
-        box, line = self._system_prompt_view(variant, mode)
-        self._journal(f"system prompt override applied for {variant} {mode}")
-        return box, line, _status("Override saved. Every enhanced press from now on uses it, on every page, after a restart too.")
-
-    def restore_default(self, variant, mode):
-        try:
-            had = enhance.clear_override(variant, mode)
-        except IntegrationError as error:
-            return gr.skip(), gr.skip(), _status(errors.message(error.code))
-        box, line = self._system_prompt_view(variant, mode)
-        return box, line, _status("Back to the default." if had else "There was no override; the default is shown.")
 
     def cancel_all(self, page):
         """Cancel everything: enhancing and pending jobs, from every page."""
@@ -2155,47 +2118,29 @@ class ClipboardTab:
                                                elem_classes=["minipaint-clip-prompt-history"])
                     enhanced_on = enhance.enabled()
                     # A SYSTEM PROMPT IS A PAGE OF PROSE, AND THIS COLUMN IS
-                    # A THIRD OF THE WINDOW WIDE. It used to be edited here,
-                    # in ten visible lines beside a thumbnail grid: fine for
-                    # reading a sentence of it, wrong for the thing people
-                    # actually do with it, and a permanent third of the
-                    # composer given to a panel most presses never touch.
-                    #
-                    # So the tab keeps one button and nothing else. What it
-                    # opens is the panel below, which is on the page but has
-                    # no other shape - the stylesheet gives it none until it
-                    # is filling the window. One set of controls, in one
-                    # place, with no second door to drift from the first.
+                    # A THIRD OF THE WINDOW WIDE. So the tab keeps one button,
+                    # and what it opens is the system prompt editor every
+                    # door of this extension shares: a pop-over over 90% of
+                    # the window, drawn by the browser (``minipaint_sheet.js``)
+                    # over ``routes.ENHANCE_SETTINGS_ROUTE``, the same one the
+                    # gallery's Send to WanGP prompt editor stacks over itself
+                    # (2026-11-23: "make both the system prompt editors and
+                    # this wan2gp pop over be like a pop up that covers 90% of
+                    # the screen ... consistent and modularized"). Until then
+                    # it was a second shape of a Gradio panel in this tab,
+                    # which could not be drawn over another tab at all.
                     sp_open = gr.Button("⤢ Prompt enhancement and system prompts", elem_id=_id("sp_open"),
                                         elem_classes=["minipaint-clip-sp-open"])
+                    # The switch, and the line above it, stay Gradio's and are
+                    # never drawn: the press reads the switch as an input,
+                    # and the Send to WanGP popup and the editor both mirror
+                    # into it. The editor draws its own of each.
                     with gr.Column(elem_id=_id("enhance_panel"), elem_classes=["minipaint-clip-enhance-panel"]):
-                        gr.Markdown("**Prompt enhancement** (ModelSwitchRefiner: MiniMax H3, LTX 2.3 and 2.5)",
-                                    elem_classes=["minipaint-clip-title"])
                         enhance_line = gr.HTML(self._enhance_line(), elem_id=_id("enhance_line"))
                         enhance_toggle = gr.Checkbox(
                             value=enhanced_on, label="Enhance the prompt through ModelSwitchRefiner before it reaches WanGP",
                             elem_classes=["minipaint-clip-enhance-toggle"], elem_id=_id("enhance_toggle"),
                         )
-                        gr.Markdown("**System prompt** - the instructions the writer runs under. Six sets: each variant, with and without a picture; LTX 2.3 and 2.5 share theirs.",
-                                    elem_classes=["minipaint-clip-hint"])
-                        with gr.Row(elem_classes=["minipaint-clip-pair"]):
-                            sp_variant = gr.Dropdown(SP_VARIANT_CHOICES, value=enhance.FL2VA, label="Variant", elem_id=_id("sp_variant"), min_width=140)
-                            sp_mode = gr.Dropdown(SP_MODE_CHOICES, value=enhance.MODE_TEXT, label="Instructions used", elem_id=_id("sp_mode"), min_width=140)
-                        sp_box, sp_line = self._system_prompt_view(enhance.FL2VA, enhance.MODE_TEXT)
-                        system_prompt = gr.Textbox(
-                            sp_box.get("value", "") if isinstance(sp_box, dict) else "", lines=10, max_lines=40, label="System prompt",
-                            elem_id=_id("system_prompt"), elem_classes=["minipaint-clip-system-prompt"],
-                        )
-                        sp_state = gr.Markdown(sp_line, elem_id=_id("sp_state"), elem_classes=["minipaint-clip-sp-state"])
-                        with gr.Row(elem_classes=["minipaint-clip-pair"]):
-                            sp_apply = gr.Button("Apply override", variant="primary", elem_id=_id("sp_apply"))
-                            sp_restore = gr.Button("Restore default", elem_id=_id("sp_restore"))
-                            sp_reload = gr.Button("Reload", elem_id=_id("sp_reload"))
-                            # Only ever on screen while the panel is filling
-                            # the window; the stylesheet decides, because
-                            # which of the two shapes this panel is in is a
-                            # question about the browser and nothing else.
-                            sp_close = gr.Button("Close", elem_id=_id("sp_close"), elem_classes=["minipaint-clip-sp-close"])
                     queue_btn = gr.Button(
                         QUEUE_BUTTON_LABEL if running else QUEUE_BUTTON_BLOCKED, variant="primary", interactive=running,
                         elem_id=_id("queue"), elem_classes=["minipaint-clip-queue"],
@@ -2237,9 +2182,7 @@ class ClipboardTab:
             slot_action=slot_action, slot_uploads=slot_uploads, prompt=prompt, queue_btn=queue_btn, queue_status=queue_status,
             model_box=model_box,
             outbox_list=outbox_list, cancel_all_btn=cancel_all_btn, history_open=history_open, history_panel=history_panel,
-            enhance_line=enhance_line, enhance_toggle=enhance_toggle, sp_variant=sp_variant, sp_mode=sp_mode, system_prompt=system_prompt,
-            sp_state=sp_state, sp_apply=sp_apply, sp_restore=sp_restore, sp_reload=sp_reload,
-            sp_open=sp_open, sp_close=sp_close,
+            enhance_line=enhance_line, enhance_toggle=enhance_toggle, sp_open=sp_open,
             history_list=history_list, history_close=history_close, history_action=history_action,
             send_request=send_request, send_press=send_press, send_backend=send_backend, send_ack=send_ack, switch_box=switch_box, payload_box=payload_box, to_canvas=to_canvas, mask_clear=mask_clear,
             receive_receipt=receive_receipt,
@@ -2273,6 +2216,11 @@ class ClipboardTab:
             # activation hook is in the browser. A panel that is already on
             # screen - a reload with this tab selected - loads at once.
             Context.root_block.load(None, js=ATTACH_WITH_BUNDLES_JS)
+            # The pop-over every editor shares, at every page load: the gear
+            # it puts on txt2img's and img2img's prompt boxes is on the tabs
+            # people open first, and the popup's editor opens inside the
+            # press that asks for it.
+            Context.root_block.load(None, js=SHEET_JS)
         p["menu_btn"].click(None, js=MENU_JS)
         # Every server render carries a nonce, so a callback that happened to
         # return the same values still proves the channel is alive. It is the
@@ -2347,19 +2295,10 @@ class ClipboardTab:
         # so the line above the switch follows the WanGP tab.
         p["enhance_toggle"].input(self.toggle_enhance, inputs=[p["enhance_toggle"], p["model_box"]], outputs=[p["enhance_line"]], **quiet)
         p["model_box"].input(self.model_changed, inputs=[p["model_box"]], outputs=[p["enhance_line"]], **quiet)
-        # The editor's two shapes. Opening it also puts it on the pair of
-        # instructions this page's own situation names - see open_prompt_editor.
-        p["sp_open"].click(self.open_prompt_editor, inputs=[p["model_box"], p["sp_variant"], p["sp_mode"]],
-                           outputs=[p["sp_variant"], p["sp_mode"], p["system_prompt"], p["sp_state"]],
-                           js=OPEN_PROMPT_EDITOR_JS, **quiet)
-        p["sp_close"].click(None, js=CLOSE_PROMPT_EDITOR_JS, inputs=[], outputs=[])
-        for selector in (p["sp_variant"], p["sp_mode"]):
-            selector.input(self.system_prompt_selected, inputs=[p["sp_variant"], p["sp_mode"]], outputs=[p["system_prompt"], p["sp_state"]], **quiet)
-        p["sp_reload"].click(self.system_prompt_selected, inputs=[p["sp_variant"], p["sp_mode"]], outputs=[p["system_prompt"], p["sp_state"]], **quiet)
-        p["sp_apply"].click(self.apply_override, inputs=[p["sp_variant"], p["sp_mode"], p["system_prompt"]],
-                            outputs=[p["system_prompt"], p["sp_state"], p["queue_status"]], **quiet)
-        p["sp_restore"].click(self.restore_default, inputs=[p["sp_variant"], p["sp_mode"]],
-                              outputs=[p["system_prompt"], p["sp_state"], p["queue_status"]], **quiet)
+        # The system prompt editor: the browser's pop-over, which reads and
+        # writes over the settings route and chooses its set from the model
+        # and the composer's pictures there (``routes.editor_answer``).
+        p["sp_open"].click(None, js=OPEN_PROMPT_EDITOR_JS, inputs=[], outputs=[])
 
         # -- history: the panel is Gradio, the list inside it is the browser's.
         # Load still crosses the framework, because what it changes - the

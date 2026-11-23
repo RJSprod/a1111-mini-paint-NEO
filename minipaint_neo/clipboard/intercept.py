@@ -49,10 +49,13 @@ counts and the first eight characters of an id.
 
 from __future__ import annotations
 
+import collections
 import datetime
 import io
 import re
 import secrets
+import threading
+import time
 import typing
 
 from ..wangp import errors, protocol
@@ -394,6 +397,9 @@ def _normalize_entry(raw: typing.Any) -> typing.Optional[dict]:
         "created_at": str(raw.get("created_at") or "")[:40],
         "prompt": prompt[:protocol.PROMPT_MAX_CHARS],
         "enhance": raw.get("enhance") is True,
+        # A prompt the editor's Enhance wrote and the user took: sent as it
+        # was, and loaded back as one - never enhanced again (2026-11-23).
+        "prewritten": raw.get("prewritten") is True,
         "inherit": raw.get("inherit") is not False,
         "roles": roles,
         "available_roles": available,
@@ -535,6 +541,7 @@ def history_view(model: typing.Any = None, inputs: typing.Any = None) -> typing.
             "when": entry["created_at"].replace("T", " ").replace("+00:00", " UTC"),
             "prompt": entry["prompt"][:160],
             "enhance": entry["enhance"],
+            "prewritten": entry["prewritten"],
             "inherit": entry["inherit"],
             "roles": [{"id": role, "label": ROLE_LABELS[role], "valid": role in available} for role in entry["roles"]],
             "summary": entry["summary"],
@@ -578,7 +585,9 @@ def recipe(entry_id: typing.Any, model: typing.Any = None, inputs: typing.Any = 
     draft = history.load_draft()
     draft["prompt_override"] = entry["prompt"]
     history.save_draft(draft)
-    enabled = enhance.set_enabled(entry["enhance"])
+    # A prompt the editor wrote was sent with the switch as the user had it,
+    # and off for that press alone; loading it leaves the switch alone too.
+    enabled = enhance.enabled() if entry["prewritten"] else enhance.set_enabled(entry["enhance"])
     config.update(intercept_inherit=entry["inherit"])
     _journal(f"history {entry['id'][:8]} loaded: {len(kept)} role(s) kept, {len(dropped)} dropped")
     return {
@@ -586,6 +595,7 @@ def recipe(entry_id: typing.Any, model: typing.Any = None, inputs: typing.Any = 
         "id": entry["id"],
         "prompt": entry["prompt"],
         "enhance": enabled,
+        "prewritten": entry["prewritten"],
         "inherit": entry["inherit"],
         "roles": kept,
         "dropped_roles": [{"id": role, "label": ROLE_LABELS[role]} for role in dropped],
@@ -713,6 +723,8 @@ def submit(
     inputs: typing.Any = None,
     settings_flush: typing.Any = "",
     auto: bool = False,
+    prewritten: bool = False,
+    typed: typing.Any = None,
 ) -> dict:
     """Generate: capture, revalidate, build, submit, record - in that order.
 
@@ -736,6 +748,12 @@ def submit(
     which chose them here before, are the Clipboard tab's Auto's alone.
     Everything else is Generate's too - the prompt, Enhance and Inherit as
     they stand - and what Auto changes is only what the answer says.
+
+    ``prewritten`` is a prompt the enhancer already wrote in the editor and
+    the user took (2026-11-23): it is sent as it is - never enhanced a second
+    time, whatever the switch says, and the switch is left where it is -
+    with ``typed``, what the user had typed before it was written, as the
+    prompt the History keeps.
     """
     parsed = parse_handoff(handoff)
     if parsed is None:
@@ -752,19 +770,23 @@ def submit(
     # that does not say - sends the picture in the ticked roles and nothing
     # of Clipboard's with it (2026-11-23).
     use_draft = inherit is True
-    wanted = None if enhance_wanted is None else bool(enhance_wanted)
+    written = prewritten is True
+    wanted = False if written else (None if enhance_wanted is None else bool(enhance_wanted))
+    typed_text = str(typed) if written and isinstance(typed, str) and typed.strip() else None
     block = enhance.model_block(model)
     # The shared prompt is Clipboard's the moment Generate is pressed - the
     # visible value, not whatever a blur may or may not have saved.
     save_prompt(prompt)
     try:
         request = build_request(prompt, kept, token, use_draft)
-        if wanted is not None and wanted != enhance.enabled():
+        if not written and wanted is not None and wanted != enhance.enabled():
             # The switch on screen and the setting on disk had drifted, as
             # they can when a change event is lost; the press is the answer.
+            # Not for a prompt the editor already wrote: that press is off
+            # for itself alone, and the switch stays as the user left it.
             enhance.set_enabled(wanted)
         job = outbox.submit(request, page, outbox.ORIGIN_GALLERY, model=block, enhance=wanted,
-                            settings_flush=str(settings_flush or ""))
+                            settings_flush=str(settings_flush or ""), typed_prompt=typed_text)
     except IntegrationError as error:
         _journal(f"generate refused before storing - {error.code}")
         notes = []
@@ -791,6 +813,7 @@ def submit(
     entry = add_history({
         "prompt": str(prompt or ""),
         "enhance": bool(job.get("enhance_requested")),
+        "prewritten": written,
         "inherit": use_draft,
         "roles": kept,
         "available_roles": [role["id"] for role in caps["roles"]],
@@ -812,6 +835,7 @@ def submit(
     pending = outbox.pending_count()
     _journal(f"{'auto' if auto else 'generate'}: job {job['job_id'][:8]} from {parsed['tab'] or 'a gallery'} as {', '.join(kept)}"
              f"{'; inheriting Clipboard' if use_draft else ''}{'; enhanced' if job.get('enhance_requested') else ''}"
+             f"{'; written in the editor' if written else ''}"
              f"{'; ' + str(len(dropped)) + ' role(s) no longer offered dropped' if dropped else ''}; {pending} waiting"
              f"; {outbox.flush_note(job)}")
     line = "Queued on the server." if server else "Queued for WanGP."
@@ -827,6 +851,8 @@ def submit(
         notes.insert(0, settings["warning"])
         _journal(f"{'auto' if auto else 'generate'}: job {job['job_id'][:8]} - not the settings on WanGP's screen "
                  f"({settings['source'] or 'read at its turn'})")
+    if written:
+        notes.append("the prompt written in the editor goes as it is")
     if dropped:
         notes.append(", ".join(ROLE_LABELS[role] for role in dropped) + " is not offered by the current model and was dropped")
     if job.get("narrowed"):
@@ -851,11 +877,187 @@ def submit(
     }
 
 
+# ------------------------------------------------- enhance, in the editor --
+#
+# The prompt pop-over's Enhance (2026-11-23): the prompt is written by the
+# enhancer there and then, from the editor, and shown - not at Generate, and
+# not stored as a job. Asked for: "I should be able to role an enhance right
+# there and see the results, and also edit the system prompt used for
+# enhancing using that pop over stacked."
+#
+# IT IS THE ENHANCEMENT A PRESS WOULD MAKE. The request is built exactly as
+# Generate builds it - the frozen picture in the ticked roles, Clipboard's
+# inputs only when Inherit is on - narrowed to what the model is sent, and
+# planned by ``enhance.plan`` against the model the readiness check names.
+# So the writer, the instructions and the picture the writer looks at are
+# the ones a press with Enhance on would have used, and the system prompt
+# the editor opens on is that set.
+#
+# NOTHING IS HELD OPEN. ``enhance_start`` asks for the prompt and answers
+# with the writer's job id; the page then reads ``enhance_status`` - one
+# short request at a time, each answered at once from the API's own record -
+# until the job is over or the editor is closed, when ``enhance_cancel``
+# stops it. Only ids started here are answered, so the route is not a way to
+# read another caller's prompts.
+
+#: How many editor enhancements are remembered by id, and for how long. A
+#: person rolls a few; these bounds are for a page left polling by mistake.
+PREVIEW_KEPT = 32
+PREVIEW_TTL_SECONDS = 3600.0
+PREVIEW_CANCEL_REASON = "cancelled from the Send to WanGP prompt editor"
+
+_previews: "collections.OrderedDict[str, float]" = collections.OrderedDict()
+_previews_lock = threading.Lock()
+
+
+def _remember_preview(llm_id: str) -> None:
+    with _previews_lock:
+        now = time.monotonic()
+        _previews[llm_id] = now
+        _previews.move_to_end(llm_id)
+        for key in [key for key, started in _previews.items() if now - started > PREVIEW_TTL_SECONDS]:
+            _previews.pop(key, None)
+        while len(_previews) > PREVIEW_KEPT:
+            _previews.popitem(last=False)
+
+
+def _known_preview(llm_id: typing.Any) -> bool:
+    if not isinstance(llm_id, str) or not llm_id:
+        return False
+    with _previews_lock:
+        started = _previews.get(llm_id)
+        return started is not None and time.monotonic() - started <= PREVIEW_TTL_SECONDS
+
+
+def _plan_enhancement(handoff: typing.Any, prompt: typing.Any, roles: typing.Any, inherit: typing.Any,
+                      model: typing.Any = None, inputs: typing.Any = None) -> typing.Tuple[dict, dict]:
+    """The plan an enhancement of this popup's request would run under, and
+    the facts the editor says about it. Raises IntegrationError, with the
+    readiness view when the Clipboard is blocked."""
+    from .. import interop
+    from . import targets
+
+    parsed = parse_handoff(handoff)
+    if parsed is None:
+        raise IntegrationError(errors.REQUEST_INVALID, "not a WanGP request handoff")
+    if not staged_exists(parsed["token"]):
+        raise IntegrationError(errors.INTERCEPT_IMAGE_EXPIRED, "the frozen picture is gone")
+    ready = targets.readiness(model)
+    if not ready.get("ready"):
+        raise IntegrationError(ready.get("code") or errors.INTERNAL_ERROR, str(ready.get("message") or "")[:200], readiness=ready)
+    target = str(ready.get("target") or "")
+    caps = capabilities(model, inputs)
+    kept, _dropped = reconcile_roles(roles, caps)
+    text = str(prompt or "")
+    # The prompt itself does not decide the plan; a blank one only means a
+    # plan asked for before anything was typed.
+    request = build_request(text if text.strip() else "-", kept, parsed["token"], inherit is True)
+    normalised = interop.normalize_public_request(request)
+    targets.narrow(normalised, target)
+    block = enhance.model_block(model)
+    if not block.get("type") and (ready.get("model") or {}).get("type"):
+        block = enhance.model_block(ready["model"])
+    planned = enhance.plan(normalised, block, target)
+    variant = planned["variant"]
+    facts = {
+        "variant": variant,
+        "variant_label": enhance.VARIANT_LABELS.get(variant, variant),
+        "prompt_set": enhance.prompt_set(variant),
+        "mode": enhance.MODE_IMAGE if planned.get("has_image") else enhance.MODE_TEXT,
+        "described": [enhance.SLOT_LABELS.get(slot, slot) for slot in enhance.SLOTS if slot in (planned.get("slots") or {})],
+        "left_out": [ROLE_LABELS.get(FIELD_ROLES.get(field, ""), field) for field in planned.get("dropped") or []],
+        "roles": kept,
+        # The model the plan was made for, so the system prompt editor the
+        # prompt editor stacks can say it too.
+        "model": block,
+    }
+    return planned, facts
+
+
+def _refusal(error: IntegrationError) -> dict:
+    refused = {"ok": False, "code": error.code, "message": errors.message(error.code)}
+    view = error.extra.get("readiness") if isinstance(error.extra.get("readiness"), dict) else None
+    if view is not None:
+        refused["readiness"] = view
+        refused["message"] = str(view.get("message") or refused["message"])
+    return refused
+
+
+def enhance_plan(handoff: typing.Any, prompt: typing.Any, roles: typing.Any, inherit: typing.Any,
+                 model: typing.Any = None, inputs: typing.Any = None) -> dict:
+    """What Enhance in the editor would do, before it is pressed: which writer,
+    under which of the six instruction sets, looking at which picture - and
+    whether the LLM side can take it at all. Starts nothing."""
+    try:
+        _planned, facts = _plan_enhancement(handoff, prompt, roles, inherit, model, inputs)
+    except IntegrationError as error:
+        return _refusal(error)
+    availability = enhance.availability(model)
+    return dict(facts, ok=True, available=enhance.capabilities()["available"],
+                availability={"state": availability.get("state", "unknown"), "text": availability.get("text", "")})
+
+
+def enhance_start(handoff: typing.Any, prompt: typing.Any, roles: typing.Any, inherit: typing.Any,
+                  model: typing.Any = None, inputs: typing.Any = None) -> dict:
+    """Ask the writer for the prompt now, as a press would. Answers with the
+    writer's job id; ``enhance_status`` reads it from there."""
+    text = str(prompt or "")
+    if not text.strip():
+        return {"ok": False, "code": errors.ENHANCE_PROMPT_REQUIRED, "message": "Type a prompt to enhance first."}
+    try:
+        planned, facts = _plan_enhancement(handoff, text, roles, inherit, model, inputs)
+        started = enhance.submit(text, planned)
+    except IntegrationError as error:
+        _journal(f"enhance in the editor refused - {error.code}")
+        return _refusal(error)
+    llm_id = started["llm_id"]
+    _remember_preview(llm_id)
+    _journal(f"enhance in the editor: llm {llm_id[:8]} as {facts['variant']}"
+             f" ({', '.join(facts['described']) or 'no picture'}{'; override' if started.get('system_override') else ''})")
+    return dict(facts, ok=True, llm_id=llm_id, override=bool(started.get("system_override")))
+
+
+def enhance_status(llm_id: typing.Any) -> dict:
+    """Where one editor enhancement is: the API's own state and stage, and the
+    written prompt once it is done. Only for an id started here."""
+    if not _known_preview(llm_id):
+        return {"ok": False, "code": errors.REQUEST_INVALID, "message": "That enhancement was not started from this editor."}
+    found = enhance.status(llm_id)
+    if found is None:
+        return {"ok": True, "state": "lost", "stage": "", "message": errors.message(errors.ENHANCE_LOST)}
+    answer = {"ok": True, "state": found["state"], "stage": found["stage"], "position": found["position"],
+              "elapsed": found["elapsed"], "image_used": enhance.SLOT_LABELS.get(found["image_used"], "")}
+    if found["state"] == enhance.LLM_DONE:
+        answer["prompt"] = found["prompt"]
+    elif found["state"] == enhance.LLM_FAILED:
+        answer["message"] = found["error"] or errors.message(errors.ENHANCE_FAILED)
+    elif found["state"] == enhance.LLM_CANCELLED:
+        answer["message"] = found["reason"] or errors.message(errors.ENHANCE_CANCELLED)
+    return answer
+
+
+def enhance_cancel(llm_id: typing.Any) -> dict:
+    """Stop one editor enhancement, queued or running. Only for an id started here."""
+    if not _known_preview(llm_id):
+        return {"ok": False, "code": errors.REQUEST_INVALID, "message": "That enhancement was not started from this editor."}
+    answer = enhance.cancel(llm_id, PREVIEW_CANCEL_REASON)
+    _journal(f"enhance in the editor: llm {str(llm_id)[:8]} {'cancelled' if answer.get('ok') else 'could not be cancelled'}")
+    return {"ok": True, "cancelled": answer.get("ok") is True}
+
+
+def forget_previews() -> None:
+    """For the checks: no editor enhancement is remembered."""
+    with _previews_lock:
+        _previews.clear()
+
+
 __all__ = [
-    "FIELD_ROLES", "HISTORY_NAME", "HISTORY_SCHEMA", "MAX_PINNED", "MAX_UNPINNED", "POPUP_PREFIX", "PREVIEW_SIDE",
+    "FIELD_ROLES", "HISTORY_NAME", "HISTORY_SCHEMA", "MAX_PINNED", "MAX_UNPINNED", "POPUP_PREFIX", "PREVIEW_CANCEL_REASON",
+    "PREVIEW_KEPT", "PREVIEW_SIDE", "PREVIEW_TTL_SECONDS",
     "ROLES", "ROLE_FIELDS", "ROLE_FIRST", "ROLE_IDS", "ROLE_LABELS", "ROLE_LAST", "ROLE_REFERENCE",
     "STATUS_BUSY", "STATUS_IDLE", "STATUS_OFF", "STATUS_RUNNING", "STATUS_UNKNOWN",
     "add_history", "auto_refusal", "auto_roles", "build_request", "cancel", "capabilities", "delete_history", "describe", "discard",
+    "enhance_cancel", "enhance_plan", "enhance_start", "enhance_status", "forget_previews",
     "generate_button", "get_history", "handoff_text", "history_view", "load_history", "parse_handoff", "pin_history",
     "preview", "recipe", "reconcile_roles", "save_prompt", "stage", "staged_exists", "submit", "trim", "wangp_status",
 ]

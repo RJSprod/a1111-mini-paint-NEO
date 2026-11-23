@@ -11,7 +11,15 @@
  * is idle or generating, whether Generate is a button, and the history.
  * Generate hands the visible values back to the same route, which builds the
  * request the way the Clipboard composer would and puts it in the same
- * queue; the popup closes the moment the server has stored it. Auto, beside
+ * queue; the popup closes the moment the server has stored it.
+ *
+ * THE PROMPT IS NOT TYPED HERE (2026-11-23). The box shows it, and a tap -
+ * or Enter on it - opens the prompt editor every editor of this extension
+ * shares (``minipaint_sheet.js``): 90% of the window, the cursor in the text,
+ * and Enhance there and then, with the system prompt it runs under one
+ * press away, stacked over it. A prompt the enhancer wrote and the user took
+ * goes as it is: never enhanced a second time at Generate, and the switch is
+ * left where it was. Auto, beside
  * it, is the same press: the picture in the roles ticked here, one or
  * several (since 2026-11-23; before then it took the Clipboard's Auto
  * Options, which are now the Clipboard tab's Auto's alone).
@@ -47,6 +55,7 @@ window.minipaintIntercept = (function () {
     const IMAGE_ROUTE = "/minipaint-clipboard/intercept/image/";
     const STAGE_ROUTE = "/minipaint-interop/stage";
     const ENHANCE_SETTINGS_ROUTE = "/minipaint-clipboard/enhance-settings";
+    const PROMPT_PLACEHOLDER = "Use current WanGP prompt";
     const PREFIX = "wangp:";
     //: The public API's own key, so a page that loads the API later shares
     //: the identity its jobs were submitted under.
@@ -124,6 +133,13 @@ window.minipaintIntercept = (function () {
         enhanceTouched: false,
         inheritTouched: false,
         promptDirty: false,
+        //: The prompt the popup sends, as the box shows it, and - when the
+        //: enhancer wrote it in the editor and the user took it - what was
+        //: typed before (``{typed, written}``), so Generate sends it as it is.
+        promptText: "",
+        prewritten: null,
+        //: The editor sheets this popup opened, still open.
+        sheets: [],
         busy: false,
         bundles: {},
         bridgeLoad: null,
@@ -433,11 +449,20 @@ window.minipaintIntercept = (function () {
         blocked.appendChild(recheck);
         root.appendChild(blocked);
 
-        const prompt = el("textarea", CLASS + "-prompt");
-        prompt.rows = 3;
-        prompt.placeholder = "Use current WanGP prompt";
-        prompt.setAttribute("aria-label", "Prompt");
-        prompt.addEventListener("input", function () { S.promptDirty = true; mirrorPrompt(prompt.value); });
+        // The prompt as it will be sent, to read - and to tap, which opens the
+        // editor. Not a text box: typing happens in the editor, where there is
+        // room for it and Enhance beside it.
+        const prompt = el("div", CLASS + "-prompt");
+        prompt.setAttribute("role", "button");
+        prompt.tabIndex = 0;
+        prompt.title = "Edit the prompt (Enter)";
+        prompt.addEventListener("click", function () { editPrompt(); });
+        prompt.addEventListener("keydown", function (event) {
+            if ((event.key === "Enter" && !event.ctrlKey && !event.metaKey) || event.key === " ") {
+                event.preventDefault();
+                editPrompt();
+            }
+        });
         root.appendChild(prompt);
 
         const enhanceRow = el("label", CLASS + "-row " + CLASS + "-check");
@@ -553,6 +578,132 @@ window.minipaintIntercept = (function () {
         root.style.left = Math.round(left) + "px";
     }
 
+    /** Whether the prompt is one the editor's Enhance wrote and the user took. */
+    function writtenHere() {
+        return !!(S.prewritten && String(S.promptText || "").trim());
+    }
+
+    /** The prompt the popup will send, and how the box shows it. */
+    function setPrompt(text, prewritten) {
+        S.promptText = String(text == null ? "" : text);
+        S.prewritten = prewritten && typeof prewritten === "object"
+            ? { typed: String(prewritten.typed || ""), written: String(prewritten.written || "") } : null;
+        renderPrompt();
+        renderEnhanceNote();
+    }
+
+    function renderPrompt() {
+        const dom = S.dom;
+        if (!dom) { return; }
+        const text = String(S.promptText || "");
+        dom.prompt.textContent = text || PROMPT_PLACEHOLDER;
+        dom.prompt.classList.toggle(CLASS + "-prompt-empty", !text);
+        dom.prompt.classList.toggle(CLASS + "-prompt-written", writtenHere());
+        dom.prompt.setAttribute("aria-label", (text ? "Prompt: " + text.slice(0, 120) : "Prompt: " + PROMPT_PLACEHOLDER) + ". Press to edit.");
+    }
+
+    /** The shared sheet bundle: the page loads it with the Clipboard tab; a
+     *  page that has not yet is asked for it here, once. */
+    function loadSheet() {
+        if (window.minipaintSheet) { return Promise.resolve(true); }
+        const loader = window.minipaintAssets;
+        if (!loader || typeof loader.load !== "function" || !S.bundles.sheet) { return Promise.resolve(false); }
+        return loader.load([S.bundles.sheet]).then(function (ok) { return !!ok && !!window.minipaintSheet; }, function () { return false; });
+    }
+
+    function trackSheet(sheet) {
+        if (!sheet) { return null; }
+        S.sheets.push(sheet);
+        const spec = sheet.spec || {};
+        const closed = spec.closed;
+        spec.closed = function (reason) {
+            const index = S.sheets.indexOf(sheet);
+            if (index >= 0) { S.sheets.splice(index, 1); }
+            if (typeof closed === "function") { closed(reason); }
+        };
+        return sheet;
+    }
+
+    function closeSheets() {
+        while (S.sheets.length) {
+            const sheet = S.sheets[S.sheets.length - 1];
+            S.sheets.pop();
+            try { sheet.close("popup closed"); } catch (e) { /* gone already */ }
+        }
+    }
+
+    /** The facts the editor's Enhance is planned against: the popup as it
+     *  stands - the ticks, Inherit and the live page's model. */
+    function enhanceBody(action, text) {
+        const dom = S.dom;
+        return Object.assign({
+            action: action, handoff: S.handoff, prompt: String(text || ""),
+            roles: selectedRoles(), inherit: dom ? !!dom.inherit.checked : false
+        }, factsBody());
+    }
+
+    /**
+     * The prompt editor, on this popup's prompt: Done (or Escape, or a tap
+     * on the edge) keeps the text, Cancel puts it back. Enhance is the
+     * press's own enhancement, run now and shown; System prompt opens the
+     * instructions it runs under, stacked over the editor.
+     */
+    function editPrompt() {
+        if (!S.open || S.busy || blockedView()) { return Promise.resolve(null); }
+        const sheetApi = window.minipaintSheet;
+        if (!sheetApi) {
+            // Fetched on the spot: the press is kept, and the editor opens
+            // once the bundle is here (without the keyboard on some phones).
+            return loadSheet().then(function (ok) {
+                if (!ok) { showMessage("The prompt editor could not be loaded; reload the page.", true); return null; }
+                return editPrompt();
+            });
+        }
+        const token = S.token;
+        const sub = [S.tab, S.size].filter(Boolean).join(" · ");
+        const sheet = sheetApi.prompt({
+            name: "wangp-prompt",
+            title: "Prompt for WanGP",
+            subtitle: sub,
+            text: S.promptText,
+            placeholder: PROMPT_PLACEHOLDER + " - or type one here",
+            prewritten: writtenHere() ? S.prewritten : null,
+            done: function (text, info) {
+                if (!S.open || S.token !== token) { return; }
+                const changed = text !== S.promptText || !!(info && info.prewritten) !== writtenHere();
+                setPrompt(text, info && info.prewritten ? info.prewritten : null);
+                if (changed) {
+                    S.promptDirty = true;
+                    mirrorPrompt(text);
+                }
+                showMessage("");
+            },
+            enhance: {
+                plan: function () { return post(enhanceBody("enhance_plan", "")); },
+                start: function (text) { return post(enhanceBody("enhance_start", text)); },
+                status: function (id) { return post({ action: "enhance_status", llm_id: id }); },
+                cancel: function (id) { return post({ action: "enhance_cancel", llm_id: id }); }
+            },
+            systemPrompt: function (plan) {
+                const usable = plan && plan.ok !== false;
+                return trackSheet(sheetApi.systemPrompt({
+                    name: "system-prompt",
+                    model: S.facts && S.facts.model ? S.facts.model : (usable && plan.model && typeof plan.model === "object" ? plan.model : null),
+                    variant: usable ? String(plan.prompt_set || "") : "",
+                    mode: usable ? String(plan.mode || "") : "",
+                    switched: function (flag) {
+                        if (!S.dom) { return; }
+                        S.dom.enhance.checked = !!flag;
+                        S.enhanceTouched = false;
+                        renderEnhanceNote();
+                    }
+                }));
+            }
+        });
+        note("the editor opened on the popup's text");
+        return Promise.resolve(trackSheet(sheet));
+    }
+
     function selectedRoles() {
         const dom = S.dom;
         if (!dom) { return []; }
@@ -597,6 +748,11 @@ window.minipaintIntercept = (function () {
         dom.enhanceNote.dataset.state = state;
         dom.enhanceNote.title = String(info.text || "");
         if (!dom.enhance.checked) { dom.enhanceNote.textContent = ""; return; }
+        if (writtenHere()) {
+            dom.enhanceNote.dataset.state = "written";
+            dom.enhanceNote.textContent = "written in the editor, so it goes as it is";
+            return;
+        }
         dom.enhanceNote.textContent = state === "ready" ? "ready" : state === "unknown" ? "model not known yet" : "not available now";
     }
 
@@ -768,9 +924,9 @@ window.minipaintIntercept = (function () {
             if (!answer || !answer.ok) { showMessage((answer && answer.message) || "That entry could not be loaded.", true); return; }
             const dom = S.dom;
             if (!dom || !S.open) { return; }
-            dom.prompt.value = String(answer.prompt || "");
+            setPrompt(String(answer.prompt || ""), answer.prewritten === true ? { typed: "", written: String(answer.prompt || "") } : null);
             S.promptDirty = true;
-            mirrorPrompt(dom.prompt.value);
+            mirrorPrompt(S.promptText);
             dom.enhance.checked = !!answer.enhance;
             mirrorEnhance(dom.enhance.checked);
             dom.inherit.checked = answer.inherit !== false;
@@ -813,7 +969,7 @@ window.minipaintIntercept = (function () {
         const dom = S.dom;
         if (!dom) { return; }
         S.describe = answer;
-        if (!S.promptDirty) { dom.prompt.value = sharedPrompt(answer.prompt); }
+        if (!S.promptDirty) { setPrompt(sharedPrompt(answer.prompt), null); }
         if (!S.enhanceTouched) { dom.enhance.checked = sharedEnhance(answer.enhance && answer.enhance.enabled); }
         const caps = answer.capabilities || {};
         S.roles.available = Array.isArray(caps.roles) ? caps.roles : [];
@@ -908,8 +1064,11 @@ window.minipaintIntercept = (function () {
             S.promptDirty = false;
             S.enhanceTouched = false;
             S.inheritTouched = false;
+            S.prewritten = null;
+            S.promptText = sharedPrompt(S.promptText);
         }
         S.facts = null;
+        renderPrompt();
         dom.thumb.src = IMAGE_ROUTE + encodeURIComponent(parsed.token);
         dom.sub.textContent = (parsed.tab ? parsed.tab + " · " : "") + S.size;
         dom.root.hidden = false;
@@ -952,6 +1111,7 @@ window.minipaintIntercept = (function () {
     function close() {
         const was = S.open;
         S.open = false;
+        closeSheets();
         removeKeys();
         if (S.dom) { S.dom.root.hidden = true; }
         if (was) { announce(false); }
@@ -962,7 +1122,7 @@ window.minipaintIntercept = (function () {
         if (!S.open) { return false; }
         const handoff = S.handoff;
         const dom = S.dom;
-        const promptText = dom ? dom.prompt.value : "";
+        const promptText = dom ? S.promptText : "";
         const dirty = S.promptDirty;
         close();
         S.last = { action: "cancel", code: "", message: "" };
@@ -983,13 +1143,20 @@ window.minipaintIntercept = (function () {
         const body = Object.assign({
             action: "submit",
             handoff: S.handoff,
-            prompt: dom ? String(dom.prompt.value || "") : "",
-            enhance: dom ? !!dom.enhance.checked : false,
+            prompt: dom ? String(S.promptText || "") : "",
+            // A prompt the editor's Enhance wrote and the user took is sent as
+            // it is: Enhance off for this press alone (``prewritten``), the
+            // switch left as it stands.
+            enhance: dom ? !!dom.enhance.checked && !writtenHere() : false,
             inherit: dom ? !!dom.inherit.checked : false,
             roles: selectedRoles(),
             page: pageId()
         }, factsBody());
         if (auto) { body.auto = true; }
+        if (writtenHere()) {
+            body.prewritten = true;
+            body.typed = String(S.prewritten.typed || "");
+        }
         return body;
     }
 
@@ -1094,7 +1261,9 @@ window.minipaintIntercept = (function () {
             // The ticks the press used, Auto's as Generate's: they are the user's.
             S.userRoles = body.roles.slice();
             mirrorPrompt(body.prompt);
-            mirrorEnhance(body.enhance);
+            // The switch as it stands, not this press's own: a prompt written
+            // in the editor went without enhancing and leaves the switch alone.
+            mirrorEnhance(dom.enhance.checked);
             close();
             // A job that will not run at the settings on WanGP's screen is
             // the server's first note, and the notice is marked for it: it is
@@ -1321,7 +1490,9 @@ window.minipaintIntercept = (function () {
             open: S.open, token: S.token, tab: S.tab, busy: S.busy, opened: S.opened,
             roles: { available: S.roles.available.map(function (role) { return role.id; }), defaults: S.roles.defaults.slice(),
                      selected: selectedRoles() },
-            prompt: S.dom ? S.dom.prompt.value : "",
+            prompt: S.dom ? S.promptText : "",
+            prewritten: writtenHere() ? { typed: S.prewritten.typed, written: S.prewritten.written } : null,
+            sheets: S.sheets.map(function (sheet) { return sheet.name; }),
             enhance: S.dom ? !!S.dom.enhance.checked : false,
             inherit: S.dom ? !!S.dom.inherit.checked : false,
             facts: S.facts ? { hasModel: !!S.facts.model, hasInputs: !!S.facts.inputs, generating: S.facts.generating } : null,

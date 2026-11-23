@@ -802,7 +802,8 @@ the result under an opaque token (never in the library) and opens a compact popu
 the gallery: the composer's prompt and its *Enhanced prompts* switch, the image roles the
 WanGP page's model reads (first frame, last frame, reference, several at once - for LTX 2.3
 and 2.5 a first and a last frame, never a reference), *Inherit Clipboard inputs* for everything the
-popup does not override, a dot saying whether WanGP is idle, generating or not running, and
+popup does not override (off until you turn it on, so only the roles you tick go with the picture),
+a dot saying whether WanGP is idle, generating or not running, and
 Generate - with **Auto** beside it, which sends the picture in the roles the Clipboard's Auto
 Options name instead of the ticked ones. It is blocked by the same answer as the Clipboard's section: until WanGP is ready
 for its page's model, the popup holds the same quiet line and Check again where the prompt,

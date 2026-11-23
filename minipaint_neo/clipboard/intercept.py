@@ -752,7 +752,10 @@ def submit(
         kept, dropped = reconcile_roles(roles, caps)
     if not kept:
         return {"ok": False, "code": errors.INTERCEPT_NO_IMAGE_ROLE, "message": errors.message(errors.INTERCEPT_NO_IMAGE_ROLE)}
-    use_draft = inherit is not False
+    # Only an Inherit the press says is on: anything else - off, or a body
+    # that does not say - sends the picture in the ticked roles and nothing
+    # of Clipboard's with it (2026-11-23).
+    use_draft = inherit is True
     wanted = None if enhance_wanted is None else bool(enhance_wanted)
     block = enhance.model_block(model)
     # The shared prompt is Clipboard's the moment Generate is pressed - the

@@ -211,7 +211,10 @@ function describeAnswer(body) {
         capabilities: { roles: withFacts ? TWO : ALL, default_roles: withFacts ? ["last_frame"] : ["reference"], inherit_supported: true, known: withFacts },
         prompt: "the server's prompt",
         enhance: { enabled: true, state: "ready", text: "ready line" },
-        inherit: { default: false, supported: true, draft: [{ role: "first_frame", label: "First Frame", names: ["forest.png"] }] },
+        // "inheritunsaid": an answer that does not say what Inherit was last
+        // left at; "inheriton": one that says it was left on.
+        inherit: MODE === "inheritunsaid" ? { supported: true, draft: [{ role: "first_frame", label: "First Frame", names: ["forest.png"] }] }
+            : { default: MODE === "inheriton", supported: true, draft: [{ role: "first_frame", label: "First Frame", names: ["forest.png"] }] },
         wangp: { state: "idle", running: true, generating: false, text: "WanGP is idle" },
         generate: MODE === "autooff" ? { label: "Generate", enabled: false, reason: "WanGP is not running" }
                                      : { label: "Generate", enabled: true, reason: "" },
@@ -374,6 +377,14 @@ async function main() {
         const reopened = popup.open(H1, {});
         await tick(20);
         report({ before: before, reopened: reopened, describesAfter: posted("describe").length });
+    }
+    if (MODE === "inheritunsaid" || MODE === "inheriton") {
+        popup.open(H1, {});
+        await tick(40);
+        const before = JSON.parse(JSON.stringify(popup.state()));
+        await popup.generate();
+        await tick(20);
+        report({ before: before });
     }
     if (MODE === "save" || MODE === "savemute") {
         popup.open(H1, {});
@@ -627,6 +638,18 @@ def run() -> Results:
                 opened["overlays"] == ["intercept:open", "intercept:closed"], str(opened["overlays"]))
         r.check("a handoff already opened once is refused - the step that hands it over runs after a failed receive too",
                 opened.get("reopened") is False and opened["hidden"] is True and opened.get("describesAfter") == 1, str(opened.get("reopened")))
+
+    # Inherit Clipboard inputs is off until it is chosen (2026-11-23): an
+    # answer that does not say it was left on opens the popup with it off,
+    # so a role nobody ticked is not filled from the Clipboard's cards.
+    unsaid = _run("inheritunsaid")
+    r.check("an answer that does not say Inherit was left on opens the popup with it off, and Generate sends it off",
+            unsaid is not None and "error" not in unsaid and (unsaid.get("before") or {}).get("inherit") is False
+            and bool(unsaid.get("submits")) and unsaid["submits"][0].get("inherit") is False, str(unsaid)[:300])
+    left_on = _run("inheriton")
+    r.check("and one that says it was left on opens it on, and Generate sends it on",
+            left_on is not None and "error" not in left_on and (left_on.get("before") or {}).get("inherit") is True
+            and bool(left_on.get("submits")) and left_on["submits"][0].get("inherit") is True, str(left_on)[:300])
 
     # Auto: Generate with the roles the Clipboard's Auto Options name, so a
     # gallery picture goes where the toolbar's Auto sends a grid picture.

@@ -889,7 +889,8 @@ WanGP line, the cards, the prompt, History, `sp_open`, Add to Queue, +First /
 ```python
 # __init__.py / config.py / history.py: as in 1.2.0 (the folder, the intercept, the draft and history), plus the destination:
 # config: INTERCEPT_MINIPAINT | INTERCEPT_CLIPBOARD | INTERCEPT_WANGP; INTERCEPT_TARGETS; INTERCEPT_LABELS; DEFAULT_INTERCEPT_TARGET = minipaint
-#         DEFAULT_INTERCEPT_INHERIT = True; intercept_target_of(value, legacy=None) -> target
+#         DEFAULT_INTERCEPT_INHERIT = False (since 2026-11-23); intercept_target_of(value, legacy=None) -> target
+#         INTERCEPT_INHERIT_RULE = 2: clipboard.json's intercept_inherit is read only beside intercept_inherit_rule == 2 (else off, once)
 #         Config.intercept_target; Config.intercept_inherit; Config.intercept (bool: == clipboard; setting it maps to a target)
 #         clipboard.json carries intercept_target and the legacy intercept bool side by side; a document with only the bool is migrated on read
 # __init__: intercept_target() -> target (never raises: minipaint when unreadable); intercept_enabled() -> target == clipboard
@@ -922,6 +923,8 @@ def describe(handoff, model=None, inputs=None, fresh=False) -> dict           # 
 def save_prompt(prompt) -> dict; def cancel(handoff) -> dict
 def submit(handoff, prompt, roles, inherit, enhance_wanted, page, model=None, inputs=None, settings_flush="", auto=False)
     -> {ok, instruction, status, notes, settings, roles, dropped_roles, auto, history}
+                                                                             # inherit: the composer's cards fill the roles not ticked only when it is True;
+                                                                             # False or absent sends the picture in the ticked roles and nothing else (2026-11-23)
                                                                              # auto: the roles are auto_roles(caps), not the ticked ones, and none left is
                                                                              # INTERCEPT_NO_IMAGE_ROLE with auto_refusal's sentence - never a fallback
                                                                              # saves the prompt to the draft, repairs the enhance switch, outbox.submit(..., ORIGIN_GALLERY, ...), records the recipe;

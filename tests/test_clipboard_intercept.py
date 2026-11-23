@@ -464,6 +464,85 @@ def submit_checks(r: Results, tab) -> None:
     outbox.use_executor(outbox.EXECUTOR_BROWSER)
 
 
+def inherit_default_checks(r: Results, tab) -> None:
+    """Inherit is off until it is chosen (2026-11-23).
+
+    A gallery picture sent to MiniMax H3 as the reference alone reached WanGP
+    with the Clipboard composer's first frame beside it: *Inherit Clipboard
+    inputs* was on by default, and remembered on every Generate, so a role
+    the popup did not tick was filled from the composer's cards - "make sure
+    that my options are respected and first image is not passed if I only
+    want to pass a reference". Off by default now, a stored choice from
+    before read as off once, and only an Inherit the press says is on brings
+    anything of Clipboard's along.
+    """
+    library = tab.library
+    first = _write_asset(library, "an-old-first-frame.png", (220, 200, 30))
+    draft = history.empty_draft()
+    draft["first_asset_id"] = first.asset_id
+    draft["prompt_override"] = "the composer's prompt"
+    history.save_draft(draft)
+    outbox.use_running(lambda: True)
+    outbox.use_executor(outbox.EXECUTOR_BROWSER)
+    enhance.set_enabled(False)
+
+    def document() -> dict:
+        return config.read_document(config.CONFIG_NAME, {})
+
+    # -- the setting: off until chosen, and a choice from before read as off once
+    stored = document()
+    stored.pop("intercept_inherit", None)
+    stored.pop("intercept_inherit_rule", None)
+    config.write_document(config.CONFIG_NAME, stored)
+    r.check("a fresh install starts the popup's Inherit off", config.load().intercept_inherit is False)
+    stored = document()
+    stored["intercept_inherit"] = True
+    stored.pop("intercept_inherit_rule", None)
+    config.write_document(config.CONFIG_NAME, stored)
+    r.check("an Inherit stored on while it was on by default is read as off, once",
+            config.load().intercept_inherit is False and config.load().configured)
+    config.save(config.load())
+    r.check("and written back off, under the rule that reads it from now on",
+            document().get("intercept_inherit") is False and document().get("intercept_inherit_rule") == config.INTERCEPT_INHERIT_RULE,
+            str({k: document().get(k) for k in ("intercept_inherit", "intercept_inherit_rule")}))
+    config.update(intercept_inherit=True)
+    r.check("an Inherit turned on under the new rule stays on", config.load().intercept_inherit is True)
+    config.update(intercept_inherit=False)
+
+    # -- the user's case: Clipboard holds a first frame, the picture goes as the reference
+    handoff = intercept.stage(_photo((40, 160, 220)), "txt2img")
+    token = _staged_of(handoff)
+    told = intercept.describe(handoff, REFERENCE_MODEL, ALL_THREE)
+    r.check("the popup opens with Inherit off, and the reference ticked on a reference model",
+            told["inherit"]["default"] is False and told["capabilities"]["default_roles"] == ["reference"],
+            str((told["inherit"]["default"], told["capabilities"]["default_roles"])))
+    answer = intercept.submit(handoff, "a reference only", ["reference"], False, False, PAGE, REFERENCE_MODEL, ALL_THREE)
+    images = outbox.get(answer["job_id"])["request"]["images"]
+    r.check("Reference ticked and Inherit off: the picture goes as the reference and no first frame goes with it",
+            images == {"references": [{"kind": "staged", "id": token}]}, json.dumps(images))
+    handoff = intercept.stage(_photo((60, 160, 220)), "txt2img")
+    token = _staged_of(handoff)
+    answer = intercept.submit(handoff, "a reference only", ["reference"], None, False, PAGE, REFERENCE_MODEL, ALL_THREE)
+    images = outbox.get(answer["job_id"])["request"]["images"]
+    r.check("and a press that does not say whether to inherit inherits nothing",
+            images == {"references": [{"kind": "staged", "id": token}]} and config.load().intercept_inherit is False
+            and intercept.load_history()[0]["inherit"] is False, json.dumps(images))
+    outbox.use_executor(outbox.EXECUTOR_SERVER)
+    handoff = intercept.stage(_photo((80, 160, 220)), "txt2img")
+    answer = intercept.submit(handoff, "a reference only", ["reference"], False, False, PAGE, REFERENCE_MODEL, ALL_THREE)
+    inputs = (outbox.get(answer["job_id"]) or {}).get("inputs") or {}
+    r.check("under the unattended queue the job holds the reference alone, with no first frame for WanGP",
+            answer["ok"] and not inputs.get("start") and len(inputs.get("references") or []) == 1, str(inputs))
+    for stored_job in outbox.jobs():
+        if stored_job["state"] in ("pending", "admitted"):
+            try:
+                outbox.cancel(stored_job["job_id"])
+            except Exception:
+                pass
+    outbox.use_executor(outbox.EXECUTOR_BROWSER)
+    history.save_draft(history.empty_draft())
+
+
 def auto_checks(r: Results, tab) -> None:
     """The popup's Auto: Generate with the roles Auto Options names, not the ticks.
 
@@ -917,6 +996,7 @@ def run() -> Results:
                 capability_checks(r)
                 describe_checks(r, tab, token)
                 submit_checks(r, tab)
+                inherit_default_checks(r, tab)
                 auto_checks(r, tab)
                 enhancer_checks(r, tab)
                 history_checks(r)

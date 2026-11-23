@@ -805,7 +805,9 @@ window.minipaintIntercept = (function () {
         S.roles.defaults = Array.isArray(caps.default_roles) ? caps.default_roles : [];
         const chosen = S.userRoles || selectedRoles();
         renderRoles(reconcileRoles(chosen, S.roles.available, S.roles.defaults));
-        if (!S.inheritTouched) { dom.inherit.checked = !(answer.inherit && answer.inherit.default === false); }
+        // Off unless the server says the last choice was on: a role the
+        // popup does not tick stays empty unless Inherit is asked for.
+        if (!S.inheritTouched) { dom.inherit.checked = !!(answer.inherit && answer.inherit.default === true); }
         renderEnhanceNote();
         renderInheritNote();
         renderStatus();
@@ -966,7 +968,7 @@ window.minipaintIntercept = (function () {
             handoff: S.handoff,
             prompt: dom ? String(dom.prompt.value || "") : "",
             enhance: dom ? !!dom.enhance.checked : false,
-            inherit: dom ? !!dom.inherit.checked : true,
+            inherit: dom ? !!dom.inherit.checked : false,
             roles: selectedRoles(),
             page: pageId()
         }, factsBody());
@@ -1303,7 +1305,7 @@ window.minipaintIntercept = (function () {
                      selected: selectedRoles() },
             prompt: S.dom ? S.dom.prompt.value : "",
             enhance: S.dom ? !!S.dom.enhance.checked : false,
-            inherit: S.dom ? !!S.dom.inherit.checked : true,
+            inherit: S.dom ? !!S.dom.inherit.checked : false,
             facts: S.facts ? { hasModel: !!S.facts.model, hasInputs: !!S.facts.inputs, generating: S.facts.generating } : null,
             seen: Object.keys(S.seen).length,
             wangp: S.dom ? S.dom.dot.dataset.state : "",

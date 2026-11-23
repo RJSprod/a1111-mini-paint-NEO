@@ -1157,8 +1157,14 @@ What the popup shows, top to bottom:
   not said) - and never *Reference* for LTX 2.3 or 2.5 Distilled - and one is ticked by default. What was ticked is checked again at Generate,
   so a request whose picture has nowhere left to go is refused
   (`INTERCEPT_NO_IMAGE_ROLE`) rather than sent without it.
-* **Inherit Clipboard inputs** — on by default. On, the composer's own cards fill every
+* **Inherit Clipboard inputs** — off by default. On, the composer's own cards fill every
   role the popup does not override; off, only the roles ticked here go with the request.
+  The last choice is remembered. It was on by default until 2026-11-23, when a picture sent
+  from the Txt2Img gallery as the reference alone reached WanGP with the composer's first
+  frame beside it ("make sure that my options are respected and first image is not passed if
+  I only want to pass a reference"); a choice stored before then is read as off, once, since
+  every Generate had stored the default as if it were chosen. Only a press that says Inherit
+  is on brings anything of the Clipboard's along - one that does not say inherits nothing.
 * **The WanGP dot** — not running, idle, generating (the request joins WanGP's queue) or
   running when the page has not yet said which. Generate follows the composer's own
   *Add to Queue* rule, so it is a button exactly when a press there would be and greyed

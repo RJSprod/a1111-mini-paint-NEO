@@ -770,21 +770,59 @@ answers with "not a queue action" looks, from the tab, exactly like a press
 that did nothing.
 
     GET  /minipaint-clipboard/enhance-settings?variant&mode
-    POST /minipaint-clipboard/enhance-settings  {action: describe|toggle|override|restore, ...}
+    POST /minipaint-clipboard/enhance-settings  {action: describe|toggle, ...}
       describe {model?, variant?, mode?, fallback?, draft?}
-        -> {ok, enabled, availability: {state, text}, sets: [{id, label}], modes: [{id, label}],
-            view: {variant, mode, text, source: override|default|unavailable, label, line}}
-      override {variant, mode, text} / restore {variant, mode} -> {ok, text, source, view, status}
+        -> {ok, enabled, keeps_instructions, availability: {state, text}, variant, mode}
+      toggle {enabled} -> {ok, enabled, status}
+      override / restore -> 409 {ok: false, code: REQUEST_INVALID, message: routes.MOVED_MESSAGE}
 
-The system prompt editor's whole server (since 2026-11-23, `routes.editor_answer`):
-the editor is the browser's pop-over (`browser/minipaint_sheet.js`) and every
-door opens the same one - the Clipboard tab's button, and the Send to WanGP
-prompt editor, which stacks it. `describe` chooses the set: a `variant` the
-caller names, else the one the `model` is written under
-(`enhance.editor_choice`), else the `fallback` (the set the editor last showed);
-and the mode: a `mode` named, else - for the Clipboard tab's door, which says
-`draft` - whether the composer holds a picture that set's writer reads
-(`ui.draft_has_picture_for`), else without one.
+The system prompt editor is **ModelSwitchRefiner's** since 2026-11-24
+(`mcSheet.systemPrompt`, its `javascript/mc_sheet.js`; its docs/21 §6.1): the
+instructions are its writers', kept and edited there, and every request that
+brings none runs under them. This route's part is what only this extension
+knows: `describe` (`routes.editor_answer`) is the answer to the editor's
+`choose({fallback})` as it opens from this extension's doors - the Clipboard
+tab's button, and the Send to WanGP prompt editor, which stacks it. It chooses
+the set: a `variant` the caller names, else the one the `model` is written
+under (`enhance.editor_choice`), else the `fallback` (the set the editor last
+showed); and the mode: a `mode` named, else - for the Clipboard tab's door,
+which says `draft` - whether the composer holds a picture that set's writer
+reads (`ui.draft_has_picture_for`), else without one; with `enabled`, where
+the switch stands, which the editor draws as the opener's `toggle`. `toggle`
+is that switch's write. A page from before 2026-11-24 that asks to `override`
+or `restore` is told where the instructions are now.
+
+**The overrides this extension kept** (`clipboard-enhance.json`'s
+`overrides`, written by its own editor until 2026-11-24) are handed to
+ModelSwitchRefiner once - `enhance.hand_over()`, at Forge's start
+(`executor.recover`) and before a press is enhanced - through
+`mc_llm_api.adopt_instructions(sets, origin="minipaint-clipboard")`, which
+keeps an edit made there first; the file then keeps them only as the record
+of the move (`handed_over: {at, adopted, kept, refused, sets}`). A press sends
+no `system_prompt` to a ModelSwitchRefiner whose `capabilities()` says
+`keeps_instructions` (and has `instructions()`), and reads whether the set it
+runs under is the user's from `instructions()` (`system_override` on the job);
+to an older one the file's override is sent, as it always was, and can no
+longer be edited from here.
+
+**The pop-over, `window.mcSheet`** (ModelSwitchRefiner's, loaded by Forge on
+every page of a WebUI with that extension), as this extension uses it:
+
+    mcSheet.prompt({name: "wangp-prompt", title, subtitle, text, placeholder, prewritten,
+                    done(text, {prewritten, changed}), cancel(),
+                    enhance: {plan(), start(text), status(id), cancel(id)}, systemPrompt(plan)})
+    mcSheet.systemPrompt({name: "system-prompt", choose({fallback}) -> {variant, mode, on},
+                          toggle: {label, title, on, set(flag) -> {ok, on, status, message}}})
+    a sheet: close(reason), spec.closed(reason); mcSheet.top(), isOpen(), closeAll()
+
+The Enhance callbacks post the intercept route's `enhance_*` actions below;
+`plan()`'s answer is handed back to `systemPrompt(plan)` (its `prompt_set` and
+`mode` are the set). Without `mcSheet` the popup types its prompt in place
+(`typeInPlace`) and the Clipboard tab's button says the system prompts are
+ModelSwitchRefiner's to edit. This extension's browser checks carry a stand-in
+of exactly this (`SHEET_STAND_IN_JS`, `tests/browser_clipboard.py`);
+ModelSwitchRefiner's `tests/test_sheet_layout.py` drives the real one with
+callbacks in this shape: a change of either side is made on both.
 
     POST /minipaint-clipboard/intercept  {action: describe|submit|cancel|draft|history|history_load|history_delete|history_pin|
                                                   enhance_plan|enhance_start|enhance_status|enhance_cancel,
@@ -1107,13 +1145,13 @@ toolbar's Auto; no backend fn, so no hidden component), `cancel_all.click(js: ca
 openPromptEditor)` with no backend fn.
 
 The system prompts have **no Gradio editor at all** since 2026-11-23: `sp_open`
-opens the shared pop-over (`minipaintSheet.systemPrompt`, over
-`/minipaint-clipboard/enhance-settings`), which can be drawn over any tab - the
-gallery's prompt editor stacks it over txt2img - where a panel of this tab,
-inside a tab panel Gradio sets `display: none`, could not. The panel
-`minipaint-clip-enhance-panel` still holds the switch and its line, never
-drawn (`display: none`): the press reads the switch as an input, and the popup
-and the editor mirror into it.
+opens ModelSwitchRefiner's pop-over (`mcSheet.systemPrompt`, since 2026-11-24;
+it chooses its set over `/minipaint-clipboard/enhance-settings`), which can be
+drawn over any tab - the gallery's prompt editor stacks it over txt2img - where
+a panel of this tab, inside a tab panel Gradio sets `display: none`, could not.
+The panel `minipaint-clip-enhance-panel` still holds the switch and its line,
+never drawn (`display: none`): the press reads the switch as an input, and the
+popup and the editor's `toggle` mirror into it.
 
 The tab's browser side, `browser/minipaint_clipboard.js`
 (`window.minipaintClipboard`): `attach` (mounts the grid, fetches the library

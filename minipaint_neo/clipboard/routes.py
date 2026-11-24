@@ -941,20 +941,20 @@ def _output_poster(request: typing.Any) -> typing.Any:
 
 
 def editor_answer(body: typing.Mapping[str, typing.Any]) -> dict:
-    """What the system prompt editor draws itself from, in one answer.
+    """Which set the system prompt editor opens on, from this extension's side.
 
-    The switch, the line about the LLM side and WanGP's model, the sets and
-    the modes it can be moved to, and the set it is on - with its text, where
-    that text comes from and the line that says so (``enhance.prompt_view``).
+    The editor is ModelSwitchRefiner's since 2026-11-24 (``mcSheet.systemPrompt``,
+    over its own route): it reads and writes the instructions itself. What only
+    this extension knows is which set a press here would use, and where its
+    switch stands - so that is the whole answer, given to the editor's
+    ``choose()`` as it opens.
 
     Which set: a ``variant`` the caller names, else the one the ``model`` is
     written under (``enhance.editor_choice``), else the ``fallback`` - the set
     the editor last showed, because a WanGP that has not said its model is no
     reason to jump to another one. Which mode: a ``mode`` the caller names,
-    else - for the Clipboard tab's own door, which says ``draft`` - whether
-    the composer holds a picture that set's writer reads, else without a
-    picture. The gallery's prompt editor names both: it asked the intercept
-    route which set its press would use.
+    else - for the Clipboard tab's own door, which says ``draft`` - whether the
+    composer holds a picture that set's writer reads, else without a picture.
     """
     from . import enhance as enhance_module
     from . import ui as ui_module
@@ -971,23 +971,27 @@ def editor_answer(body: typing.Mapping[str, typing.Any]) -> dict:
     return {
         "ok": True,
         "enabled": enhance_module.enabled(),
+        "keeps_instructions": enhance_module.keeps_instructions(),
         "availability": {"state": availability.get("state", "unknown"), "text": availability.get("text", "")},
-        "sets": [{"id": item, "label": enhance_module.PROMPT_SET_LABELS[item]} for item in enhance_module.PROMPT_SETS],
-        "modes": [{"id": item, "label": enhance_module.MODE_LABELS[item]} for item in enhance_module.MODES],
-        "view": enhance_module.prompt_view(chosen, mode),
+        "variant": chosen,
+        "mode": mode,
     }
 
 
-async def _enhance_settings(request: typing.Any) -> typing.Any:
-    """The prompt-enhancement settings, over HTTP: describe, toggle, edit.
+#: What a page loaded before the editor moved gets for its old editor's writes.
+MOVED_MESSAGE = ("The system prompts are kept by ModelSwitchRefiner now, and its editor writes them. "
+                 "Reload the page to edit them there.")
 
-    The describe half has existed since the enhancer did; these are the
-    write halves it never had - the switch, an override for one of the four
-    instruction sets, and the restore that forgets one. Each is
-    request-and-response and none of them was ever a push. Since 2026-11-23
-    this is the whole of the system prompt editor's server: ``describe``
-    (``editor_answer``) is what it draws itself from, and ``override`` and
-    ``restore`` answer with the set as it now stands (``view``).
+
+async def _enhance_settings(request: typing.Any) -> typing.Any:
+    """The prompt-enhancement settings, over HTTP: describe and toggle.
+
+    The switch, and which instruction set a press here would use
+    (``editor_answer``, what ModelSwitchRefiner's system prompt editor asks as
+    it opens from this extension's doors). The instructions themselves are
+    ModelSwitchRefiner's since 2026-11-24, read and written over its own route;
+    a page from before that asks to ``override`` or ``restore`` is told so.
+    Each is request-and-response and none of them was ever a push.
     """
     if not _signed_in(request):
         return _json({"ok": False, "code": errors.AUTH_BOUNDARY_FAILED, "message": "Sign in first."}, 401)
@@ -1024,19 +1028,9 @@ async def _enhance_settings(request: typing.Any) -> typing.Any:
             wanted = enhance_module.set_enabled(bool(body.get("enabled")))
             return _json({"ok": True, "enabled": wanted,
                           "status": f"Prompt enhancement is {'on' if wanted else 'off'}."})
-        if action == "override":
-            enhance_module.set_override(body.get("variant"), body.get("mode"), body.get("text"))
-            text, source = enhance_module.effective_prompt(body.get("variant"), body.get("mode"))
-            return _json({"ok": True, "text": text, "source": source,
-                          "view": enhance_module.prompt_view(body.get("variant"), body.get("mode")),
-                          "status": "Override saved. Every enhanced press from now on uses it, "
-                                    "on every page, after a restart too."})
-        if action == "restore":
-            had = enhance_module.clear_override(body.get("variant"), body.get("mode"))
-            text, source = enhance_module.effective_prompt(body.get("variant"), body.get("mode"))
-            return _json({"ok": True, "text": text, "source": source,
-                          "view": enhance_module.prompt_view(body.get("variant"), body.get("mode")),
-                          "status": "Back to the default." if had else "There was no override; the default is shown."})
+        if action in ("override", "restore"):
+            return _json({"ok": False, "code": errors.REQUEST_INVALID, "message": MOVED_MESSAGE,
+                          "status": MOVED_MESSAGE}, 409)
     except IntegrationError as error:
         return _refused_here(error)
     except Exception:
@@ -1509,5 +1503,5 @@ __all__ = ["ARCHIVES_ROUTE", "ARCHIVE_IMAGE_ROUTE", "ARCHIVE_LIST_ROUTE", "AUTO_
            "INTERCEPT_ROUTE", "INTERCEPT_SENTENCES", "LIBRARY_ROUTE", "PAGE_SIZE",
            "PAGE_SIZE_MAX", "PAGE_SIZE_MIN", "REVALIDATED_CACHE", "ROUTE_PREFIX",
            "SEND_ROUTE", "SETTINGS_ROUTE", "QUEUE_ROUTE", "READINESS_ROUTE", "ENHANCE_SETTINGS_ROUTE", "PROMPTS_ROUTE", "REQUEST_MEMORY_SECONDS",
-           "apply_settings", "archive_image_url", "archives_action", "archives_answer", "auto_sentence", "clamp_size", "editor_answer", "forget_request", "image_url", "install", "intercept_action", "library_listing",
+           "MOVED_MESSAGE", "apply_settings", "archive_image_url", "archives_action", "archives_answer", "auto_sentence", "clamp_size", "editor_answer", "forget_request", "image_url", "install", "intercept_action", "library_listing",
            "menu_facts", "page_of", "prompts_action", "recent_request", "remember_request"]

@@ -178,7 +178,7 @@ def _after_receive_js() -> str:
         from .. import assets
 
         intercept_url = assets.url_for("intercept")
-        bundles = json.dumps({name: assets.url_for(name) for name in ("wangp", "interop", "sheet")})
+        bundles = json.dumps({name: assets.url_for(name) for name in ("wangp", "interop")})
     except Exception:
         intercept_url = ""
     return (

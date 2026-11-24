@@ -99,7 +99,9 @@ def build_page(library: pathlib.Path):
 
 
 def head_html() -> str:
-    """Only what Forge really puts on every page, plus a stand-in editor.
+    """Only what Forge really puts on every page, plus a stand-in editor, and
+    a stand-in for ModelSwitchRefiner's pop-over (``SHEET_STAND_IN_JS``), which
+    Forge loads on every page of a WebUI that has that extension.
 
     No Forge checkout: the Canvas is not what is being tested, and requiring
     one would keep this suite out of CI - which is where the regressions it
@@ -108,6 +110,7 @@ def head_html() -> str:
     return (
         "<script>" + loading.FORGE_CANVAS_STUB + "</script>"
         "<script>" + FORGE_GALLERY_HELPERS + "</script>"
+        "<script>" + SHEET_STAND_IN_JS + "</script>"
         "<script>" + (ROOT / "javascript" / "main.js").read_text(encoding="utf-8") + "</script>"
         "<style>" + (ROOT / "style.css").read_text(encoding="utf-8") + "</style>"
     )
@@ -119,6 +122,82 @@ def head_html() -> str:
 # A page without this exercised a helper no real Forge has, which is how a
 # pick that wrapped the answer once more, into a list Gradio 4.40 refuses
 # before the receive function runs, passed every suite.
+#: ModelSwitchRefiner's pop-over (its javascript/mc_sheet.js, ``window.mcSheet``),
+#: stood in for: since 2026-11-24 every large editor this extension opens - the
+#: Send to WanGP prompt editor, the system prompt editor - is that extension's,
+#: and this repository's CI has no ModelSwitchRefiner. The stand-in keeps the
+#: contract's shape - ``prompt()`` and ``systemPrompt()`` take the options this
+#: extension passes, and a sheet has ``close()`` and ``spec.closed`` - and draws
+#: the least a check can type into. The real sheet is checked in that
+#: repository (tests/test_sheet_layout.py), with callbacks in this extension's
+#: shape; what a check here asks of it is what this extension hands it.
+SHEET_STAND_IN_JS = """
+window.mcSheet = (function () {
+    const S = { stack: [], prompts: [], systems: [] };
+    function sheetOf(kind, options) {
+        const node = document.createElement('div');
+        node.className = 'mc-sheet-layer';
+        node.setAttribute('role', 'dialog');
+        node.style.cssText = 'position:fixed;inset:5%;z-index:2010;background:#222;color:#eee;padding:8px';
+        node.dataset.sheet = options.name || kind;
+        document.body.appendChild(node);
+        const sheet = { name: options.name || kind, kind: kind, options: options, node: node, spec: {}, closed: false };
+        sheet.close = function (why) {
+            if (sheet.closed) { return false; }
+            sheet.closed = true;
+            node.remove();
+            const at = S.stack.indexOf(sheet);
+            if (at >= 0) { S.stack.splice(at, 1); }
+            if (typeof sheet.spec.closed === 'function') { sheet.spec.closed(why); }
+            return true;
+        };
+        sheet.request = sheet.close;
+        S.stack.push(sheet);
+        (kind === 'prompt' ? S.prompts : S.systems).push(sheet);
+        return sheet;
+    }
+    function prompt(options) {
+        const o = options || {};
+        const sheet = sheetOf('prompt', o);
+        const box = document.createElement('textarea');
+        box.className = 'mc-sheet-text';
+        box.value = String(o.text || '');
+        const done = document.createElement('button');
+        done.className = 'mc-sheet-done';
+        done.textContent = 'Done';
+        done.addEventListener('click', function () {
+            if (typeof o.done === 'function') {
+                o.done(box.value, { prewritten: sheet.written || null, changed: box.value !== String(o.text || '') });
+            }
+            sheet.close('done');
+        });
+        const cancel = document.createElement('button');
+        cancel.className = 'mc-sheet-cancel';
+        cancel.textContent = 'Cancel';
+        cancel.addEventListener('click', function () {
+            if (typeof o.cancel === 'function') { o.cancel(); }
+            sheet.close('cancel');
+        });
+        sheet.node.appendChild(box);
+        sheet.node.appendChild(done);
+        sheet.node.appendChild(cancel);
+        sheet.box = box;
+        try { box.focus(); } catch (e) { /* fine */ }
+        return sheet;
+    }
+    function systemPrompt(options) { return sheetOf('system', options || {}); }
+    return {
+        version: 1, standIn: true, prompt: prompt, systemPrompt: systemPrompt,
+        top: function () { return S.stack.length ? S.stack[S.stack.length - 1] : null; },
+        isOpen: function () { return S.stack.length > 0; },
+        closeAll: function (why) { while (S.stack.length) { S.stack[S.stack.length - 1].close(why || 'close'); } },
+        state: function () { return { open: S.stack.map(function (sheet) { return sheet.name; }), depth: S.stack.length }; },
+        prompts: S.prompts, systems: S.systems
+    };
+})();
+"""
+
+
 FORGE_GALLERY_HELPERS = """
 function selected_gallery_index() {
     const app = typeof gradioApp === "function" ? gradioApp() : document;
@@ -1610,17 +1689,17 @@ def check_the_queue_is_read_again_unasked(r: Results, page) -> None:
         page.wait_for_timeout(300)
 
 
-def check_the_prompt_editor_fills_the_window(r: Results, page) -> None:
-    """The system prompt editor is the pop-over every editor shares.
+def check_the_system_prompt_editor_is_model_switch_refiners(r: Results, page) -> None:
+    """The system prompt editor is ModelSwitchRefiner's (2026-11-24).
 
-    A system prompt is a page of prose; the composer is a third of a window.
-    Since 2026-11-23 the tab's one button opens the shared pop-over
-    (``minipaint_sheet.js``) rather than a second shape of a Gradio panel:
-    90% of the window with the page dimmed round it, the box most of it, the
-    cursor in the box, every control the panel had, and an unsaved change
-    asked about before it is thrown away. What is IN the box is the server's
-    answer and depends on whether ModelSwitchRefiner is installed beside this
-    one, so nothing here reads it.
+    "Those are related LLM studio": the instructions are its writers', kept
+    and edited there (``mcSheet.systemPrompt``, its javascript/mc_sheet.js),
+    and LLM Studio's own MiniMax workspace runs under them too. The tab keeps
+    its one button, and what it hands the editor is this extension's part:
+    which set a press here would use - the composer's pictures decide - and
+    this tab's Enhance switch, at the editor's top as it always was. The sheet
+    is stood in for (``SHEET_STAND_IN_JS``); how it looks is that repository's
+    to check.
     """
     from minipaint_neo.clipboard import enhance
 
@@ -1628,7 +1707,7 @@ def check_the_prompt_editor_fills_the_window(r: Results, page) -> None:
     time.sleep(1.0)
     r.check("the editor is not on the page at all until it is asked for",
             page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False
-            and page.evaluate("() => !document.querySelector('.minipaint-sheet-layer')"))
+            and page.evaluate("() => !document.querySelector('.mc-sheet-layer')"))
     hidden = page.evaluate("""() => {
         const panel = document.getElementById('minipaint_clipboard_enhance_panel');
         return panel ? Math.round(panel.getBoundingClientRect().height) : -1; }""")
@@ -1639,6 +1718,8 @@ def check_the_prompt_editor_fills_the_window(r: Results, page) -> None:
     r.check("the button that opens it is there",
             page.evaluate("""() => { const b = document.getElementById('minipaint_clipboard_sp_open');
                 return !!b && b.getBoundingClientRect().height > 0; }"""))
+    r.check("and this extension draws no pop-over of its own any more",
+            page.evaluate("() => typeof window.minipaintSheet === 'undefined'"))
 
     def press_open():
         return page.evaluate("""() => {
@@ -1648,103 +1729,67 @@ def check_the_prompt_editor_fills_the_window(r: Results, page) -> None:
             b.click();
             return true; }""")
 
-    overlays = page.evaluate("""() => { window.__sheetOverlays = [];
-        document.addEventListener('minipaint:overlay', e => window.__sheetOverlays.push(e.detail.name + ':' + (e.detail.open ? 'open' : 'closed')));
-        return true; }""")
     asked = []
 
     def on_request(request):
         if "/minipaint-clipboard/enhance-settings" in request.url and request.method == "POST":
             asked.append(request.post_data or "")
 
-    page.on("request", on_request)
-    r.check("the editor has a way in", overlays and press_open() is True)
-    page.wait_for_timeout(1500)
-    page.remove_listener("request", on_request)
-    first = json.loads(asked[0]) if asked else {}
-    r.check("it asks the server which instructions to open on, saying they are this tab's - the composer's pictures decide",
-            first.get("action") == "describe" and first.get("draft") is True, str(first)[:200])
-    shape = page.evaluate("""() => {
-        const layer = document.querySelector('.minipaint-sheet-layer');
-        const sheet = layer && layer.querySelector('.minipaint-sheet');
-        const box = sheet && sheet.querySelector('.minipaint-sheet-text');
-        const p = sheet ? sheet.getBoundingClientRect() : null;
-        const t = box ? box.getBoundingClientRect() : null;
-        const w = window.innerWidth, h = window.innerHeight;
-        const hit = (x, y) => { const e = document.elementFromPoint(x, y); return e ? e.className : ''; };
-        return { open: window.minipaintClipboard.debug().editorOpen, names: window.minipaintSheet.state().open,
-                 left: p ? p.left : -1, top: p ? p.top : -1, width: p ? p.width : 0, height: p ? p.height : 0,
-                 boxW: t ? t.width : 0, boxH: t ? t.height : 0, w: w, h: h,
-                 edge: hit(8, h / 2), centre: hit(w / 2, h / 2),
-                 focused: !!box && document.activeElement === box,
-                 controls: { toggle: !!sheet.querySelector('[role=switch]'), sets: sheet.querySelectorAll('.minipaint-sheet-set option').length,
-                             modes: sheet.querySelectorAll('.minipaint-sheet-mode option').length,
-                             save: !!sheet.querySelector('.minipaint-sheet-save'), restore: !!sheet.querySelector('.minipaint-sheet-restore'),
-                             reload: !!sheet.querySelector('.minipaint-sheet-reload'), close: !!sheet.querySelector('.minipaint-sheet-close-text') } };
-    }""")
-    r.check("the press opens the shared pop-over, as the system prompt editor",
-            shape["open"] is True and shape["names"] == ["system-prompt"], str(shape)[:300])
-    r.check("90% of the window, in the middle of it",
-            abs(shape["width"] - shape["w"] * 0.9) <= 2 and abs(shape["height"] - shape["h"] * 0.9) <= 2
-            and abs(shape["left"] - shape["w"] * 0.05) <= 2 and abs(shape["top"] - shape["h"] * 0.05) <= 2, str(shape)[:300])
-    r.check("with the page dimmed round its edge, and the sheet over the middle",
-            "minipaint-sheet-backdrop" in shape["edge"] and "minipaint-sheet" in shape["centre"], str((shape["edge"], shape["centre"])))
-    r.check("MOSTLY the box being edited, which is what the view is for",
-            shape["boxH"] >= shape["h"] * 0.45 and shape["boxW"] >= shape["width"] * 0.9, str(shape)[:300])
-    r.check("and the cursor is already in the box", shape["focused"] is True, str(shape)[:300])
-    r.check("every control the panel had: the switch, the writer and the instructions used, save, restore, reload and close",
-            all(shape["controls"].values()) and shape["controls"]["sets"] == 3 and shape["controls"]["modes"] == 2, str(shape["controls"]))
-    r.check("announced to the page as an overlay, so the Forge Assistant gets out of its way",
-            "sheet:system-prompt:open" in page.evaluate("() => window.__sheetOverlays"), str(page.evaluate("() => window.__sheetOverlays")))
-
-    page.keyboard.press("Control+End")
-    page.keyboard.type(" EDITED-IN-THE-SHEET")
-    page.keyboard.press("Escape")
-    page.wait_for_timeout(300)
-    asked = page.evaluate("() => window.minipaintSheet.top() ? window.minipaintSheet.top().state() : null")
-    r.check("Escape with an unsaved change asks before throwing it away, and stays open",
-            bool(asked) and asked["asking"] is True and asked["dirty"] is True and editor_open(page), str(asked))
-    page.locator(".minipaint-sheet-keep").click()
-    page.wait_for_timeout(200)
-    r.check("Keep editing goes back to the box with the change in it",
-            page.evaluate("() => document.activeElement && document.activeElement.classList.contains('minipaint-sheet-text') && document.activeElement.value.indexOf('EDITED-IN-THE-SHEET') >= 0"))
-    page.keyboard.press("Escape")
-    page.wait_for_timeout(200)
-    page.locator(".minipaint-sheet-discard").click()
-    page.wait_for_timeout(500)
-    r.check("Discard closes it", page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False
-            and page.evaluate("() => !document.querySelector('.minipaint-sheet-layer')"))
-    view = None
     try:
-        r.check("it opens again", press_open() is True)
-        page.wait_for_timeout(1500)
-        view = page.evaluate("() => window.minipaintSheet.top().state().view")
-        r.check("re-read, rather than keeping the edit it was told to discard",
-                bool(view) and "EDITED-IN-THE-SHEET" not in page.evaluate("() => document.querySelector('.minipaint-sheet-text').value"), str(view)[:200])
-        page.evaluate("() => { const b = document.querySelector('.minipaint-sheet-text'); b.focus(); b.select(); }")
-        page.keyboard.type("Saved from the shared editor.")
-        page.locator(".minipaint-sheet-save").click()
-        page.wait_for_timeout(1200)
-        saved = page.evaluate("() => window.minipaintSheet.top().state()")
-        r.check("Save override writes the set it shows, and says so",
-                bool(view) and enhance.override(view["variant"], view["mode"]) == "Saved from the shared editor."
-                and saved["view"]["source"] == "override" and saved["dirty"] is False, str(saved)[:200])
-        page.locator(".minipaint-sheet-restore").click()
-        page.wait_for_timeout(1200)
-        restored = page.evaluate("() => window.minipaintSheet.top().state()")
-        r.check("and Restore default forgets it", bool(view) and enhance.override(view["variant"], view["mode"]) == ""
-                and restored["view"]["source"] != "override", str(restored)[:200])
-        page.locator(".minipaint-sheet-close-text").click()
-        page.wait_for_timeout(500)
-        r.check("and Close puts it away", page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False)
-        r.check("saying so to the page", "sheet:system-prompt:closed" in page.evaluate("() => window.__sheetOverlays"))
+        r.check("the editor has a way in", press_open() is True)
+        page.wait_for_timeout(300)
+        opened = page.evaluate("""() => { const sheet = window.mcSheet.systems[window.mcSheet.systems.length - 1];
+            return sheet ? { name: sheet.options.name, choose: typeof sheet.options.choose,
+                             label: sheet.options.toggle && sheet.options.toggle.label,
+                             set: sheet.options.toggle && typeof sheet.options.toggle.set,
+                             open: window.minipaintClipboard.debug().editorOpen } : null; }""")
+        r.check("the press opens ModelSwitchRefiner's system prompt editor, with this tab's switch at its top",
+                opened == {"name": "system-prompt", "choose": "function", "label": "Enhance prompts before they reach WanGP",
+                           "set": "function", "open": True}, str(opened))
+        page.on("request", on_request)
+        chosen = page.evaluate("""async () => {
+            const sheet = window.mcSheet.systems[window.mcSheet.systems.length - 1];
+            return await sheet.options.choose({ fallback: 'ref2va' }); }""")
+        page.remove_listener("request", on_request)
+        first = json.loads(asked[0]) if asked else {}
+        r.check("it asks this tab's route which set to open on, saying the composer's pictures decide, and passing the set shown last",
+                first.get("action") == "describe" and first.get("draft") is True and first.get("fallback") == "ref2va", str(first)[:200])
+        r.check("and is answered with a set, a mode and where the switch stands",
+                bool(chosen) and chosen.get("variant") in enhance.PROMPT_SETS and chosen.get("mode") in enhance.MODES
+                and chosen.get("on") is enhance.enabled(), str(chosen))
+        turned = page.evaluate("""async () => {
+            const sheet = window.mcSheet.systems[window.mcSheet.systems.length - 1];
+            return await sheet.options.toggle.set(true); }""")
+        page.wait_for_timeout(600)
+        box = page.evaluate("""() => { const host = document.getElementById('minipaint_clipboard_enhance_toggle');
+            const input = host && host.querySelector('input[type=checkbox]'); return input ? input.checked : null; }""")
+        r.check("the switch turned there is this tab's setting, and its own switch says so",
+                turned.get("ok") is True and turned.get("on") is True and enhance.enabled() is True and box is True, str((turned, box)))
+        turned = page.evaluate("""async () => {
+            const sheet = window.mcSheet.systems[window.mcSheet.systems.length - 1];
+            return await sheet.options.toggle.set(false); }""")
+        page.wait_for_timeout(600)
+        r.check("and back off", turned.get("on") is False and enhance.enabled() is False, str(turned))
+        r.check("a second press while it is open opens no second one",
+                press_open() is True and page.evaluate("() => window.mcSheet.systems.length") == 1)
+        page.evaluate("() => window.mcSheet.closeAll()")
+        r.check("and once it is put away the tab knows", page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False)
+        # Gradio runs the button's script after the click, so the stand-in
+        # stays away until it has.
+        page.evaluate("() => { window.__keptSheet = window.mcSheet; window.mcSheet = undefined; }")
+        press_open()
+        page.wait_for_timeout(800)
+        toasts = page.evaluate("""() => Array.from(document.querySelectorAll('.minipaint-clip-toast'))
+            .map((t) => t.textContent).join(' | ')""")
+        page.evaluate("() => { window.mcSheet = window.__keptSheet; }")
+        r.check("without ModelSwitchRefiner the press says the system prompts are its to edit, and opens nothing",
+                "ModelSwitchRefiner" in toasts and page.evaluate("() => window.mcSheet.systems.length") == 1
+                and page.evaluate("() => !document.querySelector('.mc-sheet-layer')"), toasts)
     finally:
-        if view:
-            try:
-                enhance.clear_override(view["variant"], view["mode"])
-            except Exception:
-                pass
-        page.evaluate("() => window.minipaintSheet && window.minipaintSheet.closeAll()")
+        enhance.set_enabled(False)
+        page.wait_for_timeout(300)
+        page.evaluate("() => { if (!window.mcSheet && window.__keptSheet) { window.mcSheet = window.__keptSheet; } "
+                      "window.mcSheet && window.mcSheet.closeAll(); }")
 
 
 def editor_open(page) -> bool:
@@ -4301,34 +4346,25 @@ def check_a_long_request_column_scrolls_inside_itself(r: Results, page) -> None:
         r.check("not even once the column has reached its end",
                 end["scrolled"] == 0 and end["scrollTop"] >= end["scrollHeight"] - end["clientHeight"] - 2, str(end))
 
-        # The two full-window views live inside this column. Scrolled or not,
-        # its scroll box must not clip them: they are the window, not a part
-        # of the column.
+        # The system prompt editor is ModelSwitchRefiner's, drawn on the page's
+        # body (its tests measure it); from a scrolled column the press still
+        # reaches it.
         page.evaluate("""() => {
             const host = document.getElementById('minipaint_clipboard_sp_open');
             const b = host && (host.tagName === 'BUTTON' ? host : host.querySelector('button'));
             if (b) { b.click(); }
         }""")
-        page.wait_for_timeout(1500)
-        view = page.evaluate("""() => {
-            const layer = document.querySelector('.minipaint-sheet-layer');
-            const sheet = layer ? layer.querySelector('.minipaint-sheet') : null;
-            const p = sheet ? sheet.getBoundingClientRect() : { width: 0, height: 0, left: 0, top: 0 };
-            const inside = (x, y) => { const hit = document.elementFromPoint(x, y); return !!hit && !!layer && layer.contains(hit); };
-            const w = window.innerWidth, h = window.innerHeight;
-            return { open: window.minipaintClipboard.debug().editorOpen,
-                     width: p.width, height: p.height, w: w, h: h,
-                     corners: [inside(12, h - 12), inside(w - 24, h - 12), inside(w / 2, h / 2), inside(12, h / 2)],
-                     columnScrolled: document.getElementById('minipaint_clipboard_composer').scrollTop };
-        }""")
-        r.check("the system prompt editor, opened from a scrolled column, is still 90% of the window",
-                view["open"] is True and view["columnScrolled"] > 0
-                and abs(view["width"] - view["w"] * 0.9) <= 2 and abs(view["height"] - view["h"] * 0.9) <= 2, str(view))
-        r.check("and none of it is cut off by the column it came from",
-                all(view["corners"]), str(view))
-        page.evaluate("""() => document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))""")
-        page.wait_for_timeout(800)
-        r.check("and Escape puts it back", page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False)
+        page.wait_for_timeout(300)
+        view = page.evaluate("""() => ({ open: window.minipaintClipboard.debug().editorOpen,
+            names: window.mcSheet.state().open,
+            onBody: !!document.querySelector('body > .mc-sheet-layer'),
+            columnScrolled: document.getElementById('minipaint_clipboard_composer').scrollTop })""")
+        r.check("the system prompt editor opens from a scrolled column, over the page rather than in the column",
+                view["open"] is True and view["names"] == ["system-prompt"] and view["onBody"] is True
+                and view["columnScrolled"] > 0, str(view))
+        page.evaluate("() => window.mcSheet.closeAll()")
+        page.wait_for_timeout(200)
+        r.check("and is put away again", page.evaluate("() => window.minipaintClipboard.debug().editorOpen") is False)
     finally:
         grow(0)
         page.evaluate("""() => {
@@ -7187,7 +7223,7 @@ def run() -> Results:
                     ("check_the_queue_section_is_the_browsers", lambda: check_the_queue_section_is_the_browsers(r, page)),
                     ("check_queue_reads_are_one_at_a_time", lambda: check_queue_reads_are_one_at_a_time(r, page)),
                     ("check_the_queue_is_read_again_unasked", lambda: check_the_queue_is_read_again_unasked(r, page)),
-                    ("check_the_prompt_editor_fills_the_window", lambda: check_the_prompt_editor_fills_the_window(r, page)),
+                    ("check_the_system_prompt_editor_is_model_switch_refiners", lambda: check_the_system_prompt_editor_is_model_switch_refiners(r, page)),
                     ("check_the_history_button_opens_the_last_prompts", lambda: check_the_history_button_opens_the_last_prompts(r, page)),
                     ("check_auto_sends_the_selected_picture", lambda: check_auto_sends_the_selected_picture(r, page)),
                     ("check_a_press_says_when_the_settings_in_view_were_not_used",

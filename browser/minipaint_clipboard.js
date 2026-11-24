@@ -2765,18 +2765,21 @@ window.minipaintClipboard = (function () {
     }
 
     /**
-     * The system prompt editor: the pop-over every editor of this extension
-     * shares (``minipaint_sheet.js``), opened on the set this tab's next
-     * press would use - the model WanGP is on, and whether the composer holds
-     * a picture that model's writer reads (the server decides both, from the
-     * same draft the press is built from).
-     *
-     * Until 2026-11-23 it was this tab's own Gradio panel given a full-window
-     * shape; it is the same editor the gallery's prompt editor stacks over
-     * itself now, so the two cannot drift.
+     * The system prompt editor: ModelSwitchRefiner's (``mcSheet.systemPrompt``,
+     * its javascript/mc_sheet.js), which keeps the writers' instructions since
+     * 2026-11-24 - "those are related LLM studio" - and reads and writes them
+     * itself. Opened on the set this tab's next press would use - the model
+     * WanGP is on, and whether the composer holds a picture that model's writer
+     * reads; the server decides both, from the same draft the press is built
+     * from (``routes.editor_answer``) - with this tab's Enhance switch at its
+     * top, as the editor always had it.
      */
+    const ENHANCE_SETTINGS_ROUTE = "/minipaint-clipboard/enhance-settings";
+    const ENHANCE_TOGGLE_ID = "minipaint_clipboard_enhance_toggle";
+    const EDITOR_DEADLINE_MS = 20000;
+
     function editorSheet() {
-        const api = window.minipaintSheet;
+        const api = window.mcSheet;
         const top = api && typeof api.top === "function" ? api.top() : null;
         return top && top.name === "system-prompt" ? top : null;
     }
@@ -2790,27 +2793,53 @@ window.minipaintClipboard = (function () {
         } catch (e) { return null; }
     }
 
+    /** The composer's switch, written so Gradio hears it as a press would. */
+    function mirrorEnhanceSwitch(flag) {
+        const host = byId(ENHANCE_TOGGLE_ID);
+        const box = host ? (host.matches && host.matches("input") ? host : host.querySelector("input[type=checkbox]")) : null;
+        if (!box || !!box.checked === !!flag) { return; }
+        try {
+            const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked");
+            if (descriptor && descriptor.set) { descriptor.set.call(box, !!flag); } else { box.checked = !!flag; }
+            box.dispatchEvent(new Event("input", { bubbles: true }));
+            box.dispatchEvent(new Event("change", { bubbles: true }));
+        } catch (e) { /* the setting is written over the route either way */ }
+    }
+
     function openPromptEditor() {
-        const api = window.minipaintSheet;
-        if (!api) {
-            const bundle = String(menuState().sheet_bundle || "");
-            const loader = window.minipaintAssets;
-            if (!bundle || !loader || typeof loader.load !== "function") {
-                toast("The system prompt editor could not be loaded; reload the page.", true);
-                return false;
-            }
-            loader.load([bundle]).then(function (ok) {
-                if (ok && window.minipaintSheet) { openPromptEditor(); }
-                else { toast("The system prompt editor could not be loaded; reload the page.", true); }
-            });
+        const api = window.mcSheet;
+        if (!api || typeof api.systemPrompt !== "function") {
+            toast("The system prompts are ModelSwitchRefiner's to edit: install or update it, then reload the page.", true);
             return false;
         }
         if (editorOpen()) { return true; }
         api.systemPrompt({
             name: "system-prompt",
-            model: modelBlock(),
-            draft: true,
-            switched: function (flag) { note("enhanced prompts switched " + (flag ? "on" : "off") + " from the system prompt editor"); }
+            choose: function (info) {
+                return askJson(ENHANCE_SETTINGS_ROUTE, { action: "describe", model: modelBlock(), draft: true,
+                                                         fallback: (info && info.fallback) || "" },
+                               EDITOR_DEADLINE_MS, "system prompts").then(function (answer) {
+                    if (!answer || !answer.ok) { return null; }
+                    return { variant: answer.variant, mode: answer.mode, on: answer.enabled === true };
+                });
+            },
+            toggle: {
+                label: "Enhance prompts before they reach WanGP",
+                title: "Enhance every press's prompt before it reaches WanGP",
+                on: enhanceSwitch() === true,
+                set: function (flag) {
+                    return askJson(ENHANCE_SETTINGS_ROUTE, { action: "toggle", enabled: !!flag }, EDITOR_DEADLINE_MS,
+                                   "enhance switch").then(function (answer) {
+                        if (!answer || !answer.ok) {
+                            return { ok: false, message: (answer && answer.message) || "The switch could not be changed." };
+                        }
+                        const on = answer.enabled === true;
+                        mirrorEnhanceSwitch(on);
+                        note("enhanced prompts switched " + (on ? "on" : "off") + " from the system prompt editor");
+                        return { ok: true, on: on, status: answer.status || "" };
+                    });
+                }
+            }
         });
         note("system prompts: opened");
         return true;
@@ -8483,8 +8512,7 @@ window.minipaintClipboard = (function () {
         return Promise.resolve(loading).then(function (ok) {
             const popup = window.minipaintIntercept;
             if (!ok || !popup || typeof popup.stageAndOpen !== "function") { return failed(); }
-            const sheet = String(menuState().sheet_bundle || "");
-            return popup.stageAndOpen(url, tab, sheet ? { bundles: { sheet: sheet } } : {});
+            return popup.stageAndOpen(url, tab, {});
         }, failed);
     }
 

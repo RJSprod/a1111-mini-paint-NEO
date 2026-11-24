@@ -112,7 +112,7 @@ def _attach_with_bundles_js() -> str:
 
     return (
         "async () => { "
-        f"await ({assets.tab_loader_js(TAB_ID, ['wangp', 'interop', 'sheet', 'clipboard'])})(); "
+        f"await ({assets.tab_loader_js(TAB_ID, ['wangp', 'interop', 'clipboard'])})(); "
         f"await ({assets.module_js('host')})(); "
         f"if ({_JS}) {_JS}.attach(); "
         "}"
@@ -122,23 +122,6 @@ def _attach_with_bundles_js() -> str:
 ATTACH_WITH_BUNDLES_JS = _attach_with_bundles_js()
 
 
-def _sheet_js() -> str:
-    """Load the shared pop-over (``minipaint_sheet.js``) and give Forge's
-    prompt boxes their gear. At page load, not on a tab: the gear is on
-    txt2img and img2img, and a Reload UI builds those boxes again, which is
-    why it is asked for every time (the gear goes on a box only once)."""
-    from .. import assets
-
-    url = assets.url_for("sheet")
-    return (
-        "async () => { const w = window.minipaintAssets; "
-        f"const ok = (w && w.load) ? await w.load([{url!r}]) : false; "
-        "if (ok && window.minipaintSheet) { window.minipaintSheet.installGears(); } "
-        "return ok; }"
-    ).replace("'", '"')
-
-
-SHEET_JS = _sheet_js()
 MENU_JS = f"() => {{ if ({_JS}) {_JS}.toggleMenu(); }}"
 #: The toolbar's two flyouts. Each opens the menu straight at one
 #: section, anchored under its own button and with no "Back" row,
@@ -168,9 +151,10 @@ AUTO_JS = f"(prompt, enhanceOn) => {{ if ({_JS}) {_JS}.autoQueue(prompt, enhance
 # of those jobs.
 CANCEL_ALL_JS = f"() => {{ if ({_JS}) {_JS}.cancelAll(); }}"
 MENU_STATE_JS = f"(state) => {{ if ({_JS}) {_JS}.menuStateChanged(state); }}"
-# The system prompt editor is the browser's pop-over (``minipaint_sheet.js``):
-# the press is all page, and the instructions it opens on are asked for over
-# HTTP by the pop-over itself, so it opens whether or not Gradio's queue is.
+# The system prompt editor is ModelSwitchRefiner's pop-over (``mcSheet``, its
+# javascript/mc_sheet.js), which keeps the writers' instructions since
+# 2026-11-24: the press is all page, and the set it opens on is asked of this
+# tab's route over HTTP, so it opens whether or not Gradio's queue is.
 OPEN_PROMPT_EDITOR_JS = f"() => {{ if ({_JS}) {_JS}.openPromptEditor(); }}"
 #: The gallery of what WanGP made. Browser-only in both directions:
 #: the view is drawn from /minipaint-clipboard/outputs and the press
@@ -959,7 +943,6 @@ class ClipboardTab:
             # And the pop-over's, which the popup's prompt editor and the
             # system prompt editor are: loaded at page load, named here for a
             # page that missed that.
-            "sheet_bundle": _bundle_url("sheet"),
             # A value that differs every time, so a callback returning the
             # same settings as last time still reaches the browser. It is
             # what the page watches to know the framework's channel is
@@ -2119,22 +2102,21 @@ class ClipboardTab:
                     enhanced_on = enhance.enabled()
                     # A SYSTEM PROMPT IS A PAGE OF PROSE, AND THIS COLUMN IS
                     # A THIRD OF THE WINDOW WIDE. So the tab keeps one button,
-                    # and what it opens is the system prompt editor every
-                    # door of this extension shares: a pop-over over 90% of
-                    # the window, drawn by the browser (``minipaint_sheet.js``)
-                    # over ``routes.ENHANCE_SETTINGS_ROUTE``, the same one the
+                    # and what it opens is the system prompt editor every door
+                    # shares: ModelSwitchRefiner's pop-over over 90% of the
+                    # window (``mcSheet.systemPrompt``), the same one the
                     # gallery's Send to WanGP prompt editor stacks over itself
-                    # (2026-11-23: "make both the system prompt editors and
-                    # this wan2gp pop over be like a pop up that covers 90% of
-                    # the screen ... consistent and modularized"). Until then
-                    # it was a second shape of a Gradio panel in this tab,
-                    # which could not be drawn over another tab at all.
+                    # and LLM Studio's MiniMax workspace opens. The
+                    # instructions are ModelSwitchRefiner's since 2026-11-24
+                    # ("those are related LLM studio"); this tab's route says
+                    # which set a press here would use.
                     sp_open = gr.Button("⤢ Prompt enhancement and system prompts", elem_id=_id("sp_open"),
                                         elem_classes=["minipaint-clip-sp-open"])
                     # The switch, and the line above it, stay Gradio's and are
                     # never drawn: the press reads the switch as an input,
                     # and the Send to WanGP popup and the editor both mirror
-                    # into it. The editor draws its own of each.
+                    # into it. The editor draws its own, handed it by this
+                    # tab's script (``openPromptEditor``).
                     with gr.Column(elem_id=_id("enhance_panel"), elem_classes=["minipaint-clip-enhance-panel"]):
                         enhance_line = gr.HTML(self._enhance_line(), elem_id=_id("enhance_line"))
                         enhance_toggle = gr.Checkbox(
@@ -2216,11 +2198,6 @@ class ClipboardTab:
             # activation hook is in the browser. A panel that is already on
             # screen - a reload with this tab selected - loads at once.
             Context.root_block.load(None, js=ATTACH_WITH_BUNDLES_JS)
-            # The pop-over every editor shares, at every page load: the gear
-            # it puts on txt2img's and img2img's prompt boxes is on the tabs
-            # people open first, and the popup's editor opens inside the
-            # press that asks for it.
-            Context.root_block.load(None, js=SHEET_JS)
         p["menu_btn"].click(None, js=MENU_JS)
         # Every server render carries a nonce, so a callback that happened to
         # return the same values still proves the channel is alive. It is the
@@ -2295,9 +2272,10 @@ class ClipboardTab:
         # so the line above the switch follows the WanGP tab.
         p["enhance_toggle"].input(self.toggle_enhance, inputs=[p["enhance_toggle"], p["model_box"]], outputs=[p["enhance_line"]], **quiet)
         p["model_box"].input(self.model_changed, inputs=[p["model_box"]], outputs=[p["enhance_line"]], **quiet)
-        # The system prompt editor: the browser's pop-over, which reads and
-        # writes over the settings route and chooses its set from the model
-        # and the composer's pictures there (``routes.editor_answer``).
+        # The system prompt editor: ModelSwitchRefiner's pop-over, which reads
+        # and writes the instructions over its own route; this tab's settings
+        # route chooses the set from the model and the composer's pictures
+        # (``routes.editor_answer``).
         p["sp_open"].click(None, js=OPEN_PROMPT_EDITOR_JS, inputs=[], outputs=[])
 
         # -- history: the panel is Gradio, the list inside it is the browser's.

@@ -38,7 +38,7 @@ from minipaint_neo.clipboard import config, enhance, executor, intercept, outbox
 from minipaint_neo.wangp import config as wangp_config  # noqa: E402
 from minipaint_neo.wangp import control, errors, process_log, protocol  # noqa: E402
 from minipaint_neo.wangp.errors import IntegrationError  # noqa: E402
-from test_clipboard_enhance import FakeApi, FakeRejected  # noqa: E402
+from test_clipboard_enhance import FakeApi, FakeRejected, _forget_overrides, _keep_override  # noqa: E402
 
 BRIDGE_DIR = ROOT / "wan2gp_bridge" / "wan2gp-minipaint-bridge"
 PAGE = "e" * 16
@@ -379,14 +379,15 @@ def writer_checks(r: Results, library) -> None:
     r.check("the press's own reading of the target wins over the names",
             enhance.plan({"prompt": "p"}, {"type": "x", "architecture": "ltx2_22B"}, target="ltx23")["variant"] == "ltx23")
 
-    enhance.set_override("ltx23", "image", "Write it plainly.")
+    _keep_override("ltx23", "image", "Write it plainly.")
     asked = enhance.submit("she turns and waves", planned)
     sent = api.ltx_submissions[-1]
     r.check("it goes to submit_ltx with the first frame as a picture and no variant",
             asked["variant"] == "ltx23" and sent["first_frame"] is not None and hasattr(sent["first_frame"], "size")
             and sent["origin"] == enhance.ORIGIN and sent["remember"] is True and not api.submissions, str(sent)[:200])
-    r.check("under the override saved for LTX 2.3 with a picture", sent["system_prompt"] == "Write it plainly." and asked["system_override"] is True)
-    enhance.clear_override("ltx23", "image")
+    r.check("under the override kept for LTX 2.3 with a picture, to a writer that keeps none itself",
+            sent["system_prompt"] == "Write it plainly." and asked["system_override"] is True)
+    _forget_overrides()
     enhance.submit("a dog runs", enhance.plan({"prompt": "a dog runs"}, LTX_DISTILLED))
     r.check("a text request goes with no picture and no override", api.ltx_submissions[-1]["first_frame"] is None
             and api.ltx_submissions[-1]["system_prompt"] is None)
@@ -513,27 +514,24 @@ def ltx25_checks(r: Results, library) -> None:
     enhance.submit("a dog runs", enhance.plan({"prompt": "a dog runs"}, LTX_DISTILLED))
     r.check("and an LTX 2.3 press is still sent as the writer's default", api.ltx_submissions[-1]["model"] == "ltx23")
 
-    enhance.set_override("ltx23", "image", "One set of words for both.")
+    _keep_override("ltx23", "image", "One set of words for both.")
     enhance.submit("she turns and waves", planned)
-    r.check("an override saved for LTX 2.3 is the one an LTX 2.5 press runs under: one system prompt for both",
+    r.check("an override kept for LTX 2.3 is the one an LTX 2.5 press runs under: one system prompt for both",
             api.ltx_submissions[-1]["system_prompt"] == "One set of words for both." and enhance.override("ltx25", "image") == "One set of words for both.")
-    enhance.set_override("ltx25", "text", "Saved from LTX 2.5's side.")
+    _keep_override("ltx25", "text", "Kept from LTX 2.5's side.")
     document = json.loads((config.config_dir() / enhance.ENHANCE_NAME).read_text(encoding="utf-8"))
-    r.check("and one saved for LTX 2.5 is LTX 2.3's too: one document entry, no second set",
-            enhance.override("ltx23", "text") == "Saved from LTX 2.5's side." and "ltx25" not in document["overrides"]
+    r.check("and one kept for LTX 2.5 is LTX 2.3's too: one document entry, no second set",
+            enhance.override("ltx23", "text") == "Kept from LTX 2.5's side." and "ltx25" not in document["overrides"]
             and set(enhance.overrides()) == {"fl2va", "ref2va", "ltx23"}, json.dumps(document["overrides"])[:200])
-    enhance.clear_override("ltx25", "text")
-    r.check("Restore default forgets it for both", enhance.override("ltx23", "text") == "" and enhance.override("ltx23", "image") != "")
-    enhance.clear_override("ltx23", "image")
+    _forget_overrides()
     api.asked = []
     r.check("its default is the API's LTX 2.3 pair, asked for by that name",
             enhance.default_prompt("ltx25", "image") == "LTX image instructions" and api.asked == ["ltx23"], str(api.asked))
     from minipaint_neo.clipboard import routes as clipboard_routes
 
-    offered = clipboard_routes.editor_answer({"model": LTX_25}).get("sets", [])
-    r.check("the editor offers three sets, the LTX one named for both models, and no separate LTX 2.5 set",
-            [item["id"] for item in offered] == ["fl2va", "ref2va", "ltx23"]
-            and "LTX 2.3 and 2.5" in dict((item["id"], item["label"]) for item in offered)["ltx23"], str(offered))
+    chosen = clipboard_routes.editor_answer({"model": LTX_25})
+    r.check("the editor is told LTX 2.3's set for an LTX 2.5 page: one set for both, no separate LTX 2.5 set",
+            chosen["variant"] == "ltx23", str(chosen))
     line = enhance.availability(LTX_25)
     r.check("the enhancement line names LTX 2.5 and says whose instructions it is written under",
             line["state"] == "ready" and line["variant"] == "ltx25" and "LTX 2.5 Distilled" in line["text"]
@@ -546,17 +544,15 @@ def ltx25_checks(r: Results, library) -> None:
     from minipaint_neo.clipboard import history
 
     history.save_draft(history.empty_draft())
-    view = clipboard_routes.editor_answer({"model": LTX_25, "fallback": "fl2va", "draft": True})["view"]
+    view = clipboard_routes.editor_answer({"model": LTX_25, "fallback": "fl2va", "draft": True})
     r.check("the system prompt editor opens on the LTX set for a page on LTX 2.5, without a picture when none is attached",
-            view["variant"] == "ltx23" and view["mode"] == "text" and view["text"] == "LTX text instructions",
-            f"{view['variant']}/{view['mode']}")
+            view["variant"] == "ltx23" and view["mode"] == "text", f"{view['variant']}/{view['mode']}")
     draft = history.load_draft()
     draft["first_asset_id"] = first
     history.save_draft(draft)
-    view = clipboard_routes.editor_answer({"model": LTX_DISTILLED, "fallback": "fl2va", "draft": True})["view"]
+    view = clipboard_routes.editor_answer({"model": LTX_DISTILLED, "fallback": "fl2va", "draft": True})
     r.check("and for LTX 2.3, with the picture instructions once a first frame is attached",
-            view["variant"] == "ltx23" and view["mode"] == "image" and view["text"] == "LTX image instructions",
-            f"{view['variant']}/{view['mode']}")
+            view["variant"] == "ltx23" and view["mode"] == "image", f"{view['variant']}/{view['mode']}")
     history.save_draft(history.empty_draft())
 
     older = LtxApi()

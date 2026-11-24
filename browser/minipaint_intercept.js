@@ -14,10 +14,12 @@
  * queue; the popup closes the moment the server has stored it.
  *
  * THE PROMPT IS NOT TYPED HERE (2026-11-23). The box shows it, and a tap -
- * or Enter on it - opens the prompt editor every editor of this extension
- * shares (``minipaint_sheet.js``): 90% of the window, the cursor in the text,
- * and Enhance there and then, with the system prompt it runs under one
- * press away, stacked over it. A prompt the enhancer wrote and the user took
+ * or Enter on it - opens the prompt editor: ModelSwitchRefiner's pop-over
+ * since 2026-11-24 (``window.mcSheet``, its javascript/mc_sheet.js), 90% of
+ * the window, the cursor in the text, and Enhance there and then - this
+ * popup's own callbacks - with the system prompt it runs under one press
+ * away, stacked over it. Without ModelSwitchRefiner the prompt is typed where
+ * it is shown (``typeInPlace``). A prompt the enhancer wrote and the user took
  * goes as it is: never enhanced a second time at Generate, and the switch is
  * left where it was. Auto, beside
  * it, is the same press: the picture in the roles ticked here, one or
@@ -231,8 +233,8 @@ window.minipaintIntercept = (function () {
         return token;
     }
 
-    /** One bounded POST to the intercept route. Never throws. */
-    function post(body) {
+    /** One bounded POST to the intercept route (or ``url``). Never throws. */
+    function post(body, url) {
         let controller = null;
         try { controller = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { controller = null; }
         const cutoff = controller ? setTimeout(function () { try { controller.abort(); } catch (e) { /* settled */ } }, ASK_TIMEOUT_MS) : 0;
@@ -242,7 +244,7 @@ window.minipaintIntercept = (function () {
             body: JSON.stringify(body || {})
         };
         if (controller) { options.signal = controller.signal; }
-        return fetch(ROUTE, options).then(function (response) {
+        return fetch(url || ROUTE, options).then(function (response) {
             return response.json().then(function (answer) {
                 return answer && typeof answer === "object" ? answer
                     : { ok: false, code: "INTERNAL_ERROR", message: "The server did not answer (" + response.status + ")." };
@@ -602,15 +604,6 @@ window.minipaintIntercept = (function () {
         dom.prompt.setAttribute("aria-label", (text ? "Prompt: " + text.slice(0, 120) : "Prompt: " + PROMPT_PLACEHOLDER) + ". Press to edit.");
     }
 
-    /** The shared sheet bundle: the page loads it with the Clipboard tab; a
-     *  page that has not yet is asked for it here, once. */
-    function loadSheet() {
-        if (window.minipaintSheet) { return Promise.resolve(true); }
-        const loader = window.minipaintAssets;
-        if (!loader || typeof loader.load !== "function" || !S.bundles.sheet) { return Promise.resolve(false); }
-        return loader.load([S.bundles.sheet]).then(function (ok) { return !!ok && !!window.minipaintSheet; }, function () { return false; });
-    }
-
     function trackSheet(sheet) {
         if (!sheet) { return null; }
         S.sheets.push(sheet);
@@ -643,22 +636,99 @@ window.minipaintIntercept = (function () {
     }
 
     /**
-     * The prompt editor, on this popup's prompt: Done (or Escape, or a tap
-     * on the edge) keeps the text, Cancel puts it back. Enhance is the
-     * press's own enhancement, run now and shown; System prompt opens the
-     * instructions it runs under, stacked over the editor.
+     * The writers' system prompts, in ModelSwitchRefiner's editor
+     * (``mcSheet.systemPrompt``), on the set ``wanted`` names - the set this
+     * press's enhancement would use - with this extension's Enhance switch
+     * at its top, as the editor always had it. The instructions are
+     * ModelSwitchRefiner's to read and write; what this side says is which
+     * set, and where the switch stands (``routes.editor_answer``).
+     */
+    function openInstructions(sheetApi, wanted) {
+        const facts = S.facts && S.facts.model ? S.facts.model : null;
+        return sheetApi.systemPrompt({
+            name: "system-prompt",
+            choose: function (info) {
+                return post({ action: "describe", model: facts, variant: wanted.variant || "",
+                              mode: wanted.mode || "", fallback: (info && info.fallback) || "" },
+                            ENHANCE_SETTINGS_ROUTE).then(function (answer) {
+                    if (!answer || !answer.ok) { return { variant: wanted.variant || "", mode: wanted.mode || "" }; }
+                    return { variant: answer.variant, mode: answer.mode, on: answer.enabled === true };
+                });
+            },
+            toggle: {
+                label: "Enhance prompts before they reach WanGP",
+                title: "Enhance every press's prompt before it reaches WanGP",
+                on: !!(S.dom && S.dom.enhance.checked),
+                set: function (flag) {
+                    return post({ action: "toggle", enabled: !!flag }, ENHANCE_SETTINGS_ROUTE).then(function (answer) {
+                        if (!answer || !answer.ok) {
+                            return { ok: false, message: (answer && answer.message) || "The switch could not be changed." };
+                        }
+                        const on = answer.enabled === true;
+                        mirrorEnhance(on);
+                        if (S.dom) {
+                            S.dom.enhance.checked = on;
+                            S.enhanceTouched = false;
+                            renderEnhanceNote();
+                        }
+                        return { ok: true, on: on, status: answer.status || "" };
+                    });
+                }
+            }
+        });
+    }
+
+    /**
+     * Without ModelSwitchRefiner there is no pop-over to open - its
+     * ``mc_sheet.js`` draws every large editor, this one included - and no
+     * Enhance either, which is its writers'. So the prompt is typed where it
+     * is shown: a box in its place until the box lets go of the keyboard.
+     */
+    function typeInPlace() {
+        const dom = S.dom;
+        if (!dom) { return null; }
+        if (dom.field) { try { dom.field.focus(); } catch (e) { /* fine */ } return dom.field; }
+        const field = el("textarea", CLASS + "-prompt " + CLASS + "-prompt-field");
+        field.value = String(S.promptText || "");
+        field.placeholder = PROMPT_PLACEHOLDER + " - or type one here";
+        field.setAttribute("aria-label", "Prompt");
+        dom.prompt.hidden = true;
+        dom.prompt.parentNode.insertBefore(field, dom.prompt.nextSibling);
+        dom.field = field;
+        field.addEventListener("input", function () {
+            S.promptText = field.value;
+            S.prewritten = null;
+            S.promptDirty = true;
+            mirrorPrompt(field.value);
+        });
+        field.addEventListener("blur", function () {
+            if (dom.field !== field) { return; }
+            dom.field = null;
+            try { field.remove(); } catch (e) { /* gone with the popup */ }
+            dom.prompt.hidden = false;
+            setPrompt(field.value, null);
+        });
+        try {
+            field.focus();
+            const end = field.value.length;
+            field.setSelectionRange(end, end);
+        } catch (e) { /* not worth an exception */ }
+        note("no pop-over on this page (ModelSwitchRefiner is not here): the prompt is typed in place");
+        return field;
+    }
+
+    /**
+     * The prompt editor, on this popup's prompt: ModelSwitchRefiner's
+     * pop-over (``mcSheet.prompt``), where Done (or Escape, or a tap on the
+     * edge) keeps the text and Cancel puts it back. Enhance is the press's
+     * own enhancement, run now and shown; System prompt opens the
+     * instructions it runs under, stacked over the editor. Without
+     * ModelSwitchRefiner the prompt is typed in place (``typeInPlace``).
      */
     function editPrompt() {
         if (!S.open || S.busy || blockedView()) { return Promise.resolve(null); }
-        const sheetApi = window.minipaintSheet;
-        if (!sheetApi) {
-            // Fetched on the spot: the press is kept, and the editor opens
-            // once the bundle is here (without the keyboard on some phones).
-            return loadSheet().then(function (ok) {
-                if (!ok) { showMessage("The prompt editor could not be loaded; reload the page.", true); return null; }
-                return editPrompt();
-            });
-        }
+        const sheetApi = window.mcSheet;
+        if (!sheetApi || typeof sheetApi.prompt !== "function") { return Promise.resolve(typeInPlace()); }
         const token = S.token;
         const sub = [S.tab, S.size].filter(Boolean).join(" · ");
         const sheet = sheetApi.prompt({
@@ -686,17 +756,9 @@ window.minipaintIntercept = (function () {
             },
             systemPrompt: function (plan) {
                 const usable = plan && plan.ok !== false;
-                return trackSheet(sheetApi.systemPrompt({
-                    name: "system-prompt",
-                    model: S.facts && S.facts.model ? S.facts.model : (usable && plan.model && typeof plan.model === "object" ? plan.model : null),
+                return trackSheet(openInstructions(sheetApi, {
                     variant: usable ? String(plan.prompt_set || "") : "",
-                    mode: usable ? String(plan.mode || "") : "",
-                    switched: function (flag) {
-                        if (!S.dom) { return; }
-                        S.dom.enhance.checked = !!flag;
-                        S.enhanceTouched = false;
-                        renderEnhanceNote();
-                    }
+                    mode: usable ? String(plan.mode || "") : ""
                 }));
             }
         });

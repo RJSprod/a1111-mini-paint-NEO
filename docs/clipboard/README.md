@@ -606,15 +606,17 @@ without that keyword and files it as LTX 2.3's. A ModelSwitchRefiner without the
 refuses an LTX press with `ENHANCE_LTX_UNSUPPORTED` rather than sending it to MiniMax.
 
 Under the prompt box, one button: **⤢ Prompt enhancement and system prompts**. It opens the
-**system prompt editor**, the pop-over every editor of this extension shares
-(`browser/minipaint_sheet.js`, 2026-11-23): 90% of the window, the page dimmed round its
-edge, the composer left as it was. Everything this section describes lives in it - the
-switch (drawn, so no theme's checkbox styling reaches it), the *Writer* and *Instructions
+**system prompt editor** - ModelSwitchRefiner's since 2026-11-24 (`mcSheet.systemPrompt`,
+its `javascript/mc_sheet.js`): "those are related LLM studio IMO", and the instructions are
+its writers', kept there. 90% of the window, the page dimmed round its edge, the composer
+left as it was. In it: this tab's switch at the top (handed to the editor as its `toggle`,
+drawn there, so no theme's checkbox styling reaches it), the *Writer* and *Instructions
 used* selectors, the box with its state line, **Save override**, **Restore default**,
 **Reload** and **Close**. Escape, a tap on the dimmed edge and ✕ close it too, and with an
 unsaved change in the box each of them - and a move to another set - asks first: **Save**,
 **Discard** or **Keep editing**. The gallery's Send to WanGP prompt editor opens the very
-same editor, stacked over itself. The switch
+same editor, stacked over itself, and so does LLM Studio's MiniMax workspace. Without
+ModelSwitchRefiner the button says the system prompts are that extension's to edit. The switch
 is off by default and does nothing until three things are true, and the view's first line
 says which of them is not: the *SD-Neo-ModelSwitchRefiner* extension is installed in this Forge
 (its external LLM API, `mc_llm_api`, is imported straight from that extension's folder -
@@ -653,12 +655,24 @@ provenance under it (*Default, as ModelSwitchRefiner ships it* or *Override save
 WanGP page is on - an H3 variant, or the LTX set for LTX 2.3 or 2.5 - and the picture half
 when the draft holds a picture that model reads - a First or Last Frame for FL2VA, a
 Reference for Ref2VA, a First Frame for LTX - which are the same two questions a press asks.
-A page on none of them opens on the set the editor last showed. Each open re-reads the
-effective prompt, exactly as *Reload* would. Edit it and **Save override** to replace
-that set for every enhanced press from then on, on every page, after a restart too
-(`clipboard-enhance.json`); **Restore default** forgets the override and shows the default
-again; **Reload** re-reads whichever is current. A blank override is refused, not saved.
-WanGP's own `@` and `@@` prompt dialect still applies on top, as the API documents.
+A page on none of them opens on the set the editor last showed. (Which set is this tab's
+to say - its settings route answers the editor's `choose()` with it, and with where the
+switch stands, `routes.editor_answer`; the instructions are read and written over
+ModelSwitchRefiner's own route.) Each open re-reads the effective prompt, exactly as
+*Reload* would. Edit it and **Save override** to replace that set for every request that
+brings none of its own - this tab's presses, the gallery's, LLM Studio's MiniMax workspace's
+- from then on, after a restart too; **Restore default** forgets the override and shows the
+default again; **Reload** re-reads whichever is current. A blank override is refused, not
+saved. WanGP's own `@` and `@@` prompt dialect still applies on top, as the API documents.
+
+**Where the overrides live.** In ModelSwitchRefiner (its docs/21 §6.1), which says so with
+`capabilities()["keeps_instructions"]`. Until 2026-11-24 this tab kept them in
+`clipboard-enhance.json` and sent the one a press needed with it; what is there is handed
+over once (`enhance.hand_over`, at Forge's start and before a press is enhanced) - an edit
+made in ModelSwitchRefiner first is kept over it - and is left in the file only as the
+record of the move (`handed_over`). From then on a press sends no instructions of its own.
+To a ModelSwitchRefiner from before that date, which keeps none, the file's overrides are
+still sent, as they always were; they can no longer be edited from here.
 
 **The line is strict.** Requests reach WanGP in the order pressed. A job whose prompt is
 still being written holds every job behind it - a plain job pressed later, on any page,
@@ -1187,8 +1201,10 @@ What the popup shows, top to bottom:
 
 **The prompt editor** (2026-11-23: "a new pop over for editing the prompt in the send to
 wan2gp pop up ... I should be able to [roll] an enhance right there and see the results, and
-also edit the system prompt used for enhancing using that pop over stacked"). The shared
-pop-over over 90% of the window, the page and the popup dimmed round it, the cursor at the end
+also edit the system prompt used for enhancing using that pop over stacked"). The pop-over
+every large editor shares - ModelSwitchRefiner's since 2026-11-24 (`mcSheet.prompt`, its
+`javascript/mc_sheet.js`), with this popup's Enhance handed to it as callbacks - over 90% of
+the window, the page and the popup dimmed round it, the cursor at the end
 of the text - inside the tap, so a phone raises its keyboard - and sized to what the keyboard
 leaves of the screen. **Done**, Escape, ✕ and a tap on the dimmed edge keep what is in the
 box; **Cancel** puts it back. Ctrl+Enter is Done, never Forge's Generate behind it.
@@ -1202,22 +1218,21 @@ box; **Cancel** puts it back. Ctrl+Enter is Done, never Forge's Generate behind 
   writer works stops the writer. What it wrote is shown beside your words (under them on a
   narrow screen): **Use this** puts it in the box, **Roll again** asks once more from the same
   words, **Back to what I typed** undoes Use this, **Dismiss** puts the result away.
-* **System prompt** opens the system prompt editor over the prompt editor - a little smaller,
-  so the editor shows round it - on the set this press's enhancement runs under; Escape closes
-  the top one only.
+* **System prompt** opens ModelSwitchRefiner's system prompt editor over the prompt editor - a
+  little smaller, so the editor shows round it - on the set this press's enhancement runs
+  under, with the Enhance switch at its top as in the Clipboard tab's; Escape closes the top
+  one only.
 * **A prompt the enhancer wrote and you took goes as it is.** The popup marks it (an accent
   line), says so beside Enhance, and Generate sends it with `prewritten`: never enhanced a
   second time whatever the switch says, the switch left where you put it, and the words you
   typed are what the composer's History keeps. Its history entry says so, and Load brings it
   back the same way.
 
-**A gear on Forge's prompt boxes.** The same editor opens from a gear in the top right corner
-of txt2img's and img2img's Prompt and Negative prompt - never from a tap into the box, which
-types as it always did. The gear is drawn (no character a theme could swap for an icon), kept
-clear of a scroll bar and of Forge's token counter over the box's top edge, with room kept in
-the box so no word sits under it. There is no Enhance or System prompt there: those are
-WanGP's. Done writes the text back into Forge's box as typing would, so Forge's token counter
-and everything else listening hears it.
+**Without ModelSwitchRefiner** there is no pop-over - every large editor is its - and no
+Enhance either, which is its writers': a tap on the popup's prompt puts a box in its place to
+type into (`typeInPlace`), and the prompt is shown again as typed when the box lets go of the
+keyboard. The gear on txt2img's and img2img's prompt boxes that opened the same editor until
+2026-11-24 is ModelSwitchRefiner's now, beside the rest of its prompt tooling there.
 
 **Blocked when the Clipboard is.** The popup asks the same readiness question as the composer
 (WanGP running, its bridge answering, the page on MiniMax H3 FL2VA, Ref2VA, LTX 2.3

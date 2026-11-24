@@ -125,6 +125,13 @@ class Node {
     set textContent(text) { this._text = String(text); this.children = []; }
     appendChild(child) { if (child.parentNode) { child.parentNode.removeChild(child); } child.parentNode = this; this.children.push(child); return child; }
     removeChild(child) { const at = this.children.indexOf(child); if (at !== -1) { this.children.splice(at, 1); child.parentNode = null; } return child; }
+    insertBefore(child, ref) {
+        if (child.parentNode) { child.parentNode.removeChild(child); }
+        child.parentNode = this;
+        const at = ref ? this.children.indexOf(ref) : -1;
+        if (at === -1) { this.children.push(child); } else { this.children.splice(at, 0, child); }
+        return child;
+    }
     remove() { if (this.parentNode) { this.parentNode.removeChild(this); } }
     setAttribute(name, value) { this.attributes[name] = String(value); if (name === "id") { this.id = String(value); } }
     getAttribute(name) { return this.attributes[name] === undefined ? null : this.attributes[name]; }
@@ -254,7 +261,15 @@ global.fetch = function (url, options) {
     const body = options && typeof options.body === "string" ? JSON.parse(options.body) : null;
     calls.push({ url: text, body: body, method: (options && options.method) || "GET" });
     let payload = { ok: true };
-    if (text.indexOf("/minipaint-clipboard/intercept") === 0) {
+    if (text.indexOf("/minipaint-clipboard/enhance-settings") === 0 && body) {
+        // The tab's settings route, as routes.editor_answer and the toggle answer.
+        if (body.action === "describe") {
+            payload = { ok: true, enabled: true, keeps_instructions: true, variant: body.variant || body.fallback || "set-b",
+                        mode: body.mode || "text", availability: { state: "ready", text: "ready" } };
+        } else if (body.action === "toggle") {
+            payload = { ok: true, enabled: !!body.enabled, status: "Prompt enhancement is " + (body.enabled ? "on." : "off.") };
+        }
+    } else if (text.indexOf("/minipaint-clipboard/intercept") === 0) {
         const action = body.action;
         if (action === "describe") { payload = describeAnswer(body); }
         else if (action === "submit") {
@@ -343,10 +358,11 @@ if (MODE === "shared") {
 
 /* ------------------------------------------------------ the editor ----- */
 
-//: The shared pop-over (minipaint_sheet.js), stood in for: what the popup
-//: asks it for is recorded, and a check answers for the person - Done with
-//: some text, Cancel, or a stacked system prompt. The sheet itself is
-//: checked in a real browser (browser_intercept.py).
+//: ModelSwitchRefiner's pop-over (its javascript/mc_sheet.js, window.mcSheet),
+//: stood in for: what the popup asks it for is recorded, and a check answers
+//: for the person - Done with some text, Cancel, or a stacked system prompt.
+//: The sheet itself is checked in a real browser in that repository
+//: (tests/test_sheet_layout.py), with Enhance callbacks in this popup's shape.
 const sheets = { prompts: [], systems: [], closed: [] };
 function standIn(kind, options) {
     const sheet = { name: options.name, kind: kind, options: options, spec: {}, closed: false };
@@ -361,7 +377,7 @@ function standIn(kind, options) {
     return sheet;
 }
 if (MODE !== "nosheet") {
-    window.minipaintSheet = {
+    window.mcSheet = {
         prompt: function (options) { return standIn("prompt", options); },
         systemPrompt: function (options) { return standIn("system", options); }
     };
@@ -591,14 +607,20 @@ async function main() {
         await again.options.enhance.start("a fox in snow");
         await again.options.enhance.status("feedfacefeedface");
         await again.options.enhance.cancel("feedfacefeedface");
-        // System prompt: stacked, on the set the plan named.
+        // System prompt: stacked, on the set the plan named, asked of the tab's
+        // settings route as the editor opens (its choose), with the switch.
         const system = again.options.systemPrompt({ ok: true, prompt_set: "set-a", mode: "image" });
-        const systemAsked = system ? { name: system.options.name, variant: system.options.variant, mode: system.options.mode } : null;
-        // The switch turned in the stacked editor reaches the popup's own box.
-        system.options.switched(false);
-        const switchAfter = popup.state().enhance;
-        system.options.switched(true);
+        const chosen = system ? await system.options.choose({ fallback: "set-b" }) : null;
+        const systemAsked = system ? { name: system.options.name, chosen: chosen, label: system.options.toggle.label,
+                                       on: system.options.toggle.on } : null;
+        // The switch turned in the stacked editor reaches the popup's own box
+        // and the Clipboard tab's.
+        const turned = await system.options.toggle.set(false);
+        const switchAfter = { popup: popup.state().enhance, answer: turned,
+                              clipboard: body.querySelector("#minipaint_clipboard_enhance_toggle input").checked };
+        await system.options.toggle.set(true);
         system.close("close");
+        const settingsBeforeGenerate = calls.filter(function (c) { return c.url.indexOf("enhance-settings") !== -1; }).length;
         // The enhancer's prompt, taken: Done hands it back as written.
         again.options.done("A red fox in deep snow, low sun.", { prewritten: { typed: "a fox in snow", written: "A red fox in deep snow, low sun." }, changed: true });
         again.close("done");
@@ -610,7 +632,7 @@ async function main() {
         await popup.generate();
         await tick(20);
         report({ shown: shown, opened: opened, byEnter: byEnter, systemAsked: systemAsked, switchAfter: switchAfter, afterDone: afterDone,
-                 note: note, marked: marked, sheets: { closed: sheets.closed },
+                 note: note, marked: marked, sheets: { closed: sheets.closed }, settingsBeforeGenerate: settingsBeforeGenerate,
                  toggleAfter: body.querySelector("#minipaint_clipboard_enhance_toggle input").checked,
                  enhanceCalls: calls.filter(function (c) { return c.body && /^enhance_/.test(c.body.action || ""); }).map(function (c) { return c.body; }),
                  toggles: calls.filter(function (c) { return c.url.indexOf("enhance-settings") !== -1; }).map(function (c) { return c.body; }) });
@@ -646,11 +668,27 @@ async function main() {
         report({ blocked: blocked, opened: sheets.prompts.length });
     }
     if (MODE === "nosheet") {
-        popup.open(H1, { bundles: { sheet: "/s.js" } });
+        // No ModelSwitchRefiner on the page, so no pop-over: the prompt is
+        // typed where it is shown.
+        popup.open(H1, {});
         await tick(40);
-        root().querySelector(".minipaint-intercept-prompt").click();
-        await tick(40);
-        report({ loadedSheet: loaded.filter(function (urls) { return urls.indexOf("/s.js") !== -1; }).length });
+        const display = root().querySelector(".minipaint-intercept-prompt");
+        display.click();
+        const field = root().querySelector(".minipaint-intercept-prompt-field");
+        const opened = field ? { tag: field.tagName, value: field.value, displayHidden: display.hidden } : null;
+        display.click();
+        const fields = root().querySelectorAll(".minipaint-intercept-prompt-field").length;
+        field.value = "typed in place";
+        field.dispatchEvent(new FakeEvent("input"));
+        const whileTyping = popup.state().prompt;
+        field.dispatchEvent(new FakeEvent("blur"));
+        await tick(10);
+        const after = { field: !!root().querySelector(".minipaint-intercept-prompt-field"), displayHidden: display.hidden,
+                        shown: display.textContent, prompt: popup.state().prompt };
+        await popup.generate();
+        await tick(20);
+        report({ opened: opened, fields: fields, whileTyping: whileTyping, after: after, written: window.__written,
+                 loadedSheet: loaded.filter(function (urls) { return urls.join(" ").indexOf("sheet") !== -1; }).length });
     }
     if (MODE === "editorhistory") {
         // A prompt the editor wrote, loaded back from the history, goes as it is again.
@@ -905,9 +943,13 @@ def run() -> Results:
                                         and call.get("inherit") is False for call in asked[:2])
                 and asked[1].get("prompt") == "a fox in snow" and asked[2].get("llm_id") == "feedfacefeedface"
                 and asked[3].get("llm_id") == "feedfacefeedface", str(asked)[:300])
-        r.check("System prompt opens the instructions the plan named, stacked",
-                edited.get("systemAsked") == {"name": "system-prompt", "variant": "set-a", "mode": "image"}, str(edited.get("systemAsked")))
-        r.check("and the switch turned there is the popup's switch at once", edited.get("switchAfter") is False, str(edited.get("switchAfter")))
+        r.check("System prompt opens ModelSwitchRefiner's instructions on the set the plan named, stacked, with the switch at its top",
+                edited.get("systemAsked") == {"name": "system-prompt", "chosen": {"variant": "set-a", "mode": "image", "on": True},
+                                              "label": "Enhance prompts before they reach WanGP", "on": True}, str(edited.get("systemAsked")))
+        switched = edited.get("switchAfter") or {}
+        r.check("and the switch turned there is the popup's and the Clipboard tab's at once",
+                switched.get("popup") is False and switched.get("clipboard") is False
+                and (switched.get("answer") or {}).get("ok") is True and (switched.get("answer") or {}).get("on") is False, str(switched))
         after = edited.get("afterDone") or {}
         r.check("Done hands back the enhancer's prompt, taken, with what was typed before it",
                 after.get("prompt") == "A red fox in deep snow, low sun."
@@ -918,8 +960,9 @@ def run() -> Results:
         r.check("Generate sends it as written: not enhanced again, marked prewritten, with the words typed for the History",
                 sent.get("prompt") == "A red fox in deep snow, low sun." and sent.get("enhance") is False and sent.get("prewritten") is True
                 and sent.get("typed") == "a fox in snow", str(sent)[:300])
-        r.check("and the switch, on, is left on: nothing posted to the setting, and the Clipboard tab's own switch still on",
-                edited.get("toggles") == [] and edited.get("toggleAfter") is True, str((edited.get("toggles"), edited.get("toggleAfter"))))
+        r.check("and the switch, on, is left on: Generate posts nothing to the setting, and the Clipboard tab's own switch is still on",
+                len(edited.get("toggles") or []) == edited.get("settingsBeforeGenerate") and edited.get("toggleAfter") is True,
+                str((edited.get("toggles"), edited.get("toggleAfter"))))
     cancelled_edit = _run("editorcancel")
     r.check("Cancel in the editor leaves the popup's prompt as it was",
             cancelled_edit is not None and cancelled_edit.get("afterCancel") == "the server's prompt", str(cancelled_edit)[:300])
@@ -930,8 +973,19 @@ def run() -> Results:
     r.check("a popup blocked by the Clipboard's readiness opens no editor, pressed or Enter",
             blocked_edit is not None and blocked_edit.get("blocked") is True and blocked_edit.get("opened") == 0, str(blocked_edit)[:300])
     missing = _run("nosheet")
-    r.check("a page without the editor's bundle fetches it on the press, and says so when it cannot",
-            missing is not None and missing.get("loadedSheet") == 1 and "could not be loaded" in (missing.get("message") or ""), str(missing)[:300])
+    r.check("the no-pop-over scenario ran", missing is not None and "error" not in missing, str(missing)[:300])
+    if missing and "error" not in missing:
+        r.check("without ModelSwitchRefiner a press types the prompt where it is shown, in a box in its place",
+                missing.get("opened") == {"tag": "TEXTAREA", "value": "the server's prompt", "displayHidden": True}
+                and missing.get("fields") == 1, str(missing.get("opened")))
+        r.check("what is typed is the popup's prompt as it is typed",
+                missing.get("whileTyping") == "typed in place", str(missing)[:300])
+        r.check("and when the box lets go the prompt is shown again, as typed",
+                missing.get("after") == {"field": False, "displayHidden": False, "shown": "typed in place", "prompt": "typed in place"},
+                str(missing.get("after")))
+        sent = (missing.get("submits") or [{}])[0]
+        r.check("Generate sends it, and nothing is fetched for a pop-over this extension no longer has",
+                sent.get("prompt") == "typed in place" and missing.get("loadedSheet") == 0, str(sent)[:200])
     from_history = _run("editorhistory")
     loaded_state = (from_history or {}).get("loadedState") or {}
     sent = (from_history or {}).get("submits") or [{}]

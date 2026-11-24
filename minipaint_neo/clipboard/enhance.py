@@ -78,6 +78,8 @@ from ..wangp.errors import IntegrationError
 from . import config
 
 ENHANCE_NAME = "clipboard-enhance.json"
+#: One hand-over at a time: Forge's start and a press can ask together.
+_hand_over_lock = threading.Lock()
 SCHEMA = 1
 
 #: The module the other extension publishes, and the contract version this
@@ -321,7 +323,7 @@ def capabilities() -> dict:
     found = {
         "found": False, "available": False, "api_version": 0, "enabled": False, "configured": False,
         "vision": False, "model": "", "variants": list(VARIANTS), "max_queued": 0, "reason": "",
-        "ltx": False, "ltx_models": [],
+        "ltx": False, "ltx_models": [], "keeps_instructions": False,
     }
     module = api()
     if module is None:
@@ -356,6 +358,11 @@ def capabilities() -> dict:
     found["variants"] = (variants or list(MINIMAX_VARIANTS)) + (list(LTX_VARIANTS) if found["ltx"] else [])
     capacity = raw.get("max_queued")
     found["max_queued"] = int(capacity) if isinstance(capacity, int) and not isinstance(capacity, bool) and capacity > 0 else 0
+    # Since 2026-11-24 ModelSwitchRefiner keeps the writers' instructions and
+    # every request that brings none runs under them; one from before keeps
+    # nothing, and is sent this extension's own with each request.
+    found["keeps_instructions"] = (raw.get("keeps_instructions") is True
+                                   and callable(getattr(module, "instructions", None)))
     found["available"] = found["enabled"] and found["configured"]
     if found["api_version"] > API_VERSION_SUPPORTED:
         found["available"] = False
@@ -470,7 +477,13 @@ def _normalize_document(raw: typing.Any) -> dict:
                 kept[mode] = text[:MAX_SYSTEM_PROMPT_CHARS]
         if kept:
             overrides[variant] = kept
-    return {"schema": SCHEMA, "enabled": raw.get("enabled") is True, "overrides": overrides}
+    document = {"schema": SCHEMA, "enabled": raw.get("enabled") is True, "overrides": overrides}
+    handed = raw.get("handed_over")
+    if isinstance(handed, dict):
+        # What was handed to ModelSwitchRefiner, kept as it was given: the
+        # record of the move, never read for a request again.
+        document["handed_over"] = handed
+    return document
 
 
 def _document() -> dict:
@@ -543,39 +556,72 @@ def override(variant: typing.Any, mode: typing.Any) -> str:
     return _document()["overrides"].get(variant, {}).get(mode, "")
 
 
-def set_override(variant: typing.Any, mode: typing.Any, text: typing.Any) -> str:
-    """Replace one instruction set for every request from now on. Kept on
-    disk, so it survives a restart; blank is refused, not stored."""
-    variant, mode = _check(variant, mode)
-    cleaned = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-    if not cleaned.strip():
-        raise IntegrationError(errors.ENHANCE_SYSTEM_PROMPT_EMPTY, "a blank override")
-    if len(cleaned) > MAX_SYSTEM_PROMPT_CHARS:
-        raise IntegrationError(errors.REQUEST_INVALID, f"{len(cleaned)} characters of system prompt")
-    document = _document()
-    document["overrides"].setdefault(variant, {})[mode] = cleaned
-    _write(document)
-    _journal(f"system prompt override saved for {variant} {mode} ({len(cleaned)} characters)")
-    return cleaned
+def keeps_instructions() -> bool:
+    """Whether ModelSwitchRefiner keeps the writers' instructions itself.
+
+    Since 2026-11-24 it does: the system prompt editor is its own
+    (``mcSheet.systemPrompt``), and every request that brings no instructions
+    runs under the ones saved there - LLM Studio's MiniMax workspace's as much
+    as this extension's presses. One from before keeps nothing, and is sent
+    this extension's own saved overrides with each request (``override``),
+    which can no longer be edited from here."""
+    try:
+        return bool(capabilities().get("keeps_instructions"))
+    except Exception:
+        return False
 
 
-def clear_override(variant: typing.Any, mode: typing.Any) -> bool:
-    """Back to the API's default for that set. True when there was one."""
-    variant, mode = _check(variant, mode)
-    document = _document()
-    had = mode in document["overrides"].get(variant, {})
-    if had:
-        del document["overrides"][variant][mode]
-        if not document["overrides"][variant]:
-            del document["overrides"][variant]
+def hand_over() -> typing.Optional[dict]:
+    """Give ModelSwitchRefiner the overrides this extension kept, once.
+
+    Asked at every Forge start and before a press is enhanced; does nothing
+    once there is nothing left to give, while ModelSwitchRefiner is not here
+    or does not keep instructions yet, or when it refuses. ModelSwitchRefiner
+    keeps an edit made there over anything handed over. What was handed over
+    stays in this extension's file as the record of the move (``handed_over``)
+    and is never sent again. Answers the hand-over's counts, or None."""
+    with _hand_over_lock:
+        document = _document()
+        if not document["overrides"]:
+            return None
+        module = api()
+        adopt = getattr(module, "adopt_instructions", None) if module is not None else None
+        if not callable(adopt) or not keeps_instructions():
+            return None
+        try:
+            answer = adopt({variant: dict(modes) for variant, modes in document["overrides"].items()},
+                           origin=ORIGIN)
+        except Exception as error:
+            _journal(f"system prompts: the hand-over to ModelSwitchRefiner failed ({type(error).__name__}); "
+                     "this extension's own are kept and sent until it works")
+            return None
+        answer = answer if isinstance(answer, dict) else {}
+        counts = {key: int(answer.get(key) or 0) for key in ("adopted", "kept", "refused")}
+        document["handed_over"] = dict(counts, at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                       sets=document["overrides"])
+        document["overrides"] = {}
         _write(document)
-        _journal(f"system prompt override cleared for {variant} {mode}")
-    return had
+        _journal(f"system prompts: {counts['adopted']} set(s) handed to ModelSwitchRefiner, which keeps them now "
+                 f"({counts['kept']} it had already, {counts['refused']} it could not use)")
+        return counts
 
 
 def overrides() -> typing.Dict[str, typing.Dict[str, bool]]:
     """Which of the six sets are overridden, without their text - by set, so
-    LTX 2.5 is answered under ``ltx23``."""
+    LTX 2.5 is answered under ``ltx23``. ModelSwitchRefiner's answer where it
+    keeps them, this extension's file where it does not."""
+    if keeps_instructions():
+        module = api()
+        found = {}
+        for variant in PROMPT_SETS:
+            found[variant] = {}
+            for mode in MODES:
+                try:
+                    view = module.instructions(variant, has_image=(mode == MODE_IMAGE))
+                    found[variant][mode] = isinstance(view, dict) and view.get("source") == "override"
+                except Exception:
+                    found[variant][mode] = False
+        return found
     saved = _document()["overrides"]
     return {variant: {mode: mode in saved.get(variant, {}) for mode in MODES} for variant in PROMPT_SETS}
 
@@ -603,30 +649,22 @@ def default_prompt(variant: typing.Any, mode: typing.Any) -> str:
 
 def effective_prompt(variant: typing.Any, mode: typing.Any) -> typing.Tuple[str, str]:
     """``(text, source)``: the instructions a request would run under, and
-    whether they are an ``override``, the ``default``, or ``unavailable``."""
+    whether they are an ``override``, the ``default``, or ``unavailable``.
+    ModelSwitchRefiner's own answer where it keeps them."""
+    variant, mode = _check(variant, mode)
+    if keeps_instructions():
+        try:
+            view = api().instructions(variant, has_image=(mode == MODE_IMAGE))
+        except Exception:
+            view = None
+        if isinstance(view, dict) and str(view.get("text") or ""):
+            return str(view["text"]), ("override" if view.get("source") == "override" else "default")
+        return "", "unavailable"
     saved = override(variant, mode)
     if saved:
         return saved, "override"
     text = default_prompt(variant, mode)
     return (text, "default") if text else ("", "unavailable")
-
-
-def prompt_view(variant: typing.Any, mode: typing.Any) -> dict:
-    """One instruction set as the system prompt editor shows it: the set and
-    the mode, the text a press would run under, where that text comes from,
-    and the line under the box that says so. Raises for a variant or a mode
-    that is not one of the six sets."""
-    text, source = effective_prompt(variant, mode)
-    chosen = prompt_set(variant)
-    label = f"{PROMPT_SET_LABELS.get(chosen, chosen)}, {MODE_LABELS.get(mode, mode)}"
-    if source == "override":
-        line = f"Override saved for {label}. Restore default forgets it."
-    elif source == "default":
-        line = f"Default for {label}, as ModelSwitchRefiner ships it. Edit it and save an override to replace it."
-    else:
-        line = (f"No default for {label} could be read: ModelSwitchRefiner is not available in this Forge. "
-                "An override can still be saved.")
-    return {"variant": chosen, "mode": mode, "text": text, "source": source, "label": label, "line": line}
 
 
 def editor_choice(model: typing.Any, variant: typing.Any = "", has_picture: bool = False) -> typing.Tuple[str, str]:
@@ -725,9 +763,24 @@ def submit(prompt: str, planned: typing.Mapping[str, typing.Any]) -> dict:
                 raise IntegrationError(errors.ENHANCE_IMAGE_UNREADABLE, f"{slot}: {type(error).__name__}")
             pictures.append(picture)
             keywords[slot] = picture
-        replacement = override(variant, MODE_IMAGE if pictures else MODE_TEXT)
+        # ModelSwitchRefiner keeps the instructions now, and a request that
+        # brings none runs under what is saved there; an older one is sent
+        # this extension's own, as it always was.
+        try:
+            hand_over()
+        except Exception:
+            pass
+        mode = MODE_IMAGE if pictures else MODE_TEXT
+        replacement = "" if ready.get("keeps_instructions") else override(variant, mode)
         if replacement:
             keywords["system_prompt"] = replacement
+        saved_there = False
+        if ready.get("keeps_instructions"):
+            try:
+                view = module.instructions(prompt_set(variant), has_image=(mode == MODE_IMAGE))
+                saved_there = isinstance(view, dict) and view.get("source") == "override"
+            except Exception:
+                saved_there = False
         try:
             if ltx:
                 writer = getattr(module, "submit_ltx", None)
@@ -753,8 +806,8 @@ def submit(prompt: str, planned: typing.Mapping[str, typing.Any]) -> dict:
     if not llm_id:
         raise IntegrationError(errors.ENHANCE_REFUSED, "the API returned no job id")
     _journal(f"llm {llm_id[:8]}: {variant} enhancement requested ({', '.join(slot for slot in SLOTS if slot in keywords) or 'no picture'}"
-             f"{'; override' if replacement else ''})")
-    return {"llm_id": llm_id, "system_override": bool(replacement), "variant": variant}
+             f"{'; override' if replacement else ''}{'; saved instructions' if saved_there else ''})")
+    return {"llm_id": llm_id, "system_override": bool(replacement or saved_there), "variant": variant}
 
 
 def _seconds(value: typing.Any) -> float:
@@ -1062,9 +1115,9 @@ __all__ = [
     "LLM_QUEUED", "LLM_RUNNING", "LLM_STATES", "LLM_TERMINAL", "MAX_SYSTEM_PROMPT_CHARS", "MODES", "MODE_IMAGE", "MODE_LABELS", "MODE_TEXT",
     "LTX23", "LTX25", "LTX_KIND", "LTX_VARIANTS", "MINIMAX_VARIANTS", "PROMPT_SETS", "PROMPT_SET_LABELS", "PROMPT_SET_OF", "prompt_set",
     "ORIGIN", "REF2VA", "REJECTIONS", "SLOTS", "SLOTS_FOR", "SLOT_FIRST", "SLOT_LABELS", "SLOT_LAST", "SLOT_REFERENCE", "VARIANTS",
-    "VARIANT_LABELS", "api", "availability", "cancel", "cancel_all", "capabilities", "clear_override", "default_prompt", "describe",
-    "editor_choice", "effective_prompt", "enabled", "follow", "model_block", "override", "overrides", "plan", "preflight", "prompt_view", "release_runtime",
-    "reset_for_tests", "set_enabled", "set_override", "start_session", "status", "submit", "system_prompts", "target_for_model",
+    "VARIANT_LABELS", "api", "availability", "cancel", "cancel_all", "capabilities", "default_prompt", "describe",
+    "editor_choice", "effective_prompt", "enabled", "follow", "hand_over", "keeps_instructions", "model_block", "override", "overrides", "plan", "preflight", "release_runtime",
+    "reset_for_tests", "set_enabled", "start_session", "status", "submit", "system_prompts", "target_for_model",
     "use_api", "variant_for_model",
     "FEED_CONTENT_EVENTS", "FEED_TERMINAL_EVENTS", "FEED_WAIT_SECONDS",
 ]

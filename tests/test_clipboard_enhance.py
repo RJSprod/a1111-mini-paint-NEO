@@ -220,6 +220,59 @@ def _refused(call, *args, **keywords) -> str:
     return ""
 
 
+class KeepingApi(FakeApi):
+    """``mc_llm_api`` from 2026-11-24 on: it keeps the writers' instructions,
+    runs every request that brings none under them, and takes over the ones
+    a caller kept itself, once (``adopt_instructions``)."""
+
+    def __init__(self):
+        super().__init__()
+        self.saved = {}
+        self.adopted = []
+        self.refuse_adopt = False
+
+    def capabilities(self):
+        return dict(super().capabilities(), keeps_instructions=True)
+
+    def instructions(self, variant="", *, has_image=False):
+        chosen = "ltx23" if variant in ("ltx23", "ltx25") else (variant if variant in ("fl2va", "ref2va") else "fl2va")
+        mode = "image" if has_image else "text"
+        text = self.saved.get(chosen, {}).get(mode)
+        default = f"DEFAULT {chosen} {mode} instructions"
+        return {"variant": chosen, "mode": mode, "text": text or default, "source": "override" if text else "default",
+                "default": default, "label": f"{chosen}, {mode}"}
+
+    def adopt_instructions(self, sets, *, origin=""):
+        if self.refuse_adopt:
+            raise RuntimeError("the store cannot be written")
+        self.adopted.append({"sets": json.loads(json.dumps(sets)), "origin": origin})
+        taken = kept = 0
+        for variant, modes in sets.items():
+            for mode, text in modes.items():
+                if mode in self.saved.get(variant, {}):
+                    kept += 1
+                else:
+                    self.saved.setdefault(variant, {})[mode] = text
+                    taken += 1
+        return {"adopted": taken, "kept": kept, "refused": 0}
+
+
+def _keep_override(variant, mode, text):
+    """An override as this extension kept it before 2026-11-24, when its own
+    editor wrote it: what an older ModelSwitchRefiner is still sent, and what
+    a newer one is handed once."""
+    document = enhance._document()
+    document["overrides"].setdefault(enhance.prompt_set(variant), {})[mode] = text
+    enhance._write(document)
+
+
+def _forget_overrides():
+    document = enhance._document()
+    document["overrides"] = {}
+    document.pop("handed_over", None)
+    enhance._write(document)
+
+
 def _png(colour=(10, 200, 30, 255), size=(6, 4)) -> bytes:
     buffer = io.BytesIO()
     Image.new("RGBA", size, colour).save(buffer, format="PNG")
@@ -357,26 +410,138 @@ def decision_checks(r: Results, fake: FakeApi) -> None:
 
 
 def override_checks(r: Results) -> None:
+    """The overrides this extension kept, as an older ModelSwitchRefiner
+    still gets them. Nothing here writes one any more: the editor is
+    ModelSwitchRefiner's since 2026-11-24 (``instructions_checks``)."""
     r.check("enhanced prompts are off until somebody turns them on", enhance.enabled() is False)
     r.check("turning them on is read back from disk", enhance.set_enabled(True) is True and enhance.enabled() is True and (config.config_dir() / enhance.ENHANCE_NAME).is_file())
     enhance.set_enabled(False)
     r.check("and off again", enhance.enabled() is False)
     text, source = enhance.effective_prompt("fl2va", "image")
     r.check("with no override the effective instructions are the API's default", source == "default" and text == "DEFAULT fl2va image instructions")
-    r.check("a blank override is refused, not saved", _refused(enhance.set_override, "fl2va", "image", "   \n") == errors.ENHANCE_SYSTEM_PROMPT_EMPTY and enhance.override("fl2va", "image") == "")
-    r.check("an unknown variant or mode is refused", _refused(enhance.set_override, "fl3va", "image", "x") == errors.REQUEST_INVALID and _refused(enhance.override, "fl2va", "video") == errors.REQUEST_INVALID)
-    saved = enhance.set_override("fl2va", "image", "Write it MY way\r\nwith two lines")
-    r.check("an override is saved with its newlines normalised", saved == "Write it MY way\nwith two lines" and enhance.override("fl2va", "image") == saved)
+    r.check("nothing here writes an override any more - the editor is ModelSwitchRefiner's",
+            not hasattr(enhance, "set_override") and not hasattr(enhance, "clear_override") and not hasattr(enhance, "prompt_view"))
+    r.check("an unknown variant or mode is refused", _refused(enhance.override, "fl3va", "image") == errors.REQUEST_INVALID and _refused(enhance.override, "fl2va", "video") == errors.REQUEST_INVALID)
+    raw = enhance._document()
+    raw["overrides"] = {"fl2va": {"image": "   \n", "text": ""}}
+    config.write_document(enhance.ENHANCE_NAME, raw)
+    r.check("a blank override on disk is no override", enhance.override("fl2va", "image") == "" and enhance.overrides()["fl2va"] == {"text": False, "image": False})
+    _keep_override("fl2va", "image", "Write it MY way\nwith two lines")
     text, source = enhance.effective_prompt("fl2va", "image")
-    r.check("and is what an enhanced request runs under", source == "override" and text == saved)
+    r.check("an override kept on disk is what an enhanced request runs under", source == "override" and text == "Write it MY way\nwith two lines")
     r.check("the other five sets are untouched (LTX 2.3's two included)", enhance.effective_prompt("fl2va", "text")[1] == "default" and enhance.overrides() == {
         "fl2va": {"text": False, "image": True}, "ref2va": {"text": False, "image": False}, "ltx23": {"text": False, "image": False}})
     document = json.loads((config.config_dir() / enhance.ENHANCE_NAME).read_text(encoding="utf-8"))
     r.check("it lives in its own document, beside the outbox, and would survive a restart",
-            document["overrides"]["fl2va"]["image"] == saved and document["enabled"] is False and document["schema"] == 1)
-    r.check("Restore default forgets it", enhance.clear_override("fl2va", "image") is True and enhance.effective_prompt("fl2va", "image")[1] == "default" and enhance.clear_override("fl2va", "image") is False)
+            document["overrides"]["fl2va"]["image"] == "Write it MY way\nwith two lines" and document["enabled"] is False and document["schema"] == 1)
+    r.check("an older ModelSwitchRefiner keeps nothing, so nothing is handed over", enhance.hand_over() is None
+            and enhance.override("fl2va", "image") == "Write it MY way\nwith two lines")
+    _forget_overrides()
     prompts = enhance.system_prompts()
     r.check("all four defaults are readable with their structure guides", set(prompts) == {"fl2va", "ref2va"} and prompts["ref2va"]["max_tokens"] == 2048 and prompts["fl2va"]["image"] == "DEFAULT fl2va image instructions")
+
+
+def instructions_checks(r: Results, clock: _Clock, base: pathlib.Path) -> None:
+    """ModelSwitchRefiner keeps the writers' instructions since 2026-11-24 -
+    "those are related LLM studio IMO" - and every request that brings none
+    runs under them. So this extension hands over what it kept, once, and
+    sends nothing of its own from then on."""
+    keeping = KeepingApi()
+    enhance.use_api(keeping)
+    try:
+        ready = enhance.capabilities()
+        r.check("a ModelSwitchRefiner that keeps them says so", ready["keeps_instructions"] is True and enhance.keeps_instructions() is True)
+        broken = KeepingApi()
+        broken.instructions = None
+        enhance.use_api(broken)
+        r.check("and one that says so without the function to read them is not believed", enhance.capabilities()["keeps_instructions"] is False)
+        enhance.use_api(keeping)
+
+        r.check("with nothing kept here there is nothing to hand over", enhance.hand_over() is None and keeping.adopted == [])
+        _keep_override("fl2va", "image", "MINE, with a picture")
+        _keep_override("ltx25", "text", "MINE for LTX")
+        keeping.refuse_adopt = True
+        r.check("a hand-over ModelSwitchRefiner refuses keeps them here, to try again",
+                enhance.hand_over() is None and enhance.override("fl2va", "image") == "MINE, with a picture")
+        keeping.refuse_adopt = False
+        keeping.adopted.clear()
+        counts = enhance.hand_over()
+        r.check("they are handed over once, by set, under this extension's name",
+                counts == {"adopted": 2, "kept": 0, "refused": 0} and keeping.adopted == [{
+                    "sets": {"fl2va": {"image": "MINE, with a picture"}, "ltx23": {"text": "MINE for LTX"}},
+                    "origin": enhance.ORIGIN}], json.dumps(keeping.adopted))
+        document = json.loads((config.config_dir() / enhance.ENHANCE_NAME).read_text(encoding="utf-8"))
+        r.check("and kept in this extension's file only as the record of the move",
+                document["overrides"] == {} and document["handed_over"]["sets"]["fl2va"]["image"] == "MINE, with a picture"
+                and document["handed_over"]["adopted"] == 2 and "at" in document["handed_over"], json.dumps(document)[:300])
+        r.check("a second ask hands over nothing", enhance.hand_over() is None and len(keeping.adopted) == 1)
+        r.check("what a request runs under is ModelSwitchRefiner's answer now",
+                enhance.effective_prompt("fl2va", "image") == ("MINE, with a picture", "override")
+                and enhance.effective_prompt("ref2va", "text") == ("DEFAULT ref2va text instructions", "default")
+                and enhance.overrides()["ltx23"] == {"text": True, "image": False})
+
+        library = clipboard_store.store()
+        library.set_root(str(base / "instructions-library"), create=True)
+        first = library.import_bytes(_png((200, 30, 30, 255)), "first.png", "upload")
+        start = {"kind": "clipboard_asset", "id": first.asset_id}
+        outbox.use_running(lambda: True)
+        enhance.set_enabled(True)
+        clock.now += 1
+        job = outbox.submit(_request("a rough prompt", start=start), PAGE_A, model=FL2VA_MODEL)
+        sent = keeping.submissions[-1]
+        r.check("a press sends no instructions of its own: ModelSwitchRefiner's saved ones apply",
+                sent["system_prompt"] is None and job["enhance"]["system_override"] is True, json.dumps({key: sent[key] for key in ("system_prompt", "variant", "images")}))
+        clock.now += 1
+        plain = outbox.submit(_request("words alone"), PAGE_A, model=FL2VA_MODEL)
+        r.check("and says plainly when the set it runs under is the default",
+                keeping.submissions[-1]["system_prompt"] is None and plain["enhance"]["system_override"] is False)
+        for stored in outbox.jobs():
+            if stored["state"] in ("pending", "enhancing"):
+                outbox.cancel(stored["job_id"])
+        enhance.set_enabled(False)
+
+        # A hand-over that fails leaves the old overrides here, and still
+        # nothing of them is sent: the instructions in force are the ones
+        # ModelSwitchRefiner's editor shows.
+        _forget_overrides()
+        _keep_override("fl2va", "text", "MINE, not handed over yet")
+        keeping.refuse_adopt = True
+        enhance.set_enabled(True)
+        clock.now += 1
+        outbox.submit(_request("words alone again"), PAGE_A, model=FL2VA_MODEL)
+        r.check("a press whose hand-over failed still sends nothing of this extension's own",
+                keeping.submissions[-1]["system_prompt"] is None and enhance.override("fl2va", "text") == "MINE, not handed over yet")
+        keeping.refuse_adopt = False
+        for stored in outbox.jobs():
+            if stored["state"] in ("pending", "enhancing"):
+                outbox.cancel(stored["job_id"])
+        enhance.set_enabled(False)
+
+        # A press made before the start-up hand-over could run hands them
+        # over itself, and still sends nothing of its own.
+        _forget_overrides()
+        keeping.adopted.clear()
+        _keep_override("ref2va", "text", "MINE for Ref2VA")
+        enhance.set_enabled(True)
+        clock.now += 1
+        outbox.submit(_request("from the composer"), PAGE_B, model=REF2VA_MODEL)
+        r.check("a press hands over what is still kept here, first", len(keeping.adopted) == 1
+                and keeping.submissions[-1]["system_prompt"] is None and keeping.saved["ref2va"]["text"] == "MINE for Ref2VA")
+        for stored in outbox.jobs():
+            if stored["state"] in ("pending", "enhancing"):
+                outbox.cancel(stored["job_id"])
+        enhance.set_enabled(False)
+
+        from minipaint_neo.clipboard import executor
+
+        _forget_overrides()
+        _keep_override("fl2va", "text", "MINE at the start")
+        keeping.adopted.clear()
+        counted = executor.recover()
+        r.check("Forge's start hands them over", counted.get("instructions_handed_over") is True and len(keeping.adopted) == 1, json.dumps(counted)[:200])
+    finally:
+        _forget_overrides()
+        enhance.use_api(None)
 
 
 # ------------------------------------------------------------- the pipeline --
@@ -426,7 +591,7 @@ def pipeline_checks(r: Results, fake: FakeApi, clock: _Clock, base: pathlib.Path
     outbox.cancel([job for job in outbox.jobs() if job["state"] == "pending"][0]["job_id"])
 
     # -- an enhanced press asks the LLM at once and waits in the line
-    enhance.set_override("fl2va", "image", "MY fl2va image instructions")
+    _keep_override("fl2va", "image", "MY fl2va image instructions")
     clock.now += 1
     job = outbox.submit(_request("a rough prompt", start=start, references=[ref]), PAGE_A, model=FL2VA_MODEL)
     record = job["enhance"]
@@ -438,9 +603,9 @@ def pipeline_checks(r: Results, fake: FakeApi, clock: _Clock, base: pathlib.Path
     r.check("the LLM got the prompt, the variant, the first frame as a picture and not a path, and our origin",
             sent["prompt"] == "a rough prompt" and sent["variant"] == "fl2va" and sent["images"] == ["first_frame"] and hasattr(picture, "size") and sent["origin"] == enhance.ORIGIN and sent["remember"] is True)
     r.check("the reference was left out of the enhancement, and the job says so", record["dropped"] == ["references"] and "reference" not in sent["images"])
-    r.check("the saved override for FL2VA with a picture went with it", sent["system_prompt"] == "MY fl2va image instructions" and record["system_override"] is True)
+    r.check("to an older ModelSwitchRefiner, the saved override for FL2VA with a picture went with it", sent["system_prompt"] == "MY fl2va image instructions" and record["system_override"] is True)
     r.check("the job still carries every image for WanGP", job["request"]["images"]["start"] == start and job["request"]["images"]["references"] == [ref])
-    enhance.clear_override("fl2va", "image")
+    _forget_overrides()
 
     answer = outbox.claim(PAGE_A)
     r.check("the pressing page is told to wait for the enhancement, naming the job",
@@ -616,11 +781,12 @@ def tab_checks(r: Results, fake: FakeApi, clock: _Clock, base: pathlib.Path) -> 
     line = tab.toggle_enhance(True, json.dumps(FL2VA_MODEL))
     r.check("the switch turns enhancement on and the line says ready, naming the variant", enhance.enabled() and 'data-state="ready"' in line and "FL2VA" in line and "are on" in line, line)
     r.check("the line follows the page's model", 'data-state="model"' in tab.model_changed(json.dumps(VIDEO_MODEL)) and 'data-state="unknown"' in tab.model_changed(""))
-    # -- the system prompt editor: the shared pop-over, over the settings route
+    # -- the system prompt editor: ModelSwitchRefiner's pop-over
     #
-    # Since 2026-11-23 it is drawn by the browser (minipaint_sheet.js) and
-    # asks the route for everything it shows - the same answers the Gradio
-    # editor it replaced gave, from one place every door shares.
+    # Since 2026-11-24 the editor and the instructions are ModelSwitchRefiner's
+    # (its mcSheet.systemPrompt, over its own route). What this tab's settings
+    # route still answers is which set a press here would use, and where the
+    # switch stands; a page from before that asks to save is told where to.
     from fastapi import FastAPI
     from starlette.testclient import TestClient
     from minipaint_neo.clipboard import routes as clipboard_routes
@@ -633,28 +799,16 @@ def tab_checks(r: Results, fake: FakeApi, clock: _Clock, base: pathlib.Path) -> 
         return settings.post(clipboard_routes.ENHANCE_SETTINGS_ROUTE, json=dict(body, action="describe")).json()
 
     shown = editor(variant="ref2va", mode="image")
-    view = shown.get("view") or {}
-    r.check("the editor shows a default with its provenance",
-            shown.get("ok") and view.get("text") == "DEFAULT ref2va image instructions" and view.get("source") == "default"
-            and view.get("line", "").startswith("Default for"), str(view)[:200])
-    r.check("with the switch, the line about the LLM side and the sets and modes it can move to",
-            shown.get("enabled") is True and shown.get("availability", {}).get("state")
-            and [item["id"] for item in shown.get("sets", [])] == list(enhance.PROMPT_SETS)
-            and [item["id"] for item in shown.get("modes", [])] == list(enhance.MODES), json.dumps(shown)[:300])
-    saved = settings.post(clipboard_routes.ENHANCE_SETTINGS_ROUTE,
-                          json={"action": "override", "variant": "ref2va", "mode": "image", "text": "MINE for ref2va"}).json()
-    r.check("Save override saves it and says so",
-            saved.get("ok") and saved["view"]["text"] == "MINE for ref2va" and saved["view"]["line"].startswith("Override saved")
-            and "Override saved" in saved.get("status", "") and enhance.override("ref2va", "image") == "MINE for ref2va", str(saved)[:200])
-    blank = settings.post(clipboard_routes.ENHANCE_SETTINGS_ROUTE,
-                          json={"action": "override", "variant": "ref2va", "mode": "image", "text": "  "})
-    r.check("a blank override is refused with the sentence, and the saved one stands",
-            blank.status_code == 400 and "cannot be blank" in blank.json().get("status", "") and enhance.override("ref2va", "image") == "MINE for ref2va",
-            blank.text[:200])
-    restored = settings.post(clipboard_routes.ENHANCE_SETTINGS_ROUTE, json={"action": "restore", "variant": "ref2va", "mode": "image"}).json()
-    r.check("Restore default forgets it and shows the default again",
-            restored.get("ok") and restored["view"]["text"] == "DEFAULT ref2va image instructions" and restored["view"]["source"] == "default"
-            and enhance.override("ref2va", "image") == "", str(restored)[:200])
+    r.check("the editor is told the set, the switch and the line about the LLM side - no instructions",
+            shown.get("ok") and shown.get("variant") == "ref2va" and shown.get("mode") == "image"
+            and shown.get("enabled") is True and shown.get("availability", {}).get("state")
+            and "view" not in shown and "sets" not in shown and shown.get("keeps_instructions") is False, json.dumps(shown)[:300])
+    for action in ("override", "restore"):
+        moved = settings.post(clipboard_routes.ENHANCE_SETTINGS_ROUTE,
+                              json={"action": action, "variant": "ref2va", "mode": "image", "text": "MINE"})
+        r.check(f"an old page's {action} is told the instructions are ModelSwitchRefiner's now, and nothing is kept here",
+                moved.status_code == 409 and "ModelSwitchRefiner" in moved.json().get("message", "")
+                and enhance.override("ref2va", "image") == "", moved.text[:200])
 
     # -- the editor opens on the pair a press would actually use
     #
@@ -664,14 +818,14 @@ def tab_checks(r: Results, fake: FakeApi, clock: _Clock, base: pathlib.Path) -> 
     # holding one that variant reads. Opening on the pair chosen last means
     # editing one set and finding out at the next press that another was used.
     def opened(model, fallback, draft=True):
-        found = editor(model=model, fallback=fallback, draft=draft).get("view") or {}
-        return found.get("variant"), found.get("mode"), found.get("text")
+        found = editor(model=model, fallback=fallback, draft=draft)
+        return found.get("variant"), found.get("mode"), None
 
     library = clipboard_store.store()
     history.save_draft(history.normalize_draft({}))
     variant, mode, text = opened(FL2VA_MODEL, "ref2va")
     r.check("with WanGP on FL2VA and nothing attached, the editor opens on FL2VA without a picture",
-            variant == "fl2va" and mode == "text" and text == "DEFAULT fl2va text instructions", f"{variant}/{mode}")
+            variant == "fl2va" and mode == "text", f"{variant}/{mode}")
     variant, mode, _text = opened(REF2VA_MODEL, "fl2va")
     r.check("and follows WanGP to Ref2VA rather than staying where it was", variant == "ref2va" and mode == "text", f"{variant}/{mode}")
 
@@ -701,7 +855,7 @@ def tab_checks(r: Results, fake: FakeApi, clock: _Clock, base: pathlib.Path) -> 
             variant == "ref2va", str(variant))
     variant, _mode, _text = opened(VIDEO_MODEL, "ref2va")
     r.check("and so does a model that is neither variant", variant == "ref2va", str(variant))
-    named = editor(model=FL2VA_MODEL, variant="ref2va", mode="image").get("view") or {}
+    named = editor(model=FL2VA_MODEL, variant="ref2va", mode="image")
     r.check("while a set the caller names is the set it opens on", named.get("variant") == "ref2va" and named.get("mode") == "image", str(named)[:120])
 
     library.delete(picture.asset_id)
@@ -777,6 +931,11 @@ def run() -> Results:
             decision_checks(r, fake)
             override_checks(r)
             pipeline_checks(r, fake, clock, base)
+            outbox.reset_for_tests()
+            outbox.use_clock(clock)
+            (config.config_dir() / outbox.OUTBOX_NAME).unlink(missing_ok=True)
+            instructions_checks(r, clock, base)
+            enhance.use_api(fake)
             outbox.reset_for_tests()
             outbox.use_clock(clock)
             (config.config_dir() / outbox.OUTBOX_NAME).unlink(missing_ok=True)

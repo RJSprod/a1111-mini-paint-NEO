@@ -586,21 +586,28 @@ sees. Memory profiles do not change this: 1-4 pin (every model, or the
 transformer alone), 3+ and 5 pin nothing, and none of them makes the total
 smaller - a model that is not pinned is still in RAM, pageable.
 
-**Every editor over the page is one sheet, drawn by the browser.** The prompt editor of the
-Send to WanGP popup, the system prompt editor and the gear's editor on Forge's prompt boxes
-are `browser/minipaint_sheet.js` (2026-11-23: "these should look the same ... consistent and
-modularized"), loaded at every page load by the Clipboard tab's build. The system prompt
-editor used to be a Gradio panel of the Clipboard tab given a full-window class, and a panel
-of a tab Gradio has set `display: none` cannot be drawn over another tab at all - which is
-what stacking it over the popup's editor on txt2img needs. So it reads and writes over the
-settings route (`routes.editor_answer`) and the Gradio controls are gone; do not move it back
-into Gradio. Sheets stack on the dialog layer (+10 each, a deeper one a little smaller), each
-announced with `minipaint:overlay` as `sheet:<name>`, and the keyboard is the top sheet's,
-taken on the window's capture phase: **Ctrl+Enter over Forge is Forge's Generate** (its
-`script.js` listens on the document), so a text box in anything over the page has to stop it
-there or a Done presses Generate behind the dialog - the gear's check listens on the document
-and expects nothing. Closing a prompt editor any way but Cancel keeps the text; a system
-prompt with an unsaved change asks.
+**Every editor over the page is one sheet, and it is ModelSwitchRefiner's.** The prompt editor
+of the Send to WanGP popup and the system prompt editor are `window.mcSheet` (that extension's
+`javascript/mc_sheet.js`, loaded by Forge on every page) since 2026-11-24, at the user's word:
+"you put the gear and system promot editor in minipaint, but those are related LLM studio IMO".
+This extension drew them the day before (2026-11-23: "these should look the same ...
+consistent and modularized") in `browser/minipaint_sheet.js`, which is gone, with the gear on
+Forge's prompt boxes - ModelSwitchRefiner's now. What is left here is this extension's half:
+the popup hands `mcSheet.prompt` its text and Enhance callbacks (the intercept route's
+`enhance_*`), both doors hand `mcSheet.systemPrompt` a `choose()` (which set a press here would
+use, from `routes.editor_answer`) and a `toggle` (the Enhance switch), and without `mcSheet` the
+popup types its prompt in place (`typeInPlace`). The instructions are ModelSwitchRefiner's too:
+a press sends no `system_prompt` to one whose `capabilities()` says `keeps_instructions`, and
+this extension's old overrides are handed over once (`enhance.hand_over`). Do not move the
+system prompt editor back into Gradio - a panel of a tab Gradio has set `display: none` cannot
+be drawn over another tab, which stacking it over the popup's editor on txt2img needs - nor
+into this repository: a second sheet could not stack with the first. The contract is in
+`docs/clipboard/CONTRACTS.md`; this repository's browser checks carry a stand-in of it
+(`SHEET_STAND_IN_JS` in `tests/browser_clipboard.py`), and the real sheet's checks are that
+repository's (`tests/test_sheet_layout.py`), with Enhance callbacks in this extension's shape.
+**Ctrl+Enter over Forge is Forge's Generate** (its `script.js` listens on the document): the
+sheet stops it on the window's capture phase, and anything else drawn over the page with a text
+box in it has to do the same, or a Done presses Generate behind the dialog.
 
 ## The sibling repositories
 
@@ -773,6 +780,16 @@ border-box sizing to lay out as Gradio's does (`STUDIO_GRADIO_CSS`; without the 
 it), and a blob address rather than
 `srcdoc` for any check that messages it, because an about:srcdoc document's
 `location.origin` is "null" and the bridge checks every message against its own origin.
+
+A tenth and an eleventh are shared since 2026-11-24, and both are that extension's: **the
+pop-over, `window.mcSheet`**, which draws this extension's prompt editor and system prompt
+editor (above), and **the writers' saved instructions** - `mc_llm_api.instructions`,
+`save_instructions`, `restore_instructions`, `adopt_instructions` and
+`capabilities()["keeps_instructions"]` (its docs/21 §6.1). Every MiniMax and LTX request that
+brings no `system_prompt` runs under what is saved there, so this extension sends none to a
+ModelSwitchRefiner that keeps them, and hands its own over once. Renaming `mcSheet`, the options
+this extension passes it, or `keeps_instructions` breaks the editors or the hand-over here with
+nothing said; `docs/clipboard/CONTRACTS.md` has the shape, and a change is made on both sides.
 
 The Clipboard's own presses - the tab's Add to Queue and the gallery popup's
 Generate - are gated since 2026-10-03 by `clipboard/targets.py`: WanGP running,

@@ -163,13 +163,15 @@ def tick_role(page, role, on=True):
 
 def type_prompt(page, text):
     """The way a person writes the popup's prompt since 2026-11-23: a tap on it
-    opens the shared editor, the text is typed there, Done hands it back."""
+    opens the prompt editor - ModelSwitchRefiner's pop-over since 2026-11-24,
+    stood in for here (``clip.SHEET_STAND_IN_JS``) - the text is typed there,
+    Done hands it back."""
     page.locator(".minipaint-intercept-prompt").click()
-    page.wait_for_selector(".minipaint-sheet-layer .minipaint-sheet-text", timeout=10000)
+    page.wait_for_selector(".mc-sheet-layer .mc-sheet-text", timeout=10000)
     page.keyboard.press("Control+A")
     page.keyboard.type(text)
-    page.locator(".minipaint-sheet-done").click()
-    page.wait_for_function("() => !document.querySelector('.minipaint-sheet-layer')", timeout=10000)
+    page.locator(".mc-sheet-done").click()
+    page.wait_for_function("() => !document.querySelector('.mc-sheet-layer')", timeout=10000)
 
 
 def click_generate(page):
@@ -355,29 +357,29 @@ def check_generate_queues_and_closes(r: Results, page, library) -> None:
     r.check("and the page says so where the popup was", toast.startswith("Queued"), repr(toast))
 
 
-SHEET_BOX_JS = """() => {
-    const layers = Array.from(document.querySelectorAll('.minipaint-sheet-layer'));
-    const w = window.innerWidth, h = window.innerHeight;
-    return { w: w, h: h, names: window.minipaintSheet ? window.minipaintSheet.state().open : [],
-             sheets: layers.map(layer => { const r = layer.querySelector('.minipaint-sheet').getBoundingClientRect();
-                 return { left: r.left, top: r.top, width: r.width, height: r.height, z: Number(getComputedStyle(layer).zIndex) }; }),
-             active: document.activeElement ? document.activeElement.className : '' };
+#: What the popup handed ModelSwitchRefiner's pop-over (the stand-in records
+#: it): the latest prompt editor's options, and the latest system prompt's.
+LATEST_SHEET_JS = """(kind) => {
+    const list = kind === 'system' ? window.mcSheet.systems : window.mcSheet.prompts;
+    const sheet = list[list.length - 1];
+    if (!sheet) { return null; }
+    const o = sheet.options;
+    return { name: o.name, title: o.title, text: o.text, closed: sheet.closed,
+             enhance: Object.keys(o.enhance || {}).sort(), system: typeof o.systemPrompt,
+             prewritten: o.prewritten || null };
 }"""
-
-
-def sheet_box(page):
-    return page.evaluate(SHEET_BOX_JS)
 
 
 def check_the_prompt_editor(r: Results, page, library) -> None:
     """The popup's prompt is not typed in the popup (2026-11-23).
 
-    It shows the prompt, and a tap opens the pop-over every editor shares:
-    90% of the window with the page dimmed round it, the cursor in the text,
-    Done (or Escape, or a tap on the dimmed edge) keeping what was typed and
-    Cancel putting it back. Enhance runs the press's own enhancement there
-    and then and shows the result; Use this puts it in the box, and Generate
-    sends it as written. System prompt opens the instructions, stacked.
+    It shows the prompt, and a tap opens the prompt editor - ModelSwitchRefiner's
+    pop-over since 2026-11-24 (``mcSheet.prompt``), stood in for here: how it
+    looks, and its keys, are that repository's to check. What is checked here
+    is this extension's half, against its real routes: what the popup hands
+    the editor, Enhance asked of the intercept route a step at a time against
+    a writer stood in for in this process, the system prompt's set and switch,
+    and a prompt the enhancer wrote sent as written.
     """
     from minipaint_neo.clipboard import enhance, intercept, outbox, targets as clip_targets
     from test_clipboard_enhance import FakeApi
@@ -389,51 +391,24 @@ def check_the_prompt_editor(r: Results, page, library) -> None:
     r.check("its prompt is shown, to read and to press - no text field in the popup to type into",
             shown["tag"] == "DIV" and shown["role"] == "button" and shown["editable"] is False and shown["fields"] == 0
             and shown["text"] == "a lighthouse at dusk", str(shown))
-    page.evaluate("""() => { window.__overlays = [];
-        document.addEventListener('minipaint:overlay', e => window.__overlays.push(e.detail.name + ':' + (e.detail.open ? 'open' : 'closed'))); }""")
     page.locator(".minipaint-intercept-prompt").click()
-    page.wait_for_selector(".minipaint-sheet-layer .minipaint-sheet-text", timeout=10000)
-    box = sheet_box(page)
-    one = box["sheets"][0] if box["sheets"] else {}
-    r.check("a tap opens the editor over 90% of the window, in its middle",
-            box["names"] == ["wangp-prompt"] and abs(one.get("width", 0) - box["w"] * 0.9) <= 2 and abs(one.get("height", 0) - box["h"] * 0.9) <= 2
-            and abs(one.get("left", 0) - box["w"] * 0.05) <= 2 and abs(one.get("top", 0) - box["h"] * 0.05) <= 2, str(box))
-    above = page.evaluate("""() => { const pop = document.querySelector('.minipaint-intercept').getBoundingClientRect();
-        const hit = document.elementFromPoint(pop.left + pop.width / 2, pop.top + 12);
-        return hit ? hit.className : ''; }""")
-    r.check("over the popup it came from, which is dimmed with the rest of the page", "minipaint-sheet" in above, above)
-    caret = page.evaluate("""() => { const t = document.activeElement;
-        return t && t.classList.contains('minipaint-sheet-text') ? { value: t.value, start: t.selectionStart, end: t.selectionEnd } : null; }""")
-    r.check("with the cursor in the text, at its end, so typing carries on",
-            caret is not None and caret["value"] == "a lighthouse at dusk" and caret["start"] == caret["end"] == len(caret["value"]), str(caret))
-    r.check("and announced to the page, so the Forge Assistant gets out of its way",
-            page.evaluate("() => window.__overlays") == ["sheet:wangp-prompt:open"], str(page.evaluate("() => window.__overlays")))
+    page.wait_for_selector(".mc-sheet-layer .mc-sheet-text", timeout=10000)
+    opened = page.evaluate(LATEST_SHEET_JS, "prompt")
+    r.check("a tap opens ModelSwitchRefiner's prompt editor on the prompt as it stands, with Enhance and System prompt",
+            opened is not None and opened["name"] == "wangp-prompt" and opened["text"] == "a lighthouse at dusk"
+            and opened["enhance"] == ["cancel", "plan", "start", "status"] and opened["system"] == "function", str(opened))
     page.keyboard.type(", fog rolling in")
-    page.keyboard.press("Escape")
+    page.locator(".mc-sheet-done").click()
     page.wait_for_timeout(300)
     state = popup_state(page) or {}
-    r.check("Escape closes the editor and keeps what was typed - the popup stays open with it",
-            sheet_box(page)["names"] == [] and popup_shown(page) and state.get("prompt") == "a lighthouse at dusk, fog rolling in", str(state.get("prompt")))
+    r.check("Done hands back what was typed - the popup stays open with it",
+            popup_shown(page) and state.get("prompt") == "a lighthouse at dusk, fog rolling in", str(state.get("prompt")))
     page.locator(".minipaint-intercept-prompt").click()
-    page.wait_for_selector(".minipaint-sheet-text", timeout=10000)
+    page.wait_for_selector(".mc-sheet-text", timeout=10000)
     page.keyboard.type(" THROWN AWAY")
-    page.locator(".minipaint-sheet-cancel").click()
+    page.locator(".mc-sheet-cancel").click()
     page.wait_for_timeout(300)
     r.check("Cancel puts the text back as it was", (popup_state(page) or {}).get("prompt") == "a lighthouse at dusk, fog rolling in")
-    page.locator(".minipaint-intercept-prompt").click()
-    page.wait_for_selector(".minipaint-sheet-text", timeout=10000)
-    page.keyboard.type(" at night")
-    page.mouse.click(6, 6)
-    page.wait_for_timeout(300)
-    r.check("a tap on the dimmed edge keeps it too", (popup_state(page) or {}).get("prompt") == "a lighthouse at dusk, fog rolling in at night"
-            and sheet_box(page)["names"] == [] and popup_shown(page))
-    jobs_before = len(gallery_jobs())
-    page.locator(".minipaint-intercept-prompt").click()
-    page.wait_for_selector(".minipaint-sheet-text", timeout=10000)
-    page.keyboard.press("Control+Enter")
-    page.wait_for_timeout(600)
-    r.check("Ctrl+Enter in the editor is Done, and does not Generate behind it",
-            sheet_box(page)["names"] == [] and popup_shown(page) and len(gallery_jobs()) == jobs_before)
 
     # Enhance, there and then: the press's own enhancement, against a writer
     # stood in for in this process, and a model the readiness check names.
@@ -442,55 +417,55 @@ def check_the_prompt_editor(r: Results, page, library) -> None:
     enhance.use_api(fake)
     clip_targets.use_readiness(lambda model_=None, fresh=False: clip_targets.always_ready(model, fresh))
     tick_role(page, "reference", True)
-    statuses = []
-
-    def on_request(request):
-        if "/minipaint-clipboard/intercept" in request.url and "enhance_status" in (request.post_data or ""):
-            statuses.append(request.post_data or "")
-
-    page.on("request", on_request)
+    jobs_before = len(gallery_jobs())
     try:
         page.locator(".minipaint-intercept-prompt").click()
-        page.wait_for_selector(".minipaint-sheet-text", timeout=10000)
-        page.wait_for_function("() => { const i = document.querySelector('.minipaint-sheet-info'); return i && !i.hidden && i.dataset.state === 'ready'; }", timeout=10000)
-        info = page.evaluate("() => document.querySelector('.minipaint-sheet-info').textContent")
-        r.check("the editor says what Enhance would do before it is pressed: the writer and the picture it reads",
-                "Ref2VA" in info and "the reference" in info, info)
-        page.locator(".minipaint-sheet-enhance").click()
-        page.wait_for_function("() => { const t = window.minipaintSheet.top(); return t && t.state().id; }", timeout=10000)
-        running = page.evaluate("() => window.minipaintSheet.top().state()")
+        page.wait_for_selector(".mc-sheet-text", timeout=10000)
+        plan = page.evaluate("""async () => { const o = window.mcSheet.prompts[window.mcSheet.prompts.length - 1].options;
+            return await o.enhance.plan(); }""")
+        r.check("Enhance's plan says what it would do before it is pressed: the writer and the picture it reads",
+                plan.get("ok") is True and plan.get("prompt_set") == "ref2va" and plan.get("mode") == "image"
+                and "the reference" in (plan.get("described") or []), str(plan)[:300])
+        started = page.evaluate("""async () => { const o = window.mcSheet.prompts[window.mcSheet.prompts.length - 1].options;
+            return await o.enhance.start('a lighthouse at dusk, fog rolling in at night'); }""")
         r.check("Enhance asks the writer now, for the press's own request - the picture as the reference, the words as typed - and stores no job",
-                running["running"] is True and fake.submissions and fake.submissions[-1]["prompt"] == "a lighthouse at dusk, fog rolling in at night"
-                and fake.submissions[-1]["images"] == ["reference"] and len(gallery_jobs()) == jobs_before, str(running)[:200])
-        page.wait_for_timeout(2600)
-        r.check("and reads where it is a step at a time while it runs", len(statuses) >= 1, str(len(statuses)))
-        fake.finish(running["id"], prompt="A lighthouse stands in rolling fog at night, its beam sweeping the dark sea.")
-        page.wait_for_function("() => window.minipaintSheet.top().state().state === 'done'", timeout=10000)
-        shown_result = page.evaluate("() => document.querySelector('.minipaint-sheet-result-text').textContent")
-        r.check("the written prompt is shown in the editor, beside the words typed",
-                shown_result == "A lighthouse stands in rolling fog at night, its beam sweeping the dark sea."
-                and page.evaluate("() => document.querySelector('.minipaint-sheet-text').value") == "a lighthouse at dusk, fog rolling in at night", shown_result)
-        reads = len(statuses)
-        page.wait_for_timeout(2600)
-        r.check("and once it is written nothing more is asked", len(statuses) == reads, f"{reads} then {len(statuses)}")
+                started.get("ok") is True and started.get("llm_id") and fake.submissions
+                and fake.submissions[-1]["prompt"] == "a lighthouse at dusk, fog rolling in at night"
+                and fake.submissions[-1]["images"] == ["reference"] and len(gallery_jobs()) == jobs_before, str(started)[:200])
+        status = page.evaluate("""async (id) => { const o = window.mcSheet.prompts[window.mcSheet.prompts.length - 1].options;
+            return await o.enhance.status(id); }""", started.get("llm_id"))
+        r.check("and is read where it is, a step at a time", status.get("ok") is True and status.get("state") in ("queued", "running"), str(status)[:200])
+        fake.finish(started["llm_id"], prompt="A lighthouse stands in rolling fog at night, its beam sweeping the dark sea.")
+        done = page.evaluate("""async (id) => { const o = window.mcSheet.prompts[window.mcSheet.prompts.length - 1].options;
+            return await o.enhance.status(id); }""", started.get("llm_id"))
+        r.check("until it is written", done.get("state") == "done"
+                and done.get("prompt") == "A lighthouse stands in rolling fog at night, its beam sweeping the dark sea.", str(done)[:200])
 
-        # System prompt, stacked over the editor.
-        page.locator(".minipaint-sheet-system-open").click()
-        page.wait_for_function("() => window.minipaintSheet.state().depth === 2 && window.minipaintSheet.top().state().view", timeout=10000)
-        stacked = sheet_box(page)
-        lower, upper = stacked["sheets"][0], stacked["sheets"][1]
-        view = page.evaluate("() => window.minipaintSheet.top().state().view")
-        r.check("System prompt opens the instructions over the editor, a little smaller, so the editor shows round it",
-                stacked["names"] == ["wangp-prompt", "system-prompt"] and upper["z"] > lower["z"]
-                and upper["width"] < lower["width"] and upper["height"] < lower["height"]
-                and upper["left"] > lower["left"] and upper["top"] > lower["top"], str(stacked))
-        r.check("on the set the press would run under: Ref2VA's, with a picture", view["variant"] == "ref2va" and view["mode"] == "image", str(view))
-        page.keyboard.press("Escape")
+        # System prompt, stacked over the editor: ModelSwitchRefiner's, on the
+        # set the plan named, with this extension's switch at its top.
+        page.evaluate("""(plan) => { const o = window.mcSheet.prompts[window.mcSheet.prompts.length - 1].options;
+            o.systemPrompt(plan); }""", plan)
+        chosen = page.evaluate("""async () => { const sheet = window.mcSheet.systems[window.mcSheet.systems.length - 1];
+            return { name: sheet.options.name, chosen: await sheet.options.choose({ fallback: '' }),
+                     label: sheet.options.toggle.label, depth: window.mcSheet.state().depth }; }""")
+        r.check("System prompt opens the instructions over the editor, on the set the press would run under: Ref2VA's, with a picture",
+                chosen["name"] == "system-prompt" and chosen["depth"] == 2
+                and chosen["chosen"] == {"variant": "ref2va", "mode": "image", "on": enhance.enabled()}
+                and chosen["label"] == "Enhance prompts before they reach WanGP", str(chosen))
+        turned = page.evaluate("""async () => { const sheet = window.mcSheet.systems[window.mcSheet.systems.length - 1];
+            return await sheet.options.toggle.set(true); }""")
         page.wait_for_timeout(300)
-        r.check("Escape closes the top one only", sheet_box(page)["names"] == ["wangp-prompt"] and popup_shown(page))
+        r.check("the switch turned there is this extension's setting and the popup's box at once",
+                turned.get("on") is True and enhance.enabled() is True
+                and page.evaluate("() => document.querySelector('.minipaint-intercept-enhance').checked") is True, str(turned))
+        page.evaluate("() => { const list = window.mcSheet.systems; list[list.length - 1].close('close'); }")
 
-        page.locator(".minipaint-sheet-use").click()
-        page.locator(".minipaint-sheet-done").click()
+        # The enhancer's prompt, taken: Done hands it back as written.
+        page.evaluate("""() => { const sheet = window.mcSheet.prompts[window.mcSheet.prompts.length - 1];
+            sheet.options.done('A lighthouse stands in rolling fog at night, its beam sweeping the dark sea.',
+                { prewritten: { typed: 'a lighthouse at dusk, fog rolling in at night',
+                                written: 'A lighthouse stands in rolling fog at night, its beam sweeping the dark sea.' }, changed: true });
+            sheet.close('done'); }""")
         page.wait_for_timeout(300)
         state = popup_state(page) or {}
         r.check("Use this, then Done: the popup's prompt is the written one, marked as such",
@@ -498,7 +473,6 @@ def check_the_prompt_editor(r: Results, page, library) -> None:
                 and state.get("prewritten", {}).get("typed") == "a lighthouse at dusk, fog rolling in at night"
                 and page.evaluate("() => document.querySelector('.minipaint-intercept-prompt').classList.contains('minipaint-intercept-prompt-written')"),
                 str(state)[:300])
-        enhance.set_enabled(True)
         before = len(gallery_jobs())
         click_generate(page)
         r.check("Generate closes the popup", wait_popup(page, False, 20.0))
@@ -520,8 +494,7 @@ def check_the_prompt_editor(r: Results, page, library) -> None:
                 except Exception:
                     pass
     finally:
-        page.remove_listener("request", on_request)
-        page.evaluate("() => window.minipaintSheet && window.minipaintSheet.closeAll()")
+        page.evaluate("() => window.mcSheet && window.mcSheet.closeAll()")
         enhance.set_enabled(False)
         enhance.use_api(None)
         clip_targets.use_readiness(clip_targets.always_ready)
@@ -530,89 +503,52 @@ def check_the_prompt_editor(r: Results, page, library) -> None:
             wait_popup(page, False, 10.0)
 
 
-def check_the_gear_on_forges_prompt(r: Results, page) -> None:
-    """A gear in the top right corner of txt2img's Prompt box opens the same
-    editor on it; a tap into the box itself types, as it always did."""
+def check_the_prompt_without_model_switch_refiner(r: Results, page) -> None:
+    """Without ModelSwitchRefiner there is no pop-over - every large editor is
+    its - and no Enhance either, which is its writers': the popup's prompt is
+    typed where it is shown."""
+    kept = page.evaluate("() => { window.__keptSheet = window.mcSheet; window.mcSheet = undefined; return !!window.__keptSheet; }")
+    try:
+        r.check("(the page's stand-in is put aside)", kept is True)
+        r.check("the popup opens", press_send(page) and wait_popup(page, True), str(popup_state(page)))
+        before = (popup_state(page) or {}).get("prompt") or ""
+        page.locator(".minipaint-intercept-prompt").click()
+        page.wait_for_selector(".minipaint-intercept-prompt-field", timeout=10000)
+        field = page.evaluate("""() => { const f = document.querySelector('.minipaint-intercept-prompt-field');
+            const d = document.querySelector('.minipaint-intercept-prompt');
+            return { tag: f.tagName, focused: document.activeElement === f, value: f.value,
+                     displayShown: d.getBoundingClientRect().height > 0, height: f.getBoundingClientRect().height }; }""")
+        r.check("a tap puts a box in the prompt's place, the cursor in it",
+                field["tag"] == "TEXTAREA" and field["focused"] is True and field["displayShown"] is False
+                and bool(before) and field["value"] == before and field["height"] >= 56, str(field))
+        page.keyboard.press("End")
+        page.keyboard.type(" by hand")
+        page.evaluate("() => document.activeElement.blur()")
+        page.wait_for_timeout(200)
+        after = page.evaluate("""() => ({ field: !!document.querySelector('.minipaint-intercept-prompt-field'),
+            shown: document.querySelector('.minipaint-intercept-prompt').textContent }) """)
+        r.check("and when it lets go of the keyboard the prompt is shown again, as typed",
+                after == {"field": False, "shown": before + " by hand"} and (popup_state(page) or {}).get("prompt") == before + " by hand",
+                str(after))
+    finally:
+        page.evaluate("() => { window.mcSheet = window.__keptSheet; }")
+        if popup_shown(page):
+            page.keyboard.press("Escape")
+            wait_popup(page, False, 10.0)
+
+
+def check_no_gear_of_its_own(r: Results, page) -> None:
+    """The gear on Forge's prompt boxes is ModelSwitchRefiner's since
+    2026-11-24, beside the rest of its prompt tooling there: this extension
+    puts nothing on txt2img's boxes, and has no pop-over bundle to load."""
+    from minipaint_neo import assets
+
     open_txt2img(page)
     page.wait_for_timeout(400)
-    gear = page.evaluate("""() => {
-        const host = document.getElementById('txt2img_prompt');
-        const gear = host && host.querySelector('.minipaint-prompt-gear');
-        const area = host && host.querySelector('textarea');
-        if (!gear || !area) { return null; }
-        const g = gear.getBoundingClientRect(), a = area.getBoundingClientRect();
-        return { tag: gear.tagName, text: gear.textContent, svg: !!gear.querySelector('svg'), label: gear.getAttribute('aria-label'),
-                 inside: g.left >= a.left && g.right <= a.right && g.top >= a.top,
-                 fromRight: a.right - g.right, fromTop: g.top - a.top, roomRight: parseFloat(getComputedStyle(area).paddingRight) };
-    }""")
-    r.check("txt2img's Prompt box has a gear", gear is not None and gear["tag"] == "BUTTON", str(gear))
-    if gear is None:
-        return
-    r.check("drawn, not written - a theme that swaps characters for icons has nothing to take",
-            gear["text"] == "" and gear["svg"] is True and "large view" in (gear["label"] or ""), str(gear))
-    r.check("in the box's top right corner, with room kept so no word sits under it",
-            gear["inside"] and gear["fromRight"] <= 24 and gear["fromTop"] <= 12 and gear["roomRight"] >= 36, str(gear))
-    page.locator("#txt2img_prompt textarea").click()
-    page.wait_for_timeout(200)
-    r.check("a tap into the box types there, as always - no editor",
-            sheet_box(page)["names"] == [] and page.evaluate("() => document.activeElement === document.querySelector('#txt2img_prompt textarea')"))
-    page.keyboard.type("a castle")
-    heard = page.evaluate("""() => { window.__heard = { input: 0, keys: 0 };
-        const area = document.querySelector('#txt2img_prompt textarea');
-        area.addEventListener('input', () => { window.__heard.input += 1; });
-        document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.ctrlKey) { window.__heard.keys += 1; } });
-        return true; }""")
-    page.locator("#txt2img_prompt .minipaint-prompt-gear").click()
-    page.wait_for_selector(".minipaint-sheet-text", timeout=10000)
-    opened = page.evaluate("() => ({ names: window.minipaintSheet.state().open, value: document.activeElement.value, title: document.querySelector('.minipaint-sheet-title').textContent })")
-    r.check("the gear opens the editor on the box's text, titled for it",
-            heard and opened["names"] == ["forge-prompt"] and opened["value"] == "a castle" and opened["title"] == "Prompt", str(opened))
-    r.check("the editor for Forge's prompt has no Enhance and no System prompt: those are WanGP's",
-            page.evaluate("() => !document.querySelector('.minipaint-sheet-enhance') && !document.querySelector('.minipaint-sheet-system-open')"))
-    page.keyboard.type(" at dusk")
-    page.keyboard.press("Control+Enter")
-    page.wait_for_timeout(400)
-    after = page.evaluate("() => ({ value: document.querySelector('#txt2img_prompt textarea').value, heard: window.__heard })")
-    r.check("Done (Ctrl+Enter) writes it back into Forge's box, which hears it as typing",
-            after["value"] == "a castle at dusk" and after["heard"]["input"] >= 1, str(after))
-    r.check("and Ctrl+Enter is the editor's: Forge's own Generate shortcut behind it never hears it", after["heard"]["keys"] == 0, str(after))
-    page.locator("#txt2img_prompt .minipaint-prompt-gear").click()
-    page.wait_for_selector(".minipaint-sheet-text", timeout=10000)
-    page.keyboard.type(" THROWN AWAY")
-    page.locator(".minipaint-sheet-cancel").click()
-    page.wait_for_timeout(300)
-    r.check("Cancel leaves Forge's box as it was",
-            page.evaluate("() => document.querySelector('#txt2img_prompt textarea').value") == "a castle at dusk")
-    # Forge lays its token counter over the box's top edge, 1em in from its
-    # right (Forge's `.block.token-counter`, with the label hidden as Forge's
-    # prompt hides it); the gear keeps clear of it. Placed where Forge's
-    # rule puts it relative to the box, because this page's box has a label
-    # above it and Forge's does not.
-    clear = page.evaluate("""() => {
-        const host = document.getElementById('txt2img_prompt');
-        const area = host.querySelector('textarea');
-        const parent = host.parentElement;
-        parent.style.position = 'relative';
-        const counter = document.createElement('div');
-        counter.id = 'txt2img_token_counter';
-        counter.className = 'block token-counter';
-        counter.textContent = '0/75';
-        parent.insertBefore(counter, host);
-        const a = area.getBoundingClientRect(), p = parent.getBoundingClientRect();
-        counter.style.cssText = 'position:absolute; z-index:100; padding:2px 10px; border:2px solid #999; line-height:16px; '
-            + 'top:' + (a.top - p.top - 10) + 'px; right:' + (p.right - a.right + 16) + 'px';
-        const before = (() => { const g = host.querySelector('.minipaint-prompt-gear').getBoundingClientRect(), c = counter.getBoundingClientRect();
-            return !(g.right <= c.left || g.left >= c.right || g.bottom <= c.top || g.top >= c.bottom); })();
-        window.minipaintSheet.placeGears();
-        const g = host.querySelector('.minipaint-prompt-gear').getBoundingClientRect(), c = counter.getBoundingClientRect();
-        const overlap = !(g.right <= c.left || g.left >= c.right || g.bottom <= c.top || g.top >= c.bottom);
-        counter.remove();
-        window.minipaintSheet.placeGears();
-        return { before: before, overlap: overlap, gearTop: g.top, counterBottom: c.bottom, inside: g.top >= a.top && g.right <= a.right };
-    }""")
-    r.check("a counter where Forge puts it would sit on the gear where the gear first goes", clear["before"] is True, str(clear))
-    r.check("and the gear moves clear of it, still inside the box", clear["overlap"] is False and clear["inside"] is True, str(clear))
-    page.evaluate("() => { const a = document.querySelector('#txt2img_prompt textarea'); window.minipaintWriteInput(a, ''); }")
+    found = page.evaluate("""() => ({ gears: document.querySelectorAll('.minipaint-prompt-gear, .minipaint-has-gear').length,
+        bundle: typeof window.minipaintSheet })""")
+    r.check("no gear of this extension's on Forge's prompt boxes, and no pop-over of its own",
+            found == {"gears": 0, "bundle": "undefined"} and "sheet" not in assets.BUNDLES, str(found))
 
 
 def check_escape_queues_nothing(r: Results, page) -> None:
@@ -1904,7 +1840,8 @@ def run() -> Results:
                 check_the_button_opens_the_popup(r, page, library)
                 check_generate_queues_and_closes(r, page, library)
                 check_the_prompt_editor(r, page, library)
-                check_the_gear_on_forges_prompt(r, page)
+                check_the_prompt_without_model_switch_refiner(r, page)
+                check_no_gear_of_its_own(r, page)
                 check_escape_queues_nothing(r, page)
                 check_the_popup_is_blocked_when_the_clipboard_is(r, page)
                 check_the_menu_offers_the_destinations(r, page)

@@ -573,11 +573,16 @@ for under exactly the LTX 2.3 system prompt: one set of instructions, one overri
 both. ModelSwitchRefiner keeps each LTX prompt it writes in Prompt Studio's history as a
 **[No settings]** entry, saying which of the two it was for. The job waits in the Queue as
 *Enhancing* with the writer's own progress, and goes to WanGP in press order once its prompt
-exists. One button under the prompt opens the **system prompt editor** - the pop-over every
-editor here shares (below) - with the switch and the six system prompts the writers run under
-(FL2VA, Ref2VA and the LTX set 2.3 and 2.5 share, each with and without a picture), opened on
-the pair the next press would use; it takes an override that is kept across sessions,
-restores the default, and asks before an unsaved change is thrown away.
+exists. One button under the prompt opens the **system prompt editor** - ModelSwitchRefiner's,
+since the instructions are its writers' and are kept there (below) - with this tab's switch at
+its top and the six system prompts the writers run under (FL2VA, Ref2VA and the LTX set 2.3
+and 2.5 share, each with and without a picture), opened on the pair the next press would use;
+it takes an override that is kept across sessions, restores the default, and asks before an
+unsaved change is thrown away. What is saved there is what every request runs under -
+LLM Studio's own MiniMax workspace's too. Overrides this tab kept before 2026-11-24 are handed
+to ModelSwitchRefiner once, at the first start with it, and none of its own is sent with a
+press after that; to an older ModelSwitchRefiner, which keeps none, they are still sent, but
+can no longer be edited from here.
 **Cancel everything** empties the whole line - the writer's requests and the pending jobs -
 in one press; jobs already being sent finish, and nothing in WanGP's own queue is touched.
 
@@ -772,8 +777,9 @@ over, in or out of focus mode - both measured and re-measured when the window, t
 the layout changes. When the queue needs more room than there is, the Prompt box goes back to
 its own size first, and what still does not fit **scrolls inside the request column**: the
 column is a window of its own, and the page - the grid, the toolbar, the tab bar - stays where
-it is, even once the column's scroll reaches its end. The system prompt editor and View
-Outputs still fill the whole window from a scrolled column. On a narrow window the columns
+it is, even once the column's scroll reaches its end. The system prompt editor (drawn over
+the page by ModelSwitchRefiner) and View Outputs still fill the whole window from a scrolled
+column. On a narrow window the columns
 stack, the grid keeps its old share, and the request column under it is the page's to scroll
 to, as it always was.
 
@@ -821,8 +827,9 @@ an HTTP/1.1 Forge and nothing at all over the auto-TLS extension's HTTP/2.
 `docs/clipboard/README.md` has the whole of it.
 
 **The prompt is written in a pop-over, not in the popup.** The popup shows its prompt; a tap
-on it (or Enter) opens the **prompt editor** over 90% of the window, the page dimmed round its
-edge, the cursor in the text. **Enhance** there runs the enhancement the press would make -
+on it (or Enter) opens the **prompt editor** - ModelSwitchRefiner's pop-over, the one its own
+large editors use - over 90% of the window, the page dimmed round its edge, the cursor in the
+text. **Enhance** there runs the enhancement the press would make -
 the picture in the roles ticked, Inherit as it stands, the writer for the model WanGP is on -
 there and then, and shows what it wrote beside your words (under them on a phone): **Use
 this** puts it in the box, **Roll again** asks once more from the same words, **Back to what I
@@ -832,14 +839,10 @@ Escape, or a tap on the dimmed edge - keeps what is in the box; Cancel puts the 
 prompt the enhancer wrote and you took is marked in the popup and **sent as it is**: never
 enhanced a second time at Generate, whatever the switch says, and the switch is left where
 you put it. The enhancement is read back a second at a time while the editor is open and
-stopped when it closes; nothing is held open.
-
-**A gear on Forge's prompt boxes.** txt2img's and img2img's Prompt and Negative prompt get a
-gear in their top right corner (drawn, so a theme's icon swap cannot take it, clear of Forge's
-token counter, with room kept so no word sits under it). It opens the same editor on that
-box - no Enhance or System prompt there, those are WanGP's - and Done writes the text back as
-if typed. A tap into the box itself types, as it always did. Ctrl+Enter in any of these
-editors is the editor's Done, never Forge's Generate behind it.
+stopped when it closes; nothing is held open. Without ModelSwitchRefiner there is no pop-over
+(and no Enhance, which is its writers'): a tap on the popup's prompt puts a box in its place to
+type into. The gear on txt2img's and img2img's prompt boxes that opened the same editor is
+ModelSwitchRefiner's since 2026-11-24, beside the rest of its prompt tooling.
 
 **Themed.** Every part of the tab is an ordinary Gradio component and every colour is a
 theme variable; there is no fixed white or black anywhere in it, so a night-mode theme
@@ -1207,8 +1210,6 @@ browser/minipaint_clipboard.js   the Clipboard tab's browser side: the grid draw
                                  (browser/ is not auto-loaded: each tab fetches its own bundle from /minipaint-assets/js/, cached by content)
 browser/minipaint_intercept.js   the Send to WanGP popup: opened by the gallery button on a frozen picture, drawn from
                                  /minipaint-clipboard/intercept, closed the moment the outbox has the job; fetched only when first needed
-browser/minipaint_sheet.js       the pop-over every editor shares: the prompt editor (the popup's, with Enhance), the system
-                                 prompt editor, and the gear on txt2img's and img2img's prompt boxes; loaded at page load
 wan2gp_bridge/                   the companion plugin, installed into your WanGP
 style.css                        legacy rules, rules scoped to the Canvas root, then to the Clipboard root (theme variables only)
 miniPaint/                       the legacy editor itself

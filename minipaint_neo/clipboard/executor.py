@@ -1209,6 +1209,15 @@ def recover() -> dict:
             counted["enhance_reset"] = True
     except Exception:
         pass
+    # The system prompts this extension kept go to ModelSwitchRefiner, which
+    # keeps them since 2026-11-24 and runs every request under them; once.
+    try:
+        from . import enhance
+
+        if enhance.hand_over():
+            counted["instructions_handed_over"] = True
+    except Exception:
+        pass
     return counted
 
 

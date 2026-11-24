@@ -219,16 +219,14 @@ def run() -> Results:
     # be raised each time the Clipboard grows another full-window view, and a
     # check that is routinely edited is a check nobody reads.
     #
-    # Exactly five shapes are allowed. Focus mode, which is this canvas
+    # Exactly four shapes are allowed. Focus mode, which is this canvas
     # filling the window on purpose; anything under the Clipboard tab's own
     # root, which cannot reach this canvas at all because the selector cannot
     # match outside that tab; the gallery's Send to WanGP popup, a dialog
     # over the page by design - hidden until a gallery send is pointed at
-    # WanGP, one column wide, and matching nothing but its own elements; the
-    # shared pop-over's layer (browser/minipaint_sheet.js, 2026-11-23), a
-    # modal dialog by design that the script puts in the document when an
-    # editor opens and takes out when it closes, matching nothing but its own
-    # elements; and the WanGP tab's parked panel, which is fixed so that it stays a
+    # WanGP, one column wide, and matching nothing but its own elements (the
+    # pop-over its prompt editor opens is ModelSwitchRefiner's since
+    # 2026-11-24, styled there); and the WanGP tab's parked panel, which is fixed so that it stays a
     # rendered box while another tab is selected, and which cannot cover
     # anything because the same rule makes it invisible and untouchable -
     # both of which this insists on, because a parked panel that could be
@@ -247,8 +245,7 @@ def run() -> Results:
     def deliberate(block):
         one = block.split("{")[0].strip()
         return "minipaint-focus" in one or "#minipaint_clipboard_root" in one \
-            or one.split("\n")[-1].strip().startswith(".minipaint-intercept") \
-            or one.split("\n")[-1].strip() == ".minipaint-sheet-layer" or parked(block)
+            or one.split("\n")[-1].strip().startswith(".minipaint-intercept") or parked(block)
     stray = [block.split("{")[0].strip() for block in fixed_blocks if not deliberate(block)]
     r.check("every fixed rule is either focus mode or scoped inside the Clipboard tab, so none can cover the canvas",
             bool(selectors) and not stray, str(stray or selectors))

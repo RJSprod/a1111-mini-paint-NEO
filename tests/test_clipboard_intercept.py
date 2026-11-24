@@ -38,7 +38,7 @@ from minipaint_neo.clipboard import ui as clipboard_ui  # noqa: E402
 from minipaint_neo.wangp import config as wangp_config  # noqa: E402
 from minipaint_neo.wangp import errors, process_log, protocol  # noqa: E402
 from minipaint_neo.wangp.errors import IntegrationError  # noqa: E402
-from test_clipboard_enhance import FakeApi  # noqa: E402
+from test_clipboard_enhance import FakeApi, _forget_overrides, _keep_override  # noqa: E402
 from test_clipboard_ui import RECEIVE_STATE, RECEIVE_STATUS, _skipped, build_page, component_of, config_of, dangling  # noqa: E402
 
 PAGE = "f" * 16
@@ -642,7 +642,7 @@ def enhancer_checks(r: Results, tab) -> None:
     fake = FakeApi()
     enhance.use_api(fake)
     try:
-        enhance.set_override(enhance.REF2VA, enhance.MODE_IMAGE, "Describe the picture the way I like it.")
+        _keep_override(enhance.REF2VA, enhance.MODE_IMAGE, "Describe the picture the way I like it.")
         outbox.use_running(lambda: True)
         outbox.use_executor(outbox.EXECUTOR_BROWSER)
         handoff = intercept.stage(_photo((4, 5, 6)), "txt2img")
@@ -672,7 +672,7 @@ def enhancer_checks(r: Results, tab) -> None:
                 except Exception:
                     pass
     finally:
-        enhance.clear_override(enhance.REF2VA, enhance.MODE_IMAGE)
+        _forget_overrides()
         enhance.set_enabled(False)
         enhance.use_api(None)
 
